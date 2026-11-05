@@ -10,8 +10,7 @@ WHY:
   twice every step: ``float(grad_norm)`` right after clipping, before
   ``optimizer.step()``, and ``.item()`` on the micro-batch loss mean after it.
   The CPU therefore cannot queue the optimizer and the next forward ahead of the
-  GPU, and each step starts with a GPU bubble while it catches up: 45-60 ms on
-  FLUX.1-schnell FP8, of which deferring recovered 15 ms per step.
+  GPU, and each step starts with a GPU bubble while it catches up.
 
 WHAT:
   The loss mean stays a GPU tensor and is accumulated as one, in float64 like the
@@ -25,7 +24,9 @@ WHAT:
 
   The edits are source rewrites of the upstream method (``_source_patch``): they
   sit in the middle of a long loop that no wrapper can reach. An anchor that no
-  longer matches raises, naming it.
+  longer matches raises, naming it, and the loop stays AutoModel's. The class
+  keeps both loops and picks one each time the loop starts, so a later job in
+  the same process that turns the setting off gets AutoModel's.
 
 Setting (``primus_train:`` section, off by default):
   defer_host_sync: false
@@ -36,6 +37,7 @@ import logging
 
 from primus.backends.automodel import options
 from primus.backends.automodel._source_patch import patch_method_source
+from primus.backends.automodel.profiling.torch_profiler import LOOP_WRAPPED_FLAG
 
 logger = logging.getLogger(__name__)
 
@@ -76,29 +78,41 @@ def is_enabled() -> bool:
     return options.flag("primus_train.defer_host_sync")
 
 
-def install() -> bool:
+def install() -> None:
     """Rewrite ``TrainDiffusionRecipe.run_train_validation_loop``."""
     from nemo_automodel.recipes.diffusion.train import TrainDiffusionRecipe
 
-    return patch_recipe(TrainDiffusionRecipe)
+    try:
+        patch_recipe(TrainDiffusionRecipe)
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "[PrimusDeferredHostSync] primus_train.defer_host_sync is on, but the train loop could not "
+            f"be rewritten, so its host syncs are not deferred: {exc}"
+        ) from exc
 
 
-def patch_recipe(recipe_cls) -> bool:
-    """Apply the rewrite to ``recipe_cls``; True once it is in place."""
-    if getattr(recipe_cls, _PATCH_FLAG, False):
-        return True
+def patch_recipe(recipe_cls) -> None:
+    """Give ``recipe_cls`` a loop that runs the rewrite while the setting is on."""
+    if recipe_cls.__dict__.get(_PATCH_FLAG, False):
+        return
 
-    loop = recipe_cls.__dict__.get("run_train_validation_loop")
-    if getattr(loop, "_primus_profile_wrapped", False):
+    original = recipe_cls.__dict__.get("run_train_validation_loop")
+    if getattr(original, LOOP_WRAPPED_FLAG, False):
         raise RuntimeError(
             "[PrimusDeferredHostSync] run_train_validation_loop is already wrapped by the profiler; "
             "this rewrite must be installed first (lower patch priority)."
         )
 
-    patch_method_source(recipe_cls, "run_train_validation_loop", REPLACEMENTS)
+    deferred = patch_method_source(recipe_cls, "run_train_validation_loop", REPLACEMENTS)
+
+    def run_train_validation_loop(self):
+        return (deferred if is_enabled() else original)(self)
+
+    run_train_validation_loop.__qualname__ = deferred.__qualname__
+    run_train_validation_loop.__doc__ = original.__doc__
+    recipe_cls.run_train_validation_loop = run_train_validation_loop
     setattr(recipe_cls, _PATCH_FLAG, True)
     logger.info(
         "[PrimusDeferredHostSync] train-loop host syncs (loss .item(), float(grad_norm)) deferred to "
         "logging steps"
     )
-    return True

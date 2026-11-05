@@ -26,6 +26,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from primus.backends.automodel.profiling.torch_profiler import (  # noqa: E402
+    LOOP_WRAPPED_FLAG,
+)
 from primus.backends.automodel.training import deferred_host_sync  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -91,15 +94,20 @@ STUB_SOURCE = textwrap.dedent(
 )
 
 
-@pytest.fixture
-def stub_module(tmp_path, monkeypatch):
+def _load_stub(tmp_path, monkeypatch, source):
+    """Import ``source`` from a real file, which ``inspect.getsource`` needs."""
     path = tmp_path / "deferred_sync_stub.py"
-    path.write_text(STUB_SOURCE)
+    path.write_text(source)
     spec = importlib.util.spec_from_file_location("deferred_sync_stub", path)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, "deferred_sync_stub", module)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def stub_module(tmp_path, monkeypatch):
+    return _load_stub(tmp_path, monkeypatch, STUB_SOURCE)
 
 
 def _steps(n=6, micro=3):
@@ -119,12 +127,13 @@ def _run(recipe_cls, steps, log_every=2, ckpt_every=3):
     return recipe
 
 
-def test_logged_values_are_unchanged_to_the_bit(stub_module):
+def test_logged_values_are_unchanged_to_the_bit(stub_module, set_option):
     """The deferred sum is float64, like the Python float it replaces."""
+    set_option("primus_train.defer_host_sync", True)
     steps = _steps(n=24)
     reference = _run(stub_module.Recipe, steps, log_every=4, ckpt_every=6)
 
-    assert deferred_host_sync.patch_recipe(stub_module.Recipe) is True
+    deferred_host_sync.patch_recipe(stub_module.Recipe)
     deferred = _run(stub_module.Recipe, steps, log_every=4, ckpt_every=6)
 
     assert len(deferred.logged) == len(reference.logged) == 6
@@ -137,7 +146,8 @@ def test_logged_values_are_unchanged_to_the_bit(stub_module):
     assert deferred.epoch_avgs == reference.epoch_avgs
 
 
-def test_only_logging_steps_hold_python_floats(stub_module):
+def test_only_logging_steps_hold_python_floats(stub_module, set_option):
+    set_option("primus_train.defer_host_sync", True)
     deferred_host_sync.patch_recipe(stub_module.Recipe)
     recipe = _run(stub_module.Recipe, _steps(), log_every=2, ckpt_every=0)
 
@@ -146,23 +156,66 @@ def test_only_logging_steps_hold_python_floats(stub_module):
         assert types_ == (expected, expected, expected), f"step {step}"
 
 
+def test_a_later_run_with_the_setting_off_gets_the_upstream_loop(stub_module, set_option):
+    set_option("primus_train.defer_host_sync", True)
+    deferred_host_sync.patch_recipe(stub_module.Recipe)
+    deferred = _run(stub_module.Recipe, _steps(), log_every=2, ckpt_every=0)
+
+    set_option("primus_train.defer_host_sync", False)
+    upstream = _run(stub_module.Recipe, _steps(), log_every=2, ckpt_every=0)
+
+    assert deferred.types[0] == (torch.Tensor, torch.Tensor, torch.Tensor)
+    assert all(types_ == (float, float, float) for types_ in upstream.types)
+
+
 def test_the_rewrite_is_idempotent(stub_module):
     deferred_host_sync.patch_recipe(stub_module.Recipe)
     patched = stub_module.Recipe.run_train_validation_loop
 
-    assert deferred_host_sync.patch_recipe(stub_module.Recipe) is True
+    deferred_host_sync.patch_recipe(stub_module.Recipe)
     assert stub_module.Recipe.run_train_validation_loop is patched
+
+
+def test_a_subclass_that_overrides_the_loop_gets_its_own_rewrite(tmp_path, monkeypatch, set_option):
+    loop = STUB_SOURCE[STUB_SOURCE.index("    def run_train_validation_loop") :]
+    module = _load_stub(tmp_path, monkeypatch, STUB_SOURCE + "\n\nclass SubRecipe(Recipe):\n" + loop)
+    set_option("primus_train.defer_host_sync", True)
+
+    deferred_host_sync.patch_recipe(module.Recipe)
+    deferred_host_sync.patch_recipe(module.SubRecipe)
+
+    recipe = _run(module.SubRecipe, _steps(), log_every=2, ckpt_every=0)
+    assert recipe.types[0] == (torch.Tensor, torch.Tensor, torch.Tensor)
 
 
 def test_a_profiler_wrapped_loop_is_refused(stub_module):
     def wrapped(self):
         pass
 
-    wrapped._primus_profile_wrapped = True
+    setattr(wrapped, LOOP_WRAPPED_FLAG, True)
     stub_module.Recipe.run_train_validation_loop = wrapped
 
     with pytest.raises(RuntimeError, match="profiler"):
         deferred_host_sync.patch_recipe(stub_module.Recipe)
+
+
+def test_a_rewrite_that_fails_names_the_setting_and_leaves_the_loop(tmp_path, monkeypatch):
+    drifted = STUB_SOURCE.replace(
+        "epoch_loss += group_loss_mean", "epoch_loss = epoch_loss + group_loss_mean"
+    )
+    module = _load_stub(tmp_path, monkeypatch, drifted)
+    upstream = module.Recipe.__dict__["run_train_validation_loop"]
+    monkeypatch.setitem(
+        sys.modules,
+        "nemo_automodel.recipes.diffusion.train",
+        SimpleNamespace(TrainDiffusionRecipe=module.Recipe),
+    )
+
+    with pytest.raises(
+        RuntimeError, match="primus_train.defer_host_sync is on, but the train loop could not"
+    ):
+        deferred_host_sync.install()
+    assert module.Recipe.__dict__["run_train_validation_loop"] is upstream
 
 
 def _pinned_train_loop() -> Path:
@@ -199,7 +252,7 @@ def test_the_anchors_match_the_pinned_train_loop(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "upstream_loop_stub", module)
     module_spec.loader.exec_module(module)
 
-    assert deferred_host_sync.patch_recipe(module.TrainDiffusionRecipe) is True
+    deferred_host_sync.patch_recipe(module.TrainDiffusionRecipe)
 
 
 def _ctx(transformer_cls=None):
@@ -223,6 +276,9 @@ def test_the_patch_is_registered_gated_and_runs_before_the_profiler(set_option):
     assert loop is not None and profiler is not None
     assert loop.priority < profiler.priority
 
-    assert loop.condition(_ctx()) is False
+    contexts = [_ctx(), _ctx("FluxTransformer2DModel"), _ctx("WanTransformer3DModel")]
+    assert not any(loop.condition(ctx) for ctx in contexts)
+    set_option("primus_train.defer_host_sync", False)
+    assert not any(loop.condition(ctx) for ctx in contexts)
     set_option("primus_train.defer_host_sync", True)
-    assert loop.condition(_ctx("WanTransformer3DModel")) is True
+    assert all(loop.condition(ctx) for ctx in contexts)

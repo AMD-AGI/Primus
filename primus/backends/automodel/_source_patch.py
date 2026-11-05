@@ -25,6 +25,7 @@ import __future__
 
 import functools
 import inspect
+import linecache
 import operator
 import textwrap
 from typing import Any, Callable, Sequence, Tuple
@@ -32,6 +33,7 @@ from typing import Any, Callable, Sequence, Tuple
 _FUTURE_FLAGS = functools.reduce(
     operator.or_, (getattr(__future__, name).compiler_flag for name in __future__.all_feature_names)
 )
+_REBUILT_FLAG = "_primus_source_patched"
 
 
 def patch_method_source(
@@ -46,14 +48,16 @@ def patch_method_source(
     anchor means upstream changed, and an ambiguous one would inject the change
     somewhere it was never meant to go.
 
-    A method can be source-patched only once, because ``inspect.getsource``
-    cannot read a function rebuilt from a string. Batch all rewrites of one
-    method into a single call. The rebuilt method keeps the ``from __future__``
-    imports of the module it came from.
+    A method can be source-patched only once: batch all rewrites of one method
+    into a single call. The rebuilt method keeps the ``from __future__`` imports
+    of the module it came from. Tracebacks and debuggers show its rewritten
+    source, under a name that gives the upstream file, at the upstream line
+    numbers up to the first rewrite that adds or removes lines.
 
     Raises:
-        RuntimeError: If ``cls`` does not define the method itself, its source
-            cannot be read (as after an earlier source patch), or an anchor does
+        RuntimeError: If ``cls`` does not define the method itself as a plain
+            function, the method reads variables of an enclosing function, it was
+            source-patched already, its source cannot be read, or an anchor does
             not match exactly once.
     """
     original = cls.__dict__.get(method_name)
@@ -62,13 +66,26 @@ def patch_method_source(
             f"[SourcePatch] {method_name} is not defined on {cls.__name__} itself; "
             "patch the class that defines it"
         )
+    if not inspect.isfunction(original):
+        raise RuntimeError(
+            f"[SourcePatch] {cls.__name__}.{method_name} is a {type(original).__name__}; "
+            "only plain functions can be source-patched"
+        )
+    if getattr(original, _REBUILT_FLAG, False):
+        raise RuntimeError(
+            f"[SourcePatch] {cls.__name__}.{method_name} was source-patched already; "
+            "a method can be source-patched only once"
+        )
+    free_vars = sorted(set(original.__code__.co_freevars) - {"__class__"})
+    if free_vars:
+        raise RuntimeError(
+            f"[SourcePatch] {cls.__name__}.{method_name} reads variables of an enclosing function "
+            f"({', '.join(free_vars)}), which the rebuilt method could not see"
+        )
     try:
         source = inspect.getsource(original)
     except OSError as exc:
-        raise RuntimeError(
-            f"[SourcePatch] cannot read the source of {cls.__name__}.{method_name}; "
-            "a method can be source-patched only once"
-        ) from exc
+        raise RuntimeError(f"[SourcePatch] cannot read the source of {cls.__name__}.{method_name}") from exc
     for ori_code, new_code in replacements:
         found = source.count(ori_code)
         if found != 1:
@@ -81,19 +98,32 @@ def patch_method_source(
     modified_source = textwrap.dedent(source)
 
     # Compiling inside a throwaway class keeps the implicit ``__class__`` cell that
-    # zero-argument ``super()`` needs; the cell is then retargeted to ``cls``.
-    wrapper_source = "class _PrimusPatchWrapper:\n" + textwrap.indent(modified_source, "    ")
+    # zero-argument ``super()`` needs; the cell is then retargeted to ``cls``. The
+    # leading blank lines put the method at its upstream line numbers.
+    wrapper_source = (
+        "\n" * max(original.__code__.co_firstlineno - 2, 0)
+        + "class _PrimusPatchWrapper:\n"
+        + textwrap.indent(modified_source, "    ")
+    )
+    filename = f"<{cls.__qualname__}.{method_name}, source-patched from {original.__code__.co_filename}>"
     # dont_inherit: the rebuilt method takes the ``from __future__`` flags of the
     # module it came from, never those of the module calling compile().
     code = compile(
         wrapper_source,
-        f"<source patch of {cls.__qualname__}.{method_name}>",
+        filename,
         "exec",
         flags=original.__code__.co_flags & _FUTURE_FLAGS,
         dont_inherit=True,
     )
     namespace: dict = {}
     exec(code, original.__globals__, namespace)  # noqa: S102
+    # No modification time, so linecache.checkcache() never drops the entry.
+    linecache.cache[filename] = (
+        len(wrapper_source),
+        None,
+        wrapper_source.splitlines(keepends=True),
+        filename,
+    )
     wrapper_cls = namespace["_PrimusPatchWrapper"]
     new_func = wrapper_cls.__dict__[original.__name__]
     if new_func.__closure__:
@@ -103,5 +133,6 @@ def patch_method_source(
     new_func.__qualname__ = f"{cls.__qualname__}.{method_name}"
     new_func.__module__ = original.__module__
     new_func.__doc__ = original.__doc__
+    setattr(new_func, _REBUILT_FLAG, True)
     setattr(cls, method_name, new_func)
     return new_func
