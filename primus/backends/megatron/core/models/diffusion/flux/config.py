@@ -322,6 +322,16 @@ class FluxConfig(BaseDiffusionConfig):
                 "quantization contexts that keep sensitive layers in bf16"
             )
 
+        # An MXFP4 weight has no lazy column-wise copy, and TE quantizes one for
+        # recompute only when an autocast is already active where the checkpoint
+        # starts, which the per-layer contexts rule out.
+        if uses_per_layer_quantization_context(self) and self.fp4 and self.recompute_granularity == "full":
+            raise ValueError(
+                "bf16 first/last layers with fp4 on transformer_impl='transformer_engine' cannot run "
+                "with full activation recompute: the recomputed MXFP4 linears miss the column-wise "
+                "weight their backward needs; turn recompute off, or use transformer_impl: local"
+            )
+
     def get_num_layers(self):
         """
         Get total number of transformer layers.

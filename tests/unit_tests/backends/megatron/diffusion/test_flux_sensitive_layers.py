@@ -28,6 +28,7 @@ from primus.backends.megatron.core.transformer.diffusion_transformer_block impor
     DiffusionTransformerBlock,
     uses_per_layer_quantization_context,
 )
+from tests.unit_tests.backends.megatron.conftest import requires_mxfp4
 
 SENSITIVE = dict(
     sensitive_layers_enabled=True,
@@ -35,6 +36,8 @@ SENSITIVE = dict(
     sensitive_layers_end=1,
     sensitive_layer_precision="bf16",
 )
+
+RECOMPUTE = dict(recompute_granularity="full", recompute_method="uniform", recompute_num_layers=1)
 
 
 def _te_config(**overrides):
@@ -191,6 +194,24 @@ def test_stack_runners_are_rejected_with_megatrons_own_bf16_edge_layers(strategy
         )
 
 
+MXFP4_TE = dict(fp8=None, fp4="mxfp4", fp4_recipe="mxfp4")
+
+
+def test_mxfp4_sensitive_layers_with_full_recompute_are_rejected():
+    """Recomputed MXFP4 TE linears fail in backward without an autocast around the checkpoint."""
+    with pytest.raises(ValueError, match="cannot run with full activation recompute"):
+        _te_config(**MXFP4_TE, **SENSITIVE, **RECOMPUTE)
+
+
+def test_mxfp4_with_recompute_builds_without_sensitive_layers():
+    assert _te_config(**MXFP4_TE, **RECOMPUTE).recompute_granularity == "full"
+
+
+def test_fp8_sensitive_layers_build_with_full_recompute():
+    """A Float8 weight makes its transpose lazily, so FP8 keeps recompute."""
+    assert _te_config(**SENSITIVE, **RECOMPUTE).first_last_layers_bf16
+
+
 def test_stack_runners_still_build_without_sensitive_layers():
     assert _te_config(torch_compile_strategy="full_dit").torch_compile_strategy == "full_dit"
 
@@ -302,7 +323,8 @@ def _flux_inputs():
         pack_latents,
     )
 
-    batch, height, width, text = 2, 16, 16, 8
+    # MXFP4 linears need tokens (sequence x batch) divisible by 32 in every stream.
+    batch, height, width, text = 2, 16, 16, 16
     img = pack_latents(torch.randn(batch, 16, height, width)).transpose(0, 1).cuda().to(torch.bfloat16)
     txt = torch.randn(text, batch, 4096).cuda().to(torch.bfloat16)
     y = torch.randn(batch, 768).cuda().to(torch.bfloat16)
@@ -312,18 +334,31 @@ def _flux_inputs():
     return img, txt, y, timesteps, img_ids, txt_ids
 
 
-RECOMPUTE = dict(recompute_granularity="full", recompute_method="uniform", recompute_num_layers=1)
+# TE quantizes MXFP4 under the same autocast state as FP8, so the hooks read both.
+TE_QUANTIZATION = [
+    pytest.param(dict(), id="fp8"),
+    pytest.param(MXFP4_TE, id="mxfp4", marks=requires_mxfp4),
+]
 
 
 class TestTESpecFP8PerLayer:
     @pytest.fixture(autouse=True)
-    def setup_parallel(self, init_parallel_state):
+    def setup_parallel(self, init_parallel_state, monkeypatch):
         pytest.importorskip("transformer_engine")
+        self.monkeypatch = monkeypatch
 
-    def _fp8_seen(self, recompute, sensitive):
+    def _fp8_seen(self, quantization, recompute, sensitive):
         from primus.backends.megatron.core.models.diffusion.flux.model import Flux
 
-        overrides = {**(RECOMPUTE if recompute else {}), **(SENSITIVE if sensitive else {})}
+        if quantization.get("fp4"):
+            import megatron.core.fp4_utils as fp4_utils
+
+            from primus.backends.megatron.core.fp4_utils import get_fp4_context
+
+            # Upstream Megatron's get_fp4_context has no MXFP4 recipe; the launcher swaps in Primus's.
+            self.monkeypatch.setattr(fp4_utils, "get_fp4_context", get_fp4_context)
+
+        overrides = {**quantization, **(RECOMPUTE if recompute else {}), **(SENSITIVE if sensitive else {})}
         model = Flux(_te_config(**overrides)).cuda().to(torch.bfloat16)
         seen = _record_fp8_per_layer(model)
         model.train()
@@ -332,10 +367,29 @@ class TestTESpecFP8PerLayer:
             output.float().sum().backward()
         return {index: sorted(states) for index, states in seen.items()}
 
-    @pytest.mark.parametrize("recompute", [False, True], ids=["no_recompute", "full_recompute"])
-    def test_sensitive_layers_run_in_bf16(self, recompute):
-        assert self._fp8_seen(recompute, sensitive=True) == {0: [False], 1: [True], 2: [True], 3: [False]}
+    # MXFP4 sensitive layers with full recompute are rejected at config time.
+    @pytest.mark.parametrize(
+        "quantization,recompute",
+        [
+            pytest.param(dict(), False, id="fp8-no_recompute"),
+            pytest.param(dict(), True, id="fp8-full_recompute"),
+            pytest.param(MXFP4_TE, False, id="mxfp4-no_recompute", marks=requires_mxfp4),
+        ],
+    )
+    def test_sensitive_layers_run_in_bf16(self, quantization, recompute):
+        assert self._fp8_seen(quantization, recompute, sensitive=True) == {
+            0: [False],
+            1: [True],
+            2: [True],
+            3: [False],
+        }
 
+    @pytest.mark.parametrize("quantization", TE_QUANTIZATION)
     @pytest.mark.parametrize("recompute", [False, True], ids=["no_recompute", "full_recompute"])
-    def test_every_layer_runs_in_fp8_without_sensitive_layers(self, recompute):
-        assert self._fp8_seen(recompute, sensitive=False) == {0: [True], 1: [True], 2: [True], 3: [True]}
+    def test_every_layer_runs_quantized_without_sensitive_layers(self, quantization, recompute):
+        assert self._fp8_seen(quantization, recompute, sensitive=False) == {
+            0: [True],
+            1: [True],
+            2: [True],
+            3: [True],
+        }
