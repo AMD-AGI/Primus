@@ -31,13 +31,14 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
+from primus_turbo.flydsl.utils import buffer_ops
 
 KERNEL_NAME = "v4_swa_bwd_dkv_kernel"
 
@@ -593,7 +594,7 @@ def build_v4_swa_bwd_dkv_module(
                                 m_row = arith.index(mt * 16) + lane_mod_16
                                 d_col = arith.index(ks * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                                 lds_idx = m_row * arith.index(LDS_Q_STRIDE) + d_col
-                                pack = vector.load_op(mfma_pack_type, lds_q, [lds_idx])
+                                pack = vector.load(mfma_pack_type, lds_q, [lds_idx])
                                 q_b_packs[mt][ks] = pack
 
                         do_b_packs_gemm3 = [[None] * K_STEPS_QK for _ in range(M_TILES)]
@@ -602,7 +603,7 @@ def build_v4_swa_bwd_dkv_module(
                                 m_row = arith.index(mt * 16) + lane_mod_16
                                 d_col = arith.index(ks * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                                 lds_idx = m_row * arith.index(LDS_DO_STRIDE) + d_col
-                                pack = vector.load_op(mfma_pack_type, lds_do, [lds_idx])
+                                pack = vector.load(mfma_pack_type, lds_do, [lds_idx])
                                 do_b_packs_gemm3[mt][ks] = pack
                 else:
                     # R6b fallback: HBM-direct B-frag per m-tile. row = m_start + mt*16 + lane_mod_16.
@@ -655,12 +656,12 @@ def build_v4_swa_bwd_dkv_module(
                             # 6N-2 iter2: load Q B-frag inside the gate when LDS Q/DO.
                             acc = v4f32_zero
                             for ks in range_constexpr(K_STEPS_QK):
-                                k_pack = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_wave(ks)])
+                                k_pack = vector.load(mfma_pack_type, lds_kv, [_k_idx_wave(ks)])
                                 if USE_LDS_FOR_Q_DO:
                                     _m_row_b = arith.index(mt * 16) + lane_mod_16
                                     _d_col_b = arith.index(ks * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                                     _lds_idx_b = _m_row_b * arith.index(LDS_Q_STRIDE) + _d_col_b
-                                    q_pack = vector.load_op(mfma_pack_type, lds_q, [_lds_idx_b])
+                                    q_pack = vector.load(mfma_pack_type, lds_q, [_lds_idx_b])
                                 else:
                                     q_pack = q_b_packs[mt][ks]
                                 acc = mfma_acc(k_pack, q_pack, acc)
@@ -718,7 +719,7 @@ def build_v4_swa_bwd_dkv_module(
                         # Legacy path: every wave does GEMM1[mt] + softmax + pT_write.
                         acc = v4f32_zero
                         for ks in range_constexpr(K_STEPS_QK):
-                            k_pack = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_wave(ks)])
+                            k_pack = vector.load(mfma_pack_type, lds_kv, [_k_idx_wave(ks)])
                             acc = mfma_acc(k_pack, q_b_packs[mt][ks], acc)
                         s_accs[mt] = acc
 
@@ -775,7 +776,7 @@ def build_v4_swa_bwd_dkv_module(
                     kv_row_a = wave_n_offset + lane_mod_16
                     m_col_a = arith.index(m_step * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                     lds_idx = kv_row_a * arith.index(LDS_PT_STRIDE) + m_col_a
-                    pack = vector.load_op(mfma_pack_type, lds_pt, [lds_idx])
+                    pack = vector.load(mfma_pack_type, lds_pt, [lds_idx])
                     pt_a_packs.append(pack)
 
                 # ---- GEMM2: dV += pT @ DO ----
@@ -847,12 +848,12 @@ def build_v4_swa_bwd_dkv_module(
                             # 6N-2 iter2: load DO B-frag inside the gate when LDS Q/DO.
                             acc = v4f32_zero
                             for ks in range_constexpr(K_STEPS_QK):
-                                v_pack = vector.load_op(mfma_pack_type, lds_kv, [_v_idx_wave(ks)])
+                                v_pack = vector.load(mfma_pack_type, lds_kv, [_v_idx_wave(ks)])
                                 if USE_LDS_FOR_Q_DO:
                                     _m_row_b = arith.index(mt * 16) + lane_mod_16
                                     _d_col_b = arith.index(ks * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                                     _lds_idx_b = _m_row_b * arith.index(LDS_DO_STRIDE) + _d_col_b
-                                    do_pack = vector.load_op(mfma_pack_type, lds_do, [_lds_idx_b])
+                                    do_pack = vector.load(mfma_pack_type, lds_do, [_lds_idx_b])
                                 else:
                                     do_pack = do_b_packs_gemm3[mt][ks]
                                 acc = mfma_acc(v_pack, do_pack, acc)
@@ -874,7 +875,7 @@ def build_v4_swa_bwd_dkv_module(
                     # Legacy path
                     dp_accs = [v4f32_zero for _ in range(M_TILES)]
                     for ks in range_constexpr(K_STEPS_QK):
-                        v_pack = vector.load_op(mfma_pack_type, lds_kv, [_v_idx_wave(ks)])
+                        v_pack = vector.load(mfma_pack_type, lds_kv, [_v_idx_wave(ks)])
                         for mt in range_constexpr(M_TILES):
                             dp_accs[mt] = mfma_acc(v_pack, do_b_packs_gemm3[mt][ks], dp_accs[mt])
                     for mt in range_constexpr(M_TILES):
@@ -902,7 +903,7 @@ def build_v4_swa_bwd_dkv_module(
                     kv_row_a = wave_n_offset + lane_mod_16
                     m_col_a = arith.index(m_step * K_STEP_QK) + lane_div_16 * MFMA_LANE_K
                     lds_idx = kv_row_a * arith.index(LDS_PT_STRIDE) + m_col_a
-                    pack = vector.load_op(mfma_pack_type, lds_pt, [lds_idx])
+                    pack = vector.load(mfma_pack_type, lds_pt, [lds_idx])
                     ds_a_packs.append(pack)
 
                 # ---- GEMM4: dK += dsT @ Q  (MFMA 16x16x32) ----

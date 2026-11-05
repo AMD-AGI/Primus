@@ -6,6 +6,7 @@ extends:
 
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: THUDM/glm-4-9b  # Use appropriate tokenizer
+vocab_size: 151552  # zai-org/GLM-4.7 (the tokenizer above is a stand-in)
 
 # model architecture
 num_layers: 90

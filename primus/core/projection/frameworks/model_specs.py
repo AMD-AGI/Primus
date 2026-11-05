@@ -7,13 +7,15 @@
 """Backend-neutral model architecture records for the projection tool.
 
 TorchTitan names a model ``(model.name, model.flavor)`` and keeps the shape in a
-Python dataclass.  That shape never reaches the Primus experiment YAML -- an
-experiment says ``flavor: "8B"`` and nothing else -- so a config adapter has to
-recover the shape before it can describe the workload to the projection.
+Python dataclass; MaxText names it ``model_name`` and keeps the shape in a YAML
+file.  Neither spelling reaches the Primus experiment YAML -- an experiment says
+``flavor: "8B"`` or ``model_name: "llama3-8b"`` and nothing else -- so a config
+adapter has to recover the shape before it can describe the workload to the
+projection.
 
-The backend is the authority on its own flavors, so the adapter reads it first
-(:mod:`primus.core.projection.frameworks.torchtitan` imports the flavor table).
-This module is what answers when the
+The backend is the authority on its own flavors, so the adapters read it first
+(:mod:`primus.core.projection.frameworks.torchtitan` imports the flavor table,
+the MaxText adapter reads the model YAML).  This module is what answers when the
 backend is not installed, which is the normal case for projection: sizing a
 cluster is supposed to need neither a GPU nor a training checkout.  A ``ModelSpec``
 is therefore a *transcription* of the backend's own definition, and
@@ -21,9 +23,9 @@ is therefore a *transcription* of the backend's own definition, and
 against the backend whenever the backend happens to be present, so a spec that
 drifts from upstream fails a test rather than quietly mis-sizing a cluster.
 
-Specs are keyed by a backend-neutral canonical name on purpose: a TorchTitan
-``llama3/8B`` and a Megatron Llama 3 8B are the same 32 layers of the same
-GEMMs, and the projection has no reason to hold two opinions about that.
+Specs are shared across backends on purpose: a TorchTitan ``llama3/8B`` and a
+MaxText ``llama3-8b`` are the same 32 layers of the same GEMMs, and the
+projection has no reason to hold two opinions about that.
 """
 
 from dataclasses import dataclass
@@ -227,8 +229,25 @@ def _gpt_oss(n_layers, num_experts) -> ModelSpec:
     )
 
 
+def _mixtral(dim, n_layers, n_heads, ffn, vocab) -> ModelSpec:
+    return ModelSpec(
+        num_layers=n_layers,
+        hidden_size=dim,
+        ffn_hidden_size=ffn,
+        num_attention_heads=n_heads,
+        num_query_groups=8,
+        kv_channels=128,
+        vocab_size=vocab,
+        num_experts=8,
+        moe_ffn_hidden_size=ffn,
+        moe_router_topk=2,
+    )
+
+
 BUILTIN_MODEL_SPECS: Dict[str, ModelSpec] = {
-    # Llama 3 / 4
+    # Llama 2 / 3 / 4
+    "llama2-7b": ModelSpec(32, 4096, 11008, 32, 32, 128, 32000),
+    "llama2-70b": ModelSpec(80, 8192, 28672, 64, 8, 128, 32000),
     "llama3-8b": _llama3(4096, 32, 32, 8, 1024, 1.3),
     "llama3-70b": _llama3(8192, 80, 64, 8, 4096, 1.3),
     "llama3.1-405b": _llama3(16384, 126, 128, 8, 4096, 1.2),
@@ -276,6 +295,37 @@ BUILTIN_MODEL_SPECS: Dict[str, ModelSpec] = {
     # GPT-OSS
     "gpt-oss-20b": _gpt_oss(24, 32),
     "gpt-oss-120b": _gpt_oss(36, 128),
+    # Mixtral / Grok
+    "mixtral-8x7b": _mixtral(4096, 32, 32, 14336, 32000),
+    "mixtral-8x22b": _mixtral(6144, 56, 48, 16384, 32768),
+    "grok1": _mixtral(6144, 64, 48, 32768, 131072),
+    # Gemma 4 (GeGLU is still a gated MLP, so it keeps the three-matrix shape)
+    "gemma4-26b": ModelSpec(
+        num_layers=30,
+        hidden_size=2816,
+        ffn_hidden_size=2112,
+        num_attention_heads=16,
+        num_query_groups=8,
+        kv_channels=256,
+        vocab_size=262144,
+        tie_embeddings=True,
+        num_experts=128,
+        moe_ffn_hidden_size=704,
+        moe_router_topk=8,
+        num_shared_experts=1,
+        attn_sliding_window=1024,
+    ),
+    "gemma4-31b": ModelSpec(
+        num_layers=60,
+        hidden_size=5376,
+        ffn_hidden_size=21504,
+        num_attention_heads=32,
+        num_query_groups=16,
+        kv_channels=256,
+        vocab_size=262144,
+        tie_embeddings=True,
+        attn_sliding_window=1024,
+    ),
 }
 
 
@@ -303,6 +353,37 @@ TORCHTITAN_FLAVOR_ALIASES: Dict[Tuple[str, str], str] = {
 }
 
 
+# ``model_name`` as MaxText spells it, lowercased.
+MAXTEXT_MODEL_ALIASES: Dict[str, str] = {
+    "llama2-7b": "llama2-7b",
+    "llama2-70b": "llama2-70b",
+    "llama3-8b": "llama3-8b",
+    "llama3.1-8b": "llama3-8b",
+    "llama3-70b": "llama3-70b",
+    "llama3.1-70b": "llama3-70b",
+    "llama3.3-70b": "llama3-70b",
+    "llama3.1-405b": "llama3.1-405b",
+    "llama4-17b-16e": "llama4-17bx16e",
+    "llama4-17b-128e": "llama4-17bx128e",
+    "mixtral-8x7b": "mixtral-8x7b",
+    "mixtral-8x22b": "mixtral-8x22b",
+    "deepseek2-16b": "deepseek-v2-16b",
+    "deepseek2-236b": "deepseek-v2-236b",
+    "deepseek3-671b": "deepseek-v3-671b",
+    "qwen3-14b": "qwen3-14b",
+    "qwen3-30b-a3b": "qwen3-30b-a3b",
+    "qwen3-235b-a22b": "qwen3-235b-a22b",
+    "gpt-oss-20b": "gpt-oss-20b",
+    "gpt-oss-120b": "gpt-oss-120b",
+    "gemma4-26b": "gemma4-26b",
+    "gemma4-31b": "gemma4-31b",
+    # MaxText ships no config for Grok-1, so the Primus preset spells the
+    # architecture out; the alias is here for an experiment that only names it.
+    "grok-1": "grok1",
+    "grok1": "grok1",
+}
+
+
 def get_builtin_spec(canonical_name: str) -> Optional[ModelSpec]:
     """Return the transcribed spec for *canonical_name*, or ``None``."""
     if not canonical_name:
@@ -314,6 +395,12 @@ def torchtitan_builtin_spec(name: str, flavor: str) -> Optional[ModelSpec]:
     """Return the spec for a TorchTitan ``(model.name, model.flavor)`` pair."""
     key = (str(name or "").lower().strip(), str(flavor or "").lower().strip())
     return get_builtin_spec(TORCHTITAN_FLAVOR_ALIASES.get(key, ""))
+
+
+def maxtext_builtin_spec(model_name: str) -> Optional[ModelSpec]:
+    """Return the spec for a MaxText ``model_name``."""
+    key = str(model_name or "").lower().strip()
+    return get_builtin_spec(MAXTEXT_MODEL_ALIASES.get(key, ""))
 
 
 def spec_to_projection_fields(spec: ModelSpec) -> Dict[str, object]:

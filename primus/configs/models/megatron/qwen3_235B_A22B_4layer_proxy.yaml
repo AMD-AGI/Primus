@@ -5,4 +5,5 @@ extends:
 # architecture, reduce depth, and use the small repository with the same tokenizer.
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: Qwen/Qwen3-0.6B
+vocab_size: 151936
 num_layers: 4

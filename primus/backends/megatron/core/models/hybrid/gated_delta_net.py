@@ -48,7 +48,7 @@ except ImportError:
 
     HAVE_FLA = False
 
-from megatron.training import get_args as _get_args
+from primus.backends.megatron.core.utils import get_megatron_arg
 
 try:
     from causal_conv1d import causal_conv1d_fn
@@ -210,7 +210,7 @@ class GatedDeltaNet(MegatronModule):
 
         # Output layernorm before projection
         self._use_fla_fused_gated_norm = False
-        _use_fla_gated_norm = getattr(_get_args(), "use_fla_fused_gated_norm", False)
+        _use_fla_gated_norm = get_megatron_arg("use_fla_fused_gated_norm", False)
         if _use_fla_gated_norm and config.normalization == "RMSNorm":
             try:
                 from fla.modules.fused_norm_gate import FusedRMSNormGated
@@ -358,7 +358,7 @@ class GatedDeltaNet(MegatronModule):
         # Convolution on qkv (or SiLU-only when use_short_conv=False)
         nvtx_range_push(suffix="conv1d")
         if self.use_short_conv:
-            _use_fla_conv = getattr(_get_args(), "use_fla_short_conv", False)
+            _use_fla_conv = get_megatron_arg("use_fla_short_conv", False)
             if _use_fla_conv and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
                 # FLA's Triton causal_conv1d expects [B, T, D] (no transpose needed)
                 # and matches FLA reference run bit-for-bit.

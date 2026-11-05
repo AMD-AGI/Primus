@@ -1,7 +1,7 @@
 # Qwen3.5-4B DFlash offline hidden-state capture (Primus-owned).
 #
-# Image: examples/specforge/docker/README.md
-# primus-cli sketch: examples/specforge/README.md
+# Image: docs/04-technical-guides/specforge/runtime-image.md
+# primus-cli sketch: docs/04-technical-guides/specforge/running.md
 #
 # Still SpecForge's scripts/prepare_hidden_states.py under the hood. Primus
 # only owns paths, GPU count, and the DFlash filter.

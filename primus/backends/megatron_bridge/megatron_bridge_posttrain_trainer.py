@@ -16,6 +16,7 @@ optimized for post-training workflows with smaller datasets and specialized
 training objectives.
 """
 
+import functools
 from typing import Any
 
 from primus.backends.megatron_bridge.config_utils import load_recipe_config
@@ -23,6 +24,53 @@ from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
     MegatronBridgeBaseTrainer,
 )
 from primus.core.utils.module_utils import log_dict_aligned, log_rank_0
+
+
+def _is_vlm_model(model_cfg: Any) -> bool:
+    # Ministral3 and Nemotron-VL have no vision_config, but every VLM provider
+    # (and no text-only one) defines freeze_vision_model.
+    return getattr(model_cfg, "vision_config", None) is not None or hasattr(model_cfg, "freeze_vision_model")
+
+
+class _DefaultAttentionMask:
+    """Adds ``attention_mask=None`` to batches that omit it.
+
+    gpt_step.get_batch indexes ``batch["attention_mask"]``, but the chat SFT collate
+    (with the default get_attention_mask_from_fusion=True) leaves the key out.
+    """
+
+    def __init__(self, data_iterator):
+        self._data_iterator = data_iterator
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        batch = next(self._data_iterator)
+        if isinstance(batch, dict):
+            batch.setdefault("attention_mask", None)
+        return batch
+
+
+def _with_default_attention_mask(forward_step):
+    @functools.wraps(forward_step)
+    def wrapped(state, data_iterator, model, *args, **kwargs):
+        if data_iterator is not None:
+            data_iterator = _DefaultAttentionMask(data_iterator)
+        return forward_step(state, data_iterator, model, *args, **kwargs)
+
+    return wrapped
+
+
+def _select_forward_step(model_cfg: Any):
+    # vlm_step pads tokens without updating cu_seqlens, which breaks packed text-only batches.
+    if _is_vlm_model(model_cfg):
+        from megatron.bridge.training.vlm_step import forward_step
+
+        return forward_step
+    from megatron.bridge.training.gpt_step import forward_step
+
+    return _with_default_attention_mask(forward_step)
 
 
 class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
@@ -103,7 +151,9 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             # Execute post-training based on configuration
             from megatron.bridge.training.config import runtime_config_update
             from megatron.bridge.training.finetune import finetune
-            from megatron.bridge.training.vlm_step import forward_step
+
+            forward_step = _select_forward_step(self.cfg_container.model)
+            log_rank_0(f"Using forward step: {forward_step.__module__}.forward_step")
 
             # log_rank_0(f"ConfigContainer: {self.cfg_container}")
             runtime_config_update(self.cfg_container)

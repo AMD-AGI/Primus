@@ -21,10 +21,32 @@ If submodules.router is the default TopKRouter, we need to ensure it's PrimusTop
 """
 
 import dataclasses
+import functools
+import inspect
 import sys
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+
+def _use_primus_topk_router_in_moe_spec(spec):
+    """Swap Megatron's ``TopKRouter`` in an MoE spec's ``MoESubmodules.router`` for ``PrimusTopKRouter``.
+
+    The spec is a ``ModuleSpec`` before Megatron-core 0.19 and ``functools.partial(MoELayer,
+    submodules=...)`` from 0.19 on; either way its ``MoESubmodules`` is edited in place. Any other
+    router (e.g. one the backend chose) is kept.
+    """
+    from primus.backends.megatron.core.transformer.moe.router import (
+        primus_topk_router_for,
+    )
+
+    if isinstance(spec, functools.partial):
+        submodules = spec.keywords.get("submodules")
+    else:
+        submodules = getattr(spec, "submodules", None)
+    if submodules is not None and hasattr(submodules, "router"):
+        submodules.router = primus_topk_router_for(submodules.router)
+    return spec
 
 
 @register_patch(
@@ -50,7 +72,10 @@ def patch_primus_topk_router(ctx: PatchContext):
         - Patch moe_module_specs.MoESubmodules if imported
         - If deprecated MoE is enabled, also patch deprecated_20251209.moe_layer
     """
-    from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
+    from primus.backends.megatron.core.transformer.moe.router import (
+        PrimusTopKRouter,
+        primus_topk_router_for,
+    )
 
     # Step 1: Patch sys.modules for core megatron router module
     # This ensures any future imports will get PrimusTopKRouter
@@ -77,6 +102,9 @@ def patch_primus_topk_router(ctx: PatchContext):
     # Step 3: Patch MoESubmodules.router default value
     # The dataclass field default is bound at class definition time (line 75: router: RouterBuilder = TopKRouter)
     # We need to update the field's default attribute to use PrimusTopKRouter
+    # This moves only what dataclasses.fields() reports (K3's quantile-balancing router reads it):
+    # MoESubmodules() keeps the default its generated __init__ was built with, so a spec that leaves
+    # the router unset still gets that class. Steps 4 and 5 swap it where specs and MoELayer use it.
     if hasattr(moe_layer, "MoESubmodules"):
         fields_dict = moe_layer.MoESubmodules.__dataclass_fields__
         if "router" in fields_dict:
@@ -89,10 +117,17 @@ def patch_primus_topk_router(ctx: PatchContext):
             if hasattr(field, "default_factory") and field.default_factory is not dataclasses.MISSING:
                 field.default_factory = dataclasses.MISSING
 
+            # What MoESubmodules() itself defaults to, which the edit above does not change
+            init_router = inspect.signature(moe_layer.MoESubmodules).parameters.get("router")
+            init_note = (
+                f" (MoESubmodules() still defaults to {getattr(init_router.default, '__name__', init_router.default)})"
+                if init_router is not None and init_router.default is not PrimusTopKRouter
+                else ""
+            )
             log_rank_0(
-                f"[Patch:megatron.moe.primus_topk_router]   Patched MoESubmodules.router default: "
+                f"[Patch:megatron.moe.primus_topk_router]   Patched MoESubmodules.router field default: "
                 f"{old_default.__name__ if hasattr(old_default, '__name__') else old_default} "
-                f"-> {PrimusTopKRouter.__name__}"
+                f"-> {PrimusTopKRouter.__name__}{init_note}"
             )
         else:
             log_rank_0(
@@ -112,11 +147,8 @@ def patch_primus_topk_router(ctx: PatchContext):
         def patched_get_moe_module_spec_for_backend(*args, **kwargs):
             """Wrapped version that ensures MoESubmodules uses PrimusTopKRouter."""
             result = original_get_moe_module_spec_for_backend(*args, **kwargs)
-            # result is a ModuleSpec with submodules=MoESubmodules(...)
-            if hasattr(result, "submodules") and hasattr(result.submodules, "router"):
-                # Explicitly set router to PrimusTopKRouter
-                result.submodules.router = PrimusTopKRouter
-            return result
+            # result is a ModuleSpec with submodules=MoESubmodules(...), or a functools.partial on 0.19+
+            return _use_primus_topk_router_in_moe_spec(result)
 
         moe_module_specs.get_moe_module_spec_for_backend = patched_get_moe_module_spec_for_backend
         log_rank_0(
@@ -130,10 +162,7 @@ def patch_primus_topk_router(ctx: PatchContext):
 
             def patched_get_moe_module_spec(*args, **kwargs):
                 """Wrapped version that ensures MoESubmodules uses PrimusTopKRouter."""
-                result = original_get_moe_module_spec(*args, **kwargs)
-                if hasattr(result, "submodules") and hasattr(result.submodules, "router"):
-                    result.submodules.router = PrimusTopKRouter
-                return result
+                return _use_primus_topk_router_in_moe_spec(original_get_moe_module_spec(*args, **kwargs))
 
             moe_module_specs.get_moe_module_spec = patched_get_moe_module_spec
             log_rank_0(
@@ -149,14 +178,14 @@ def patch_primus_topk_router(ctx: PatchContext):
                 if field.default is PrimusTopKRouter:
                     log_rank_0(
                         f"[Patch:megatron.moe.primus_topk_router]   Verified moe_module_specs.MoESubmodules.router "
-                        f"default is {PrimusTopKRouter.__name__}"
+                        f"field default is {PrimusTopKRouter.__name__}"
                     )
                 else:
                     field.default = PrimusTopKRouter
                     if hasattr(field, "default_factory") and field.default_factory is not dataclasses.MISSING:
                         field.default_factory = dataclasses.MISSING
                     log_rank_0(
-                        f"[Patch:megatron.moe.primus_topk_router]   Patched moe_module_specs.MoESubmodules.router default "
+                        f"[Patch:megatron.moe.primus_topk_router]   Patched moe_module_specs.MoESubmodules.router field default "
                         f"-> {PrimusTopKRouter.__name__}"
                     )
     except ImportError:
@@ -167,6 +196,7 @@ def patch_primus_topk_router(ctx: PatchContext):
     # Step 5: Patch MoELayer.__init__ to ensure submodules.router is PrimusTopKRouter
     # This is the most reliable method: directly patch MoELayer.__init__ to check and fix
     # submodules.router before it's used, regardless of when MoESubmodules was created
+    # (PrimusTurboMegaMoELayer replaces MoELayer and makes the same swap itself)
     original_moelayer_init = moe_layer.MoELayer.__init__
 
     def patched_moelayer_init(self, config, submodules=None, layer_number=None, pg_collection=None, **kwargs):
@@ -174,20 +204,14 @@ def patch_primus_topk_router(ctx: PatchContext):
         # Fix submodules.router before calling original __init__
         if submodules is not None and hasattr(submodules, "router"):
             router = submodules.router
-            # Check if router is a class (not an instance) and is not PrimusTopKRouter
-            if isinstance(router, type):
-                # Simple check: if router is not PrimusTopKRouter, replace it
-                # This handles all cases where TopKRouter was used as default
-                if router is not PrimusTopKRouter:
-                    router_module_name = getattr(router, "__module__", "")
-                    router_class_name = getattr(router, "__name__", "")
-                    # Only replace if it's actually TopKRouter (not some other router class)
-                    if router_class_name == "TopKRouter":
-                        submodules.router = PrimusTopKRouter
-                        log_rank_0(
-                            f"[Patch:megatron.moe.primus_topk_router]   Fixed submodules.router in MoELayer.__init__: "
-                            f"{router_module_name}.{router_class_name} -> {PrimusTopKRouter.__name__}"
-                        )
+            # Only Megatron's TopKRouter class is replaced, not other router classes or builders
+            primus_router = primus_topk_router_for(router)
+            if primus_router is not router:
+                submodules.router = primus_router
+                log_rank_0(
+                    f"[Patch:megatron.moe.primus_topk_router]   Fixed submodules.router in MoELayer.__init__: "
+                    f"{router.__module__}.{router.__name__} -> {primus_router.__name__}"
+                )
 
         # Call original __init__ (forward all kwargs like is_mtp_layer, etc.)
         return original_moelayer_init(self, config, submodules, layer_number, pg_collection, **kwargs)

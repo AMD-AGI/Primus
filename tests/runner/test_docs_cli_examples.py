@@ -36,7 +36,7 @@ ALLOWED_MISSING = {
     "tools/fetch_primus.sh",
     # Marked "(helper; not committed)" inline: a local calibration helper that
     # is intentionally kept out of the tree.
-    "examples/deepseek-v4/projection/script/_calibrate_flash.sh",
+    "examples/megatron/models/deepseek-v4/projection/script/_calibrate_flash.sh",
     # Forward reference to the ODC rocSHMEM example, which lands with the PR
     # that the same README says the ops are still waiting on.
     "examples/llm_training/run.sh",

@@ -45,6 +45,10 @@ sink_sliding_window: 0
 sink_window_even_layers_only: true
 # attention float8 path
 enable_turbo_attention_float8: false
+# Fuse the packed-QKV split, Q/K RMSNorm and RoPE into one Primus-Turbo FlyDSL op
+# (training, TP=1, SBHD, head_dim supported by the installed Turbo). Layers that do
+# not qualify keep the Megatron path.
+use_turbo_fused_qk_rmsnorm_rope: false
 
 # ===== Parallel Linear =====
 # operator switch
@@ -61,6 +65,11 @@ use_turbo_grouped_gemm: false
 # Fuse the grouped MLP chain (fc1 + GLU + fc2, including WGRAD) into Primus-Turbo's
 # fused grouped MLP op.
 turbo_fused_grouped_gemm: false
+# Hand the fused grouped MLP its input and output gradient already in FP8 (tensorwise current
+# scaling only): the DeepEP dispatcher quantizes the dispatched tokens before permute, and the
+# combine gradient before un-permute's backward, instead of their topk-times larger permuted
+# copies. Bit-identical. Requires turbo_fused_grouped_gemm and use_turbo_deepep.
+turbo_fp8_permute: false
 # let Turbo grouped GEMMs consume non-aligned expert token counts directly,
 # without TE Fp8Padding/Fp8Unpadding
 turbo_grouped_gemm_without_padding: false
@@ -96,3 +105,18 @@ use_turbo_rms_norm: false
 # GEMM on Transformer Engine. use_turbo_gemm moves that GEMM to Turbo as well,
 # which costs more than the norm saves on the GPT-OSS-20B shapes.
 use_turbo_norm_te_linear: false
+
+# ===== MoE gather quantization =====
+# EP1/TP1 all-to-all with the fused Turbo MXFP4 grouped MLP only.
+moe_permute_quant_fusion: false
+moe_backward_permute_quant_fusion: false
+# Preserve activation storage across identity expert sorting.
+moe_skip_identity_sort: true
+
+# ===== Cross entropy =====
+# Use Turbo fused cross entropy for TP=1 BF16/FP32 logits when
+# cross_entropy_loss_fusion is enabled. Other cases keep the configured loss.
+use_turbo_cross_entropy: false
+# Allow backward to overwrite contiguous logits with their gradient. Only enable
+# when no other consumer needs the original logits.
+turbo_ce_overwrite_input: false

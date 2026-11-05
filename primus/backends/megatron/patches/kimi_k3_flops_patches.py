@@ -898,7 +898,9 @@ def _make_k3_num_floating_point_operations(original_fn):
     for comparison.
     """
 
-    def wrapped(args, batch_size):
+    # *extra/**extra_kwargs: Megatron-core 0.19+ pass per-batch sequence statistics; the
+    # K3 formula is dense-sequence and ignores them.
+    def wrapped(args, batch_size, *extra, **extra_kwargs):
         total_flops, breakdown = compute_kimi_k3_flops(args, batch_size)
 
         global _BREAKDOWN_LOGGED

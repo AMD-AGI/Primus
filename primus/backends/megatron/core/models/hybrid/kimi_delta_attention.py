@@ -76,7 +76,7 @@ try:
 except ImportError:
     causal_conv1d_fn = None
 
-from megatron.training import get_args as _get_args
+from primus.backends.megatron.core.utils import get_megatron_arg
 
 try:
     from fla.modules.conv.causal_conv1d import causal_conv1d as _fla_causal_conv1d
@@ -655,7 +655,7 @@ class KimiDeltaAttention(MegatronModule):
         #   (3) Pure-PyTorch fallback when neither is available or
         #       deterministic_mode is set.
         nvtx_range_push(suffix="kda_conv")
-        _use_fla_conv = getattr(_get_args(), "use_fla_short_conv", False)
+        _use_fla_conv = get_megatron_arg("use_fla_short_conv", False)
         if _use_fla_conv and _fla_causal_conv1d is not None and not self.config.deterministic_mode:
             assert self.activation in ["silu", "swish"]
             qkv, _ = _fla_causal_conv1d(

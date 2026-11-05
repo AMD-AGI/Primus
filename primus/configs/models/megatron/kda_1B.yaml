@@ -5,6 +5,7 @@ extends:
 model_type: mamba
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B
+vocab_size: 128256
 
 # Model size parameters (matches FLA: hidden_size=2048, intermediate_size=8192, num_hidden_layers=16)
 # Megatron counts sublayers: 16 KDA + 16 MLP = 32

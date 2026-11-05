@@ -5,6 +5,7 @@ extends:
 model_type: mamba  # CRITICAL: Hybrid models must use mamba model type
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B
+vocab_size: 128256
 
 # Model size parameters
 num_layers: 32

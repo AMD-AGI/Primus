@@ -6,6 +6,7 @@ extends:
 
 tokenizer_type: DeepSeekV2Tokenizer
 tokenizer_model: deepseek-ai/DeepSeek-V2
+vocab_size: 102400
 
 # model
 num_layers: 60

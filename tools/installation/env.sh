@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # env.sh — Primus venv environment (Python 3.12, ROCm via pip rocm-sdk-devel)
-# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.7
+# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.9
 #
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
@@ -61,11 +61,8 @@ export SRC_DIR="${SRC_DIR:-/tmp/primus-build}"
 export MAX_JOBS="${MAX_JOBS:-128}"
 
 # ---- Python version ----
-# 3.12 is REQUIRED, not a preference. The pinned torch nightly
-# (2.12.0+rocm7.15.0a20260727) published a cp312 Linux wheel and nothing else,
-# so this holds even where TransformerEngine is built from source. In wheel mode
-# TE reinforces it: its prebuilt core library `transformer_engine_rocm7` is also
-# cp312-only, with no sdist and no other cp3xx build. See README.md.
+# 3.12 matches the image and is the version this environment is validated on;
+# changing it means re-validating every source build.
 export PRIMUS_PYTHON_VERSION="${PRIMUS_PYTHON_VERSION:-3.12}"
 # Interpreters provisioned by `uv python install` land under PRIMUS_BASE rather
 # than uv's default in ~/.local/share, so the whole environment stays in one
@@ -161,6 +158,13 @@ _primus_check_inside_base PRIMUS_PIP_CONSTRAINTS "$PRIMUS_PIP_CONSTRAINTS"
 export HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0
 export HSA_NO_SCRATCH_RECLAIM=1
 
+# Device (AQL) queue path, enabled by the image since v26.8.
+export GPU_USE_DEVICE_QUEUE="${GPU_USE_DEVICE_QUEUE:-1}"
+export DEBUG_CLR_AQL_DEV_QUEUE="${DEBUG_CLR_AQL_DEV_QUEUE:-1}"
+
+# Set by the v26.9 image, alongside Primus #1286, to resolve memory issues.
+export TORCH_DIST_USE_NCCL2="${TORCH_DIST_USE_NCCL2:-0}"
+
 # ---- ROCm path: comes from the pip-installed _rocm_sdk_devel package ----
 # Computed dynamically so it works for any Python minor version.
 if command -v python >/dev/null 2>&1; then
@@ -191,10 +195,15 @@ if [ -n "${_ROCM_SDK:-}" ]; then
 fi
 
 # ---- TransformerEngine tuning ----
-# Only the runtime performance knobs v26.6 keeps. The NVTE_USE_ROCM /
-# NVTE_FRAMEWORK / NVTE_ROCM_ARCH / NVTE_USE_HIPBLASLT vars that earlier images
-# exported are build-time switches, which is why they are not exported here;
-# stage_te_source sets them inline for the duration of its build.
+# Only the runtime performance knobs. The image also exports NVTE_USE_ROCM,
+# NVTE_FRAMEWORK, NVTE_ROCM_ARCH, NVTE_USE_HIPBLASLT, NVTE_CK_JIT,
+# NVTE_FUSED_ATTN_CK and friends, but those are build-time switches read by TE's
+# CMake; stage_te sets them inline for the duration of its build.
+# The aiter tree TE was built against is kept, as the image keeps
+# /workspace/deps/te-aiter, and pointed at the same way.
+if [ -d "$WORKSPACE_DIR/deps/te-aiter" ]; then
+    export NVTE_AITER_SOURCE_DIR="${NVTE_AITER_SOURCE_DIR:-$WORKSPACE_DIR/deps/te-aiter}"
+fi
 export NVTE_USE_CAST_TRANSPOSE_TRITON="${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}"
 export NVTE_CK_USES_FWD_V3="${NVTE_CK_USES_FWD_V3:-1}"
 export NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
@@ -207,8 +216,7 @@ export NVTE_CK_HOW_V3_BF16_CVT="${NVTE_CK_HOW_V3_BF16_CVT:-2}"
 # iteration 1 with "found Inf in local grad norm for bucket #0 in backward pass".
 # Primus's own tuning guide prescribes 1 for these GPUs
 # (docs/02-user-guide/training-recipes.md), so default it per detected arch.
-# Measured on MI325X: BWD_V3=1 + fp32 atomics = 614 TFLOP/s/GPU, versus 535 with
-# BWD_V3 disabled, so this is worth ~15% as well as being the correct fix.
+# It keeps BWD_V3=1 usable on these GPUs instead of having to disable it.
 case ";${PYTORCH_ROCM_ARCH};" in
     *";gfx942;"*) _PRIMUS_CK_ATOMIC_FP32=1 ;;
     *)            _PRIMUS_CK_ATOMIC_FP32=0 ;;

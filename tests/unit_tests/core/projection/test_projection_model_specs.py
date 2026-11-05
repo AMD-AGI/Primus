@@ -14,8 +14,9 @@ from every authority that happens to be reachable and compare:
 * **Primus' own Megatron presets**, which ship in this repo, so this check always
   runs -- a Llama 3 8B is the same 32 layers whichever backend trains it.
 * **The installed TorchTitan flavor table**, when TorchTitan is importable.
+* **MaxText's model YAMLs**, when a MaxText checkout is reachable.
 
-The backend-sourced check skips rather than fails when the backend is absent,
+The backend-sourced checks skip rather than fail when the backend is absent,
 which is the normal case in CI and on a projection-only machine.
 """
 
@@ -26,8 +27,15 @@ from typing import Dict, Optional
 import pytest
 import yaml
 
+from primus.core.projection.frameworks.jax import (
+    _MAXTEXT_ARCH_DEFAULTS,
+    _maxtext_config_dir,
+    _read_maxtext_model_config,
+    _spec_from_maxtext_keys,
+)
 from primus.core.projection.frameworks.model_specs import (
     BUILTIN_MODEL_SPECS,
+    MAXTEXT_MODEL_ALIASES,
     TORCHTITAN_FLAVOR_ALIASES,
     ModelSpec,
     get_builtin_spec,
@@ -41,12 +49,16 @@ _MEGATRON_PRESET_DIR = Path(__file__).resolve().parents[4] / "primus" / "configs
 
 # Canonical spec name -> the Megatron preset describing the same model.
 _MEGATRON_PRESETS: Dict[str, str] = {
+    "llama2-7b": "llama2_7B.yaml",
+    "llama2-70b": "llama2_70B.yaml",
     "llama3.2-1b": "llama3.2_1B.yaml",
     "llama3-8b": "llama3_8B.yaml",
     "llama3-70b": "llama3_70B.yaml",
     "llama3.1-405b": "llama3.1_405B.yaml",
     "llama4-17bx16e": "llama4_17B16E.yaml",
     "llama4-17bx128e": "llama4_17B128E.yaml",
+    "mixtral-8x7b": "mixtral_8x7B_v0.1.yaml",
+    "mixtral-8x22b": "mixtral_8x22B_v0.1.yaml",
     "deepseek-v2-16b": "deepseek_v2_lite.yaml",
     "deepseek-v2-236b": "deepseek_v2.yaml",
     "deepseek-v3-671b": "deepseek_v3.yaml",
@@ -62,7 +74,7 @@ _MEGATRON_PRESETS: Dict[str, str] = {
 
 # Megatron preset key -> ModelSpec attribute holding the same number.  The
 # vocabulary is deliberately absent: Megatron pads it to the tokenizer Primus
-# trains with, while TorchTitan carries the model's own.
+# trains with, while TorchTitan and MaxText carry the model's own.
 _MEGATRON_FIELD_MAP = {
     "num_layers": "num_layers",
     "hidden_size": "hidden_size",
@@ -202,13 +214,48 @@ def test_spec_matches_the_installed_torchtitan_flavor(flavor_key):
         )
 
 
+@pytest.mark.skipif(_maxtext_config_dir() is None, reason="no MaxText checkout found")
+@pytest.mark.parametrize("model_name", sorted(MAXTEXT_MODEL_ALIASES))
+def test_spec_matches_the_maxtext_model_config(model_name):
+    config = _read_maxtext_model_config(model_name)
+    if config is None:
+        pytest.skip(f"MaxText checkout has no config for {model_name}")
+
+    merged = dict(_MAXTEXT_ARCH_DEFAULTS)
+    merged.update({k: v for k, v in config.items() if k in _MAXTEXT_ARCH_DEFAULTS})
+    live = _spec_from_maxtext_keys(merged)
+
+    transcribed = get_builtin_spec(MAXTEXT_MODEL_ALIASES[model_name])
+    attrs = [
+        "num_layers",
+        "hidden_size",
+        "num_attention_heads",
+        "num_query_groups",
+        "kv_channels",
+        "num_experts",
+        "moe_router_topk",
+        "moe_ffn_hidden_size",
+    ]
+    if not transcribed.num_experts or not all(transcribed.moe_layer_pattern()):
+        # A model that routes every layer through experts has no dense MLP, and
+        # MaxText reuses ``base_mlp_dim`` for the expert width in that case, so
+        # the dense width is not something the two sides have to agree on.
+        attrs.append("ffn_hidden_size")
+
+    for attr in attrs:
+        assert getattr(transcribed, attr) == getattr(live, attr), (
+            f"transcribed spec for {model_name}: {attr} has drifted from MaxText's "
+            "own config; update BUILTIN_MODEL_SPECS"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Coverage: every model the shipped examples name has to resolve
 # --------------------------------------------------------------------------- #
 
 
 def test_every_builtin_spec_is_reachable_from_a_backend_alias():
-    reachable = set(TORCHTITAN_FLAVOR_ALIASES.values())
+    reachable = set(TORCHTITAN_FLAVOR_ALIASES.values()) | set(MAXTEXT_MODEL_ALIASES.values())
     orphans = sorted(set(BUILTIN_MODEL_SPECS) - reachable)
     assert not orphans, f"specs no backend alias points at: {orphans}"
 

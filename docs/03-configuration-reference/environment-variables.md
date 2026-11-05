@@ -37,6 +37,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_LOG_LEVEL` | `INFO` | User; debug paths in `runner/primus-cli-*.sh` set `DEBUG` | `runner/lib/common.sh` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `PRIMUS_LOG_TIMESTAMP` | `1` | User | `runner/lib/common.sh` | `1` prefixes logs with timestamps; `0` disables. |
 | `PRIMUS_LOG_COLOR` | `1` (auto-off if not a TTY) | User; tests may set `0` | `runner/lib/common.sh` | ANSI colors in runner logs. |
+| `PRIMUS_VERBOSE_FILELOCK` | `0` | User | `primus/core/utils/logger.py` | `1` keeps the `filelock` library's DEBUG lines (one per 0.05 s poll while a rank waits on a lock, e.g. during a torch extension build), which Primus otherwise hides by raising that logger to INFO. Only `1` is honored; it does not lower a stricter level set elsewhere (MLPerf quiet mode, `PRIMUS_LOG_SUPPRESSION=1`, sets ERROR). `PRIMUS_LOG_LEVEL` and `stderr_sink_level` do not bring the lines back. |
 | `PRIMUS_DEBUG` | `0` | User | `runner/helpers/envs/primus-env.sh` | `1` enables `set -x` in the env loader for shell tracing. |
 | `PRIMUS_SKIP_VALIDATION` | `0` | User / tests | `runner/helpers/envs/primus-env.sh` | `1` skips `validate_distributed_params` (not recommended). |
 | `PRIMUS_EXPECT_IB` | (unset) | User | `primus/tools/preflight/network/network_standard.py` | When `1`, preflight treats InfiniBand as expected for validation. |
@@ -128,6 +129,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `HSA_ENABLE_SDMA` | `1` | `base_env.sh` | ROCm runtime | Enable SDMA engines for copies. |
 | `HSA_NO_SCRATCH_RECLAIM` | `1` | `base_env.sh`, container passthrough | ROCm runtime; documented for MoE stability | `1` keeps scratch allocated (often used for MoE stability). See [ROCR environment](https://rocm.docs.amd.com/projects/ROCR-Runtime/en/docs-7.1.1/environment_variables.html). |
 | `HIP_VISIBLE_DEVICES` | `0..GPUS_PER_NODE-1` | `base_env.sh` | ROCm device visibility | Restricts which GPU indices ROCm exposes. |
+| `HIP_MEM_POOL_USE_VM` | (unset); `0` on hosts with amdgpu DRM < 3.64 | `runner/helpers/hooks/05_check_amdgpu_vm_timeline.py`; a user-set value is kept | HIP runtime (`hipMallocAsync` pools) | `0` backs HIP memory pools with plain allocations instead of virtual-memory mappings. ROCm 10.x on amdgpu drivers older than DRM 3.64 otherwise blocks forever in the first pool allocation (e.g. Primus Turbo's MoE permute) ([ROCm/rocm-systems#9820](https://github.com/ROCm/rocm-systems/issues/9820)). |
 | `ROCBLAS_DEFAULT_ATOMICS_MODE` | (unset) | User | `primus/backends/megatron/patches/args/rocm_arg_validation.py` | Read for deterministic / accuracy-sensitive GEMM behavior. |
 | `TORCH_COMPILE_CACHE_KEY_TAG` | (unset) | `primus/core/patches/triton_bufops_war_patches.py`, on ROCm only | torch.compile caching | Gets `primus-bufops-war-v<N>` appended so graphs compiled before (or under a different version of) the workaround are not reused. An existing value is appended to, not replaced. |
 
@@ -249,7 +251,7 @@ Primus owns these defaults in one place per backend: `primus/backends/<backend>/
 |----------|---------|-----------|------------|-------------|
 | `XLA_FLAGS` | managed string (see below) | `primus/backends/maxtext/env_spec.py`; may also be image-baked | JAX / XLA compiler | Space-separated XLA compiler flags. Primus **appends** its managed flags to whatever was inherited, so its values win (XLA honors the last occurrence). Setting this in a config `env:` block takes full ownership and skips the managed defaults. |
 | `XLA_FLAGS_APPEND` | (unset) | User (config `env:` or CLI `--env`) | `apply_xla_flags_append` in `primus/core/backend/env_registry.py` | Appended onto `XLA_FLAGS` as the final layer, so it overrides any single managed flag without replacing the rest. Consumed on use. **Preferred override mechanism.** |
-| `XLA_GPU_AUTOTUNE_LEVEL` | `4` | User | `primus/backends/maxtext/env_spec.py` | Parameterizes `--xla_gpu_autotune_level` in the managed string. Must be `>= 1`: at `0` XLA picks a default fp8 GEMM kernel that overflows on fine-grained MoE expert einsums, giving NaN loss on fp8 runs. |
+| `XLA_GPU_AUTOTUNE_LEVEL` | `3` | User | `primus/backends/maxtext/env_spec.py` | Parameterizes `--xla_gpu_autotune_level` in the managed string. Must be `>= 1`: at `0` XLA picks a default fp8 GEMM kernel that overflows on fine-grained MoE expert einsums, giving NaN loss on fp8 runs. Defaults to `3` because level `4` adds autotuner correctness checks that intermittently abort compilation on the JAX 0.11.1 / ROCm 10.2 images. Set `4` if fp8 MoE runs show NaN loss (plain fp8 on MI355X is not yet verified at `3`). Under `primus-cli container`, pass it with `--env`; a host `export` is not forwarded. |
 | `XLA_PYTHON_CLIENT_MEM_FRACTION` | `.97` | `env_spec.py` (setdefault) | JAX / XLA allocator | Fraction of GPU memory pre-allocated for JAX. Raised from the JAX default to avoid HSA OOM during multi-node runs. |
 | `TF_CPP_MIN_LOG_LEVEL` | `2` | `env_spec.py` (setdefault) | JAX / TF logging | Suppresses benign JAX/MaxText shutdown errors. |
 | `DUMP_HLO` | `0` | User | `env_spec.py` → `--xla_dump_to` | `1` enables HLO dumping. Prefer this over adding `--xla_dump_to` by hand. |
@@ -257,7 +259,7 @@ Primus owns these defaults in one place per backend: `primus/backends/<backend>/
 | `JAX_COORDINATOR_IP` | `MASTER_ADDR` | `env_spec.py` when `NNODES > 1` | `jax.distributed.initialize` | Coordinator host. Left unset on single-node runs so MaxText uses the local single-controller path. |
 | `JAX_COORDINATOR_PORT` | `MASTER_PORT` (`1234`) | `env_spec.py` when `NNODES > 1` | `jax.distributed.initialize` | Coordinator port. |
 
-**Managed `XLA_FLAGS` for MaxText** (see `_build_xla_flags` for the authoritative string): `--xla_gpu_memory_limit_slop_factor=95`, `--xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592`, `--xla_gpu_all_gather_combine_threshold_bytes=8589934592`, `--xla_gpu_enable_command_buffer=''`, `--xla_gpu_enable_latency_hiding_scheduler=true`, `--xla_gpu_enable_triton_gemm=false`, `--xla_gpu_enable_cublaslt=true`, `--xla_gpu_autotune_level=4`, `--xla_gpu_enable_all_gather_combine_by_dim=false`.
+**Managed `XLA_FLAGS` for MaxText** (see `_build_xla_flags` for the authoritative string): `--xla_gpu_memory_limit_slop_factor=95`, `--xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592`, `--xla_gpu_all_gather_combine_threshold_bytes=8589934592`, `--xla_gpu_enable_command_buffer=''`, `--xla_gpu_enable_latency_hiding_scheduler=true`, `--xla_gpu_enable_triton_gemm=false`, `--xla_gpu_enable_cublaslt=true`, `--xla_gpu_autotune_level=3`, `--xla_gpu_enable_all_gather_combine_by_dim=false`.
 
 **Note:** The MaxDiffusion backend declares no XLA defaults; its example configs set `XLA_FLAGS` themselves and are used verbatim. MaxText and JAX also read many additional knobs upstream that Primus does not wrap; see the MaxText sources for those.
 
@@ -265,4 +267,4 @@ Primus owns these defaults in one place per backend: `primus/backends/<backend>/
 
 ## 15. SpecForge (ROCm overlay)
 
-SpecForge env, YAML, and CLI live in the [SpecForge configuration reference](../../examples/specforge/CONFIGURATION.md). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.
+SpecForge env, YAML, and CLI live in the [SpecForge configuration reference](../04-technical-guides/specforge/configuration.md). That page lists Primus-owned names (`RUN_ID`, `CONSUMER_STATE_DIR`, `PRIMUS_SPECFORGE_*`, …) and points SpecForge Hydra keys at the SpecForge AMD ROCm tutorial.
