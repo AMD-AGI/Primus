@@ -90,6 +90,9 @@ export FP4_RECIPE=mxfp4
 
 export USE_HIPBLASLT=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
+# run_and_time.sh takes hipblaslt_tuning/'s file for the image's hipBLASLt build when this is unset;
+# set it to a file of your own, or to empty for hipBLASLt's own choices.
+# export HIPBLASLT_TUNING_OVERRIDE_FILE=
 
 # Turbo fused cross entropy (see the yaml); the image's Primus-Turbo must have ops.cross_entropy.
 export PRIMUS_TURBO_CROSS_ENTROPY=${PRIMUS_TURBO_CROSS_ENTROPY:-false}
