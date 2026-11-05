@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """FP8 forward + dgrad for LoRA-frozen base weights after healing.
 
 Healing installs the FP8 stash pre_quantize_mxfp4 built at load: one E4M3 direct cast per

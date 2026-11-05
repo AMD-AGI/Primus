@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """FlyDSL QKV split + RoPE in place of TE's ``apply_fused_qkv_rotary_pos_emb``.
 
 With ``fused_single_qkv_rope`` on, Megatron's attention applies RoPE to the packed QKV

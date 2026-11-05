@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """LoRA qkv/proj adapters folded into the frozen MXFP4 base GEMM.
 
 Production runs each LoRALinear as the frozen base GEMM followed by Bridge's

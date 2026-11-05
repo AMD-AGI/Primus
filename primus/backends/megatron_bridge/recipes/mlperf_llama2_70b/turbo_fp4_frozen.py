@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """MXFP4 GEMM for LoRA-frozen base weights, on FlyDSL quantize and FlyDSL GEMM.
 
 Stock ``primus_turbo.pytorch.ops.gemm_fp4`` is written for trainable weights. Per call
