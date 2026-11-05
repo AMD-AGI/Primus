@@ -6,10 +6,10 @@ extends:
 # (HF no_rope_layer_interval=4 -> layers 3,7,11,... skip RoPE). Megatron
 # expresses the NoPE pattern through `no_rope_freq` (1 marks a NoPE layer).
 rotary_base: 5000000
-# RMSNorm eps 1e-6. `layernorm_epsilon` is the key Megatron reads (dest of --norm-epsilon).
-# Megatron does not read `norm_epsilon` for this model, but llama3_base.yaml sets it to 1e-5
-# and config tools (and the native converter's field set) read it. It is set to the same
-# value so the merged config does not show a 1e-5 that the model does not use.
+# RMSNorm eps 1e-6. Training reads `layernorm_epsilon` (TransformerConfig's field, the dest of
+# --norm-epsilon). `norm_epsilon` is the name the native converters' fields use (and
+# llama3_base.yaml sets 1e-5 under it); it must carry the same value. A run whose two values
+# differ stops at startup (smollm3_norm_epsilon_patches.py).
 layernorm_epsilon: 1.0e-06
 norm_epsilon: 1.0e-06
 untie_embeddings_and_output_weights: false

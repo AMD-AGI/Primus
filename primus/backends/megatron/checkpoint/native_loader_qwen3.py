@@ -76,8 +76,8 @@ def build_margs(cfg_fields, args):
     m.hidden_size = cfg_fields["hidden_size"]
     m.num_attention_heads = cfg_fields["num_attention_heads"]
     m.num_layers = cfg_fields["num_layers"]
-    # --norm-epsilon has dest layernorm_epsilon in the pinned Megatron; norm_epsilon is
-    # not read by validate_args or the model config, so set the attribute Megatron reads.
+    m.norm_epsilon = cfg_fields["norm_epsilon"]
+    # --norm-epsilon has dest layernorm_epsilon (the TransformerConfig field the model reads).
     m.layernorm_epsilon = cfg_fields["norm_epsilon"]
     m.ffn_hidden_size = cfg_fields["ffn_hidden_size"]
     m.untie_embeddings_and_output_weights = cfg_fields["untie_embeddings_and_output_weights"]

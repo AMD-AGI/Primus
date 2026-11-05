@@ -44,10 +44,15 @@ HF_SMOLLM3_DEFAULTS = {
     "hidden_act": "silu",
     "no_rope_layer_interval": 4,
 }
-# Keys whose HF default is a model size or a value the SmolLM3-3B release overrides: a
-# config.json without them is warned about (the bias / activation defaults are not).
+# Keys whose missing value changes the built model: a config.json without them is warned
+# about. These are the shape keys (the HF defaults are the 3B shapes), rms_norm_eps,
+# tie_word_embeddings, no_rope_layer_interval, and rope_theta / max_position_embeddings,
+# the two whose HF defaults differ from the SmolLM3-3B release (2e6 vs 5e6, 32768 vs
+# 65536). Not warned: the bias / activation defaults (the only supported values), and
+# vocab_size, which the converter does not use (Megatron sizes the vocab from the
+# tokenizer; the checkpoint's embedding rows are padded or trimmed to it).
 _WARN_IF_MISSING = tuple(
-    k for k in HF_SMOLLM3_DEFAULTS if k not in ("attention_bias", "mlp_bias", "hidden_act")
+    k for k in HF_SMOLLM3_DEFAULTS if k not in ("attention_bias", "mlp_bias", "hidden_act", "vocab_size")
 )
 HF_DEFAULT_NO_ROPE_LAYER_INTERVAL = HF_SMOLLM3_DEFAULTS["no_rope_layer_interval"]
 # HF default for a MISSING num_key_value_heads (an explicit null means plain MHA, so it
@@ -57,19 +62,37 @@ HF_DEFAULT_NUM_KEY_VALUE_HEADS = 4
 _NULL_MEANS_FALSE = ("attention_bias", "mlp_bias")
 # Keys a null is allowed for, because something else gives the value (see with_hf_defaults).
 _NULL_RESOLVED_ELSEWHERE = ("rope_theta", "no_rope_layer_interval")
+# Keys the converter does not use (Megatron sizes the vocab from the tokenizer): a null is ignored.
+_UNUSED = ("vocab_size",)
 
-LOG_NAME = "smollm3"  # log prefix in native_loader_llama.convert
+LOG_NAME = "smollm3"  # log prefix in convert
 
 
-def _binary(values, what):
-    """Return ``values`` as a list of ints; every entry must be exactly 0 or 1 (int or bool)."""
+def _binary(values, what, allow_float=False):
+    """Return ``values`` as a list of ints; every entry must be 0 or 1 as an int or a bool
+    (``True``/``False`` count as 1/0, as in Python), or, with ``allow_float``, as a float
+    (``0.0``/``1.0``: HF reads config.json's ``no_rope_layers`` entries as truth values,
+    so a float list builds in HF). Anything else raises ValueError."""
     out = []
     for v in values:
         if isinstance(v, bool) or (isinstance(v, int) and v in (0, 1)):
             out.append(int(v))
+        elif allow_float and isinstance(v, float) and v in (0.0, 1.0):
+            out.append(int(v))
         else:
-            raise ValueError(f"{what} must hold only 0/1 integers, got {v!r}")
+            raise ValueError(f"{what} must hold only 0/1 values, got {v!r}")
     return out
+
+
+def _hf_interval(interval):
+    """config.json's ``no_rope_layer_interval`` as an int. HF computes ``(i + 1) %
+    interval``, so an integral float (``4.0``) gives the same layers as ``4``; it is
+    accepted. A bool, a non-integral or non-positive number, or a non-number raises."""
+    if isinstance(interval, float) and interval.is_integer():
+        interval = int(interval)
+    if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
+        raise ValueError(f"no_rope_layer_interval must be a positive integer, got {interval!r}")
+    return interval
 
 
 def nope_pattern(cfg):
@@ -77,24 +100,26 @@ def nope_pattern(cfg):
 
     Follows HF ``SmolLM3Config``: an explicit ``no_rope_layers`` (1 = RoPE) is used as
     given, and ``no_rope_layer_interval`` is then ignored (HF always saves the interval,
-    so it is not checked against a custom list). Only when ``no_rope_layers`` is
-    missing or null is the list built from the interval: a missing interval takes HF's
-    default (4); an explicit null interval is rejected, as HF itself fails on it
-    (``(i + 1) % None``).
+    so it is not checked against a custom list). Its entries may be 0/1 ints, bools or
+    floats (HF tests them for truth). Only when ``no_rope_layers`` is missing or null is
+    the list built from the interval: a missing interval takes HF's default (4); an
+    integral float (``4.0``) is accepted as HF accepts it; an explicit null interval is
+    rejected, as HF itself fails on it (``(i + 1) % None``).
     Megatron uses the opposite polarity (1 = skip RoPE), so the result is inverted.
     """
-    n = int(cfg["num_hidden_layers"])
+    n = cfg["num_hidden_layers"]
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise ValueError(f"num_hidden_layers must be a positive integer, got {n!r}")
     rope_layers = cfg.get("no_rope_layers")
+    if rope_layers is not None and not isinstance(rope_layers, (list, tuple)):
+        raise ValueError(f"no_rope_layers must be a list, got {type(rope_layers).__name__} {rope_layers!r}")
     if rope_layers is None:
-        interval = cfg.get("no_rope_layer_interval", HF_DEFAULT_NO_ROPE_LAYER_INTERVAL)
-        if isinstance(interval, bool) or not isinstance(interval, int) or interval < 1:
-            raise ValueError(f"no_rope_layer_interval must be a positive int, got {interval!r}")
+        interval = _hf_interval(cfg.get("no_rope_layer_interval", HF_DEFAULT_NO_ROPE_LAYER_INTERVAL))
         rope_layers = [int((i + 1) % interval != 0) for i in range(n)]
     else:
-        rope_layers = list(rope_layers)
         if len(rope_layers) != n:
             raise ValueError(f"no_rope_layers has {len(rope_layers)} entries for num_hidden_layers={n}")
-        rope_layers = _binary(rope_layers, "no_rope_layers")
+        rope_layers = _binary(rope_layers, "no_rope_layers", allow_float=True)
     pattern = [1 - r for r in rope_layers]
     return pattern if any(pattern) else None
 
@@ -103,11 +128,13 @@ def megatron_no_rope_freq(pattern):
     """Value for Megatron's ``no_rope_freq`` (1 = NoPE layer).
 
     Returns the period N when the pattern is ``[0]*(N-1) + [1]`` repeated at
-    least twice (SmolLM3: N = 4 over 36 layers; all-NoPE is N = 1). Megatron
-    expands the int form in ``TransformerConfig.__post_init__`` (it asserts
-    ``num_layers % N == 0``). Any other pattern, including one period that spans
-    the whole depth, is returned as the explicit list (Megatron asserts
-    ``len == num_layers``). Both forms give the same per-layer placement.
+    least twice (SmolLM3: N = 4 over 36 layers; all-NoPE over two or more layers is
+    N = 1). Megatron expands the int form in ``TransformerConfig.__post_init__`` (it
+    asserts ``num_layers % N == 0``). Any other pattern is returned as the explicit
+    list (Megatron asserts ``len == num_layers``); this includes every one-layer
+    pattern (``[1]``) and any pattern that is a single period spanning the whole
+    depth (``[0, 0, 1]``). Both forms give the same per-layer placement. Entries
+    must be 0/1 ints or bools (``_binary``).
     """
     if not pattern:
         return None
@@ -126,10 +153,12 @@ def expand_no_rope_freq(value, num_layers):
     meaning to: a falsy value (``None``, ``0``, ``[]``) means no NoPE layer; an int
     N >= 1 must divide ``num_layers``; a list must have ``num_layers`` entries.
     It is stricter than Megatron on purpose, because it is used to check a built
-    model (``check_model_nope``): list entries must be 0 or 1, and bools, negative
-    ints, floats and strings raise ValueError, where Megatron would accept some of
-    them without a check. The length and entries of a non-empty list are checked
-    before the all-zero case, so a wrong-length all-zero list is rejected too.
+    model (``check_model_nope``): a scalar must be a non-negative int (a bool, a
+    negative int, a float or a string raises ValueError), and list entries must be
+    0 or 1 as ints or bools (``True``/``False`` count as 1/0; floats and other values
+    raise), where Megatron would accept some of them without a check. The length and
+    entries of a non-empty list are checked before the all-zero case, so a wrong-length
+    all-zero list is rejected too.
     """
     if value is None or (isinstance(value, (list, tuple)) and len(value) == 0):
         return None  # falsy: Megatron skips its no_rope_freq handling
@@ -145,13 +174,13 @@ def expand_no_rope_freq(value, num_layers):
         return ([0] * (value - 1) + [1]) * (num_layers // value)
     if not isinstance(value, (list, tuple)):
         raise ValueError(f"no_rope_freq must be an int or a list, got {type(value).__name__} {value!r}")
-    value = _binary(list(value), "no_rope_freq")
+    value = _binary(value, "no_rope_freq")
     if len(value) != num_layers:
         raise ValueError(f"no_rope_freq has {len(value)} entries for num_layers={num_layers}")
     return value if any(value) else None
 
 
-def check_supported(cfg):
+def check_supported(cfg, log=None):
     """Raise NotImplementedError for SmolLM3 settings this converter does not build, and
     ValueError for an inconsistent or invalid config.json.
 
@@ -165,12 +194,19 @@ def check_supported(cfg):
     ``layer_types``, HF makes the NoPE layers sliding only when
     ``use_sliding_window`` is true AND ``sliding_window`` is not null; that case is
     rejected only when there is at least one NoPE layer, as otherwise HF builds
-    all full attention. RoPE scaling must be absent or explicitly
-    ``rope_type``/``type`` "default"; a dict without a type is rejected, not guessed.
+    all full attention. RoPE scaling must be absent or have ``rope_type`` "default"
+    (a null or missing ``rope_type`` falls back to ``type``, as in HF). A dict with no
+    type is rejected, with one exception: a ``rope_parameters`` dict holding only
+    ``rope_theta`` (or nothing) is taken as default RoPE, because transformers 5.x
+    writes the base there and treats a missing type as "default".
+
+    All checks read the resolved config (``with_hf_defaults``), except
+    ``layer_types`` / ``use_sliding_window`` / ``sliding_window`` / the rope dicts,
+    which have no default to resolve.
     """
     # Explicit nulls and missing keys are resolved as HF does first (a null that HF
     # cannot build raises ValueError here), so the checks below see real values.
-    resolved = with_hf_defaults(cfg)
+    resolved = with_hf_defaults(cfg, log=log)
     layer_types = cfg.get("layer_types")
     if layer_types is not None:
         layer_types = list(layer_types)
@@ -194,15 +230,15 @@ def check_supported(cfg):
             "SmolLM3 sliding-window attention is not supported by this converter "
             "(use_sliding_window with a sliding_window makes HF's NoPE layers sliding)"
         )
-    if cfg.get("mlp_bias"):
+    if resolved["mlp_bias"]:
         raise NotImplementedError("SmolLM3 mlp_bias=true is not supported by this converter")
-    if cfg.get("attention_bias"):
+    if resolved["attention_bias"]:
         # HF adds a bias to q/k/v AND o_proj; the reused Llama mapping copies weights only.
         raise NotImplementedError(
             "SmolLM3 attention_bias=true (biases on q/k/v/o_proj) is not supported by this converter"
         )
     act = resolved["hidden_act"]
-    if act != "silu":
+    if act not in ("silu", "swish"):  # HF ACT2FN: "swish" is the same SiLU
         raise NotImplementedError(
             f"SmolLM3 hidden_act={act!r} is not supported: the converter builds a SwiGLU (silu) MLP"
         )
@@ -212,7 +248,9 @@ def check_supported(cfg):
             continue
         if not isinstance(rope, dict):
             raise NotImplementedError(f"SmolLM3 {key}={rope!r} is not supported")
-        rope_type = rope.get("rope_type", rope.get("type"))
+        rope_type = rope.get("rope_type")
+        if rope_type is None:
+            rope_type = rope.get("type")
         if rope_type is None and key == "rope_parameters" and set(rope) <= {"rope_theta"}:
             rope_type = "default"  # transformers 5.x: rope_parameters may carry only the base
         if rope_type != "default":
@@ -228,11 +266,19 @@ def check_supported(cfg):
     # Every rope_theta given in config.json must be the one the converter builds with
     # (resolved: the top-level value, else the first nested one, else HF's default).
     for key, theta in _nested_thetas(cfg):
-        if float(theta) != float(resolved["rope_theta"]):
+        if _theta(theta, f"{key}.rope_theta") != resolved["rope_theta"]:
             raise ValueError(
                 f"{key}.rope_theta={theta} disagrees with the resolved rope_theta={resolved['rope_theta']}"
             )
     return resolved, pattern
+
+
+def _theta(value, what):
+    """``value`` as a float; a bool, a non-number (also a numeric string) or a
+    non-positive or infinite value raises ValueError naming ``what``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < float("inf"):
+        raise ValueError(f"SmolLM3 config.json {what}={value!r} is not a positive finite number")
+    return float(value)
 
 
 def _nested_thetas(cfg):
@@ -246,9 +292,10 @@ def _nested_thetas(cfg):
     return out
 
 
-def with_hf_defaults(cfg):
-    """``cfg`` with HF SmolLM3Config defaults filled in for MISSING keys; a warning names
-    each key that fell back to a default.
+def with_hf_defaults(cfg, log=None):
+    """``cfg`` with HF SmolLM3Config defaults filled in for MISSING keys; one warning
+    names each key that fell back to a default. It goes to ``log`` (``convert`` passes
+    its ``[smollm3-convert]`` log) or, without one, to ``warnings.warn``.
 
     An explicit null is resolved the way HF resolves it, where this converter supports
     that, and rejected otherwise:
@@ -270,16 +317,20 @@ def with_hf_defaults(cfg):
         k
         for k in _WARN_IF_MISSING + ("num_key_value_heads",)
         if k not in cfg and not (k == "rope_theta" and nested)
+        # An explicit no_rope_layers list is used as given; the interval is then unused.
+        and not (k == "no_rope_layer_interval" and cfg.get("no_rope_layers") is not None)
     )
     if filled:
         # Shape keys and rope_theta / max_position_embeddings are normally in config.json;
         # say which ones fell back (the HF defaults are not the SmolLM3-3B preset values,
         # e.g. rope_theta 2e6 vs 5e6).
-        warnings.warn(
-            "SmolLM3 config.json omits "
-            + ", ".join(f"{k} (using HF default {defaults[k]!r})" for k in filled),
-            stacklevel=2,
+        message = "SmolLM3 config.json omits " + ", ".join(
+            f"{k} (using HF default {defaults[k]!r})" for k in filled
         )
+        if log is not None:
+            log(f"WARNING: {message}")
+        else:
+            warnings.warn(message, stacklevel=2)
     if out.get("rope_theta") is None and nested:
         out["rope_theta"] = nested[0][1]
     for k, v in HF_SMOLLM3_DEFAULTS.items():
@@ -288,14 +339,21 @@ def with_hf_defaults(cfg):
         elif out[k] is None:
             if k in _NULL_MEANS_FALSE:
                 out[k] = False
-            elif k not in _NULL_RESOLVED_ELSEWHERE:
+            elif k not in _NULL_RESOLVED_ELSEWHERE + _UNUSED:
                 raise ValueError(
                     f"SmolLM3 config.json sets {k}=null; this converter does not support a null {k}"
                 )
+    if "head_dim" in cfg and cfg["head_dim"] is None:
+        # Not in HF SmolLM3Config; HF takes getattr(config, "head_dim", hidden // heads),
+        # so a null head_dim does not build in HF either.
+        raise ValueError(
+            "SmolLM3 config.json sets head_dim=null; this converter does not support a null head_dim"
+        )
     if out["rope_theta"] is None:
         raise ValueError(
             "SmolLM3 config.json sets rope_theta=null and no rope_parameters/rope_scaling rope_theta"
         )
+    _theta(out["rope_theta"], "rope_theta")  # validated; kept as given (int or float)
     # HF: a missing key takes the default 4; an explicit null means plain MHA.
     if "num_key_value_heads" not in cfg:
         out["num_key_value_heads"] = HF_DEFAULT_NUM_KEY_VALUE_HEADS
@@ -304,29 +362,32 @@ def with_hf_defaults(cfg):
     return out
 
 
-def derive_megatron_fields(cfg):
-    cfg, pattern = check_supported(cfg)
+def derive_megatron_fields(cfg, log=None):
+    """Megatron fields for ``cfg`` (``check_supported`` first); ``log`` gets the
+    missing-key warning (see ``with_hf_defaults``)."""
+    cfg, pattern = check_supported(cfg, log=log)
     fields = _llama.derive_megatron_fields(cfg)
-    fields["no_rope_freq"] = pattern
-    # config.json's depth, kept apart from ``num_layers`` (which callers such as the
-    # layer-wise verifier lower to build a cut model); check_model_nope uses it.
+    fields["nope_layers"] = pattern
+    # config.json's depth, kept apart from ``num_layers`` (a caller may lower it to build
+    # a model cut to its first N layers, e.g. a small parity or debug model; see
+    # test_check_model_nope in tests/unit_tests/backends/megatron/smollm3); check_model_nope uses it.
     fields["hf_num_layers"] = int(cfg["num_hidden_layers"])
     return fields
 
 
 def extra_log_fields(cfg_fields):
-    """Fields that ``native_loader_llama.convert`` adds to its arch log line."""
-    return {"no_rope_freq": cfg_fields["no_rope_freq"]} if cfg_fields.get("no_rope_freq") else {}
+    """Fields that ``convert`` adds to its arch log line."""
+    return {"nope_layers": cfg_fields["nope_layers"]} if cfg_fields.get("nope_layers") else {}
 
 
 def build_margs(cfg_fields, args):
     # no_rope_freq is a TransformerConfig field that validate_args does not check;
     # TransformerConfig.__post_init__ checks it against num_layers when the model is built.
     # A caller may lower cfg_fields["num_layers"] to build a cut model (the first N
-    # layers, as the layer-wise verifier does): give Megatron the pattern of those N
+    # layers, e.g. a small parity or debug model): give Megatron the pattern of those N
     # layers only, so it has num_layers entries (or an int period that divides N).
-    # The shared Llama build_margs sets layernorm_epsilon from config.json's rms_norm_eps
-    # (1e-6 for SmolLM3, as the preset trains with).
+    # The Llama build_margs sets layernorm_epsilon (rms_norm_eps, 1e-6 for SmolLM3-3B);
+    # check_model_eps checks it on the built model.
     m = _llama.build_margs(cfg_fields, args)
     m.no_rope_freq = megatron_no_rope_freq(nope_pattern_for_depth(cfg_fields, int(cfg_fields["num_layers"])))
     return m
@@ -334,14 +395,14 @@ def build_margs(cfg_fields, args):
 
 def _hf_depth(cfg_fields):
     """config.json's depth, ``hf_num_layers`` (set by ``derive_megatron_fields``).
-    Raises ValueError when it is missing, or when the ``no_rope_freq`` pattern's length
+    Raises ValueError when it is missing, or when the ``nope_layers`` pattern's length
     is not that depth."""
     if cfg_fields.get("hf_num_layers") is None:
         raise ValueError("SmolLM3: cfg_fields has no hf_num_layers (use derive_megatron_fields)")
     depth = int(cfg_fields["hf_num_layers"])
-    full = cfg_fields.get("no_rope_freq")
+    full = cfg_fields.get("nope_layers")
     if full and len(full) != depth:
-        raise ValueError(f"no_rope_freq pattern has {len(full)} entries, config.json has {depth} layers")
+        raise ValueError(f"nope_layers pattern has {len(full)} entries, config.json has {depth} layers")
     return depth
 
 
@@ -355,7 +416,7 @@ def nope_pattern_for_depth(cfg_fields, num_layers):
             f"num_layers={num_layers} is deeper than config.json's {hf_layers} layers "
             f"(built model has {num_layers} layers, config.json has {hf_layers})"
         )
-    head = list(cfg_fields.get("no_rope_freq") or [])[:num_layers]
+    head = list(cfg_fields.get("nope_layers") or [])[:num_layers]
     return head if any(head) else None
 
 
@@ -366,7 +427,7 @@ def check_model_nope(model, cfg_fields):
 
     ``convert()`` builds the full depth, so the model has exactly as many layers as
     config.json. A model with fewer layers is accepted only as a cut to its first
-    ``num_layers`` layers (the layer-wise verifier builds 4-layer models); it is
+    ``num_layers`` layers (a caller that lowers ``num_layers`` for a small model); it is
     then checked against those layers. A model deeper than config.json raises; the
     depth is ``cfg_fields["hf_num_layers"]`` (config.json's ``num_hidden_layers``),
     so the check works also when config.json has no NoPE layer.
@@ -391,8 +452,22 @@ def check_model_nope(model, cfg_fields):
     return got
 
 
+def check_model_eps(model, cfg_fields):
+    """Raise if the built model's RMSNorm epsilon (``config.layernorm_epsilon``) is not
+    config.json's ``rms_norm_eps``. Returns the epsilon."""
+    config = getattr(model, "config", None)
+    got = getattr(config, "layernorm_epsilon", None)
+    want = float(cfg_fields["norm_epsilon"])
+    if got is None or float(got) != want:
+        raise RuntimeError(
+            f"SmolLM3 converter: model.config.layernorm_epsilon={got}, config.json rms_norm_eps={want}"
+        )
+    return got
+
+
 def build_mcore_state_dict(model, store, margs, cfg_fields, log):
     log(f"  margs.no_rope_freq (1 = NoPE; int N = every N-th layer) = {margs.no_rope_freq}")
+    log(f"  model.config.layernorm_epsilon = {check_model_eps(model, cfg_fields)} (matches rms_norm_eps)")
     got = check_model_nope(model, cfg_fields)
     nope_layers = [i for i, v in enumerate(got or []) if v]
     log(f"  model.config.no_rope_freq matches config.json; NoPE layers = {nope_layers}")
@@ -400,7 +475,13 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
 
 
 def convert(hf_dir, save_dir, **kwargs):
-    """Convert a SmolLM3 HF checkpoint to a legacy Megatron torch checkpoint: the Llama
-    conversion sequence (``native_loader_llama.convert``) with this module's field
-    functions. Same keyword arguments."""
+    """Convert a SmolLM3 HF checkpoint to a legacy Megatron torch checkpoint.
+
+    ``native_loader_llama.convert`` (same arguments) with this module's
+    ``derive_megatron_fields``, ``build_margs`` and ``build_mcore_state_dict`` (NoPE
+    layers and ``layernorm_epsilon``, both checked on the built model). ``family`` is not an
+    argument here: it is always this module.
+    """
+    if "family" in kwargs:
+        raise TypeError("native_loader_smollm3.convert() takes no 'family' argument (it is SmolLM3)")
     return _llama.convert(hf_dir, save_dir, family=sys.modules[__name__], **kwargs)

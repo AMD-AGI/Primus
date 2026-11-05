@@ -46,12 +46,15 @@ import torch
 
 from primus.backends.megatron.checkpoint import native_convert_common as common
 
+LOG_NAME = "llama"  # log prefix in convert
+
 
 # ---------------------------------------------------------------------------
 # HF config.json -> Megatron args
 # ---------------------------------------------------------------------------
-def derive_megatron_fields(cfg):
-    """Translate a Llama (2/3/3.1) HF config dict into Megatron arg values."""
+def derive_megatron_fields(cfg, log=None):
+    """Translate a Llama (2/3/3.1) HF config dict into Megatron arg values (``log`` is
+    unused here; a family module's version may log to it)."""
     num_heads = cfg["num_attention_heads"]
     # Standard MHA when num_key_value_heads is absent or equals num_attention_heads;
     # GQA otherwise. Either way num_query_groups drives the mcore fused-QKV layout.
@@ -87,8 +90,8 @@ def build_margs(cfg_fields, args):
     m.hidden_size = cfg_fields["hidden_size"]
     m.num_attention_heads = cfg_fields["num_attention_heads"]
     m.num_layers = cfg_fields["num_layers"]
-    # --norm-epsilon has dest layernorm_epsilon in the pinned Megatron; norm_epsilon is
-    # not read by validate_args or the model config, so set the attribute Megatron reads.
+    m.norm_epsilon = cfg_fields["norm_epsilon"]
+    # --norm-epsilon has dest layernorm_epsilon (the TransformerConfig field the model reads).
     m.layernorm_epsilon = cfg_fields["norm_epsilon"]
     m.ffn_hidden_size = cfg_fields["ffn_hidden_size"]
     m.untie_embeddings_and_output_weights = cfg_fields["untie_embeddings_and_output_weights"]
@@ -250,16 +253,9 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
 # ---------------------------------------------------------------------------
 # In-process entrypoint
 # ---------------------------------------------------------------------------
-LOG_NAME = "llama"  # log prefix in convert
-
-
 def extra_log_fields(cfg_fields):
-    """Fields a family adds to the arch log line of ``convert`` (none for Llama)."""
+    """Fields ``convert`` adds to its arch log line (none for Llama)."""
     return {}
-
-
-# What a converter family module passed to ``convert`` must define (this module does).
-_FAMILY_INTERFACE = ("derive_megatron_fields", "build_margs", "build_mcore_state_dict", "extra_log_fields")
 
 
 def convert(
@@ -276,28 +272,35 @@ def convert(
     log=None,
     family=None,
 ):
-    """Convert a Llama-architecture HF checkpoint (Llama 2/3/3.1, or a variant given as
-    ``family``) to a legacy Megatron torch ckpt.
+    """Convert a Llama (2/3/3.1) HF checkpoint to a legacy Megatron torch ckpt.
 
     Single process, CPU-only. Assumes the ``phase="convert"`` patches have
     already been applied in this process (the conversion hook does so).
 
-    ``family`` is for Llama-architecture variants (SmolLM3): a module that defines the
-    functions in ``_FAMILY_INTERFACE`` and a ``LOG_NAME`` string, as this module does.
-    The conversion sequence is the same; default: this module.
+    ``family``: the module of a Llama-layout family that reuses these steps
+    (default: this module). It provides what this module does:
+    ``LOG_NAME``, ``derive_megatron_fields(cfg, log=None)``,
+    ``extra_log_fields(cfg_fields)``, ``build_margs(cfg_fields, args)`` and
+    ``build_mcore_state_dict(model, store, margs, cfg_fields, log)``.
     """
-    fam = family or sys.modules[__name__]
-    missing = [f for f in _FAMILY_INTERFACE if not callable(getattr(fam, f, None))]
-    if not isinstance(getattr(fam, "LOG_NAME", None), str):
-        missing.append("LOG_NAME")
+    family = family or sys.modules[__name__]
+    missing = [
+        n
+        for n in (
+            "LOG_NAME",
+            "derive_megatron_fields",
+            "extra_log_fields",
+            "build_margs",
+            "build_mcore_state_dict",
+        )
+        if not hasattr(family, n)
+    ]
     if missing:
-        # Checked before Megatron is initialised, not as a late AttributeError.
-        raise TypeError(f"converter family {getattr(fam, '__name__', fam)!r} lacks {missing}")
-    name = fam.LOG_NAME
+        raise TypeError(f"family module {family.__name__} lacks {missing}")
     if log is None:
 
         def log(*a):
-            print(f"[{name}-convert]", *a, flush=True)
+            print(f"[{family.LOG_NAME}-convert]", *a, flush=True)
 
     common.ensure_megatron_on_path()
     common.assert_bridge_free("entry")
@@ -314,22 +317,21 @@ def convert(
     )
 
     log(f"reading HF config from {hf_dir}")
-    cfg = common.read_hf_config(hf_dir)
-    cfg_fields = fam.derive_megatron_fields(cfg)
+    cfg_fields = family.derive_megatron_fields(common.read_hf_config(hf_dir), log=log)
+    extra = "".join(f" {k}={v}" for k, v in family.extra_log_fields(cfg_fields).items())
     log(
         f"arch: L={cfg_fields['num_layers']} h={cfg_fields['hidden_size']} "
         f"heads={cfg_fields['num_attention_heads']} kv_groups={cfg_fields['num_query_groups']} "
         f"head_dim={cfg_fields['kv_channels']} ffn={cfg_fields['ffn_hidden_size']} "
         f"rope_theta={cfg_fields['rotary_base']} "
-        f"tie_emb={not cfg_fields['untie_embeddings_and_output_weights']}"
-        + "".join(f" {k}={v}" for k, v in fam.extra_log_fields(cfg_fields).items())
+        f"tie_emb={not cfg_fields['untie_embeddings_and_output_weights']}{extra}"
     )
 
-    margs = fam.build_margs(cfg_fields, args)
+    margs = family.build_margs(cfg_fields, args)
     log(
         f"megatron: TP={margs.tensor_model_parallel_size} PP={margs.pipeline_model_parallel_size} "
         f"EP={margs.expert_model_parallel_size} dtype={margs.params_dtype} "
-        f"layernorm_epsilon={margs.layernorm_epsilon}"
+        f"layernorm_epsilon={getattr(margs, 'layernorm_epsilon', None)}"
     )
 
     margs = common.init_megatron_single_process(margs, master_port, log=log)
@@ -341,7 +343,7 @@ def convert(
 
     store = common.SafetensorsStore(hf_dir)
     log("mapping HF safetensors -> mcore parameters ...")
-    sd, consumed = fam.build_mcore_state_dict(model, store, margs, cfg_fields, log)
+    sd, consumed = family.build_mcore_state_dict(model, store, margs, cfg_fields, log)
 
     common.load_validate_save(model, sd, consumed, store, margs, save_dir, log)
     common.assert_bridge_free("post-save")

@@ -12,14 +12,15 @@
   2. The checkpoint-convert hook routes model_type ``smollm3`` /
      ``SmolLM3ForCausalLM`` to the SmolLM3 converter.
   3. The preset matches the released config.json values.
-  4. The converter's shared Llama driver, ``convert(family=...)``, runs this module's
+  4. The converter's ``convert`` (the Llama conversion steps) runs this module's
      field functions (Megatron setup, model build and save are faked).
+  5. NoPE placement: on the config, and in a forward pass of a small GPTModel.
 
-The skip_embedding_weight_decay patch is tested in
-tests/unit_tests/backends/megatron/patches/test_embedding_weight_decay_patches.py.
-Megatron-dependent tests use ``tests.utils.require_megatron`` (MEGATRON_PATH aware).
+Megatron-dependent tests call ``require_megatron_training`` (skip when megatron.core is not
+importable, as other Megatron unit tests do with ``pytest.importorskip``).
 """
 
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -34,21 +35,22 @@ import torch  # noqa: E402
 from primus.backends.megatron.checkpoint import (  # noqa: E402
     native_loader_smollm3 as smol,
 )
-from tests.utils import require_megatron  # noqa: E402
+from tests.unit_tests.backends.megatron.checkpoint.native_loader_test_utils import (  # noqa: E402
+    llama_layout_hf_tensors,
+    margs_args,
+    require_megatron_training,
+    stub_convert_pipeline,
+)
 
+# The repository root (tests/unit_tests/backends/megatron/smollm3/ is five levels down).
 REPO = Path(__file__).resolve().parents[5]
 
 
 def _merged_preset(name):
-    """The preset ``name`` with its ``extends`` chain merged (later files override)."""
-    import yaml
+    """The preset ``name`` as training loads it (``PresetLoader``: extends, deep merge, env)."""
+    from primus.core.config.preset_loader import PresetLoader
 
-    doc = yaml.safe_load((REPO / "primus/configs/models/megatron" / name).read_text()) or {}
-    merged = {}
-    for parent in doc.pop("extends", []) or []:
-        merged.update(_merged_preset(parent))
-    merged.update(doc)
-    return merged
+    return PresetLoader.load(name, "megatron", config_type="models")
 
 
 # HuggingFaceTB/SmolLM3-3B-Base@d78a42f79198 config.json (fields the converter reads)
@@ -78,18 +80,24 @@ NOPE_LAYERS = [3, 7, 11, 15, 19, 23, 27, 31, 35]
 # --------------------------------------------------------------------------- loader
 def test_nope_pattern_from_interval_inverts_polarity():
     pattern = smol.nope_pattern(SMOLLM3_CFG)
-    assert len(pattern) == 36
+    assert pattern == [0, 0, 0, 1] * 9
     assert [i for i, v in enumerate(pattern) if v] == NOPE_LAYERS
+    assert smol.nope_pattern({"num_hidden_layers": 6, "no_rope_layer_interval": 4}) == [0, 0, 0, 1, 0, 0]
 
 
-def test_nope_pattern_from_explicit_hf_list():
-    # HF: 1 = RoPE, 0 = NoPE. Megatron: 1 = NoPE.
-    cfg = {"num_hidden_layers": 4, "no_rope_layers": [1, 0, 1, 1]}
-    assert smol.nope_pattern(cfg) == [0, 1, 0, 0]
-
-
-def test_nope_pattern_none_when_all_rope():
-    assert smol.nope_pattern({"num_hidden_layers": 4, "no_rope_layers": [1, 1, 1, 1]}) is None
+@pytest.mark.parametrize(
+    "extra, rope_layers, expected",
+    [
+        ({}, [1, 0, 1, 1], [0, 1, 0, 0]),  # HF: 1 = RoPE, 0 = NoPE. Megatron: 1 = NoPE.
+        ({}, [1, 1, 1, 1], None),  # all RoPE
+        # HF SmolLM3Config uses an explicit no_rope_layers verbatim and ignores the interval
+        # (save_pretrained always writes it); the interval is then not validated either.
+        ({"no_rope_layer_interval": 4}, [1, 0, 1, 1], [0, 1, 0, 0]),
+        ({"no_rope_layer_interval": 0}, [1, 1, 1, 0], [0, 0, 0, 1]),
+    ],
+)
+def test_nope_pattern_from_explicit_hf_list(extra, rope_layers, expected):
+    assert smol.nope_pattern({"num_hidden_layers": 4, "no_rope_layers": rope_layers, **extra}) == expected
 
 
 def test_nope_pattern_unset_uses_hf_default_interval():
@@ -97,17 +105,6 @@ def test_nope_pattern_unset_uses_hf_default_interval():
     assert smol.nope_pattern({"num_hidden_layers": 8}) == [0, 0, 0, 1, 0, 0, 0, 1]
     trimmed = {k: v for k, v in SMOLLM3_CFG.items() if k != "no_rope_layer_interval"}
     assert smol.nope_pattern(trimmed) == smol.nope_pattern(SMOLLM3_CFG)
-
-
-def test_nope_pattern_explicit_list_wins_over_interval():
-    # HF SmolLM3Config uses an explicit no_rope_layers verbatim and ignores the interval
-    # (save_pretrained always writes the interval, default 4).
-    base = {"num_hidden_layers": 4, "no_rope_layer_interval": 4}
-    assert smol.nope_pattern({**base, "no_rope_layers": [1, 0, 1, 1]}) == [0, 1, 0, 0]
-    assert smol.nope_pattern({**base, "no_rope_layers": [1, 1, 1, 1]}) is None
-    # The interval is not validated when the list makes it irrelevant.
-    cfg = {**base, "no_rope_layer_interval": 0, "no_rope_layers": [1, 1, 1, 0]}
-    assert smol.nope_pattern(cfg) == [0, 0, 0, 1]
 
 
 def test_nope_pattern_null_list_uses_interval_and_null_interval_is_rejected():
@@ -124,16 +121,32 @@ def test_nope_pattern_null_list_uses_interval_and_null_interval_is_rejected():
     assert cfg["no_rope_layer_interval"] is None and smol.nope_pattern(cfg) is None
 
 
-@pytest.mark.parametrize("interval", [0, -4, 1.5, "4", True])
+@pytest.mark.parametrize("interval", [0, -4, 1.5, 4.5, "4", True])
 def test_nope_pattern_rejects_bad_interval(interval):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="no_rope_layer_interval"):
         smol.nope_pattern({"num_hidden_layers": 4, "no_rope_layer_interval": interval})
 
 
-@pytest.mark.parametrize("bad", [[1, 1, 1, 0, 1, 1], [1, 1, 0]])
+@pytest.mark.parametrize("bad", [[1, 1, 1, 0, 1, 1], [1, 1, 0], 5, "1101"])
 def test_nope_pattern_rejects_wrong_length(bad):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="no_rope_layers"):
         smol.nope_pattern({"num_hidden_layers": 4, "no_rope_layers": bad})
+
+
+@pytest.mark.parametrize("layers", [0, -1, 4.0, True])
+def test_nope_pattern_rejects_bad_depth(layers):
+    with pytest.raises(ValueError, match="num_hidden_layers"):
+        smol.nope_pattern({"num_hidden_layers": layers})
+
+
+def test_convert_rejects_a_family_argument():
+    with pytest.raises(TypeError, match="no 'family' argument"):
+        smol.convert("/x", "/y", family=smol)
+
+
+def test_null_vocab_size_is_ignored():
+    """vocab_size is not used (Megatron sizes the vocab from the tokenizer)."""
+    smol.check_supported({**SMOLLM3_CFG, "vocab_size": None})
 
 
 @pytest.mark.parametrize("bad", [[1, 2], [1, 1.5], [1, "1"], [1, None]])
@@ -148,22 +161,27 @@ def test_megatron_no_rope_freq_rejects_non_binary(bad):
         smol.megatron_no_rope_freq(bad)
 
 
-def test_megatron_no_rope_freq_collapses_periodic_pattern():
-    assert smol.megatron_no_rope_freq(smol.nope_pattern(SMOLLM3_CFG)) == 4
-    assert smol.megatron_no_rope_freq([1, 1, 1]) == 1
-    assert smol.megatron_no_rope_freq([0, 1, 0, 1, 0, 1]) == 2
-
-
-def test_megatron_no_rope_freq_keeps_list_otherwise():
-    assert smol.megatron_no_rope_freq([0, 1, 1, 0]) == [0, 1, 1, 0]
-    # One period spanning the whole depth stays a list (both forms are valid for Megatron;
-    # the int form is used only for a pattern that repeats).
-    assert smol.megatron_no_rope_freq([0, 0, 0, 0, 0, 1]) == [0, 0, 0, 0, 0, 1]
-    # 6 layers with interval 4: not periodic over the depth -> explicit list
-    six = smol.nope_pattern({"num_hidden_layers": 6, "no_rope_layer_interval": 4})
-    assert six == [0, 0, 0, 1, 0, 0]
-    assert smol.megatron_no_rope_freq(six) == six
-    assert smol.megatron_no_rope_freq(None) is None
+@pytest.mark.parametrize(
+    "pattern, expected",
+    [
+        # A pattern that repeats over the depth collapses to its int period.
+        ([0, 0, 0, 1] * 9, 4),
+        ([1, 1, 1], 1),
+        ([1, 1], 1),
+        ([0, 1, 0, 1, 0, 1], 2),
+        # A one-layer pattern, or one period spanning the whole depth, stays a list
+        # (both forms are valid for Megatron; the int form is used only for a repeat).
+        ([1], [1]),
+        ([0, 0, 1], [0, 0, 1]),
+        ([0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 1]),
+        # Not periodic over the depth (6 layers with interval 4): an explicit list.
+        ([0, 0, 0, 1, 0, 0], [0, 0, 0, 1, 0, 0]),
+        ([0, 1, 1, 0], [0, 1, 1, 0]),
+        (None, None),
+    ],
+)
+def test_megatron_no_rope_freq_int_or_list(pattern, expected):
+    assert smol.megatron_no_rope_freq(pattern) == expected
 
 
 def test_megatron_value_expands_back_to_pattern():
@@ -206,6 +224,7 @@ def test_check_supported_rejects_unsupported_features(extra):
         # HF builds sliding layers only when use_sliding_window AND sliding_window is set.
         {"use_sliding_window": True, "sliding_window": None},
         {"rope_parameters": {"rope_theta": 5000000.0}},
+        {"hidden_act": "swish"},  # HF ACT2FN maps "swish" to the same SiLU
     ],
 )
 def test_check_supported_accepts_no_op_settings(extra):
@@ -246,6 +265,57 @@ def test_check_supported_rejects_disagreeing_nested_thetas():
                 "rope_scaling": {"rope_type": "default", "rope_theta": 3e6},
             }
         )
+
+
+def test_nope_pattern_accepts_what_hf_accepts():
+    """HF computes (i + 1) % interval and tests no_rope_layers entries for truth: an
+    integral float interval and 0.0/1.0 (or bool) entries build the same layers."""
+    n = 8
+    assert smol.nope_pattern({"num_hidden_layers": n, "no_rope_layer_interval": 4.0}) == smol.nope_pattern(
+        {"num_hidden_layers": n, "no_rope_layer_interval": 4}
+    )
+    rope = [1.0, 1.0, 1.0, 0.0] * 2
+    assert smol.nope_pattern({"num_hidden_layers": n, "no_rope_layers": rope}) == [0, 0, 0, 1] * 2
+    assert (
+        smol.nope_pattern({"num_hidden_layers": n, "no_rope_layers": [bool(r) for r in rope]})
+        == [0, 0, 0, 1] * 2
+    )
+    with pytest.raises(ValueError):
+        smol.nope_pattern({"num_hidden_layers": 2, "no_rope_layers": [0.5, 1.0]})
+    # The check of a built model stays strict: no float entries there.
+    with pytest.raises(ValueError):
+        smol.expand_no_rope_freq([0.0, 1.0], 2)
+    assert smol.expand_no_rope_freq([False, True], 2) == [0, 1]
+
+
+def test_check_supported_rope_type_null_falls_back_to_type():
+    smol.check_supported({**SMOLLM3_CFG, "rope_scaling": {"rope_type": None, "type": "default"}})
+    with pytest.raises(NotImplementedError):
+        smol.check_supported(
+            {**SMOLLM3_CFG, "rope_scaling": {"rope_type": None, "type": "yarn", "factor": 2.0}}
+        )
+
+
+@pytest.mark.parametrize("theta", ["5e6", True, -1.0, [5e6], float("inf"), float("nan")])
+def test_non_numeric_rope_theta_is_a_clear_error(theta):
+    with pytest.raises(ValueError, match="not a positive finite number"):
+        smol.check_supported({**SMOLLM3_CFG, "rope_theta": theta})
+    cfg = {k: v for k, v in SMOLLM3_CFG.items() if k != "rope_theta"}
+    with pytest.raises(ValueError, match="not a positive finite number"):
+        smol.check_supported({**cfg, "rope_parameters": {"rope_type": "default", "rope_theta": theta}})
+
+
+def test_missing_key_warning_goes_to_the_convert_log(recwarn):
+    """convert passes its [smollm3-convert] log: the missing-key warning goes there (not
+    to warnings.warn); vocab_size is not warned about (the tokenizer sizes the vocab)."""
+    lines = []
+    cfg = {k: v for k, v in SMOLLM3_CFG.items() if k not in ("rope_theta", "vocab_size")}
+    smol.derive_megatron_fields(cfg, log=lines.append)
+    assert len(lines) == 1 and lines[0].startswith("WARNING: SmolLM3 config.json omits rope_theta")
+    assert "vocab_size" not in lines[0]
+    assert not [w for w in recwarn if "omits" in str(w.message)]
+    smol.with_hf_defaults({k: v for k, v in SMOLLM3_CFG.items() if k != "vocab_size"})
+    assert not [w for w in recwarn if "omits" in str(w.message)]
 
 
 def test_with_hf_defaults_is_silent_on_a_full_config(recwarn):
@@ -333,13 +403,13 @@ def _model(num_layers, no_rope_freq):
 
 
 def test_check_model_nope():
-    fields = {"no_rope_freq": [0, 0, 0, 1, 0, 0, 0, 1], "num_layers": 8, "hf_num_layers": 8}
-    assert smol.check_model_nope(_model(8, 4), fields) == fields["no_rope_freq"]
+    fields = {"nope_layers": [0, 0, 0, 1, 0, 0, 0, 1], "num_layers": 8, "hf_num_layers": 8}
+    assert smol.check_model_nope(_model(8, 4), fields) == fields["nope_layers"]
     with pytest.raises(RuntimeError, match="no_rope_freq"):
         smol.check_model_nope(_model(8, None), fields)  # dropped arg -> all RoPE
-    all_rope8 = {"no_rope_freq": None, "num_layers": 8, "hf_num_layers": 8}
+    all_rope8 = {"nope_layers": None, "num_layers": 8, "hf_num_layers": 8}
     assert smol.check_model_nope(_model(8, None), all_rope8) is None
-    # A model cut to its first 4 layers (layer-wise verifier) is checked on those layers.
+    # A model cut to its first 4 layers (num_layers lowered) is checked on those layers.
     assert smol.check_model_nope(_model(4, 4), fields) == [0, 0, 0, 1]
     with pytest.raises(RuntimeError):
         smol.check_model_nope(_model(4, None), fields)
@@ -353,7 +423,7 @@ def test_check_model_nope():
     # A float or a wrong-length all-zero list is wrapped too, not escaped or accepted.
     with pytest.raises(RuntimeError, match="invalid model.config.no_rope_freq"):
         smol.check_model_nope(_model(8, 4.0), fields)
-    all_rope = {"no_rope_freq": None, "num_layers": 8, "hf_num_layers": 8}
+    all_rope = {"nope_layers": None, "num_layers": 8, "hf_num_layers": 8}
     with pytest.raises(RuntimeError, match="invalid model.config.no_rope_freq"):
         smol.check_model_nope(_model(8, [0, 0]), all_rope)
     # The depth guard works also when config.json has no NoPE layer (hf_num_layers).
@@ -364,20 +434,7 @@ def test_check_model_nope():
 
 def test_derive_fields_carries_hf_depth():
     fields = smol.derive_megatron_fields({**SMOLLM3_CFG, "no_rope_layers": [1] * 36})
-    assert fields["no_rope_freq"] is None and fields["hf_num_layers"] == 36
-
-
-def _margs_args():
-    return SimpleNamespace(
-        hf_dir="/nonexistent",
-        save_dir="/nonexistent",
-        dtype="fp32",
-        tensor_parallel_size=1,
-        pipeline_parallel_size=1,
-        expert_parallel_size=1,
-        seq_length=128,
-        make_vocab_size_divisible_by=128,
-    )
+    assert fields["nope_layers"] is None and fields["hf_num_layers"] == 36
 
 
 @pytest.mark.parametrize(
@@ -390,9 +447,9 @@ def _margs_args():
     ],
 )
 def test_build_margs_cuts_pattern_to_num_layers(cfg_extra, depth, expected):
-    require_megatron()
+    require_megatron_training()
     fields = smol.derive_megatron_fields({**SMOLLM3_CFG, **cfg_extra})
-    m = smol.build_margs({**fields, "num_layers": depth}, _margs_args())
+    m = smol.build_margs({**fields, "num_layers": depth}, margs_args())
     assert m.num_layers == depth
     assert m.no_rope_freq == expected
     # Megatron's own expansion of what build_margs gives is HF's pattern for the cut depth
@@ -414,10 +471,10 @@ def test_build_margs_cuts_pattern_to_num_layers(cfg_extra, depth, expected):
 @pytest.mark.parametrize(
     "fields, depth",
     [
-        ({"no_rope_freq": [0, 0, 0, 1], "hf_num_layers": 4, "num_layers": 4}, 8),
-        ({"no_rope_freq": None, "hf_num_layers": 36, "num_layers": 36}, 40),
+        ({"nope_layers": [0, 0, 0, 1], "hf_num_layers": 4, "num_layers": 4}, 8),
+        ({"nope_layers": None, "hf_num_layers": 36, "num_layers": 36}, 40),
         ({"hf_num_layers": 4, "num_layers": 4}, 8),
-        ({"no_rope_freq": None, "hf_num_layers": 0, "num_layers": 4}, 1),  # 0 is a depth, not "missing"
+        ({"nope_layers": None, "hf_num_layers": 0, "num_layers": 4}, 1),  # 0 is a depth, not "missing"
     ],
 )
 def test_nope_pattern_for_depth_rejects_deeper_than_config(fields, depth):
@@ -430,9 +487,9 @@ def test_nope_pattern_for_depth_needs_a_depth():
     with pytest.raises(ValueError, match="no hf_num_layers"):
         smol.nope_pattern_for_depth({}, 2)
     with pytest.raises(ValueError, match="no hf_num_layers"):
-        smol.nope_pattern_for_depth({"no_rope_freq": [0, 0, 0, 1], "num_layers": 4}, 4)
+        smol.nope_pattern_for_depth({"nope_layers": [0, 0, 0, 1], "num_layers": 4}, 4)
     with pytest.raises(ValueError, match="entries"):
-        smol.nope_pattern_for_depth({"no_rope_freq": [0, 0, 0, 1], "hf_num_layers": 8}, 4)
+        smol.nope_pattern_for_depth({"nope_layers": [0, 0, 0, 1], "hf_num_layers": 8}, 4)
 
 
 def test_check_supported_sliding_window_follows_hf():
@@ -465,7 +522,7 @@ def test_check_supported_explicit_null_is_value_error(key):
 
 
 def test_derive_fields_and_build_margs():
-    require_megatron()
+    require_megatron_training()
     fields = smol.derive_megatron_fields(SMOLLM3_CFG)
     assert fields["num_layers"] == 36
     assert fields["num_query_groups"] == 4
@@ -475,95 +532,11 @@ def test_derive_fields_and_build_margs():
     assert fields["hf_num_layers"] == 36
     # Full depth: the stock interval collapses to Megatron's int form (cut depths are
     # in test_build_margs_cuts_pattern_to_num_layers).
-    m = smol.build_margs(fields, _margs_args())
+    m = smol.build_margs(fields, margs_args())
     assert m.no_rope_freq == 4
     assert m.layernorm_epsilon == 1e-06
     assert m.rotary_base == 5000000.0
     assert m.untie_embeddings_and_output_weights is False
-
-
-# Not 1e-5: that is Megatron's own default and would pass without the converter setting it.
-@pytest.mark.parametrize("eps", [1e-6, 3e-6])
-def test_llama_build_margs_sets_layernorm_epsilon(eps):
-    """The shared Llama build_margs sets the attribute Megatron reads (layernorm_epsilon,
-    the dest of --norm-epsilon), not the dead norm_epsilon."""
-    require_megatron()
-    from primus.backends.megatron.checkpoint import native_loader_llama as llama
-
-    cfg = {k: v for k, v in SMOLLM3_CFG.items() if k not in ("model_type", "architectures")}
-    fields = llama.derive_megatron_fields({**cfg, "model_type": "llama", "rms_norm_eps": eps})
-    m = llama.build_margs(fields, _margs_args())
-    assert m.layernorm_epsilon == eps
-    assert not hasattr(m, "norm_epsilon")
-
-
-_QWEN3_CFG = {
-    "hidden_size": 256,
-    "intermediate_size": 512,
-    "num_hidden_layers": 2,
-    "num_attention_heads": 4,
-    "num_key_value_heads": 2,
-    "head_dim": 64,
-    "max_position_embeddings": 512,
-    "rms_norm_eps": 1e-6,
-    "rope_theta": 1e6,
-    "tie_word_embeddings": False,
-}
-_DEEPSEEK_CFG = {
-    "hidden_size": 256,
-    "intermediate_size": 512,
-    "moe_intermediate_size": 128,
-    "num_hidden_layers": 2,
-    "first_k_dense_replace": 1,
-    "num_attention_heads": 4,
-    "vocab_size": 1024,
-    "q_lora_rank": None,
-    "kv_lora_rank": 64,
-    "qk_nope_head_dim": 32,
-    "qk_rope_head_dim": 16,
-    "v_head_dim": 32,
-    "n_routed_experts": 4,
-    "n_shared_experts": 1,
-    "num_experts_per_tok": 2,
-    "rms_norm_eps": 1e-6,
-    "rope_theta": 10000,
-}
-
-
-@pytest.mark.parametrize("family", ["qwen3", "deepseek"])
-def test_qwen3_and_deepseek_build_margs_set_layernorm_epsilon(family, monkeypatch):
-    """Like the Llama converter: build_margs sets layernorm_epsilon (what Megatron reads),
-    so the converted model is built and validated at the HF rms_norm_eps, and it does not
-    set the dead norm_epsilon. Runs on CPU: validate_args asks the GPU's compute capability
-    when moe_grouped_gemm is on (DeepSeek), so that one call is stubbed."""
-    require_megatron()
-    import importlib
-
-    import torch
-
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a, **k: (9, 4))
-    conv = importlib.import_module(f"primus.backends.megatron.checkpoint.native_loader_{family}")
-    cfg = _QWEN3_CFG if family == "qwen3" else _DEEPSEEK_CFG
-    fields = conv.derive_megatron_fields(cfg)
-    assert fields["norm_epsilon"] == 1e-6
-    m = conv.build_margs(fields, _margs_args())  # any error fails the test (no skip)
-    assert m.layernorm_epsilon == 1e-6
-    assert not hasattr(m, "norm_epsilon")
-
-
-def test_convert_checks_the_family_interface_first():
-    """A family module without the converter functions is refused before Megatron starts."""
-    import types
-
-    from primus.backends.megatron.checkpoint import native_loader_llama as llama
-
-    fam = types.ModuleType("native_loader_partial")
-    fam.derive_megatron_fields = lambda cfg: {}
-    with pytest.raises(TypeError, match="build_margs.*LOG_NAME"):
-        llama.convert("/nonexistent", "/nonexistent-out", family=fam)
-    for module in (llama, smol):  # both families meet the whole contract
-        assert all(callable(getattr(module, f)) for f in llama._FAMILY_INTERFACE)
-        assert isinstance(module.LOG_NAME, str)
 
 
 def test_missing_epsilon_defaults():
@@ -613,8 +586,6 @@ def test_hook_dispatches_smollm3_to_its_converter(tmp_path, monkeypatch):
     monkeypatch.setattr(conv, "convert", lambda hf, out, **k: calls.append((hf, out)))
     hook.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), {"family": "smollm3"})
     assert calls == [(str(tmp_path), str(tmp_path / "out"))]
-    with pytest.raises(ValueError, match="no native converter for family 'smolm3'"):
-        hook.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), {"family": "smolm3"})
 
 
 def test_hook_families_each_have_a_converter_module():
@@ -626,53 +597,24 @@ def test_hook_families_each_have_a_converter_module():
 
 
 # --------------------------------------------------------------------------- convert driver
-class _DictStore:
-    """Stands in for common.SafetensorsStore: HF tensors by name."""
-
-    def __init__(self, tensors):
-        self.tensors = tensors
-
-    def has(self, name):
-        return name in self.tensors
-
-    def get(self, name, dtype):
-        return self.tensors[name].to(dtype)
-
-
-def _tiny_hf_tensors(layers, hidden, ffn, heads, kv_heads, vocab):
-    head_dim = hidden // heads
-    g = torch.Generator().manual_seed(0)
-
-    def r(*shape):
-        return torch.randn(*shape, generator=g)
-
-    t = {"model.embed_tokens.weight": r(vocab, hidden), "model.norm.weight": r(hidden)}
-    for i in range(layers):
-        h = f"model.layers.{i}."
-        t[h + "input_layernorm.weight"] = r(hidden)
-        t[h + "post_attention_layernorm.weight"] = r(hidden)
-        t[h + "self_attn.q_proj.weight"] = r(heads * head_dim, hidden)
-        t[h + "self_attn.k_proj.weight"] = r(kv_heads * head_dim, hidden)
-        t[h + "self_attn.v_proj.weight"] = r(kv_heads * head_dim, hidden)
-        t[h + "self_attn.o_proj.weight"] = r(hidden, heads * head_dim)
-        t[h + "mlp.gate_proj.weight"] = r(ffn, hidden)
-        t[h + "mlp.up_proj.weight"] = r(ffn, hidden)
-        t[h + "mlp.down_proj.weight"] = r(hidden, ffn)
-    return t
-
-
-@pytest.mark.parametrize("break_nope", [False, True])
-def test_convert_with_smollm3_family_runs_smollm3_fields(tmp_path, monkeypatch, break_nope):
-    """native_loader_smollm3.convert drives the shared Llama sequence with the SmolLM3
+@pytest.mark.parametrize("broken", [None, "no_rope_freq", "layernorm_epsilon"])
+def test_convert_with_smollm3_family_runs_smollm3_fields(tmp_path, monkeypatch, broken):
+    """native_loader_smollm3.convert runs the Llama conversion sequence with the SmolLM3
     functions: derive_megatron_fields (rope_theta, eps, NoPE pattern from config.json),
     build_margs (real Megatron argument parsing and validate_args) and
-    build_mcore_state_dict (the NoPE check on the built model, then the weight mapping).
-    Only the heavy common.* steps (process-group init, model build, save) are faked.
-    A model built without the NoPE pattern stops the conversion before the save."""
-    require_megatron()
-    from megatron.core.transformer.transformer_config import TransformerConfig
+    build_mcore_state_dict (the NoPE and epsilon checks on the built model, then the weight
+    mapping). The model's TransformerConfig is built from the args by Megatron's own
+    ``core_transformer_config_from_args`` (as gpt_builder does), so a field lost on the way from
+    args to config fails the checks. Only process-group init, the module build and the save are
+    faked. ``broken``: that arg is reset to Megatron's default before the config is built; the
+    conversion must stop before the save."""
+    require_megatron_training()
+    import argparse
 
-    from primus.backends.megatron.checkpoint import native_convert_common as common
+    from megatron.training.argument_utils import core_transformer_config_from_args
+    from megatron.training.arguments import add_megatron_arguments
+
+    defaults = add_megatron_arguments(argparse.ArgumentParser(allow_abbrev=False)).parse_args([])
 
     L, H, F, NH, KV, V = 8, 64, 128, 4, 2, 200
     cfg = {
@@ -684,19 +626,15 @@ def test_convert_with_smollm3_family_runs_smollm3_fields(tmp_path, monkeypatch, 
         "num_key_value_heads": KV,
         "vocab_size": V,
     }
-    tensors = _tiny_hf_tensors(L, H, F, NH, KV, V)
+    tensors = llama_layout_hf_tensors(L, H, F, NH, KV, V)
     seen = {}
 
     def build_model(margs):
         seen["margs"] = margs
-        no_rope = None if break_nope else margs.no_rope_freq
-        config = TransformerConfig(
-            num_layers=margs.num_layers,
-            hidden_size=margs.hidden_size,
-            num_attention_heads=margs.num_attention_heads,
-            num_query_groups=margs.num_query_groups,
-            no_rope_freq=no_rope,
-        )
+        args = SimpleNamespace(**vars(margs))
+        if broken:
+            setattr(args, broken, getattr(defaults, broken))
+        config = core_transformer_config_from_args(args)
         padded = 256
         sd = {"embedding.word_embeddings.weight": torch.zeros(padded, H)}
         return SimpleNamespace(config=config, state_dict=lambda: sd)
@@ -704,18 +642,13 @@ def test_convert_with_smollm3_family_runs_smollm3_fields(tmp_path, monkeypatch, 
     def save(model, sd, consumed, store, margs, save_dir, log):
         seen["sd"], seen["consumed"], seen["save_dir"] = sd, consumed, save_dir
 
-    monkeypatch.setattr(common, "ensure_megatron_on_path", lambda: None)
-    monkeypatch.setattr(common, "assert_bridge_free", lambda stage: None)
-    monkeypatch.setattr(common, "read_hf_config", lambda hf_dir: dict(cfg))
-    monkeypatch.setattr(common, "init_megatron_single_process", lambda margs, port, log=None: margs)
-    monkeypatch.setattr(common, "build_mcore_gpt_model", build_model)
-    monkeypatch.setattr(common, "SafetensorsStore", lambda hf_dir: _DictStore(tensors))
-    monkeypatch.setattr(common, "load_validate_save", save)
+    stub_convert_pipeline(monkeypatch, cfg, tensors, build_model, save)
 
     logs = []
     kwargs = dict(dtype="fp32", seq_length=128, log=lambda *a: logs.append(" ".join(map(str, a))))
-    if break_nope:
-        with pytest.raises(RuntimeError, match="no_rope_freq expands to"):
+    if broken:
+        match = {"no_rope_freq": "no_rope_freq expands to", "layernorm_epsilon": "layernorm_epsilon=1e-05"}
+        with pytest.raises(RuntimeError, match=match[broken]):
             smol.convert(str(tmp_path), str(tmp_path / "out"), **kwargs)
         assert "sd" not in seen
         return
@@ -732,6 +665,9 @@ def test_convert_with_smollm3_family_runs_smollm3_fields(tmp_path, monkeypatch, 
     assert len([k for k in sd if k.startswith("decoder.layers.")]) == 6 * L
     emb = sd["embedding.word_embeddings.weight"]
     torch.testing.assert_close(emb[:V], tensors["model.embed_tokens.weight"])
+    # Tied embeddings: the head uses the embedding; the checkpoint has no lm_head to map.
+    assert margs.untie_embeddings_and_output_weights is False
+    assert "output_layer.weight" not in sd
     assert any("NoPE layers = [3, 7]" in line for line in logs)
     assert any("layernorm_epsilon=1e-06" in line for line in logs)
 
@@ -747,8 +683,8 @@ def test_preset_matches_config_json():
     assert preset["kv_channels"] == 128
     assert float(preset["rotary_base"]) == SMOLLM3_CFG["rope_theta"]
     assert float(preset["layernorm_epsilon"]) == SMOLLM3_CFG["rms_norm_eps"]
-    # norm_epsilon is not read by Megatron for this model, but config tools read it
-    # (merged from llama3_base.yaml); it must not show a value the model does not use.
+    # norm_epsilon is not read by Megatron for this model; the merged config must not
+    # show llama3_base.yaml's 1e-5 next to the value in use.
     assert float(preset["norm_epsilon"]) == float(preset["layernorm_epsilon"])
     assert preset["untie_embeddings_and_output_weights"] is False
     assert smol.expand_no_rope_freq(preset["no_rope_freq"], 36) == smol.nope_pattern(SMOLLM3_CFG)
@@ -756,10 +692,15 @@ def test_preset_matches_config_json():
 
 @pytest.mark.parametrize("num_layers", [4, 8, 36])
 def test_megatron_nope_placement_matches_hf(num_layers):
-    """Per-PR NoPE placement check: Megatron's TransformerConfig expands the preset's
+    """Per-PR NoPE config check: Megatron's TransformerConfig expands the preset's
     no_rope_freq: 4 to the same per-layer pattern as HF SmolLM3 (no_rope_layer_interval 4:
-    every 4th layer, 1-based, skips RoPE)."""
-    require_megatron()
+    every 4th layer, 1-based, skips RoPE).
+
+    This checks the config only. That attention then skips RoPE on those layers is
+    Megatron's Attention.forward (it sets rotary_pos_emb to None where no_rope_freq is 1,
+    before the core attention, so it holds for TE and Turbo attention alike);
+    test_attention_skips_rope_on_nope_layers checks that in a forward pass."""
+    require_megatron_training()
     from megatron.core.transformer.transformer_config import TransformerConfig
 
     preset = _merged_preset("smollm3_3B_Base.yaml")
@@ -774,6 +715,140 @@ def test_megatron_nope_placement_matches_hf(num_layers):
     assert list(cfg.no_rope_freq) == list(hf)
     # HF: layer i (0-based) uses RoPE unless (i + 1) % interval == 0.
     assert [i for i, v in enumerate(cfg.no_rope_freq) if v] == list(range(3, num_layers, 4))
+
+
+def test_attention_skips_rope_on_nope_layers(request, monkeypatch):
+    """Model-level NoPE check: a forward pass through the decoder of a small Megatron
+    GPTModel built from the preset's no_rope_freq applies RoPE in exactly the layers where
+    HF SmolLM3 does (no_rope_layers[i] == 1). Every layer gets the RoPE tensor; the layers
+    that call apply_rotary_pos_emb are recorded."""
+    require_megatron_training()
+    # Requested after require_megatron_training: the fixture imports megatron.core, so without
+    # Megatron-LM the test is skipped (or fails in CI) like its siblings, not an error.
+    request.getfixturevalue("init_parallel_state")
+    import megatron.core.transformer.attention as attention
+    import megatron.core.transformer.transformer_block as transformer_block
+    from megatron.core.models.gpt import GPTModel
+    from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+    from megatron.core.transformer.enums import AttnBackend
+    from megatron.core.transformer.transformer_config import TransformerConfig
+
+    for var in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):  # GPTModel sets them
+        monkeypatch.delenv(var, raising=False)
+    # TE's CPU-offload context creates a CUDA stream; without it the block takes its
+    # no-TE path (cpu_offloading is off), so the model builds on a host with no GPU.
+    monkeypatch.setattr(transformer_block, "get_cpu_offload_context", None)
+    num_layers, seq = 8, 8
+    preset = _merged_preset("smollm3_3B_Base.yaml")
+    config = TransformerConfig(
+        num_layers=num_layers,
+        hidden_size=32,
+        num_attention_heads=4,
+        num_query_groups=2,
+        no_rope_freq=preset["no_rope_freq"],
+        normalization="RMSNorm",
+        attention_backend=AttnBackend.local,
+        use_cpu_initialization=True,
+    )
+    model = GPTModel(
+        config,
+        transformer_layer_spec=get_gpt_layer_local_spec(normalization="RMSNorm"),
+        vocab_size=64,
+        max_sequence_length=seq,
+        position_embedding_type="rope",
+        rotary_base=int(preset["rotary_base"]),
+    ).eval()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+
+    current, rope_layers = [None], []
+
+    class _CoreAttentionStub(torch.nn.Module):
+        """RoPE is applied before the core attention; Megatron's DotProductAttention needs
+        CUDA (its global buffer), so it is replaced by a shape-preserving stub."""
+
+        def forward(self, query, key, value, *args, **kwargs):
+            return query.reshape(query.shape[0], query.shape[1], -1)
+
+    for module in model.modules():
+        if isinstance(module, attention.Attention):
+            module.register_forward_pre_hook(lambda m, a: current.__setitem__(0, m.layer_number))
+            module.core_attention = _CoreAttentionStub()
+    model.decoder.final_layernorm = torch.nn.Identity()  # TE RMSNorm needs CUDA; not under test
+    rotary = attention.apply_rotary_pos_emb
+
+    def recording_rotary(t, *args, **kwargs):
+        if not rope_layers or rope_layers[-1] != current[0]:
+            rope_layers.append(current[0])
+        return rotary(t, *args, **kwargs)
+
+    monkeypatch.setattr(attention, "apply_rotary_pos_emb", recording_rotary)
+    # The decoder (all attention layers) gets one RoPE tensor, as from GPTModel's
+    # RotaryEmbedding ([s, 1, 1, head_dim]; built here because that module needs CUDA).
+    head_dim = config.kv_channels
+    inv_freq = 1.0 / (float(preset["rotary_base"]) ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    freqs = torch.outer(torch.arange(seq).float(), inv_freq)
+    rotary_pos_emb = torch.cat([freqs, freqs], dim=-1)[:, None, None, :].to(device)
+    tokens = torch.randint(0, 64, (1, seq), device=device)
+    mask = torch.triu(torch.ones(seq, seq, dtype=torch.bool, device=device), diagonal=1)[None, None]
+    with torch.no_grad():
+        hidden = model.embedding(tokens, torch.arange(seq, device=device)[None])
+        model.decoder(hidden, mask, rotary_pos_emb=rotary_pos_emb)
+
+    hf_nope = smol.nope_pattern({**SMOLLM3_CFG, "num_hidden_layers": num_layers})  # 1 = NoPE
+    hf_rope_layers = [i + 1 for i in range(num_layers) if not hf_nope[i]]  # 1-based
+    assert rope_layers == hf_rope_layers == [1, 2, 3, 5, 6, 7]
+
+
+@pytest.mark.parametrize("use_turbo_attention", [False, True], ids=["te", "turbo"])
+def test_shipped_attention_specs_keep_megatron_nope(monkeypatch, use_turbo_attention):
+    """The example recipes build attention from Primus's TE spec provider: Primus-Turbo flash
+    attention (MI300X/MI325X, use_turbo_attention) or TE attention (MI355X). Both only swap the
+    *core* attention, which gets q and k after RoPE: the layer is Megatron's SelfAttention, whose
+    forward applies the NoPE skip (attention.py: no_rope_freq[layer_number - 1] -> no RoPE, the
+    path test_attention_skips_rope_on_nope_layers runs). This checks the shipped spec keeps that
+    module and does not replace the attention forward. primus_turbo needs a GPU at import, so on
+    a CPU host its classes are stand-ins (the spec wiring is what is under test)."""
+    require_megatron_training()
+    pytest.importorskip("transformer_engine")
+    import sys
+    import types
+
+    from megatron.core.models.gpt import gpt_layer_specs
+    from megatron.core.transformer.attention import Attention, SelfAttention
+
+    turbo_name = "primus.backends.megatron.core.extensions.primus_turbo"
+    provider_name = "primus.backends.megatron.core.extensions.transformer_engine_spec_provider"
+    if not torch.cuda.is_available():
+        stand_in = types.ModuleType(turbo_name)
+        for name in (
+            "PrimusTurboAttention",
+            "PrimusTurboColumnParallelGroupedLinear",
+            "PrimusTurboColumnParallelLinear",
+            "PrimusTurboLayerNormColumnParallelLinear",
+            "PrimusTurboLinear",
+            "PrimusTurboRowParallelGroupedLinear",
+            "PrimusTurboRowParallelLinear",
+        ):
+            setattr(stand_in, name, type(name, (), {}))
+        stand_in._make_primus_turbo_norm_te_column_parallel_linear = lambda *a, **k: None
+        monkeypatch.setitem(sys.modules, turbo_name, stand_in)
+        monkeypatch.delitem(sys.modules, provider_name, raising=False)
+    provider = importlib.import_module(provider_name)
+    if use_turbo_attention and provider.PrimusTurboAttention is None:
+        pytest.skip("primus_turbo not importable")
+    cfg = provider._build_default_primus_args()
+    cfg.enable_primus_turbo = use_turbo_attention
+    cfg.use_turbo_attention = use_turbo_attention
+    monkeypatch.setattr(provider, "get_primus_args", lambda: cfg)
+    # As the turbo te_spec_provider patch does for the run: the GPT spec builder uses Primus's provider.
+    monkeypatch.setattr(gpt_layer_specs, "TESpecProvider", provider.PrimusTurboSpecProvider)
+    spec = gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec()
+    attn = spec.submodules.self_attention
+    assert attn.module is SelfAttention
+    assert attn.module.forward is Attention.forward  # the NoPE skip is in this forward
+    expected = provider.PrimusTurboAttention if use_turbo_attention else provider.TEDotProductAttention
+    assert attn.submodules.core_attention is expected
 
 
 # --------------------------------------------------------------------------- config -> args (per PR)
@@ -815,30 +890,32 @@ def _runtime_backend_args(tmp_path, monkeypatch, config, overrides=()):
 
 
 @pytest.mark.parametrize("platform", ["MI300X", "MI325X", "MI355X"])
-def test_recipe_flags_reach_the_megatron_args(tmp_path, monkeypatch, platform):
+def test_recipe_reaches_the_megatron_args(tmp_path, monkeypatch, platform):
     """Per-PR check of the config binding (the trainer E2E case is weekly): the example
-    recipe's skip_embedding_weight_decay and reset_log_on_first_iteration reach the args
-    that Megatron's parse_args returns (MegatronBaseTrainer patches parse_args to return
-    backend_args), the before_train patch conditions see them, and the embedding patch's
-    own backend-args checks pass. A CLI override turns the flag off end to end."""
-    require_megatron()
-    from primus.backends.megatron.patches import embedding_weight_decay_patches as ew
-    from primus.backends.megatron.patches.training_log import (
-        first_iteration_reset_patches as rp,
-    )
-    from primus.core.patches import PatchContext
+    recipe's SmolLM3 settings reach the args that Megatron's parse_args returns."""
+    require_megatron_training()
 
     config = f"examples/megatron/configs/{platform}/smollm3_3B_Base-BF16-pretrain.yaml"
     args, module_config = _runtime_backend_args(tmp_path, monkeypatch, config)
-    assert args.skip_embedding_weight_decay is True
-    assert args.reset_log_on_first_iteration is True
     assert args.layernorm_epsilon == pytest.approx(1e-6) and args.no_rope_freq == 4
-    ctx = PatchContext(backend="megatron", phase="before_train", extra={"module_config": module_config})
-    assert ew.skip_embedding_wd_enabled(ctx) and rp.reset_log_on_first_iteration_enabled(ctx)
-    assert ew.skip_embedding_wd_in_args(args) and ew.unsupported_reason(args) is None
+    assert args.rotary_base == 5000000 and args.untie_embeddings_and_output_weights is False
 
-    off, module_config = _runtime_backend_args(
-        tmp_path, monkeypatch, config, ["skip_embedding_weight_decay=false"]
-    )
-    ctx = PatchContext(backend="megatron", phase="before_train", extra={"module_config": module_config})
-    assert off.skip_embedding_weight_decay is False and not ew.skip_embedding_wd_enabled(ctx)
+
+def test_check_model_eps():
+    """The built model must use config.json's rms_norm_eps (a dropped override gives
+    Megatron's 1e-5 while the weights still load)."""
+    fields = {"norm_epsilon": 1e-6}
+    ok = SimpleNamespace(config=SimpleNamespace(layernorm_epsilon=1e-6))
+    assert smol.check_model_eps(ok, fields) == 1e-6
+    for bad in (SimpleNamespace(config=SimpleNamespace(layernorm_epsilon=1e-5)), SimpleNamespace()):
+        with pytest.raises(RuntimeError, match="layernorm_epsilon"):
+            smol.check_model_eps(bad, fields)
+
+
+def test_null_head_dim_is_rejected_and_explicit_list_does_not_warn_about_interval(recwarn):
+    with pytest.raises(ValueError, match="head_dim=null"):
+        smol.with_hf_defaults({**SMOLLM3_CFG, "head_dim": None})
+    cfg = {k: v for k, v in SMOLLM3_CFG.items() if k != "no_rope_layer_interval"}
+    n = cfg["num_hidden_layers"]
+    smol.with_hf_defaults({**cfg, "no_rope_layers": [int((i + 1) % 4 != 0) for i in range(n)]})
+    assert not [w for w in recwarn if "no_rope_layer_interval" in str(w.message)]

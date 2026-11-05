@@ -22,9 +22,9 @@ modules:
 
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-      log_interval: 1
-      # Each printed lm loss covers only its own iteration, also after a resume.
-      reset_log_on_first_iteration: true
+      # 2, not 1: Megatron does not close the logging interval on a run's first iteration, so
+      # with 1 the first loss line after a resume averages two iterations.
+      log_interval: 2
 
       train_iters: 50
       micro_batch_size: 4
@@ -32,19 +32,18 @@ modules:
 
       seq_length: 4096
 
-      # Short demo schedule (cosine, small lr). SmolLM3's own pretraining used a
-      # higher peak lr with a warmup-stable-decay schedule; set those for a real run.
+      # Short demo schedule
       lr: 1.0e-5
       min_lr: 0.0
       lr_warmup_iters: 2
       lr_decay_iters: null
       lr_decay_style: cosine
-      # AdamW settings as in SmolLM3 pretraining: weight decay 0.1, but none on the
-      # (tied) token embedding (after OLMo 2).
+      # AdamW
       weight_decay: 0.1
-      skip_embedding_weight_decay: true
       adam_beta1: 0.9
       adam_beta2: 0.95
+
+      # loss: mask the EOD token (packed documents are separated by EOD)
       eod_mask_loss: true
 
       # precision and optimizer sharding (also the pre_trainer.yaml defaults; set here
@@ -61,12 +60,8 @@ modules:
       gradient_accumulation_fusion: false
 
       # data
-      # SmolLM3 was pretrained with intra-document attention masking. To train the
-      # same way, set reset_attention_mask: true and reset_position_ids: true. They are
-      # left off in this short example because turning them on makes Megatron build a
-      # full [seq, seq] mask per sample (arbitrary-mask attention path: slower, more
-      # memory, and no context_parallel_size > 1). Mock data does have document
-      # boundaries (EOD tokens), which is why eod_mask_loss above has an effect.
+      # Mock data; set reset_attention_mask/reset_position_ids for intra-document masking on
+      # real packed data (Megatron then builds a full [seq, seq] mask per sample).
       mock_data: true
       train_data_path: null
       valid_data_path: null
@@ -85,12 +80,10 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Attention through Transformer Engine, which also supports context_parallel_size > 1.
-      # Primus Turbo attention (use_turbo_attention: true) works only with
-      # context_parallel_size 1 for this model.
-      # Dense model: no grouped GEMM.
+      # Turbo: Primus-Turbo flash attention, as llama3.2_3B on this GPU (NoPE layers only
+      # skip RoPE, which is applied before the attention kernel). Dense: no grouped GEMM.
       enable_primus_turbo: true
-      use_turbo_attention: false
+      use_turbo_attention: true
       use_turbo_grouped_gemm: false
 
       # Cross entropy flags
