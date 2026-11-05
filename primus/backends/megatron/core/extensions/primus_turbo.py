@@ -81,15 +81,6 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
-try:
-    from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
-except (ImportError, ModuleNotFoundError):
-    ENV_GEMM_BACKEND = "PRIMUS_TURBO_GEMM_BACKEND"
-    ENV_GROUPED_GEMM_BACKEND = "PRIMUS_TURBO_GROUPED_GEMM_BACKEND"
-try:
-    from primus_turbo.common.envs import set_env as _turbo_set_env
-except (ImportError, ModuleNotFoundError):
-    _turbo_set_env = None
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -244,11 +235,13 @@ def _bridge_activation_grad(
     return PrimusTurboQuantizedTensorPair(data=rowwise, data_t=colwise)
 
 
-def _publish_turbo_env(name: str, value: str) -> None:
-    # Primus-Turbo caches its env vars at first read; a bare os.environ write after that is ignored.
-    if _turbo_set_env is not None:
-        _turbo_set_env(name, value)
-    else:
+try:
+    # Primus-Turbo since AMD-AGI/Primus-Turbo#605 caches each environment variable at its first
+    # read; set_env() writes os.environ and drops that cached value
+    from primus_turbo.common.envs import set_env as _set_turbo_env
+except ImportError:  # older Primus-Turbo reads os.environ at every dispatch
+
+    def _set_turbo_env(name: str, value: str) -> None:
         os.environ[name] = value
 
 
@@ -257,7 +250,7 @@ def _apply_turbo_gemm_backend_env() -> None:
     """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
     backend = getattr(get_args(), "turbo_gemm_backend", "default")
     if backend != "default":
-        _publish_turbo_env(ENV_GEMM_BACKEND, backend)
+        _set_turbo_env("PRIMUS_TURBO_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
 
 
@@ -266,7 +259,7 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
     """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
     backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
     if backend != "default":
-        _publish_turbo_env(ENV_GROUPED_GEMM_BACKEND, backend)
+        _set_turbo_env("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 

@@ -4,28 +4,57 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""CPU tests for ``_publish_turbo_env``. The helper itself is not modified."""
+"""CPU tests that the turbo backend helpers publish through ``_set_turbo_env``."""
 
-import os
+from types import SimpleNamespace
+
+import pytest
 
 from primus.backends.megatron.core.extensions import primus_turbo as primus_turbo_ext
 
+CASES = [
+    (
+        "_apply_turbo_gemm_backend_env",
+        "turbo_gemm_backend",
+        "PRIMUS_TURBO_GEMM_BACKEND",
+    ),
+    (
+        "_apply_turbo_grouped_gemm_backend_env",
+        "turbo_grouped_gemm_backend",
+        "PRIMUS_TURBO_GROUPED_GEMM_BACKEND",
+    ),
+]
 
-def test_publish_turbo_env_uses_set_env(monkeypatch):
+
+@pytest.mark.parametrize("helper,arg,variable", CASES, ids=["gemm", "grouped_gemm"])
+def test_backend_env_is_published_via_set_turbo_env(monkeypatch, helper, arg, variable):
     calls = []
+    monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setattr(primus_turbo_ext, "_set_turbo_env", lambda name, value: calls.append((name, value)))
+    monkeypatch.setattr(primus_turbo_ext, "get_args", lambda: SimpleNamespace(**{arg: "flydsl"}))
+    monkeypatch.setattr(primus_turbo_ext, "warning_rank_0", lambda *args, **kwargs: None)
 
-    def record(name, value):
-        calls.append((name, value))
+    fn = getattr(primus_turbo_ext, helper)
+    fn.cache_clear()
+    try:
+        fn()
+    finally:
+        fn.cache_clear()
 
-    monkeypatch.setattr(primus_turbo_ext, "_turbo_set_env", record)
-    monkeypatch.delenv("PRIMUS_TURBO_TEST_SET_ENV", raising=False)
-    primus_turbo_ext._publish_turbo_env("PRIMUS_TURBO_TEST_SET_ENV", "flydsl")
-    assert calls == [("PRIMUS_TURBO_TEST_SET_ENV", "flydsl")]
-    assert "PRIMUS_TURBO_TEST_SET_ENV" not in os.environ
+    assert calls == [(variable, "flydsl")]
 
 
-def test_publish_turbo_env_writes_os_environ_when_set_env_is_missing(monkeypatch):
-    monkeypatch.setattr(primus_turbo_ext, "_turbo_set_env", None)
-    monkeypatch.delenv("PRIMUS_TURBO_TEST_PUBLISH", raising=False)
-    primus_turbo_ext._publish_turbo_env("PRIMUS_TURBO_TEST_PUBLISH", "flydsl")
-    assert os.environ["PRIMUS_TURBO_TEST_PUBLISH"] == "flydsl"
+@pytest.mark.parametrize("helper,arg,variable", CASES, ids=["gemm", "grouped_gemm"])
+def test_default_backend_publishes_nothing(monkeypatch, helper, arg, variable):
+    calls = []
+    monkeypatch.setattr(primus_turbo_ext, "_set_turbo_env", lambda name, value: calls.append((name, value)))
+    monkeypatch.setattr(primus_turbo_ext, "get_args", lambda: SimpleNamespace(**{arg: "default"}))
+
+    fn = getattr(primus_turbo_ext, helper)
+    fn.cache_clear()
+    try:
+        fn()
+    finally:
+        fn.cache_clear()
+
+    assert calls == []
