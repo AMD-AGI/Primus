@@ -283,6 +283,10 @@ class WanConfig(BaseDiffusionConfig):
         # forward never enters, so on the TE path they would silently run bf16.
         if getattr(self, "fp4", None) and self.transformer_impl != "local":
             raise ValueError("fp4 (MXFP4) on WAN requires transformer_impl='local'")
+        # Any fp4 value builds the MXFP4 local linears, and their preshuffle-contract
+        # check only runs for "mxfp4".
+        if getattr(self, "fp4", None) and self.fp4 != "mxfp4":
+            raise ValueError(f"WAN's fp4 path is Primus-Turbo MXFP4: set fp4: mxfp4, got fp4={self.fp4!r}")
         if self.fp8 and self.transformer_impl != "local":
             raise ValueError("fp8 on WAN requires transformer_impl='local'")
 

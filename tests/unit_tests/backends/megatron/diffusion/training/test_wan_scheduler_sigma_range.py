@@ -99,3 +99,17 @@ def test_dynamic_shifting_ignores_the_static_shift():
     scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=0.0, use_dynamic_shifting=True)
 
     assert torch.isfinite(scheduler.sigmas).all()
+
+
+def test_training_with_dynamic_shifting_is_rejected():
+    """The noise and the conditioning would take the static shift while the schedule takes mu."""
+    scheduler = WanFlowMatchScheduler(num_train_timesteps=N, shift=3.0, use_dynamic_shifting=True)
+    t = torch.arange(1, N + 1)
+
+    for train_step in (
+        lambda: scheduler.add_noise(torch.zeros(N, 4), torch.ones(N, 4), t),
+        lambda: scheduler.conditioning_timestep(t),
+        lambda: scheduler.timestep_bounds((0.5, 1.0)),
+    ):
+        with pytest.raises(ValueError, match="train with use_dynamic_shifting=False"):
+            train_step()

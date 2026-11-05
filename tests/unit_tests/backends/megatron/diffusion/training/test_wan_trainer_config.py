@@ -39,6 +39,13 @@ def test_fp4_recipe_value_reaches_the_model_config():
     assert config.fp4_recipe == "mxfp4"
 
 
+@pytest.mark.parametrize("fp4", ["e2m1", "nvfp4", True])
+def test_fp4_other_than_mxfp4_is_rejected(fp4):
+    """Any fp4 value builds the MXFP4 linears, which check their preshuffle contract only for "mxfp4"."""
+    with pytest.raises(ValueError, match="set fp4: mxfp4"):
+        _build(fp4=fp4, fp4_recipe="mxfp4")
+
+
 def test_fp4_unset_leaves_the_model_config_without_fp4():
     config = _build()
 

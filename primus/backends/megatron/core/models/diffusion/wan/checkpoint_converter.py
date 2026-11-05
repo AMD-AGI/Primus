@@ -378,7 +378,7 @@ def _convert_blocks(
 ) -> None:
     """Convert every DiT block's keys between the diffusers and Primus layouts."""
     heads = config.num_attention_heads
-    renames = _RENAMED_BLOCK_SUFFIXES + _CROSS_ATTN_NORM_SUFFIXES
+    renames = _RENAMED_BLOCK_SUFFIXES + (_CROSS_ATTN_NORM_SUFFIXES if config.cross_attn_norm else ())
     for n in range(config.num_dit_layers):
         hb, pb = _DIFFUSERS_BLOCK_PREFIX.format(n=n), _MCORE_BLOCK_PREFIX.format(n=n)
         src_b, dst_b = (hb, pb) if to_primus else (pb, hb)
@@ -471,6 +471,11 @@ def _convert(
     """Shared driver: dispatch over the detected backbone prefixes."""
     report = ConversionReport(direction=direction)
     detected = _detect_backbone_prefixes(src)
+    if prefix and len(detected) > 1:
+        raise ValueError(
+            f"prefix={prefix!r} would write both backbones ({', '.join(detected)}) under one "
+            "prefix; leave it unset to keep each backbone's own"
+        )
 
     if not detected:
         out = _convert_one_backbone(src, config, direction, report)

@@ -149,6 +149,11 @@ class WanFlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         Returns a 1-D float32 tensor (no broadcasting); callers reshape as
         needed.
         """
+        if self.use_dynamic_shifting:
+            raise ValueError(
+                "the training helpers apply the static shift; use_dynamic_shifting shifts by a "
+                "per-call mu they do not take, so train with use_dynamic_shifting=False"
+            )
         if not isinstance(timesteps, torch.Tensor):
             timesteps = torch.tensor(timesteps, device=device)
         t = timesteps.to(device=device or timesteps.device, dtype=torch.float32)
