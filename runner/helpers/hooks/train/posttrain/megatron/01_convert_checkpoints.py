@@ -103,12 +103,13 @@ def read_native_opts(config_file: str) -> dict:
 
     Returns a dict with ``enabled`` (tri-state: ``None`` when the config does not
     set ``native_ckpt_convert`` at all, else ``True`` / ``False``), plus optional
-    ``dtype`` / ``out`` overrides. ``None`` lets the caller pick the default
-    (native for supported families); ``True`` forces native; ``False`` forces the
-    legacy Megatron-Bridge path.
+    ``dtype`` / ``out`` / ``ckpt_format`` overrides. ``None`` lets the caller pick
+    the default (native for supported families); ``True`` forces native; ``False``
+    forces the legacy Megatron-Bridge path. ``ckpt_format`` (``native_ckpt_format``)
+    is ``torch_dist`` or ``torch``; ``None`` follows the experiment's ``ckpt_format``.
     """
     cfg = load_primus_config(Path(config_file), None)
-    opts = {"enabled": None, "dtype": None, "out": None}
+    opts = {"enabled": None, "dtype": None, "out": None, "ckpt_format": None}
 
     for module_name in ["sft_trainer", "post_trainer"]:
         module = get_module_config(cfg, module_name)
@@ -127,9 +128,44 @@ def read_native_opts(config_file: str) -> dict:
         opts["out"] = _first_config_value(params, "native_ckpt_out") or _first_config_value(
             module, "native_ckpt_out"
         )
+        opts["ckpt_format"] = _first_config_value(params, "native_ckpt_format") or _first_config_value(
+            module, "native_ckpt_format"
+        )
         break
 
     return opts
+
+
+def read_experiment_checkpoint_settings(config_file: str) -> dict:
+    """Read the experiment's parallel layout and checkpoint format.
+
+    Returns ``{"tp", "pp", "ep", "ckpt_format"}``: the tensor / pipeline /
+    expert parallel sizes (default 1) and ``ckpt_format`` (default
+    ``torch_dist``, Megatron's default) the fine-tune runs with.
+    """
+    cfg = load_primus_config(Path(config_file), None)
+    names = {
+        "tensor_model_parallel_size": "tp",
+        "pipeline_model_parallel_size": "pp",
+        "expert_model_parallel_size": "ep",
+        "ckpt_format": "ckpt_format",
+    }
+    settings = {"tp": 1, "pp": 1, "ep": 1, "ckpt_format": "torch_dist"}
+
+    for module_name in ["sft_trainer", "post_trainer"]:
+        module = get_module_config(cfg, module_name)
+        if module is None:
+            continue
+        params = getattr(module, "params", None)
+        for name, key in names.items():
+            value = _first_config_value(params, name)
+            if value is None:
+                value = _first_config_value(module, name)
+            if value is not None:
+                settings[key] = str(value) if key == "ckpt_format" else int(value)
+        break
+
+    return settings
 
 
 def _resolve_bridge_paths() -> tuple[Path, Path]:
@@ -199,8 +235,10 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
-# it (Primus-managed converters), producing a legacy ``torch`` checkpoint WITHOUT
-# ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
+# it (Primus-managed converters), producing a ``torch_dist`` checkpoint that
+# Megatron reshards to the experiment's TP / PP / EP on load (or a legacy
+# TP1/PP1 ``torch`` checkpoint for an experiment with ``ckpt_format: torch``)
+# WITHOUT ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
 # fused-kernels no-op) are applied in THIS process via ``run_patches(phase=
 # "convert")`` so they take effect for the single-process conversion; the
 # Megatron-LM submodule stays pristine. Set ``native_ckpt_convert: false`` to
@@ -259,7 +297,9 @@ def _native_dtype_from_config(hf_path: str, override: str | None) -> str:
 
 
 def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
-    """Convert a HF checkpoint to a legacy Megatron torch ckpt, bridge-free.
+    """Convert a HF checkpoint to a Megatron checkpoint, bridge-free.
+
+    ``opts["ckpt_format"]`` selects ``torch_dist`` (default) or legacy ``torch``.
 
     Applies the ``phase="convert"`` patches in this process, then runs the
     Primus-managed native converter for the detected family, all single-process.
@@ -284,8 +324,9 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     tp = int(opts.get("tensor_parallel_size", 1))
     pp = int(opts.get("pipeline_parallel_size", 1))
     ep = int(opts.get("expert_parallel_size", 1))
+    ckpt_format = common.check_ckpt_format(opts.get("ckpt_format") or common.DEFAULT_CKPT_FORMAT)
 
-    log_info(f"Native ({family}) conversion: dtype={dtype} TP={tp} PP={pp} EP={ep}")
+    log_info(f"Native ({family}) conversion: dtype={dtype} TP={tp} PP={pp} EP={ep} format={ckpt_format}")
     log_info(f"  Source: {hf_path}")
     log_info(f"  Target: {megatron_path}")
 
@@ -303,6 +344,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         tensor_parallel_size=tp,
         pipeline_parallel_size=pp,
         expert_parallel_size=ep,
+        ckpt_format=ckpt_format,
     )
 
     # Hard evidence for the bridge-free guarantee.
@@ -390,34 +432,101 @@ def fix_common_pt_for_megatron_lm(checkpoint_dir: Path):
     log_success("     Successfully added 'args' to common.pt")
 
 
-def _native_main(hf_path: str, native_opts: dict):
+def _emit_native_checkpoint_args(megatron_path: Path):
+    """Point training at the converted checkpoint."""
+    print(f"extra.pretrained_checkpoint={megatron_path}")
+    print(f"extra.finetune=true")
+
+
+def _resolve_native_ckpt_format(requested: str | None, experiment: dict) -> str:
+    """Pick the format the native converter writes, or exit with the reason.
+
+    Unset (``requested is None``): the experiment's own ``ckpt_format`` when the
+    converter can write it (``torch_dist`` by default; ``torch`` for experiments
+    that ask for it, as before), else ``torch_dist``. Then two layouts are
+    refused, because Megatron cannot load them:
+
+    * ``torch`` at any TP / PP / EP other than 1: a legacy checkpoint is not
+      resharded on load.
+    * ``torch_dist`` for an experiment with ``ckpt_format: torch``: Megatron
+      builds the state dict it loads into from the experiment's ``ckpt_format``.
+    """
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
+    run_format = experiment.get("ckpt_format", "torch_dist")
+    if requested is None:
+        ckpt_format = run_format if run_format in common.CKPT_FORMATS else common.DEFAULT_CKPT_FORMAT
+    else:
+        ckpt_format = requested
+    if ckpt_format not in common.CKPT_FORMATS:
+        log_error(f"native_ckpt_format: {ckpt_format!r} is not supported; use one of {common.CKPT_FORMATS}")
+        sys.exit(1)
+
+    layout = {k: int(experiment.get(k, 1)) for k in ("tp", "pp", "ep")}
+    if ckpt_format == "torch" and any(v != 1 for v in layout.values()):
+        log_error(
+            "A legacy torch checkpoint (TP1/PP1/EP1) cannot be loaded at "
+            f"TP={layout['tp']} PP={layout['pp']} EP={layout['ep']}. Set ckpt_format: torch_dist "
+            "(and native_ckpt_format: torch_dist if set): Megatron reshards a torch_dist checkpoint on load."
+        )
+        sys.exit(1)
+    if ckpt_format == "torch_dist" and run_format == "torch":
+        log_error(
+            "native_ckpt_format: torch_dist needs the experiment to load torch_dist checkpoints; "
+            "set ckpt_format: torch_dist (or native_ckpt_format: torch at TP1/PP1/EP1)."
+        )
+        sys.exit(1)
+    return ckpt_format
+
+
+def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None):
     """Bridge-free native conversion branch of main().
 
     Mirrors the Bridge path's skip-if-exists / rank-0-converts-others-wait
-    semantics, but produces a legacy ``torch`` checkpoint via the Primus-managed
-    in-process converter and emits ``pretrained_checkpoint`` + ``finetune`` back
-    to the runner.
+    semantics, but produces the checkpoint via the Primus-managed in-process
+    converter and emits ``pretrained_checkpoint`` + ``finetune`` back to the
+    runner.
+
+    ``experiment`` holds the fine-tune's parallel layout and ``ckpt_format``
+    (``read_experiment_checkpoint_settings``). The converter writes
+    ``torch_dist`` for a ``torch_dist`` experiment, which Megatron reshards on
+    load to any TP / PP / EP; see ``_resolve_native_ckpt_format``. The format is
+    part of the default output path and is checked against an existing
+    checkpoint before it is reused, so a checkpoint of one format is never
+    handed to a run that needs the other.
     """
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
     family = _detect_native_family(hf_path)
     if family is None:
         log_error(f"native_ckpt_convert: true but no native converter matches HF model at {hf_path}")
         sys.exit(1)
     native_opts["family"] = family
 
-    # Output path (legacy torch layout: <out>/iter_0000001/mp_rank_00/...).
+    ckpt_format = _resolve_native_ckpt_format(native_opts.get("ckpt_format"), experiment or {})
+    native_opts["ckpt_format"] = ckpt_format
+
+    # Output path. torch_dist: <out>/release/ (metadata.json, .metadata, *.distcp);
+    # torch: <out>/iter_0000001/mp_rank_00/model_optim_rng.pt.
     if native_opts.get("out"):
         megatron_path = Path(native_opts["out"])
     else:
         data_path = Path(os.environ.get("DATA_PATH", PRIMUS_ROOT / "data"))
-        megatron_path = data_path / "megatron_checkpoints" / f"{Path(hf_path).name}_native"
+        megatron_path = data_path / "megatron_checkpoints" / f"{Path(hf_path).name}_native_{ckpt_format}"
 
-    log_info(f"HF Model: {hf_path}  (native family: {family})")
+    log_info(f"HF Model: {hf_path}  (native family: {family}, format: {ckpt_format})")
     log_info(f"Megatron Path: {megatron_path}")
 
-    if megatron_path.exists() and (megatron_path / "latest_checkpointed_iteration.txt").exists():
-        log_info(f"Native Megatron checkpoint already exists at {megatron_path}, skipping conversion")
-        print(f"extra.pretrained_checkpoint={megatron_path}")
-        print(f"extra.finetune=true")
+    if (megatron_path / common.TRACKER_FILENAME).exists():
+        existing = common.saved_ckpt_format(str(megatron_path))
+        if existing != ckpt_format:
+            log_error(
+                f"{megatron_path} holds a {existing or 'missing or incomplete'} checkpoint, not "
+                f"{ckpt_format}. Remove it, or set native_ckpt_out to another directory."
+            )
+            sys.exit(1)
+        log_info(f"Native {ckpt_format} checkpoint already exists at {megatron_path}, skipping conversion")
+        _emit_native_checkpoint_args(megatron_path)
         return
 
     node_rank = int(os.environ.get("NODE_RANK", os.environ.get("RANK", 0)))
@@ -439,8 +548,7 @@ def _native_main(hf_path: str, native_opts: dict):
         wait_for_conversion(done_file, lock_file)
         log_success(f"[RANK {node_rank}] Checkpoint ready at {megatron_path}")
 
-    print(f"extra.pretrained_checkpoint={megatron_path}")
-    print(f"extra.finetune=true")
+    _emit_native_checkpoint_args(megatron_path)
 
 
 def main():
@@ -489,7 +597,7 @@ def main():
                 "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)
-        _native_main(hf_path, native_opts)
+        _native_main(hf_path, native_opts, read_experiment_checkpoint_settings(config_file))
         return
 
     log_info("Using Megatron-Bridge conversion path (native disabled or unsupported family)")

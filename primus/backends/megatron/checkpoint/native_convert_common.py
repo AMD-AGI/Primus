@@ -286,10 +286,14 @@ def build_mcore_gpt_model(margs):
 
 
 # ---------------------------------------------------------------------------
-# Load mapped state dict, validate, and save a legacy torch checkpoint
+# Load mapped state dict, validate, and save in the requested checkpoint format
 # ---------------------------------------------------------------------------
 def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     """Apply ``sd`` to ``model`` (strict=False), assert an exact mapping, save.
+
+    The checkpoint is written in ``margs.ckpt_format`` (see ``CKPT_FORMATS``).
+    A ``torch_dist`` checkpoint is moved to the ``release/`` layout afterwards
+    (``finalize_release_layout``).
 
     Raises ``RuntimeError`` if the mapping is not complete/exact so the caller
     (conversion hook) fails loudly instead of writing a silently-wrong ckpt.
@@ -321,8 +325,13 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
 
     from megatron.training.checkpointing import save_checkpoint
 
+    ckpt_format = check_ckpt_format(margs.ckpt_format)
     os.makedirs(save_dir, exist_ok=True)
-    log(f"saving legacy torch checkpoint to {save_dir} ...")
+    if ckpt_format == "torch_dist" and os.path.exists(os.path.join(save_dir, "release")):
+        raise RuntimeError(
+            f"{save_dir} already has a 'release' directory; remove it or convert into an empty directory."
+        )
+    log(f"saving {ckpt_format} checkpoint to {save_dir} ...")
     save_checkpoint(
         margs.iteration,
         [model],
@@ -330,9 +339,78 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
         None,
         num_floating_point_operations_so_far=0,
     )
-    log(f"DONE. Converted checkpoint at: {save_dir}")
+    if ckpt_format == "torch_dist":
+        finalize_release_layout(save_dir, margs.iteration)
+    log(f"DONE. Converted {ckpt_format} checkpoint at: {save_dir}")
 
 
 def read_hf_config(hf_dir: str) -> dict:
     with open(os.path.join(hf_dir, "config.json")) as f:
         return json.load(f)
+
+
+# ---------------------------------------------------------------------------
+# Output checkpoint format
+# ---------------------------------------------------------------------------
+# ``torch_dist``: Megatron distributed checkpoint (``megatron.core.dist_checkpointing``)
+#     in the ``release/`` layout. Each tensor is stored with its global shape, so
+#     Megatron reshards it on load and the same converted checkpoint fine-tunes
+#     at any tensor / pipeline / expert parallel size. Default.
+# ``torch``: legacy per-rank checkpoint (``iter_0000001/mp_rank_00/``). Megatron
+#     does not reshard it, so it loads only at TP = PP = EP = 1.
+CKPT_FORMATS = ("torch_dist", "torch")
+DEFAULT_CKPT_FORMAT = "torch_dist"
+
+TRACKER_FILENAME = "latest_checkpointed_iteration.txt"
+
+
+def check_ckpt_format(ckpt_format: str) -> str:
+    """Return ``ckpt_format`` if the native converter can write it, else raise ``ValueError``."""
+    if ckpt_format not in CKPT_FORMATS:
+        raise ValueError(
+            f"unsupported native checkpoint format {ckpt_format!r}; expected one of {CKPT_FORMATS}"
+        )
+    return ckpt_format
+
+
+def finalize_release_layout(save_dir: str, iteration: int) -> None:
+    """Move the checkpoint saved at ``iteration`` to ``<save_dir>/release``.
+
+    A converted model is a starting point, not a training step. Megatron's
+    loader finds ``release`` through the tracker file, and Primus' LoRA pre-wrap
+    loader looks for a ``torch_dist`` checkpoint in ``<path>/release`` (the
+    layout the Megatron-Bridge conversion path produces).
+    """
+    iter_dir = os.path.join(save_dir, f"iter_{iteration:07d}")
+    os.rename(iter_dir, os.path.join(save_dir, "release"))
+    with open(os.path.join(save_dir, TRACKER_FILENAME), "w") as f:
+        f.write("release")
+
+
+def saved_ckpt_format(save_dir: str) -> str | None:
+    """Format of the checkpoint the tracker file in ``save_dir`` points at.
+
+    Returns ``"torch_dist"`` (the directory has dist-checkpointing
+    ``metadata.json``), ``"torch"`` (it has ``mp_rank_*`` shards), or ``None``
+    when there is no tracker file or the checkpoint it names is missing or
+    incomplete.
+    """
+    tracker = os.path.join(save_dir, TRACKER_FILENAME)
+    if not os.path.isfile(tracker):
+        return None
+    with open(tracker) as f:
+        content = f.read().strip()
+    if content == "release":
+        ckpt_dir = os.path.join(save_dir, "release")
+    else:
+        try:
+            ckpt_dir = os.path.join(save_dir, f"iter_{int(content):07d}")
+        except ValueError:
+            return None
+    if not os.path.isdir(ckpt_dir):
+        return None
+    if os.path.isfile(os.path.join(ckpt_dir, "metadata.json")):
+        return "torch_dist"
+    if any(name.startswith("mp_rank_") for name in os.listdir(ckpt_dir)):
+        return "torch"
+    return None
