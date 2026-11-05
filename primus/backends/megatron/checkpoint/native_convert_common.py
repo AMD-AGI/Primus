@@ -25,7 +25,7 @@ converter):
        and save a legacy ``torch`` checkpoint.
 
 Bridge-free guarantee: this module (and its callers) import ONLY
-``megatron.core`` / ``megatron.training`` / ``megatron.legacy``. ``megatron.bridge``
+``megatron.core`` / ``megatron.training`` / ``megatron.legacy`` (when present). ``megatron.bridge``
 is never imported; a hard guard asserts it never leaked into ``sys.modules``.
 
 The ROCm-only ``megatron.legacy.fused_kernels.load`` no-op that the legacy CPU
@@ -34,11 +34,17 @@ init path needs is supplied as a Primus ``phase="convert"`` monkeypatch
 in-process before conversion -- NOT by editing the submodule.
 """
 
+import errno
 import json
 import os
 import sys
 
 import torch
+
+# q / k / v -> linear_qkv: the shared row layout (re-exported for the converters)
+from primus.backends.megatron.core.models.common.qkv_layout import (  # noqa: F401
+    fuse_qkv,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -236,29 +242,72 @@ def pad_vocab(t: torch.Tensor, padded_vocab_size: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Single-process Megatron init (real trivial gloo groups, TP=PP=EP=1)
 # ---------------------------------------------------------------------------
-def init_megatron_single_process(margs, master_port: int, log=print):
+def _address_in_use(error) -> bool:
+    """True if a TCPStore bind failed because the port is taken (EADDRINUSE)."""
+    text = str(error).lower()
+    return (
+        getattr(error, "errno", None) == errno.EADDRINUSE
+        or "address already in use" in text
+        or "eaddrinuse" in text
+    )
+
+
+def _private_store(master_port, log=print):
+    """A TCPStore for a private one-rank world, always on 127.0.0.1 (never an inherited
+    ``MASTER_ADDR``, which may name another host). ``master_port`` is tried first; only when it is
+    taken (EADDRINUSE, e.g. another conversion on this host) does the store bind a free port chosen
+    by the OS while binding (also for ``master_port`` 0 / None), so no other process can take it
+    between choosing and binding. Any other bind error is raised."""
+    port = int(master_port or 0)
+    try:
+        return torch.distributed.TCPStore(
+            "127.0.0.1", port, world_size=1, is_master=True, wait_for_workers=False
+        )
+    except (RuntimeError, OSError) as e:
+        if port == 0 or not _address_in_use(e):
+            raise
+        log(f"master port {port} is in use on 127.0.0.1; binding a free port instead")
+        return torch.distributed.TCPStore(
+            "127.0.0.1", 0, world_size=1, is_master=True, wait_for_workers=False
+        )
+
+
+def init_megatron_single_process(margs, master_port=None, log=print):
     """Initialise Megatron globals + a trivial single-rank gloo world.
 
     ``build_tokenizer=True`` so ``padded_vocab_size`` is derived from the HF
     tokenizer's real vocab, identical to how Primus native SFT sizes the model.
+    Without a process group, the world is private to this process: its store is on
+    127.0.0.1 (see :func:`_private_store`; ``master_port`` 0 / None: a free port) and the
+    rendezvous env vars are set to it. A process group that already exists is kept and its
+    env vars are left as they are; it must have one rank (the converters build TP = PP = EP = 1).
     """
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ["MASTER_PORT"] = str(master_port)
-    os.environ["RANK"] = "0"
-    os.environ["WORLD_SIZE"] = "1"
-    os.environ["LOCAL_RANK"] = "0"
+    store = None
+    if torch.distributed.is_initialized():
+        world = torch.distributed.get_world_size()
+        if world != 1:
+            raise RuntimeError(
+                f"init_megatron_single_process needs a one-rank world; the existing process group has "
+                f"{world} ranks (run the conversion in its own process)"
+            )
+    else:
+        store = _private_store(master_port, log)
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(store.port)
+        os.environ["RANK"] = "0"
+        os.environ["WORLD_SIZE"] = "1"
+        os.environ["LOCAL_RANK"] = "0"
     neutralize_nvte_attention_env()
 
     from megatron.core import mpu
-    from megatron.legacy import fused_kernels
     from megatron.training.global_vars import get_args, set_global_variables
 
     set_global_variables(margs, build_tokenizer=True)
     margs = get_args()
     log(f"padded_vocab_size (from tokenizer) = {margs.padded_vocab_size}")
 
-    if not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(backend="gloo", world_size=1, rank=0)
+    if store is not None:
+        torch.distributed.init_process_group(backend="gloo", store=store, world_size=1, rank=0)
     mpu.initialize_model_parallel(
         tensor_model_parallel_size=margs.tensor_model_parallel_size,
         pipeline_model_parallel_size=margs.pipeline_model_parallel_size,
@@ -267,20 +316,32 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     # ROCm: legacy fused kernels are CUDA-only and their build shells out to
     # nvcc; conversion never runs them. Neutralised by the phase="convert"
     # Primus patch (checkpoint_convert_patches) applied earlier this process.
-    fused_kernels.load(margs)
+    # Megatron-LM trees without ``megatron.legacy`` (core 0.19+) have no such
+    # kernels to build, so there is nothing to load.
+    try:
+        import megatron.legacy.fused_kernels as fused_kernels
+    except ModuleNotFoundError as e:
+        # only the absence of the module itself; a missing dependency inside it is an error
+        if e.name not in ("megatron.legacy", "megatron.legacy.fused_kernels"):
+            raise
+        log(f"{e.name} not present; no legacy fused kernels to load")
+    else:
+        fused_kernels.load(margs)
     return margs
 
 
-def build_mcore_gpt_model(margs):
+def build_mcore_gpt_model(margs, model_type="gpt"):
     """Build the mcore ``GPTModel`` via Primus' own model-provider resolver.
 
-    Using ``get_model_provider('gpt')`` (the same shim native SFT uses) means the
+    Using ``get_model_provider(model_type)`` (the same shim native SFT uses) means the
     produced parameter names match exactly what SFT will build, and keeps us off
-    the ``tools/checkpoint`` directory layout.
+    the ``tools/checkpoint`` directory layout. ``model_type`` (default ``'gpt'``) selects the
+    model through the same resolver, e.g. ``'olmo3'`` for the Primus-owned OLMo-3 model (a
+    ``GPTModel`` subclass); it must be the ``model_type`` training uses, so the names match.
     """
     from primus.core.utils.import_utils import get_model_provider
 
-    model_provider = get_model_provider(model_type="gpt")
+    model_provider = get_model_provider(model_type=model_type)
     model = model_provider(pre_process=True, post_process=True)
     return model.to(margs.params_dtype)
 
@@ -333,79 +394,6 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     log(f"DONE. Converted checkpoint at: {save_dir}")
 
 
-# ---------------------------------------------------------------------------
-# HF q / k / v -> mcore linear_qkv
-# ---------------------------------------------------------------------------
-def fuse_qkv(q, k, v, nh: int, ng: int, hdim: int, hidden: int):
-    """HF q / k / v projections -> mcore ``linear_qkv``: per query group, its ``nh / ng`` query
-    heads, then its key head, then its value head (no RoPE permutation). Used by the Qwen3,
-    Llama and OLMo-3 converters (one copy of the layout)."""
-    if ng <= 0 or nh <= 0 or nh % ng:
-        raise ValueError(f"num_heads ({nh}) must be a positive multiple of num_query_groups ({ng})")
-    for name, w, rows in (("q", q, nh * hdim), ("k", k, ng * hdim), ("v", v, ng * hdim)):
-        if tuple(w.shape) != (rows, hidden):
-            raise ValueError(
-                f"HF {name}_proj weight has shape {tuple(w.shape)}, expected ({rows}, {hidden}) for "
-                f"num_heads={nh}, num_query_groups={ng}, head_dim={hdim}, hidden={hidden} (a transposed "
-                "or mismatched checkpoint)"
-            )
-    return torch.cat(
-        [
-            q.reshape(ng, (nh // ng) * hdim, hidden),
-            k.reshape(ng, hdim, hidden),
-            v.reshape(ng, hdim, hidden),
-        ],
-        dim=1,
-    ).reshape(-1, hidden)
-
-
-# ---------------------------------------------------------------------------
-# HF config.json -> Megatron args
-# ---------------------------------------------------------------------------
-
-
 def read_hf_config(hf_dir: str) -> dict:
     with open(os.path.join(hf_dir, "config.json")) as f:
         return json.load(f)
-
-
-# ---------------------------------------------------------------------------
-# Shared converter runtime / save args
-# ---------------------------------------------------------------------------
-# the iteration the converted checkpoint is saved at
-SAVE_ITERATION = 1
-
-
-def set_converter_runtime_args(margs, save_dir) -> None:
-    """Set the runtime args every native converter shares on ``margs`` (after the layout and the
-    dtype), before ``validate_args``. It only sets attributes; it builds and saves nothing. The
-    values: a CPU build without init, the TE implementation, fusions off, and a legacy ``torch``
-    checkpoint at ``save_dir`` without optimizer / RNG state. The save iteration is set after
-    ``validate_args`` by :func:`set_save_iteration`."""
-    margs.use_cpu_initialization = True
-    margs.perform_initialization = False
-    margs.transformer_impl = "transformer_engine"
-    margs.gradient_accumulation_fusion = False
-    margs.async_tensor_model_parallel_allreduce = False
-    margs.bias_gelu_fusion = False
-    margs.bias_swiglu_fusion = False
-    margs.masked_softmax_fusion = False
-    margs.bias_dropout_fusion = False
-    margs.apply_query_key_layer_scaling = False
-
-    margs.save = save_dir
-    margs.ckpt_format = "torch"
-    margs.no_save_optim = True
-    margs.no_save_rng = True
-    margs.no_load_optim = True
-    margs.no_load_rng = True
-    margs.save_interval = 1
-    margs.async_save = False
-    margs.ckpt_assume_constant_structure = False
-
-
-def set_save_iteration(margs):
-    """After ``validate_args``: the iteration the converted checkpoint is saved at
-    (:data:`SAVE_ITERATION`). Returns ``margs``."""
-    margs.iteration = SAVE_ITERATION
-    return margs

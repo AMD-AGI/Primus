@@ -13,22 +13,27 @@ __all__ = ["Olmo3MLP"]
 
 
 class Olmo3MLP(MLP):
-    def __init__(self, config, submodules, *args, post_norm=None, **kwargs):
+    def __init__(
+        self, config, submodules, *args, post_norm=None, pg_collection=None, is_mtp_layer=False, **kwargs
+    ):
+        if post_norm is None:
+            raise ValueError("OLMo-3 MLP needs post_norm (its post_feedforward_layernorm)")
+        # TransformerLayer (Megatron-LM core_v0.19) builds its mlp with pg_collection / is_mtp_layer,
+        # as MLP.as_mlp_submodule takes them; MLP itself takes tp_group.
+        del is_mtp_layer
+        if pg_collection is not None and kwargs.get("tp_group") is None:
+            kwargs["tp_group"] = pg_collection.tp
         super().__init__(config, submodules, *args, **kwargs)
-        self.post_feedforward_layernorm = (
-            post_norm(config=config, hidden_size=config.hidden_size, eps=config.layernorm_epsilon)
-            if post_norm is not None
-            else None
+        self.post_feedforward_layernorm = post_norm(
+            config=config, hidden_size=config.hidden_size, eps=config.layernorm_epsilon
         )
 
     def forward(self, hidden_states, *args, **kwargs):
         out, bias = super().forward(hidden_states, *args, **kwargs)
-        if self.post_feedforward_layernorm is not None:
-            if bias is not None:
-                out = out + bias
-                bias = None
-            out = self.post_feedforward_layernorm(out)
-        return out, bias
+        if bias is not None:
+            out = out + bias
+            bias = None
+        return self.post_feedforward_layernorm(out), bias
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Upstream ``MLP.sharded_state_dict`` with the post-norm handled too.
@@ -52,8 +57,10 @@ class Olmo3MLP(MLP):
             else:
                 sub_sd = module.sharded_state_dict(sub_prefix, sharded_offsets, metadata)
             if self.config.gated_linear_unit and name == "linear_fc1":
-                for k, v in sub_sd.items():
-                    if k in (f"{sub_prefix}weight", f"{sub_prefix}bias"):
-                        sub_sd[k] = apply_swiglu_sharded_factory(v, sharded_offsets, singleton_local_shards)
+                for k in (f"{sub_prefix}weight", f"{sub_prefix}bias"):
+                    if k in sub_sd:
+                        sub_sd[k] = apply_swiglu_sharded_factory(
+                            sub_sd[k], sharded_offsets, singleton_local_shards
+                        )
             sd.update(sub_sd)
         return sd

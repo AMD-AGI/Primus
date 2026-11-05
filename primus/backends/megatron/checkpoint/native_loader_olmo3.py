@@ -25,21 +25,67 @@ from types import SimpleNamespace
 import torch
 
 from primus.backends.megatron.checkpoint import native_convert_common as common
-from primus.backends.megatron.checkpoint.native_flow_olmo3 import (
-    check_single_shard_layout,
-)
 from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
     YARN_BETA_FAST_DEFAULT,
     YARN_BETA_SLOW_DEFAULT,
     check_olmo3_unsupported,
-    olmo3_window_from_settings,
+    olmo3_te_window,
 )
 
+
+def check_single_shard_layout(tp, pp, ep) -> None:
+    """Refuse a layout other than TP = PP = EP = 1: the native convert hook builds the model in a
+    1-rank world and saves a single-shard legacy checkpoint."""
+    if tuple(int(x) for x in (tp, pp, ep)) != (1, 1, 1):
+        raise ValueError(
+            "the OLMo-3 converter writes single-shard TP=PP=EP=1 checkpoints (it runs in a 1-rank "
+            f"world); got TP={tp} PP={pp} EP={ep}"
+        )
+
+
 # ---------------------------------------------------------------------------
-# Converter runtime (the build / save part is common.set_converter_runtime_args, shared by
-# every native converter; the layout and dtype checks are OLMo-3 own)
+# Converter runtime / save args (local to the OLMo-3 converter; the Llama / Qwen3 / DeepSeek
+# converters set the same values inline in their build_margs)
 # ---------------------------------------------------------------------------
+# converter --dtype -> params_dtype
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+
+
+def set_converter_runtime_args(margs, save_dir) -> None:
+    """Set the converter runtime args on ``margs`` (after the layout and the dtype), before
+    ``validate_args``: a CPU build without init, the TE implementation, fusions off, and a legacy
+    ``torch`` checkpoint at ``save_dir`` without optimizer / RNG state. It only sets attributes.
+    The save iteration is set after ``validate_args`` by :func:`set_save_iteration`."""
+    margs.use_cpu_initialization = True
+    margs.perform_initialization = False
+    margs.transformer_impl = "transformer_engine"
+    margs.gradient_accumulation_fusion = False
+    margs.async_tensor_model_parallel_allreduce = False
+    margs.bias_gelu_fusion = False
+    margs.bias_swiglu_fusion = False
+    margs.masked_softmax_fusion = False
+    margs.bias_dropout_fusion = False
+    margs.apply_query_key_layer_scaling = False
+
+    margs.save = save_dir
+    margs.ckpt_format = "torch"
+    margs.no_save_optim = True
+    margs.no_save_rng = True
+    margs.no_load_optim = True
+    margs.no_load_rng = True
+    margs.save_interval = 1
+    margs.async_save = False
+    margs.ckpt_assume_constant_structure = False
+
+
+def set_save_iteration(margs):
+    """After ``validate_args``: the converted checkpoint is saved at iteration 1. Returns ``margs``."""
+    margs.iteration = 1
+    return margs
+
+
+# progress log: one "mapped layer" line every N layers (and the last one)
+_LOG_EVERY_N_LAYERS = 5
 
 
 def _apply_runtime_margs(m, args) -> None:
@@ -68,7 +114,7 @@ def _apply_runtime_margs(m, args) -> None:
     m.bf16 = args.dtype == "bf16"
     m.fp16 = args.dtype == "fp16"
     m.params_dtype = DTYPES[args.dtype]
-    common.set_converter_runtime_args(m, args.save_dir)
+    set_converter_runtime_args(m, args.save_dir)
 
 
 def _window_fields(cfg):
@@ -118,6 +164,48 @@ _REQUIRED_KEYS = (
 _LAYER_TYPES = ("full_attention", "sliding_attention")
 
 
+def _positive_int(cfg, key) -> int:
+    v = cfg.get(key)
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        raise ValueError(f"OLMo-3 config.json {key} must be a positive integer, got {v!r}")
+    return v
+
+
+def _finite_number(v) -> bool:
+    """An int or float (not a bool, not a string) that is finite (no NaN / inf)."""
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v)
+
+
+def _positive_number(cfg, key, where="config.json") -> float:
+    """A real number > 0 (int or float, not a bool or a string)."""
+    v = cfg.get(key)
+    if not _finite_number(v) or not v > 0:
+        raise ValueError(f"OLMo-3 {where} {key} must be a positive number, got {v!r}")
+    return float(v)
+
+
+def _kv_heads(cfg) -> int:
+    """KV heads (Megatron num_query_groups): ``num_key_value_heads`` (a positive int) when the key is
+    present, else MHA (one per head). An explicit 0, null or other invalid value is refused."""
+    if "num_key_value_heads" not in cfg:
+        return _positive_int(cfg, "num_attention_heads")
+    return _positive_int(cfg, "num_key_value_heads")
+
+
+def _head_dim(cfg) -> int:
+    """``head_dim`` (a positive int) when present, else ``hidden_size / num_attention_heads``, which
+    must divide evenly (no silent floor)."""
+    if "head_dim" in cfg and cfg["head_dim"] is not None:
+        return _positive_int(cfg, "head_dim")
+    hidden, nh = _positive_int(cfg, "hidden_size"), _positive_int(cfg, "num_attention_heads")
+    if hidden % nh:
+        raise ValueError(
+            f"OLMo-3 config.json hidden_size ({hidden}) must be divisible by num_attention_heads ({nh}) "
+            "when head_dim is not given"
+        )
+    return hidden // nh
+
+
 def _check_hf_config(cfg):
     """Refuse configs this converter does not map (no biases, SwiGLU only, OLMo-3 only).
 
@@ -139,14 +227,31 @@ def _check_hf_config(cfg):
     missing = [k for k in _REQUIRED_KEYS if cfg.get(k) is None]
     if missing:
         raise ValueError(f"OLMo-3 config.json is missing required keys: {', '.join(missing)}")
+    for key in (
+        "hidden_size",
+        "num_attention_heads",
+        "num_hidden_layers",
+        "intermediate_size",
+        "max_position_embeddings",
+    ):
+        _positive_int(cfg, key)
+    if cfg.get("vocab_size") is not None:  # optional (the tokenizer sizes the vocabulary)
+        _positive_int(cfg, "vocab_size")
+    _positive_number(cfg, "rms_norm_eps")
+    if cfg.get("rope_theta") is not None:  # may sit in the rope parameters instead (checked there)
+        _positive_number(cfg, "rope_theta")
     nh = cfg["num_attention_heads"]
-    ng = cfg.get("num_key_value_heads") or nh
+    ng = _kv_heads(cfg)
     if nh % ng:
         raise ValueError(f"num_attention_heads ({nh}) must be divisible by num_key_value_heads ({ng})")
+    _head_dim(cfg)
 
 
 def _rope_type(params):
-    t = params.get("rope_type", params.get("type")) or "default"
+    a, b = params.get("rope_type"), params.get("type")
+    if a is not None and b is not None and a != b:
+        raise ValueError(f"OLMo-3 rope parameters give rope_type {a!r} and type {b!r}; they must agree")
+    t = a or b or "default"
     if t not in ("default", "yarn"):
         raise ValueError(f"OLMo-3 converter supports rope_type 'default' or 'yarn', got {t!r}")
     return t
@@ -192,11 +297,18 @@ def _yarn_params(params, cfg):
             "OLMo-3 converter: YaRN truncate must be true (Megatron rounds the correction range)"
         )
     factor = params.get("factor")
-    if isinstance(factor, bool) or not isinstance(factor, (int, float)) or factor < 1.0:
-        raise ValueError(f"OLMo-3 YaRN factor must be a number >= 1, got {factor!r}")
+    if not _finite_number(factor) or factor < 1.0:
+        raise ValueError(f"OLMo-3 YaRN factor must be a finite number >= 1, got {factor!r}")
     factor = float(factor)
     max_pos = cfg["max_position_embeddings"]
     orig = params.get("original_max_position_embeddings")
+    if orig is not None:
+        # an int, or an integral float (8192.0): it is a position count
+        if not _finite_number(orig) or not orig > 0 or float(orig) != int(orig):
+            raise ValueError(
+                f"OLMo-3 YaRN original_max_position_embeddings must be a positive integer, got {orig!r}"
+            )
+        orig = int(orig)
     if orig is None:
         orig = max_pos
     elif not math.isclose(max_pos / float(orig), factor, rel_tol=1e-9):
@@ -205,18 +317,31 @@ def _yarn_params(params, cfg):
             f"OLMo-3 YaRN factor {factor} != max_position_embeddings / original_max_position_embeddings "
             f"= {max_pos} / {orig}; refusing an inconsistent rope config"
         )
-    beta_fast = float(params["beta_fast"] if params.get("beta_fast") is not None else YARN_BETA_FAST_DEFAULT)
-    beta_slow = float(params["beta_slow"] if params.get("beta_slow") is not None else YARN_BETA_SLOW_DEFAULT)
+    betas = {}
+    for key, default in (("beta_fast", YARN_BETA_FAST_DEFAULT), ("beta_slow", YARN_BETA_SLOW_DEFAULT)):
+        v = params.get(key)
+        if v is None:
+            v = default
+        if not _finite_number(v) or not v > 0:
+            raise ValueError(f"OLMo-3 YaRN {key} must be a finite number > 0, got {v!r}")
+        betas[key] = float(v)
+    beta_fast, beta_slow = betas["beta_fast"], betas["beta_slow"]
     if beta_fast < beta_slow:
         raise ValueError(f"OLMo-3 YaRN beta_fast ({beta_fast}) must be >= beta_slow ({beta_slow})")
     af = params.get("attention_factor")
     if af is not None:
-        if isinstance(af, bool) or not isinstance(af, (int, float)) or not af > 0:
-            raise ValueError(f"OLMo-3 YaRN attention_factor must be > 0, got {af!r}")
+        if not _finite_number(af) or not af > 0:
+            raise ValueError(f"OLMo-3 YaRN attention_factor must be a finite number > 0, got {af!r}")
         af = float(af)
+        if factor == 1.0 and af != 1.0:
+            # OLMo-3 builds no YaRN table for factor 1, so the logit scale af**2 would be dropped
+            raise ValueError(
+                f"OLMo-3 YaRN attention_factor {af} with factor 1.0 is not supported (it would be "
+                "ignored); a factor-1 YaRN config must have attention_factor unset or 1"
+            )
     return dict(
         factor=factor,
-        original_max_position_embeddings=int(orig),
+        original_max_position_embeddings=orig,
         beta_fast=beta_fast,
         beta_slow=beta_slow,
         attention_factor=af,
@@ -241,7 +366,8 @@ def _rope_source(cfg):
 
 
 def _rope_config(cfg):
-    """``(full-attention RoPE params, sliding-layer layout or None, rope_theta)`` from an HF config.
+    """``(full-attention YaRN params or None, sliding-layer layout or None, rope_theta)`` from an HF
+    config; the YaRN params are :func:`_yarn_params` of the full-attention entry, computed once.
 
     Handles the flat ``rope_scaling`` / ``rope_parameters`` dict (transformers 4.57 checkpoints)
     and the per-layer-type form ``{"full_attention": {...}, "sliding_attention": {...}}``
@@ -251,6 +377,7 @@ def _rope_config(cfg):
     """
     raw = _rope_source(cfg)
     layout = None
+    yf = None
     if any(isinstance(v, dict) for v in raw.values()):
         unknown = set(raw) - set(_LAYER_TYPES)
         if unknown or "full_attention" not in raw:
@@ -277,11 +404,10 @@ def _rope_config(cfg):
                 layout = "per_type"
             else:
                 raise ValueError("OLMo-3: YaRN on sliding layers needs YaRN on full layers too")
-            if sliding.get("rope_theta", full.get("rope_theta")) != full.get("rope_theta"):
-                raise ValueError("OLMo-3 converter needs one rope_theta for all layer types")
             # yarn_all builds one YaRN table (and attention factor) for every layer: the sliding
             # layers' YaRN values must be the full layers' ones, not silently replaced by them.
-            ys, yf = _yarn_params(sliding, cfg), _yarn_params(full, cfg)
+            ys = _yarn_params(sliding, cfg)
+            yf = _yarn_params(full, cfg)
             if ys is not None and ys != yf:
                 diff = sorted(k for k in ys if ys[k] != yf[k])
                 raise ValueError(
@@ -290,16 +416,27 @@ def _rope_config(cfg):
                 )
     else:
         full = raw
-    _rope_type(full)
-    # transformers 5.x may write ``rope_theta: null`` at the top level and the value in the
-    # rope parameters: None counts as missing; two different values are refused.
-    top, nested = cfg.get("rope_theta"), full.get("rope_theta")
-    if top is not None and nested is not None and float(top) != float(nested):
-        raise ValueError(f"OLMo-3 config.json: rope_theta {top} differs from the rope parameters' {nested}")
-    theta = top if top is not None else nested
-    if theta is None:
+    # validated (once) here, so an unsupported rope type fails before the rope_theta checks below,
+    # with the message that names it
+    if yf is None:
+        yf = _yarn_params(full, cfg)
+    # One rope_theta for every layer: the top level, full_attention and sliding_attention values
+    # that are given must agree (transformers 5.x may write ``rope_theta: null`` at the top level
+    # and the value in the rope parameters; None or a missing key counts as not given).
+    given = {"top level": cfg.get("rope_theta"), "full_attention": full.get("rope_theta")}
+    if layout is not None:
+        given["sliding_attention"] = sliding.get("rope_theta")
+    given = {
+        k: _positive_number({"rope_theta": v}, "rope_theta", f"config.json ({k})")
+        for k, v in given.items()
+        if v is not None
+    }
+    if "top level" not in given and "full_attention" not in given:
+        # the full layers' theta is not stated (a sliding_attention value does not give it)
         raise ValueError("OLMo-3 config.json has no rope_theta (top level or in the rope parameters)")
-    return full, layout, float(theta)
+    if len(set(given.values())) > 1:
+        raise ValueError(f"OLMo-3 converter needs one rope_theta for all layer types, got {given}")
+    return yf, layout, next(iter(given.values()))
 
 
 def derive_megatron_fields(cfg, rope_layout=None, default_layout="auto"):
@@ -327,18 +464,17 @@ def derive_megatron_fields(cfg, rope_layout=None, default_layout="auto"):
     )
 
     _check_hf_config(cfg)
-    rope, cfg_layout, rotary_base = _rope_config(cfg)
-    yarn = _yarn_params(rope, cfg)
+    yarn, cfg_layout, rotary_base = _rope_config(cfg)
     yarn_scales = yarn is not None and yarn["factor"] > 1.0
+    explicit = rope_layout is not None and rope_layout != "auto"
     if cfg_layout is not None:
-        if rope_layout not in (None, "auto") and rope_layout != cfg_layout:
+        if explicit and rope_layout != cfg_layout:
             raise ValueError(
                 f"OLMo-3 config declares olmo3_rope_layout {cfg_layout!r} through its per-layer-type "
                 f"rope parameters, but {rope_layout!r} was requested"
             )
         layout = cfg_layout
     else:
-        explicit = rope_layout is not None and rope_layout != "auto"
         layout = resolve_olmo3_rope_layout(rope_layout if rope_layout is not None else default_layout)
         if layout == "yarn_all" and not yarn_scales:
             if explicit:
@@ -348,6 +484,7 @@ def derive_megatron_fields(cfg, rope_layout=None, default_layout="auto"):
     nh = cfg["num_attention_heads"]
     return dict(
         hidden_size=cfg["hidden_size"],
+        vocab_size=cfg.get("vocab_size"),
         num_attention_heads=nh,
         num_layers=cfg["num_hidden_layers"],
         max_position_embeddings=cfg["max_position_embeddings"],
@@ -355,14 +492,12 @@ def derive_megatron_fields(cfg, rope_layout=None, default_layout="auto"):
         rotary_base=rotary_base,
         untie_embeddings_and_output_weights=True,  # _check_hf_config: tie_word_embeddings is false
         ffn_hidden_size=cfg["intermediate_size"],
-        num_query_groups=cfg.get("num_key_value_heads") or nh,
-        kv_channels=cfg.get("head_dim") or cfg["hidden_size"] // nh,
+        num_query_groups=_kv_heads(cfg),
+        kv_channels=_head_dim(cfg),
         add_qkv_bias=False,  # _check_hf_config: attention_bias is false
-        # Megatron / TE convention (W - 1, 0) by the shared window reader; the HF W is kept in
-        # olmo3_sliding_window.
-        window_size=olmo3_window_from_settings(None, sliding_window)[0],
+        # Megatron / TE convention (W - 1, 0); the HF W is kept in olmo3_sliding_window.
+        window_size=olmo3_te_window(sliding_window),
         olmo3_sliding_window=sliding_window,
-        olmo3_window_size_form="megatron",
         window_attn_skip_freq=skip_freq,
         olmo3_yarn_rotary_scaling_factor=yarn["factor"] if yarn else 1.0,
         olmo3_yarn_original_max_position_embeddings=(
@@ -380,7 +515,6 @@ _UPSTREAM_WINDOW_FIELDS = ("window_size", "window_attn_skip_freq")
 # Primus-only OLMo-3 fields (no argparse option): set after validate_args.
 _OLMO3_FIELDS = (
     "olmo3_sliding_window",
-    "olmo3_window_size_form",
     "olmo3_yarn_rotary_scaling_factor",
     "olmo3_yarn_original_max_position_embeddings",
     "olmo3_yarn_beta_fast",
@@ -441,7 +575,7 @@ def build_margs(cfg_fields, args):
     for k in _UPSTREAM_WINDOW_FIELDS:  # derive_megatron_fields returns every key
         setattr(m, k, cfg_fields[k])
 
-    m = common.set_save_iteration(validate_args(m))
+    m = set_save_iteration(validate_args(m))
     for k in _OLMO3_FIELDS:
         setattr(m, k, cfg_fields[k])
     # The olmo3_* fields are not argparse options, so they are set after validate_args. Check the
@@ -456,17 +590,31 @@ def build_model(margs):
     Kept as a module-level entry point: the parity tooling builds a family's own model through
     ``<converter>.build_model``; the plain GPT model would not have the OLMo-3 layers.
     """
-    from primus.core.utils.import_utils import get_model_provider
-
-    model = get_model_provider(model_type="olmo3")(pre_process=True, post_process=True)
-    return model.to(margs.params_dtype)
+    return common.build_mcore_gpt_model(margs, model_type="olmo3")
 
 
 # ---------------------------------------------------------------------------
 # HF -> mcore weight mapping
 # ---------------------------------------------------------------------------
-def build_mcore_state_dict(model, store, margs, _cfg_fields, log):
-    """HF tensors -> mcore names. ``_cfg_fields`` is unused (kept for the shared converter API)."""
+def check_vocab_rows(name, rows: int, vocab_size, padded_vocab: int) -> None:
+    """The HF ``name`` table must have ``config.json``'s ``vocab_size`` rows (when stated) and fit
+    the model's padded vocabulary (sized from the tokenizer). Otherwise ``pad_vocab`` would cut rows
+    off or pad a table that belongs to another tokenizer, silently."""
+    if vocab_size is not None and rows != int(vocab_size):
+        raise ValueError(
+            f"OLMo-3 converter: HF {name} has {rows} rows but config.json vocab_size is {vocab_size}"
+        )
+    if rows > padded_vocab:
+        raise ValueError(
+            f"OLMo-3 converter: HF {name} has {rows} rows, more than the model's padded vocabulary "
+            f"{padded_vocab} (sized from the tokenizer in the checkpoint dir): the tokenizer does not "
+            "match the checkpoint; rows would be cut off"
+        )
+
+
+def build_mcore_state_dict(model, store, margs, cfg_fields, log):
+    """HF tensors -> mcore names. ``cfg_fields`` gives ``vocab_size`` (config.json), checked
+    against the embedding / lm_head rows."""
     dtype = margs.params_dtype
     # Read from the parameter, not model.state_dict(): state_dict() collects TE _extra_state, and
     # TE's get_extra_state synchronises the GPU (it fails on a host without one).
@@ -475,7 +623,6 @@ def build_mcore_state_dict(model, store, margs, _cfg_fields, log):
     nh = margs.num_attention_heads
     ng = margs.num_query_groups
     hdim = margs.kv_channels
-    hidden = margs.hidden_size
     sd = {}
     consumed = set()
 
@@ -486,13 +633,23 @@ def build_mcore_state_dict(model, store, margs, _cfg_fields, log):
     def fused_qkv(layer):
         a = f"model.layers.{layer}.self_attn."
         return common.fuse_qkv(
-            get(a + "q_proj.weight"), get(a + "k_proj.weight"), get(a + "v_proj.weight"), nh, ng, hdim, hidden
+            get(a + "q_proj.weight"),
+            get(a + "k_proj.weight"),
+            get(a + "v_proj.weight"),
+            heads=nh,
+            groups=ng,
+            head_dim=hdim,
         )
 
-    sd["embedding.word_embeddings.weight"] = common.pad_vocab(get("model.embed_tokens.weight"), padded_vocab)
+    vocab_size = (cfg_fields or {}).get("vocab_size")
+    embed, head = get("model.embed_tokens.weight"), get("lm_head.weight")
+    check_vocab_rows("model.embed_tokens.weight", embed.shape[0], vocab_size, padded_vocab)
+    check_vocab_rows("lm_head.weight", head.shape[0], vocab_size, padded_vocab)
+    log(f"vocab: {embed.shape[0]} HF rows (config.json {vocab_size}) padded to {padded_vocab}")
+    sd["embedding.word_embeddings.weight"] = common.pad_vocab(embed, padded_vocab)
     sd["decoder.final_layernorm.weight"] = get("model.norm.weight")
     # untied only: _check_hf_config refuses tie_word_embeddings
-    sd["output_layer.weight"] = common.pad_vocab(get("lm_head.weight"), padded_vocab)
+    sd["output_layer.weight"] = common.pad_vocab(head, padded_vocab)
 
     for L in range(margs.num_layers):
         p = f"decoder.layers.{L}."
@@ -507,7 +664,7 @@ def build_mcore_state_dict(model, store, margs, _cfg_fields, log):
         ).contiguous()
         sd[p + "mlp.linear_fc2.weight"] = get(h + "mlp.down_proj.weight")
         sd[p + "mlp.post_feedforward_layernorm.weight"] = get(h + "post_feedforward_layernorm.weight")
-        if L % 5 == 0 or L == margs.num_layers - 1:
+        if L % _LOG_EVERY_N_LAYERS == 0 or L == margs.num_layers - 1:
             log(f"  mapped layer {L:2d}")
 
     return sd, consumed
@@ -526,14 +683,16 @@ def convert(
     expert_parallel_size=1,
     seq_length=4096,
     make_vocab_size_divisible_by=128,
-    master_port=29563,
+    master_port=None,
     rope_layout=None,
     log=None,
 ):
     """Convert an OLMo-3 HF checkpoint to a legacy Megatron torch ckpt (single process, CPU).
 
-    Writes a single-shard checkpoint: TP = PP = EP = 1 (reshard a torch_dist
-    checkpoint for other layouts). The saved args carry a concrete
+    Writes a single-shard legacy torch checkpoint (TP = PP = EP = 1). Megatron cannot reshard a
+    legacy checkpoint: load it at TP = PP = 1, re-save it as torch_dist, then load that with the
+    target parallelism. A training run that loads it with TP or PP > 1 is refused before the model
+    is built (``olmo3_validation.check_olmo3_checkpoint_layout``). The saved args carry a concrete
     ``olmo3_rope_layout``, never ``auto`` (refused): the layout the config's
     per-layer-type rope parameters declare (transformers 5.x; a different
     ``rope_layout`` raises), else ``rope_layout`` if given, else ``per_type``
@@ -543,8 +702,6 @@ def convert(
         raise ValueError(
             "convert() writes a checkpoint: olmo3_rope_layout must be per_type or yarn_all, not auto"
         )
-    # TP = PP = EP = 1 (also enforced in _apply_runtime_margs); checked first to fail fast.
-    check_single_shard_layout(tensor_parallel_size, pipeline_parallel_size, expert_parallel_size)
     if log is None:
 
         def log(*a):
@@ -566,6 +723,7 @@ def convert(
     cfg_fields = derive_megatron_fields(cfg, rope_layout=rope_layout, default_layout="per_type")
     log(f"arch: {cfg_fields}")
     margs = build_margs(cfg_fields, args)
+    # a private 127.0.0.1 world; master_port None: a free port bound by the store
     margs = common.init_megatron_single_process(margs, master_port, log=log)
     common.assert_bridge_free("post-init")
     model = build_model(margs)

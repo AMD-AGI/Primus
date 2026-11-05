@@ -8,24 +8,21 @@
 
 ``megatron.olmo3.args`` (phase ``before_train``):
 
-* Window. The rules live in
-  :mod:`primus.backends.megatron.core.models.olmo3.olmo3_validation` (one contract for the args
-  patch, ``Olmo3TransformerConfig`` and the builder). ``olmo3_window_size_form`` says which form
-  ``window_size`` holds (``hf``: ``[W, 0]``, the model preset; ``megatron``: ``(W - 1, 0)``), so it
-  decides whether the window is already converted; ``olmo3_sliding_window`` is the HF window W the
-  converted value must agree with. This patch converts an HF window
-  once to Megatron / TE ``(W - 1, 0)`` and sets ``olmo3_sliding_window = W`` and
-  ``olmo3_window_size_form = megatron``. A window with neither setting is ambiguous and raises
-  (never guessed, so a lost form or W cannot shorten the window by one key). The patch is
-  idempotent.
+* Window. ``olmo3_sliding_window`` is W (HF ``sliding_window``, the preset sets 4096) and is
+  required; ``window_size`` next to it may be W (an int, the preset's form), the Megatron / TE
+  pair ``(W - 1, 0)`` or unset (alone it is refused). The patch sets ``window_size = (W - 1, 0)``.
+  Rules: :func:`olmo3_validation.olmo3_window_from_settings`.
 * ``window_attn_skip_freq`` is required: an int ``2 <= k <= num_layers`` or a 0/1 list of
   ``num_layers`` entries with at least one 0 and one 1; CLI strings (``"4"``,
-  ``"([1]*3+[0])*8"``) are parsed without ``eval``.
+  ``"([1]*3+[0])*8"``) are parsed as Megatron parses them.
+* A single-shard legacy checkpoint (what the native converter writes) loaded with tensor or
+  pipeline parallel size > 1 is refused (:func:`olmo3_validation.check_olmo3_checkpoint_layout`).
 * Settings the OLMo-3 model does not implement are refused with the shared
-  :data:`OLMO3_UNSUPPORTED` table (the same table the config and the builder use).
+  :data:`olmo3_validation.OLMO3_UNSUPPORTED` table (the same table the config and the builder use).
 """
 
 from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
+    check_olmo3_checkpoint_layout,
     check_olmo3_unsupported,
     olmo3_window_from_settings,
     parse_olmo3_skip_freq,
@@ -45,33 +42,22 @@ def is_olmo3_model_type(ctx: PatchContext) -> bool:
     "megatron.olmo3.args",
     backend="megatron",
     phase="before_train",
-    description="OLMo-3: HF (W, 0) window -> Megatron (W-1, 0) + olmo3_sliding_window; refuse unsupported settings.",
+    description="OLMo-3: window_size = (W - 1, 0) for olmo3_sliding_window W; refuse unsupported settings.",
     condition=is_olmo3_model_type,
 )
 def patch_olmo3_args(ctx: PatchContext):
     args = get_args(ctx)
-    ws, w = olmo3_window_from_settings(
-        getattr(args, "window_size", None),
-        getattr(args, "olmo3_sliding_window", None),
-        getattr(args, "olmo3_window_size_form", None),
-    )
+    before = getattr(args, "window_size", None)
+    ws, w = olmo3_window_from_settings(before, getattr(args, "olmo3_sliding_window", None))
     skip = parse_olmo3_skip_freq(
         getattr(args, "window_attn_skip_freq", None), getattr(args, "num_layers", None)
     )
     check_olmo3_unsupported(args)
-    before = getattr(args, "window_size", None)
-    converted = before is None or isinstance(before, str) or tuple(int(x) for x in before) != tuple(ws)
+    check_olmo3_checkpoint_layout(args)
     args.window_size = ws
     args.olmo3_sliding_window = w
-    args.olmo3_window_size_form = "megatron"
     args.window_attn_skip_freq = skip
-    if converted:
-        log_rank_0(
-            f"[Patch:megatron.olmo3.args] sliding_window={w}: window_size {before!r} -> {ws} (Megatron/TE) "
-            f"window_attn_skip_freq={skip}"
-        )
-    else:
-        log_rank_0(
-            f"[Patch:megatron.olmo3.args] window_size={ws} (already Megatron form, sliding_window={w}) "
-            f"window_attn_skip_freq={skip}"
-        )
+    log_rank_0(
+        f"[Patch:megatron.olmo3.args] sliding_window={w}: window_size {before!r} -> {ws} (Megatron/TE) "
+        f"window_attn_skip_freq={skip}"
+    )

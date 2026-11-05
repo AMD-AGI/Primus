@@ -5,14 +5,12 @@
 ###############################################################################
 
 
-import json
 import math
 import os
 import re
 import subprocess
 import sys
 import unittest
-from pathlib import Path
 
 import pytest
 
@@ -123,6 +121,11 @@ def run_posttrain_script(
 
 
 OLMO3_HF_VOCAB_SIZE = 100278  # allenai/Olmo-3-1025-7B config.json vocab_size
+# From the same config.json: sliding_window, and layer_types of the first 4 layers (the run below
+# has 4). Pinned here, not read from the preset, so a wrong preset value fails the plan check.
+OLMO3_HF_SLIDING_WINDOW = 4096
+OLMO3_HF_FIRST_LAYER_TYPES = ("sliding_attention",) * 3 + ("full_attention",)
+OLMO3_HF_ROPE_LAYOUT = "per_type"  # YaRN on the full-attention layers only
 
 
 def _olmo3_bad_loss_report(stdout: str, train_iters: int, vocab_size: int | None = None) -> list[str]:
@@ -168,13 +171,6 @@ def _olmo3_bad_loss_report(stdout: str, train_iters: int, vocab_size: int | None
         if max(losses) > losses[0] + 0.5:
             problems.append(f"lm loss rises from {losses[0]} to {max(losses)}")
     return problems
-
-
-def _olmo3_built_layers(stdout: str) -> list[dict]:
-    """The '[Primus:OLMo-3] built layers: [...]' JSON the OLMo-3 builder prints (read from the
-    built modules: core-attention window and softmax scale, RoPE table per layer)."""
-    found = re.findall(r"\[Primus:OLMo-3\] built layers: (\[.*\])", stdout)
-    return json.loads(found[-1]) if found else []
 
 
 class TestMegatronTrainer(PrimusUT):
@@ -228,44 +224,25 @@ class TestMegatronTrainer(PrimusUT):
     # A smoke test: 4 layers, 3 iterations, mock data. No download: mock data uses NullTokenizer,
     # pinned here with the OLMo-3 vocab size, so the HF tokenizer in the preset is never loaded.
     # It checks that the OLMo-3 provider, args patch and builder ran (no silent fallback to the GPT
-    # spec), that the built core attentions apply the preset's window on the sliding layers only and
-    # the YaRN softmax scale on the full layer only, and the losses (see _olmo3_bad_loss_report). The
-    # expected values come from the model preset, not from constants here. The layer math is
-    # compared with HF in tests/unit_tests/backends/megatron/olmo3/.
-    # The per-layer values are read from the built modules by the builder, which prints them only
-    # when PRIMUS_OLMO3_LAYER_REPORT is on (an opt-in diagnostic, so normal runs do not log it); the
-    # trainer runs in a subprocess, so its log is the channel this test has.
+    # spec), the layer plan the builder logs from the effective (merged, overridden) config, and
+    # the losses (see _olmo3_bad_loss_report). The per-layer window / RoPE / softmax scale of the
+    # built modules are checked in tests/unit_tests/backends/megatron/olmo3/.
     @pytest.mark.weekly
     def test_olmo_3_1025_7B(self):
-        import yaml
-
-        repo = Path(__file__).resolve().parents[2]
-        presets = repo / "primus/configs/models/megatron"
-
-        def load_preset(name):  # the preset with its extends chain merged (olmo_base.yaml, ...)
-            with open(presets / name) as f:
-                own = yaml.safe_load(f)
-            merged = {}
-            for parent in own.pop("extends", None) or []:
-                merged.update(load_preset(parent))
-            merged.update(own)
-            return merged
-
-        preset = load_preset("olmo_3_1025_7B.yaml")
+        # The expected plan comes from the HF config (pinned above), not from the preset, so a
+        # wrong preset window / skip pattern / RoPE layout makes the plan check fail.
         # The preset has no vocab size (the HF tokenizer gives it at run time); the mock-data run
         # uses NullTokenizer, so it is set here: vocab_size of allenai/Olmo-3-1025-7B config.json.
-        num_layers, vocab = 4, OLMO3_HF_VOCAB_SIZE
-        w = int(preset["window_size"][0])  # HF form [W, 0] (olmo3_window_size_form: hf)
-        self.assertEqual(preset["olmo3_window_size_form"], "hf")
-        skip = int(preset["window_attn_skip_freq"])
-        full = [n % skip == 0 for n in range(1, num_layers + 1)]
+        num_layers, vocab = len(OLMO3_HF_FIRST_LAYER_TYPES), OLMO3_HF_VOCAB_SIZE
+        w = OLMO3_HF_SLIDING_WINDOW
+        full = [t == "full_attention" for t in OLMO3_HF_FIRST_LAYER_TYPES]
         self.assertTrue(any(full) and not all(full), "the 4-layer run must mix sliding and full layers")
         seq_length = w + 256  # above the window, so the sliding window acts (and is cheap)
         stdout, _ = run_script(
             self.__class__.__name__,
             "olmo_3_1025_7B",
             exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/olmo_3_1025_7B-BF16-pretrain.yaml",
-            env_override={"PRIMUS_OLMO3_LAYER_REPORT": "1"},  # the "built layers" line below
+            env_override={},
             # Pinned so the cost does not follow the example yaml.
             # log_interval 1: one iteration line per iteration (the loss check reads each one).
             extra_args=[
@@ -295,31 +272,25 @@ class TestMegatronTrainer(PrimusUT):
                 "0",
                 "--use_turbo_attention",
                 "0",
+                # parallel layout pinned too (one GPU's worth of model, data parallel on the rest)
+                "--tensor_model_parallel_size",
+                "1",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--context_parallel_size",
+                "1",
             ],
         )
         self.assertIn("Loaded OLMo-3 model_provider", stdout)
         self.assertIn("[Patch:megatron.olmo3.args]", stdout)
         self.assertIn("[Primus:OLMo-3] building Olmo3Model", stdout)
         plan = " ".join("F+yarn" if f else "S" for f in full)
-        self.assertIn(f"[Primus:OLMo-3] layer plan: W={w} rope={preset['olmo3_rope_layout']} {plan}", stdout)
-        # read from the built modules: TE core attention window (W - 1, 0) on the sliding layers,
-        # "full" (no window) on the full layers; softmax scale 1/sqrt(kv_channels), times m**2 on the
-        # YaRN layers (m = 0.1 * ln(factor) + 1, derived from the preset's factor); RoPE table per layer
-        layers = _olmo3_built_layers(stdout)
-        self.assertEqual([r["layer"] for r in layers], list(range(1, num_layers + 1)), stdout[-2000:])
-        # Every value must be read from the built modules: a TE build (or a refactor) whose window /
-        # scale cannot be read reports "unknown" / None / "mixed" and fails here, so the test never
-        # passes without checking them.
-        for r, f in zip(layers, full):
-            self.assertEqual(r["window"], "full" if f else [w - 1, 0], msg=str(r))
-        self.assertEqual([r["rope"] for r in layers], ["yarn" if f else "plain" for f in full])
-        base = 1.0 / math.sqrt(int(preset["kv_channels"]))
-        m = 0.1 * math.log(float(preset["olmo3_yarn_rotary_scaling_factor"])) + 1.0
-        for r, f in zip(layers, full):
-            self.assertIsInstance(
-                r["softmax_scale"], float, msg=f"softmax scale not read from the module: {r}"
-            )
-            self.assertAlmostEqual(r["softmax_scale"], base * m * m if f else base, places=6, msg=str(r))
+        # the whole logged plan, to the end of the line: exactly num_layers entries, so it proves
+        # the --num_layers override reached the built model (a 32-layer plan does not match)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", stdout)  # the rank logger colours its lines
+        plans = re.findall(r"\[Primus:OLMo-3\] layer plan: (.*?)\s*$", plain, flags=re.M)
+        self.assertTrue(plans, "no OLMo-3 layer plan in the log")
+        self.assertEqual(set(plans), {f"W={w} rope={OLMO3_HF_ROPE_LAYOUT} {plan}"})
         self.assertEqual(_olmo3_bad_loss_report(stdout, train_iters=3, vocab_size=vocab), [])
 
     # The only dense FP8 case; every other FP8 case here is MoE.

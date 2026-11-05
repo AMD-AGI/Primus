@@ -7,8 +7,8 @@
 """Unit tests for the OLMo-3 Megatron port (config, window, RoPE, QK-norm, converter)."""
 
 import importlib.util
+import json
 import math
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,19 +59,25 @@ def test_yarn_attention_factor():
     assert yarn_attention_factor(1.0) == 1.0
     assert yarn_attention_factor(8.0) == pytest.approx(0.1 * math.log(8.0) + 1.0)
     assert yarn_attention_factor(8.0, 1.5) == 1.5
-    # HF applies the attention factor for rope_type yarn only: YaRN off -> 1.0
-    assert yarn_attention_factor(1.0, 1.5) == 1.0
+    # YaRN off (factor 1): unset or 1 gives 1.0; any other explicit value is refused (it would be
+    # dropped, while HF applies it)
+    assert yarn_attention_factor(1.0, 1.0) == 1.0
+    with pytest.raises(ValueError, match="attention_factor"):
+        yarn_attention_factor(1.0, 1.5)
 
 
-def test_config_window_tuple_and_mscale():
-    cfg = _cfg(olmo3_yarn_attention_factor=1.2079441541679836)
+def test_config_window_tuple_and_attention_factor():
+    cfg = _cfg()
     # window_size is Megatron / TE (W - 1, 0); the HF W is olmo3_sliding_window
     assert cfg.window_size == (4095, 0) and cfg.olmo3_sliding_window == 4096
-    # neutral defaults: YaRN off, so the factor is not applied
+    # neutral defaults: YaRN off, attention factor 1
     assert cfg.olmo3_yarn_rotary_scaling_factor == 1.0
-    assert cfg.olmo3_yarn_mscale == 1.0
+    assert cfg.olmo3_yarn_effective_attention_factor == 1.0
+    # YaRN off with an explicit attention factor != 1 would drop it: refused
+    with pytest.raises(ValueError, match="attention_factor"):
+        _cfg(olmo3_yarn_attention_factor=1.2079441541679836)
     cfg = _cfg(olmo3_yarn_rotary_scaling_factor=8.0, olmo3_yarn_original_max_position_embeddings=8192)
-    assert cfg.olmo3_yarn_mscale == pytest.approx(0.1 * math.log(8.0) + 1.0)
+    assert cfg.olmo3_yarn_effective_attention_factor == pytest.approx(0.1 * math.log(8.0) + 1.0)
     with pytest.raises(ValueError, match="original_max_position_embeddings"):
         _cfg(olmo3_yarn_rotary_scaling_factor=8.0)
 
@@ -84,19 +90,24 @@ def test_explicit_yarn_attention_factor_that_disagrees_is_used_and_warned(caplog
         cfg = _cfg(
             olmo3_yarn_rotary_scaling_factor=8.0, olmo3_yarn_attention_factor=1.2079441541679836, **yarn
         )
-    assert cfg.olmo3_yarn_mscale == pytest.approx(1.2079441541679836) and "differs" not in caplog.text
+    assert (
+        cfg.olmo3_yarn_effective_attention_factor == pytest.approx(1.2079441541679836)
+        and "differs" not in caplog.text
+    )
     with caplog.at_level("WARNING"):
         cfg = _cfg(
             olmo3_yarn_rotary_scaling_factor=4.0, olmo3_yarn_attention_factor=1.2079441541679836, **yarn
         )
-    assert cfg.olmo3_yarn_mscale == pytest.approx(1.2079441541679836)
+    assert cfg.olmo3_yarn_effective_attention_factor == pytest.approx(1.2079441541679836)
     assert "differs from 0.1*ln(factor)+1" in caplog.text
 
 
 def test_layer_types_match_hf_pattern():
+    from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
+        olmo3_te_window,
+    )
     from primus.backends.megatron.core.transformer.olmo3.olmo3_attention import (
         olmo3_layer_is_sliding,
-        olmo3_te_window,
     )
 
     cfg = _cfg(num_layers=8)
@@ -172,11 +183,13 @@ def test_converter_fields_from_hf_config():
     assert f["olmo3_rope_layout"] == "per_type"
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="rotary tables live on GPU")
-def test_dual_rope_matches_hf_formulas():
+def test_dual_rope_matches_hf_formulas(monkeypatch):
     from primus.backends.megatron.core.models.olmo3.olmo3_rotary import (
         Olmo3DualRotaryEmbedding,
     )
+
+    if not torch.cuda.is_available():
+        _cpu_numerics(monkeypatch)  # the tables are built on torch.cuda.current_device()
 
     cfg = _cfg(olmo3_yarn_rotary_scaling_factor=8.0, olmo3_yarn_original_max_position_embeddings=8192)
     rope = Olmo3DualRotaryEmbedding(cfg, rotary_base=500000.0)
@@ -218,7 +231,8 @@ def test_rope_layout_default_and_explicit():
 
 
 def test_rope_layout_auto_versions(monkeypatch):
-    """auto: too old for Olmo3 and a pre-release at a bound are refused; the rest map to a layout."""
+    """auto maps only the measured minor versions (4.57 per_type, 5.10 yarn_all); any other version,
+    and a pre-release, is refused instead of guessed."""
     transformers = pytest.importorskip("transformers")
 
     from primus.backends.megatron.core.models.olmo3.olmo3_transformer_config import (
@@ -227,18 +241,18 @@ def test_rope_layout_auto_versions(monkeypatch):
 
     for ver, want in (
         ("4.57.0", "per_type"),
+        ("4.57.3", "per_type"),
         ("5.10.0", "yarn_all"),
-        ("5.0.0", "yarn_all"),
-        ("5.13.1", "per_type"),
-        ("5.10.0.dev0", "yarn_all"),
-        ("4.58.0rc1", "per_type"),
+        ("5.10.2", "yarn_all"),
     ):
         monkeypatch.setattr(transformers, "__version__", ver)
         assert resolve_olmo3_rope_layout("auto") == want, ver
     for ver, why in (
-        ("4.55.0", "no Olmo3"),
-        ("5.0.0rc1", "pre-release"),
-        ("5.13.0.dev0", "pre-release"),
+        ("4.55.0", "not measured"),
+        ("4.58.0", "not measured"),
+        ("5.0.0", "not measured"),
+        ("5.13.1", "not measured"),
+        ("5.10.0.dev0", "not measured"),
         ("garbage", "cannot parse"),
     ):
         monkeypatch.setattr(transformers, "__version__", ver)
@@ -269,8 +283,7 @@ def _run_args_patch(**kw):
     from primus.backends.megatron.patches.olmo3_args_patches import patch_olmo3_args
     from primus.core.patches import PatchContext
 
-    if "olmo3_sliding_window" not in kw:
-        kw.setdefault("olmo3_window_size_form", "hf")  # as the model preset
+    kw.setdefault("olmo3_sliding_window", 4096)  # the preset sets it
     params = SimpleNamespace(model_type="olmo3", **kw)
     ctx = PatchContext(
         backend="megatron", phase="before_train", extra={"module_config": SimpleNamespace(params=params)}
@@ -279,67 +292,72 @@ def _run_args_patch(**kw):
     return params
 
 
-def test_preset_window_override_is_not_reinterpreted():
-    """The preset states the window once (window_size [4096, 0], form hf; no olmo3_sliding_window):
-    the args patch makes it (4095, 0) + W 4096, and an override of window_size alone changes the
-    window. A converted value that disagrees with a W that is also set is still refused."""
+def test_preset_window_has_one_source():
+    """The preset states W as olmo3_sliding_window 4096 and window_size 4096 (an int: W itself, as
+    config.json states sliding_window); the args patch sets window_size to Megatron/TE (W - 1, 0)."""
     import yaml
 
-    preset = yaml.safe_load(open("primus/configs/models/megatron/olmo_3_1025_7B.yaml"))
-    assert "olmo3_sliding_window" not in preset and preset["window_size"] == [4096, 0]
-    assert preset["olmo3_window_size_form"] == "hf"
+    preset = yaml.safe_load(open(_REPO_ROOT / "primus/configs/models/megatron/olmo_3_1025_7B.yaml"))
+    assert preset["olmo3_sliding_window"] == 4096 and preset["window_size"] == 4096
+    assert "olmo3_window_size_form" not in preset
     # derived from the factor (0.1 * ln(8) + 1 = the HF attention_factor), so a factor override moves it
     assert "olmo3_yarn_attention_factor" not in preset and preset["olmo3_yarn_rotary_scaling_factor"] == 8.0
-    # run switches live in the example configs, not in the model preset
-    assert "log_reset_first_iteration" not in preset and "keep_absolute_save_path" not in preset
     assert preset["norm_epsilon"] == preset["layernorm_epsilon"] == 1e-6
-    base = dict(olmo3_window_size_form="hf", window_attn_skip_freq=4)
-    a = _run_args_patch(**{**base, "window_size": [4096, 0]})
-    assert a.window_size == (4095, 0) and a.olmo3_window_size_form == "megatron"
-    assert a.olmo3_sliding_window == 4096
-    a = _run_args_patch(**{**base, "window_size": [2048, 0]})
-    assert a.window_size == (2047, 0) and a.olmo3_sliding_window == 2048
-    for bad in ([4095, 0], "(4095, 0)", [2048, 0]):
+    base = dict(window_attn_skip_freq=4)
+    # next to olmo3_sliding_window W, window_size is W (int), the TE pair (W - 1, 0), or unset
+    for ws in (4096, "4096", [4095, 0], "(4095, 0)", "[4095,0]", None):
+        a = _run_args_patch(**{**base, "window_size": ws})
+        assert (a.window_size, a.olmo3_sliding_window) == ((4095, 0), 4096)
+    for bad in ([2048, 0], [4094, 0], [4097, 0], [4096, 0], "(4096, 0)", 4095, 4097):
         with pytest.raises(ValueError, match="disagrees"):
-            _run_args_patch(**{**base, "olmo3_sliding_window": 4096, "window_size": bad})
-    a = _run_args_patch(**{**base, "olmo3_sliding_window": 2048, "window_size": None})
-    assert a.window_size == (2047, 0) and a.olmo3_sliding_window == 2048
+            _run_args_patch(**{**base, "window_size": bad})
+    # without olmo3_sliding_window, window_size alone is refused
+    for ws in ([4095, 0], "[4095, 0]", "4095,0", 4096):
+        with pytest.raises(ValueError, match="olmo3_sliding_window"):
+            _run_args_patch(**{**base, "olmo3_sliding_window": None, "window_size": ws})
+    # no window at all is refused
+    with pytest.raises(ValueError, match="olmo3_sliding_window"):
+        _run_args_patch(**{**base, "window_size": None, "olmo3_sliding_window": None})
+    with pytest.raises(ValueError, match="disagrees"):
+        _run_args_patch(**{**base, "olmo3_sliding_window": 4098, "window_size": 4096})
 
 
 def test_args_patch_window_size_forms():
-    """The HF (W, 0) of the preset becomes Megatron (W - 1, 0) + olmo3_sliding_window W."""
-    for ws in ([4096, 0], "(4096, 0)", (4096.0, 0)):
-        a = _run_args_patch(window_size=ws, window_attn_skip_freq=4)
-        assert a.window_size == (4095, 0) and a.olmo3_sliding_window == 4096
-    a = _run_args_patch(window_size=(4096, 0), window_attn_skip_freq=[1, 1, 1, 0], num_layers=4)
+    """window_size is Megatron/TE (left, 0) as for every model; next to olmo3_sliding_window W it
+    may also be [W, 0]. The result is (W - 1, 0) with no marker on the args, and a re-run on the
+    output (or args rebuilt from a checkpoint) keeps it."""
+    a = _run_args_patch(window_size=4096, window_attn_skip_freq=[1, 1, 1, 0], num_layers=4)
     assert a.window_size == (4095, 0) and a.window_attn_skip_freq == [1, 1, 1, 0]
-    # idempotent: a second run (or reloaded checkpoint args) keeps the converted value
+    assert not hasattr(a, "_olmo3_window_size_is_te")
     a2 = _run_args_patch(window_size=a.window_size, olmo3_sliding_window=4096, window_attn_skip_freq=4)
     assert a2.window_size == (4095, 0) and a2.olmo3_sliding_window == 4096
-    # Megatron's --window-attn-skip-freq string forms (as moe_freq_type)
-    assert _run_args_patch(window_size=[4096, 0], window_attn_skip_freq="4").window_attn_skip_freq == 4
-    a = _run_args_patch(window_size=[4096, 0], window_attn_skip_freq="([1]*3+[0])*2", num_layers=8)
-    assert a.window_attn_skip_freq == [1, 1, 1, 0] * 2
+    with pytest.raises(ValueError, match="olmo3_sliding_window"):
+        _run_args_patch(window_size=a.window_size, olmo3_sliding_window=None, window_attn_skip_freq=4)
+    # Megatron's --window-attn-skip-freq string forms, spaces allowed
+    assert _run_args_patch(window_size=4096, window_attn_skip_freq="4").window_attn_skip_freq == 4
+    for text in ("([1]*3+[0])*2", "([1]*3 + [0]) * 2", "[1, 1, 1, 0, 1, 1, 1, 0]"):
+        a = _run_args_patch(window_size=4096, window_attn_skip_freq=text, num_layers=8)
+        assert a.window_attn_skip_freq == [1, 1, 1, 0] * 2
 
 
 @pytest.mark.parametrize(
     "kw",
     [
-        dict(window_size=None, window_attn_skip_freq=4),
-        dict(window_size="", window_attn_skip_freq=4),
-        dict(window_size="  ", window_attn_skip_freq=4),
-        dict(window_size="()", window_attn_skip_freq=4),
+        # no window at all
+        dict(window_size=None, olmo3_sliding_window=None, window_attn_skip_freq=4),
+        dict(window_size=[4095, 0], olmo3_sliding_window=4097, window_attn_skip_freq=4),
+        dict(window_size=[4097, 0], olmo3_sliding_window=4096, window_attn_skip_freq=4),
         dict(window_size=[4096], window_attn_skip_freq=4),
         dict(window_size=[4096, 5], window_attn_skip_freq=4),
         dict(window_size=[0, 0], window_attn_skip_freq=4),
         dict(window_size=[-1, 0], window_attn_skip_freq=4),
         dict(window_size=[1, 0], window_attn_skip_freq=4),
-        dict(window_size=[4096, 0]),
-        dict(window_size=[4096, 0], window_attn_skip_freq=None),
-        dict(window_size=[4096, 0], window_attn_skip_freq=1),
-        dict(window_size=[4096, 0], window_attn_skip_freq=[0, 0, 0, 0], num_layers=4),
-        dict(window_size=[4096, 0], window_attn_skip_freq=[1, 1, 0], num_layers=4),
-        dict(window_size=[4096, 0], window_attn_skip_freq=4, context_parallel_size=2, cp_comm_type="p2p"),
+        dict(window_size=4096),
+        dict(window_size=4096, window_attn_skip_freq=None),
+        dict(window_size=4096, window_attn_skip_freq=1),
+        dict(window_size=4096, window_attn_skip_freq=[0, 0, 0, 0], num_layers=4),
+        dict(window_size=4096, window_attn_skip_freq=[1, 1, 0], num_layers=4),
+        dict(window_size=4096, window_attn_skip_freq=4, context_parallel_size=2, cp_comm_type="p2p"),
         # non-integer windows are not truncated
         dict(window_size=[4096.7, 0], window_attn_skip_freq=4),
         dict(window_size="(4096.5, 0)", window_attn_skip_freq=4),
@@ -347,9 +365,11 @@ def test_args_patch_window_size_forms():
         # window_size disagrees with olmo3_sliding_window
         dict(window_size=[4000, 0], olmo3_sliding_window=4096, window_attn_skip_freq=4),
         # bad skip-freq strings
-        dict(window_size=[4096, 0], window_attn_skip_freq="([1]*3+[0])*8", num_layers=4),
-        dict(window_size=[4096, 0], window_attn_skip_freq="__import__('os')"),
-        dict(window_size=[4096, 0], window_attn_skip_freq="[1,2,0,1]", num_layers=4),
+        dict(window_size=4096, window_attn_skip_freq="([1]*3+[0])*8", num_layers=4),
+        dict(window_size=4096, window_attn_skip_freq="__import__('os')"),
+        dict(window_size=4096, window_attn_skip_freq="[1]*10**10", num_layers=4),
+        dict(window_size=4096, window_attn_skip_freq="[1]*10000000000", num_layers=4),
+        dict(window_size=4096, window_attn_skip_freq="[1,2,0,1]", num_layers=4),
     ],
 )
 def test_args_patch_refuses_bad_window(kw):
@@ -358,34 +378,30 @@ def test_args_patch_refuses_bad_window(kw):
 
 
 def test_args_patch_cp_comm_type():
+    _run_args_patch(window_size=4096, window_attn_skip_freq=4, context_parallel_size=2, cp_comm_type="a2a")
     _run_args_patch(
-        window_size=[4096, 0], window_attn_skip_freq=4, context_parallel_size=2, cp_comm_type="a2a"
+        window_size=4096, window_attn_skip_freq=4, context_parallel_size=2, cp_comm_type=["all_gather"]
     )
-    _run_args_patch(
-        window_size=[4096, 0], window_attn_skip_freq=4, context_parallel_size=2, cp_comm_type=["all_gather"]
-    )
-    _run_args_patch(
-        window_size=[4096, 0], window_attn_skip_freq=4, context_parallel_size=1, cp_comm_type="p2p"
-    )
+    _run_args_patch(window_size=4096, window_attn_skip_freq=4, context_parallel_size=1, cp_comm_type="p2p")
 
 
 def test_te_window_conversion():
-    from primus.backends.megatron.core.transformer.olmo3.olmo3_attention import (
+    from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
         olmo3_te_window,
     )
 
     assert olmo3_te_window(4096) == (4095, 0)
     assert olmo3_te_window(2) == (1, 0)
-    # one rule with olmo3_window_from_settings: YAML / CLI forms of an int are the int
-    assert olmo3_te_window("4096") == olmo3_te_window(4096.0) == (4095, 0)
-    for bad in (None, (4096, 0), 0, -1, 1, 4096.5, True, "abc"):
+    # one rule with window_size: an int or a bare-int string; floats are refused (Megatron's type=int)
+    assert olmo3_te_window("4096") == (4095, 0)
+    for bad in (None, (4096, 0), 0, -1, 1, 4096.0, "4096.0", 4096.5, True, "abc"):
         with pytest.raises(ValueError, match="window"):
             olmo3_te_window(bad)
 
 
 def test_args_patch_turbo_attention_only():
     # Turbo GEMMs etc. are fine; only the Turbo attention kernel lacks sliding windows.
-    w = dict(window_size=[4096, 0], window_attn_skip_freq=4)
+    w = dict(window_size=4096, window_attn_skip_freq=4)
     _run_args_patch(**w, enable_primus_turbo=True, use_turbo_attention=False)
     with pytest.raises(ValueError, match="use_turbo_attention"):
         _run_args_patch(**w, enable_primus_turbo=True, use_turbo_attention=True)
@@ -394,44 +410,39 @@ def test_args_patch_turbo_attention_only():
 
 
 def test_switch_settings_refuse_typos():
-    """A switch setting is a bool, 0 / 1 or true / false / yes / no / on / off (any case); a typo is
-    refused with the setting's message instead of being read as on (bool("ture")) or off."""
+    """A switch setting is read as Primus reads a CLI override (arg_utils.parse_cli_overrides):
+    a bool, 0 / 1, or true / false (any case). A typo is refused with the setting's message instead
+    of being read as on (bool("ture")) or off."""
     from primus.backends.megatron.core.models.olmo3 import olmo3_validation as v
 
-    for on in (True, 1, "true", " Yes ", "ON", "1"):
+    for on in (True, 1, "true", " True ", "TRUE", "1"):
         assert v._truthy(on) is True
-    for off in (False, 0, None, "", "null", "~", "false", "No", "off", "0"):
+    for off in (False, 0, None, "", "None", "false", "False", "0"):
         assert v._truthy(off) is False
-    for bad in ("ture", "flase", "enabled", 2, 0.5):
+    # the shared reader does not read these as switches, so neither does OLMo-3
+    for bad in ("ture", "flase", "enabled", 2, 0.5, "yes", "off", "null", "~"):
         with pytest.raises(ValueError):
             v._truthy(bad)
-    w = dict(window_size=[4096, 0], window_attn_skip_freq=4)
+    w = dict(window_size=4096, window_attn_skip_freq=4)
     with pytest.raises(ValueError, match="qk_layernorm"):
         _run_args_patch(**w, qk_layernorm="flase")
     with pytest.raises(ValueError, match="swiglu"):
         _run_args_patch(**w, swiglu="ture")
-    _run_args_patch(**w, qk_layernorm="off", swiglu="yes")
+    _run_args_patch(**w, qk_layernorm="false", swiglu="true")
 
 
-def test_args_patch_logs_conversion_only_when_it_happens(monkeypatch):
+def test_args_patch_logs_the_window(monkeypatch):
     from primus.backends.megatron.patches import olmo3_args_patches as ap
 
     logs = []
     monkeypatch.setattr(ap, "log_rank_0", logs.append)
-    _run_args_patch(window_size=[4096, 0], window_attn_skip_freq=4)
-    assert "window_size [4096, 0] -> (4095, 0)" in logs[-1]
-    _run_args_patch(
-        window_size=[4095, 0],
-        olmo3_sliding_window=4096,
-        olmo3_window_size_form="megatron",
-        window_attn_skip_freq=4,
-    )
-    assert "->" not in logs[-1] and "already Megatron form" in logs[-1]
+    _run_args_patch(window_size=4096, window_attn_skip_freq=4)
+    assert "sliding_window=4096: window_size 4096 -> (4095, 0)" in logs[-1]
 
 
 def test_args_patch_accepts_neutral_defaults():
     _run_args_patch(
-        window_size=[4096, 0],
+        window_size=4096,
         window_attn_skip_freq=4,
         qk_layernorm=False,
         num_experts=None,
@@ -464,54 +475,44 @@ def test_config_refuses_unsupported(kw):
         _cfg(**kw)
 
 
-def test_config_window_needs_marker_and_te_form():
-    """The config reads window_size only in the form olmo3_window_size_form declares (unset =
-    megatron) and needs olmo3_sliding_window W; it ends in the Megatron form."""
+def test_config_window_reads_like_the_args_patch():
+    """The config reads window_size with the args patch's rule and always holds (W - 1, 0)."""
     assert _cfg(window_size=(4095, 0)).window_size == (4095, 0)
     assert _cfg(window_size=[4095, 0]).window_size == (4095, 0)
-    assert _cfg().window_size == (4095, 0)  # derived from the marker
-    cfg = _cfg(window_size=[4096, 0], olmo3_window_size_form="hf")
-    assert (cfg.window_size, cfg.olmo3_window_size_form) == ((4095, 0), "megatron")
-    # the config needs olmo3_sliding_window W (set by the args patch / converter)
-    with pytest.raises(ValueError, match="olmo3_sliding_window"):
-        _cfg(olmo3_sliding_window=None, window_size=[4095, 0])
-    # HF form next to the marker without form: hf (the old W -> 4097 confusion): refused
+    assert _cfg(window_size=4096).window_size == (4095, 0)  # W (int) next to W
     with pytest.raises(ValueError, match="disagrees"):
-        _cfg(window_size=[4096, 0])
-    # the Megatron form declared as hf: refused
-    with pytest.raises(ValueError, match="window_size"):
-        _cfg(window_size=(4095, 0), olmo3_window_size_form="hf")
+        _cfg(window_size=[4096, 0])  # a pair is the TE form: 4097 keys
+    assert _cfg().window_size == (4095, 0)  # derived from olmo3_sliding_window
+    with pytest.raises(ValueError, match="needs olmo3_sliding_window"):  # built after the args patch
+        _cfg(olmo3_sliding_window=None, window_size=[4095, 0])
+    for bad in ([4097, 0], [4094, 0]):
+        with pytest.raises(ValueError, match="disagrees"):
+            _cfg(window_size=bad)
 
 
-def test_window_form_never_guessed():
-    """A window_size without the marker is never read as HF by default: a lost marker on a
-    converted (4095, 0) must not silently become a 4095-key window."""
+def test_window_rule():
+    """W is olmo3_sliding_window; window_size next to it is W (int), the TE pair (W - 1, 0) or
+    unset. Without it, window_size alone is refused."""
     from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
         olmo3_window_from_settings as f,
     )
 
-    with pytest.raises(ValueError, match="ambiguous"):
-        f((4095, 0), None)
-    with pytest.raises(ValueError, match="ambiguous"):
-        f("[4095, 0]", None, "  ")
-    assert f((4096, 0), None, "hf") == ((4095, 0), 4096)
-    assert f((4095, 0), None, "megatron") == ((4095, 0), 4096)
+    assert f(4096, 4096) == ((4095, 0), 4096)
+    assert f("4096", "4096") == ((4095, 0), 4096)
     assert f((4095, 0), 4096) == ((4095, 0), 4096)
-    assert f((4095, 0), 4096, "megatron") == ((4095, 0), 4096)
-    assert f((4096, 0), 4096, "hf") == ((4095, 0), 4096)
-    assert f(None, 4096, "hf") == ((4095, 0), 4096)
-    for ws, w, form in (((4096, 0), 4096, None), ((4096, 0), 4096, "megatron"), ((4095, 0), 4096, "hf")):
+    assert f("[4095, 0]", "4096") == ((4095, 0), 4096)
+    assert f(None, 4096) == ((4095, 0), 4096)
+    for ws, w in (((4097, 0), 4096), ((4096, 0), 4096), ((4094, 0), 4096), (4096, "4098"), (4096, 4097)):
         with pytest.raises(ValueError, match="disagrees"):
-            f(ws, w, form)
-    with pytest.raises(ValueError, match="olmo3_window_size_form"):
-        f((4096, 0), None, "te")
-    # args patch: a converted window whose marker was lost (use_checkpoint_args, --olmo3_sliding_window null)
-    with pytest.raises(ValueError, match="ambiguous"):
-        _run_args_patch(window_size=[4095, 0], window_attn_skip_freq=4, olmo3_window_size_form=None)
-    # the patch output declares its form, so it is idempotent even if the marker is then dropped
-    a = _run_args_patch(window_size=[4096, 0], window_attn_skip_freq=4)
-    assert (a.window_size, a.olmo3_sliding_window, a.olmo3_window_size_form) == ((4095, 0), 4096, "megatron")
-    a.olmo3_sliding_window = None
+            f(ws, w)
+    for ws in ((2047, 0), 4096, None):
+        with pytest.raises(ValueError, match="olmo3_sliding_window"):
+            f(ws, None)
+    with pytest.raises(ValueError, match="> 1"):
+        f((1, 0), 1)
+    # the patch output carries W, so a second run keeps the window
+    a = _run_args_patch(window_size=4096, window_attn_skip_freq=4)
+    assert (a.window_size, a.olmo3_sliding_window) == ((4095, 0), 4096)
     from primus.backends.megatron.patches.olmo3_args_patches import patch_olmo3_args
     from primus.core.patches import PatchContext
 
@@ -523,18 +524,120 @@ def test_window_form_never_guessed():
     assert (a.window_size, a.olmo3_sliding_window) == ((4095, 0), 4096)
 
 
+def test_olmo3_patch_condition_selects_olmo3_only():
+    """is_olmo3_model_type (the condition of every OLMo-3 patch) is true for model_type olmo3 only."""
+    from primus.backends.megatron.patches.olmo3_args_patches import is_olmo3_model_type
+    from primus.core.patches import PatchContext
+
+    def ctx(model_type):
+        params = SimpleNamespace(model_type=model_type)
+        return PatchContext(
+            backend="megatron", phase="before_train", extra={"module_config": SimpleNamespace(params=params)}
+        )
+
+    assert is_olmo3_model_type(ctx("olmo3"))
+    assert not is_olmo3_model_type(ctx("gpt"))
+    assert not is_olmo3_model_type(ctx(None))
+
+
+def test_checkpoint_layout_refuses_single_shard_legacy_at_tp2(tmp_path):
+    """The native converter's single-shard legacy checkpoint loaded with TP or PP > 1 is refused
+    before the model is built; TP = PP = 1, or a sharded checkpoint, passes."""
+    from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
+        check_olmo3_checkpoint_layout as check,
+    )
+
+    (tmp_path / "iter_0000001" / "mp_rank_00").mkdir(parents=True)
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("1")
+    ck = str(tmp_path)
+    check(
+        SimpleNamespace(
+            tensor_model_parallel_size=1, pipeline_model_parallel_size=1, pretrained_checkpoint=ck
+        )
+    )
+    for tp_, pp_ in ((2, 1), (1, 2)):
+        with pytest.raises(ValueError, match="single-shard legacy torch checkpoint"):
+            check(
+                SimpleNamespace(
+                    tensor_model_parallel_size=tp_, pipeline_model_parallel_size=pp_, pretrained_checkpoint=ck
+                )
+            )
+    with pytest.raises(ValueError, match="load="):
+        check(SimpleNamespace(tensor_model_parallel_size=2, pipeline_model_parallel_size=1, load=ck))
+    (tmp_path / "iter_0000001" / "mp_rank_01").mkdir()
+    check(
+        SimpleNamespace(
+            tensor_model_parallel_size=2, pipeline_model_parallel_size=1, pretrained_checkpoint=ck
+        )
+    )
+    check(
+        SimpleNamespace(
+            tensor_model_parallel_size=2, pipeline_model_parallel_size=1, pretrained_checkpoint=None
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # shared validation (olmo3_validation): window contract, skip_freq, one refusal table
 # ---------------------------------------------------------------------------
-def test_args_patch_hf_form_next_to_marker_raises():
-    """(W, 0) with olmo3_sliding_window=W and no declared form is ambiguous (HF or a TE window of
-    W + 1 keys): refused. With olmo3_window_size_form: hf it is the HF form of the same W."""
-    with pytest.raises(ValueError, match="disagrees"):
-        _run_args_patch(window_size=[4096, 0], olmo3_sliding_window=4096, window_attn_skip_freq=4)
-    a = _run_args_patch(
-        window_size=[4096, 0], olmo3_sliding_window=4096, window_attn_skip_freq=4, olmo3_window_size_form="hf"
+
+
+def test_checkpoint_layout_reads_sizes_strictly(tmp_path):
+    """TP / PP 0 is refused (not read as 1); unset is 1. A lone mp_rank_00_000 (the first shard of a
+    PP > 1 save: Megatron adds _{pp:03d} only for PP > 1) is not read as single-shard."""
+    from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
+        check_olmo3_checkpoint_layout as check,
     )
-    assert a.window_size == (4095, 0)
+
+    (tmp_path / "iter_0000001" / "mp_rank_00").mkdir(parents=True)
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("1")
+    ck = str(tmp_path)
+    with pytest.raises(ValueError, match=">= 1"):
+        check(SimpleNamespace(tensor_model_parallel_size=0, pretrained_checkpoint=ck))
+    check(SimpleNamespace(tensor_model_parallel_size=None, pretrained_checkpoint=ck))
+    with pytest.raises(ValueError, match="single-shard legacy torch checkpoint"):
+        check(SimpleNamespace(tensor_model_parallel_size=2, pretrained_checkpoint=ck))
+    pp_ck = tmp_path / "pp"
+    (pp_ck / "iter_0000001" / "mp_rank_00_000").mkdir(parents=True)
+    (pp_ck / "latest_checkpointed_iteration.txt").write_text("1")
+    check(SimpleNamespace(tensor_model_parallel_size=2, pretrained_checkpoint=str(pp_ck)))
+
+
+def test_checkpoint_layout_checks_only_what_megatron_loads(tmp_path):
+    """Megatron reads pretrained_checkpoint only when load holds no checkpoint (no tracker file), so
+    a single-shard pretrained_checkpoint next to a resharded load is not refused; ckpt_step picks
+    the iteration that is inspected."""
+    from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
+        check_olmo3_checkpoint_layout as check,
+    )
+
+    pre = tmp_path / "converted"
+    (pre / "iter_0000001" / "mp_rank_00").mkdir(parents=True)
+    (pre / "latest_checkpointed_iteration.txt").write_text("1")
+    load = tmp_path / "resumed"
+    (load / "iter_0000005").mkdir(parents=True)  # torch_dist: no mp_rank dirs
+    (load / "latest_checkpointed_iteration.txt").write_text("5")
+    args = dict(tensor_model_parallel_size=2, pipeline_model_parallel_size=1, pretrained_checkpoint=str(pre))
+    check(SimpleNamespace(**args, load=str(load)))  # the reviewer's resume workflow
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(ValueError, match="pretrained_checkpoint="):
+        check(SimpleNamespace(**args, load=str(empty)))  # load has no checkpoint: pretrained is read
+    # ckpt_step selects a legacy single-shard iteration inside the resumed directory
+    (load / "iter_0000002" / "mp_rank_00").mkdir(parents=True)
+    with pytest.raises(ValueError, match="load="):
+        check(SimpleNamespace(**args, load=str(load), ckpt_step=2))
+    check(SimpleNamespace(**args, load=str(load), ckpt_step=5))
+
+
+def test_args_patch_hf_form_next_to_marker():
+    """W (int, the preset's form) next to olmo3_sliding_window=W is the same window: it becomes
+    (W - 1, 0). A window_size that is neither W nor the pair (W - 1, 0) is refused."""
+    a = _run_args_patch(window_size=4096, olmo3_sliding_window=4096, window_attn_skip_freq=4)
+    assert (a.window_size, a.olmo3_sliding_window) == ((4095, 0), 4096)
+    for bad in ([4097, 0], [4094, 0], [4096, 0], 4097):
+        with pytest.raises(ValueError, match="disagrees"):
+            _run_args_patch(window_size=bad, olmo3_sliding_window=4096, window_attn_skip_freq=4)
     # the marker alone (window_size unset) is enough
     a = _run_args_patch(window_size=None, olmo3_sliding_window=4096, window_attn_skip_freq=4)
     assert a.window_size == (4095, 0)
@@ -545,7 +648,7 @@ def test_args_patch_hf_form_next_to_marker_raises():
 
 def test_args_patch_and_config_agree_on_window():
     """The args patch output builds a config with the same window (no 4097)."""
-    a = _run_args_patch(window_size=[4096, 0], window_attn_skip_freq=4, num_layers=4)
+    a = _run_args_patch(window_size=4096, window_attn_skip_freq=4, num_layers=4)
     cfg = _cfg(
         window_size=a.window_size,
         olmo3_sliding_window=a.olmo3_sliding_window,
@@ -563,8 +666,12 @@ def test_args_patch_and_config_agree_on_window():
         (9, 8),
         ("abc", 4),
         ("**", 4),
-        ("[1]*10**10", 4),
-        ("[1]*100000000", 4),
+        ("[1]*10**10", 4),  # ** is refused before anything is built
+        ("[1]*100000000", 4),  # longer than num_layers: refused before it is built
+        ("([1]*1000)*1000*1000", 4),
+        ("[1]*4096*4096", 4),
+        ("[1,1,1,0]*2+[0]", 8),  # 9 entries
+        ("int('4')", 4),
         ("-" * 100 + "4", 4),  # nested too deeply
         ("[1,1,1,0]*", 4),
         ("[[1],0]", 4),
@@ -592,7 +699,7 @@ def test_skip_freq_refuses(skip, layers):
     with pytest.raises(ValueError, match="window_attn_skip_freq"):
         parse_olmo3_skip_freq(skip, layers)
     with pytest.raises(ValueError, match="window_attn_skip_freq"):
-        _run_args_patch(window_size=[4096, 0], window_attn_skip_freq=skip, num_layers=layers)
+        _run_args_patch(window_size=4096, window_attn_skip_freq=skip, num_layers=layers)
     with pytest.raises(ValueError, match="window_attn_skip_freq"):
         _cfg(num_layers=layers, window_attn_skip_freq=skip)
 
@@ -612,6 +719,9 @@ def test_skip_freq_refuses(skip, layers):
         ([1, 1, 1, 0], 4, [1, 1, 1, 0]),
         ((1, 0), 2, [1, 0]),
         ("[1]*(1+2)+[0]", 4, [1, 1, 1, 0]),
+        # spaces, as YAML / CLI users write them (Megatron's own parser refuses them)
+        ("([1]*3 + [0])*8", 32, [1, 1, 1, 0] * 8),
+        (" ( [1] * 3 + [0] ) * 2 ", 8, [1, 1, 1, 0] * 2),
     ],
 )
 def test_skip_freq_accepts(skip, layers, want):
@@ -623,17 +733,30 @@ def test_skip_freq_accepts(skip, layers, want):
     assert _cfg(num_layers=layers, window_attn_skip_freq=skip).window_attn_skip_freq == want
 
 
+def test_skip_freq_string_is_bounded_without_num_layers():
+    """With num_layers unknown the list bound is _MAX_PATTERN; no input builds a huge list."""
+    from primus.backends.megatron.core.models.olmo3 import olmo3_validation as v
+
+    assert v._skip_freq_value("([1]*3 + [0])*8") == [1, 1, 1, 0] * 8
+    for bad in ("[1]*10**10", "[1]*4097", "[1]*64*64*64", "9**9**9"):
+        with pytest.raises(ValueError, match="window_attn_skip_freq"):
+            v._skip_freq_value(bad)
+    # an int is bounded by the caller, with one bound for both paths
+    with pytest.raises(ValueError, match="window_attn_skip_freq"):
+        v.parse_olmo3_skip_freq("4097", num_layers=None)
+
+
 def test_skip_freq_proxy_depths():
     """The int skip_freq of the preset works at the reduced proxy depths the L4 gates use."""
     for layers in (4, 5, 8, 32):
         assert (
             _run_args_patch(
-                window_size=[4096, 0], window_attn_skip_freq="4", num_layers=str(layers)
+                window_size=4096, window_attn_skip_freq="4", num_layers=str(layers)
             ).window_attn_skip_freq
             == 4
         )
     with pytest.raises(ValueError, match="num_layers"):
-        _run_args_patch(window_size=[4096, 0], window_attn_skip_freq=4, num_layers=2)
+        _run_args_patch(window_size=4096, window_attn_skip_freq=4, num_layers=2)
 
 
 # Each entry: (setting, bad value). The same table refuses it on args (YAML or CLI string) and on
@@ -682,7 +805,6 @@ _SHARED_REFUSALS = [
     ("use_te_activation_func", True),
     ("activation_func_clamp_value", 7.0),
     ("glu_linear_offset", 1.0),
-    ("olmo3_window_size_form", "te"),
 ]
 
 
@@ -690,7 +812,13 @@ _SHARED_REFUSALS = [
 def test_shared_refusal_table(name, value):
     from megatron.core.transformer.transformer_config import TransformerConfig
 
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    try:
+        # megatron.training imports mamba_ssm, which queries GPU 0 at import time
+        from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    except RuntimeError as e:
+        if torch.cuda.is_available():
+            raise
+        pytest.skip(f"megatron.training needs a GPU to import here: {e}")
     from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
         OLMO3_UNSUPPORTED,
         check_olmo3_unsupported,
@@ -699,7 +827,7 @@ def test_shared_refusal_table(name, value):
     assert name in {n for n, _, _ in OLMO3_UNSUPPORTED}
     # args patch (YAML values and CLI strings)
     with pytest.raises(ValueError, match=name):
-        _run_args_patch(window_size=[4096, 0], window_attn_skip_freq=4, **{name: value})
+        _run_args_patch(window_size=4096, window_attn_skip_freq=4, **{name: value})
     # builder (same table, before any config is built)
     args = SimpleNamespace(use_legacy_models=False, spec=None, mtp_num_layers=None, **{name: value})
     with pytest.raises(ValueError, match=name):
@@ -865,18 +993,6 @@ def test_upstream_model_provider_import_errors(monkeypatch):
         olmo3_builders._upstream_model_provider()
 
 
-def test_built_layer_report_does_not_raise():
-    """Unreadable values are "unknown"; a model without decoder layers gives []."""
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
-
-    assert olmo3_builders.olmo3_built_layer_report(object()) == []
-    layer = SimpleNamespace(layer_number="x", self_attention=SimpleNamespace(core_attention=None))
-    model = SimpleNamespace(config=SimpleNamespace(), decoder=SimpleNamespace(layers=[layer]))
-    (r,) = olmo3_builders.olmo3_built_layer_report(model)
-    assert r["layer"] == "unknown" and r["rope"] == "unknown" and r["softmax_scale"] == "unknown"
-    assert r["window"] == "unknown"
-
-
 def test_model_provider_delegates_to_upstream(monkeypatch):
     """model_provider runs upstream's model_provider (record_memory_history, ...) with the OLMo-3 builder."""
     from primus.backends.megatron.core.models.olmo3 import olmo3_builders
@@ -971,18 +1087,6 @@ def test_rotary_refuses_partial_rotary():
         Olmo3DualRotaryEmbedding(_cfg(), rotary_base=500000.0, rotary_percent=0.5)
 
 
-def test_flops_sliding_layer_count_uses_shared_parser():
-    from primus.backends.megatron.patches.olmo3_flops_patches import (
-        olmo3_sliding_layer_count,
-    )
-
-    assert olmo3_sliding_layer_count(8, (4095, 0), "([1]*3+[0])*2") == 6
-    assert olmo3_sliding_layer_count(8, (4095, 0), "4") == 6
-    for bad in (0, 1, "abc", 9, [1] * 8, None):
-        with pytest.raises(ValueError, match="window_attn_skip_freq"):
-            olmo3_sliding_layer_count(8, (4095, 0), bad)
-
-
 def test_per_layer_te_window_cpu(monkeypatch):
     """The window and softmax scale each layer's core attention gets, without a per-layer config copy.
 
@@ -1021,16 +1125,18 @@ def test_per_layer_te_window_cpu(monkeypatch):
     cfg = _cfg(
         num_layers=8, olmo3_yarn_rotary_scaling_factor=8.0, olmo3_yarn_original_max_position_embeddings=8192
     )
-    subs = SelfAttentionSubmodules(linear_qkv=None, core_attention=FakeCore)
+    subs = SelfAttentionSubmodules(linear_qkv=None, core_attention=FakeCore, linear_proj=None)
     for n in range(1, 9):
         with pytest.raises(StopIteration):
-            oa.Olmo3SelfAttention(cfg, subs, n)
+            oa.Olmo3SelfAttention(cfg, subs, n, post_norm=object)
+    with pytest.raises(ValueError, match="post_norm"):
+        oa.Olmo3SelfAttention(cfg, subs, 1)
     base = 1.0 / math.sqrt(cfg.kv_channels)
     for n, (c, win, scale) in seen.items():
         sliding = n % 4 != 0
         assert c is cfg, n  # no private config copy
         assert win == ((4095, 0) if sliding else None), n
-        want = base if sliding else base * cfg.olmo3_yarn_mscale**2
+        want = base if sliding else base * cfg.olmo3_yarn_effective_attention_factor**2
         assert (scale or base) == pytest.approx(want), n
     assert cfg.window_size == (4095, 0) and cfg.softmax_scale is None  # the shared config is not modified
     assert subs.core_attention is FakeCore  # nor the shared spec
@@ -1050,7 +1156,8 @@ def test_softmax_scale_injection_survives_build_module():
             self.softmax_scale, self.extra = softmax_scale, extra
 
     cls = oa._with_softmax_scale(FakeCore, 0.5)
-    assert isinstance(cls, type) and issubclass(cls, FakeCore) and cls.__name__ == "FakeCore"
+    assert isinstance(cls, type) and issubclass(cls, FakeCore) and cls.__name__ == "FakeCoreOlmo3YarnScaled"
+    assert cls.olmo3_softmax_scale == 0.5 and cls.__qualname__ != FakeCore.__qualname__
     assert oa._with_softmax_scale(FakeCore, 0.5) is cls  # one class per (class, scale)
     built = build_module(cls, config=None, softmax_scale=0.125)
     assert isinstance(built, FakeCore) and built.softmax_scale == 0.5
@@ -1130,6 +1237,95 @@ def test_full_width_rmsnorm_fn_gradcheck():
     x = torch.randn(3, 2, 4, 3, dtype=torch.float64, requires_grad=True)  # [s, b, heads, head_dim]
     w = torch.rand(4, 3, dtype=torch.float64, requires_grad=True)
     assert torch.autograd.gradcheck(lambda a, b: _FullWidthRMSNormFn.apply(a, b, 1e-6, 12, None), (x, w))
+
+
+@pytest.mark.parametrize(
+    "bad, match",
+    [
+        ({"num_key_value_heads": 0}, "num_key_value_heads"),
+        ({"num_key_value_heads": None}, "num_key_value_heads"),
+        ({"num_key_value_heads": -2}, "num_key_value_heads"),
+        ({"head_dim": 0}, "head_dim"),
+        ({"head_dim": 2.5}, "head_dim"),
+        ({"hidden_size": 258}, "divisible by num_attention_heads"),
+        ({"num_attention_heads": 0}, "num_attention_heads"),
+    ],
+)
+def test_converter_refuses_invalid_head_settings(bad, match):
+    """Explicit invalid head settings are refused, not replaced by a default or floored."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
+    )
+
+    cfg = {**_HF_CFG, **bad}
+    if "hidden_size" in bad:
+        cfg.pop("head_dim", None)
+    with pytest.raises(ValueError, match=match):
+        derive_megatron_fields(cfg, rope_layout="per_type")
+
+
+def test_converter_rope_type_and_legacy_type_key():
+    """rope_type and the legacy type key must agree; a null rope_type falls back to type."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import _rope_type
+
+    assert _rope_type({"rope_type": None, "type": "yarn"}) == "yarn"
+    assert _rope_type({"type": "yarn"}) == "yarn" and _rope_type({}) == "default"
+    assert _rope_type({"rope_type": "yarn", "type": "yarn"}) == "yarn"
+    with pytest.raises(ValueError, match="must agree"):
+        _rope_type({"rope_type": "yarn", "type": "default"})
+
+
+def test_converter_head_defaults():
+    """No num_key_value_heads: MHA; no head_dim: hidden_size / num_attention_heads."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
+    )
+
+    cfg = {k: v for k, v in _HF_CFG.items() if k not in ("num_key_value_heads", "head_dim")}
+    f = derive_megatron_fields(cfg, rope_layout="per_type")
+    assert f["num_query_groups"] == cfg["num_attention_heads"]
+    assert f["kv_channels"] == cfg["hidden_size"] // cfg["num_attention_heads"]
+
+
+def test_converter_checks_vocab_rows_against_config_and_tokenizer():
+    """The HF embedding / lm_head rows must equal config.json vocab_size and fit the padded
+    vocabulary from the tokenizer; a mismatch is refused instead of truncated or padded."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        check_vocab_rows,
+        derive_megatron_fields,
+    )
+
+    assert (
+        derive_megatron_fields({**_HF_CFG, "vocab_size": 100278}, rope_layout="per_type")["vocab_size"]
+        == 100278
+    )
+    check_vocab_rows("lm_head.weight", 100278, 100278, 100352)  # the released 7B
+    check_vocab_rows("lm_head.weight", 100278, None, 100352)  # no vocab_size stated: fit only
+    with pytest.raises(ValueError, match="config.json vocab_size"):
+        check_vocab_rows("lm_head.weight", 100277, 100278, 100352)
+    with pytest.raises(ValueError, match="padded vocabulary"):
+        check_vocab_rows("model.embed_tokens.weight", 100278, 100278, 100224)
+
+
+def test_qk_norm_modules_run_their_hooks(init_parallel_state, monkeypatch):
+    """Running the OLMo-3 attention fires forward pre-hooks registered on q_norm and k_norm
+    (Megatron DDP's overlap_param_gather wait is such a hook)."""
+    from megatron.core.transformer.spec_utils import build_module
+
+    from primus.backends.megatron.core.models.olmo3.olmo3_rotary import (
+        Olmo3DualRotaryEmbedding,
+    )
+
+    _cpu_numerics(monkeypatch)
+    cfg = _cpu_cfg()
+    att = build_module(_cpu_layer_spec().submodules.self_attention, config=cfg, layer_number=1)
+    fired = []
+    att.q_norm.register_forward_pre_hook(lambda m, a: fired.append("q"))
+    att.k_norm.register_forward_pre_hook(lambda m, a: fired.append("k"))
+    s_, b = 8, 1
+    rope = Olmo3DualRotaryEmbedding(cfg, rotary_base=500000.0)(s_)
+    att(torch.randn(s_, b, cfg.hidden_size), None, rotary_pos_emb=rope)
+    assert sorted(fired) == ["k", "q"]
 
 
 def test_full_width_rmsnorm_does_not_copy_split_views():
@@ -1374,142 +1570,6 @@ def test_convert_keeps_config_rope_layout(monkeypatch, tmp_path, sliding_yarn, l
     assert seen["olmo3_rope_layout"] == layout
 
 
-def test_flops_patch_sliding_correction():
-    from primus.backends.megatron.core.transformer.olmo3.olmo3_attention import (
-        olmo3_layer_is_sliding,
-    )
-    from primus.backends.megatron.patches import olmo3_flops_patches as fpm
-    from primus.backends.megatron.patches.olmo3_flops_patches import (
-        olmo3_attention_flops_correction,
-        olmo3_mean_visible_keys,
-        olmo3_saved_keys,
-        olmo3_sliding_layer_count,
-    )
-
-    assert olmo3_sliding_layer_count(32, (4095, 0), 4) == 24
-    assert olmo3_sliding_layer_count(4, (4095, 0), [1, 1, 1, 0]) == 3
-    assert olmo3_sliding_layer_count(32, None, 4) == 0
-    with pytest.raises(ValueError, match="entries"):
-        olmo3_sliding_layer_count(32, (4095, 0), [1, 1, 1, 0])
-    # the count is the model's own per-layer rule
-    cfg = SimpleNamespace(window_size=(4095, 0), window_attn_skip_freq=[1, 0, 1, 1, 0, 1])
-    assert olmo3_sliding_layer_count(6, (4095, 0), cfg.window_attn_skip_freq) == sum(
-        olmo3_layer_is_sliding(cfg, n) for n in range(1, 7)
-    )
-    for bad in (-1, 0, 1, 4096.5, "4k", True):
-        with pytest.raises(ValueError, match="window"):
-            olmo3_mean_visible_keys(10, bad)
-        with pytest.raises(ValueError, match="window"):
-            olmo3_saved_keys(10, bad)
-    # brute force mean visible keys
-    for s, w in ((16, 4), (8, 8), (8, 100), (10, 2)):
-        ref = sum(min(i + 1, w) for i in range(s)) / s
-        assert olmo3_mean_visible_keys(s, w) == pytest.approx(ref)
-    # normalised args (after the OLMo-3 args patch)
-    a = SimpleNamespace(
-        num_layers=32,
-        window_size=(4095, 0),
-        olmo3_sliding_window=4096,
-        olmo3_window_size_form="megatron",
-        window_attn_skip_freq=4,
-        seq_length=8192,
-        kv_channels=128,
-        num_attention_heads=32,
-    )
-    corr = olmo3_attention_flops_correction(a, 1)
-    # upstream's convention: s / 2 minus the continuous windowed count W - W^2 / (2 s)
-    saved = 8192 / 2 - (4096 - 4096**2 / (2 * 8192))
-    assert saved == pytest.approx(1024.0)
-    assert corr == pytest.approx(8192 * 24 * 3 * 2 * 4096 * saved * 2)
-    assert olmo3_attention_flops_correction(a, 16) == pytest.approx(16 * corr)  # scaled per sample
-    # the HF form the preset writes ([4096, 0], form hf) is W = 4096, not 4097
-    hf = SimpleNamespace(**dict(vars(a), window_size=[4096, 0], olmo3_window_size_form="hf"))
-    assert olmo3_attention_flops_correction(hf, 1) == pytest.approx(corr)
-    del hf.olmo3_sliding_window
-    assert olmo3_attention_flops_correction(hf, 1) == pytest.approx(corr)
-    # memoised: one evaluation per setting
-    fpm._correction_per_sample.cache_clear()
-    for _ in range(5):
-        olmo3_attention_flops_correction(a, 8)
-    assert fpm._correction_per_sample.cache_info().misses == 1
-    # window not active (seq <= window): exactly no correction
-    for s in (1, 1024, 4095, 4096):
-        a.seq_length = s
-        assert olmo3_attention_flops_correction(a, 1) == 0.0
-    # the windowed count a sliding layer keeps is within half a key of the exact (brute-force) mean,
-    # as upstream's s / 2 is within half a key of the exact causal mean; never negative
-    for s, w in ((10, 3), (8192, 4096), (4097, 4096), (64, 2), (100, 99)):
-        kept = s / 2 - olmo3_saved_keys(s, w)
-        exact = sum(min(i + 1, w) for i in range(s)) / s
-        assert olmo3_saved_keys(s, w) >= 0
-        assert 0 <= exact - kept <= 0.5
-    a.seq_length, a.olmo3_sliding_window, a.window_size = 10, 3, (2, 0)
-    a.num_layers, a.window_attn_skip_freq, a.kv_channels, a.num_attention_heads = 4, 4, 1, 1
-    assert olmo3_attention_flops_correction(a, 1) == pytest.approx(10 * 3 * 3 * 2 * (7**2 / 20) * 2)
-    a.num_layers, a.olmo3_sliding_window, a.window_size, a.seq_length = 32, 4096, (4095, 0), 8192
-    a.window_attn_skip_freq, a.kv_channels, a.num_attention_heads = 4, 128, 32
-    # string values (CLI / YAML overrides) as the args patch reads them; marker and window must agree
-    a.olmo3_sliding_window = "4096"
-    assert olmo3_attention_flops_correction(a, 1) == pytest.approx(corr)
-    a.olmo3_sliding_window = 2048
-    with pytest.raises(ValueError, match="olmo3_sliding_window"):
-        olmo3_attention_flops_correction(a, 1)
-    for bad in ("4k", 0, 1, True):
-        a.olmo3_sliding_window = bad
-        with pytest.raises(ValueError, match="window|OLMo-3"):
-            olmo3_attention_flops_correction(a, 1)
-    # no marker and no declared form: ambiguous, refused as by the args patch (never guessed)
-    a.olmo3_sliding_window, a.olmo3_window_size_form = None, None
-    with pytest.raises(ValueError, match="ambiguous"):
-        olmo3_attention_flops_correction(a, 1)
-
-
-def test_flops_patch_does_not_stack(monkeypatch):
-    """A second patch run is a no-op even when another wrapper sits on top of ours."""
-    import functools
-
-    import megatron.training.training as training_module
-
-    from primus.backends.megatron.patches.olmo3_flops_patches import patch_olmo3_flops
-
-    monkeypatch.setattr(training_module, "num_floating_point_operations", lambda args, bs: 1.0e15)
-    patch_olmo3_flops(None)
-    ours = training_module.num_floating_point_operations
-    assert ours._olmo3_flops_patched
-    # a correction that fails at install time (bad window, a None field) never stops the run: it
-    # is logged and the patch installs (the count turns the correction off at the first count)
-    from primus.backends.megatron.patches import olmo3_flops_patches as fp
-
-    warnings = []
-    monkeypatch.setattr(fp, "warning_rank_0", warnings.append)
-    base = dict(
-        num_layers=4,
-        window_size=(3, 0),
-        olmo3_sliding_window=4,
-        seq_length=16,
-        window_attn_skip_freq=4,
-        kv_channels=8,
-        num_attention_heads=2,
-    )
-    for bad in (dict(olmo3_sliding_window=9), dict(kv_channels=None), dict(seq_length=None)):
-        monkeypatch.setattr(training_module, "num_floating_point_operations", lambda args, bs: 1.0e15)
-        warnings.clear()
-        patch_olmo3_flops(SimpleNamespace(extra={"backend_args": SimpleNamespace(**{**base, **bad})}))
-        assert training_module.num_floating_point_operations._olmo3_flops_patched
-        assert any("at install time" in w for w in warnings), bad
-    monkeypatch.setattr(training_module, "num_floating_point_operations", lambda args, bs: 1.0e15)
-    patch_olmo3_flops(None)
-    ours = training_module.num_floating_point_operations
-
-    @functools.wraps(ours)
-    def other(args, bs):
-        return ours(args, bs)
-
-    monkeypatch.setattr(training_module, "num_floating_point_operations", other)
-    patch_olmo3_flops(None)
-    assert training_module.num_floating_point_operations is other
-
-
 def test_converter_stores_concrete_rope_layout(monkeypatch):
     """``auto`` is resolved before it reaches the (saved) args."""
     transformers = pytest.importorskip("transformers")
@@ -1529,8 +1589,12 @@ def test_converter_stores_concrete_rope_layout(monkeypatch):
     "par", [dict(tensor_parallel_size=2), dict(pipeline_parallel_size=2), dict(expert_parallel_size=2)]
 )
 def test_converter_single_shard_only(par, tmp_path):
+    """Refused by build_margs (the one layout check) before Megatron is initialised."""
+    import json
+
     from primus.backends.megatron.checkpoint import native_loader_olmo3 as conv
 
+    (tmp_path / "config.json").write_text(json.dumps(_HF_CFG))
     with pytest.raises(ValueError, match="single-shard"):
         conv.convert(str(tmp_path), str(tmp_path / "out"), **par)
 
@@ -1589,10 +1653,17 @@ def test_converter_qkv_fusion_order_and_names():
     )
     sd, consumed = build_mcore_state_dict(_Model(), _Store(), margs, {}, lambda *a: None)
     assert consumed == set(hf)
-    q = hf[h + "self_attn.q_proj.weight"].reshape(ng, nh // ng, hd, hidden)
-    k = hf[h + "self_attn.k_proj.weight"].reshape(ng, 1, hd, hidden)
-    v = hf[h + "self_attn.v_proj.weight"].reshape(ng, 1, hd, hidden)
-    want = torch.cat([q, k, v], dim=1).reshape(-1, hidden)
+    # independent row-by-row oracle: for each query group g, the rows of its q heads, then its k
+    # head, then its v head (not the reshape / cat the converter uses)
+    qw, kw, vw = (hf[h + f"self_attn.{n}_proj.weight"] for n in "qkv")
+    rows = []
+    for g in range(ng):
+        for j in range(nh // ng):
+            head = g * (nh // ng) + j
+            rows += [qw[head * hd + r] for r in range(hd)]
+        rows += [kw[g * hd + r] for r in range(hd)]
+        rows += [vw[g * hd + r] for r in range(hd)]
+    want = torch.stack(rows)
     assert torch.equal(sd["decoder.layers.0.self_attention.linear_qkv.weight"], want)
     fc1 = sd["decoder.layers.0.mlp.linear_fc1.weight"]
     assert torch.equal(fc1[:ffn], hf[h + "mlp.gate_proj.weight"])
@@ -1624,13 +1695,6 @@ def _load_convert_hook(monkeypatch):
     return mod
 
 
-def _stub_hook_config(mod, monkeypatch, hf_path, opts, checkpoint=None):
-    """main() reads the config once: stub that reading with (hf_path, checkpoint) and ``opts``."""
-    monkeypatch.setattr(mod, "_module_value_reader", lambda cfg, cli=None: None)
-    monkeypatch.setattr(mod, "_checkpoint_paths", lambda value: (hf_path, checkpoint))
-    monkeypatch.setattr(mod, "_native_opts", lambda value: {"enabled": None, **opts})
-
-
 def test_convert_hook_routes_olmo3_to_its_converter(monkeypatch, tmp_path):
     """native_convert_checkpoint on an OLMo-3 config.json calls native_loader_olmo3.convert."""
     import json
@@ -1652,7 +1716,6 @@ def test_convert_hook_routes_olmo3_to_its_converter(monkeypatch, tmp_path):
                 tensor_parallel_size=1,
                 pipeline_parallel_size=1,
                 expert_parallel_size=1,
-                make_vocab_size_divisible_by=128,
             ),
         )
     ]
@@ -1665,132 +1728,6 @@ def test_convert_hook_refuses_unknown_family(monkeypatch, tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "gpt_neox"}))
     with pytest.raises(ValueError, match="no native converter"):
         mod.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), {})
-
-
-def test_convert_hook_refuses_olmo3_on_the_bridge_path(monkeypatch, tmp_path, capsys):
-    """OLMo-3 never reaches the Megatron-Bridge path (it has no OLMo-3): native_ckpt_convert false, or
-    an hf_path that is not a local HF directory (the preset's hub id) with model_type olmo3 that is
-    not in the Hugging Face cache and cannot be downloaded, exits 1 with the reason before any lock
-    or conversion. Other families keep the Bridge path."""
-    import json
-
-    mod = _load_convert_hook(monkeypatch)
-    hf = tmp_path / "hf"
-    hf.mkdir()
-    (hf / "config.json").write_text(json.dumps({"model_type": "olmo3"}))
-    monkeypatch.setattr(mod, "convert_checkpoint", lambda *a: pytest.fail("Bridge path for OLMo-3"))
-    monkeypatch.setattr(mod, "_native_main", lambda *a: pytest.fail("native path"))
-    monkeypatch.setattr(mod, "_resolve_hub_snapshot", lambda hf_path, opts: None)  # no cache, no network
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", str(tmp_path / "x.yaml")])
-    monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
-    cases = [
-        (str(hf), dict(enabled=False), "native_ckpt_convert is"),
-        ("allenai/Olmo-3-1025-7B", dict(enabled=None, model_type="olmo3"), "local HF directory"),
-        ("allenai/Olmo-3-1025-7B", dict(enabled=True, model_type="olmo3"), "local HF directory"),
-        ("allenai/Olmo-3-1025-7B", dict(enabled=False, model_type="olmo3"), "native_ckpt_convert is"),
-    ]
-    for hf_path, opts, msg in cases:
-        _stub_hook_config(mod, monkeypatch, hf_path, opts)
-        with pytest.raises(SystemExit):
-            mod.main()
-        assert msg in capsys.readouterr().err
-    assert not (tmp_path / "data").exists()
-    assert mod._olmo3_bridge_refusal("org/llama", None, dict(model_type="gpt")) is None
-    # model_type olmo3 builds OLMo-3: a checkpoint of another family is refused, never converted
-    refusal = mod._olmo3_bridge_refusal(str(hf), "llama", dict(model_type="olmo3"))
-    assert "is llama" in refusal and "cannot load into OLMo-3" in refusal
-    for family in ("llama", "qwen3", "deepseek"):
-        assert mod.conversion_plan(str(hf), None, dict(model_type="olmo3", enabled=None), family) == "refuse"
-        assert mod.conversion_plan(str(hf), None, dict(model_type="gpt", enabled=None), family) == "native"
-    assert mod.conversion_plan(str(hf), None, dict(model_type="olmo3", enabled=None), "olmo3") == "native"
-    # a hub id with model_type gpt (the SFT trainer default) is still recognised as OLMo-3 by the
-    # HF id, whose name must start with olmo3 / olmo-3 / olmo_3 and a separator or the end
-    for hf_id in ("allenai/Olmo-3-1025-7B", "/models/olmo3-7b", "org/OLMo_3", "org/olmo-3.1-7b"):
-        assert "local HF directory" in mod._olmo3_bridge_refusal(hf_id, None, dict(model_type="gpt"))
-    for hf_id in (
-        "allenai/OLMo-2-1124-7B",
-        "org/OLMo-30B",
-        "org/olmo3x",
-        "org/olmo_32b",
-        "org/olmo-35",
-        "org/llama-olmo3-distill",
-    ):
-        assert mod._olmo3_bridge_refusal(hf_id, None, dict(model_type="gpt")) is None, hf_id
-    # the preset name is not an option: an explicit non-OLMo hf_path keeps its own family
-    assert "model" not in mod._native_opts(None)
-    assert mod._olmo3_bridge_refusal("Qwen/Qwen3-8B", None, dict(model_type="gpt")) is None
-    # the message names the actual cause: a hub id that could not be fetched, or a local
-    # directory without config.json (no download is tried for it)
-    assert "could not be downloaded" in mod._olmo3_bridge_refusal(
-        "allenai/Olmo-3-1025-7B", None, dict(model_type="olmo3")
-    )
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    msg = mod._olmo3_bridge_refusal(str(empty), None, dict(model_type="olmo3"))
-    assert "has no config.json" in msg and "downloaded" not in msg
-
-
-def test_convert_hook_passes_olmo3_training_settings(monkeypatch, tmp_path):
-    """make_vocab_size_divisible_by (the padded vocab rows) and the RoPE layout reach the OLMo-3
-    converter; seq_length (no effect on the weights) does not."""
-    import json
-
-    import primus.backends.megatron.checkpoint.native_loader_olmo3 as conv
-
-    mod = _load_convert_hook(monkeypatch)
-    calls = []
-    monkeypatch.setattr(conv, "convert", lambda *a, **k: calls.append(k))
-    (tmp_path / "config.json").write_text(json.dumps({"model_type": "olmo3", "torch_dtype": "bfloat16"}))
-    opts = dict(seq_length="8192", make_vocab_size_divisible_by=64, olmo3_rope_layout="per_type")
-    mod.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), opts)
-    assert "seq_length" not in calls[0] and calls[0]["make_vocab_size_divisible_by"] == 64
-    assert calls[0]["rope_layout"] == "per_type"
-
-
-def test_convert_hook_refuses_olmo3_single_shard_at_tp_pp(monkeypatch, tmp_path):
-    """The OLMo-3 converter writes TP=PP=EP=1 only; training OLMo-3 at TP, PP or EP > 1 gets a clear
-    message before any conversion (the hook checks OLMo-3 only; see the other-families test)."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    assert flow.single_shard_conflict({}) is None
-    assert flow.single_shard_conflict(dict(tensor_model_parallel_size=1)) is None
-    msg = flow.single_shard_conflict(dict(tensor_model_parallel_size=1, expert_model_parallel_size=8))
-    assert msg and "expert_model_parallel_size=8" in msg
-    for tp, pp in ((2, 1), (1, 2), ("8", "1")):
-        msg = flow.single_shard_conflict(dict(tensor_model_parallel_size=tp, pipeline_model_parallel_size=pp))
-        assert "native_ckpt_convert" not in msg and f"tensor_model_parallel_size={int(tp)}" in msg
-        assert "pretrained_checkpoint" in msg and "UNVERIFIED" in msg
-    # an unresolved ${VAR} (or any non-integer) is a clear error, not a bare int() traceback
-    for bad in ("${TP:1}", "two", 1.5, True):
-        with pytest.raises(ValueError, match="tensor_model_parallel_size must be an integer"):
-            flow.single_shard_conflict(dict(tensor_model_parallel_size=bad))
-
-    hf = tmp_path / "hf"
-    hf.mkdir()
-    (hf / "config.json").write_text('{"model_type": "olmo3"}')
-    ran = []
-    monkeypatch.setattr(mod, "_native_main", lambda *a: ran.append(a))
-    _stub_hook_config(mod, monkeypatch, str(hf), dict(tensor_model_parallel_size=2))
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", str(tmp_path / "x.yaml")])
-    with pytest.raises(SystemExit):
-        mod.main()
-    assert not ran
-    _stub_hook_config(mod, monkeypatch, str(hf), dict(tensor_model_parallel_size="two"))
-    with pytest.raises(SystemExit):
-        mod.main()
-    assert not ran
-    _stub_hook_config(mod, monkeypatch, str(hf), dict(tensor_model_parallel_size=1))
-    mod.main()
-    assert len(ran) == 1
-    # a hub id (the preset's tokenizer_model): the layout is refused before any snapshot download
-    monkeypatch.setattr(mod, "_resolve_hub_snapshot", lambda *a, **k: pytest.fail("downloaded first"))
-    _stub_hook_config(
-        mod, monkeypatch, "allenai/Olmo-3-1025-7B", dict(model_type="olmo3", tensor_model_parallel_size=2)
-    )
-    with pytest.raises(SystemExit):
-        mod.main()
-    assert len(ran) == 1
 
 
 def test_yarn_parameter_validation():
@@ -1859,7 +1796,7 @@ def test_yarn_attention_factor_refusals():
         yarn_attention_factor,
     )
 
-    for bad in ((0.5,), (8.0, 0.0), (8.0, -1.0), (1.0, 0.0)):
+    for bad in ((0.5,), (8.0, 0.0), (8.0, -1.0), (1.0, 0.0), (1.0, 1.5)):
         with pytest.raises(ValueError, match="YaRN|yarn|attention_factor"):
             yarn_attention_factor(*bad)
     with pytest.raises(ValueError, match="attention_factor"):
@@ -1900,247 +1837,32 @@ def test_rope_parameters_and_rope_scaling_must_agree():
         _rope_source({**base, "rope_scaling": "yarn"})
 
 
-def _causal_attention_flops(a):
-    """Upstream's core-attention FLOPs per sample at s / 2 keys per query (the count the OLMo-3
-    correction subtracts from): 3 * 2 * q_size * s / 2 * 2 per token, s tokens, every layer."""
-    return 6.0 * a.kv_channels * a.num_attention_heads * a.num_layers * a.seq_length**2
+def test_rope_theta_is_compared_across_top_level_and_layer_types():
+    """Every rope_theta given (top level, full_attention, sliding_attention) must agree; a missing
+    one falls back to the others."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import _rope_config
 
-
-def test_flops_patch_backs_off_when_upstream_counts_the_window(monkeypatch):
-    """If upstream's FLOPs already depend on window_size (a newer Megatron), the correction is not
-    subtracted a second time; today's upstream does not, so it is applied."""
-    import megatron.training.training as training_module
-
-    from primus.backends.megatron.patches.olmo3_flops_patches import (
-        olmo3_attention_flops_correction,
-        patch_olmo3_flops,
-        upstream_counts_window,
-    )
-
-    args = SimpleNamespace(
-        num_layers=4,
-        window_size=(3, 0),
-        olmo3_sliding_window=4,
-        olmo3_window_size_form="megatron",
-        window_attn_skip_freq=4,
-        seq_length=16,
-        kv_channels=8,
-        num_attention_heads=2,
-    )
-    corr = olmo3_attention_flops_correction(args, 1)
-    assert corr > 0
-
-    full = 1.0e9 + _causal_attention_flops(args)
-
-    def window_blind(a, bs):
-        return (1.0e9 + _causal_attention_flops(a)) * bs
-
-    def window_aware(a, bs):
-        return (1.0e9 + _causal_attention_flops(a) - (5.0 if a.window_size is not None else 0.0)) * bs
-
-    assert not upstream_counts_window(window_blind, args)
-    assert upstream_counts_window(window_aware, args)
-    assert args.window_size == (3, 0) and args.window_attn_skip_freq == 4  # args untouched
-    for fn, want in ((window_blind, full - corr), (window_aware, full - 5.0)):
-        monkeypatch.setattr(training_module, "num_floating_point_operations", fn)
-        patch_olmo3_flops(SimpleNamespace(extra={"backend_args": args}))
-        assert training_module.num_floating_point_operations(args, 1) == pytest.approx(want)
-        monkeypatch.setattr(training_module, "num_floating_point_operations", fn)
-        patch_olmo3_flops(None)  # no built args: checked at the first call
-        assert training_module.num_floating_point_operations(args, 1) == pytest.approx(want)
-    # a later non-OLMo-3 run in the same process (args without the OLMo-3 form) is not corrected
-    other = SimpleNamespace(**{k: v for k, v in vars(args).items() if k != "olmo3_window_size_form"})
-    assert training_module.num_floating_point_operations(other, 1) == pytest.approx(full - 5.0)
-    # an error in the deferred upstream check (inside training_log) does not stop training: it is
-    # logged and the correction is turned off (upstream's count, never corrected unchecked)
-    calls = []
-
-    def flaky(a, bs):
-        calls.append(1)
-        if len(calls) == 1:
-            raise RuntimeError("not ready")
-        return window_blind(a, bs)
-
-    monkeypatch.setattr(training_module, "num_floating_point_operations", flaky)
-    patch_olmo3_flops(None)
-    assert training_module.num_floating_point_operations(args, 1) == pytest.approx(full)
-    assert training_module.num_floating_point_operations(args, 1) == pytest.approx(full)
-    # a second install in the same process with a window the correction cannot use: logged, the
-    # installed wrapper is kept, the run goes on
-    bad = SimpleNamespace(**{**vars(args), "window_attn_skip_freq": 1})
-    installed = training_module.num_floating_point_operations
-    patch_olmo3_flops(SimpleNamespace(extra={"backend_args": bad}))
-    assert training_module.num_floating_point_operations is installed
-    # an error at install time (args not final) is retried at the first count, not final
-    calls.clear()
-    monkeypatch.setattr(training_module, "num_floating_point_operations", flaky)
-    patch_olmo3_flops(
-        SimpleNamespace(extra={"backend_args": SimpleNamespace(**vars(args), padded_vocab_size=64)})
-    )
-    assert training_module.num_floating_point_operations(args, 1) == pytest.approx(full - corr)
-    # an error in the correction itself (a window_size the correction cannot read) does not stop
-    # training either: upstream's count is kept
-    broken = SimpleNamespace(**{**vars(args), "window_size": "bogus"})
-    assert training_module.num_floating_point_operations(broken, 1) == pytest.approx(full)
-    # a second install (a new run in the process) resets the per-run state: checked afresh
-    assert training_module.num_floating_point_operations(args, 1) == pytest.approx(full)
-    patch_olmo3_flops(None)
-    assert training_module.num_floating_point_operations(args, 1) == pytest.approx(full - corr)
-    # ... and, with built args, the second install checks upstream at install time, as a first
-    # install does (not only at the first count)
-    from primus.backends.megatron.patches import olmo3_flops_patches as fp
-
-    logs = []
-    monkeypatch.setattr(fp, "log_rank_0", logs.append)
-    installed = training_module.num_floating_point_operations
-    patch_olmo3_flops(
-        SimpleNamespace(extra={"backend_args": SimpleNamespace(**vars(args), padded_vocab_size=64)})
-    )
-    assert training_module.num_floating_point_operations is installed
-    assert installed._olmo3_state == {"checked": True, "apply": True}
-    assert any("count windowed attention FLOPs" in m for m in logs)
-
-
-def test_flops_patch_backs_off_when_upstream_counts_attention_another_way(monkeypatch):
-    """The correction assumes upstream counts causal attention as s / 2 keys per query. An upstream
-    that counts another number (here s keys: no causal halving) is detected by its seq_length**2
-    coefficient, and the correction is not applied."""
-    import megatron.training.training as training_module
-
-    from primus.backends.megatron.patches.olmo3_flops_patches import (
-        patch_olmo3_flops,
-        upstream_causal_keys_ok,
-    )
-
-    args = SimpleNamespace(
-        num_layers=4,
-        window_size=(3, 0),
-        olmo3_sliding_window=4,
-        olmo3_window_size_form="megatron",
-        window_attn_skip_freq=4,
-        seq_length=16,
-        kv_channels=8,
-        num_attention_heads=2,
-        padded_vocab_size=64,
-    )
-
-    def half(a, bs):
-        return (7.0 + 3.0 * a.seq_length + _causal_attention_flops(a)) * bs
-
-    def no_halving(a, bs):
-        return (7.0 + 2 * _causal_attention_flops(a)) * bs
-
-    assert upstream_causal_keys_ok(half, args) and not upstream_causal_keys_ok(no_halving, args)
-    monkeypatch.setattr(training_module, "num_floating_point_operations", no_halving)
-    patch_olmo3_flops(SimpleNamespace(extra={"backend_args": args}))
-    assert training_module.num_floating_point_operations(args, 1) == pytest.approx(no_halving(args, 1))
-
-
-def test_flops_patch_waits_for_padded_vocab_size(monkeypatch):
-    """At ``before_train`` the tokenizer has not set ``padded_vocab_size``: the patch must install
-    and run the upstream check at the first count, not call upstream with None (the L4 runs logged
-    "unsupported operand type(s) for *: 'int' and 'NoneType'")."""
-    import megatron.training.training as training_module
-
-    from primus.backends.megatron.patches.olmo3_flops_patches import (
-        olmo3_attention_flops_correction,
-        patch_olmo3_flops,
-    )
-
-    args = SimpleNamespace(
-        num_layers=4,
-        window_size=(3, 0),
-        olmo3_sliding_window=4,
-        olmo3_window_size_form="megatron",
-        window_attn_skip_freq=4,
-        seq_length=16,
-        kv_channels=8,
-        num_attention_heads=2,
-        padded_vocab_size=None,
-    )
-
-    def upstream(a, bs):
-        return (1.0e9 + _causal_attention_flops(a)) * bs + a.padded_vocab_size * 2
-
-    from primus.backends.megatron.patches import olmo3_flops_patches as fp
-
-    logs, seen = [], []
-    monkeypatch.setattr(fp, "log_rank_0", logs.append)
-    monkeypatch.setattr(fp, "warning_rank_0", logs.append)
-
-    def spy(a, bs):
-        seen.append(getattr(a, "padded_vocab_size", "absent"))
-        return upstream(a, bs)
-
-    monkeypatch.setattr(training_module, "num_floating_point_operations", spy)
-    patch_olmo3_flops(SimpleNamespace(extra={"backend_args": args}))
-    # upstream is not called at install time (padded_vocab_size None): no failed check logged
-    assert seen == [] and not any("cannot check upstream" in m for m in logs)
-    assert any("upstream check runs at the first FLOPs count" in m for m in logs)
-    args.padded_vocab_size = 128
-    want = 1.0e9 + _causal_attention_flops(args) + 256 - olmo3_attention_flops_correction(args, 1)
-    assert training_module.num_floating_point_operations(args, 1) == pytest.approx(want)
-
-
-def test_upstream_flops_ignore_the_window(monkeypatch):
-    """Pins today's upstream by behaviour: the real num_floating_point_operations (unwrapped) gives
-    the same count with and without the OLMo-3 window (upstream_counts_window, the probe the patch
-    runs), so the OLMo-3 correction is needed and is applied once."""
-    import sys
-
-    import megatron.training.training as training_module
-    from megatron.training.arguments import parse_args
-
-    from primus.backends.megatron.patches.olmo3_flops_patches import (
-        _installed_wrapper,
-        upstream_causal_keys_ok,
-        upstream_counts_window,
-    )
-
-    fn = training_module.num_floating_point_operations
-    while _installed_wrapper(fn) is not None:
-        fn = fn.__wrapped__
-    monkeypatch.setattr(sys, "argv", ["test"])
-    args = parse_args(ignore_unknown_args=True)  # every upstream default, not a hand-picked subset
-    for k, v in dict(
-        num_layers=8,
-        hidden_size=256,
-        ffn_hidden_size=512,
-        num_attention_heads=4,
-        num_query_groups=4,
-        kv_channels=64,
-        seq_length=1024,
-        padded_vocab_size=1024,
-        swiglu=True,
-        group_query_attention=False,
-        window_size=(127, 0),
-        olmo3_sliding_window=128,
-        olmo3_window_size_form="megatron",
-        window_attn_skip_freq=4,
-    ).items():
-        setattr(args, k, v)
-    assert fn(args, 1) > 0
-    assert not upstream_counts_window(fn, args)
-    assert upstream_causal_keys_ok(fn, args)  # s / 2 keys per query, the convention corrected
-
-
-def test_convert_hook_switch_values(monkeypatch, tmp_path):
-    """native_ckpt_convert: off / no / "false" mean False (not bool("off") == True). The switch
-    parser itself is tested in tests/unit_tests/core/utils/test_arg_utils.py."""
-    mod = _load_convert_hook(monkeypatch)
-    cfg = tmp_path / "c.yaml"
-    seen = {}
-    for v in ("off", "no", '"false"'):
-        monkeypatch.setattr(mod, "load_primus_config", lambda *a: None)
-        params = SimpleNamespace(native_ckpt_convert=v.strip('"'))
-        monkeypatch.setattr(
-            mod,
-            "get_module_config",
-            lambda cfg_, name: SimpleNamespace(params=params) if name == "post_trainer" else None,
-        )
-        seen[v] = mod.read_native_opts(str(cfg), [])["enabled"]
-        assert mod.read_native_opts(str(cfg))["enabled"] is False  # without a command line too
-    assert seen == {"off": False, "no": False, '"false"': False}
+    base = {k: v for k, v in _HF_CFG.items() if k not in ("rope_scaling", "rope_theta")}
+    full = {"rope_type": "yarn", "factor": 8.0, "original_max_position_embeddings": 8192}
+    # the reviewer's config: top level and sliding 500000, full_attention without rope_theta
+    cfg = {
+        **base,
+        "rope_theta": 500000,
+        "rope_parameters": {
+            "full_attention": dict(full),
+            "sliding_attention": {"rope_type": "default", "rope_theta": 500000},
+        },
+    }
+    assert _rope_config(cfg)[1:] == ("per_type", 500000.0)
+    # sliding differs from the top level (full_attention silent): refused
+    cfg["rope_parameters"]["sliding_attention"]["rope_theta"] = 10000
+    with pytest.raises(ValueError, match="one rope_theta for all layer types"):
+        _rope_config(cfg)
+    # only the sliding layers give it: the full layers' theta is unknown, refused
+    sliding = {"rope_type": "default", "rope_theta": 500000}
+    cfg = {**base, "rope_parameters": {"full_attention": dict(full), "sliding_attention": sliding}}
+    with pytest.raises(ValueError, match="no rope_theta"):
+        _rope_config(cfg)
 
 
 _OLMO3_HF_CFG = {
@@ -2161,1116 +1883,6 @@ def _olmo3_hf_dir(tmp_path, name="hf"):
     (hf / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"a": "model-1.safetensors"}}))
     (hf / "model-1.safetensors").write_bytes(b"w" * 8)
     return hf
-
-
-def test_convert_hook_olmo3_reuses_only_a_matching_checkpoint(monkeypatch, tmp_path, capsys):
-    """OLMo-3: rank 0 writes a record of the conversion settings and source after the checkpoint; a
-    checkpoint is reused only if its record matches. The record has the converter version, the
-    resolved hf_path, a weights fingerprint, dtype, vocab padding and the saved RoPE layout. Settings
-    that change nothing saved (seq_length) and side files of the HF directory do not block reuse.
-    A refusal writes <out>.failed so the other nodes stop too."""
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    hf = _olmo3_hf_dir(tmp_path)
-    out = tmp_path / "out"
-    opts = dict(
-        enabled=None,
-        out=str(out),
-        seq_length=8192,
-        make_vocab_size_divisible_by=128,
-        olmo3_rope_layout="per_type",
-    )
-    converted = []
-
-    def fake_convert(hf_path, megatron_path, o):
-        assert not (Path(megatron_path) / flow.CONVERT_RECORD).exists()  # written after the save
-        converted.append(dict(o))
-        Path(megatron_path).mkdir(parents=True, exist_ok=True)
-        (Path(megatron_path) / "latest_checkpointed_iteration.txt").write_text("1")
-
-    monkeypatch.setattr(mod, "native_convert_checkpoint", fake_convert)
-    monkeypatch.setenv("NODE_RANK", "0")
-    mod._native_main(str(hf), dict(opts))
-    record = json.loads((out / flow.CONVERT_RECORD).read_text())
-    assert record == {
-        "family": "olmo3",
-        "converter_version": flow.CONVERTER_VERSION,
-        "hf_path": os.path.realpath(hf),
-        "hf_config_sha256": record["hf_config_sha256"],
-        "hf_weights_fingerprint": flow.weights_fingerprint(str(hf)),
-        "dtype": "bf16",
-        "make_vocab_size_divisible_by": 128,
-        "olmo3_rope_layout": "per_type",
-    }
-    assert Path(f"{out}.done").exists() and not Path(f"{out}.converting.lock").exists()
-    assert not flow.failed_marker(out).exists()
-    (hf / "training_args.bin.txt").write_bytes(b"x")
-    (hf / "optimizer.pt").write_bytes(b"y")
-    for change in (
-        {},
-        dict(seq_length=4096),
-        dict(olmo3_rope_layout=None),
-    ):  # None: per_type for a flat config
-        mod._native_main(str(hf), {**opts, **change})
-        assert "skipping conversion" in capsys.readouterr().out
-    assert len(converted) == 1
-    for change in (
-        dict(make_vocab_size_divisible_by=64),
-        dict(dtype="fp32"),
-        dict(olmo3_rope_layout="yarn_all"),
-    ):
-        with pytest.raises(SystemExit):
-            mod._native_main(str(hf), {**opts, **change})
-        assert "cannot be reused" in capsys.readouterr().err
-        assert "cannot be reused" in json.loads(flow.failed_marker(out).read_text())["reason"]
-    # another HF dir with the same basename (same config.json, other weights) is not reused
-    other = _olmo3_hf_dir(tmp_path / "elsewhere")
-    (other / "model-1.safetensors").write_bytes(b"w" * 9)
-    with pytest.raises(SystemExit):
-        mod._native_main(str(other), dict(opts))
-    err = capsys.readouterr().err
-    assert "hf_weights_fingerprint" in err and "hf_path:" not in err  # hf_path is not compared
-    # an older converter's checkpoint is not reused
-    record["converter_version"] = 0
-    (out / flow.CONVERT_RECORD).write_text(json.dumps(record))
-    with pytest.raises(SystemExit):
-        mod._native_main(str(hf), dict(opts))
-    assert "converter_version" in capsys.readouterr().err
-    (out / flow.CONVERT_RECORD).unlink()  # a killed conversion (tracker, no record): not reused
-    with pytest.raises(SystemExit):
-        mod._native_main(str(hf), dict(opts))
-    assert "has no primus_native_convert.json" in capsys.readouterr().err
-    assert len(converted) == 1
-
-
-def test_convert_hook_olmo3_conversion_failure_writes_marker(monkeypatch, tmp_path):
-    """Rank 0: a conversion that raises leaves <out>.failed with the reason (and no lock); a new
-    conversion removes an old marker first."""
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    hf = _olmo3_hf_dir(tmp_path)
-    out = tmp_path / "out"
-
-    def boom(*a):
-        raise RuntimeError("shape mismatch in layer 3")
-
-    monkeypatch.setattr(mod, "native_convert_checkpoint", boom)
-    monkeypatch.setenv("NODE_RANK", "0")
-    for key in flow.LAUNCH_ID_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("SLURM_JOB_ID", "77")
-    with pytest.raises(RuntimeError, match="shape mismatch"):
-        mod._native_main(str(hf), dict(enabled=None, out=str(out)))
-    data = json.loads(flow.failed_marker(out).read_text())
-    assert data["reason"] == "RuntimeError: shape mismatch in layer 3" and data["launch"] == "SLURM_JOB_ID=77"
-    assert not Path(f"{out}.converting.lock").exists()
-
-    def ok(hf_path, megatron_path, o):
-        assert not flow.failed_marker(out).exists()  # removed before the conversion
-        Path(megatron_path).mkdir(parents=True, exist_ok=True)
-        (Path(megatron_path) / "latest_checkpointed_iteration.txt").write_text("1")
-
-    monkeypatch.setattr(mod, "native_convert_checkpoint", ok)
-    mod._native_main(str(hf), dict(enabled=None, out=str(out)))
-    assert (out / flow.CONVERT_RECORD).exists()
-
-
-def test_convert_hook_olmo3_other_nodes_wait_for_a_ready_checkpoint(monkeypatch, tmp_path):
-    """OLMo-3, node 1: it waits until the checkpoint has its tracker and a matching record; an old
-    .done does not release it, and a .done is not needed (a ready checkpoint ends the wait). The
-    timeout is native_ckpt_wait_timeout (default 3600 s), counted on a monotonic clock, and its
-    message says what was seen."""
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    hf = _olmo3_hf_dir(tmp_path)
-    out = tmp_path / "out"
-    Path(f"{out}.done").touch()  # an earlier launch's marker
-    want = flow.convert_record(str(hf), {}, "bf16")
-    clock, steps = [0.0], []
-    lock = Path(f"{out}.converting.lock")
-
-    def sleep(s):
-        steps.append(s)
-        clock[0] += s
-        if len(steps) == 1:
-            lock.touch()  # rank 0 converting
-        if len(steps) == 2:  # rank 0: weights + tracker, record not written yet
-            out.mkdir()
-            (out / "latest_checkpointed_iteration.txt").write_text("1")
-        if len(steps) == 4:  # rank 0: record written last
-            (out / flow.CONVERT_RECORD).write_text(json.dumps(want))
-            lock.unlink()
-
-    monkeypatch.setattr(flow.time, "sleep", sleep)
-    monkeypatch.setattr(flow.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(mod, "native_convert_checkpoint", lambda *a: pytest.fail("node 1 converted"))
-    monkeypatch.setenv("NODE_RANK", "1")
-    mod._native_main(str(hf), dict(enabled=None, out=str(out)))
-    assert len(steps) == 4
-    steps.clear()
-    mod._native_main(str(hf), dict(enabled=None, out=str(out)))  # ready: no wait
-    assert steps == []
-
-    out2 = tmp_path / "out2"
-    monkeypatch.setattr(flow.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
-    clock[0] = 0.0
-    with pytest.raises(
-        TimeoutError, match="Timeout after 3600 s.*no checkpoint yet.*native_ckpt_wait_timeout"
-    ):
-        mod._native_main(str(hf), dict(enabled=None, out=str(out2)))
-    assert 3600 <= clock[0] < 3610
-    clock[0] = 0.0
-    with pytest.raises(TimeoutError, match="Timeout after 120 s"):
-        mod._native_main(str(hf), dict(enabled=None, out=str(out2), wait_timeout="120"))
-    assert 120 <= clock[0] < 130
-
-
-def test_convert_hook_olmo3_other_nodes_fail_fast(monkeypatch, tmp_path, capsys):
-    """OLMo-3, node 1 stops (exit 1, with the reason) instead of waiting for the timeout when
-    * rank 0 writes <out>.failed for this launch (the conversion raised); or
-    * the checkpoint has a tracker, no lock and a record that does not match (rank 0 refuses it
-      too; node 1 computes the reason itself).
-    A marker of another launch (other SLURM_JOB_ID) does not stop it."""
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    hf = _olmo3_hf_dir(tmp_path)
-    out = tmp_path / "out"
-    clock = [0.0]
-    monkeypatch.setattr(flow.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(mod, "native_convert_checkpoint", lambda *a: pytest.fail("node 1 converted"))
-    monkeypatch.setenv("NODE_RANK", "1")
-    for key in flow.LAUNCH_ID_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("SLURM_JOB_ID", "5")
-
-    flow.failed_marker(out).write_text(json.dumps({"reason": "old", "launch": "SLURM_JOB_ID=4", "time": 0}))
-
-    def sleep(s):
-        clock[0] += s
-        if clock[0] == 10:  # rank 0 of this launch fails
-            marker = flow.failed_marker(out)
-            marker.write_text(
-                json.dumps({"reason": "RuntimeError: bad shard", "launch": "SLURM_JOB_ID=5", "time": 1})
-            )
-            later = marker.stat().st_mtime + 1  # a coarse mtime could equal the wait's start
-            os.utime(marker, (later, later))
-
-    monkeypatch.setattr(flow.time, "sleep", sleep)
-    with pytest.raises(SystemExit):
-        mod._native_main(str(hf), dict(enabled=None, out=str(out)))
-    assert "rank 0 failed to convert the checkpoint: RuntimeError: bad shard" in capsys.readouterr().err
-    assert clock[0] == 10  # the old launch's marker did not stop it, this one did at once
-
-    flow.failed_marker(out).unlink()
-    out.mkdir()
-    (out / "latest_checkpointed_iteration.txt").write_text("1")  # stale: no record, no lock
-    monkeypatch.setattr(flow.time, "sleep", lambda s: pytest.fail("waited on a stale checkpoint"))
-    with pytest.raises(SystemExit):
-        mod._native_main(str(hf), dict(enabled=None, out=str(out)))
-    assert "cannot be reused: it has no primus_native_convert.json" in capsys.readouterr().err
-
-
-def test_convert_hook_olmo3_failure_marker_without_launch_id(monkeypatch, tmp_path):
-    """Without a launch id, a marker counts only if the storage wrote it after the wait started
-    (a storage time, no slack): an earlier launch's marker is never taken; no storage time, no marker."""
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    for key in flow.LAUNCH_ID_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    out = tmp_path / "out"
-    flow.write_failure(out, "boom")
-    assert json.loads(flow.failed_marker(out).read_text())["launch"] is None
-    now = flow.failed_marker(out).stat().st_mtime
-    assert flow.read_failure(out, since=now - 1) == "boom"
-    assert flow.read_failure(out, since=now) is None  # written before (or as) the wait started
-    assert flow.read_failure(out, since=None) is None
-    since = flow._storage_now(out, 1)
-    assert since is not None and not Path(f"{out}.waiting.node1").exists()
-
-
-def test_olmo3_conversion_lock_has_an_owner(monkeypatch, tmp_path):
-    """Rank 0 takes <out>.converting.lock with O_EXCL and its owner. A lock of a dead process on
-    this host is replaced; a lock held by another host (or a live process) stops rank 0 at once with
-    the owner and what to do, and writes <out>.failed so the other nodes stop too. The conversion
-    goes to <out>.partial and is renamed to <out> with its record, so a killed conversion never
-    leaves a partial <out>; its <out>.partial is deleted by the next owner."""
-    import json
-    import socket
-    from types import SimpleNamespace
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    monkeypatch.setattr(flow, "convert_record", lambda *a: {"family": "olmo3"})
-    log = SimpleNamespace(info=lambda m: None, error=lambda m: None, success=lambda m: None)
-    out = tmp_path / "out"
-    seen = []
-
-    def convert(hf, path, opts):
-        seen.append(path)
-        assert json.loads(flow.lock_path(out).read_text())["pid"] == os.getpid()
-        Path(path).mkdir(parents=True)
-        (Path(path) / "latest_checkpointed_iteration.txt").write_text("1")
-
-    # a stale lock (dead pid on this host) and a partial directory of a killed conversion
-    flow.lock_path(out).write_text(
-        json.dumps({"host": socket.gethostname(), "pidns": flow._pid_namespace(), "pid": 2**22 + 12345})
-    )
-    flow.partial_path(out).mkdir()
-    (flow.partial_path(out) / "junk").write_text("x")
-    flow.run_native_flow("/hf", out, {}, convert, "bf16", 0, log)
-    assert seen == [str(flow.partial_path(out))] and not flow.partial_path(out).exists()
-    assert (out / flow.CONVERT_RECORD).exists() and not (out / "junk").exists()
-    assert not flow.lock_path(out).exists()
-
-    out2 = tmp_path / "out2"
-    flow.lock_path(out2).write_text(json.dumps({"host": "other-node", "pid": 1}))
-    with pytest.raises(flow.ConversionFailed, match="other-node.*delete the lock"):
-        flow.run_native_flow("/hf", out2, {}, convert, "bf16", 0, log)
-    assert "other-node" in json.loads(flow.failed_marker(out2).read_text())["reason"]
-    assert flow.lock_path(out2).exists()  # not ours: left in place
-
-    flow.lock_path(out2).unlink()
-
-    def crash(hf, path, opts):
-        Path(path).mkdir(parents=True)
-        (Path(path) / "latest_checkpointed_iteration.txt").write_text("1")
-        raise RuntimeError("killed")
-
-    with pytest.raises(RuntimeError):
-        flow.run_native_flow("/hf", out2, {}, crash, "bf16", 0, log)
-    assert not out2.exists() and not flow.lock_path(out2).exists()  # <out> is never partial
-
-    out3 = tmp_path / "out3"
-    out3.mkdir()
-    (out3 / "stray").write_text("x")  # not a checkpoint: refused, not overwritten
-    with pytest.raises(flow.ConversionFailed, match="holds no checkpoint"):
-        flow.run_native_flow("/hf", out3, {}, convert, "bf16", 0, log)
-
-
-def test_olmo3_failure_marker_of_an_earlier_launch_with_the_same_id(monkeypatch, tmp_path):
-    """A rerun outside a scheduler has the same MASTER_ADDR:MASTER_PORT id; an old marker (written
-    before this node started waiting) is still not taken, a new one is."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    for key in flow.LAUNCH_ID_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("MASTER_ADDR", "node0")
-    monkeypatch.setenv("MASTER_PORT", "29500")
-    out = tmp_path / "out"
-    flow.write_failure(out, "old launch failure")
-    old = flow.failed_marker(out).stat().st_mtime
-    assert flow.read_failure(out, since=old) is None
-    assert flow.read_failure(out, since=None) is None
-    assert flow.read_failure(out, since=old - 1) == "old launch failure"
-    monkeypatch.setenv("MASTER_PORT", "29501")  # another launch's id: never taken
-    assert flow.read_failure(out, since=old - 1) is None
-
-
-def test_olmo3_weights_fingerprint_reads_the_weight_bytes(tmp_path):
-    """Two checkpoints with the same index file and shard names / sizes but other weights (base vs.
-    instruct) have different fingerprints; a copy has the same one."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    dirs = []
-    for name, fill in (("base", b"a"), ("instruct", b"b"), ("copy", b"a")):
-        d = tmp_path / name
-        d.mkdir()
-        (d / "model.safetensors.index.json").write_text('{"weight_map": {"w": "model-1.safetensors"}}')
-        (d / "model-1.safetensors").write_bytes(fill * (3 * 1024 * 1024 + 7))
-        dirs.append(flow.weights_fingerprint(str(d)))
-    assert dirs[0] != dirs[1] and dirs[0] == dirs[2]
-
-
-def test_olmo3_failure_marker_launch_id_parts(monkeypatch):
-    """The launch id joins every source, so another srun step or a requeue is another launch."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    for key in flow.LAUNCH_ID_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    assert flow._launch_id() is None
-    monkeypatch.setenv("SLURM_JOB_ID", "5")
-    monkeypatch.setenv("SLURM_STEP_ID", "0")
-    first = flow._launch_id()
-    monkeypatch.setenv("SLURM_STEP_ID", "1")
-    assert flow._launch_id() != first
-    monkeypatch.setenv("SLURM_RESTART_COUNT", "1")
-    monkeypatch.setenv("PRIMUS_LAUNCH_ID", "run-a")
-    assert flow._launch_id().startswith("PRIMUS_LAUNCH_ID=run-a;SLURM_JOB_ID=5")
-
-
-def test_olmo3_rope_layout_option_is_normalised_once(tmp_path):
-    """converter_options and the record use the same normalised olmo3_rope_layout; a bad value is
-    refused at option parsing."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    assert flow.converter_options({"olmo3_rope_layout": " Per_Type "})["rope_layout"] == "per_type"
-    assert "rope_layout" not in flow.converter_options({"olmo3_rope_layout": "null"})
-    for bad in ("auto", "yarn"):
-        with pytest.raises(ValueError, match="olmo3_rope_layout"):
-            flow.converter_options({"olmo3_rope_layout": bad})
-
-
-def test_olmo3_record_ignores_hf_path(tmp_path):
-    """A node that sees the HF directory at another path reuses the checkpoint: hf_path is kept in
-    the record for information, not compared."""
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    out = tmp_path / "ckpt"
-    out.mkdir()
-    have = {"family": "olmo3", "hf_path": "/mnt/a/model", "hf_config_sha256": "x"}
-    (out / flow.CONVERT_RECORD).write_text(json.dumps(have))
-    assert flow.stale_checkpoint_reason(out, {**have, "hf_path": "/cache/model"}) is None
-    assert "hf_config_sha256" in flow.stale_checkpoint_reason(out, {**have, "hf_config_sha256": "y"})
-
-
-def test_olmo3_record_rope_layout(tmp_path):
-    """The record's olmo3_rope_layout is what convert() saves: per_type for a flat config, the
-    config's own layout for a per-layer-type config; auto and a conflict are refused."""
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    hf = _olmo3_hf_dir(tmp_path)
-    assert flow._record_rope_layout(str(hf), {}) == "per_type"
-    assert flow._record_rope_layout(str(hf), dict(olmo3_rope_layout="yarn_all")) == "yarn_all"
-    with pytest.raises(ValueError, match="not auto"):
-        flow._record_rope_layout(str(hf), dict(olmo3_rope_layout="auto"))
-    yarn = dict(_OLMO3_HF_CFG["rope_scaling"])
-    cfg = dict(
-        _OLMO3_HF_CFG, rope_scaling=None, rope_parameters={"full_attention": yarn, "sliding_attention": yarn}
-    )
-    (hf / "config.json").write_text(json.dumps(cfg))
-    assert flow._record_rope_layout(str(hf), {}) == "yarn_all"
-    with pytest.raises(ValueError, match="declares olmo3_rope_layout 'yarn_all'"):
-        flow._record_rope_layout(str(hf), dict(olmo3_rope_layout="per_type"))
-
-
-def test_convert_hook_layout_keys(monkeypatch, tmp_path):
-    """Every family converts at TP = PP = EP = 1, as at the base hook (its opts had no layout
-    keys); Megatron reshards at load. The training layout (``*_model_parallel_size``) is read only
-    by the OLMo-3 flow's checks, never as the conversion layout of any family."""
-    import json
-    import sys
-    import types
-
-    mod = _load_convert_hook(monkeypatch)
-    calls = []
-    fake = types.ModuleType("primus.backends.megatron.checkpoint.native_loader_llama")
-    fake.convert = lambda *a, **k: calls.append(k)
-    monkeypatch.setitem(sys.modules, fake.__name__, fake)
-    import primus.backends.megatron.checkpoint as pkg
-
-    monkeypatch.setattr(pkg, "native_loader_llama", fake, raising=False)
-    (tmp_path / "config.json").write_text(json.dumps({"model_type": "llama", "torch_dtype": "bfloat16"}))
-    opts = dict(
-        family="llama",
-        tensor_model_parallel_size=2,
-        pipeline_model_parallel_size="2",
-        expert_model_parallel_size=8,
-        tensor_parallel_size=2,
-    )
-    mod.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), opts)
-    assert [
-        (k["tensor_parallel_size"], k["pipeline_parallel_size"], k["expert_parallel_size"]) for k in calls
-    ] == [(1, 1, 1)]
-    # the other families keep TP = PP = EP = 1 and get a warning when the run trains otherwise
-    msgs = []
-    monkeypatch.setattr(mod, "log_info", msgs.append)
-    mod._warn_single_shard_layout("deepseek", {"expert_model_parallel_size": 8})
-    assert len(msgs) == 1 and "single-shard" in msgs[0] and "'expert_model_parallel_size': 8" in msgs[0]
-    mod._warn_single_shard_layout("qwen3", {"tensor_model_parallel_size": "1"})
-    mod._warn_single_shard_layout("qwen3", {})
-    assert len(msgs) == 1
-    mod._warn_single_shard_layout("llama", {"pipeline_model_parallel_size": "two"})
-    assert len(msgs) == 2 and "unreadable" in msgs[1]
-
-
-def test_convert_hook_other_families_keep_the_base_flow(monkeypatch, tmp_path):
-    """Qwen3 / Llama / DeepSeek launches behave as before the port: TP / PP / EP > 1 (the shipped
-    MoE SFT recipes use EP 8) still convert, in place, with no record, and an existing checkpoint is reused.
-    """
-    import json
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    hf = tmp_path / "hf"
-    hf.mkdir()
-    (hf / "config.json").write_text(
-        json.dumps({"architectures": ["Qwen3MoeForCausalLM"], "model_type": "qwen3_moe"})
-    )
-    out = tmp_path / "out"
-    calls = []
-
-    def fake_convert(hf_path, megatron_path, o):
-        calls.append(megatron_path)
-        Path(megatron_path).mkdir(parents=True, exist_ok=True)
-        (Path(megatron_path) / "latest_checkpointed_iteration.txt").write_text("1")
-
-    monkeypatch.setattr(mod, "native_convert_checkpoint", fake_convert)
-    monkeypatch.setattr(flow, "convert_record", lambda *a: pytest.fail("record built for qwen3"))
-    _stub_hook_config(
-        mod,
-        monkeypatch,
-        str(hf),
-        dict(out=str(out), tensor_model_parallel_size=1, expert_model_parallel_size=8),
-    )
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", str(tmp_path / "x.yaml")])
-    monkeypatch.setenv("NODE_RANK", "0")
-    mod.main()
-    assert calls == [str(out)] and (tmp_path / "out.done").exists()
-    assert not (out / flow.CONVERT_RECORD).exists()
-    mod.main()  # reused
-    assert len(calls) == 1
-
-
-def test_convert_hook_and_install_hook_decide_the_same_way(monkeypatch, tmp_path):
-    """00_install_requirements.sh runs read_hook_settings + conversion_plan on the arguments
-    execute_hooks.sh forwards, the same calls as 01's main(); e.g. --native_ckpt_convert false
-    turns a Qwen3 run to the Bridge path (install) in both, and an OLMo-3 run is never the Bridge
-    path. The install hook's Python block is run here as the shell runs it."""
-    import json
-    import re as re_
-    import sys
-
-    mod = _load_convert_hook(monkeypatch)
-    qwen = tmp_path / "qwen"
-    qwen.mkdir()
-    (qwen / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
-    params = SimpleNamespace(hf_path=str(qwen), native_ckpt_convert=None, model_type="gpt")
-    module = SimpleNamespace(name="post_trainer", params=params)
-    monkeypatch.setattr(mod, "load_primus_config", lambda *a: SimpleNamespace(modules=[module]))
-    plan = lambda cli: mod.conversion_plan(*mod.read_hook_settings("x.yaml", cli))  # noqa: E731
-    assert plan(["train", "posttrain"]) == "native"
-    assert plan(["train", "posttrain", "--native_ckpt_convert", "false"]) == "bridge"
-    assert plan(["train", "posttrain", "--load", "/ck"]) == "skip"
-    assert plan(["--hf_path", "allenai/Olmo-3-1025-7B", "--native_ckpt_convert", "false"]) == "refuse"
-    assert plan(["--hf_path", "allenai/Olmo-3-1025-7B"]) == "native"
-    assert plan(["--hf_path", "Qwen/Qwen3-8B"]) == "bridge"
-
-    # the install hook's Python block, run with the hook module patched above: the same decisions
-    script = _INSTALL_HOOK.read_text()
-    block = re_.search(r"<<'PY'\n(.*?)\nPY\n", script, re_.S).group(1)
-    import contextlib
-    import importlib.util
-    import io
-
-    class _Loader:
-        def exec_module(self, _module):
-            pass
-
-    monkeypatch.setattr(
-        importlib.util, "spec_from_file_location", lambda *a: SimpleNamespace(loader=_Loader())
-    )
-    monkeypatch.setattr(importlib.util, "module_from_spec", lambda spec: mod)
-
-    def install_decision(forwarded):
-        monkeypatch.setattr(sys, "argv", ["-", "x.yaml", *forwarded])
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            exec(compile(block, "00_install_requirements.sh", "exec"), {"__name__": "__main__"})
-        return out.getvalue().strip().splitlines()[-1]
-
-    for cli, want in (
-        (["train", "posttrain", "--config", "x.yaml"], "SKIP"),  # native
-        (["train", "posttrain", "--config=x.yaml", "--native_ckpt_convert", "false"], "INSTALL"),
-        (["--config", "x.yaml", "--load", "/ck", "--native_ckpt_convert", "false"], "SKIP"),
-        (["--hf_path", "allenai/Olmo-3-1025-7B", "--native_ckpt_convert", "false"], "SKIP"),  # refused
-        (["--native_ckpt_convert", "maybe"], "SETTINGS_ERROR"),
-    ):
-        assert install_decision(cli) == "__DECISION__:" + want, cli
-
-
-@pytest.mark.parametrize(
-    "fake_python, installs, message",
-    [
-        # an unknown failure (python3 without yaml): legacy fallback, install, reason logged
-        ('echo "No module named yaml" >&2; exit 1', True, "no decision printed -> installing"),
-        ('cat >/dev/null; echo "__REASON__:OSError: x"; echo "__DECISION__:INSTALL"', True, "OSError: x"),
-        # a settings error 01 stops on: nothing installed
-        (
-            'cat >/dev/null; echo "__REASON__:ValueError: bad"; echo "__DECISION__:SETTINGS_ERROR"',
-            False,
-            "conversion settings error: ValueError: bad",
-        ),
-        ('cat >/dev/null; echo "__DECISION__:SKIP"', False, "Megatron-Bridge conversion will not run"),
-    ],
-)
-def test_install_hook_falls_back_to_install_except_on_a_settings_error(
-    tmp_path, fake_python, installs, message
-):
-    """00_install_requirements.sh: only a settings error (a ValueError from read_hook_settings, which
-    01 stops on too) or a SKIP decision installs nothing; any other failure installs, and every
-    failure logs its reason."""
-    import subprocess
-
-    script = _INSTALL_HOOK
-    (tmp_path / "python3").write_text(f"#!/bin/bash\n{fake_python}\n")
-    (tmp_path / "pip").write_text('#!/bin/bash\necho "FAKEPIP $*"\n')
-    for exe in ("python3", "pip"):
-        (tmp_path / exe).chmod(0o755)
-    env = {
-        **os.environ,
-        "PATH": f"{tmp_path}:{os.environ['PATH']}",
-        "DATA_PATH": str(tmp_path),
-        "PRIMUS_SKIP_PIP": "",
-    }
-    out = subprocess.run(
-        ["bash", str(script), "--config", "x.yaml"], env=env, capture_output=True, text=True, check=True
-    )
-    text = out.stdout + out.stderr
-    assert message in text, text
-    assert ("FAKEPIP" in text) is installs, text
-
-
-@pytest.mark.parametrize(
-    "argv, config",
-    [
-        (["train", "posttrain", "--config", "x.yaml"], "x.yaml"),
-        (["train", "posttrain", "--config=x.yaml"], "x.yaml"),
-        (["--config", "a.yaml", "--lr", "1", "--config=b.yaml"], "b.yaml"),  # the last one wins
-        (["--config=a.yaml", "--config", "/abs/b.yaml"], "/abs/b.yaml"),
-    ],
-)
-def test_install_hook_finds_the_config_in_both_forms(tmp_path, argv, config):
-    """00_install_requirements.sh takes --config <file> and --config=<file> (the last one wins, as
-    01's argparse): the decision runs on that file, so a native / skip run installs nothing."""
-    import subprocess
-
-    script = _INSTALL_HOOK
-    seen = tmp_path / "argv.txt"
-    (tmp_path / "python3").write_text(
-        f'#!/bin/bash\nprintf "%s\\n" "$@" > {seen}\ncat >/dev/null\necho "__DECISION__:SKIP"\n'
-    )
-    (tmp_path / "pip").write_text('#!/bin/bash\necho "FAKEPIP $*"\n')
-    for exe in ("python3", "pip"):
-        (tmp_path / exe).chmod(0o755)
-    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "DATA_PATH": str(tmp_path)}
-    env.pop("PRIMUS_SKIP_PIP", None)
-    out = subprocess.run(["bash", str(script), *argv], env=env, capture_output=True, text=True, check=True)
-    text = out.stdout + out.stderr
-    assert "FAKEPIP" not in text and "Megatron-Bridge conversion will not run" in text, text
-    want = config if config.startswith("/") else str(_REPO_ROOT / config)
-    # python3 - <config file> <the forwarded args>
-    assert seen.read_text().splitlines()[:2] == ["-", want]
-
-
-def test_install_hook_settings_error_is_only_a_read_hook_settings_value_error(tmp_path):
-    """The decision script in 00_install_requirements.sh: a ValueError raised by read_hook_settings
-    is a settings error (01 stops on the same one); a ValueError from conversion_plan, such as a
-    corrupt HF config.json (json.JSONDecodeError), is not one: the dependencies are installed."""
-    import re
-    import subprocess
-    import sys
-
-    script = _INSTALL_HOOK.read_text()
-    decision = re.search(r"<<'PY'\n(.*?)\nPY\n", script, re.S).group(1)
-    hook_dir = tmp_path / "runner/helpers/hooks/train/posttrain/megatron"
-    hook_dir.mkdir(parents=True)
-    cases = {
-        "settings": ("raise ValueError('native_ckpt_convert must be true or false')", "return 'native'"),
-        "corrupt_config": ("return 'hf', None, {}", "import json; json.loads('{')"),
-        "bridge": ("return 'hf', None, {}", "return 'bridge'"),
-        "native": ("return 'hf', None, {}", "return 'native'"),
-    }
-    seen = {}
-    for name, (read, plan) in cases.items():
-        (hook_dir / "01_convert_checkpoints.py").write_text(
-            f"def read_hook_settings(cfg, overrides):\n    {read}\n\n"
-            f"def conversion_plan(hf_path, pretrained, opts):\n    {plan}\n"
-        )
-        out = subprocess.run(
-            [sys.executable, "-", "x.yaml", "--config", "x.yaml"],
-            input=decision,
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        seen[name] = re.search(r"__DECISION__:(\w+)", out).group(1)
-        if name == "corrupt_config":
-            assert "__REASON__:JSONDecodeError" in out, out
-    assert seen == {
-        "settings": "SETTINGS_ERROR",
-        "corrupt_config": "INSTALL",
-        "bridge": "INSTALL",
-        "native": "SKIP",
-    }
-
-
-def test_install_hook_forwards_the_overrides_01_reads(tmp_path):
-    """The decision script passes read_hook_settings the arguments execute_hooks.sh forwards with
-    ``--config <file>`` / ``--config=<file>`` removed and every other token kept in order, the list
-    01's main() reads after argparse removes --config; the decision follows those overrides."""
-    import json
-    import re
-    import subprocess
-    import sys
-
-    script = _INSTALL_HOOK.read_text()
-    decision = re.search(r"<<'PY'\n(.*?)\nPY\n", script, re.S).group(1)
-    hook_dir = tmp_path / "runner/helpers/hooks/train/posttrain/megatron"
-    hook_dir.mkdir(parents=True)
-    record = tmp_path / "seen.json"
-    (hook_dir / "01_convert_checkpoints.py").write_text(
-        "import json\n\n"
-        "def read_hook_settings(cfg, overrides):\n"
-        f"    json.dump([cfg, overrides], open({str(record)!r}, 'w'))\n"
-        "    off = overrides[overrides.index('--native_ckpt_convert') + 1] == 'false' "
-        "if '--native_ckpt_convert' in overrides else False\n"
-        "    return 'hf', None, {'enabled': False if off else None}\n\n"
-        "def conversion_plan(hf_path, pretrained, opts):\n"
-        "    return 'bridge' if opts['enabled'] is False else 'native'\n"
-    )
-
-    def run(*forwarded):
-        out = subprocess.run(
-            [sys.executable, "-", "/abs/x.yaml", *forwarded],
-            input=decision,
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        return re.search(r"__DECISION__:(\w+)", out).group(1), json.loads(record.read_text())
-
-    want = ["train", "posttrain", "--native_ckpt_convert", "false", "--load=/ck", "x=1"]
-    for forwarded in (
-        ["train", "posttrain", "--config", "x.yaml", "--native_ckpt_convert", "false", "--load=/ck", "x=1"],
-        ["train", "posttrain", "--native_ckpt_convert", "false", "--config=x.yaml", "--load=/ck", "x=1"],
-        ["train", "posttrain", "--native_ckpt_convert", "false", "--load=/ck", "x=1", "--config", "x.yaml"],
-    ):
-        assert run(*forwarded) == ("INSTALL", ["/abs/x.yaml", want]), forwarded
-    assert run("--config", "x.yaml") == ("SKIP", ["/abs/x.yaml", []])
-    assert run("--config", "x.yaml", "--native_ckpt_convert", "true")[0] == "SKIP"
-
-
-def test_convert_hook_cli_values_drop_only_the_hook_target(monkeypatch):
-    """At most the two leading <group> <name> tokens are dropped; the rest is parsed as the trainer
-    parses overrides (a bare --flag is true, dashed keys are underscore keys)."""
-    mod = _load_convert_hook(monkeypatch)
-    assert mod._cli_values(["train", "posttrain", "--load", "/ck"]) == {"load": "/ck"}
-    assert mod._cli_values(["--load", "/ck"]) == {"load": "/ck"}
-    assert mod._cli_values(["train", "posttrain", "x=1", "--native-ckpt-out", "/o"]) == {
-        "x": 1,
-        "native_ckpt_out": "/o",
-    }
-    assert mod._cli_values(["train", "posttrain", "--flag"]) == {"flag": True}
-    # a bare path flag names no path: dropped, so it is not a configured checkpoint
-    for key in ("load", "pretrained_checkpoint", "hf_path"):
-        assert mod._cli_values(["train", "posttrain", f"--{key}"]) == {}
-        assert mod._cli_values(["train", "posttrain", f"--{key}", "--x", "1"]) == {"x": 1}
-    assert "stray" not in mod._cli_values(["train", "posttrain", "stray", "--a", "1"])
-
-
-def test_convert_hook_resolves_an_olmo3_hub_id(monkeypatch, tmp_path):
-    """The preset's tokenizer_model is a hub id: an OLMo-3 run resolves it to a local snapshot
-    (cache, else download) and converts it natively; the output is named after the model, not the
-    snapshot hash. The other families keep the fixed wait (no native_ckpt_wait_timeout)."""
-    import json
-
-    mod = _load_convert_hook(monkeypatch)
-    snap = tmp_path / "snapshots" / "a81bae42"
-    snap.mkdir(parents=True)
-    (snap / "config.json").write_text(json.dumps({"model_type": "olmo3"}))
-    resolve = mod._resolve_hub_snapshot
-    assert resolve(str(snap), {}) is None  # a local path is not a hub id
-    monkeypatch.setattr(mod, "_resolve_hub_snapshot", lambda hf, opts: str(snap))
-    monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
-    seen = []
-    monkeypatch.setattr(mod, "_native_main", lambda hf, opts, fam=None: seen.append((hf, fam, opts["out"])))
-    opts = dict(enabled=None, model_type="olmo3", out=None, tensor_model_parallel_size=1)
-    mod._main("allenai/Olmo-3-1025-7B", None, opts)
-    assert seen == [(str(snap), "olmo3", str(tmp_path / "data/megatron_checkpoints/Olmo-3-1025-7B_native"))]
-    import inspect
-
-    assert not hasattr(mod, "_wait_timeout")
-    assert inspect.signature(mod.wait_for_conversion).parameters["timeout"].default == 600
-
-
-def test_olmo3_hub_snapshot_is_complete_and_only_rank0_downloads(monkeypatch, tmp_path):
-    """A snapshot needs config.json and its safetensors weights (every shard of the index). Rank 0
-    reads the cache, then downloads; a waiting node only reads the cache and stops when rank 0
-    writes <out>.failed."""
-    import json
-    import sys
-    import types
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    snap = tmp_path / "snap"
-    snap.mkdir()
-    foreign = tmp_path / "foreign"
-    foreign.mkdir()
-    (foreign / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
-    assert "config.json" in flow.snapshot_incomplete_reason(snap)
-    (snap / "config.json").write_text(json.dumps({"model_type": "olmo3"}))
-    assert "safetensors" in flow.snapshot_incomplete_reason(snap)
-    # a shard landed before the index (download in progress): incomplete, not "any safetensors"
-    shard = snap / "model-00001-of-00003.safetensors"
-    shard.write_bytes(b"x")
-    assert "index" in flow.snapshot_incomplete_reason(snap)
-    shard.unlink()
-    single = tmp_path / "single"
-    single.mkdir()
-    (single / "config.json").write_text(json.dumps({"model_type": "olmo3"}))
-    (single / "model.safetensors").write_bytes(b"x")
-    assert flow.snapshot_incomplete_reason(single) is None  # one unsharded file needs no index
-    (snap / "model.safetensors.index.json").write_text(
-        json.dumps({"weight_map": {"a": "m-1.safetensors", "b": "m-2.safetensors"}})
-    )
-    (snap / "m-1.safetensors").write_bytes(b"x")
-    assert "m-2.safetensors" in flow.snapshot_incomplete_reason(snap)
-    (snap / "m-2.safetensors").write_bytes(b"x")
-    assert flow.snapshot_incomplete_reason(snap) is None
-    assert flow.is_hub_id("allenai/Olmo-3-1025-7B") and not flow.is_hub_id(str(snap))
-
-    calls, config_reads = [], []
-    cached = {"ok": False}
-
-    def snapshot_download(repo, allow_patterns, local_files_only):
-        if allow_patterns == ["config.json"]:  # the model-type check reads config.json only
-            config_reads.append(repo)
-            return str(foreign if repo == "Qwen/Qwen3-8B" else snap)
-        calls.append(local_files_only)
-        if local_files_only and not cached["ok"]:
-            raise FileNotFoundError("not cached")
-        return str(snap)
-
-    monkeypatch.setitem(
-        sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=snapshot_download)
-    )
-    monkeypatch.delenv("PRIMUS_LAUNCH_ID", raising=False)
-    log = types.SimpleNamespace(info=lambda m: None, error=lambda m: None, success=lambda m: None)
-    out = tmp_path / "out"
-    assert flow.resolve_hub_snapshot("org/olmo-3", out, {}, 0, log) == str(snap)
-    assert calls == [True, False]
-    calls.clear()
-    cached["ok"] = True
-    assert flow.resolve_hub_snapshot("org/olmo-3", out, {}, 1, log, poll=0.01) == str(snap)
-    assert calls == [True]  # a waiting node never downloads
-
-    # rank 0 cannot get it: it writes <out>.failed; a waiting node stops with it
-    cached["ok"] = False
-    calls.clear()
-    monkeypatch.setenv("PRIMUS_LAUNCH_ID", "launch-7")
-    (snap / "m-2.safetensors").unlink()
-    assert flow.resolve_hub_snapshot("org/olmo-3", out, {}, 0, log) is None
-    assert "m-2.safetensors" in flow.FailureWatch(out, None, grace=0).check()
-    calls.clear()
-    monkeypatch.setattr(flow, "MARKER_GRACE", 0)  # the marker predates the wait (same process)
-    assert flow.resolve_hub_snapshot("org/olmo-3", out, {"wait_timeout": 30}, 1, log, poll=0.01) is None
-    assert set(calls) == {True}
-
-    # a hub id of another family (model_type olmo3 runs it as OLMo-3): rank 0 reads its config.json
-    # only and stops, before any weights are downloaded; the waiting nodes stop with it
-    calls.clear()
-    errors = []
-    log = types.SimpleNamespace(info=lambda m: None, error=errors.append, success=lambda m: None)
-    assert flow.resolve_hub_snapshot("Qwen/Qwen3-8B", out, {}, 0, log) is None
-    assert calls == [] and config_reads[-1] == "Qwen/Qwen3-8B"
-    assert "model_type 'qwen3'" in errors[-1] and "qwen3" in flow.FailureWatch(out, None, grace=0).check()
-
-
-def test_olmo3_lock_owner_rules(monkeypatch, tmp_path):
-    """A lock is stale only on this host and PID namespace with a dead pid or this process's pid (a
-    relaunch with the same pid); another namespace or host is a running owner. release_lock removes
-    only a lock this process wrote. Rank 0 checks the output again under the lock: a checkpoint
-    written meanwhile is reused, not converted again and not marked failed."""
-    import json
-    import socket
-    from types import SimpleNamespace as NS
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    host, ns = socket.gethostname(), flow._pid_namespace()
-    assert flow._lock_is_stale({"host": host, "pidns": ns, "pid": os.getpid()})
-    assert flow._lock_is_stale({"host": host, "pidns": ns, "pid": 2**22 + 12345})
-    assert not flow._lock_is_stale({"host": host, "pidns": "pid:[1]", "pid": 2**22 + 12345})
-    assert not flow._lock_is_stale({"host": "other", "pidns": ns, "pid": 2**22 + 12345})
-    out = tmp_path / "out"
-    flow.lock_path(out).write_text(json.dumps({"host": "other", "pid": 1, "token": "t"}))
-    flow.release_lock(out)
-    assert flow.lock_path(out).exists()
-    flow.lock_path(out).unlink()
-
-    monkeypatch.setattr(flow, "convert_record", lambda *a: {"family": "olmo3"})
-    original = flow.acquire_lock
-
-    def acquire(path):
-        original(path)  # another launch finished just before this one got the lock
-        out.mkdir()
-        (out / "latest_checkpointed_iteration.txt").write_text("1")
-        (out / flow.CONVERT_RECORD).write_text(json.dumps({"family": "olmo3"}))
-
-    monkeypatch.setattr(flow, "acquire_lock", acquire)
-    log = NS(info=lambda m: None, error=lambda m: None, success=lambda m: None)
-    flow.run_native_flow("/hf", out, {}, lambda *a: pytest.fail("converted again"), "bf16", 0, log)
-    assert not flow.failed_marker(out).exists() and not flow.lock_path(out).exists()
-
-
-def test_olmo3_waiting_node_stops_on_early_refusals(monkeypatch, tmp_path):
-    """A waiting node computes rank 0's early refusals itself (a non-empty output without a
-    tracker); a marker rank 0 wrote before the node looked counts once it stays in place for the
-    grace (rank 0 removes stale markers first); a marker of another launch is ignored."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    monkeypatch.setattr(flow.time, "sleep", lambda s: pytest.fail("waited"))
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "junk").write_text("x")
-    with pytest.raises(flow.ConversionFailed, match="holds no checkpoint"):
-        flow.wait_for_checkpoint(out, {"v": 1}, 30, node_rank=1)
-
-    for key in flow.LAUNCH_ID_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("SLURM_JOB_ID", "7")
-    out2 = tmp_path / "out2"
-    flow.write_failure(out2, "lock held")
-    later = flow.failed_marker(out2).stat().st_mtime + 100
-    assert flow.read_failure(out2, since=later) is None  # older than the wait: FailureWatch decides
-    clock = [0.0]
-    monkeypatch.setattr(flow.time, "monotonic", lambda: clock[0])
-    watch = flow.FailureWatch(out2, later)
-    assert watch.check() is None  # may be a stale marker that rank 0 has not removed yet
-    clock[0] = flow.MARKER_GRACE - 1
-    assert watch.check() is None
-    clock[0] = flow.MARKER_GRACE
-    assert "lock held" in watch.check()  # still in place: rank 0 stopped early
-    monkeypatch.setenv("SLURM_JOB_ID", "8")
-    assert flow.FailureWatch(out2, None, grace=0).check() is None  # another launch: never
-
-
-def test_olmo3_failure_watch_ignores_a_marker_that_rank0_clears(monkeypatch, tmp_path):
-    """A marker older than the wait with the same launch id (a retry inside one allocation, a
-    constant PRIMUS_LAUNCH_ID) does not stop the node when rank 0 removes it; a new marker that
-    rank 0 then writes stops the node at once, also in the same mtime second (after the grace)."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    for key in flow.LAUNCH_ID_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("PRIMUS_LAUNCH_ID", "fixed")
-    clock = [0.0]
-    monkeypatch.setattr(flow.time, "monotonic", lambda: clock[0])
-    out = tmp_path / "out"
-    flow.write_failure(out, "previous attempt")
-    mtime = flow.failed_marker(out).stat().st_mtime
-    watch = flow.FailureWatch(out, mtime + 1)
-    assert watch.check() is None
-    clock[0] = 10.0
-    flow.clear_failure(out)  # rank 0's first step
-    assert watch.check() is None
-    clock[0] = flow.MARKER_GRACE + 20
-    assert watch.check() is None  # the stale marker is gone: no stop
-    flow.write_failure(out, "this attempt")  # rank 0 stops; the storage time is coarse
-    os.utime(flow.failed_marker(out), (mtime, mtime))
-    assert watch.check() is None
-    clock[0] += flow.MARKER_GRACE
-    assert "this attempt" in watch.check()
-    later = mtime + 5
-    os.utime(flow.failed_marker(out), (later + 1, later + 1))
-    assert flow.FailureWatch(out, later).check() == "this attempt"  # newer than the wait: at once
-
-
-def test_convert_hook_keeps_the_install_hook_api(monkeypatch, tmp_path):
-    """get_checkpoint_config(cfg) and read_native_opts(cfg) still accept the config path only (the
-    pre-port API; 00_install_requirements.sh now calls read_hook_settings + conversion_plan)."""
-    import json
-    from types import SimpleNamespace
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    hf = tmp_path / "hf"
-    hf.mkdir()
-    (hf / "config.json").write_text(json.dumps({"model_type": "olmo3"}))
-    params = SimpleNamespace(native_ckpt_convert=None, hf_path=str(hf), pretrained_checkpoint=None)
-    monkeypatch.setattr(
-        mod,
-        "load_primus_config",
-        lambda *a: SimpleNamespace(modules=[SimpleNamespace(name="post_trainer", params=params)]),
-    )
-    assert mod.get_checkpoint_config("/c.yaml") == (str(hf), None)
-    assert mod.read_native_opts("/c.yaml")["enabled"] is None
-    params.tensor_model_parallel_size = "${TP:1}"
-    with pytest.raises(ValueError, match="tensor_model_parallel_size"):
-        flow.single_shard_conflict(mod.read_native_opts("/c.yaml", []))
-
-
-def test_convert_hook_reads_cli_overrides_and_preset_defaults(monkeypatch, tmp_path):
-    """Layout and converter settings come from the resolved module params (preset + trainer
-    defaults + YAML overrides) with the trainer's CLI overrides on top."""
-    from types import SimpleNamespace
-
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    mod = _load_convert_hook(monkeypatch)
-    params = SimpleNamespace(
-        tensor_model_parallel_size=1,
-        seq_length=4096,
-        expert_model_parallel_size=1,
-        make_vocab_size_divisible_by=128,
-        native_ckpt_convert=None,
-        hf_path="/hf",
-        tokenizer_model="/tok",
-        pretrained_checkpoint=None,
-        load=None,
-    )
-    module = SimpleNamespace(name="post_trainer", params=params)
-    monkeypatch.setattr(mod, "load_primus_config", lambda *a: SimpleNamespace(modules=[module]))
-    opts = mod.read_native_opts("x.yaml", [])
-    assert (opts["tensor_model_parallel_size"], opts["make_vocab_size_divisible_by"]) == (1, 128)
-    assert "seq_length" not in opts  # no consumer: not collected
-    opts = mod.read_native_opts(
-        "x.yaml",
-        [
-            "train",
-            "posttrain",
-            "--tensor_model_parallel_size",
-            "2",
-            "--seq_length=8192",
-            "--native_ckpt_convert",
-            "false",
-        ],
-    )
-    assert (opts["tensor_model_parallel_size"], opts["enabled"]) == (2, False)
-    assert flow.single_shard_conflict(opts) is not None
-    opts = mod.read_native_opts("x.yaml", ["--expert_model_parallel_size", "8"])
-    assert "expert_model_parallel_size=8" in flow.single_shard_conflict(opts)
-    # dashed CLI keys are the same keys
-    opts = mod.read_native_opts("x.yaml", ["--native-ckpt-out", "/o", "--tensor-model-parallel-size=4"])
-    assert (opts["out"], opts["tensor_model_parallel_size"]) == ("/o", 4)
-    # null on the command line clears the YAML value of that key, as in training (the converter
-    # then uses its default)
-    for null in ("null", "None", "~", ""):
-        opts = mod.read_native_opts("x.yaml", [f"--make_vocab_size_divisible_by={null}"])
-        assert opts["make_vocab_size_divisible_by"] is None
-    params.native_ckpt_out = "null"
-    assert mod.read_native_opts("x.yaml", [])["out"] is None
-    # per key: a YAML hf_path wins over a CLI tokenizer_model (training reads hf_path first)
-    assert mod.get_checkpoint_config("x.yaml", ["--tokenizer_model", "/tok2"]) == ("/hf", None)
-    # a CLI null clears the YAML value: the next key is used (hf_path -> tokenizer_model)
-    assert mod.get_checkpoint_config("x.yaml", ["--hf_path", "null"]) == ("/tok", None)
-    # --load null / pretrained_checkpoint=null clear a YAML checkpoint, so the hook converts
-    params.load = "/yaml_ckpt"
-    assert mod.get_checkpoint_config("x.yaml", []) == ("/hf", "/yaml_ckpt")
-    assert mod.get_checkpoint_config("x.yaml", ["--load", "null"]) == ("/hf", None)
-    params.load, params.pretrained_checkpoint = None, "/yaml_pre"
-    assert mod.get_checkpoint_config("x.yaml", ["pretrained_checkpoint=null"]) == ("/hf", None)
-    assert mod.get_checkpoint_config("x.yaml", ["--pretrained_checkpoint", "~"]) == ("/hf", None)
-    params.pretrained_checkpoint = None
-    assert "load" in mod._cli_values(["--load", "null"]) and "load" in mod._cli_values(["load=null"])
-    # the checkpoint paths read the same CLI overrides as main()
-    assert mod.get_checkpoint_config("x.yaml", []) == ("/hf", None)
-    assert mod.get_checkpoint_config("x.yaml", ["--hf_path", "/hf2", "--pretrained_checkpoint", "/ck"]) == (
-        "/hf2",
-        "/ck",
-    )
-    assert mod.get_checkpoint_config("x.yaml", ["train", "posttrain", "--load=/ld"]) == ("/hf", "/ld")
-    params.hf_path = None
-    assert mod.get_checkpoint_config("x.yaml", ["--tokenizer_model", "/tok2"]) == ("/tok2", None)
-    params.hf_path = "null"
-    assert mod.get_checkpoint_config("x.yaml", []) == ("/tok", None)
-    # the order the hook always had: params (hf_path, then tokenizer_model) before the module itself
-    params.hf_path, module.hf_path = None, "/module_hf"
-    assert mod.get_checkpoint_config("x.yaml", []) == ("/tok", None)
-    params.tokenizer_model = None
-    assert mod.get_checkpoint_config("x.yaml", []) == ("/module_hf", None)
-
-
-def test_convert_hook_reads_every_family_the_same_way(monkeypatch, tmp_path, capsys):
-    """One reading for all families: the command line applies (hf_path, load, native_ckpt_*), null /
-    ~ / none are unset, and native_ckpt_convert is a switch. So a CLI hf_path decides the family
-    (no YAML family leaks through), and a CLI --load skips the conversion for Qwen3 too."""
-    import json
-
-    mod = _load_convert_hook(monkeypatch)
-    qwen = tmp_path / "qwen"
-    qwen.mkdir()
-    (qwen / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
-    olmo = tmp_path / "olmo"
-    olmo.mkdir()
-    (olmo / "config.json").write_text(json.dumps({"model_type": "olmo3"}))
-    params = SimpleNamespace(hf_path=str(olmo), load="null", native_ckpt_convert=None, model_type="gpt")
-    module = SimpleNamespace(name="post_trainer", params=params)
-    loads = []
-    monkeypatch.setattr(
-        mod, "load_primus_config", lambda *a: loads.append(a) or SimpleNamespace(modules=[module])
-    )
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", str(tmp_path / "x.yaml"), "--hf_path", str(qwen)])
-    native = []
-    monkeypatch.setattr(mod, "_native_main", lambda hf, opts, fam=None: native.append((hf, fam)))
-    mod.main()
-    assert native == [(str(qwen), "qwen3")] and len(loads) == 1  # the config is read once
-
-    params.hf_path = str(qwen)
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", "x.yaml", "--hf_path", str(olmo)])
-    native.clear()
-    mod.main()
-    assert native == [(str(olmo), "olmo3")]
-
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", "x.yaml", "--load", "/ck"])
-    native.clear()
-    mod.main()
-    assert native == [] and "already configured: /ck" in capsys.readouterr().out
-    assert mod.get_checkpoint_config("x.yaml") == (str(qwen), None)  # "null" is unset
-
-    # main(): a value no family can read exits 1 with the reason, before any conversion work
-    params.native_ckpt_convert = "maybe"
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", "x.yaml"])
-    with pytest.raises(SystemExit) as e:
-        mod.main()
-    assert e.value.code == 1 and native == []
-    assert (
-        "Checkpoint conversion settings: native_ckpt_convert must be true or false" in capsys.readouterr().err
-    )
-
-
-def test_convert_hook_conversion_errors_keep_their_traceback(monkeypatch, tmp_path):
-    """Only the settings reading turns a ValueError into a one-line message; a ValueError raised
-    during the conversion propagates with its traceback."""
-    mod = _load_convert_hook(monkeypatch)
-    hf = tmp_path / "hf"
-    hf.mkdir()
-    (hf / "config.json").write_text('{"model_type": "qwen3"}')
-    _stub_hook_config(mod, monkeypatch, str(hf), {})
-
-    def boom(*a):
-        raise ValueError("tensor shape mismatch")
-
-    monkeypatch.setattr(mod, "_native_main", boom)
-    monkeypatch.setattr(sys, "argv", ["hook", "--config", "x.yaml"])
-    with pytest.raises(ValueError, match="tensor shape mismatch"):
-        mod.main()
-
-
-def test_config_int_reads_conversion_settings():
-    """native_flow_olmo3.config_int: unset values give the default; YAML / CLI strings are read as
-    ints with the shared arg_utils.as_int (tested in tests/unit_tests/core/utils/test_arg_utils.py);
-    a bad value names the key."""
-    from primus.backends.megatron.checkpoint import native_flow_olmo3 as flow
-
-    assert flow.config_int({}, "k", 7) == 7
-    assert flow.config_int({"k": None}, "k", 7) == 7 and flow.config_int({"k": "null"}, "k", 7) == 7
-    assert flow.config_int({"k": "3"}, "k", 7) == 3 and flow.config_int({"k": 3}, "k") == 3
-    with pytest.raises(ValueError, match="wait_timeout must be an integer"):
-        flow.config_int({"wait_timeout": "two"}, "wait_timeout", 7)
 
 
 def _gpu_cfg(**kw):
@@ -3377,7 +1989,7 @@ def test_layer_forward_window_yarn_and_post_norms(init_parallel_state):
 
     torch.manual_seed(0)
     cfg = _gpu_cfg()
-    assert cfg.olmo3_yarn_mscale == pytest.approx(0.1 * math.log(8.0) + 1.0)
+    assert cfg.olmo3_yarn_effective_attention_factor == pytest.approx(0.1 * math.log(8.0) + 1.0)
     spec = get_olmo3_layer_spec()
     s, bsz, w = 32, 2, 4
     rope = Olmo3DualRotaryEmbedding(cfg, rotary_base=500000.0)(s)
@@ -3937,7 +2549,7 @@ def test_layer_forward_window_yarn_and_post_norms_cpu(init_parallel_state, monke
         core = att.core_attention
         assert core.config is cfg
         base = 1.0 / math.sqrt(cfg.kv_channels)
-        want_scale = base if sliding else base * cfg.olmo3_yarn_mscale**2
+        want_scale = base if sliding else base * cfg.olmo3_yarn_effective_attention_factor**2
         assert core.softmax_scale == pytest.approx(want_scale)
         # upstream readers of the attention's own scale (dynamic batching) see the same m**2
         assert att.softmax_scale == pytest.approx(want_scale)
@@ -4067,15 +2679,17 @@ def test_logits_match_tiny_hf_olmo3_cpu(init_parallel_state, monkeypatch, yarn, 
         else ("S+yarn S+yarn S+yarn F+yarn" if yarn else "S S S F")
     )
     assert olmo3_builders.olmo3_layer_plan(cfg) == f"W=4 rope={layout} {plan}"
-    # what the built modules apply (the trainer smoke test checks the same report on GPU / TE)
-    rep = olmo3_builders.olmo3_built_layer_report(model)
+    # what the built attention layers apply
+    atts = [layer.self_attention for layer in model.decoder.layers]
     base = 1.0 / math.sqrt(f["kv_channels"])
-    m2 = cfg.olmo3_yarn_mscale**2
-    assert [r["window"] for r in rep] == [[3, 0]] * 3 + ["full"]
-    assert [r["rope"] for r in rep] == ["yarn" if "yarn" in tok else "plain" for tok in plan.split()]
-    for r in rep:
-        want = base * m2 if r["rope"] == "yarn" and yarn else base
-        assert r["softmax_scale"] == pytest.approx(want, rel=1e-6), r
+    m2 = cfg.olmo3_yarn_effective_attention_factor**2
+    assert [att.olmo3_sliding for att in atts] == [True] * 3 + [False]
+    assert ["yarn" if att.olmo3_use_yarn else "plain" for att in atts] == [
+        "yarn" if "yarn" in tok else "plain" for tok in plan.split()
+    ]
+    for att in atts:
+        want = base * m2 if att.olmo3_use_yarn and yarn else base
+        assert att.softmax_scale == pytest.approx(want, rel=1e-6)
     margs = SimpleNamespace(
         params_dtype=torch.float32,
         num_attention_heads=f["num_attention_heads"],
@@ -4291,7 +2905,7 @@ def test_converter_runtime_margs_dtype_flags_are_exclusive():
     assert layout == (1, 1, 1) and m.expert_tensor_parallel_size == 1
     assert (m.world_size, m.rank, m.save, m.ckpt_format) == (1, 0, "/tmp/x", "torch")
     # the save iteration is set after validate_args (build_margs), not before it
-    assert not hasattr(m, "iteration") and common.common.set_save_iteration(m).iteration == 1
+    assert not hasattr(m, "iteration") and common.set_save_iteration(m).iteration == 1
     with pytest.raises(ValueError, match="dtype"):
         common._apply_runtime_margs(
             SimpleNamespace(),
@@ -4345,8 +2959,7 @@ def test_olmo3_patch_modules_import_without_megatron():
         "            raise ModuleNotFoundError(name)\n"
         "sys.meta_path.insert(0, Block())\n"
         "import importlib.util\n"
-        "for m in ('primus.backends.megatron.patches.olmo3_flops_patches',\n"
-        "          'primus.backends.megatron.patches.olmo3_args_patches'):\n"
+        "for m in ('primus.backends.megatron.patches.olmo3_args_patches',):\n"
         "    spec = importlib.util.spec_from_file_location(m, m.replace('.', '/') + '.py')\n"
         "    mod = importlib.util.module_from_spec(spec)\n"
         "    spec.loader.exec_module(mod)\n"
@@ -4354,34 +2967,6 @@ def test_olmo3_patch_modules_import_without_megatron():
     )
     r = subprocess.run([sys.executable, "-c", code], cwd=_REPO_ROOT, capture_output=True, text=True)
     assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]
-
-
-def test_built_layer_report_reads_te_backend_scale():
-    """TE's DotProductAttention keeps softmax_scale on its backends, not on itself. The report is a
-    diagnostic: values it cannot read are reported, never raised (they must not stop a build)."""
-    from primus.backends.megatron.core.models.olmo3.olmo3_builders import (
-        _core_attention_scale,
-        _core_attention_window,
-    )
-
-    class Backend(torch.nn.Module):
-        def __init__(self, s):
-            super().__init__()
-            self.softmax_scale = s
-
-    class TELike(torch.nn.Module):
-        def __init__(self, a, b):
-            super().__init__()
-            self.flash_attention, self.unfused_attention = Backend(a), Backend(b)
-
-    assert _core_attention_scale(TELike(0.25, 0.25)) == 0.25
-    assert _core_attention_scale(torch.nn.Linear(1, 1)) is None
-    assert _core_attention_scale(TELike(0.25, 0.5)) == "mixed"
-    assert _core_attention_window(torch.nn.Linear(1, 1)) == "unknown"
-    # "full" (no window) is distinct from "unknown" and from a missing value
-    for no_window in (None, (-1, -1), (-1, 0)):
-        assert _core_attention_window(SimpleNamespace(window_size=no_window)) == "full"
-    assert _core_attention_window(SimpleNamespace(window_size=(4095, 0))) == [4095, 0]
 
 
 def test_llama_loader_linear_qkv_is_the_grouped_q_k_v_layout():
@@ -4432,7 +3017,7 @@ def test_llama_loader_linear_qkv_is_the_grouped_q_k_v_layout():
     assert torch.equal(qkv, torch.cat(rows))
 
 
-# The runtime / save args every native converter had before set_converter_runtime_args shared them
+# The runtime / save args every native converter sets (Llama / Qwen3 / DeepSeek inline; OLMo-3 through set_converter_runtime_args)
 # (the base Llama / Qwen3 / DeepSeek build_margs set exactly these values).
 _BASE_CONVERTER_RUNTIME_ARGS = dict(
     use_cpu_initialization=True,
@@ -4456,6 +3041,19 @@ _BASE_CONVERTER_RUNTIME_ARGS = dict(
     ckpt_assume_constant_structure=False,
     iteration=1,
 )
+
+
+def test_olmo3_converter_runtime_args_match_the_table():
+    """native_loader_olmo3.set_converter_runtime_args + set_save_iteration set the same runtime /
+    save args as the Llama / Qwen3 / DeepSeek converters (the table above, which those converters
+    are checked against below), including the fusion and initialisation flags."""
+    from primus.backends.megatron.checkpoint import native_loader_olmo3 as conv
+
+    m = SimpleNamespace()
+    conv.set_converter_runtime_args(m, "/tmp/x")
+    conv.set_save_iteration(m)
+    assert {k: getattr(m, k) for k in _BASE_CONVERTER_RUNTIME_ARGS} == _BASE_CONVERTER_RUNTIME_ARGS
+    assert set(vars(m)) == set(_BASE_CONVERTER_RUNTIME_ARGS)  # nothing else
 
 
 @pytest.mark.parametrize(
@@ -4511,9 +3109,10 @@ _BASE_CONVERTER_RUNTIME_ARGS = dict(
     ],
 )
 def test_other_converters_keep_their_runtime_args(family, hf, monkeypatch):
-    """Llama / Qwen3 / DeepSeek build_margs, through the shared set_converter_runtime_args and
-    set_save_iteration, give the runtime / save args of their base build_margs (the values above),
-    after validate_args. Runs without a GPU: DeepSeek turns on moe_grouped_gemm, for which
+    """Llama / Qwen3 / DeepSeek build_margs (their own inline runtime blocks; they do not call
+    native_loader_olmo3.set_converter_runtime_args / set_save_iteration) give the runtime / save
+    args above after validate_args; test_olmo3_converter_runtime_args_match_the_table checks that
+    the OLMo-3 helpers set the same table. Runs without a GPU: DeepSeek turns on moe_grouped_gemm, for which
     Megatron's validate_args reads torch.cuda.get_device_capability(); on a CPU-only node the test
     answers that probe with a capability validate_args accepts (the args under test do not depend
     on it)."""
@@ -4539,58 +3138,122 @@ def test_other_converters_keep_their_runtime_args(family, hf, monkeypatch):
     assert margs.bf16 and not margs.fp16 and margs.params_dtype is torch.bfloat16
 
 
-def test_qwen3_loader_linear_qkv_and_qk_norms():
-    """Behaviour, not structure: the Qwen3 converter's linear_qkv is, per query group, its query
-    heads, then its key head, then its value head, with an explicit head_dim != hidden / heads
-    (checked row by row); the q / k norms map one to one. A transposed q_proj is refused."""
-    from primus.backends.megatron.checkpoint import native_loader_qwen3
+def test_converter_refuses_attention_factor_with_factor_one():
+    """A YaRN rope config with factor 1.0 and attention_factor != 1 would convert but lose the
+    logit scale (OLMo-3 builds no YaRN table for factor 1): it is refused."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
+    )
 
-    nh, ng, hdim, hidden, inter, vocab = 4, 2, 3, 8, 6, 16
-    g = torch.Generator().manual_seed(0)
-    hf = {
-        "model.embed_tokens.weight": torch.randn(vocab, hidden, generator=g),
-        "model.norm.weight": torch.randn(hidden, generator=g),
-        "lm_head.weight": torch.randn(vocab, hidden, generator=g),
-    }
-    h = "model.layers.0."
-    shapes = {
-        "input_layernorm.weight": (hidden,),
-        "post_attention_layernorm.weight": (hidden,),
-        "self_attn.q_proj.weight": (nh * hdim, hidden),
-        "self_attn.k_proj.weight": (ng * hdim, hidden),
-        "self_attn.v_proj.weight": (ng * hdim, hidden),
-        "self_attn.q_norm.weight": (hdim,),
-        "self_attn.k_norm.weight": (hdim,),
-        "self_attn.o_proj.weight": (hidden, nh * hdim),
-        "mlp.gate_proj.weight": (inter, hidden),
-        "mlp.up_proj.weight": (inter, hidden),
-        "mlp.down_proj.weight": (hidden, inter),
-    }
-    hf.update({h + k: torch.randn(*s, generator=g) for k, s in shapes.items()})
-    model = SimpleNamespace(
-        state_dict=lambda: {"embedding.word_embeddings.weight": torch.zeros(vocab, hidden)}
+    cfg = json.loads(json.dumps(_HF_CFG))
+    cfg["max_position_embeddings"] = 8192
+    cfg["rope_scaling"] = dict(cfg["rope_scaling"], factor=1.0, attention_factor=1.5)
+    with pytest.raises(ValueError, match="attention_factor"):
+        derive_megatron_fields(cfg, rope_layout="per_type")
+    cfg["rope_scaling"]["attention_factor"] = 1.0
+    derive_megatron_fields(cfg, rope_layout="per_type")
+
+
+def test_convert_hook_dispatches_every_family_and_refuses_unknown_ones(monkeypatch, tmp_path):
+    """Run the hook for every family in _NATIVE_FAMILIES: each reaches its own converter's
+    convert(); a family without a converter branch raises instead of using the DeepSeek one."""
+    import importlib
+
+    mod = _load_convert_hook(monkeypatch)
+    (tmp_path / "config.json").write_text("{}")
+    families = sorted(set(mod._NATIVE_FAMILIES.values()))
+    assert "olmo3" in families
+    for fam in families:
+        conv = importlib.import_module(f"primus.backends.megatron.checkpoint.native_loader_{fam}")
+        calls = []
+        monkeypatch.setattr(conv, "convert", lambda *a, _c=calls, **k: _c.append(a))
+        mod.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), {"family": fam, "dtype": "bf16"})
+        assert calls == [(str(tmp_path), str(tmp_path / "out"))], fam
+    with pytest.raises(ValueError, match="no native converter module for family 'mistral'"):
+        mod.native_convert_checkpoint(
+            str(tmp_path), str(tmp_path / "out"), {"family": "mistral", "dtype": "bf16"}
+        )
+
+
+@pytest.mark.parametrize(
+    "key, bad",
+    [
+        ("max_position_embeddings", "8k"),
+        ("max_position_embeddings", 0),
+        ("max_position_embeddings", -5),
+        ("max_position_embeddings", 65536.0),
+        ("rms_norm_eps", "x"),
+        ("rms_norm_eps", -1e-6),
+        ("rms_norm_eps", 0),
+        ("rms_norm_eps", True),
+        ("rope_theta", True),
+        ("rope_theta", "500k"),
+        ("rope_theta", 0),
+        ("vocab_size", True),
+        ("vocab_size", 0),
+        ("vocab_size", "100278"),
+    ],
+)
+def test_converter_refuses_malformed_required_numbers(key, bad):
+    """max_position_embeddings / vocab_size must be positive ints, rms_norm_eps / rope_theta
+    positive numbers (no bools, no strings); a bad value fails with a message naming the key."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
     )
-    margs = SimpleNamespace(
-        params_dtype=torch.float32,
-        num_attention_heads=nh,
-        num_query_groups=ng,
-        kv_channels=hdim,
-        hidden_size=hidden,
-        num_layers=1,
-        untie_embeddings_and_output_weights=True,
+
+    with pytest.raises(ValueError, match=key):
+        derive_megatron_fields({**_HF_CFG, key: bad}, rope_layout="per_type")
+
+
+def test_converter_accepts_the_released_numbers_and_no_vocab_size():
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
     )
-    fields = dict(num_experts=None)
-    sd, _ = native_loader_qwen3.build_mcore_state_dict(model, _DictStore(hf), margs, fields, lambda *a: None)
-    p = "decoder.layers.0.self_attention."
-    q, k, v = (hf[h + f"self_attn.{n}_proj.weight"] for n in "qkv")
-    per = nh // ng
-    rows = []
-    for grp in range(ng):
-        rows += [q[(grp * per + j) * hdim : (grp * per + j + 1) * hdim] for j in range(per)]
-        rows += [k[grp * hdim : (grp + 1) * hdim], v[grp * hdim : (grp + 1) * hdim]]
-    assert torch.equal(sd[p + "linear_qkv.weight"], torch.cat(rows))
-    assert torch.equal(sd[p + "q_layernorm.weight"], hf[h + "self_attn.q_norm.weight"])
-    assert torch.equal(sd[p + "k_layernorm.weight"], hf[h + "self_attn.k_norm.weight"])
-    hf[h + "self_attn.q_proj.weight"] = q.t().contiguous()
-    with pytest.raises(ValueError, match="q_proj weight has shape"):
-        native_loader_qwen3.build_mcore_state_dict(model, _DictStore(hf), margs, fields, lambda *a: None)
+
+    f = derive_megatron_fields({**_HF_CFG, "vocab_size": 100278}, rope_layout="per_type")
+    assert f["norm_epsilon"] == 1e-6 and f["rotary_base"] == 500000.0 and f["vocab_size"] == 100278
+    cfg = {k: v for k, v in _HF_CFG.items() if k != "vocab_size"}
+    assert derive_megatron_fields(cfg, rope_layout="per_type")["vocab_size"] is None
+
+
+@pytest.mark.parametrize(
+    "key, bad",
+    [
+        ("beta_fast", float("nan")),
+        ("beta_fast", "32"),
+        ("beta_fast", True),
+        ("beta_fast", -1.0),
+        ("beta_fast", float("inf")),
+        ("beta_slow", "1"),
+        ("beta_slow", float("nan")),
+        ("beta_slow", 0),
+        ("original_max_position_embeddings", float("inf")),
+        ("original_max_position_embeddings", 8192.5),
+        ("original_max_position_embeddings", "8192"),
+        ("factor", float("nan")),
+        ("factor", float("inf")),
+        ("attention_factor", float("nan")),
+    ],
+)
+def test_yarn_numbers_are_finite_typed_and_in_range(key, bad):
+    """Every YaRN number is an int/float (no string, no bool), finite and in range; a bad value
+    raises ValueError naming the key (inf no longer escapes as OverflowError, NaN no longer slips
+    through the beta_fast >= beta_slow check)."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
+    )
+
+    rope = {**_HF_CFG["rope_scaling"], key: bad}
+    with pytest.raises(ValueError, match=key):
+        derive_megatron_fields({**_HF_CFG, "rope_scaling": rope}, rope_layout="per_type")
+
+
+def test_yarn_integral_float_original_max_position_embeddings_is_accepted():
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
+    )
+
+    rope = {**_HF_CFG["rope_scaling"], "original_max_position_embeddings": 8192.0}
+    f = derive_megatron_fields({**_HF_CFG, "rope_scaling": rope}, rope_layout="per_type")
+    assert f["olmo3_yarn_original_max_position_embeddings"] == 8192
+    assert isinstance(f["olmo3_yarn_original_max_position_embeddings"], int)

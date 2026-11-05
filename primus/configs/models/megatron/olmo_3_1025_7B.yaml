@@ -36,24 +36,25 @@ olmo3_yarn_beta_slow: 1.0
 # (= 1.2079441541679836 for factor 8, the HF config's attention_factor), so an override of
 # olmo3_yarn_rotary_scaling_factor changes it too. An explicit value that disagrees with the derived
 # one is used as given (an HF checkpoint may carry its own), and the config logs a warning naming both.
-# RoPE on sliding layers: per_type = plain RoPE (the trained model; OLMo-core,
-# transformers 4.57 / >= 5.13). yarn_all = YaRN everywhere (transformers 5.0-5.12).
-# auto (opt-in, logged) follows the installed transformers; it is for parity tools only: the
-# OLMo-3 args patch refuses auto for training.
+# per_type = plain RoPE on sliding layers (as trained, matches OLMo-core); yarn_all = YaRN on every
+# layer. auto (parity tools only) picks the layout for a known installed transformers version and
+# errors otherwise; training refuses auto.
 olmo3_rope_layout: per_type
 
-# sliding window on 3 of every 4 layers. The window is one value: window_size in the HF convention
-# [W, 0] (W = HF sliding_window, 4096 keys incl. the current token), as olmo3_window_size_form: hf
-# declares. Before the model is built, the OLMo-3 args patch converts it once to Megatron / TE
-# (W - 1, 0) and sets olmo3_sliding_window = W. To change the window, override window_size: [W, 0].
-window_size: [4096, 0]
-olmo3_window_size_form: hf
+# sliding window on 3 of every 4 layers. The window is olmo3_sliding_window: W (HF sliding_window:
+# 4096 keys, current token included); it is required. window_size is only checked to agree with W,
+# and its shape says which form it is: an int is W itself (4096 here, as config.json states it), a
+# pair is the Megatron/TE (W - 1, 0); null is fine. The OLMo-3 args patch sets window_size to
+# (W - 1, 0), the value TE receives. To change the window, set olmo3_sliding_window and
+# window_size to the same W (or null); the preset's 4096 next to another W is refused.
+olmo3_sliding_window: 4096
+window_size: 4096
 window_attn_skip_freq: 4
 
-# allenai/Olmo-3-1025-7B. For SFT the posttrain hook converts the HF weights natively; given this hub
-# id (no hf_path), it uses the local Hugging Face cache snapshot, else downloads the config and
-# weights. Offline, set hf_path to a local download (or pretrained_checkpoint to a converted
-# checkpoint).
+# allenai/Olmo-3-1025-7B. For SFT, set hf_path to a local download of the HF checkpoint: the
+# posttrain hook converts it natively to a legacy torch checkpoint with ONE shard
+# (TP=PP=EP=1). Fine-tune it at tensor/pipeline/expert parallel size 1; a run with a larger
+# size refuses to load it (re-save it as torch_dist at TP=PP=1 first, then load that).
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: allenai/Olmo-3-1025-7B
 

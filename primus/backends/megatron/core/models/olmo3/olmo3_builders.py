@@ -11,9 +11,6 @@ OOM snapshots, ...) with :func:`olmo3_builder` as the builder. ``olmo3_builder``
 upstream ``gpt_builder``: validate, build or check the config, pick the spec, build the model.
 """
 
-import json
-import os
-import warnings
 from typing import Optional
 
 from megatron.training import get_args, print_rank_0
@@ -33,8 +30,8 @@ from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
 )
 from primus.backends.megatron.core.transformer.olmo3.olmo3_attention import (
     olmo3_layer_is_sliding,
+    olmo3_layer_uses_yarn,
 )
-from primus.core.utils.arg_utils import parse_optional_switch
 
 __all__ = ["olmo3_builder", "model_provider", "check_olmo3_build_args"]
 
@@ -51,7 +48,7 @@ def check_olmo3_build_args(args):
         raise ValueError("OLMo-3 has no MTP layers; unset mtp_num_layers.")
     if getattr(args, "yaml_cfg", None) is not None:
         # core_transformer_config_from_yaml builds a plain TransformerConfig without the OLMo-3
-        # fields (sliding window W and its form, YaRN on full layers, RoPE layout).
+        # fields (sliding window W, YaRN on full layers, RoPE layout).
         raise ValueError(
             "OLMo-3 builds its config from args (Olmo3TransformerConfig); yaml_cfg is not supported."
         )
@@ -69,86 +66,12 @@ def check_olmo3_build_args(args):
 def olmo3_layer_plan(config) -> str:
     """One token per layer, 1-indexed: ``S`` = sliding window (W keys), ``F`` = full attention;
     ``+yarn`` marks layers with the YaRN table. E.g. ``W=4096 rope=per_type S S S F+yarn``."""
-    yarn = config.olmo3_yarn_enabled
     tokens = []
     for n in range(1, config.num_layers + 1):
         sliding = olmo3_layer_is_sliding(config, n)
-        with_yarn = yarn and (not sliding or config.olmo3_rope_layout == "yarn_all")
+        with_yarn = olmo3_layer_uses_yarn(config, sliding)
         tokens.append(("S" if sliding else "F") + ("+yarn" if with_yarn else ""))
     return f"W={config.olmo3_sliding_window} rope={config.olmo3_rope_layout} " + " ".join(tokens)
-
-
-def _core_attention_window(core_attention):
-    """The window the built core attention applies: TE keeps ``window_size``; upstream's local
-    DotProductAttention keeps it on its ``scale_mask_softmax``. ``"full"`` = no window (full causal
-    attention), ``[left, right]`` = a window, ``"unknown"`` = not readable."""
-    for owner in (core_attention, getattr(core_attention, "scale_mask_softmax", None)):
-        if owner is not None and hasattr(owner, "window_size"):
-            w = owner.window_size
-            # None, or TE's "no window" forms (-1, -1) / (-1, 0)
-            return "full" if w is None or int(w[0]) < 0 else [int(x) for x in w]
-    return "unknown"  # no window attribute (another TE version, a Turbo spec): not an error
-
-
-def _core_attention_scale(core_attention):
-    """The softmax scale the built core attention applies. Local DotProductAttention keeps it on
-    itself; TE's DotProductAttention hands it to its backends (flash / fused / unfused), which
-    keep it. ``None`` if no module keeps one; ``"mixed"`` if they disagree (reported, not raised)."""
-    found = {
-        float(m.softmax_scale)
-        for m in core_attention.modules()
-        if isinstance(getattr(m, "softmax_scale", None), (int, float))
-    }
-    if len(found) > 1:
-        return "mixed"
-    return found.pop() if found else None
-
-
-def _read_or_unknown(read):
-    """``read()``, or ``"unknown"`` if it raises (a module tree this report does not know)."""
-    try:
-        return read()
-    except Exception:  # diagnostic only
-        return "unknown"
-
-
-def olmo3_built_layer_report(model) -> list:
-    """Diagnostic, opt-in (see olmo3_builder): per decoder layer of this model chunk, the window and
-    softmax scale its core attention really uses, and which RoPE table it takes. Read from the
-    modules, not the config, so a test or log reader sees what runs.
-
-    Each value is read on its own; a value that cannot be read (missing attribute, unexpected type)
-    is reported as ``"unknown"``. A model without ``decoder.layers`` gives ``[]``; without ``config``
-    each layer's ``rope`` is ``"unknown"``. So the function does not raise for an unexpected module
-    tree."""
-    report = []
-    yarn = _read_or_unknown(lambda: bool(model.config.olmo3_yarn_enabled))  # factor 1: tables agree
-    layers = _read_or_unknown(lambda: list(model.decoder.layers))
-    for layer in layers if isinstance(layers, list) else []:
-        att = getattr(layer, "self_attention", None)
-        core = getattr(att, "core_attention", None)
-        scale = _read_or_unknown(lambda: _core_attention_scale(core))
-        source = "core_attention"
-        if scale is None and isinstance(getattr(att, "softmax_scale", None), (int, float)):
-            # Some TE builds keep no scale attribute on the module tree; then report the scale the
-            # layer handed to its core attention (the softmax_scale kwarg; see Olmo3SelfAttention).
-            scale, source = float(att.softmax_scale), "passed"
-
-        def rope():
-            if yarn == "unknown":
-                return "unknown"
-            return "yarn" if bool(att.olmo3_use_yarn) and yarn else "plain"
-
-        report.append(
-            {
-                "layer": _read_or_unknown(lambda: int(layer.layer_number)),
-                "window": _read_or_unknown(lambda: _core_attention_window(core)),
-                "softmax_scale": scale,
-                "softmax_scale_source": source,
-                "rope": _read_or_unknown(rope),
-            }
-        )
-    return report
 
 
 def _check_supplied_config(config):
@@ -158,7 +81,17 @@ def _check_supplied_config(config):
     check_olmo3_unsupported(config)
     if config.olmo3_sliding_window is None:
         raise ValueError("OLMo-3 config needs olmo3_sliding_window (the HF sliding window W)")
-    olmo3_window_from_settings(config.window_size, config.olmo3_sliding_window, config.olmo3_window_size_form)
+    # __post_init__ stores the Megatron / TE window (W - 1, 0); a built config must hold exactly
+    # that (the int W form is an input form only): anything else was
+    # changed after __post_init__ and would hand TE a different window.
+    want, _ = olmo3_window_from_settings(None, config.olmo3_sliding_window)
+    ws = config.window_size
+    have = tuple(ws) if isinstance(ws, (list, tuple)) else ws
+    if have != want:
+        raise ValueError(
+            f"OLMo-3 config window_size {config.window_size!r} is not the Megatron/TE {want} for "
+            f"olmo3_sliding_window={config.olmo3_sliding_window} (changed after __post_init__?)"
+        )
     parse_olmo3_skip_freq(config.window_attn_skip_freq, config.num_layers)
 
 
@@ -196,38 +129,7 @@ def olmo3_builder(
         pg_collection=pg_collection,
         vp_stage=vp_stage,
     )
-    if layer_report_enabled():
-        _print_built_layer_report(model, vp_stage)
     return model
-
-
-# Opt-in diagnostic, set by tests/trainer/test_megatron_trainer.py::test_olmo_3_1025_7B. A switch
-# (arg_utils.parse_optional_switch: 1 / true / yes / on, 0 / false / no / off, any case; unset or "" is off;
-# another value is off with a warning: a diagnostic never stops a run).
-OLMO3_LAYER_REPORT_ENV = "PRIMUS_OLMO3_LAYER_REPORT"
-
-
-def layer_report_enabled() -> bool:
-    """True when ``PRIMUS_OLMO3_LAYER_REPORT`` is on. A value that is not a switch counts as off
-    and logs one warning, so a typo cannot fail the run after the model is built."""
-    try:
-        return parse_optional_switch(os.environ.get(OLMO3_LAYER_REPORT_ENV), OLMO3_LAYER_REPORT_ENV)
-    except ValueError as e:
-        warnings.warn(f"{e}; the OLMo-3 layer report is off", stacklevel=2)
-        return False
-
-
-def _print_built_layer_report(model, vp_stage):
-    """One JSON line per model chunk built on global rank 0, i.e. the layers of the first pipeline
-    stage only; with virtual pipeline stages each chunk prints its own line, labelled with its
-    ``vp_stage``. A failure to read the modules is logged; it never stops the build."""
-    label = "" if vp_stage is None else f" (vp_stage {vp_stage})"
-    try:
-        report = json.dumps(olmo3_built_layer_report(model))
-    except Exception as e:  # diagnostic only
-        print_rank_0(f"[Primus:OLMo-3] built layers{label}: not reported ({type(e).__name__}: {e})")
-        return
-    print_rank_0(f"[Primus:OLMo-3] built layers{label}: {report}")
 
 
 def _upstream_model_provider():
@@ -255,8 +157,10 @@ def model_provider(
     if model_builder is None:
         model_builder = olmo3_builder
     args = get_args()
-    # Checked here too: upstream model_provider takes its ModelOpt branch (has_nvidia_modelopt and
-    # modelopt_enabled) without calling model_builder, so olmo3_builder's checks would not run.
+    # Checked here as well as in olmo3_builder (so twice on the normal path; the scan is cheap):
+    # upstream model_provider takes its ModelOpt branch (has_nvidia_modelopt and modelopt_enabled)
+    # without calling model_builder, and olmo3_builder can also be called directly (one entry per
+    # build path, not one per build).
     check_olmo3_build_args(args)
     upstream = _upstream_model_provider()
     if upstream is not None:

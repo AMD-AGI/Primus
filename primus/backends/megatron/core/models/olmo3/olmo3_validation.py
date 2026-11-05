@@ -10,42 +10,43 @@ One module, so the three entry points refuse the same settings and read the wind
 
 Window contract
 ---------------
-Two conventions exist for the sliding window:
-
-* HF ``sliding_window`` W: keys a query sees, the current token included (4096 for OLMo-3).
-* Megatron / TE ``window_size = (left, right)`` = ``(W - 1, 0)``.
-
-Two settings say which form ``window_size`` holds; neither is ever guessed:
-
-* ``olmo3_window_size_form``: ``hf`` (``window_size = (W, 0)``, the model preset) or ``megatron``
-  (``(W - 1, 0)``). The args patch converts an ``hf`` window once and then sets ``megatron``.
-* ``olmo3_sliding_window = W``: the HF window itself (the converter, the args patch output and
-  saved checkpoint args carry it; the model preset does not set it, so the preset states the window
-  once, as ``window_size: [W, 0]`` with form ``hf``). With it, ``window_size`` must be
-  ``(W - 1, 0)`` (or ``(W, 0)`` when the form says ``hf``), or unset (then it is derived). A
-  ``window_size`` that disagrees is refused, never re-read in the other form.
-
-A ``window_size`` with neither setting is refused: reading it as HF would silently shorten a
-converted window by one key when both settings are lost (they are not argparse options, so
-``use_checkpoint_args`` or a CLI ``null`` can drop them). The converter, the args patch output and
-saved checkpoint args carry both settings. ``Olmo3TransformerConfig`` requires
-``olmo3_sliding_window`` (W); the form decides how ``window_size`` is read.
+The window W is the HF ``sliding_window``: keys a query sees, the current token included (4096 for
+OLMo-3). ``olmo3_sliding_window`` holds W and is required. Next to it, ``window_size`` is either an
+int, W itself (the model preset writes ``window_size: 4096``, as ``config.json`` states
+``sliding_window``), or a pair, the Megatron / TE ``(W - 1, 0)``; the shape says which, so no value
+means two windows. ``window_size`` without ``olmo3_sliding_window`` is refused. Every reader returns
+``(W - 1, 0)``. Both keys take integers only (``4096.0`` is refused for both, as Megatron's
+``type=int``). For ``window_size`` the YAML null spellings a CLI override passes (``null``, ``~``,
+``none``) mean unset.
 
 ``window_attn_skip_freq``
 -------------------------
 An int ``k`` with ``2 <= k <= num_layers`` (every k-th layer is full attention), or a 0/1 list of
-``num_layers`` entries (1 = sliding) with at least one 0 and one 1. String forms from the CLI
-(``"4"``, ``"([1]*3+[0])*8"``) are parsed by a small grammar (integers, lists, ``+``, ``*``,
-parentheses), never by ``eval``, with caps on the input and result sizes.
+``num_layers`` entries (1 = sliding) with at least one 0 and one 1. String forms from the CLI or a
+quoted YAML string (``"4"``, ``"([1]*3 + [0])*8"``) use the grammar of Megatron's
+``--window-attn-skip-freq`` (int and list literals, ``+``, ``*``, parentheses; spaces allowed). They
+are read by :func:`_skip_freq_value`: Megatron's character check, then an ``ast`` evaluator that
+checks each list's length before it builds the list (Megatron's ``eval`` has no bound, so
+``[1]*10**10`` would exhaust memory).
+
+Other string values are read with Primus's shared CLI reader (``arg_utils.parse_cli_overrides``,
+"modern" mode), then checked strictly. Only None, an empty or blank string, and the string "None"
+are unset (see :func:`is_unset`).
 
 Values may come from the YAML (typed) or from ``--key value`` CLI overrides (strings), so the checks
 accept both.
+
+Refused settings (:data:`OLMO3_UNSUPPORTED`) include CUDA graphs: ``enable_cuda_graph``,
+``external_cuda_graph`` and any ``cuda_graph_impl`` other than ``none`` (the OLMo-3 attention is not
+tested under graph capture).
 """
 
 import ast
 import math
+import os
+import re
 
-from primus.core.utils.arg_utils import as_int, is_unset, parse_optional_switch
+from primus.core.utils.arg_utils import parse_cli_overrides
 
 __all__ = [
     "OLMO3_UNSUPPORTED",
@@ -53,9 +54,12 @@ __all__ = [
     "YARN_BETA_SLOW_DEFAULT",
     "parse_olmo3_skip_freq",
     "olmo3_window_from_settings",
+    "olmo3_window_keys",
+    "olmo3_te_window",
     "check_olmo3_unsupported",
     "check_olmo3_cp",
     "check_olmo3_norm_epsilon",
+    "check_olmo3_checkpoint_layout",
 ]
 
 # HF's YaRN defaults (transformers ``_compute_yarn_parameters``) for a config that omits them; used
@@ -64,94 +68,150 @@ YARN_BETA_FAST_DEFAULT = 32.0
 YARN_BETA_SLOW_DEFAULT = 1.0
 
 
-_MAX_EXPR_CHARS = 4096
-_MAX_LIST_LEN = 65536
-_MAX_INT = 1 << 20
-_MAX_DEPTH = 32
+# ---------------------------------------------------------------------------
+# value helpers. YAML values arrive typed; a string (a quoted YAML value, a CLI override, an
+# environment substitution) is read with Primus's shared CLI reader (arg_utils.parse_cli_overrides,
+# "modern" mode, as the CLI overrides themselves are read), then checked strictly.
+# ---------------------------------------------------------------------------
+def _read(v):
+    """``v`` as Primus reads a CLI override value (strings only; other values are already typed)."""
+    if isinstance(v, str):
+        return parse_cli_overrides([f"value={v.strip()}"], type_mode="modern").get("value", "")
+    return v
 
 
-# ---------------------------------------------------------------------------
-# value helpers (YAML values or CLI strings)
-# ---------------------------------------------------------------------------
+def is_unset(v):
+    """None, an empty / blank string (an empty override), or a string the shared reader reads as
+    None (``"None"``). Other strings (``none``, ``null``) are values, as in the shared reader."""
+    return v is None or (isinstance(v, str) and (not v.strip() or _read(v) is None))
+
+
 def _as_int(v, what):
-    """The shared ``as_int`` with the OLMo-3 prefix in the message."""
-    return as_int(v, f"OLMo-3 {what}")
+    """An int, or an integral float (``4.0``), after :func:`_read`; anything else (a bool,
+    ``4.5``, ``"two"``, an unresolved ``"${TP:1}"``) raises ValueError naming ``what``."""
+    r = _read(v)
+    if isinstance(r, float) and r.is_integer() and abs(r) <= 2**53:
+        r = int(r)
+    if isinstance(r, bool) or not isinstance(r, int):
+        raise ValueError(f"OLMo-3 {what} must be an integer, got {v!r}")
+    return r
+
+
+def _strict_int(v, what):
+    """An int (Megatron's ``type=int`` / ``tuple_type`` int), after :func:`_read`: floats (``4.0``),
+    bools and empty or other strings raise ValueError naming ``what``."""
+    r = _read(v)
+    if isinstance(r, bool) or not isinstance(r, int):
+        raise ValueError(f"OLMo-3 {what} must be an integer, got {v!r}")
+    return r
 
 
 def _truthy(v):
-    """A switch value: unset (:func:`is_unset`) is False, else the shared ``parse_switch`` (a typo
-    such as "ture" raises ValueError, which check_olmo3_unsupported reports as the setting's error
-    instead of reading it as on or off)."""
-    return parse_optional_switch(v, "switch")
+    """A switch after :func:`_read`: unset is off, else a bool or the int 0 / 1. Anything else
+    (a typo such as ``"ture"``) raises ValueError, which check_olmo3_unsupported reports as the
+    setting's error instead of reading it as on (``bool("ture")``) or off."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return False
+    r = _read(v)  # parsed once; "None" reads as None (unset)
+    if r is None:
+        return False
+    if isinstance(r, bool):
+        return r
+    if isinstance(r, int) and r in (0, 1):
+        return bool(r)
+    raise ValueError(f"switch must be true or false, got {v!r}")
 
 
 def _as_float(v):
-    if isinstance(v, bool):
+    r = _read(v)
+    if isinstance(r, bool) or not isinstance(r, (int, float)):
         raise ValueError
-    return float(v)
+    return float(r)
 
 
 # ---------------------------------------------------------------------------
-# window_attn_skip_freq: safe parser
+# window_attn_skip_freq
 # ---------------------------------------------------------------------------
-def _skip_freq_value(text):
-    """Evaluate a ``window_attn_skip_freq`` string (``"4"``, ``"([1]*3+[0])*8"``, ``"[1,0,]*16"``)
-    without ``eval``: Python's own parser, then only int / list literals (a trailing comma is
-    allowed), unary minus, ``+`` (add ints, join lists) and ``*`` (multiply ints, repeat a list).
-    Floats are refused here as in a list, so every string form has one rule. Sizes are checked
-    before a list is built."""
+# Upper bound for an int skip frequency, and for a list pattern's length when num_layers is
+# unknown (no model has more layers).
+_MAX_PATTERN = 4096
+# Megatron's --window-attn-skip-freq character set (arguments._eval_pattern), spaces allowed
+_PATTERN_CHARS = re.compile(r"[,\d\[\]\(\)\+\*\s]*")
 
-    def error(why):
-        return ValueError(f"OLMo-3 window_attn_skip_freq: cannot parse {text!r} ({why})")
 
+def _eval_pattern(node, max_len):
+    """Evaluate one node of a ``window_attn_skip_freq`` expression: int literals, lists of int
+    literals, ``+`` and ``*`` (parentheses are only grouping in the AST). ``+`` and ``*`` results
+    are length-checked against ``max_len`` before they are built, from their operands' lengths; a
+    list literal is bounded by the input text and is checked after it is parsed."""
+    if isinstance(node, ast.Expression):
+        return _eval_pattern(node.body, max_len)
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    if isinstance(node, ast.List):
+        items = [_eval_pattern(e, max_len) for e in node.elts]
+        if any(type(i) is not int for i in items):
+            raise ValueError("list entries must be ints")
+        if len(items) > max_len:
+            raise ValueError("too large")
+        return items
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mult)):
+        a, b = _eval_pattern(node.left, max_len), _eval_pattern(node.right, max_len)
+        if isinstance(node.op, ast.Add):
+            if type(a) is not type(b):
+                raise ValueError("cannot add a list and an int")
+            if isinstance(a, list) and len(a) + len(b) > max_len:
+                raise ValueError("too large")
+            return a + b
+        if isinstance(a, int) and isinstance(b, int):
+            return a * b
+        lst, n = (a, b) if isinstance(a, list) else (b, a)
+        if not isinstance(lst, list) or not isinstance(n, int):
+            raise ValueError("cannot multiply two lists")
+        if len(lst) * max(n, 0) > max_len:
+            raise ValueError("too large")
+        return lst * n
+    raise ValueError(f"unsupported element {type(node).__name__}")
+
+
+def _skip_freq_value(text, max_len=_MAX_PATTERN):
+    """A ``window_attn_skip_freq`` string, as Megatron's ``--window-attn-skip-freq`` reads it
+    (``moe_freq_type``): ``"4"``, or a list expression of int / list literals with ``+``, ``*`` and
+    parentheses (spaces allowed). Megatron checks the characters and runs ``eval``. Here the
+    expression is parsed with ``ast`` and evaluated by :func:`_eval_pattern`, which checks every
+    list's length against ``max_len`` before it builds the list (Megatron's parser has no bound, so
+    ``[1]*10**10`` would exhaust memory). The caller checks the result (an int's bound, a list's
+    length ``num_layers`` and 0 / 1 entries)."""
+    s = text.strip()
+    if "[" not in s:
+        value = _read(s)  # Megatron reads it with int(): "4.0" is refused, as a float is
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"OLMo-3 window_attn_skip_freq: cannot parse {text!r} (not an int)")
+        return value  # the caller (parse_olmo3_skip_freq) bounds it
+    if not _PATTERN_CHARS.fullmatch(s) or "**" in s:
+        raise ValueError(f"OLMo-3 window_attn_skip_freq: cannot parse {text!r}")
     try:
-        tree = ast.parse(text.strip(), mode="eval")
-    except (SyntaxError, RecursionError, MemoryError, ValueError) as e:
-        raise error(getattr(e, "msg", None) or type(e).__name__) from None
-
-    def ev(node, depth=0):
-        if depth > _MAX_DEPTH:
-            raise error("nested too deeply")
-        if isinstance(node, ast.Constant) and type(node.value) is int:
-            if abs(node.value) > _MAX_INT:
-                raise error("value too large")
-            return node.value
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            v = ev(node.operand, depth + 1)
-            if isinstance(v, int):
-                return -v
-        elif isinstance(node, ast.List):
-            items = [ev(e, depth + 1) for e in node.elts]
-            if all(isinstance(v, int) for v in items):
-                return items
-            raise error("list entries must be integers")
-        elif isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mult)):
-            a, b = ev(node.left, depth + 1), ev(node.right, depth + 1)
-            if isinstance(node.op, ast.Add) and type(a) is type(b):
-                if isinstance(a, list) and len(a) + len(b) > _MAX_LIST_LEN:
-                    raise error(f"the list would have more than {_MAX_LIST_LEN} entries")
-                return a + b
-            if isinstance(node.op, ast.Mult) and not (isinstance(a, list) and isinstance(b, list)):
-                if isinstance(a, int) and isinstance(b, int):
-                    if abs(a * b) > _MAX_INT:
-                        raise error("value too large")
-                    return a * b
-                items, n = (a, b) if isinstance(a, list) else (b, a)
-                if len(items) * max(n, 0) > _MAX_LIST_LEN:
-                    raise error(f"the list would have more than {_MAX_LIST_LEN} entries")
-                return items * n
-            raise error(f"'{'+' if isinstance(node.op, ast.Add) else '*'}' cannot combine these values")
-        raise error(f"only integers, lists, unary -, + and * are allowed, got {ast.unparse(node)!r}")
-
-    return ev(tree.body)
+        value = _eval_pattern(ast.parse(s, mode="eval"), max_len)
+    except (SyntaxError, RecursionError, MemoryError) as e:
+        raise ValueError(
+            f"OLMo-3 window_attn_skip_freq: cannot parse {text!r} ({type(e).__name__})"
+        ) from None
+    except ValueError as e:
+        if str(e) == "too large":
+            raise ValueError(
+                f"OLMo-3 window_attn_skip_freq: {text!r} is too large (more than {max_len} entries)"
+            ) from None
+        raise ValueError(f"OLMo-3 window_attn_skip_freq: cannot parse {text!r} ({e})") from None
+    # an expression with a list literal evaluates to a list (+ needs equal types, list * int is a list)
+    return value
 
 
 def parse_olmo3_skip_freq(skip_freq, num_layers=None):
     """``window_attn_skip_freq`` as an int ``k`` (``2 <= k <= num_layers``) or a 0/1 list.
 
     Accepts Megatron's ``--window-attn-skip-freq`` forms: an int, ``"4"``, or a list expression
-    such as ``"([1]*3+[0])*8"`` (parsed without ``eval``). Floats are refused everywhere (``4.0``
-    as in ``[1.0, 0.0]``): Megatron's option is ``type=int`` or a list of ints. A list needs ``num_layers`` entries
+    such as ``"([1]*3 + [0])*8"`` (evaluated by :func:`_skip_freq_value`, bounded by ``num_layers``). Floats are refused everywhere, both as a
+    scalar (``4.0``) and as list entries (``[1.0, 0.0]``): Megatron's option is ``type=int`` or a list of ints. A list needs ``num_layers`` entries
     (when ``num_layers`` is known), at least one sliding layer (1) and one full layer (0).
     """
     if is_unset(skip_freq):
@@ -161,20 +221,23 @@ def parse_olmo3_skip_freq(skip_freq, num_layers=None):
         )
     if num_layers is not None:
         num_layers = _as_int(num_layers, "num_layers")
+    bound = num_layers if num_layers is not None else _MAX_PATTERN
     if isinstance(skip_freq, str):
-        if len(skip_freq) > _MAX_EXPR_CHARS:
-            raise ValueError(f"OLMo-3 window_attn_skip_freq string longer than {_MAX_EXPR_CHARS} characters")
-        skip_freq = _skip_freq_value(skip_freq)
+        skip_freq = _skip_freq_value(skip_freq, bound)
     if isinstance(skip_freq, int) and not isinstance(skip_freq, bool):
         if skip_freq < 2:
             raise ValueError(
                 f"OLMo-3 window_attn_skip_freq must be >= 2 (1 would make every layer full attention), "
                 f"got {skip_freq}"
             )
-        if num_layers is not None and skip_freq > num_layers:
+        if skip_freq > bound:
             raise ValueError(
-                f"OLMo-3 window_attn_skip_freq={skip_freq} > num_layers={num_layers}: no layer would be "
-                "full attention"
+                f"OLMo-3 window_attn_skip_freq={skip_freq} > "
+                + (
+                    f"num_layers={num_layers}: no layer would be full attention"
+                    if num_layers is not None
+                    else f"{_MAX_PATTERN} (the bound when num_layers is unknown)"
+                )
             )
         return skip_freq
     if isinstance(skip_freq, (list, tuple)):
@@ -197,75 +260,82 @@ def parse_olmo3_skip_freq(skip_freq, num_layers=None):
 # ---------------------------------------------------------------------------
 # window_size / olmo3_sliding_window
 # ---------------------------------------------------------------------------
+_WINDOW_STR = re.compile(r"\s*(?:\(([^()\[\]]*)\)|\[([^()\[\]]*)\]|([^()\[\]]*))\s*")
+
+
 def _parse_window(ws):
     if isinstance(ws, str):
-        ws = [v for v in ws.strip().strip("()[]").split(",") if v.strip()]
+        # "W, 0" bare (Megatron's tuple_type form) or inside one balanced pair of () or []
+        m = _WINDOW_STR.fullmatch(ws)
+        if m is None:
+            raise ValueError(f"OLMo-3 window_size must be a (left, 0) pair, got {ws!r}")
+        inner = next(g for g in m.groups() if g is not None)
+        ws = inner.split(",")  # an empty entry ("4096,,0", "(4096,0,)") is refused below
     if not isinstance(ws, (list, tuple)):
         raise ValueError(f"OLMo-3 window_size must be a (left, 0) pair, got {ws!r}")
-    ws = tuple(_as_int(v, "window_size entry") for v in ws)
+    ws = tuple(_strict_int(v, "window_size entry") for v in ws)
     if len(ws) != 2 or ws[1] != 0:
         raise ValueError(f"OLMo-3 window_size must be (W, 0) (causal, no future keys), got {ws}")
     return ws
 
 
-_WINDOW_FORMS = ("hf", "megatron")
-
-
-def olmo3_window_from_settings(window_size, sliding_window, form=None):
-    """``(megatron_window, W)`` from ``window_size``, ``olmo3_sliding_window`` (W) and
-    ``olmo3_window_size_form``.
-
-    * ``olmo3_sliding_window`` W set: ``window_size`` must agree with it in its declared form: ``(W - 1, 0)``
-      (``form`` unset or ``megatron``) or ``(W, 0)`` (``form: hf``), or be unset.
-    * W unset: ``form`` says how to read ``window_size``. ``"hf"`` (the model preset):
-      ``(W, 0)``; ``"megatron"``: ``(W - 1, 0)``. In the HF form an odd W is refused: it is how a
-      Megatron/TE value ``(W - 1, 0)`` of an even W looks (``[4095, 0]`` for 4096), and a silent
-      W - 1 would cost one key; an odd W is accepted when ``olmo3_sliding_window`` names it. Without ``form`` the window is ambiguous
-      (a lost W would turn a converted ``(W - 1, 0)`` into ``(W - 2, 0)``) and is refused.
-
-    ``megatron_window`` is ``(W - 1, 0)``.
-    """
-    ws = None if is_unset(window_size) else _parse_window(window_size)
-    form = None if is_unset(form) else str(form).strip().lower()
-    if form is not None and form not in _WINDOW_FORMS:
-        raise ValueError(f"OLMo-3 olmo3_window_size_form must be one of {_WINDOW_FORMS}, got {form!r}")
+def olmo3_window_keys(sliding_window) -> int:
+    """The HF ``sliding_window`` W as a checked int (> 1: keys incl. the current token)."""
     if is_unset(sliding_window):
-        if ws is None:
-            raise ValueError(
-                "OLMo-3 needs window_size: [sliding_window, 0] (HF convention, e.g. [4096, 0]) with "
-                "olmo3_window_size_form: hf; without it every layer runs full attention, which is a "
-                "different model."
-            )
-        if form is None:
-            raise ValueError(
-                f"OLMo-3 window_size {ws} without olmo3_sliding_window or olmo3_window_size_form is "
-                "ambiguous (HF (W, 0) or Megatron/TE (W - 1, 0)). Set olmo3_window_size_form: hf for "
-                "the HF form (the model preset does), or olmo3_sliding_window: W for the Megatron form."
-            )
-        if form == "hf" and ws[0] % 2 == 1:
-            raise ValueError(
-                f"OLMo-3 window_size {ws} is read in the HF form (olmo3_window_size_form: hf, as the "
-                f"model preset sets), so W = {ws[0]}, an odd window. That is what the Megatron/TE form "
-                f"(W - 1, 0) of W = {ws[0] + 1} looks like, so it is not guessed: for W = {ws[0] + 1} "
-                f"override window_size: [{ws[0] + 1}, 0] (HF form), or set olmo3_window_size_form: "
-                f"megatron; for an odd W = {ws[0]} confirm it with olmo3_sliding_window: {ws[0]}."
-            )
-        w = ws[0] if form == "hf" else ws[0] + 1
-    else:
-        w = _as_int(sliding_window, "olmo3_sliding_window")
-        allowed = {w} if form == "hf" else {w - 1}
-        if ws is not None and ws[0] not in allowed:
-            raise ValueError(
-                f"OLMo-3 window_size {ws} disagrees with olmo3_sliding_window={w} "
-                f"(olmo3_window_size_form={form!r}): window_size must be "
-                f"{(w, 0) if form == 'hf' else (w - 1, 0)} in that form. The two come from different "
-                "sources (e.g. an override changed only one of them); the window is not guessed. To "
-                "change the window, set olmo3_sliding_window: W and window_size: null (or both, "
-                "consistently); with the model preset, override window_size: [W, 0]."
-            )
+        raise ValueError("OLMo-3 needs olmo3_sliding_window (the HF sliding_window W)")
+    w = _strict_int(sliding_window, "olmo3_sliding_window")
     if w <= 1:
-        raise ValueError(f"OLMo-3 sliding_window must be > 1 keys (current token included), got {w}")
-    return (w - 1, 0), w
+        raise ValueError(f"OLMo-3 olmo3_sliding_window must be > 1 keys (current token included), got {w}")
+    return w
+
+
+def olmo3_te_window(sliding_window):
+    """The Megatron / TE ``window_size`` ``(W - 1, 0)`` for the HF ``sliding_window`` W."""
+    return (olmo3_window_keys(sliding_window) - 1, 0)
+
+
+def _window_value(ws):
+    """``window_size`` as given: an int (or a bare-int string) is W, the HF window in keys; a pair
+    (list, tuple or "(a, b)" string) is the Megatron / TE ``(left, right)`` form. Megatron itself
+    only ever holds a pair, so the two shapes never mean the same thing."""
+    if isinstance(ws, bool):
+        raise ValueError(f"OLMo-3 window_size must be W (int) or a Megatron/TE (left, 0) pair, got {ws!r}")
+    if isinstance(ws, int):
+        return ("keys", ws)
+    if isinstance(ws, str) and re.fullmatch(r"\s*-?\d+\s*", ws):
+        return ("keys", int(ws))
+    return ("te", _parse_window(ws))
+
+
+def olmo3_window_from_settings(window_size, sliding_window):
+    """``(megatron_window, W)`` from ``window_size`` and ``olmo3_sliding_window`` (W).
+
+    The window is ``olmo3_sliding_window`` W (HF form: keys incl. the current token); it is
+    required. ``window_size`` is only checked to agree with it, in one of two forms told apart by
+    shape, never by value: an int is W itself (the model preset writes ``window_size: 4096``, as
+    ``config.json`` states ``sliding_window``), a pair is the Megatron / TE ``(W - 1, 0)`` (what
+    the args patch stores and TE receives); unset is fine. Anything else is refused, e.g. the
+    preset's ``4096`` next to a changed W. ``window_size`` alone is refused. The result is always
+    ``(W - 1, 0)``.
+    """
+    if is_unset(sliding_window):
+        alone = "" if is_unset(window_size) else f"; got window_size={window_size!r} without it"
+        raise ValueError(
+            "OLMo-3 needs olmo3_sliding_window: W (HF sliding_window, keys incl. the current token; "
+            f"4096 for OLMo-3, the model preset sets it){alone}. Set olmo3_sliding_window."
+        )
+    w = olmo3_window_keys(sliding_window)
+    if isinstance(window_size, str) and window_size.strip().lower() in ("null", "none", "~"):
+        window_size = None  # YAML's null spellings, as a CLI override passes them
+    if not is_unset(window_size):
+        form, value = _window_value(window_size)
+        if (form == "keys" and value != w) or (form == "te" and value != (w - 1, 0)):
+            raise ValueError(
+                f"OLMo-3 window_size {window_size!r} disagrees with olmo3_sliding_window={w}: it must be "
+                f"{w} (W, as the preset writes it), the Megatron/TE pair {[w - 1, 0]}, or unset. To "
+                "change the window, set olmo3_sliding_window and window_size: null (or the new W)."
+            )
+    return olmo3_te_window(w), w
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +362,17 @@ def _unset_or(*allowed):
     return lambda v: v is None or v in allowed
 
 
-def _unset_or_text(*allowed):
-    """Unset, or a string in ``allowed`` after strip / lower. Used only for the Primus option
-    olmo3_window_size_form, which olmo3_window_from_settings reads after strip / lower; the rule of
-    each check is the rule of the code that reads the value."""
-    return lambda v: is_unset(v) or (isinstance(v, str) and v.strip().lower() in allowed)
+def _no_rope_off(v):
+    """``no_rope_freq`` that skips RoPE on no layer: unset, 0, or an all-zero list (also as a
+    string, e.g. ``"[0,0,0,0]"``); read once with :func:`_read`, then branched on the parsed value."""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return True
+    r = _read(v)  # parsed once; "None" reads as None (unset)
+    if r is None:
+        return True
+    if isinstance(r, (list, tuple)):
+        return not any(_as_float(x) for x in r)
+    return _as_float(r) == 0
 
 
 def _silu(v):
@@ -308,6 +384,15 @@ def _silu(v):
 # (name, allowed(value) -> bool, why). A name is checked on every object that has it (args and/or
 # TransformerConfig); a missing name is skipped. Values may be YAML values or CLI strings.
 OLMO3_UNSUPPORTED = (
+    # CUDA graphs: the OLMo-3 attention (TP all-reduce inside the full-width q/k norm, per-layer
+    # RoPE table selection) is not tested under graph capture
+    ("enable_cuda_graph", _off, "OLMo-3 is not tested with CUDA graphs; enable_cuda_graph must be false"),
+    ("external_cuda_graph", _off, "OLMo-3 is not tested with CUDA graphs; external_cuda_graph must be false"),
+    (
+        "cuda_graph_impl",
+        _unset_or("none"),
+        "OLMo-3 is not tested with CUDA graphs; cuda_graph_impl must be none",
+    ),
     # attention
     ("qk_layernorm", _off, "OLMo-3 owns full-width q/k norms; keep the per-head qk_layernorm false"),
     ("qk_l2_norm", _off, "OLMo-3 q/k norms are full-width RMSNorm, not L2 norm; qk_l2_norm must be false"),
@@ -341,23 +426,12 @@ OLMO3_UNSUPPORTED = (
         "OLMo-3 scales RoPE by YaRN only; unset rotary_seq_len_interpolation_factor",
     ),
     ("use_rope_scaling", _off, "OLMo-3 scales RoPE by YaRN only; use_rope_scaling must be false"),
-    (
-        "no_rope_freq",
-        lambda v: is_unset(v)
-        or (not isinstance(v, (list, tuple)) and _as_float(v) == 0)
-        or (isinstance(v, (list, tuple)) and not any(v)),
-        "OLMo-3 applies RoPE on every layer; unset no_rope_freq",
-    ),
+    ("no_rope_freq", _no_rope_off, "OLMo-3 applies RoPE on every layer; unset no_rope_freq"),
     (
         "apply_rope_fusion",
         _off,
         "OLMo-3 RoPE runs unfused (the path the HF parity tests cover; the model preset sets "
         "apply_rope_fusion: false); set apply_rope_fusion: false",
-    ),
-    (
-        "olmo3_window_size_form",
-        _unset_or_text(*_WINDOW_FORMS),
-        "olmo3_window_size_form must be hf (window_size = (W, 0)) or megatron ((W - 1, 0))",
     ),
     (
         "olmo3_rope_layout",
@@ -416,7 +490,12 @@ _MISSING = object()
 
 
 def check_olmo3_unsupported(obj):
-    """Raise ``ValueError`` for any :data:`OLMO3_UNSUPPORTED` setting ``obj`` (args or config) has."""
+    """Raise ``ValueError`` for any :data:`OLMO3_UNSUPPORTED` setting ``obj`` (args or config) has,
+    and for the checks that look at several settings together: context parallelism with the sliding
+    window (:func:`check_olmo3_cp`), KV heads per TP rank for the full-width k_norm
+    (:func:`check_olmo3_kv_heads_per_tp`), selective layernorm recompute
+    (:func:`check_olmo3_recompute_modules`) and ``norm_epsilon`` vs ``layernorm_epsilon``
+    (:func:`check_olmo3_norm_epsilon`)."""
     for name, ok, why in OLMO3_UNSUPPORTED:
         value = getattr(obj, name, _MISSING)
         if value is _MISSING:
@@ -428,6 +507,8 @@ def check_olmo3_unsupported(obj):
         if not good:
             raise ValueError(f"{why} (got {name}={value!r})")
     check_olmo3_cp(obj)
+    check_olmo3_kv_heads_per_tp(obj)
+    check_olmo3_recompute_modules(obj)
     check_olmo3_norm_epsilon(obj)
 
 
@@ -448,6 +529,63 @@ def check_olmo3_norm_epsilon(obj):
         )
 
 
+def check_olmo3_recompute_modules(obj):
+    """Selective recompute of ``layernorm`` would recompute nothing for OLMo-3: upstream
+    TransformerLayer recomputes only input_layernorm / pre_mlp_layernorm, which are IdentityOp
+    here (OLMo-3's norms are post-norms inside the attention and the MLP). Refused, so a user does
+    not silently lose the memory saving; ``core_attn`` and ``mlp`` work as for any model."""
+    if getattr(obj, "recompute_granularity", None) != "selective":
+        return
+    modules = getattr(obj, "recompute_modules", None)
+    if is_unset(modules):
+        return
+    if isinstance(modules, str):
+        parsed = _read(modules)  # "['layernorm']" (a quoted list) parses to a list
+        if isinstance(parsed, (list, tuple)):
+            modules = parsed
+        else:  # "layernorm mlp", "core_attn,layernorm", "[layernorm,mlp]" (unquoted list)
+            modules = modules.strip().strip("[]()").replace(",", " ").split()
+    if "layernorm" in [str(m).strip().strip("'\"") for m in modules]:
+        raise ValueError(
+            "OLMo-3 has no input / pre-MLP layernorm (its norms are post-norms), so "
+            "recompute_modules: [layernorm] would recompute nothing; remove 'layernorm' "
+            "(use core_attn and/or mlp, or recompute_granularity: full)"
+        )
+
+
+def check_olmo3_kv_heads_per_tp(obj):
+    """The full-width k_norm spans all KV heads, sharded over TP. With num_query_groups < TP,
+    Megatron replicates each KV head on TP / num_query_groups ranks, so the TP all-reduce of the
+    k sum of squares would count each head several times and the k_norm weight shards would not
+    be TP-disjoint. That layout is refused (the released OLMo-3 7B has 32 KV heads: TP must divide 32, i.e. 1, 2, 4, 8, 16 or 32).
+    """
+    tp = getattr(obj, "tensor_model_parallel_size", 1)
+    gqa = getattr(obj, "group_query_attention", _MISSING)
+    ng = getattr(obj, "num_query_groups", None)
+    # args: num_query_groups only applies with group_query_attention (Megatron's
+    # core_transformer_config_from_args uses num_attention_heads otherwise, whatever
+    # --num-query-groups holds); a TransformerConfig has no such switch and holds the real value
+    if is_unset(ng) or (gqa is not _MISSING and not _truthy(gqa)):
+        ng = getattr(obj, "num_attention_heads", None)
+    if is_unset(tp) or is_unset(ng):
+        return
+    tp, ng = _as_int(tp, "tensor_model_parallel_size"), _as_int(ng, "num_query_groups")
+    if tp <= 1:
+        return
+    if ng % tp and tp % ng:
+        raise ValueError(
+            f"OLMo-3: num_query_groups ({ng}) and tensor_model_parallel_size ({tp}) must divide one "
+            "another (Megatron shards whole KV heads over TP)"
+        )
+    if ng < tp:
+        raise ValueError(
+            f"OLMo-3 full-width k_norm needs num_query_groups >= tensor_model_parallel_size "
+            f"(got num_query_groups={ng}, tensor_model_parallel_size={tp}): with fewer KV heads than "
+            "TP ranks Megatron replicates KV heads across ranks, which the cross-rank k_norm "
+            "statistic does not support. Use a smaller tensor_model_parallel_size."
+        )
+
+
 def check_olmo3_cp(obj):
     """TE's sliding-window attention under context parallelism needs cp_comm_type a2a or all_gather."""
     cp = getattr(obj, "context_parallel_size", 1)
@@ -459,4 +597,70 @@ def check_olmo3_cp(obj):
         raise ValueError(
             f"OLMo-3 sliding-window attention with context_parallel_size={cp} needs "
             f"cp_comm_type a2a or all_gather, got {cp_comm}"
+        )
+
+
+# the tracker file Megatron writes next to its iter_* directories (checkpointing.py:
+# get_checkpoint_tracker_filename)
+CHECKPOINT_TRACKER_FILENAME = "latest_checkpointed_iteration.txt"
+
+
+def _single_shard_legacy_checkpoint(path, ckpt_step=None):
+    """True if the iteration Megatron would load from ``path`` (``ckpt_step`` if set, else the
+    tracker's) is a legacy ``torch`` checkpoint with exactly one shard, ``mp_rank_00``: the layout
+    the native OLMo-3 converter writes (TP = PP = 1). A lone ``mp_rank_00_000`` is not read as
+    single-shard: Megatron adds the ``_{pp:03d}`` suffix only for PP > 1, so it may be the first
+    shard of a PP save. Megatron's own load reports any other mismatch."""
+    tracker = os.path.join(path, CHECKPOINT_TRACKER_FILENAME)
+    if not os.path.isfile(tracker):
+        return False
+    if not is_unset(ckpt_step) and _read(ckpt_step):
+        step = f"iter_{_as_int(ckpt_step, 'ckpt_step'):07d}"
+    else:
+        with open(tracker) as f:
+            it = f.read().strip()
+        step = "release" if it == "release" else f"iter_{int(it):07d}" if it.isdigit() else None
+    step_dir = os.path.join(path, step) if step else None
+    if step_dir is None or not os.path.isdir(step_dir):
+        return False
+    shards = sorted(d for d in os.listdir(step_dir) if d.startswith("mp_rank_"))
+    return shards == ["mp_rank_00"]
+
+
+def _checkpoint_megatron_loads(args):
+    """``(key, path)`` of the checkpoint Megatron's ``load_checkpoint`` reads: ``load`` when it holds
+    a tracker file, else ``pretrained_checkpoint`` (checkpointing.py: pretrained_checkpoint is read
+    only when ``checkpoint_exists(load)`` is false); ``(None, None)`` when neither is set."""
+    load = getattr(args, "load", None)
+    if isinstance(load, str) and load and os.path.isfile(os.path.join(load, CHECKPOINT_TRACKER_FILENAME)):
+        return "load", load
+    pretrained = getattr(args, "pretrained_checkpoint", None)
+    if isinstance(pretrained, str) and pretrained:
+        return "pretrained_checkpoint", pretrained
+    return None, None
+
+
+def check_olmo3_checkpoint_layout(args):
+    """Fail fast before the model is built: the native OLMo-3 converter (posttrain hook) writes a
+    single-shard legacy ``torch`` checkpoint (``mp_rank_00``, TP = PP = 1). Megatron cannot reshard
+    a legacy checkpoint, so loading one with tensor or pipeline parallel size > 1 is refused here
+    with the fix, instead of failing later on a missing ``mp_rank_*`` file. Only the checkpoint
+    Megatron will actually load is inspected (:func:`_checkpoint_megatron_loads`)."""
+    sizes = []
+    for key in ("tensor_model_parallel_size", "pipeline_model_parallel_size"):
+        value = getattr(args, key, None)
+        size = 1 if is_unset(value) else _as_int(value, key)  # an explicit 0 is not read as 1
+        if size < 1:
+            raise ValueError(f"OLMo-3 {key} must be >= 1, got {value!r}")
+        sizes.append(size)
+    tp, pp = sizes
+    if tp == 1 and pp == 1:
+        return
+    key, path = _checkpoint_megatron_loads(args)
+    if path and _single_shard_legacy_checkpoint(path, getattr(args, "ckpt_step", None)):
+        raise ValueError(
+            f"OLMo-3: {key}={path} is a single-shard legacy torch checkpoint (mp_rank_00 only, as the "
+            f"native converter writes), but this run uses tensor_model_parallel_size={tp}, "
+            f"pipeline_model_parallel_size={pp}. Fine-tune it with TP=PP=1, or first load it at "
+            "TP=PP=1 and re-save it with ckpt_format: torch_dist, then load that checkpoint."
         )

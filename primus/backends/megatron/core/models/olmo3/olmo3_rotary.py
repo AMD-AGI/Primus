@@ -4,7 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Two RoPE tables for OLMo-3: plain RoPE (sliding layers) and YaRN (full layers).
+"""Two RoPE tables for OLMo-3: plain RoPE (sliding layers) and YaRN (full layers; plain RoPE
+again when YaRN is disabled, i.e. ``olmo3_yarn_rotary_scaling_factor`` is 1).
 
 ``forward`` returns ``torch.stack([rope, yarn])`` of shape ``[2, s, 1, 1, d]``;
 :class:`Olmo3SelfAttention` selects index 0 or 1 for its layer. The YaRN
@@ -70,7 +71,8 @@ class Olmo3DualRotaryEmbedding(RotaryEmbedding):
             )
 
     def get_emb(self, max_seq_len: int, offset: int = 0) -> Tensor:
-        """Stacked ``[2, s, 1, 1, d]`` table (index 0 plain RoPE, index 1 YaRN), before CP slicing."""
+        """Stacked ``[2, s, 1, 1, d]`` table, before CP slicing: index 0 plain RoPE, index 1 YaRN,
+        or plain RoPE when YaRN is disabled (``config.olmo3_yarn_enabled`` false)."""
         rope = super().get_emb(max_seq_len, offset)
         if self.olmo3_yarn is not None:
             yarn, _ = self.olmo3_yarn.get_emb(max_seq_len, offset)

@@ -16,14 +16,13 @@ Differences from upstream ``SelfAttention``:
   TP, which is right for replicated per-head norms and wrong for sharded ones.
   ``FullWidthRMSNorm.sharded_state_dict`` marks the weight TP-sharded on dim 0,
   so distributed (``torch_dist``) checkpoints save and reshard it across TP sizes.
-  The native HF converter (``native_loader_olmo3``) writes TP=PP=EP=1 legacy ``torch``
-  checkpoints only. Loading converted HF weights at TP > 1 therefore needs a torch -> torch_dist
-  conversion first; that path has not been run for OLMo-3. What is tested at TP = 2: training
-  from scratch, and save / reshard / load of ``torch_dist`` checkpoints Megatron itself wrote.
+  The native HF converter writes TP=PP=EP=1 legacy ``torch`` checkpoints only; to load
+  converted weights at TP > 1, convert them to ``torch_dist`` first.
 * per-layer RoPE: the model hands every layer a stacked ``[2, s, 1, 1, d]``
   embedding (index 0 = plain RoPE, index 1 = YaRN). Full-attention layers take
   YaRN; sliding layers take plain RoPE (``olmo3_rope_layout: per_type``) or
-  YaRN (``yarn_all``).
+  YaRN (``yarn_all``). With YaRN off (``olmo3_yarn_rotary_scaling_factor: 1``) every layer,
+  full-attention ones included, uses plain RoPE (index 0).
 * per-layer YaRN attention factor: HF multiplies cos and sin by ``m`` on the YaRN
   layers, which scales q and k by ``m`` and the logits by ``m**2``; it is applied
   here as ``softmax_scale = m**2 * base_scale`` (``base_scale``: ``config.softmax_scale``
@@ -51,15 +50,12 @@ from torch import Tensor
 from primus.backends.megatron.core.models.olmo3.olmo3_transformer_config import (
     OLMO3_ROPE_LAYOUTS,
 )
-from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
-    olmo3_window_from_settings,
-)
 
 __all__ = [
     "Olmo3SelfAttention",
     "FullWidthRMSNorm",
     "olmo3_layer_is_sliding",
-    "olmo3_te_window",
+    "olmo3_layer_uses_yarn",
 ]
 
 
@@ -68,17 +64,18 @@ def olmo3_layer_is_sliding(config, layer_number: int) -> bool:
     return bool(is_layer_window_attention(config.window_size, config.window_attn_skip_freq, layer_number))
 
 
-def olmo3_te_window(sliding_window):
-    """HF ``sliding_window`` W -> Megatron / TE ``(W - 1, 0)``; the rule (and the W > 1 check) is
-    :func:`olmo3_window_from_settings`."""
-    return olmo3_window_from_settings(None, sliding_window)[0]
+def olmo3_layer_uses_yarn(config, sliding: bool) -> bool:
+    """True if a layer gets the YaRN RoPE table and attention factor: YaRN is on (factor > 1) and
+    the layer is full attention, or ``olmo3_rope_layout`` is ``yarn_all``. ``sliding`` is the
+    layer's :func:`olmo3_layer_is_sliding` result (computed once per layer by the caller)."""
+    return bool(config.olmo3_yarn_enabled) and (not sliding or config.olmo3_rope_layout == "yarn_all")
 
 
 class _FullWidthRMSNormFn(torch.autograd.Function):
     """``(weight * (x * rstd)).to(x.dtype)`` with ``rstd = rsqrt(sum_all_ranks(x**2) / full + eps)``.
 
-    One op for autograd: it saves the input (in its own dtype), the weight and the fp32 ``rstd``
-    (one value per token) and recomputes the rest in backward. An eager chain of fp32 ops would
+    One op for autograd: it saves the input (in its own dtype), the weight and ``rstd`` (fp32, or the input
+    dtype if wider; one value per token) and recomputes the rest in backward. An eager chain of fp32 ops would
     keep about three fp32 copies of the projection (about 6x a bf16 input) per call.
     Backward: ``dx = rstd * dy - x * rstd**3 * sum_all_ranks(dy * x) / full`` with
     ``dy = grad * weight``; the row sum spans every TP rank's heads, so it is all-reduced, as the
@@ -153,12 +150,15 @@ class FullWidthRMSNorm(torch.nn.Module):
         if self._reduce_group is not None:
             set_tensor_model_parallel_attributes(self.weight, True, 0, 1)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def _weight_view(self, x: Tensor) -> Tensor:
         # x: [s, b, heads_local, head_dim]; normalised in place of its layout (no reshape copy)
         heads, head_dim = x.shape[-2:]
         if heads * head_dim != self.local_width:
             raise ValueError(f"FullWidthRMSNorm: got width {heads * head_dim}, expected {self.local_width}")
-        weight = self.weight.view(heads, head_dim)
+        return self.weight.view(heads, head_dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        weight = self._weight_view(x)
         return _FullWidthRMSNormFn.apply(x, weight, self.eps, self.full_width, self._reduce_group)
 
     def sharded_state_dict(self, prefix: str = "", sharded_offsets=(), metadata=None):
@@ -188,7 +188,8 @@ def _with_softmax_scale(core_attention, softmax_scale):
     ModuleSpec again: a generated subclass whose ``__init__`` replaces the ``softmax_scale``
     argument. Not a function: ``build_module`` returns a function unchanged (it would not be
     called), so the result must stay a class / spec whether upstream calls
-    ``submodules.core_attention(...)`` directly (d3528a2) or through ``build_module``. One class
+    ``submodules.core_attention(...)`` directly (some Megatron versions instantiate it that way) or
+    through ``build_module``. One class
     per (class, scale), so layers with the same scale share it."""
     if isinstance(core_attention, ModuleSpec):
         return dataclasses.replace(
@@ -207,14 +208,18 @@ def _with_softmax_scale(core_attention, softmax_scale):
             kwargs["softmax_scale"] = softmax_scale
             core_attention.__init__(self, *args, **kwargs)
 
+        # a distinct name, so a scaled layer is visible as such in repr / logs and is not looked up
+        # as the unscaled parent by qualified name; the scale is also a class attribute.
+        # Cached per (class, scale); YaRN layers share one scale, so a model adds few classes.
+        name = f"{core_attention.__name__}Olmo3YarnScaled"
         cls = type(
-            core_attention.__name__,
+            name,
             (core_attention,),
             {
                 "__init__": __init__,
-                "__module__": core_attention.__module__,
-                "__qualname__": core_attention.__qualname__,
-                "olmo3_fixed_softmax_scale": float(softmax_scale),
+                "__module__": __name__,
+                "__qualname__": name,
+                "olmo3_softmax_scale": float(softmax_scale),
             },
         )
         _SCALED_CORE_ATTENTION[key] = cls
@@ -225,6 +230,8 @@ class Olmo3SelfAttention(SelfAttention):
     """Self-attention with OLMo-3's full-width QK-norm, per-layer RoPE/window and post-norm."""
 
     def __init__(self, config, submodules, layer_number: int, *args, post_norm=None, **kwargs):
+        if post_norm is None:
+            raise ValueError("OLMo-3 attention needs post_norm (its post_attention_layernorm)")
         self.olmo3_sliding = olmo3_layer_is_sliding(config, layer_number)
         # "yarn_all": one YaRN table (and attention factor) on every layer;
         # "per_type": plain RoPE on sliding layers, YaRN on full layers.
@@ -233,27 +240,25 @@ class Olmo3SelfAttention(SelfAttention):
             # Olmo3TransformerConfig refuses it already; kept so a hand-built config cannot get
             # an implicit layout.
             raise ValueError(f"OLMo-3 olmo3_rope_layout must be one of {OLMO3_ROPE_LAYOUTS}, got {layout!r}")
-        self.olmo3_use_yarn = (not self.olmo3_sliding) or layout == "yarn_all"
+        # YaRN off (factor 1): every layer uses plain RoPE, as olmo3_layer_plan logs it.
+        self.olmo3_use_yarn = olmo3_layer_uses_yarn(config, self.olmo3_sliding)
         # No private config copy: every layer shares ``config``. Upstream core attention (TE and
         # local) already applies ``config.window_size`` = (W - 1, 0) per layer through
         # is_layer_window_attention(window_size, window_attn_skip_freq, layer_number), the same
         # rule as olmo3_layer_is_sliding, so full-attention layers get no window.
-        if self.olmo3_sliding:
-            expected = olmo3_te_window(config.olmo3_sliding_window)
-            if tuple(config.window_size) != expected:
-                raise ValueError(
-                    f"OLMo-3 window_size {tuple(config.window_size)} != {expected} "
-                    f"(olmo3_sliding_window - 1, 0 with olmo3_sliding_window={config.olmo3_sliding_window})"
-                )
-        # The upstream default (Attention sets hidden_size_per_attention_head = kv_channels), once.
+        # window_size == (olmo3_sliding_window - 1, 0) is set by Olmo3TransformerConfig and
+        # re-checked by olmo3_builder for a supplied config, the only way this layer is built.
+
+        # Upstream default softmax scale: 1/sqrt(head_dim), with head_dim = kv_channels (as Attention
+        # sets hidden_size_per_attention_head).
         base_scale = (
             config.softmax_scale if config.softmax_scale is not None else 1.0 / math.sqrt(config.kv_channels)
         )
         self.olmo3_softmax_scale = None
         if self.olmo3_use_yarn:
-            mscale = config.olmo3_yarn_mscale
-            if mscale != 1.0:
-                self.olmo3_softmax_scale = base_scale * mscale * mscale
+            attention_factor = config.olmo3_yarn_effective_attention_factor
+            if attention_factor != 1.0:
+                self.olmo3_softmax_scale = base_scale * attention_factor * attention_factor
                 # The per-layer scale goes to this layer's core attention only (upstream passes
                 # config.softmax_scale); the shared config is not changed.
                 submodules = dataclasses.replace(
@@ -268,6 +273,13 @@ class Olmo3SelfAttention(SelfAttention):
         self.softmax_scale = self.olmo3_softmax_scale if self.olmo3_softmax_scale is not None else base_scale
         eps = config.layernorm_epsilon
         hd = self.hidden_size_per_attention_head
+        if config.num_query_groups < self.world_size:
+            # KV heads would be replicated across TP ranks: the cross-rank k statistic and the
+            # TP-sharded k_norm weight assume disjoint heads (olmo3_validation refuses it earlier)
+            raise ValueError(
+                f"OLMo-3 full-width k_norm needs num_query_groups ({config.num_query_groups}) >= "
+                f"tensor parallel size ({self.world_size})"
+            )
         self.q_norm = FullWidthRMSNorm(
             self.num_attention_heads_per_partition * hd,
             config.num_attention_heads * hd,
@@ -282,11 +294,7 @@ class Olmo3SelfAttention(SelfAttention):
             config=config,
             tp_group=self.tp_group,
         )
-        self.post_attention_layernorm = (
-            post_norm(config=config, hidden_size=config.hidden_size, eps=eps)
-            if post_norm is not None
-            else None
-        )
+        self.post_attention_layernorm = post_norm(config=config, hidden_size=config.hidden_size, eps=eps)
 
     def get_query_key_value_tensors(
         self, hidden_states, key_value_states=None, output_gate=False, split_qkv=True
@@ -298,7 +306,10 @@ class Olmo3SelfAttention(SelfAttention):
         query, key, value = super().get_query_key_value_tensors(
             hidden_states, key_value_states, output_gate=False, split_qkv=True
         )
-        return self.q_norm(query), self.k_norm(key), value
+        # Call the modules (not their autograd function) so module hooks fire, e.g. Megatron DDP's
+        # overlap_param_gather wait for the q/k norm weights.
+        query, key = self.q_norm(query), self.k_norm(key)
+        return query, key, value
 
     def _select_rotary(self, rotary_pos_emb):
         """Pick this layer's table from the stacked ``[2, s, 1, 1, d]`` (plain, YaRN) tensor
@@ -334,9 +345,7 @@ class Olmo3SelfAttention(SelfAttention):
             rotary_pos_emb=self._select_rotary(rotary_pos_emb),
             **kwargs,
         )
-        if self.post_attention_layernorm is not None:
-            if bias is not None:
-                out = out + bias
-                bias = None
-            out = self.post_attention_layernorm(out)
-        return out, bias
+        if bias is not None:
+            out = out + bias
+            bias = None
+        return self.post_attention_layernorm(out), bias

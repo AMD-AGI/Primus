@@ -20,8 +20,7 @@ OLMo-3 (HF ``model_type: olmo3``) differs from the Llama layout in four ways:
 Window: ``olmo3_sliding_window`` is the HF ``sliding_window`` W (visible keys
 including the current token, 4096 for OLMo-3). ``window_size`` holds the upstream
 Megatron / TE ``(left, right)`` convention ``(W - 1, 0)``, so every upstream consumer
-(TE / local DotProductAttention, saved args) reads it correctly. Only the HF boundary
-(converter, model preset, args patch) uses W.
+(TE / local DotProductAttention, saved args) reads it correctly.
 
 The YaRN fields carry an ``olmo3_`` prefix on purpose: upstream
 ``Attention`` multiplies RoPE by a YaRN concentration factor on **every**
@@ -58,19 +57,17 @@ logger = logging.getLogger(__name__)
 OLMO3_ROPE_LAYOUTS = ("per_type", "yarn_all")
 
 
-# transformers' Olmo3 RoPE layout by version. Measured points (logprob parity against the HF model):
-# 4.57 builds plain RoPE on sliding layers and YaRN on full ones (per_type); 5.10 builds one YaRN
-# table for every layer (yarn_all).
-# The bounds 5.0 and 5.13 are unverified (no installed 5.0 or 5.13 was tested). Olmo3 first ships in 4.57; older
-# versions are refused, and so is a pre-release at a bound. ``auto`` is a parity-tool convenience
-# only; training sets the layout.
-_OLMO3_FIRST_TRANSFORMERS = (4, 57)
-_YARN_ALL_TRANSFORMERS = ((5, 0), (5, 13))  # [first, end)
+# transformers' Olmo3 RoPE layout, by the versions that were measured (logprob parity against the
+# HF model): 4.57 builds plain RoPE on sliding layers and YaRN on full ones (per_type); 5.10 builds
+# one YaRN table for every layer (yarn_all). ``auto`` maps only these minor versions; any other
+# version is refused (set per_type or yarn_all), so an unmeasured version is never guessed.
+# ``auto`` is a parity-tool convenience only; training sets the layout.
+_MEASURED_TRANSFORMERS_LAYOUTS = {(4, 57): "per_type", (5, 10): "yarn_all"}
 
 
 def _rope_layout_of_installed_transformers() -> tuple:
     """(layout, version): the layout the installed transformers' ``Olmo3Model`` uses (for ``auto``
-    only) and the transformers version it was read from."""
+    only; measured minor versions only) and the transformers version it was read from."""
     try:
         import transformers
     except ImportError as e:
@@ -84,18 +81,14 @@ def _rope_layout_of_installed_transformers() -> tuple:
             f"olmo3_rope_layout: auto cannot parse transformers version {text!r}; set per_type or yarn_all"
         )
     ver, suffix = (int(m.group(1)), int(m.group(2))), m.group(3)
-    if ver < _OLMO3_FIRST_TRANSFORMERS:
+    layout = _MEASURED_TRANSFORMERS_LAYOUTS.get(ver)
+    if layout is None or suffix:
+        measured = ", ".join(f"{a}.{b}" for a, b in _MEASURED_TRANSFORMERS_LAYOUTS)
         raise ValueError(
-            f"olmo3_rope_layout: auto: transformers {text} has no Olmo3 model (it needs >= 4.57); "
-            "set per_type or yarn_all"
+            f"olmo3_rope_layout: auto: the Olmo3 RoPE layout of transformers {text} was not measured "
+            f"(measured: {measured}); set per_type or yarn_all"
         )
-    first, end = _YARN_ALL_TRANSFORMERS
-    if suffix and ver in (first, end):  # e.g. 5.0.0rc1, 5.13.0.dev0: either side of a change
-        raise ValueError(
-            f"olmo3_rope_layout: auto: transformers pre-release {text} is at a layout change; "
-            "set per_type or yarn_all"
-        )
-    return ("yarn_all" if first <= ver < end else "per_type"), text
+    return layout, text
 
 
 def resolve_olmo3_rope_layout(layout: str = "per_type") -> str:
@@ -105,8 +98,7 @@ def resolve_olmo3_rope_layout(layout: str = "per_type") -> str:
       layers. This is the trained OLMo-3 model (OLMo-core); transformers 4.57
       measured.
     * ``"yarn_all"``: one YaRN table (and attention factor) on every layer;
-      transformers 5.10 measured (the version range is unverified, see the
-      version note above ``_OLMO3_FIRST_TRANSFORMERS``).
+      transformers 5.10 measured (see ``_MEASURED_TRANSFORMERS_LAYOUTS``).
     * ``"auto"`` (opt-in): follow the transformers installed in this
       environment; the resolved layout is logged. Use it only to match a
       transformers reference, never for training.
@@ -125,10 +117,10 @@ def resolve_olmo3_rope_layout(layout: str = "per_type") -> str:
 def yarn_attention_factor(scaling_factor: float, attention_factor: Optional[float] = None) -> float:
     """YaRN attention (concentration) factor, as HF ``_compute_yarn_parameters``.
 
-    ``scaling_factor == 1`` is YaRN off: 1.0, even if an explicit ``attention_factor`` is given
-    (HF applies it for rope_type yarn only, and OLMo-3 builds no YaRN table then). A factor
-    below 1 and an ``attention_factor <= 0`` (it would zero the softmax scale) raise
-    ``ValueError``.
+    ``scaling_factor == 1`` is YaRN off: 1.0. OLMo-3 builds no YaRN table then, so an explicit
+    ``attention_factor`` other than 1 would be dropped, while HF would still apply it: it raises
+    ``ValueError``. A factor below 1 and an ``attention_factor <= 0`` (it would zero the softmax
+    scale) also raise ``ValueError``.
     """
     scaling_factor = float(scaling_factor)
     if not scaling_factor >= 1.0:
@@ -136,6 +128,11 @@ def yarn_attention_factor(scaling_factor: float, attention_factor: Optional[floa
     if attention_factor is not None and not float(attention_factor) > 0.0:
         raise ValueError(f"OLMo-3 YaRN attention_factor must be > 0, got {attention_factor}")
     if scaling_factor == 1.0:
+        if attention_factor is not None and float(attention_factor) != 1.0:
+            raise ValueError(
+                f"OLMo-3 YaRN attention_factor {attention_factor} with scaling factor 1 (YaRN off) would "
+                "be ignored; unset it or set it to 1"
+            )
         return 1.0
     if attention_factor is not None:
         return float(attention_factor)
@@ -160,7 +157,7 @@ class Olmo3TransformerConfig(TransformerConfig):
     """YaRN ``beta_slow``."""
 
     olmo3_yarn_attention_factor: Optional[float] = None
-    """YaRN ``attention_factor``; None derives ``0.1 * ln(factor) + 1``. Ignored (1.0) when YaRN is off."""
+    """YaRN ``attention_factor``; None derives ``0.1 * ln(factor) + 1``. With YaRN off it must be unset or 1."""
 
     olmo3_rope_layout: str = "per_type"
     """RoPE on sliding layers: ``per_type`` (plain, default) or ``yarn_all`` (YaRN). ``auto`` is
@@ -168,29 +165,23 @@ class Olmo3TransformerConfig(TransformerConfig):
 
     olmo3_sliding_window: Optional[int] = None
     """HF ``sliding_window`` W: keys a sliding-layer query sees, current token included.
-    Required. ``window_size`` must agree with it in the form ``olmo3_window_size_form`` declares
-    (``(W - 1, 0)`` for ``megatron`` or unset, ``(W, 0)`` for ``hf``), or be unset (then derived);
-    any other ``window_size`` raises (see ``olmo3_validation.olmo3_window_from_settings``)."""
-
-    olmo3_window_size_form: Optional[str] = None
-    """Form of the ``window_size`` passed in: ``megatron`` ``(W - 1, 0)`` (what the args patch and the
-    converter write) or ``hf`` ``(W, 0)``; unset means ``megatron`` (``olmo3_sliding_window`` is required either way). After
-    ``__post_init__`` the config always holds the Megatron form and this field is ``megatron``."""
+    Required. ``window_size`` is set to the Megatron / TE form ``(W - 1, 0)``; as input it may be
+    that, unset, or W itself (an int) (:func:`olmo3_window_from_settings`, the args patch's reader)."""
 
     def __post_init__(self):
-        self._olmo3_check_window()
+        self._olmo3_normalize_window()
         # one table for args, config and builder (olmo3_validation.OLMO3_UNSUPPORTED)
         check_olmo3_unsupported(self)
-        m = self.olmo3_yarn_mscale
+        attention_factor = self.olmo3_yarn_effective_attention_factor
         if self.olmo3_yarn_attention_factor is not None and self.olmo3_yarn_enabled:
             derived = yarn_attention_factor(self.olmo3_yarn_rotary_scaling_factor)
-            if not math.isclose(m, derived, rel_tol=1e-9):
+            if not math.isclose(attention_factor, derived, rel_tol=1e-9):
                 # an HF checkpoint may carry its own attention_factor, so it is used, not refused
                 logger.warning(
                     "OLMo-3 olmo3_yarn_attention_factor=%s differs from 0.1*ln(factor)+1=%s for "
                     "olmo3_yarn_rotary_scaling_factor=%s; the explicit value is used (unset it to "
                     "derive it from the factor)",
-                    m,
+                    attention_factor,
                     derived,
                     self.olmo3_yarn_rotary_scaling_factor,
                 )
@@ -201,26 +192,18 @@ class Olmo3TransformerConfig(TransformerConfig):
             )
         super().__post_init__()
 
-    def _olmo3_check_window(self):
-        """``window_size = (W - 1, 0)`` (Megatron / TE) + ``olmo3_sliding_window = W``.
-
-        The config needs ``olmo3_sliding_window`` W (HF convention). ``window_size`` is read in the form
-        ``olmo3_window_size_form`` declares (``megatron`` or unset: ``(W - 1, 0)``; ``hf``:
-        ``(W, 0)``) and must agree with W, or is unset and derived. Either way the config then
-        holds the Megatron / TE ``(W - 1, 0)`` and the form ``megatron``. Without a declared form
-        an HF ``(W, 0)`` raises, so a value is never guessed.
-        """
+    def _olmo3_normalize_window(self):
+        """``window_size = (W - 1, 0)`` (Megatron / TE) + ``olmo3_sliding_window = W`` (HF)."""
         if self.olmo3_sliding_window is None:
             raise ValueError(
                 "Olmo3TransformerConfig needs olmo3_sliding_window (HF sliding_window W); window_size "
                 "then holds the Megatron/TE (W - 1, 0). Build the config from args after the OLMo-3 "
                 "args patch, or from the converter's margs."
             )
-        ws, w = olmo3_window_from_settings(
-            self.window_size, self.olmo3_sliding_window, self.olmo3_window_size_form
+        # the same reader as the args patch: window_size becomes the Megatron / TE (W - 1, 0)
+        self.window_size, self.olmo3_sliding_window = olmo3_window_from_settings(
+            self.window_size, self.olmo3_sliding_window
         )
-        self.window_size, self.olmo3_sliding_window = ws, w
-        self.olmo3_window_size_form = "megatron"
         self.window_attn_skip_freq = parse_olmo3_skip_freq(self.window_attn_skip_freq, self.num_layers)
 
     @property
@@ -229,7 +212,8 @@ class Olmo3TransformerConfig(TransformerConfig):
         return float(self.olmo3_yarn_rotary_scaling_factor) > 1.0
 
     @property
-    def olmo3_yarn_mscale(self) -> float:
-        """YaRN attention factor m, applied (as m**2 on the logits) on every layer that uses YaRN:
+    def olmo3_yarn_effective_attention_factor(self) -> float:
+        """The YaRN attention factor in effect (``olmo3_yarn_attention_factor``, else
+        ``0.1 * ln(factor) + 1``), applied (squared, on the logits) on every layer that uses YaRN:
         the full-attention layers, and with ``olmo3_rope_layout: yarn_all`` the sliding ones too."""
         return yarn_attention_factor(self.olmo3_yarn_rotary_scaling_factor, self.olmo3_yarn_attention_factor)
