@@ -26,6 +26,7 @@ skip_if_no_cuda()
 
 from megatron.core import tensor_parallel  # noqa: E402
 from megatron.training.global_vars import set_args  # noqa: E402
+from primus_turbo.pytorch.core.utils import is_gfx942  # noqa: E402
 
 from primus.backends.megatron.core.models.diffusion.wan.config import (  # noqa: E402
     WanConfig,
@@ -109,7 +110,18 @@ def _check_recompute(monkeypatch, checkpoint_owner, method, num_layers, expected
         assert error < 1e-2, f"{name}: relative gradient error {error:.2e}"
 
 
-@pytest.mark.parametrize("transformer_impl", ["local", "transformer_engine"])
+# On gfx942, aiter's v3 attention backward rejects this model's attention calls
+# ("invalid argument for fmha_v3_bwd" with aiter v0.1.24.post1); WAN's recipes
+# target gfx950, where they run.
+LOCAL = pytest.param(
+    "local",
+    marks=pytest.mark.skipif(
+        is_gfx942(), reason="aiter's gfx942 attention backward rejects WAN's attention calls"
+    ),
+)
+
+
+@pytest.mark.parametrize("transformer_impl", [LOCAL, "transformer_engine"])
 @pytest.mark.parametrize("method,num_layers,expected_calls", RECOMPUTE)
 def test_recompute_matches_plain_forward(transformer_impl, method, num_layers, expected_calls, monkeypatch):
     _check_recompute(
