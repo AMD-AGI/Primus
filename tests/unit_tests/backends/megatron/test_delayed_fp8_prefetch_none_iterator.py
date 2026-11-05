@@ -20,6 +20,7 @@ Run:
       tests/unit_tests/backends/megatron/test_delayed_fp8_prefetch_none_iterator.py -v
 """
 
+import contextlib
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -99,3 +100,40 @@ def test_none_data_iterator_skips_prefetch(stub_megatron):
     assert result == "ok"
     assert seen["data_iterator"] is None
     assert "iter" not in dfp.get_prefetch_state()
+
+
+def test_real_iterator_still_gets_prefetched(stub_megatron, monkeypatch):
+    """Positive control for the None skip: a stage that does have a data
+    iterator (first/last pipeline stage, TP=1) must still get a
+    ``CudaPrefetchIterator``, and the wrapper — not the upstream iterator —
+    must reach forward_backward_func."""
+
+    @contextlib.contextmanager
+    def _fake_stream_ctx(stream):
+        yield stream
+
+    monkeypatch.setattr(torch.cuda, "stream", _fake_stream_ctx)
+
+    params = SimpleNamespace(tensor_model_parallel_size=1, bf16=True)
+    ctx = PatchContext(
+        backend="megatron",
+        phase="before_train",
+        extra={"module_config": SimpleNamespace(params=params)},
+    )
+    dfp.patch_grad_zero_and_data_prefetch(ctx)
+
+    seen = {}
+
+    def forward_backward_func(**kwargs):
+        seen["data_iterator"] = kwargs["data_iterator"]
+        return "ok"
+
+    # plain (non-tensor) batch values keep _prefetch() off the GPU path
+    upstream = iter([{"batch": 1}])
+    result = stub_megatron.train_step(None, upstream, None, None, None, None, forward_backward_func, iteration=1)
+
+    assert result == "ok"
+    pf = dfp.get_prefetch_state()["iter"]
+    assert pf is not None
+    assert seen["data_iterator"] is pf
+    assert seen["data_iterator"] is not upstream
