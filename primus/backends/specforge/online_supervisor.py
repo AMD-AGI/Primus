@@ -24,6 +24,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+from primus.backends.specforge.capture_plugin import capture_server_env
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
     build_role_argv,
@@ -206,7 +207,7 @@ def _start_local_sglang(
     servers: list[subprocess.Popen] = []
     for index in range(int(settings["server_count"])):
         gpus = server_gpu_group(settings["server_gpus"], index, int(settings["server_tp"]))
-        server_env = _merge_env(mooncake_env(head_ip, settings, local_ip), gpus)
+        server_env = capture_server_env(_merge_env(mooncake_env(head_ip, settings, local_ip), gpus))
         log_path = log_root / f"sglang-server-{capture_rank}-{index}.log"
         proc = _popen(sglang_server_argv(index, settings), server_env, log_path)
         servers.append(proc)

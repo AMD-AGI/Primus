@@ -14,6 +14,8 @@
 # Writes raw shards to $OUTPUT_DIR/hidden_states_raw and filtered shards to
 # $OUTPUT_DIR/hidden_states.
 
+# Primus temporarily provides the plugin capture transport; SpecForge owns
+# preprocessing and shard writing. Remove the bridge once upstream supports it.
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3.5-4b-dflash-offline-capture}

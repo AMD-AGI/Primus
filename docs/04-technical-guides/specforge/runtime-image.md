@@ -21,7 +21,8 @@ installs **this Primus checkout** editable with `--no-deps`.
 | Component | Install method |
 | --- | --- |
 | SGLang / torch | Keep the base image versions |
-| SpecForge | `pip install -e . --no-deps` at a pinned git SHA |
+| SpecForge | `pip install -e . --no-deps --ignore-requires-python` at a pinned git SHA |
+| Capture plugin | `pip install -e plugins/sglang-spec-capture --no-deps` from that same checkout |
 | Primus | `pip install -e /opt/primus --no-deps` (this tree, not the PyPI wheel) |
 | Extra imports | Allowlist in [`install-light-deps.sh`](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/docker/install-light-deps.sh), each `--no-deps` |
 | tensorboard | Exception. The Dockerfile installs `tensorboard>=2.14,<2.21` with dependencies, constrained to versions already in the base image, so pip cannot upgrade numpy, protobuf, grpcio, setuptools, or pillow. `SummaryWriter` imports tensorboard's own tree, and a `--no-deps` copy leaves `--report-to tensorboard` broken. tensorboard 2.21 requires `protobuf>=6.31.1` and `grpcio>=1.74`; the upper bound keeps that release out so the constraint holds instead of upgrading the SGLang stack. |
@@ -38,38 +39,75 @@ Do not use a SpecForge checkout as the context.
 
 ```bash
 docker build -f examples/specforge/docker/Dockerfile \
-  -t primus-specforge:v0.5.14-rocm700-mi35x .
+  -t primus-specforge:v0.5.23-rocm720-mi35x-20261103 .
 ```
 
-Pins (`BASE_IMAGE` digest and `SPECFORGE_REF`) are Dockerfile `ARG`
-defaults. A plain `docker build` uses them; `--build-arg` overrides.
+`BASE_IMAGE` defaults to the tested nightly tag
+`lmsysorg/sglang-rocm:v0.5.23-rocm720-mi35x-20261103` and `SPECFORGE_REF` to
+`af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5`. Both are Dockerfile `ARG`
+defaults; `--build-arg` overrides them. The image tag is not an immutable digest.
 
 The Dockerfile:
 
-1. Starts from the pinned `lmsysorg/sglang:v0.5.14-rocm700-mi35x` digest.
-2. Clones SpecForge at `SPECFORGE_REF` and applies
-   `patches/sglang/v0.5.14/spec-capture.patch`.
-3. Installs SpecForge editable `--no-deps`.
+1. Starts from the tested SGLang ROCm nightly.
+2. Clones SpecForge at `SPECFORGE_REF`.
+3. Installs SpecForge and its SGLang capture plugin editable `--no-deps`.
+   SpecForge also uses `--ignore-requires-python` for the tested base interpreter.
 4. Copies this Primus tree and installs it editable `--no-deps`.
 5. Fills missing light packages (`accelerate`, `wandb`, …) `--no-deps`.
 6. Installs `tensorboard>=2.14,<2.21` with dependencies, constrained to the
    base image's already-installed versions.
-7. Runs GPU-free smoke checks (`enable_spec_capture`, `import specforge`,
+7. Runs GPU-free smoke checks (plugin entry-point discovery, forward-observer
+   and deferred-completion APIs, capture server arguments, `import specforge`,
    a `SummaryWriter` event-file write, `primus-cli --help`, HIP torch).
 
-Validated on AMD Instinct MI355X (gfx950). Newer SGLang ROCm tags may work if
-they still ship AITER and the speculative algorithm you will serve.
+On 2026-11-04, this image passed GPU-free build checks and a Primus Qwen3.5-4B
+DFlash online smoke test on MI355X: one capture GPU, one trainer GPU, 55 captured
+samples, and 20 training steps with finite losses. The server advertised the
+plugin backend, and the producer, consumer, and sidecars shut down successfully.
+Offline training also passed two steps using precomputed Qwen3.5-4B features.
+The temporary offline bridge below also passed fresh capture of four shards,
+resume without rewriting them, exact tensor parity between compressed and
+uncompressed output, and two training steps from the freshly captured features.
+This is functional validation; historical performance results predate the migration.
+The tested base-image digest was
+`sha256:4c9b1497e3793b2f5d216440688a53151ad67d656b8dcdc99311e79fbf734577`.
+For another GPU architecture, select a compatible ROCm image with
+AITER and the plugin extension APIs. Stock older images that only support the
+capture patch are incompatible. Prefer an image digest when available.
 
-For MI300X (gfx942), override the base tag to an `mi30x` image that still has
-those pieces:
+Primus online mode enables `SPECFORGE_SPEC_CAPTURE=1` in each capture server and
+adds `specforge_spec_capture` to an existing `SGLANG_PLUGINS` allowlist. It sends
+`deployment.disaggregated.server_capture=plugin` to the producer and consumers,
+which selects the plugin request format. Remove any explicit `server_capture=patch`
+or `DISAGG_SERVER_CAPTURE=patch` setting before migrating. Primus owns the capture
+flags; remove legacy capture flags from `sglang_extra_args`.
 
-```bash
-docker build -f examples/specforge/docker/Dockerfile \
-  --build-arg BASE_IMAGE=lmsysorg/sglang:v0.5.14-rocm700-mi30x \
-  -t primus-specforge:v0.5.14-rocm700-mi30x .
-```
+Preflight checks plugin capabilities and requires the SGLang version prefix
+`0.5.23`. `PRIMUS_SPECFORGE_PIN_SGLANG` can override that prefix (an empty value
+disables only the version check). Capability checks still apply to online mode.
+Offline training does not require the server capture plugin. Default offline
+capture uses it through the bridge below.
 
-Prefer a digest on `BASE_IMAGE` if you have one, so the override is pinned too.
+**Temporary offline capture bridge:** the pinned SpecForge native offline
+adapter requires `parallel_state_wrapper.ParallelState`, which this nightly
+does not provide. Primus therefore defaults capture to
+`primus.backends.specforge.offline_capture`, which replaces the preparation
+script's target factory with its plugin client and Mooncake store. SpecForge
+still owns tokenization, capture layers, loss masks, vocabulary mapping, shard
+writing, compression, and resume. Only the worker's imported preparation module
+is adapted; the SpecForge and SGLang source trees are unchanged.
+
+Each local TP group owns a loopback SGLang server and Mooncake master. Capture
+reads host tensors, frees the store objects after each batch, and closes sidecars
+on success or failure. TP must fit within one node and divide `nproc_per_node`;
+data parallel capture can span nodes. ROCr allocation masks are preserved.
+An explicit `specforge_capture.script` continues to select a custom script.
+
+Once SpecForge ships native plugin-backed offline preparation, update
+`SPECFORGE_REF`, restore the upstream capture entry point in the argument builder,
+and remove `offline_capture.py` and its bridge tests/help smoke check. No capture
+YAML or shard-format migration should be needed.
 
 ## Run
 
@@ -81,7 +119,7 @@ docker run -it --name primus-specforge \
   -e HF_HOME=/data/hf-cache \
   -e HF_TOKEN \
   -v /path/to/data:/data \
-  primus-specforge:v0.5.14-rocm700-mi35x \
+  primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
   bash
 ```
 
@@ -94,17 +132,17 @@ From the host, `primus-cli container` is the same as `docker run` plus
 `--shm-size 64g` and this image (not the default `rocm/primus` tag):
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+./runner/primus-cli container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
   --shm-size 64g --volume /path/to/data:/data \
   -- train pretrain \
-  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
 
 Inside the image:
 
 - Primus: `/opt/primus` (`WORKDIR`)
 - SpecForge: `/workspace/SpecForge` (`SPECFORGE_ROOT`)
-- Capture patch is already applied to the image SGLang
+- Capture plugin is installed in the SGLang environment
 
 Set `HF_TOKEN` if the target model is gated. Point `HF_HOME` at a durable cache
 so model weights are not re-downloaded.

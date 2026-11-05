@@ -20,6 +20,7 @@ so capture and serve inherit them.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Optional
 
@@ -29,6 +30,7 @@ from primus.backends.specforge.argument_builder import (
     specforge_mode,
     specforge_train_mode,
 )
+from primus.backends.specforge.capture_plugin import capture_plugin_issues
 
 ROCM_STACK_ENV_DEFAULTS = (
     ("SGLANG_USE_AITER", "1"),
@@ -40,7 +42,7 @@ ROCM_STACK_ENV_DEFAULTS = (
 FALSEY = {"0", "false", "no", "off"}
 TRUTHY = {"1", "true", "yes", "on"}
 
-DEFAULT_SGLANG_PIN_PREFIX = "0.5.14"
+DEFAULT_SGLANG_PIN_PREFIX = "0.5.23"
 
 
 def _env_flag(env: Mapping[str, str], name: str) -> Optional[bool]:
@@ -186,7 +188,7 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
     if root is None:
         issues.append(
             "SpecForge root was not resolved; set SPECFORGE_ROOT or specforge_root "
-            "(relative draft configs will not load; see job 89021)"
+            "(relative draft configs will not load)"
         )
     elif not (root / "configs").is_dir():
         issues.append(f"SpecForge root is missing configs/: {root}")
@@ -253,16 +255,14 @@ def collect_issues(params: Any, env: Optional[Mapping[str, str]] = None) -> list
                 "the radix cache"
             )
         if kind == "hip":
-            try:
-                from sglang.srt.server_args import ServerArgs
-
-                if not hasattr(ServerArgs, "enable_spec_capture"):
+            if (mode == "train" and train_mode == "online") or (
+                mode == "capture" and not capture.get("script")
+            ):
+                issues.extend(capture_plugin_issues())
+                if mode == "capture" and shutil.which("mooncake_master") is None:
                     issues.append(
-                        "sglang ServerArgs is missing enable_spec_capture; this is not the "
-                        "SpecForge-patched overlay"
+                        "mooncake_master is not on PATH; plugin offline capture needs the Mooncake binary"
                     )
-            except Exception as exc:
-                issues.append(f"sglang is not importable on the ROCm overlay: {exc}")
             pin = environ.get("PRIMUS_SPECFORGE_PIN_SGLANG", DEFAULT_SGLANG_PIN_PREFIX)
             if pin:
                 try:

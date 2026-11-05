@@ -7,5 +7,5 @@ Build from the **Primus repository root**:
 
 ```bash
 docker build -f examples/specforge/docker/Dockerfile \
-  -t primus-specforge:v0.5.14-rocm700-mi35x .
+  -t primus-specforge:v0.5.23-rocm720-mi35x-20261103 .
 ```
