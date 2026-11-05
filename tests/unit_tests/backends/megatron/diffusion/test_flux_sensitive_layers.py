@@ -363,8 +363,8 @@ class TestTESpecFP8PerLayer:
         seen = _record_fp8_per_layer(model)
         model.train()
         output = model(*_flux_inputs())
-        if recompute:
-            output.float().sum().backward()
+        # The backward is where a quantized weight's layout fails, recompute or not.
+        output.float().sum().backward()
         return {index: sorted(states) for index, states in seen.items()}
 
     # MXFP4 sensitive layers with full recompute are rejected at config time.
