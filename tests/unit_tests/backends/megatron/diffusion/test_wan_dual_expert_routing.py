@@ -12,7 +12,13 @@ configured output width, which may differ from the input width.
 import torch
 from torch import nn
 
-from primus.backends.megatron.core.models.diffusion.wan.model import Wan2_2
+from tests.utils import skip_if_no_cuda
+
+skip_if_no_cuda()
+
+from primus.backends.megatron.core.models.diffusion.wan.model import (  # noqa: E402
+    Wan2_2,
+)
 
 
 class _StubExpert(nn.Module):

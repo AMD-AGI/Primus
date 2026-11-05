@@ -38,11 +38,6 @@ from primus.backends.megatron.core.models.diffusion.wan.attention import (
     WanSelfAttentionSubmodules,
 )
 from primus.backends.megatron.core.models.diffusion.wan.config import WanConfig
-from primus.backends.megatron.core.models.diffusion.wan.layer_spec import (
-    WanLayer,
-    get_wan_layer_spec,
-    get_wan_transformer_spec_for_backend,
-)
 from primus.backends.megatron.core.models.diffusion.wan.layers import (
     WanConditionEmbedder,
     WanRotaryPosEmbed,
@@ -60,6 +55,11 @@ if TYPE_CHECKING:
     from primus.backends.megatron.core.models.diffusion.wan.checkpoint_converter import (
         convert_hf_checkpoint,
     )
+    from primus.backends.megatron.core.models.diffusion.wan.layer_spec import (
+        WanLayer,
+        get_wan_layer_spec,
+        get_wan_transformer_spec_for_backend,
+    )
     from primus.backends.megatron.core.models.diffusion.wan.model import (
         Wan,
         Wan2_2,
@@ -68,16 +68,23 @@ if TYPE_CHECKING:
     )
 
 _LAZY_MODEL_EXPORTS = ("Wan", "Wan2_2", "WanTransformer3D", "build_wan_backbone")
+_LAZY_LAYER_SPEC_EXPORTS = ("WanLayer", "get_wan_layer_spec", "get_wan_transformer_spec_for_backend")
 
 
-# LAZY IMPORT: keep the model classes out of import time so the package can be
-# imported (for configs and specs) without pulling in the full backbone stack.
+# LAZY IMPORT: keep the model classes and layer specs out of import time so the
+# package can be imported (for configs and checkpoint conversion) without the full
+# backbone stack. The layer specs resolve their backends through Primus-Turbo,
+# which fails to import on a host without a GPU.
 def __getattr__(name):
-    """Lazy import for the WAN model classes."""
+    """Lazy import for the WAN model classes and layer specs."""
     if name in _LAZY_MODEL_EXPORTS:
         from primus.backends.megatron.core.models.diffusion.wan import model
 
         return getattr(model, name)
+    if name in _LAZY_LAYER_SPEC_EXPORTS:
+        from primus.backends.megatron.core.models.diffusion.wan import layer_spec
+
+        return getattr(layer_spec, name)
     if name == "convert_hf_checkpoint":
         from primus.backends.megatron.core.models.diffusion.wan.checkpoint_converter import (
             convert_hf_checkpoint,

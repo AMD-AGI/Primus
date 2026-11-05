@@ -15,7 +15,11 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from primus.backends.megatron.core.models.diffusion.wan.model import (
+from tests.utils import skip_if_no_cuda
+
+skip_if_no_cuda()
+
+from primus.backends.megatron.core.models.diffusion.wan.model import (  # noqa: E402
     _load_backbone_checkpoint,
     resolve_backbone_checkpoint,
     resolve_expert_checkpoints,

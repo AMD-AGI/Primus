@@ -24,11 +24,19 @@ import argparse
 import pytest
 import torch
 
-from primus.backends.megatron.core.models.diffusion.wan.checkpoint_converter import (
+from tests.utils import skip_if_no_cuda
+
+skip_if_no_cuda()
+
+from primus.backends.megatron.core.models.diffusion.wan.checkpoint_converter import (  # noqa: E402
     expected_mcore_keys,
 )
-from primus.backends.megatron.core.models.diffusion.wan.config import WanConfig
-from primus.backends.megatron.core.models.diffusion.wan.model import WanTransformer3D
+from primus.backends.megatron.core.models.diffusion.wan.config import (  # noqa: E402
+    WanConfig,
+)
+from primus.backends.megatron.core.models.diffusion.wan.model import (  # noqa: E402
+    WanTransformer3D,
+)
 
 BACKENDS = ["local", "transformer_engine"]
 

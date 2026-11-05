@@ -17,7 +17,11 @@ import types
 import pytest
 import torch
 
-from primus.backends.megatron.data.synthetic import MockWanDataset
+from tests.utils import skip_if_no_cuda
+
+skip_if_no_cuda()
+
+from primus.backends.megatron.data.synthetic import MockWanDataset  # noqa: E402
 
 
 @pytest.fixture
