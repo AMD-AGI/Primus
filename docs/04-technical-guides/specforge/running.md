@@ -17,7 +17,7 @@ Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
 
 The default plugin image also supports offline capture through Primus's temporary
 compatibility module. Existing capture YAML and output formats remain unchanged.
-See [offline capture compatibility](runtime-image.md#build).
+See [offline capture compatibility](runtime-image.md#temporary-offline-capture-bridge).
 
 ## Launch with `primus-cli`
 
@@ -99,6 +99,20 @@ export NPROC_PER_NODE=8
 ./runner/primus-cli direct -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
 ```
+
+From the host, with the same capture variables exported and `/data` mounted:
+
+```bash
+./runner/primus-cli container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+  --shm-size 64g --volume /data:/data \
+  --env CAPTURE_DATA_PATH --env OUTPUT_DIR --env NPROC_PER_NODE \
+  -- train pretrain \
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+```
+
+For multi-node capture, use a shared input/output mount and prepend
+`./runner/primus-cli slurm srun -N 2 --gres=gpu:8 --` to the same `container`
+arguments; `-N` is the capture data-parallel node count.
 
 **Train** — `specforge_mode: train` with `specforge_train_mode: offline`.
 `specforge_config` points at SpecForge’s YAML; Primus forwards overrides onto

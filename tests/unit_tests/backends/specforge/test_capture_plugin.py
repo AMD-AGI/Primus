@@ -3,6 +3,8 @@
 
 """Capture migration contracts; runnable without Torch, SGLang, or a GPU."""
 
+import io
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -105,7 +107,7 @@ def test_patch_backend_is_rejected(recipe, source):
             online_settings(recipe, env=env)
 
 
-@pytest.mark.parametrize("allowed", [None, "", "other", "other, specforge_spec_capture"])
+@pytest.mark.parametrize("allowed", [None, "", "  ", "other", "other, specforge_spec_capture"])
 def test_server_env_preserves_plugin_discovery(allowed):
     original = {"MOONCAKE_PROTOCOL": "tcp"}
     if allowed is not None:
@@ -114,8 +116,10 @@ def test_server_env_preserves_plugin_discovery(allowed):
     assert result["SPECFORGE_SPEC_CAPTURE"] == "1"
     assert "SPECFORGE_SPEC_CAPTURE" not in original
     assert result["MOONCAKE_PROTOCOL"] == "tcp"
-    if allowed:
+    if allowed and allowed.strip():
         assert result["SGLANG_PLUGINS"].split(",") == ["other", "specforge_spec_capture"]
+    elif allowed:
+        assert result["SGLANG_PLUGINS"] == "specforge_spec_capture"
     else:
         assert result.get("SGLANG_PLUGINS") == allowed
 
@@ -127,6 +131,7 @@ def test_only_capture_children_enable_plugin(recipe, monkeypatch, tmp_path):
     children = []
     monkeypatch.setattr(online_supervisor, "_popen", lambda argv, env, path: children.append(env) or object())
     monkeypatch.setattr(online_supervisor, "_wait_sglang", lambda *args: None)
+    monkeypatch.setattr(online_supervisor, "require_capture_plugin", lambda *args: None)
     monkeypatch.setattr(online_supervisor, "log_rank_0", lambda *args: None)
     online_supervisor._start_local_sglang(settings, "192.0.2.1", "192.0.2.2", tmp_path, 0)
     assert [env["HIP_VISIBLE_DEVICES"] for env in children] == ["0,1", "2,3"]
@@ -229,3 +234,124 @@ def test_example_recipe_paths():
         )
         path = config["modules"]["pre_trainer"]["overrides"]["specforge_config"]
         assert f"/{directory}/qwen3.5-4b-dflash-amd.yaml" in path
+
+
+@pytest.mark.parametrize("value", [None, "null", "", "PLUGIN", "Auto", " plugin "])
+@pytest.mark.parametrize("source", ["yaml", "overrides", "environment"])
+def test_backend_normalization(recipe, value, source):
+    env = {}
+    if source == "yaml":
+        with open(recipe.specforge_config, "a") as stream:
+            stream.write(yaml.safe_dump({"deployment": {"disaggregated": {"server_capture": value}}}))
+    elif source == "overrides":
+        recipe.specforge_overrides = {capture_plugin.CAPTURE_BACKEND_KEY: value}
+    else:
+        if value is not None:
+            env["DISAGG_SERVER_CAPTURE"] = value
+    online_settings(recipe, env=env)
+    argv = build_role_argv(recipe, "producer", [])
+    assert [arg for arg in argv if "server_capture" in arg] == [
+        f"{capture_plugin.CAPTURE_BACKEND_KEY}=plugin"
+    ]
+
+
+@pytest.mark.parametrize("value", ["patch", " PATCH ", "unsupported"])
+def test_backend_normalization_still_rejects_conflicts(value):
+    with pytest.raises(ValueError, match="requires the SGLang plugin"):
+        capture_plugin.validate_capture_backend(value)
+
+
+@pytest.mark.parametrize("prefix", ["", "+", "++", "~"])
+@pytest.mark.parametrize("source", ["overrides", "extra"])
+def test_owned_backend_replaces_hydra_assignments_and_deletions(recipe, prefix, source):
+    key = prefix + capture_plugin.CAPTURE_BACKEND_KEY
+    extra = []
+    if source == "overrides":
+        recipe.specforge_overrides = {key: "auto", "training.max_steps": 7}
+    else:
+        extra = [key if prefix == "~" else key + "=auto", "run_id=test"]
+    original = dict(recipe.specforge_overrides)
+    argv = build_role_argv(recipe, "consumer", extra)
+    assert [arg for arg in argv if "server_capture" in arg] == [
+        f"{capture_plugin.CAPTURE_BACKEND_KEY}=plugin"
+    ]
+    assert recipe.specforge_overrides == original
+    assert ("training.max_steps=7" if source == "overrides" else "run_id=test") in argv
+
+
+@pytest.mark.parametrize("custom", [False, True])
+@pytest.mark.parametrize("available", [False, True])
+def test_capture_preflight_checks_transport_only_for_default_entrypoint(
+    recipe, monkeypatch, custom, available
+):
+    recipe.specforge_mode = "capture"
+    recipe.specforge_capture = {"script": "custom.py"} if custom else {}
+    monkeypatch.setattr(stack_preflight, "torch_kind", lambda: "hip")
+    probes = []
+    monkeypatch.setattr(
+        stack_preflight, "capture_plugin_issues", lambda: probes.append(True) or ["bad plugin"]
+    )
+    monkeypatch.setattr(
+        stack_preflight.shutil, "which", lambda name: "/bin/mooncake_master" if available else None
+    )
+    monkeypatch.setitem(sys.modules, "sglang", SimpleNamespace(__version__="0.5.23"))
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", SimpleNamespace(ServerArgs=object))
+    monkeypatch.setitem(sys.modules, "aiter", SimpleNamespace())
+    issues = stack_preflight.collect_issues(recipe, env={})
+    assert bool(probes) is not custom
+    assert ("bad plugin" in issues) is not custom
+    assert any("mooncake_master is not on PATH" in issue for issue in issues) == (
+        not custom and not available
+    )
+
+
+def test_custom_capture_preflight_requires_importable_sglang(recipe, monkeypatch):
+    recipe.specforge_mode = "capture"
+    recipe.specforge_capture = {"script": "custom.py"}
+    monkeypatch.setattr(stack_preflight, "torch_kind", lambda: "hip")
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", None)
+    issues = stack_preflight.collect_issues(recipe, env={})
+    assert any("ServerArgs is not importable for custom capture" in issue for issue in issues)
+
+
+@pytest.mark.parametrize("advertised", [False, True])
+def test_server_plugin_advertisement_check(monkeypatch, advertised):
+    body = {"internal_states": [{"spec_capture_backend": "plugin"}]} if advertised else {}
+    urls = []
+
+    def response(url, **kwargs):
+        import json
+
+        urls.append(url)
+        return io.BytesIO(json.dumps(body).encode())
+
+    monkeypatch.setattr(capture_plugin.urllib.request, "urlopen", response)
+    if advertised:
+        capture_plugin.require_capture_plugin("http://127.0.0.1:30000", "server.log")
+    else:
+        with pytest.raises(RuntimeError, match="did not enable the plugin"):
+            capture_plugin.require_capture_plugin("http://127.0.0.1:30000", "server.log")
+    assert urls == ["http://127.0.0.1:30000/server_info"]
+
+
+def test_online_registration_failure_cleans_up_and_does_not_publish_urls(recipe, monkeypatch, tmp_path):
+    settings = online_settings(recipe, env={})
+    started, stopped = [], []
+
+    def start(*args):
+        proc = object()
+        started.append(proc)
+        return proc
+
+    def check(*args):
+        if len(started) == 2:
+            raise RuntimeError("plugin missing")
+
+    monkeypatch.setattr(online_supervisor, "_popen", start)
+    monkeypatch.setattr(online_supervisor, "_wait_sglang", lambda *args: None)
+    monkeypatch.setattr(online_supervisor, "require_capture_plugin", check)
+    monkeypatch.setattr(online_supervisor, "_kill_group", stopped.append)
+    with pytest.raises(RuntimeError, match="plugin missing"):
+        online_supervisor._start_local_sglang(settings, "192.0.2.1", "192.0.2.2", tmp_path, 0)
+    assert stopped == started[::-1]
+    assert not online_supervisor.sglang_url_path(str(tmp_path), 0).exists()

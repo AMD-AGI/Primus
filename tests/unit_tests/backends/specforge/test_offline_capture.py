@@ -11,7 +11,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from primus.backends.specforge import offline_capture
+from primus.backends.specforge import capture_plugin, offline_capture
 from primus.backends.specforge.argument_builder import build_capture_argv
 
 
@@ -248,7 +248,7 @@ def test_started_sidecars_are_stopped_on_initialization_failure(monkeypatch, tmp
     monkeypatch.setattr(online_supervisor, "_wait_sglang", wait_server)
     monkeypatch.setattr(offline_capture, "capture_server_argv", lambda *args: ["python"])
     body = b'{"internal_states":[{"spec_capture_backend":"plugin"}]}' if failure == "store" else b"{}"
-    monkeypatch.setattr(offline_capture.urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(body))
+    monkeypatch.setattr(capture_plugin.urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(body))
     args = SimpleNamespace(output_path=str(tmp_path), tp_size=1, batch_size=1, max_length=8)
     with pytest.raises((TimeoutError, RuntimeError, ValueError)):
         with offline_capture.local_capture_target(args, SimpleNamespace(hidden_size=2), [1], "dflash"):

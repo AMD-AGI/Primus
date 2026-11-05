@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+import urllib.request
 from importlib.metadata import entry_points
 from typing import Mapping
 
@@ -17,6 +19,7 @@ def capture_server_env(env: Mapping[str, str]) -> dict[str, str]:
     """Enable capture only in the server, preserving any plugin allowlist."""
     result = dict(env)
     result["SPECFORGE_SPEC_CAPTURE"] = "1"
+    # SGLang treats unset and empty values as unrestricted discovery.
     if result.get("SGLANG_PLUGINS"):
         plugins = [name.strip() for name in result["SGLANG_PLUGINS"].split(",") if name.strip()]
         if PLUGIN_NAME not in plugins:
@@ -27,11 +30,20 @@ def capture_server_env(env: Mapping[str, str]) -> dict[str, str]:
 
 def validate_capture_backend(value: str | None) -> None:
     """Auto is compatible: Primus explicitly selects the plugin at launch."""
-    if value not in (None, "", "auto", "plugin"):
+    normalized = "" if value is None else str(value).strip().lower()
+    if normalized not in ("", "null", "auto", "plugin"):
         raise ValueError(
-            f"[Primus:specforge] {CAPTURE_BACKEND_KEY}={value} is incompatible; "
+            f"[Primus:specforge] {CAPTURE_BACKEND_KEY}={value!r} is incompatible; "
             "Primus online capture requires the SGLang plugin (use plugin or auto)"
         )
+
+
+def require_capture_plugin(url: str, log_path) -> None:
+    """Check actual scheduler registration after the server becomes healthy."""
+    with urllib.request.urlopen(url + "/server_info", timeout=10) as response:
+        info = json.load(response)
+    if not any(state.get("spec_capture_backend") == "plugin" for state in info.get("internal_states", [])):
+        raise RuntimeError(f"capture server did not enable the plugin; see {log_path}")
 
 
 def capture_plugin_issues() -> list[str]:
