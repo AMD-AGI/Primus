@@ -3,6 +3,11 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:kimi_k3.1_pro_4L-mi455-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# FlyDSL MLA. The 62-shape hipBLASLt table is not in this repo: set
+# HIPBLASLT_TUNING_OVERRIDE_FILE in the environment before launch.
+env:
+  PRIMUS_TURBO_ATTN_BACKEND: flydsl
+
 # Kimi K3.1 Pro official-width 4-layer (~94B) BF16 pretraining proxy for one node
 # of 4 x MI455X (gfx1250, 432 GiB each).
 #
@@ -12,7 +17,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # (sequence 7168 -> 4096, global batch 128 -> 64, 8 micro-batches per rank).
 # At world 4 / EP 4 the expert-DP size is 1, so the
 # memory recipe below (distributed + precision-aware optimizer, bf16
-# grads/moments, full recompute) is required, not optional. Synthetic data
+# grads/moments) is required. Recompute is off. Synthetic data
 # (mock_data: true).
 
 modules:
@@ -69,18 +74,19 @@ modules:
       use_distributed_optimizer: true
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
       use_precision_aware_optimizer: true
       main_grads_dtype: bf16
       exp_avg_dtype: bf16
       exp_avg_sq_dtype: bf16
 
-      # ---------- recompute: full over all 4 layers (block method) ----------
+      # ---------- recompute off ----------
       recompute_granularity: full
       recompute_method: block
-      recompute_num_layers: 4
+      recompute_num_layers: 0
 
       # ---------- data: MOCK (NullTokenizer, no external deps) ----------
+      create_attention_mask_in_dataloader: false
       mock_data: true
       tokenizer_type: NullTokenizer
       train_data_path: null
@@ -102,6 +108,7 @@ modules:
       # Unified KDA backend selector (supersedes kda_backend + K3P_KDA_CONV).
       use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:fla}
       moe_router_dtype: fp32
+      moe_router_bwd_bf16: true
       optimizer: adam
 
       # ---------- ckpt ----------
@@ -119,21 +126,22 @@ modules:
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: true
       moe_permute_fusion: true
-      # Left OFF, each for a measured / asserted reason:
-      #   attention              -- the validated configuration is without it.
-      #   deepep                 -- breaks K3 numerics (first backward non-finite).
+      # Attention uses the FlyDSL MLA backend (PRIMUS_TURBO_ATTN_BACKEND).
+      # DeepEP needs the dispatcher to flatten by the input width (latent MoE).
+      # Left OFF:
       #   shared_expert_overlap  -- moe_layer.py asserts NOT-overlap on the live K3
       #                             latent path; dies at forward.
-      #   sync-free              -- stage >= 2 force-enables DeepEP.
-      use_turbo_attention: false
-      use_turbo_deepep: false
+      #   sync-free              -- stage >= 2 force-enables a different DeepEP path.
+      use_turbo_attention: true
+      use_turbo_deepep: true
+      turbo_deepep_num_cu: 64
       moe_shared_expert_overlap: false
       moe_use_fused_router_with_aux_score: false
       turbo_sync_free_moe_stage: 0
 
       # ---------- host-side overhead / MoE stability ----------
       manual_gc: true
-      manual_gc_interval: 1
+      manual_gc_interval: 50
 
       # FP8 off (bf16 sweep; prior FP8 hybrid showed no gain over bf16). Re-enable
       # per-run via CLI `--fp8 hybrid`.
