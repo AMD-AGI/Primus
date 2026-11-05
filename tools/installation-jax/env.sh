@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# env.sh — Primus JAX/MaxText venv environment (v26.8).
+# env.sh — Primus JAX/MaxText venv environment (v26.9).
+# Derived from .github/workflows/docker-release/Dockerfile.jax-v26.9
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
 #
-# This mirrors the v26.8 JAX training Dockerfile, adapted for a no-docker /
+# This mirrors the v26.9 JAX training Dockerfile, adapted for a no-docker /
 # no-sudo bare-metal install. ROCm is delivered as pip TheRock wheels
-# (`rocm-sdk-devel` 10.2.0a20260923), same as the image. No system ROCm is
+# (`rocm-sdk-devel` 10.3.0a20261026), same as the image. No system ROCm is
 # required.
 #
 # NOTE: PRIMUS_JAX_BASE is REQUIRED (no default) — export it to a big-disk dir
@@ -29,9 +30,11 @@ fi
 export PRIMUS_JAX_BASE
 export VENV_DIR="${VENV_DIR:-$PRIMUS_JAX_BASE/venv}"
 export WORKSPACE_DIR="${WORKSPACE_DIR:-$PRIMUS_JAX_BASE/workspace}"  # kept checkouts (maxtext, Primus)
-# Transient build sources: put on fast LOCAL /tmp (NFS is slow for compile I/O;
-# these dirs are deleted after each build anyway).
-export SRC_DIR="${SRC_DIR:-/tmp/primus-jax-build}"
+# Transient build sources (deleted after each build). Defaults to PRIMUS_JAX_BASE,
+# not /tmp: the TensorFlow bazel output tree alone needs tens of GB and fills a
+# small /tmp ("No space left on device"). If PRIMUS_JAX_BASE is on slow NFS,
+# point SRC_DIR at a big LOCAL disk instead.
+export SRC_DIR="${SRC_DIR:-$PRIMUS_JAX_BASE/build}"
 
 # MaxText clone (deps + editable install live here). Primus resolves the
 # MaxText backend from MAXTEXT_PATH (else its own third_party/maxtext), so we
