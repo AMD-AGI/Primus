@@ -1,0 +1,88 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mistral_7B_v0_3-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: mistral_7B_v0_3.yaml
+    overrides:
+      # MI355X smoke / throughput recipe for Mistral-7B-v0.3 on mock data
+      # (50 iterations, no checkpoint). Batch, sequence and optimizer values are
+      # those of the llama3_8B recipes (same 7-8B dense GQA shape); they are not
+      # tuned per SKU. It is not a pretraining schedule: set lr, warmup,
+      # train_iters and data for a real run.
+      # log
+      wandb_project: "Primus_Mistral_Pretrain"
+      # Megatron's per-iteration lines (loss, grad norm, time) are logged at
+      # DEBUG; show them on stderr, as the llama3_8B recipes do.
+      stderr_sink_level: DEBUG
+      # disable_wandb: false
+      # disable_tensorboard: false
+      # Averaged time / throughput in the log line: skip the first 2 iterations, then
+      # average (as llama3_8B; with train_iters 50 the average never restarts).
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      # Log every 2 iterations (llama3_8B: every one). This recipe saves no
+      # checkpoint; the value matters when a user sets save / load: a resumed run
+      # then prints the same per-line loss averages as an uninterrupted one (with
+      # log_interval 1 the first line after a resume differed by 6% in our resume
+      # test), so losses compare line for line across a resume.
+      log_interval: 2
+
+      train_iters: 50
+      micro_batch_size: 2
+      global_batch_size: 16
+
+      # Same sequence length as the llama3_8B recipes; the model supports up to
+      # 32768 (max_position_embeddings in the preset).
+      seq_length: 8192
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Turbo as the MI355X llama3_8B recipe (the same attention shape: 32 heads,
+      # 8 KV groups, head_dim 128, full causal attention).
+      enable_primus_turbo: true
+      use_turbo_attention: false
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

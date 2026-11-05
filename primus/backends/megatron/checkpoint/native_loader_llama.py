@@ -34,7 +34,8 @@ inference-time frequencies; it does not touch the stored weights, so it is
 irrelevant to this weight-only conversion.)
 
 Bridge-free guarantee: this module imports ONLY ``megatron.core`` /
-``megatron.training`` / ``megatron.legacy`` (via ``native_convert_common``);
+``megatron.training`` (and ``megatron.legacy`` when present, via
+``native_convert_common``);
 ``megatron.bridge`` is never imported and a hard guard asserts it never leaks
 into ``sys.modules``.
 """
@@ -61,7 +62,7 @@ def derive_megatron_fields(cfg):
         num_layers=cfg["num_hidden_layers"],
         max_position_embeddings=cfg["max_position_embeddings"],
         norm_epsilon=cfg.get("rms_norm_eps", 1e-5),
-        rotary_base=cfg.get("rope_theta", 10000.0),
+        rotary_base=common.hf_rope_theta(cfg, common.HF_DEFAULT_ROPE_THETA),
         untie_embeddings_and_output_weights=not cfg.get("tie_word_embeddings", False),
         ffn_hidden_size=cfg["intermediate_size"],
         # GQA (num_query_groups == num_attention_heads reduces to plain MHA).
@@ -259,11 +260,15 @@ def convert(
     make_vocab_size_divisible_by=128,
     master_port=29563,
     log=None,
+    derive_fields=None,
 ):
     """Convert a Llama (2/3/3.1) HF checkpoint to a legacy Megatron torch ckpt.
 
     Single process, CPU-only. Assumes the ``phase="convert"`` patches have
     already been applied in this process (the conversion hook does so).
+    ``derive_fields`` replaces ``derive_megatron_fields`` (the config.json ->
+    Megatron translation) for a Llama-layout family with its own config handling
+    (e.g. ``native_loader_mistral``); by default Llama's own is used.
     """
     if log is None:
 
@@ -286,7 +291,7 @@ def convert(
 
     log(f"reading HF config from {hf_dir}")
     cfg = common.read_hf_config(hf_dir)
-    cfg_fields = derive_megatron_fields(cfg)
+    cfg_fields = (derive_fields or derive_megatron_fields)(cfg)
     log(
         f"arch: L={cfg_fields['num_layers']} h={cfg_fields['hidden_size']} "
         f"heads={cfg_fields['num_attention_heads']} kv_groups={cfg_fields['num_query_groups']} "

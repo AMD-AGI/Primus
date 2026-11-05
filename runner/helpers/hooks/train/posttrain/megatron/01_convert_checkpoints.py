@@ -13,6 +13,8 @@ checkpoint layout so native Megatron-LM finetune loading can consume it.
 """
 
 import argparse
+import functools
+import importlib.util
 import os
 import sys
 import time
@@ -197,7 +199,7 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # Native (bridge-free) conversion path
 # ---------------------------------------------------------------------------
-# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama): this
+# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama, Mistral): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
 # it (Primus-managed converters), producing a legacy ``torch`` checkpoint WITHOUT
 # ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
@@ -205,6 +207,12 @@ def _unset_nvte_attention_env():
 # "convert")`` so they take effect for the single-process conversion; the
 # Megatron-LM submodule stays pristine. Set ``native_ckpt_convert: false`` to
 # force the legacy Megatron-Bridge path (or ``true`` to force native).
+
+# What the native path converts, for the hook's error messages.
+_NATIVE_SUPPORTED = (
+    "Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1, Mistral (MistralForCausalLM with full causal attention, "
+    "e.g. Mistral-7B-v0.2/v0.3)"
+)
 
 # HF architectures / model_type -> Primus native converter family.
 _NATIVE_FAMILIES = {
@@ -219,25 +227,79 @@ _NATIVE_FAMILIES = {
     "deepseek": "deepseek",
     "llama": "llama",
     "llamaforcausallm": "llama",
+    "mistral": "mistral",
+    "mistralforcausallm": "mistral",
 }
 
 
-def _detect_native_family(hf_path: str) -> str | None:
-    """Return 'qwen3' | 'deepseek' | 'llama' | None from the HF config.json."""
+# Optional per-family config checks, run before a family is chosen (also by
+# 00_install_requirements.sh, before torch or Megatron is importable).
+# Contract of a checks module (registered here by family, path relative to the repo):
+#   * standard library only, no package imports (it is loaded by path, without
+#     importing ``primus.backends.megatron``, which needs torch / Megatron);
+#   * ``check_config(cfg: dict)`` raises ``ValueError`` naming the failed check when
+#     the family's native converter does not convert ``cfg`` (the parsed config.json).
+# A family without an entry has no checks: its configs are routed by name only.
+_NATIVE_CONFIG_CHECKS = {
+    "mistral": "primus/backends/megatron/checkpoint/native_config_mistral.py",
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _native_config_check(family: str):
+    """The ``check_config`` of ``family``'s checks module (loaded once per process),
+    or None when the family has none."""
+    rel = _NATIVE_CONFIG_CHECKS.get(family)
+    if rel is None:
+        return None
+    spec = importlib.util.spec_from_file_location(f"_native_config_{family}", PRIMUS_ROOT / rel)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    check = getattr(mod, "check_config", None)
+    if not callable(check):
+        raise TypeError(f"{rel} has no check_config(cfg) (see _NATIVE_CONFIG_CHECKS)")
+    return check
+
+
+def _detect_native_family_and_reason(hf_path: str) -> tuple[str | None, str | None]:
+    """``(family, reason)`` from the HF config.json: ``family`` is 'qwen3' | 'deepseek' |
+    'llama' | 'mistral' | None; ``reason`` is why a family's checks decline the config
+    (then ``family`` is None), else None. A config.json that is not valid JSON or not
+    a JSON object raises.
+
+    The family comes from the first ``architectures`` entry that names one, else from
+    ``model_type``. Every family that the config names (in ``architectures`` or
+    ``model_type``) and that has checks in ``_NATIVE_CONFIG_CHECKS`` runs them: a config
+    that any of them declines is not converted natively."""
     import json
 
     cfg_file = os.path.join(hf_path, "config.json")
     if not os.path.isfile(cfg_file):
-        return None
+        return None, None
     with open(cfg_file) as f:
-        cfg = json.load(f)
+        cfg = json.load(f)  # an unreadable config.json raises (json.JSONDecodeError)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"{cfg_file} is not a JSON object")
 
-    for arch in cfg.get("architectures", []) or []:
-        fam = _NATIVE_FAMILIES.get(str(arch).lower())
-        if fam:
-            return fam
-    mt = str(cfg.get("model_type", "")).lower()
-    return _NATIVE_FAMILIES.get(mt)
+    archs = cfg.get("architectures") or []
+    names = [str(a) for a in (archs if isinstance(archs, list) else [archs])]
+    named = [_NATIVE_FAMILIES.get(n.lower()) for n in names + [str(cfg.get("model_type", ""))]]
+    named = [f for f in named if f]
+    for fam in dict.fromkeys(named):  # each named family once, in order
+        check = _native_config_check(fam)
+        if check is None:
+            continue
+        try:
+            check(cfg)
+        except ValueError as e:  # the family's checks decline it: no family converts it
+            return None, str(e)
+    return (named[0] if named else None), None
+
+
+def _detect_native_family(hf_path: str) -> str | None:
+    """Return 'qwen3' | 'deepseek' | 'llama' | 'mistral' | None from the HF config.json
+    (None also when a family's checks in ``_NATIVE_CONFIG_CHECKS`` decline the config)."""
+    return _detect_native_family_and_reason(hf_path)[0]
 
 
 def _native_dtype_from_config(hf_path: str, override: str | None) -> str:
@@ -264,11 +326,15 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     Applies the ``phase="convert"`` patches in this process, then runs the
     Primus-managed native converter for the detected family, all single-process.
     """
-    family = opts.get("family") or _detect_native_family(hf_path)
+    family, reason = opts.get("family"), None
     if family is None:
+        family, reason = _detect_native_family_and_reason(hf_path)
+    if family is None:
+        if reason:  # a family the config names declines it in its checks
+            raise ValueError(f"the native converter declines the HF model at {hf_path}: {reason}")
         raise ValueError(
             f"native_ckpt_convert requested but no native converter for HF model at {hf_path} "
-            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1)"
+            f"(supported: {_NATIVE_SUPPORTED})"
         )
 
     # Ensure the Megatron-LM source tree is importable in this standalone hook
@@ -293,6 +359,8 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
     elif family == "llama":
         from primus.backends.megatron.checkpoint import native_loader_llama as conv
+    elif family == "mistral":
+        from primus.backends.megatron.checkpoint import native_loader_mistral as conv
     else:
         from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
 
@@ -390,7 +458,7 @@ def fix_common_pt_for_megatron_lm(checkpoint_dir: Path):
     log_success("     Successfully added 'args' to common.pt")
 
 
-def _native_main(hf_path: str, native_opts: dict):
+def _native_main(hf_path: str, native_opts: dict, family: str):
     """Bridge-free native conversion branch of main().
 
     Mirrors the Bridge path's skip-if-exists / rank-0-converts-others-wait
@@ -398,11 +466,7 @@ def _native_main(hf_path: str, native_opts: dict):
     in-process converter and emits ``pretrained_checkpoint`` + ``finetune`` back
     to the runner.
     """
-    family = _detect_native_family(hf_path)
-    if family is None:
-        log_error(f"native_ckpt_convert: true but no native converter matches HF model at {hf_path}")
-        sys.exit(1)
-    native_opts["family"] = family
+    native_opts["family"] = family  # the family main() detected
 
     # Output path (legacy torch layout: <out>/iter_0000001/mp_rank_00/...).
     if native_opts.get("out"):
@@ -470,10 +534,15 @@ def main():
 
     # ---- Choose conversion backend --------------------------------------
     # Native (bridge-free) conversion is the DEFAULT for supported families
-    # (Qwen3, DeepSeek, Llama). ``native_ckpt_convert: false`` forces the legacy
+    # (Qwen3, DeepSeek, Llama, Mistral). ``native_ckpt_convert: false`` forces the legacy
     # Megatron-Bridge path; ``native_ckpt_convert: true`` forces native.
     native_opts = read_native_opts(config_file)
-    native_family = _detect_native_family(hf_path)
+    if native_opts["enabled"] is False:  # Bridge forced: no family detection or checks
+        native_family, reason = None, None
+    else:
+        native_family, reason = _detect_native_family_and_reason(hf_path)
+    if reason and native_opts["enabled"] is None:
+        log_info(f"Native converter declines {hf_path}: {reason}")
     if native_opts["enabled"] is True:
         use_native = True
     elif native_opts["enabled"] is False:
@@ -483,13 +552,18 @@ def main():
 
     if use_native:
         if native_family is None:
+            if reason:  # a family the config names declines it in its checks
+                problem = f"the native converter declines the HF model at {hf_path}: {reason}."
+            else:
+                problem = (
+                    f"no native converter matches the HF model at {hf_path} (supported: {_NATIVE_SUPPORTED})."
+                )
             log_error(
-                "native_ckpt_convert=true but no native converter matches the HF "
-                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama). "
+                f"native_ckpt_convert=true but {problem} "
                 "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)
-        _native_main(hf_path, native_opts)
+        _native_main(hf_path, native_opts, native_family)
         return
 
     log_info("Using Megatron-Bridge conversion path (native disabled or unsupported family)")

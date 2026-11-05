@@ -9,9 +9,11 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import pytest
+import yaml
 
 from tests.utils import PrimusUT, isolated_torchrun_env, run_training_script
 
@@ -119,6 +121,87 @@ def run_posttrain_script(
     return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
 
 
+# The tiny model's sizes, in HF names; the SFT run's Megatron overrides derive from them.
+# 4 query heads in 2 KV groups, so the fused QKV layout interleaves real GQA groups;
+# Mistral-7B-v0.3's vocabulary size and head size (128).
+TINY_MISTRAL = dict(
+    num_hidden_layers=2,
+    hidden_size=512,
+    num_attention_heads=4,
+    num_key_value_heads=2,
+    intermediate_size=1024,
+    vocab_size=32768,
+)
+
+
+def _tiny_mistral_megatron_overrides(tiny=TINY_MISTRAL):
+    return dict(
+        num_layers=tiny["num_hidden_layers"],
+        hidden_size=tiny["hidden_size"],
+        ffn_hidden_size=tiny["intermediate_size"],
+        num_attention_heads=tiny["num_attention_heads"],
+        num_query_groups=tiny["num_key_value_heads"],
+        # the single-rank layout the native converter writes, loaded as it is
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        ckpt_format="torch",
+    )
+
+
+def _tiny_mistral_checkpoint(hf_dir, tiny=TINY_MISTRAL):
+    """A random MistralForCausalLM HF checkpoint (bf16, head_dim 128, every tensor
+    random) with a local tokenizer of ``tiny``'s vocabulary. Returns the HF tensors."""
+    from tests.tiny_mistral import write_checkpoint
+
+    return write_checkpoint(
+        hf_dir,
+        vocab=tiny["vocab_size"],
+        hidden=tiny["hidden_size"],
+        heads=tiny["num_attention_heads"],
+        kv_heads=tiny["num_key_value_heads"],
+        ffn=tiny["intermediate_size"],
+        layers=tiny["num_hidden_layers"],
+        head_dim=128,
+        dtype="bfloat16",
+        max_position_embeddings=32768,
+    )
+
+
+def _sft_experiment_from_pretrain(pretrain_exp, out_path, **model_overrides):
+    """Write an SFT experiment that runs ``pretrain_exp``'s pre_trainer module as a
+    post_trainer (sft_trainer.yaml) on the alpaca fixture, for 3 iterations, with
+    no checkpoint given: the posttrain hook converts ``tokenizer_model``."""
+    with open(pretrain_exp) as f:
+        doc = yaml.safe_load(f)
+    module = doc["modules"].pop("pre_trainer")
+    module["config"] = "sft_trainer.yaml"
+    module["overrides"].update(
+        stage="sft",
+        mock_data=False,
+        sft_dataset_name=os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "fixtures", "sft_lora_smoke.jsonl"
+        ),
+        sft_conversation_format="alpaca",
+        enable_packed_sequences=False,
+        train_iters=3,
+        seq_length=128,
+        micro_batch_size=1,
+        global_batch_size=8,
+        lr_warmup_iters=0,
+        eval_iters=0,
+        eval_interval=100,
+        disable_wandb=True,
+        finetune=True,
+        pretrained_checkpoint=None,
+        load=None,
+        **model_overrides,
+    )
+    doc["modules"] = {"post_trainer": module}
+    with open(out_path, "w") as f:
+        yaml.safe_dump(doc, f, sort_keys=False)
+    return out_path
+
+
 class TestMegatronTrainer(PrimusUT):
     """One model per architecture, plus one case per feature path.
 
@@ -205,6 +288,54 @@ class TestMegatronTrainer(PrimusUT):
                 "3",
             ],
         )
+
+    # The native (bridge-free) Mistral HF -> Megatron conversion path, end to end: the
+    # posttrain hook detects a MistralForCausalLM checkpoint, converts it with
+    # native_loader_mistral, and the SFT trainer loads the converted checkpoint.
+    # The run is this recipe, as an SFT run (as the l4 finetune gate derives it),
+    # on a tiny random Mistral checkpoint with a local tokenizer of v0.3's vocabulary
+    # size (no Hub access, so the test never skips). The per-PR tier runs the same
+    # hook conversion in tests/unit_tests/backends/megatron/
+    # test_native_loader_mistral_convert.py. Weekly, as every case a port adds
+    # (tests/README.md).
+    @pytest.mark.weekly
+    def test_mistral_7B_v0_3(self):
+        from tests.tiny_mistral import assert_matches_hf, load_converted
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hf_dir = os.path.join(tmp, "tiny-mistral")
+            hf = _tiny_mistral_checkpoint(hf_dir)
+            data = os.path.join(tmp, "data")
+            exp_path = _sft_experiment_from_pretrain(
+                f"examples/megatron/configs/{GPU_PLATFORM}/mistral_7B_v0_3-BF16-pretrain.yaml",
+                os.path.join(tmp, "mistral_7B_v0_3-sft.yaml"),
+                tokenizer_model=hf_dir,
+                # native or fail: the hook stops instead of falling back to Megatron-Bridge
+                native_ckpt_convert=True,
+                **_tiny_mistral_megatron_overrides(),
+            )
+            log, _ = run_posttrain_script(
+                self.__class__.__name__,
+                "mistral_7B_v0_3",
+                exp_path=exp_path,
+                env_override={"DATA_PATH": data, "HF_HUB_OFFLINE": "1"},
+            )
+            # the trainer loaded the checkpoint the native converter wrote (the native
+            # path writes <name>_native; Megatron-Bridge would write <name>)
+            native = os.path.join(data, "megatron_checkpoints", "tiny-mistral_native")
+            loaded = re.findall(r"successfully loaded checkpoint from (\S+)", log)
+            assert loaded, "the SFT run loaded no checkpoint"
+            assert os.path.realpath(loaded[-1].rstrip(".,")) == os.path.realpath(native)
+            # ... and every tensor of it is its HF source (QKV per GQA group, gate/up
+            # order, norms, both layers)
+            assert_matches_hf(
+                load_converted(native)["model"],
+                hf,
+                heads=TINY_MISTRAL["num_attention_heads"],
+                kv_heads=TINY_MISTRAL["num_key_value_heads"],
+                ffn=TINY_MISTRAL["intermediate_size"],
+                layers=TINY_MISTRAL["num_hidden_layers"],
+            )
 
     def test_llama3_70B(self):
         run_script(
