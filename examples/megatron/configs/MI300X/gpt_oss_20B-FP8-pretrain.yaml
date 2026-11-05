@@ -50,7 +50,7 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
 
       # data
       mock_data: true
@@ -61,7 +61,7 @@ modules:
       # MLA
       multi_latent_attention: false
       # rope fusion
-      apply_rope_fusion: false
+      apply_rope_fusion: true
 
       # ckpt
       finetune: false
@@ -81,22 +81,28 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       use_turbo_grouped_gemm: true
+      # the default Triton grouped GEMM is slower on MI300X
+      turbo_grouped_gemm_backend: hipblaslt
+      use_turbo_rms_norm: true
+      use_turbo_norm_te_linear: true
 
       # deepep
       use_turbo_deepep: true
 
-      # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 64
+      # 160 for ep8 on MI300X, 32 for ep16-64
+      turbo_deepep_num_cu: 160
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 0-3, 0 means not use sync-free moe
       # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
       turbo_sync_free_moe_stage: 2
+      # stage 3's fused activation; stage 3 itself OOMs on MI300X
+      use_turbo_fused_act_with_probs: true
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # enable fp8 training
       fp8: hybrid

@@ -13,6 +13,7 @@ import triton
 from primus.backends.transformer_engine.pytorch.common.triton.permutation import (
     _make_chunk_sort_map_kernel,
     _permute_kernel,
+    _row_id_map_compact_gather_kernel,
     _row_id_map_pass_1_kernel,
     _row_id_map_pass_2_kernel,
     _row_id_map_pass_3_kernel,
@@ -436,3 +437,107 @@ def sort_chunks_by_map(
         FORWARD=is_forward,
     )
     return output, permuted_probs
+
+
+def _make_row_id_map_prefix(
+    routing_map: torch.Tensor,
+    num_tokens: int,
+    num_experts: int,
+):
+    """
+    Prepare the row_id_map for the permutation.
+
+    Parameters
+    ----------
+    routing_map : torch.Tensor
+        Input tensor of shape `[num_tokens, num_experts]`. It is a mask tensor that indicates
+        which experts are routed to which tokens. The values in it: 1 means the token is routed to
+        this expert and 0 means not.
+    num_tokens : int
+        Number of tokens in the input tensor.
+    num_experts : int
+        Number of experts in the input tensor.
+
+    Returns
+    -------
+    row_id_map : torch.Tensor
+        The row_id_map for the permutation of shape `[num_tokens, num_experts * 2 + 1]`.
+        For each token, the last item is the number of experts that are routed (n_routed).
+        The first n_routed items are the destination row indices in the permuted tokens.
+        The [num_experts, num_experts + n_routed) items are the indices of the experts corresponding
+        to the first n_routed row indices above.
+    """
+    row_id_map = torch.empty((num_tokens, num_experts * 2 + 1), dtype=torch.int32, device="cuda")
+    block_size = 1024
+    grid = (num_experts, triton.cdiv(num_tokens, block_size))
+    workspace_tensor = torch.empty(grid, dtype=torch.int32, device="cuda")
+
+    # supposing num_tokens == 5, num_experts == 3, block_size == 3
+    # and we have a routing_map like this:
+    # [[1, 1, 0],
+    #  [1, 0, 1],
+    #  [0, 0, 1],
+    #  [1, 1, 0],
+    #  [0, 0, 0]]
+
+    # pass 1: block cumsum
+    # for each expert, compute the cumsum of every block_size tokens
+    # the row_id_map will be like this after pass 1 (r means useless values):
+    # [[1, 1, 0, r, r, r, r],
+    #  [2, 0, 1, r, r, r, r],
+    #  [0, 0, 2, r, r, r, r],
+    #  [1, 1, 0, r, r, r, r],
+    #  [0, 0, 0, r, r, r, r]]
+    _row_id_map_pass_1_kernel[grid](
+        routing_map,
+        num_tokens,
+        routing_map.stride(0),
+        routing_map.stride(1),
+        row_id_map.stride(0),
+        row_id_map.stride(1),
+        row_id_map,
+        workspace_tensor,
+        block_size,
+    )
+
+    # pass 2: cumsum all and process the mask
+    # process the block cumsum into the global cumsum and then into the dst row indices
+    # the row_id_map will be like this after pass 2 (r means useless value):
+    # [[ 0,  3, -1, r, r, r, r],
+    #  [ 1, -1,  5, r, r, r, r],
+    #  [-1, -1,  6, r, r, r, r],
+    #  [ 2,  4, -1, r, r, r, r],
+    #  [-1, -1, -1, r, r, r, r]]
+    _row_id_map_pass_2_kernel[grid](
+        row_id_map,
+        workspace_tensor,
+        num_tokens,
+        row_id_map.stride(0),
+        row_id_map.stride(1),
+        triton.next_power_of_2(num_experts * triton.cdiv(num_tokens, block_size)),
+        block_size,
+    )
+
+    return row_id_map
+
+
+def make_row_id_map_with_dest2src(routing_map, probs, num_tokens, num_experts, num_out_tokens):
+    row_id_map = _make_row_id_map_prefix(routing_map, num_tokens, num_experts)
+    dest2src = torch.empty((num_out_tokens,), dtype=torch.int32, device=routing_map.device)
+    permuted_probs = torch.empty((num_out_tokens,), dtype=probs.dtype, device=probs.device)
+    _row_id_map_compact_gather_kernel[(triton.cdiv(num_tokens, 8),)](
+        row_id_map,
+        dest2src,
+        permuted_probs,
+        probs,
+        num_tokens,
+        row_id_map.stride(0),
+        row_id_map.stride(1),
+        probs.stride(0),
+        probs.stride(1),
+        num_experts,
+        triton.next_power_of_2(num_experts),
+        8,
+        num_warps=4,
+    )
+    return row_id_map, dest2src, permuted_probs

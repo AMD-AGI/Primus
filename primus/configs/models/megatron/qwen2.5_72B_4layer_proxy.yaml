@@ -5,4 +5,5 @@ extends:
 # reduce depth, and use the small ungated repository with the same tokenizer.
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: Qwen/Qwen2.5-0.5B
+vocab_size: 152064  # Qwen/Qwen2.5-72B (the tokenizer above is a stand-in)
 num_layers: 4

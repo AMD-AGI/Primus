@@ -48,7 +48,7 @@ Default in `primus/configs/modules/torchtitan/pre_trainer.yaml` is `true` (usefu
 
 ### MaxText
 
-Use `dataset_type: synthetic` (or other synthetic paths in MaxText configs). See `third_party/maxtext/src/MaxText/configs/base.yml` and model YAMLs under `third_party/maxtext/src/MaxText/configs/`.
+Use `dataset_type: synthetic` (or other synthetic paths in MaxText configs). See `third_party/maxtext/src/maxtext/configs/base.yml` and model YAMLs under `third_party/maxtext/src/maxtext/configs/`.
 
 ---
 
@@ -148,7 +148,7 @@ Tokenizer and model assets are resolved from **`model.hf_assets_path`** (or equi
 
 ## 5. MaxText data pipeline
 
-MaxText configuration is defined in upstream YAML (for example `third_party/maxtext/src/MaxText/configs/base.yml`).
+MaxText configuration is defined in upstream YAML (for example `third_party/maxtext/src/maxtext/configs/base.yml`).
 
 | Parameter | Meaning |
 |-----------|---------|

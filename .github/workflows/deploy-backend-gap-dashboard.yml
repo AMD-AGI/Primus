@@ -22,7 +22,7 @@ on:
     paths:
       - "tools/backend_gap_report/**"
       - "tools/pip_index/**"
-      - "examples/deepseek-v4/projection/site/**"
+      - "examples/megatron/models/deepseek-v4/projection/site/**"
       - ".github/workflows/deploy-backend-gap-dashboard.yml"
 
 permissions:

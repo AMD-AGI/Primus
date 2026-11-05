@@ -395,7 +395,7 @@ class HyperMixer(nn.Module):
     ) -> torch.Tensor:
         """Write the sub-block output ``out`` back to K streams.
 
-        ``new_stream[h] = post[h] * out + Σ_k comb[h, k] * x[k]``
+        ``new_stream[h] = post[h] * out + Σ_k comb[k, h] * x[k]``
 
         Shapes:
         * ``x``: ``[..., K, D]`` — current K streams
@@ -405,6 +405,8 @@ class HyperMixer(nn.Module):
 
         Returns ``[..., K, D]``.
         """
+        # Sinkhorn leaves `comb` column-normalised, so the mix contracts the first index.
+        comb = comb.transpose(-1, -2).contiguous()
         # Triton-fused expand; falls back to eager for unsupported configs.
         if _hc_expand_enabled() and _hc_expand_supported(x, post, comb):
             return hc_expand_triton(x, out, post, comb)

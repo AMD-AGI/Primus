@@ -9,8 +9,8 @@
 The projection describes a workload in one vocabulary: the flat argument names
 that ``ModelConfig`` / ``RuntimeConfig`` / ``ModelParallelConfig`` declare.  That
 vocabulary is spelled the way Megatron spells it for historical reasons, but it
-is not a claim that the workload must be a Megatron job -- a Megatron Llama 3
-and a TorchTitan Llama 3 run the same GEMMs over the same tensors, and the profiler
+is not a claim that the workload must be a Megatron job -- a TorchTitan Llama 3
+and a MaxText Llama 3 run the same GEMMs over the same tensors, and the profiler
 tree only ever asked for shapes.
 
 A *config adapter* is what closes the spelling gap: given the merged
@@ -114,6 +114,17 @@ def _ensure_builtins_registered() -> None:
 
     register_config_adapter("torchtitan", torchtitan_derive_default_args)
     register_bench_override("torchtitan", torchtitan_apply_bench_overrides)
+
+    from primus.core.projection.frameworks.jax import (
+        maxtext_apply_bench_overrides,
+        maxtext_derive_default_args,
+    )
+
+    # MaxText is the JAX pretraining backend Primus ships; ``jax`` is accepted as
+    # the name users reach for when they mean "the JAX one".
+    for alias in ("maxtext", "jax"):
+        register_config_adapter(alias, maxtext_derive_default_args)
+        register_bench_override(alias, maxtext_apply_bench_overrides)
 
 
 def framework_of(args) -> str:

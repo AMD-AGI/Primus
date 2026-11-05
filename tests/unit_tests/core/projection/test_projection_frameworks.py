@@ -6,9 +6,10 @@
 
 """Unit tests for the projection's training-framework config adapters.
 
-Covers the adapter registry and the TorchTitan adapter (flavor resolution, mesh
-degrees, pipeline layout, precision, recompute), plus the idempotency the adapter
-owes the performance driver.  Pure CPU, no backend checkouts.
+Covers the adapter registry, the TorchTitan adapter (flavor resolution, mesh
+degrees, pipeline layout, precision, recompute) and the MaxText/JAX adapter
+(ICI/DCN axis fill, batch derivation, remat, quantization), plus the idempotency
+both adapters owe the performance driver.  Pure CPU, no backend checkouts.
 """
 
 import argparse
@@ -25,10 +26,12 @@ from primus.core.projection.frameworks import (
     register_config_adapter,
     resolve_config_adapter,
 )
+from primus.core.projection.frameworks.jax import maxtext_derive_default_args
 from primus.core.projection.frameworks.model_specs import (
     BUILTIN_MODEL_SPECS,
     ModelSpec,
     llama_ffn_hidden_size,
+    maxtext_builtin_spec,
     torchtitan_builtin_spec,
 )
 from primus.core.projection.frameworks.torchtitan import torchtitan_derive_default_args
@@ -47,13 +50,17 @@ def _single_node_env(monkeypatch):
 
 def test_registry_ships_every_supported_framework():
     names = available_frameworks()
-    for expected in ("megatron", "torchtitan", "dlrm"):
+    for expected in ("megatron", "torchtitan", "maxtext", "jax", "dlrm"):
         assert expected in names
 
 
 def test_registry_lookup_is_case_insensitive():
     assert get_config_adapter("TorchTitan") is get_config_adapter("torchtitan")
-    assert get_config_adapter("  TORCHTITAN  ") is get_config_adapter("torchtitan")
+    assert get_config_adapter("  JAX  ") is get_config_adapter("jax")
+
+
+def test_maxtext_and_jax_share_one_adapter():
+    assert get_config_adapter("jax") is get_config_adapter("maxtext")
 
 
 def test_unknown_framework_names_the_supported_ones():
@@ -395,6 +402,203 @@ def test_torchtitan_turbo_flags_are_read():
 
 
 # --------------------------------------------------------------------------- #
+# MaxText / JAX
+# --------------------------------------------------------------------------- #
+
+
+def _maxtext_args(**overrides):
+    """A MaxText trainer namespace shaped like a loaded experiment YAML."""
+    args = argparse.Namespace(
+        framework="maxtext",
+        model_name="llama3-8b",
+        per_device_batch_size=2,
+        max_target_length=8192,
+        remat_policy="full",
+        attention="flash",
+        opt_type="adamw",
+        quantization="",
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+@pytest.fixture
+def _no_maxtext_checkout(monkeypatch):
+    """Resolve models from the transcribed table, not from a local checkout."""
+    monkeypatch.setattr(
+        "primus.core.projection.frameworks.jax._read_maxtext_model_config",
+        lambda model_name: None,
+    )
+
+
+def test_maxtext_resolves_llama3_8b(_no_maxtext_checkout):
+    args = maxtext_derive_default_args(_maxtext_args())
+
+    assert args.num_layers == 32
+    assert args.hidden_size == 4096
+    assert args.ffn_hidden_size == 14336
+    assert args.num_attention_heads == 32
+    assert args.num_query_groups == 8
+    assert args.padded_vocab_size == 128256
+    assert args.seq_length == 8192
+
+
+def test_maxtext_fsdp_absorbs_the_unspecified_ranks(_no_maxtext_checkout):
+    # base.yml leaves ici_fsdp at -1, so it takes whatever the node has left.
+    args = maxtext_derive_default_args(_maxtext_args(ici_tensor_parallelism=2))
+
+    assert args.tensor_model_parallel_size == 2
+    assert args.data_parallel_size == 4
+    assert args.use_torch_fsdp2 is True
+
+
+def test_maxtext_folds_ici_and_dcn_into_one_degree(monkeypatch, _no_maxtext_checkout):
+    monkeypatch.setenv("NNODES", "4")
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    args = maxtext_derive_default_args(
+        _maxtext_args(
+            ici_tensor_parallelism=8,
+            ici_fsdp_parallelism=1,
+            dcn_pipeline_parallelism=2,
+            dcn_data_parallelism=2,
+        )
+    )
+    assert args.tensor_model_parallel_size == 8
+    assert args.pipeline_model_parallel_size == 2
+    assert args.data_parallel_size == 2
+
+
+def test_maxtext_tensor_sequence_counts_as_tensor_parallel(_no_maxtext_checkout):
+    args = maxtext_derive_default_args(
+        _maxtext_args(ici_tensor_parallelism=2, ici_tensor_sequence_parallelism=2)
+    )
+    assert args.tensor_model_parallel_size == 4
+
+
+def test_maxtext_context_axes_fold_into_cp(_no_maxtext_checkout):
+    args = maxtext_derive_default_args(_maxtext_args(ici_context_parallelism=2, ici_sequence_parallelism=2))
+    assert args.context_parallel_size == 4
+
+
+def test_maxtext_rejects_two_unspecified_axes_in_a_group(_no_maxtext_checkout):
+    with pytest.raises(ValueError) as excinfo:
+        maxtext_derive_default_args(_maxtext_args(ici_fsdp_parallelism=-1, ici_tensor_parallelism=-1))
+    assert "at most one" in str(excinfo.value)
+
+
+def test_maxtext_rejects_a_mesh_that_does_not_divide(_no_maxtext_checkout):
+    with pytest.raises(ValueError) as excinfo:
+        maxtext_derive_default_args(_maxtext_args(ici_tensor_parallelism=3))
+    assert "do not divide evenly" in str(excinfo.value)
+
+
+def test_maxtext_batch_is_per_device_times_the_mesh(_no_maxtext_checkout):
+    # 8 devices x 2 per device = 16 sequences a step; TP=2 mirrors the batch, so
+    # each of the 4 data-parallel ranks carries 4 of them.
+    args = maxtext_derive_default_args(_maxtext_args(per_device_batch_size=2, ici_tensor_parallelism=2))
+    assert args.micro_batch_size == 4
+    assert args.global_batch_size == 16
+
+
+def test_maxtext_gradient_accumulation_scales_the_global_batch(_no_maxtext_checkout):
+    args = maxtext_derive_default_args(_maxtext_args(per_device_batch_size=1, gradient_accumulation_steps=4))
+    assert args.global_batch_size == 32
+
+
+@pytest.mark.parametrize(
+    "policy,granularity,method",
+    [
+        ("full", "full", "uniform"),
+        ("save_all", None, None),
+        ("minimal", "selective", None),
+        ("save_dot_except_mlp", "selective", None),
+    ],
+)
+def test_maxtext_remat_policy_maps_to_recompute(policy, granularity, method, _no_maxtext_checkout):
+    args = maxtext_derive_default_args(_maxtext_args(remat_policy=policy))
+    assert args.recompute_granularity == granularity
+    assert args.recompute_method == method
+
+
+@pytest.mark.parametrize("quantization", ["fp8", "nanoo_fp8"])
+def test_maxtext_quantization_turns_on_fp8(quantization, _no_maxtext_checkout):
+    args = maxtext_derive_default_args(_maxtext_args(quantization=quantization))
+    assert args.fp8 == "hybrid"
+    assert args.fp8_recipe == "tensorwise"
+
+
+def test_maxtext_bf16_leaves_fp8_off(_no_maxtext_checkout):
+    args = maxtext_derive_default_args(_maxtext_args(quantization=""))
+    assert args.fp8 is None
+
+
+def test_maxtext_moe_model_carries_its_expert_shape(_no_maxtext_checkout):
+    args = maxtext_derive_default_args(_maxtext_args(model_name="mixtral-8x7b"))
+    assert args.num_experts == 8
+    assert args.moe_router_topk == 2
+
+
+def test_maxtext_experiment_may_spell_the_architecture_out(_no_maxtext_checkout):
+    # Grok-1 is shipped this way: MaxText has no config for it, so the Primus
+    # experiment carries the architecture itself.
+    args = maxtext_derive_default_args(
+        _maxtext_args(
+            model_name="grok-1",
+            base_num_decoder_layers=64,
+            base_emb_dim=6144,
+            base_mlp_dim=32768,
+            base_num_query_heads=48,
+            base_num_kv_heads=8,
+            head_dim=128,
+            vocab_size=131072,
+            num_experts=8,
+            num_experts_per_tok=2,
+        )
+    )
+    assert args.num_layers == 64
+    assert args.hidden_size == 6144
+    assert args.num_experts == 8
+    assert args.moe_router_topk == 2
+
+
+def test_maxtext_reads_a_real_checkout_when_there_is_one(tmp_path, monkeypatch):
+    models = tmp_path / "configs" / "models"
+    models.mkdir(parents=True)
+    (models / "tiny.yml").write_text(
+        "base_num_decoder_layers: 6\n"
+        "base_emb_dim: 512\n"
+        "base_mlp_dim: 1024\n"
+        "base_num_query_heads: 8\n"
+        "base_num_kv_heads: 4\n"
+        "head_dim: 64\n"
+        "vocab_size: 1000\n"
+    )
+    monkeypatch.setenv("PRIMUS_MAXTEXT_PATH", str(tmp_path))
+
+    args = maxtext_derive_default_args(_maxtext_args(model_name="tiny"))
+    assert args.num_layers == 6
+    assert args.hidden_size == 512
+    assert args.ffn_hidden_size == 1024
+    assert args.num_query_groups == 4
+    assert args.padded_vocab_size == 1000
+
+
+def test_maxtext_unknown_model_says_what_to_do(_no_maxtext_checkout):
+    with pytest.raises(ValueError) as excinfo:
+        maxtext_derive_default_args(_maxtext_args(model_name="no-such-model"))
+    message = str(excinfo.value)
+    assert "no-such-model" in message
+    assert "PRIMUS_MAXTEXT_PATH" in message
+
+
+def test_maxtext_rejects_global_parameter_scale(_no_maxtext_checkout):
+    with pytest.raises(ValueError) as excinfo:
+        maxtext_derive_default_args(_maxtext_args(global_parameter_scale=4))
+    assert "global_parameter_scale" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
 # Idempotency: the performance driver edits the normalized config and reconverts
 # --------------------------------------------------------------------------- #
 
@@ -403,9 +607,14 @@ def test_torchtitan_turbo_flags_are_read():
     "adapter,make_args",
     [
         (torchtitan_derive_default_args, _titan_args),
+        (maxtext_derive_default_args, _maxtext_args),
     ],
 )
-def test_adapters_normalize_in_place_and_mark_the_namespace(adapter, make_args):
+def test_adapters_normalize_in_place_and_mark_the_namespace(adapter, make_args, monkeypatch):
+    monkeypatch.setattr(
+        "primus.core.projection.frameworks.jax._read_maxtext_model_config",
+        lambda model_name: None,
+    )
     args = make_args()
     assert not is_normalized(args)
 
@@ -420,9 +629,14 @@ def test_adapters_normalize_in_place_and_mark_the_namespace(adapter, make_args):
     "adapter,make_args",
     [
         (torchtitan_derive_default_args, _titan_args),
+        (maxtext_derive_default_args, _maxtext_args),
     ],
 )
-def test_second_pass_keeps_the_drivers_edits(adapter, make_args):
+def test_second_pass_keeps_the_drivers_edits(adapter, make_args, monkeypatch):
+    monkeypatch.setattr(
+        "primus.core.projection.frameworks.jax._read_maxtext_model_config",
+        lambda model_name: None,
+    )
     args = adapter(make_args())
     assert args.num_layers == 32
 
@@ -462,11 +676,38 @@ def test_performance_driver_layer_limiting_survives_reconversion():
     assert len(args.moe_layer_freq) == limited
 
 
+# --------------------------------------------------------------------------- #
+# Cross-backend agreement
+# --------------------------------------------------------------------------- #
+
+
+def test_the_same_model_projects_the_same_shape_on_either_backend(_no_maxtext_checkout):
+    titan = torchtitan_derive_default_args(_titan_args())
+    maxtext = maxtext_derive_default_args(_maxtext_args())
+
+    for field in (
+        "num_layers",
+        "hidden_size",
+        "ffn_hidden_size",
+        "num_attention_heads",
+        "num_query_groups",
+        "kv_channels",
+        "padded_vocab_size",
+    ):
+        assert getattr(titan, field) == getattr(maxtext, field), field
+
+
 def test_alias_tables_only_point_at_specs_that_exist():
-    from primus.core.projection.frameworks.model_specs import TORCHTITAN_FLAVOR_ALIASES
+    from primus.core.projection.frameworks.model_specs import (
+        MAXTEXT_MODEL_ALIASES,
+        TORCHTITAN_FLAVOR_ALIASES,
+    )
 
     for key, canonical in TORCHTITAN_FLAVOR_ALIASES.items():
         assert torchtitan_builtin_spec(*key) is not None, key
+        assert canonical in BUILTIN_MODEL_SPECS
+    for model_name, canonical in MAXTEXT_MODEL_ALIASES.items():
+        assert maxtext_builtin_spec(model_name) is not None, model_name
         assert canonical in BUILTIN_MODEL_SPECS
 
 

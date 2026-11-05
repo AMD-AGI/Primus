@@ -5,4 +5,5 @@ extends:
 # reduce depth, and use an ungated repository that carries the same tokenizer.
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: NousResearch/Llama-2-7b-hf
+vocab_size: 32000
 num_layers: 4

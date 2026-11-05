@@ -12,6 +12,7 @@ extends:
 model_type: mamba
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B
+vocab_size: 128256
 
 # Model dimensions
 num_layers: 24                  # 12 mixer + 12 MLP sublayers
@@ -58,6 +59,9 @@ group_query_attention: false
 swiglu: true
 num_query_groups: null
 multi_latent_attention: true
+# MLA q/kv latent RMSNorms. Older Megatron applies them whenever q_lora_rank is set;
+# Megatron-LM main gates them on qk_layernorm, so it must be on to keep the same model.
+qk_layernorm: true
 num_attention_heads: 16         # MLA head count (FLA: attn.num_heads = 16)
 q_lora_rank: 672
 kv_lora_rank: 64

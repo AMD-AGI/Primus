@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
+from primus.backends.backend_aliases import resolve_backend_alias
 from primus.core.config.preset_loader import PresetLoader
 from primus.core.launcher.config import PrimusConfig
 from primus.core.utils import constant_vars, yaml_utils
@@ -45,6 +46,11 @@ def _add_common_train_args(
             "If provided, it will be appended to PYTHONPATH dynamically."
         ),
     )
+    # The launcher's option: prepare_experiment.sh reads it and rejects one that
+    # conflicts with the config's framework; the trainer ignores it. Declared only so
+    # that argparse does not take it as an abbreviation of --backend_path. allow_abbrev
+    # =False would not do: the undeclared option would become a `backend:` override.
+    parser.add_argument("--backend", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--export_config",
         type=str,
@@ -260,7 +266,8 @@ class PrimusParser(object):
 
         # Ensure framework exists
         yaml_utils.check_key_in_namespace(module, "framework")
-        framework = module.framework
+        framework = resolve_backend_alias(module.framework)
+        module.framework = framework
 
         # If both config and model are missing, skip
         has_config = yaml_utils.has_key_in_namespace(module, "config")

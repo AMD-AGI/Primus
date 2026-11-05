@@ -46,9 +46,10 @@ normalization: RMSNorm
 # specs, so it does not need the switch. kimi_k3_builder asserts on this.
 multi_latent_attention: false
 # The K3 attention subclass builds q_a / kv_a layernorms from its own
-# submodule spec (same arrangement as deepseek_v4_base.yaml), so the
-# generic MCore flag stays off.
-qk_layernorm: false
+# submodule spec (same arrangement as deepseek_v4_base.yaml). Megatron-LM
+# main's MLASelfAttention rejects explicit q/kv layernorm specs unless this
+# flag is on; older Megatron ignores it for MLA.
+qk_layernorm: true
 group_query_attention: false
 
 # ---------- positional encoding: NONE, anywhere ----------

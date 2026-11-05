@@ -3,6 +3,10 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama3_70B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+env:
+  GPU_MAX_HW_QUEUES: "4"
+  # PYTORCH_HIP_ALLOC_CONF: expandable_segments:True
+
 modules:
   pre_trainer:
     framework: megatron
@@ -16,7 +20,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
+      train_iters: 20
       micro_batch_size: 2
       global_batch_size: 16
 
@@ -69,13 +73,14 @@ modules:
       # recompute
       recompute_granularity: full # full, selective
       recompute_method: block # uniform, block
-      recompute_num_layers: 80 # int
+      # 192GB HBM limit: MBS=2 OOMs below 76 layers (and at 76 without fused CE).
+      recompute_num_layers: 76 # int
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: true
+      use_turbo_attention: false
       use_turbo_grouped_gemm: true
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

@@ -120,15 +120,14 @@ class PrimusTopKRouter(TopKRouter):
         #   * "even"    -> deterministic round-robin so per-expert counts are
         #                  constant every step (constant M_total, no autotune/
         #                  recompile churn); handled by ``_force_even_routing``.
+        #                  This must run with DeepEP too: its "even" token_indices
+        #                  gather from ``scores``, which are zero off the real
+        #                  top-k, and MegaMoE re-derives its top-k from them.
         #   * "uniform" -> Megatron-LM original random-logits balancing (already
         #                  applied upstream in ``TopKRouter.forward``; nothing to
         #                  do here).
         force_load_balancing_type = getattr(args, "moe_router_force_load_balancing_type", "uniform")
-        if (
-            args.moe_router_force_load_balancing
-            and force_load_balancing_type == "even"
-            and not getattr(args, "moe_enable_deepep", False)
-        ):
+        if args.moe_router_force_load_balancing and force_load_balancing_type == "even":
             scores, routing_map = self._force_even_routing(scores, routing_map)
 
         return scores, routing_map
@@ -165,3 +164,15 @@ class PrimusTopKRouter(TopKRouter):
         new_scores.scatter_(1, slot, topk_vals.to(scores.dtype))
 
         return new_scores, new_routing_map
+
+
+def primus_topk_router_for(router):
+    """``PrimusTopKRouter`` if ``router`` is Megatron's ``TopKRouter`` class, else ``router`` unchanged.
+
+    The swap rule of the ``megatron.moe.primus_topk_router`` patch, shared with MegaMoE. Matching the
+    class by name also catches a ``TopKRouter`` that a module bound before the patch ran; subclasses
+    such as ``InferenceTopKRouter`` and builders such as a ``functools.partial`` are left alone.
+    """
+    if isinstance(router, type) and router.__name__ == "TopKRouter":
+        return PrimusTopKRouter
+    return router

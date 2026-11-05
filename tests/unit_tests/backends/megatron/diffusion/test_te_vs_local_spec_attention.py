@@ -35,6 +35,14 @@ os.environ["NVTE_FUSED_ATTN"] = "1"
 os.environ["NVTE_FUSED_ATTN_CK"] = "1"
 os.environ["NVTE_CK_USES_FWD_V3"] = "1"
 os.environ["NVTE_CK_USES_BWD_V3"] = "1"
+# Base images set NVTE_CK_IS_V3_ATOMIC_FP32=0 (correct for gfx950). On gfx942 the
+# TE/CK v3 a16 bwd kernel (fmha_bwd_hd128_bf16_a16_rtz) memory-faults on
+# non-contiguous SBHD q/k/v views from interleaved qkv; fp32 atomics select the
+# a32 path instead. Matches tools/installation/env.sh and the MI300X recipes.
+os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] = "1"
+# Round like Primus-Turbo (rtna) rather than the images' rtz; otherwise the two
+# specs drift by ~2-3% over 100 steps.
+os.environ["NVTE_CK_HOW_V3_BF16_CVT"] = "1"
 
 import pytest
 import torch

@@ -140,6 +140,8 @@ class FluxConfig(BaseDiffusionConfig):
 
     # Normalization
     layernorm_epsilon: float = 1e-6
+    # Flux specs always fill q/k_layernorm; Megatron-core 0.19+ reject them unless this is on.
+    qk_layernorm: bool = True
 
     # Initialization
     use_cpu_initialization: bool = True
