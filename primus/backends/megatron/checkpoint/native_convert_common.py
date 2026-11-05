@@ -25,13 +25,17 @@ converter):
        and save a legacy ``torch`` checkpoint.
 
 Bridge-free guarantee: this module (and its callers) import ONLY
-``megatron.core`` / ``megatron.training`` / ``megatron.legacy``. ``megatron.bridge``
-is never imported; a hard guard asserts it never leaked into ``sys.modules``.
+``megatron.core`` / ``megatron.training`` (and ``megatron.legacy`` when the
+Megatron-LM tree has it). ``megatron.bridge`` is never imported; a hard guard
+asserts it never leaked into ``sys.modules``.
 
-The ROCm-only ``megatron.legacy.fused_kernels.load`` no-op that the legacy CPU
-init path needs is supplied as a Primus ``phase="convert"`` monkeypatch
+On a Megatron-LM tree that still has ``megatron.legacy``, the init path calls
+``megatron.legacy.fused_kernels.load``; its ROCm no-op is supplied as a Primus
+``phase="convert"`` monkeypatch
 (``primus.backends.megatron.patches.checkpoint_convert_patches``), applied
-in-process before conversion -- NOT by editing the submodule.
+in-process before conversion -- NOT by editing the submodule. Megatron-LM core
+v0.19+ has no ``megatron.legacy``; there is nothing to load and the call is
+skipped.
 """
 
 import json
@@ -250,8 +254,19 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     neutralize_nvte_attention_env()
 
     from megatron.core import mpu
-    from megatron.legacy import fused_kernels
     from megatron.training.global_vars import get_args, set_global_variables
+
+    try:
+        from megatron.legacy import fused_kernels
+    except ModuleNotFoundError as e:
+        # Megatron-LM core v0.19+ has no megatron.legacy package, hence no legacy
+        # fused kernels to load. Only that package being absent is skipped; any
+        # other missing module (including fused_kernels inside an existing
+        # megatron.legacy) is an error.
+        if e.name != "megatron.legacy":
+            raise
+        log("megatron.legacy not present in this Megatron-LM tree; skipping legacy fused kernels")
+        fused_kernels = None
 
     set_global_variables(margs, build_tokenizer=True)
     margs = get_args()
@@ -267,7 +282,8 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     # ROCm: legacy fused kernels are CUDA-only and their build shells out to
     # nvcc; conversion never runs them. Neutralised by the phase="convert"
     # Primus patch (checkpoint_convert_patches) applied earlier this process.
-    fused_kernels.load(margs)
+    if fused_kernels is not None:
+        fused_kernels.load(margs)
     return margs
 
 
