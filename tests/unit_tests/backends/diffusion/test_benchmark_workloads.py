@@ -1200,25 +1200,39 @@ def test_aiter_jit_dir_follows_package_writability(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("AITER_JIT_DIR", raising=False)
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: spec if name == "aiter" else None)
+
+    def find_spec(name, *args, **kwargs):
+        del args, kwargs
+        return spec if name == "aiter" else None
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
     fake = types.ModuleType("aiter")
     monkeypatch.setitem(sys.modules, "aiter", fake)
 
-    package_jit.chmod(0o555)
-    try:
-        aiter_backend._import_aiter()
-        assert os.environ["AITER_JIT_DIR"] == str(user_jit)
+    # The torch unit-test container runs as root. os.access(W_OK) is true for
+    # uid 0 even on a mode 0555 directory, so chmod cannot stand in for a
+    # read-only aiter package there.
+    state = {"writable": False}
+    real_access = os.access
 
-        monkeypatch.setenv("AITER_JIT_DIR", "/already/set")
-        aiter_backend._import_aiter()
-        assert os.environ["AITER_JIT_DIR"] == "/already/set"
+    def access(path, mode):
+        if os.path.abspath(path) == str(package_jit) and mode == os.W_OK:
+            return state["writable"]
+        return real_access(path, mode)
 
-        monkeypatch.delenv("AITER_JIT_DIR")
-        package_jit.chmod(0o755)
-        aiter_backend._import_aiter()
-        assert "AITER_JIT_DIR" not in os.environ
-    finally:
-        package_jit.chmod(0o755)
+    monkeypatch.setattr(os, "access", access)
+
+    aiter_backend._import_aiter()
+    assert os.environ["AITER_JIT_DIR"] == str(user_jit)
+
+    monkeypatch.setenv("AITER_JIT_DIR", "/already/set")
+    aiter_backend._import_aiter()
+    assert os.environ["AITER_JIT_DIR"] == "/already/set"
+
+    monkeypatch.delenv("AITER_JIT_DIR")
+    state["writable"] = True
+    aiter_backend._import_aiter()
+    assert "AITER_JIT_DIR" not in os.environ
 
 
 def test_synthetic_mochi_dataset_skips_asset_downloads(monkeypatch, tmp_path):
