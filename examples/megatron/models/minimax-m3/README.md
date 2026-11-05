@@ -564,9 +564,10 @@ model preset `primus/configs/models/megatron/minimax_m3.1_flash.yaml` extends `m
 so the launcher runs it with `EXP` set (see Run). With no dense attention layer, `USE_TURBO_ATTENTION`
 has nothing to act on, and the recomputed first layer is an MSA layer.
 
-The baseline shape (EP4, 8 layers, GBS 32) on `ctheliosr-rck-g02-e15-01`, caa1d392, the launcher's
-defaults, the two models alternating one at a time on the four otherwise idle GPUs. Every run finished
-10 iterations with 0 NaN.
+The baseline shape (EP4, 8 layers, GBS 32) on `ctheliosr-rck-g02-e15-01`, the launcher's defaults,
+the two models alternating one at a time on the four otherwise idle GPUs. Every run finished 10
+iterations with 0 NaN. These ran before the preset took its current file name in a79087ef; after the
+rename, one GPU gives the same loss and grad norm at every iteration.
 
 | Model | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
 | --- | --- | --- | --- | --- | --- |
