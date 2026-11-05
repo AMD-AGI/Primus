@@ -23,7 +23,9 @@ anyway. Seen on rocm/primus:v26.5 (TE 2.15.0.dev0).
 
 Set ``PRIMUS_TE_GEMM_WORKSPACE_MIB`` to enlarge the workspace; 128 clears the
 WAN shapes. Unset, nothing is touched, so a bigger workspace never silently
-changes hipBLASLt's solution choice for runs that do not need it.
+changes hipBLASLt's solution choice for runs that do not need it. It only ever
+enlarges: a workspace that is already at least that size, such as the one
+GLM-5's patch sets, is left alone.
 """
 
 import os
@@ -78,8 +80,17 @@ def patch_te_gemm_workspace_size(ctx: PatchContext):
     requested_bytes = _requested_workspace_mib() * 1024 * 1024
     try:
         previous_bytes = te_gemm.get_cublas_workspace_size_bytes()
-    except Exception:  # noqa: BLE001 - only used for the log line
+    except Exception:  # noqa: BLE001 - the size is only compared and logged
         previous_bytes = None
+
+    # Another patch may already have enlarged it (GLM-5's, through its own variable).
+    if previous_bytes is not None and previous_bytes >= requested_bytes:
+        log_rank_0(
+            "[Patch:megatron.te.hipblaslt_gemm_workspace] TE GEMM workspace is already "
+            f"{previous_bytes // (1024 * 1024)} MiB, at least the "
+            f"{requested_bytes // (1024 * 1024)} MiB {ENV_VAR} asks for; left as is"
+        )
+        return
 
     te_gemm.get_cublas_workspace_size_bytes = lambda: requested_bytes
     # Already-allocated workspaces are memoized per device.
