@@ -282,34 +282,20 @@ class FakeV4TransformerConfig(MLATransformerConfig):
     swiglu_limit: float = 0.0
 """
 
-_MEGATRON_SCOPED_BUILDER_SRC = """
-from megatron.training.arguments import core_transformer_config_from_args
+# Mirrors the real registry: the entry that declares a `config_class` is the one
+# that leads to a Primus config class; the others build upstream models.
+_MODEL_REGISTRY_SRC = """
+DEFAULT_MODEL_TYPE = "gpt"
 
-from .fake_v4_config import FakeV4TransformerConfig
-
-
-def fake_v4_builder(args, pre_process, post_process, config=None):
-    if config is None:
-        config = core_transformer_config_from_args(args, config_class=FakeV4TransformerConfig)
-    return config
-"""
-
-# Mirrors the real dispatch: the branch that names a Primus module outright is
-# the one that leads to a Primus config class; the others reach upstream.
-_MODEL_PROVIDER_SRC = """
-import importlib
-from functools import partial
-
-
-def get_model_provider(model_type="gpt"):
-    if model_type == "fake_v4":
-        module = importlib.import_module(
-            "primus.backends.megatron.core.models.fake_v4.fake_v4_builders"
-        )
-        return partial(module.model_provider, module.fake_v4_builder)
-    if model_type == "mamba":
-        return lazy_import(["model_provider", "pretrain_mamba"], "model_provider")
-    return lazy_import(["model_provider", "pretrain_gpt"], "model_provider")
+MODEL_FAMILIES = {
+    "gpt": ModelFamily(builder="gpt_builders:gpt_builder"),
+    "mamba": ModelFamily(builder="mamba_builders:mamba_builder", training="pretrain_mamba"),
+    "fake_v4": ModelFamily(
+        package="primus.backends.megatron.core.models.fake_v4",
+        config_class="fake_v4_config:FakeV4TransformerConfig",
+        model_class="fake_v4_model:FakeV4Model",
+    ),
+}
 """
 
 _MEGATRON_SCOPE_PATCH_SRC = """
@@ -393,11 +379,7 @@ def megatron_repo(tmp_path: Path) -> Path:
         tmp_path / "primus/backends/megatron/core/models/fake_v4/fake_v4_config.py",
         _MEGATRON_SCOPED_CONFIG_SRC,
     )
-    _write(
-        tmp_path / "primus/backends/megatron/core/models/fake_v4/fake_v4_builders.py",
-        _MEGATRON_SCOPED_BUILDER_SRC,
-    )
-    _write(tmp_path / "primus/core/utils/import_utils.py", _MODEL_PROVIDER_SRC)
+    _write(tmp_path / "primus/backends/megatron/core/models/registry.py", _MODEL_REGISTRY_SRC)
     _write(tmp_path / "primus/configs/models/megatron/fake_v4.yaml", "model_type: fake_v4\nnum_layers: 2\n")
     _write(tmp_path / "primus/configs/models/megatron/plain.yaml", "num_layers: 2\n")
     _write(
@@ -595,15 +577,15 @@ def test_megatron_config_extension_fields_are_schema(megatron_repo: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_model_scope_is_read_off_the_model_dispatch(megatron_repo: Path):
-    """`get_model_provider` is what decides the model, so it is what we follow."""
+def test_model_scope_is_read_off_the_model_registry(megatron_repo: Path):
+    """The registry `get_model_provider` looks models up in decides the model, so it is what we follow."""
     scopes = build_model_scopes(megatron_repo, "megatron")
 
     assert len(scopes) == 1
     scope = scopes[0]
     assert (scope.key, scope.value, scope.default) == ("model_type", "fake_v4", "gpt")
     assert scope.config_class == "FakeV4TransformerConfig"
-    assert scope.source == "primus/core/utils/import_utils.py"
+    assert scope.source == "primus/backends/megatron/core/models/registry.py"
 
 
 def test_only_a_field_nothing_else_explains_is_model_scoped(megatron_repo: Path):

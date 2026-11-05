@@ -64,11 +64,17 @@ PATCH_DIRS = {
 # backend's config dataclass.
 BACKEND_PACKAGES = {"megatron": Path("primus/backends/megatron")}
 
-# `get_model_provider(model_type=...)` is where a Megatron run decides which
-# model it builds, and the branches that name a Primus module are the ones that
-# lead to a Primus config class. See `extract_model_scopes`.
-MODEL_PROVIDERS = {
-    "megatron": (Path("primus/core/utils/import_utils.py"), "get_model_provider", "model_type"),
+# The registry `get_model_provider(model_type=...)` looks a Megatron run's model
+# up in: (file, table, name of the default, discriminator key). The entries that
+# declare a `config_class` are the ones that lead to a Primus config class. See
+# `extract_model_scopes`.
+MODEL_REGISTRIES = {
+    "megatron": (
+        Path("primus/backends/megatron/core/models/registry.py"),
+        "MODEL_FAMILIES",
+        "DEFAULT_MODEL_TYPE",
+        "model_type",
+    ),
 }
 
 # `module.model` names a preset here, and that preset is where a model declares
@@ -652,62 +658,40 @@ def _args_namespace_reads(repo_root: Path) -> frozenset[str]:
     return frozenset(names)
 
 
-def _model_provider_branches(repo_root: Path, backend: str) -> tuple[str | None, dict[str, str], str]:
-    """Read the model dispatch -- ``(default, {discriminator value: module}, source)`` -- from
-    ``get_model_provider``'s branches; only one naming a Primus module reaches a Primus config."""
-    src, func_name, key = MODEL_PROVIDERS.get(backend, (None, "", ""))
+def _str_constant(node: ast.expr | None) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _registered_config_classes(repo_root: Path, backend: str) -> tuple[str | None, dict[str, str], str]:
+    """Read the model registry -- ``(default, {discriminator value: config class}, source)``.
+    An entry without a ``config_class`` builds an upstream model and claims no Primus config."""
+    src, table, default_name, _ = MODEL_REGISTRIES.get(backend, (None, "", "", ""))
     if src is None:
         return None, {}, ""
     path = repo_root / src
     if not path.is_file():
         return None, {}, ""
-    tree = ast.parse(path.read_text())
-    func = next(
-        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == func_name),
-        None,
-    )
-    if func is None:
+
+    assigned: dict[str, ast.expr] = {}
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            assigned[node.targets[0].id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            assigned[node.target.id] = node.value
+
+    families = assigned.get(table)
+    if not isinstance(families, ast.Dict):
         return None, {}, ""
-
-    default = None
-    positional = func.args.posonlyargs + func.args.args
-    for arg, value in zip(positional[len(positional) - len(func.args.defaults) :], func.args.defaults):
-        if arg.arg == key and isinstance(value, ast.Constant) and isinstance(value.value, str):
-            default = value.value
-
-    branches: dict[str, str] = {}
-    for node in ast.walk(func):
-        if not isinstance(node, ast.If):
+    config_classes: dict[str, str] = {}
+    for name, family in zip(families.keys, families.values):
+        value = _str_constant(name)
+        if value is None or not isinstance(family, ast.Call):
             continue
-        test = node.test
-        if not isinstance(test, ast.Compare) or len(test.ops) != 1:
-            continue
-        if not isinstance(test.ops[0], ast.Eq) or not isinstance(test.left, ast.Name):
-            continue
-        if test.left.id != key:
-            continue
-        right = test.comparators[0]
-        if not (isinstance(right, ast.Constant) and isinstance(right.value, str)):
-            continue
-        for stmt in node.body:
-            for call in _calls_named(stmt, "import_module"):
-                arg = call.args[0] if call.args else None
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    branches[right.value] = arg.value
-    return default, branches, str(src)
-
-
-def _config_class_of_module(repo_root: Path, module: str) -> str | None:
-    """The class a module hands to ``core_transformer_config_from_args``."""
-    path = repo_root / (module.replace(".", "/") + ".py")
-    if not path.is_file():
-        return None
-    tree = ast.parse(path.read_text())
-    for call in _calls_named(tree, "core_transformer_config_from_args"):
-        for keyword in call.keywords:
-            if keyword.arg == "config_class" and isinstance(keyword.value, ast.Name):
-                return keyword.value.id
-    return None
+        for keyword in family.keywords:
+            ref = _str_constant(keyword.value) if keyword.arg == "config_class" else None
+            if ref:
+                config_classes[value] = ref.rpartition(":")[2]
+    return _str_constant(assigned.get(default_name)), config_classes, str(src)
 
 
 def _inherited_fields(classes: dict[str, ast.ClassDef], derived: frozenset[str], cls: str) -> set[str]:
@@ -733,16 +717,15 @@ def extract_model_scopes(
     field, each meaning it reaches something on other models too: upstream defines the argument;
     another Primus config class declares it; something reads it off the argument namespace; or a
     patch or the hand-written allowlist vouches for it globally."""
-    default, branches, source = _model_provider_branches(repo_root, backend)
-    if not branches:
+    default, registered, source = _registered_config_classes(repo_root, backend)
+    if not registered:
         return ()
-    key = MODEL_PROVIDERS[backend][2]
+    key = MODEL_REGISTRIES[backend][3]
     classes, derived = _primus_config_classes(repo_root, backend)
 
     owners: dict[str, str] = {}  # config class -> discriminator value
-    for value, module in sorted(branches.items()):
-        config_class = _config_class_of_module(repo_root, module)
-        if config_class is not None and config_class in derived:
+    for value, config_class in sorted(registered.items()):
+        if config_class in derived:
             owners[config_class] = value
     if not owners:
         return ()

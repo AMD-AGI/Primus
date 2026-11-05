@@ -159,7 +159,7 @@ def get_glm5_next_runtime_decoder_spec(
         for i in range(start, end)
     ]
     logger.info(
-        "[Primus:GLM5-Next] provider=%s layers [%d, %d) attention=%s mlp=%s",
+        "[Primus:glm5_next] provider=%s layers [%d, %d) attention=%s mlp=%s",
         type(provider).__name__,
         start,
         end,

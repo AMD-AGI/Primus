@@ -64,8 +64,8 @@ def _stub_sft_runtime_and_forward_step(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize(
     ("model_type", "expected_provider_kwargs"),
     [
-        pytest.param("gpt", {}, id="gpt-default-provider"),
-        pytest.param("mamba", {"model_type": "mamba"}, id="non-gpt-provider"),
+        pytest.param("gpt", {"model_type": "gpt"}, id="gpt-provider"),
+        pytest.param("mamba", {"model_type": "mamba"}, id="mamba-provider"),
     ],
 )
 def test_train_selects_model_provider_by_model_type(

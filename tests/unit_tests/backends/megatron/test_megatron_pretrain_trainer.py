@@ -101,13 +101,19 @@ class TestMegatronPretrainTrainer:
 
         # 4) primus.core.utils.import_utils.get_model_provider
         model_provider = object()
-        import_utils_mod = types.SimpleNamespace(
-            get_model_provider=lambda: model_provider,
-        )
+        provider_calls = []
+
+        def fake_get_model_provider(**kwargs):
+            provider_calls.append(kwargs)
+            return model_provider
+
+        import_utils_mod = types.SimpleNamespace(get_model_provider=fake_get_model_provider)
         monkeypatch.setitem(sys.modules, "primus.core.utils.import_utils", import_utils_mod)
 
         # Execute training wiring.
         trainer.train()
+
+        assert provider_calls == [{"model_type": "gpt"}]
 
         # Train datasets provider should be marked distributed.
         assert train_valid_test_datasets_provider.is_distributed is True
@@ -167,9 +173,7 @@ class TestMegatronPretrainTrainer:
         monkeypatch.setitem(sys.modules, "pretrain_gpt", pretrain_gpt_mod)
 
         model_provider = object()
-        import_utils_mod = types.SimpleNamespace(
-            get_model_provider=lambda: model_provider,
-        )
+        import_utils_mod = types.SimpleNamespace(get_model_provider=lambda **_: model_provider)
         monkeypatch.setitem(sys.modules, "primus.core.utils.import_utils", import_utils_mod)
 
         trainer.train()
@@ -182,3 +186,61 @@ class TestMegatronPretrainTrainer:
         assert args[2] is model_type.encoder_or_decoder
         assert args[3] == "FORWARD_STEP"
         assert kwargs == {"store": "STORE"}
+
+    @pytest.mark.parametrize(
+        ("trains", "forwarder"),
+        [
+            # Megatron-core 0.19+: pretrain_mamba.py only forwards to pretrain_hybrid.py.
+            ("pretrain_hybrid", "pretrain_mamba"),
+            # Older Megatron-LM: no pretrain_hybrid.
+            ("pretrain_mamba", "pretrain_hybrid"),
+        ],
+    )
+    def test_non_gpt_family_takes_components_from_its_entrypoint_marked_distributed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        trains,
+        forwarder,
+    ):
+        trainer = _build_trainer(monkeypatch)
+
+        def forward_step():
+            pass
+
+        def train_valid_test_datasets_provider():
+            pass
+
+        entrypoint = types.ModuleType(trains)
+        entrypoint.forward_step = forward_step
+        entrypoint.train_valid_test_datasets_provider = train_valid_test_datasets_provider
+        monkeypatch.setitem(sys.modules, trains, entrypoint)
+        if forwarder == "pretrain_mamba":
+            monkeypatch.setitem(sys.modules, forwarder, types.ModuleType(forwarder))
+        else:
+            monkeypatch.setitem(sys.modules, forwarder, None)
+        monkeypatch.setattr(trainer, "get_forward_step", lambda: pytest.fail("mamba trains like GPT"))
+
+        components = trainer._get_training_components("mamba")
+
+        assert components == (forward_step, train_valid_test_datasets_provider)
+        assert train_valid_test_datasets_provider.is_distributed is True
+
+    def test_missing_training_entrypoint_names_every_candidate(self, monkeypatch: pytest.MonkeyPatch):
+        trainer = _build_trainer(monkeypatch)
+        monkeypatch.setitem(sys.modules, "pretrain_hybrid", None)
+        monkeypatch.setitem(sys.modules, "pretrain_mamba", types.ModuleType("pretrain_mamba"))
+
+        with pytest.raises(ImportError, match=r"pretrain_hybrid: .*; pretrain_mamba: no forward_step"):
+            trainer._get_training_components("mamba")
+
+    @pytest.mark.parametrize("model_type", ["gpt", "kimi_k3", "inkling", "diffusion_model", None])
+    def test_gpt_trained_families_use_the_overridable_components(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        model_type,
+    ):
+        trainer = _build_trainer(monkeypatch)
+        monkeypatch.setattr(trainer, "get_forward_step", lambda: "FORWARD_STEP")
+        monkeypatch.setattr(trainer, "get_datasets_provider", lambda: "DATASETS_PROVIDER")
+
+        assert trainer._get_training_components(model_type) == ("FORWARD_STEP", "DATASETS_PROVIDER")
