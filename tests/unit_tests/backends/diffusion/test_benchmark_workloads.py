@@ -1474,7 +1474,7 @@ def test_even_batch_loader_is_full_size_and_mlperf_keeps_the_tail(tmp_path, monk
     assert [len(batch) for batch in mlperf.dataloader] == [16, 4]
 
 
-def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path):
+def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path, monkeypatch):
     import primus.backends.diffusion.utils.download as download
 
     args = _finalize(
@@ -1498,6 +1498,11 @@ def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path):
     (root / "text_encoder").mkdir()
     (root / "tokenizer").mkdir()
     (root / "tokenizer" / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        download,
+        "_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("a local Hunyuan snapshot must not be re-downloaded"),
+    )
     env = download._companion_paths("hunyuan-video", str(root / "transformer"), {})
     assert env["LLM_ENCODER"] == str(root / "text_encoder")
     assert "VAE_CHECKPOINT" not in env

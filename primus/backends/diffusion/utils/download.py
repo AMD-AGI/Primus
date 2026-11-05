@@ -357,24 +357,26 @@ def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) 
 
 
 def _hunyuan_companion_roots(root: Path, encoder: dict[str, object]) -> tuple[Path, Path]:
-    """Download the LLaMA encoder and VAE only when this run will use them."""
+    """Download the LLaMA encoder, and the VAE with it, when the encoder is absent.
+
+    A transformer-only snapshot has neither companion, so a full run fetches
+    both. A tree that already has ``text_encoder/`` but no ``vae/`` is the
+    community layout that does not ship a VAE. Latent batches do not need one,
+    and downloading it here would turn that optional folder into a hub fetch.
+    """
     llm_root = root
     vae_root = root
     missing_llm = _blank(encoder.get("llm")) and not (root / "text_encoder").exists()
-    missing_vae = _blank(encoder.get("autoencoder")) and not (root / "vae").exists()
-    if not missing_llm and not missing_vae:
+    if not missing_llm:
         return llm_root, vae_root
-    patterns: list[str] = []
-    if missing_llm:
-        patterns.extend(["text_encoder/*", "tokenizer/*"])
+    patterns = ["text_encoder/*", "tokenizer/*"]
+    missing_vae = _blank(encoder.get("autoencoder")) and not (root / "vae").exists()
     if missing_vae:
         patterns.append("vae/*")
     downloaded = Path(_snapshot(_MODEL_FILES["hunyuan-video"][0], allow_patterns=patterns))
-    if missing_llm:
-        llm_root = downloaded
     if missing_vae:
-        vae_root = downloaded
-    return llm_root, vae_root
+        return downloaded, downloaded
+    return downloaded, vae_root
 
 
 _ENCODER_ENV_KEYS = {
