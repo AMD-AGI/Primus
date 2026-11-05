@@ -12,11 +12,13 @@ The following aligns with the backend overview and the configs present in this t
 
 | Backend | Model families (documentation / stack scope) |
 | ------- | ---------------------------------------------- |
-| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro — from v26.7 also on gfx942 with context parallelism at 128k, and packed-sequence THD SFT; see [`examples/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/deepseek-v4)), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM, IBM Granite (dense, granite-4.1-3b; `model_type: granite`), Kimi K2, LFM2, MiniMax, Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
+| **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro—from v26.7 also on `gfx942` with context parallelism at 128k, and packed-sequence THD SFT; see [`examples/megatron/models/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/deepseek-v4)), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM (including GLM-5.3-Flash, from v26.9), Kimi K2, LFM2, MiniMax (M2.5 and the M3 text tower), ZAYA1-8B (from v26.8), IBM Granite (dense 4.1, `granite_4_1_3b`), Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
 | **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
 | **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
 | **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
 | **Diffusion** | Flux.1 (`schnell` / `dev`) text-to-image and Wan 2.1 / 2.2 text- and image-to-video presets under `primus/configs/models/diffusion/`, with examples under `examples/diffusion/configs/` and `examples/megatron/configs/*/diffusion/`. See [Diffusion models](../04-technical-guides/diffusion-models/README.md). |
+| **World Mirror** | HunyuanWorld-Mirror geometry training and Gaussian-head post-training. The model checkout is the unmodified submodule `third_party/HunyuanWorld-Mirror-rocm`, tracking `main` from [HunyuanWorld-Mirror](https://github.com/Tencent-Hunyuan/HunyuanWorld-Mirror). Both stages use `train posttrain`. Stage 1 starts from the public Hugging Face weights and trains the geometry heads. Stage 2 loads the stage-1 checkpoint and freezes the backbone while training the Gaussian head. The official stage configs, the Hypersim-only configs, aiter attention, the float32 raster cast, and the depth-mask fix live in Primus and are applied in memory. Examples live under `examples/worldmirror/configs/MI355X/`. |
+| **AutoModel** | Flux.1 (`dev` / `schnell`) text-to-image, Wan 2.2 T2V A14B text-to-video, and Ideogram-4 text-to-image, trained through [AutoModel](https://github.com/NVIDIA-NeMo/Automodel)'s diffusion recipe. Presets under `primus/configs/models/automodel/`, MI355X examples under `examples/automodel/configs/MI355X/diffusion/`. See [AutoModel examples](../../examples/automodel/README.md). |
 | **HummingbirdXT** | Registered backend with a post-training trainer and one checked-in example; user-facing support level still needs maintainer confirmation. |
 
 **Interpretation:** “Supported” in upstream code can exceed what this repository ships as YAML. Rows below reference representative files that exist under `primus/configs/models/` and `examples/`; they should not be treated as a complete generated inventory.
@@ -27,7 +29,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (21 configs each). For **Megatron** (top-level `*.yaml` in each directory), MI300X has 81 example configs, MI325X 68 and MI355X 121. MI325X is a subset of MI300X: MI300X also ships `qwen3_5_35B_A3B` (BF16 and FP8), `granite_4_1_3b` (BF16), and the hybrid linear-attention examples (`gdn_*`, `kda_*`, `zebra_llama_*`). **MI355X** carries most of the MI300X set (it lacks four of the `gdn_1B` and `zebra_llama` examples) and adds models such as `glm5`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, and `minimax_m2.5`. Each row's SKU list below reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B` and `granite_4_1_3b`, which are MI300X/MI355X only).
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 83 example configs and MI325X 71: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 125, adding models such as `glm5`, `glm5_3_flash`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5`, and `minimax_m3`. **gfx1250** has seven single-GPU LoRA-SFT configs: the BF16 recipes, plus FP8 hybrid proxies for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B added in v26.9. Each row's SKU list in the following table reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -41,9 +43,12 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `deepseek_v4_base.yaml` | `primus/configs/models/megatron/deepseek_v4_base.yaml` | Base fragment | — | — |
 | `glm4_7.yaml` | `primus/configs/models/megatron/glm4_7.yaml` | Model preset | No curated example in this repo | — |
 | `glm5.yaml` | `primus/configs/models/megatron/glm5.yaml` | Model preset | MI355X | BF16, FP8 |
+| `glm5_3_flash.yaml` | `primus/configs/models/megatron/glm5_3_flash.yaml` | Hybrid MoE preset (GLM-5.3-Flash, 45 layers, KDA + DSA with mHC) | MI355X | BF16 |
+| `glm5_3_flash_8L.yaml` | `primus/configs/models/megatron/glm5_3_flash_8L.yaml` | First 8 layers of GLM-5.3-Flash, for smoke tests | MI355X (`PRIMUS_MODEL=glm5_3_flash_8L`) | BF16 |
+| `glm5_next_base.yaml` | `primus/configs/models/megatron/glm5_next_base.yaml` | Base fragment | — | — |
 | `gpt_oss_20B.yaml` | `primus/configs/models/megatron/gpt_oss_20B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `gpt_oss_120B.yaml` | `primus/configs/models/megatron/gpt_oss_120B.yaml` | Model preset | MI355X | BF16, FP8 |
-| `granite_4_1_3b.yaml` | `primus/configs/models/megatron/granite_4_1_3b.yaml` | Model preset (IBM Granite dense, `model_type: granite`) | MI300X, MI355X | BF16 |
+| `granite_4_1_3b.yaml` | `primus/configs/models/megatron/granite_4_1_3b.yaml` | Model preset | MI300X, MI325X, MI355X | BF16 |
 | `grok1.yaml` | `primus/configs/models/megatron/grok1.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `grok2.yaml` | `primus/configs/models/megatron/grok2.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `grok_base.yaml` | `primus/configs/models/megatron/grok_base.yaml` | Base fragment | — | — |
@@ -55,6 +60,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `llama2_7B.yaml` | `primus/configs/models/megatron/llama2_7B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama2_13B.yaml` | `primus/configs/models/megatron/llama2_13B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama2_70B.yaml` | `primus/configs/models/megatron/llama2_70B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
+| `llama2_70B_4layer_proxy.yaml` | `primus/configs/models/megatron/llama2_70B_4layer_proxy.yaml` | 4-layer single-GPU proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
 | `llama2_base.yaml` | `primus/configs/models/megatron/llama2_base.yaml` | Base fragment | — | — |
 | `llama_base.yaml` | `primus/configs/models/megatron/llama_base.yaml` | Base fragment | — | — |
 | `llama3_8B.yaml` | `primus/configs/models/megatron/llama3_8B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
@@ -64,6 +70,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `llama3.1_70B.yaml` | `primus/configs/models/megatron/llama3.1_70B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama3.1_405B.yaml` | `primus/configs/models/megatron/llama3.1_405B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama3.2_1B.yaml` | `primus/configs/models/megatron/llama3.2_1B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
+| `llama3.2_1B_hf.yaml` | `primus/configs/models/megatron/llama3.2_1B_hf.yaml` | Hugging Face-tokenizer variant for native SFT | gfx1250 (LoRA SFT) | BF16 |
 | `llama3.2_3B.yaml` | `primus/configs/models/megatron/llama3.2_3B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama3.3_70B.yaml` | `primus/configs/models/megatron/llama3.3_70B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `llama4_17B128E.yaml` | `primus/configs/models/megatron/llama4_17B128E.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
@@ -86,15 +93,19 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen2.5_7B.yaml` | `primus/configs/models/megatron/qwen2.5_7B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen2.5_14B.yaml` | `primus/configs/models/megatron/qwen2.5_14B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen2.5_32B.yaml` | `primus/configs/models/megatron/qwen2.5_32B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
-| `qwen2.5_72B.yaml` | `primus/configs/models/megatron/qwen2.5_72B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
+| `qwen2.5_72B.yaml` | `primus/configs/models/megatron/qwen2.5_72B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 (MXFP4 on MI355X) |
+| `qwen2.5_72B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen2.5_72B_4layer_proxy.yaml` | 4-layer single-GPU proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
 | `qwen2.5_base.yaml` | `primus/configs/models/megatron/qwen2.5_base.yaml` | Base fragment | — | — |
 | `qwen3_4B.yaml` | `primus/configs/models/megatron/qwen3_4B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_8B.yaml` | `primus/configs/models/megatron/qwen3_8B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_14B.yaml` | `primus/configs/models/megatron/qwen3_14B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_32B.yaml` | `primus/configs/models/megatron/qwen3_32B.yaml` | Model preset | MI300X, MI325X, MI355X | BF16, FP8 |
-| `qwen3_30B_A3B.yaml` | `primus/configs/models/megatron/qwen3_30B_A3B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
+| `qwen3_30B_A3B.yaml` | `primus/configs/models/megatron/qwen3_30B_A3B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 (MXFP4 on MI355X) |
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
+| `qwen3_235B_A22B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B_4layer_proxy.yaml` | 4-layer single-GPU MoE proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
+| `zaya1.yaml` | `primus/configs/models/megatron/zaya1.yaml` | MoE model preset (ZAYA1-8B, CCA + MoE) | MI300X, MI325X, MI355X | BF16, FP8 |
+| `zaya1_base.yaml` | `primus/configs/models/megatron/zaya1_base.yaml` | Base fragment | — | — |
 | `zebra_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `zebra_mamba_3B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_3B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
 | `zebra_mamba_8B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_8B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
@@ -106,6 +117,10 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `kda_300M.yaml` | `primus/configs/models/megatron/kda_300M.yaml` | Pure KDA preset | MI300X | `kda_300M_BF16-pretrain.yaml` |
 | `gdn_1B.yaml` | `primus/configs/models/megatron/gdn_1B.yaml` | Pure GDN preset | MI300X, MI355X | `gdn_1B_BF16-pretrain.yaml` |
 | `gdn_300M.yaml` | `primus/configs/models/megatron/gdn_300M.yaml` | Pure GDN preset | MI300X | `gdn_300M_BF16-pretrain.yaml` |
+
+**ZAYA1-8B:** `zaya1.yaml` follows the released Zyphra/ZAYA1-base checkpoint (80 decoder stages alternating CCA attention and MoE). The MI300X, MI325X, and MI355X BF16 and FP8 examples are 30-iteration mock-data runs. On each GPU the micro-batch size is the largest that completed on one 8-GPU node with `rocm/primus:v26.8`, when the recipes were sized. The `zaya1_8B-FP8-pretrain.yaml` recipes set `fp8: hybrid` with tensorwise scaling, so FP8 is accurate from a cold start: CCA projections and expert SwiGLU GEMMs run as Transformer Engine FP8 linears, and the router, convolutions, norms, attention, embeddings, and tied logits stay in BF16. They also set `NVTE_USE_CAST_TRANSPOSE_TRITON=0`, because the Triton cast kernel autotunes for every new expert token count. The BF16 port landed on `main` in [#1199](https://github.com/AMD-AGI/Primus/pull/1199).
+
+**GLM-5.3-Flash:** `glm5_3_flash.yaml` (`model_type: glm5_next`) is a 45-layer hybrid: KDA linear attention on 34 layers, DSA sparse attention on 11, manifold-constrained hyper-connections (mHC) as the residual, and a 288-expert MoE. `examples/megatron/configs/MI355X/glm5_3_flash-BF16-pretrain.yaml` and [`examples/megatron/models/glm5-3-flash/run_glm5_3_flash.sh`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/glm5-3-flash) run it, and can load the released Hugging Face checkpoint for any TP / EP / PP (`GLM5_HF_LOAD`). Its forward-only log-probabilities match SGLang on the released checkpoint, and the 8-layer `glm5_3_flash_8L.yaml` trains from scratch. Training the full 45-layer model needs at least four MI355X nodes and has not been run. The DSA indexer is frozen (no gradient, no indexer distillation loss), and no Primus Turbo paths are enabled (`enable_primus_turbo: false`) ([#1230](https://github.com/AMD-AGI/Primus/pull/1230)). Packed sequences (`--qkv-format thd`) run under context parallelism, and the loader also accepts text-only Hugging Face exports ([#1265](https://github.com/AMD-AGI/Primus/pull/1265), [#1254](https://github.com/AMD-AGI/Primus/pull/1254)).
 
 **MiniMax M3:** `minimax_m3.yaml` covers the text tower only. The `swigluoai` activation and Gemma-style RMSNorm map onto existing Megatron options, and MiniMax Sparse Attention (MSA) runs on FlyDSL kernels on MI355X by default (`msa_backend: flydsl`), with a plain-PyTorch reference backend (`msa_backend: eager`) for other GPUs. Tensor, context and sequence parallelism for MSA, MTP, and the vision tower are not supported yet. The preset records the unmapped `config.json` values as comments.
 
@@ -201,9 +216,10 @@ Curated example layouts under `examples/` use GPU SKU subdirectories. As of this
 | ------- | ---------------------------- | ------------------------------ | ---------------------------- | ----------------------------------- |
 | **MI300X** | Yes | Yes | Yes | Yes |
 | **MI355X** | Yes | Yes | Yes | Yes |
-| **MI325X** | Yes | Yes | No | No |
+| **MI325X** | Yes | Yes | Yes | No |
+| **gfx1250** | Yes (LoRA-SFT proxies) | No | No | No |
 
-Megatron and TorchTitan ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI300X and MI355X examples, including MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
+Megatron, TorchTitan and MaxText ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron's gfx1250 examples are single-GPU LoRA-SFT proxies for bring-up. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
 
 Absence of a SKU directory for a given backend does **not** imply the backend cannot run there; it means this tree does not currently provide a checked-in example path to copy from.
 
@@ -229,41 +245,41 @@ For MoE and hybrid architectures (LLaMA 4, Qwen3-MoE, large `moe_*.yaml` templat
 
 ## HF checkpoint conversion for SFT (Granite)
 
-The post-train hook (`runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py`)
-converts an HF checkpoint before SFT. The native, bridge-free converter is the default for
-Qwen3, DeepSeek-V2/V3, Llama and IBM Granite dense (`GraniteForCausalLM`, e.g. granite-4.1-3b).
-For Granite, the converter module is `primus.backends.megatron.checkpoint.native_loader_granite`,
-and the model preset is `granite_4_1_3b.yaml`. Use these with the SFT template
-`examples/megatron/configs/MI355X/native_hf_to_megatron_sft.template.yaml` (set `model:
-granite_4_1_3b.yaml`). The template is the only copy in the tree; it has no SKU-specific
-settings, so it also serves MI300X. No ready-made Granite SFT recipe ships; the shipped
-Granite recipes are BF16 pretrain (`granite_4_1_3b-BF16-pretrain.yaml`).
+The native HF-to-Megatron converter for IBM Granite dense is
+`primus.backends.megatron.checkpoint.native_loader_granite`, with the model preset
+`granite_4_1_3b.yaml`. The post-train hook (`01_convert_checkpoints.py`) detects Granite from
+`config.json` (`architectures: [GraniteForCausalLM]`, or `model_type: granite` with no
+`architectures`; task heads such as `GraniteForSequenceClassification` are not converted
+natively) and converts it natively; set `hf_path` to a local HF checkpoint directory. The pinned
+Megatron-Bridge has no Granite bridge, so do not set `native_ckpt_convert: false` for Granite.
+The hook converts on a single node (rank 0 converts). The converter saves the HF config
+(`granite_hf_config.json`) into the converted checkpoint's iteration directory. Before the
+trainer and the model are built, a `build_args` patch (`granite_checkpoint_args_patches.py`)
+compares the model args with that config in the checkpoint Megatron loads (`load` when it holds a
+checkpoint, else `pretrained_checkpoint`; in it, the `ckpt_step` iteration or the tracker's
+latest; `native_loader_granite.check_args_against_checkpoint`), and stops on a mismatch.
+`max_position_embeddings` is not compared (with RoPE it only sizes the rotary cache), so an SFT
+or long-context run may set its own. The check reads only the config saved with the checkpoint,
+so it works when `hf_path` / `tokenizer_model` is a hub id. Checkpoints saved by training carry
+no `granite_hf_config.json`. A resume of a fine-tuning run (`load` holds its saves) is checked
+against the copy in its `pretrained_checkpoint`, the converted checkpoint its weights come from,
+so keep `pretrained_checkpoint` set when you resume. A checkpoint with no copy and no such
+`pretrained_checkpoint` (a pretraining resume, a Megatron-Bridge conversion, a checkpoint from
+another tool) loads as usual, unchecked, with a warning. To check it, copy the HF `config.json`
+of its weights into the loaded iteration's directory as `granite_hf_config.json`.
 
-- No flag is needed: with `native_ckpt_convert` unset, Granite uses the native converter.
-- The pinned Megatron-Bridge has no Granite bridge. If the native converter refuses a Granite
-  config (for example RoPE scaling or biases), the hook stops with the reason. It does not
-  fall back to Megatron-Bridge.
-- `hf_path` (or the `tokenizer_model` fallback) can be a local HF checkpoint directory or a
-  Hub repo id. With a Granite preset (`model_type: granite`) and a Hub repo id such as
-  `ibm-granite/granite-4.1-3b`, the hook downloads the checkpoint with
-  `huggingface_hub.snapshot_download` (the HF cache is reused; set `HF_HUB_OFFLINE=1` to use
-  the cache only) and converts it natively. Node rank 0 downloads the checkpoint and converts it;
-  the other nodes do not access the network and wait for the converted checkpoint (they
-  stop at once if rank 0 fails). A checkpoint converted by an earlier run is reused on
-  every node without any download. If the download fails, the hook stops with the reason and
-  says how to download the checkpoint by hand. For the other families a Hub id uses the
-  Megatron-Bridge path.
-- The hook reads only the local `hf_path`/config.json, the preset `model_type` and
-  `native_ckpt_convert`; it never looks up a Hub id in the HF cache to decide the path.
-  A local config.json names the family; the preset is used only when it names no native
-  family. The preset and the checkpoint must agree for Granite: a Granite preset with a
-  config.json of another family, or a Granite config.json with a preset whose `model_type`
-  is not `granite`, stops the hook (the second would build a model without Granite's
-  multipliers). `00_install_requirements.sh` and the hook share one decision (`_route`):
-  the Megatron-Bridge dependencies are installed exactly when the hook takes the Bridge
-  path, so never for Granite.
-- The Granite example recipe ships for MI300X and MI355X only; it was not validated on
-  MI325X.
-- `native_ckpt_convert: false` forces the Megatron-Bridge path for other families. For Granite,
-  the hook refuses it and stops early with a clear message, because Megatron-Bridge has no
-  Granite bridge.
+- Granite settings (`model_type: granite`, set by `granite_4_1_3b.yaml`): `residual_multiplier`
+  (required, a positive finite number; `1.0` means no scaling) scales each attention and MLP
+  output before the residual add. The other HF multipliers use upstream Megatron MuP fields
+  (Megatron-core `TransformerConfig`): `use_mup: true`, `mup_embedding_mult` = HF
+  `embedding_multiplier`, `mup_output_mult` = 1 / HF `logits_scaling`, and HF
+  `attention_multiplier` = the `softmax_scale` MuP sets (1 / `kv_channels` with
+  `mup_base_head_dim: null`). The Granite builder refuses options that would change this math
+  instead of ignoring them: an explicit `softmax_scale`, `window_size`, `use_rope_scaling`,
+  `rotary_interleaved`, MoE / MTP / MLA, `mup_base_hidden_size` != `hidden_size`, and others
+  (`granite_args.unsupported_problems`).
+- The Granite pretrain example (`granite_4_1_3b-BF16-pretrain.yaml`) ships for MI300X, MI325X and MI355X.
+- A Granite layer scales each residual add by `residual_multiplier` (0.22 for Granite 4.1).
+  The fused residual + RMSNorm path (`fused_residual_rmsnorm.py`, `PRIMUS_FUSED_RESIDUAL_NORM*`)
+  applies the same factor with a separate elementwise multiply per branch (two extra kernels per
+  layer; the Primus-Turbo kernels take no scale). Fused and unfused runs agree to bf16 rounding.

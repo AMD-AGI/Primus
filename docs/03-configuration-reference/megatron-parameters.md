@@ -465,7 +465,7 @@ models:
 |-----------|---------|-------------|
 | `use_legacy_models` | `false` | Use legacy Megatron model code paths. |
 | `deprecated_use_mcore_models` | `false` | Deprecated flag for Megatron-Core models; prefer current `transformer_impl` + stack. |
-| `model_type` | `gpt` | `gpt` or `mamba` family. |
+| `model_type` | `gpt` | `gpt` or `mamba` family (Primus also accepts its own model types, e.g. `granite`). |
 | `num_layers` | `24` | Transformer layers (decoder or unified stack). |
 | `encoder_num_layers` | `null` | Encoder depth (encoder–decoder). |
 | `decoder_num_layers` | `null` | Decoder depth. |
@@ -511,6 +511,16 @@ models:
 | `use_te_activation_func` | `false` | Use Transformer Engine activation kernels. |
 | `gradient_accumulation_fusion` | `true` | Fuse gradient accumulation kernels. |
 | `delay_wgrad_compute` | `false` | Delay weight-gradient computation for scheduling. |
+
+**Granite (`model_type: granite`, Primus only).** `residual_multiplier` has no default. It is
+required for `model_type: granite` and is a positive finite number (HF `residual_multiplier`;
+`1.0` means no scaling). It scales each attention and MLP output before the residual add. The other
+three HF Granite multipliers use the upstream MuP fields: `use_mup: true`,
+`mup_embedding_mult` = HF `embedding_multiplier`, `mup_output_mult` = 1 / HF `logits_scaling`,
+and HF `attention_multiplier` = the softmax scale MuP derives
+(`sqrt(mup_base_head_dim or 1) / kv_channels ** mup_attn_scale_power`; 1 / `kv_channels` with
+the defaults). `granite_4_1_3b.yaml` sets all of them; see
+[Granite](../06-developer-guide/model-support-matrix.md#hf-checkpoint-conversion-for-sft-granite).
 
 ### 10.2 Tokenizer and vocabulary
 

@@ -6,8 +6,8 @@
 
 """Per-PR, CPU-only numeric check of the Granite model against HF.
 
-A tiny Granite GPTModel (GraniteTransformerConfig + GraniteTransformerLayer, local
-spec) is loaded with random HF-layout weights through the converter mapping
+A tiny Granite GPTModel (GraniteTransformerConfig + upstream TransformerLayer with the
+scaled bda, local spec) is loaded with random HF-layout weights through the converter mapping
 (``native_loader_granite.build_mcore_state_dict``) and compared with the real
 ``transformers`` ``GraniteForCausalLM`` (when the installed transformers has it) and with an
 independent plain-torch transcription of its forward. This checks all four multipliers
@@ -58,5 +58,10 @@ def test_granite_gptmodel_matches_hf_reference_on_cpu():
     # fp32 on CPU: a correct port differs by ~1e-6; a wrong multiplier by O(1).
     tol = 1e-4 * max(1.0, result["ref_scale"])
     assert result["max_abs_err_plain_torch"] <= tol, result
-    if result["transformers_available"]:
-        assert result["max_abs_err_transformers"] <= tol, result
+    if not result["transformers_available"]:
+        # The plain-torch transcription passed; say that the HF reference did not run.
+        pytest.skip(
+            "only the plain-torch reference ran (the port matches it); the transformers "
+            f"GraniteForCausalLM reference did not: {result['transformers_skip_reason']}"
+        )
+    assert result["max_abs_err_transformers"] <= tol, result

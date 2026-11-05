@@ -14,7 +14,9 @@ modules:
     overrides:
       # log
       wandb_project: "Primus_Pretrain"
-      stderr_sink_level: DEBUG  # as in the other example configs: shows Megatron's iteration lines
+      # Megatron's per-iteration lines (lm loss, grad norm) are logged at DEBUG; keep them
+      # on stderr (as the llama3.2_3B recipes do).
+      stderr_sink_level: DEBUG
 
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
@@ -43,8 +45,6 @@ modules:
       use_distributed_optimizer: true  # needed by overlap_param_gather
       overlap_grad_reduce: true
       overlap_param_gather: true
-      # Off: weight gradients take the unfused path (computed, then added to main_grad),
-      # so training does not depend on the fused wgrad-accumulation kernel.
       gradient_accumulation_fusion: false
 
       # data
@@ -59,25 +59,15 @@ modules:
       load: null
       no_load_optim: null
       no_load_rng: null
-      save: null
-      # This perf recipe writes no checkpoint (save: null, disable_last_saving: true).
-      # To save, override all three: --save /abs/dir --save_interval N
-      # --disable_last_saving false. keep_explicit_save_path: true then writes to /abs/dir
-      # as given instead of <exp_root>/checkpoints, so a later run can --load /abs/dir.
-      # ckpt_format torch (legacy, one file per TP/PP rank) loads only at the same TP/PP;
-      # to load at another layout, save and load with --ckpt_format torch_dist.
-      keep_explicit_save_path: true
+      save: null  # to save: --save DIR --save_interval N --disable_last_saving false
       save_interval: 20000
       no_save_optim: null
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
 
-      # Primus Turbo is turned on here (the module default is off); the per-kernel
-      # use_turbo_* switches keep their defaults. Attention stays on TE: Granite's HF
-      # logprob / layer parity was measured on that path. Turbo attention also receives
-      # attention_multiplier as config.softmax_scale (the builder reads the scale back from
-      # either attention and refuses a mismatch), so --use_turbo_attention true is
-      # supported; it is not the default here because its parity is not yet measured.
+      # Attention configured as in the MI355X llama3.2 recipes (TE); TE takes
+      # config.softmax_scale (Granite attention_multiplier = 1/64).
       enable_primus_turbo: true
       use_turbo_attention: false
+      use_turbo_gemm: false

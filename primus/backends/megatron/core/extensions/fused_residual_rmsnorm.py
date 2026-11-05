@@ -38,13 +38,19 @@ Activation
   ``self_attention.linear_qkv.layer_norm_weight``. V1/V2 then fuse into
   those weights via ``rmsnorm_residual`` and skip the inner ``rmsnorm``.
 
-Falls back silently to the original ``TransformerLayer.forward`` whenever
-any precondition fails (recompute paths, fp32 residual, inference fused TP,
+Falls back to the original ``TransformerLayer.forward`` whenever any
+precondition fails (recompute paths, fp32 residual, inference fused TP,
 non-zero hidden_dropout, cross-attention layers, missing fused-LN gamma).
-Layers with a scaled residual add (Granite ``residual_multiplier`` != 1, or a bda
-wrapped by ``scaled_bias_dropout_add``) also fall back. Unlike the silent fallbacks
-above, this one is logged, once per process (the first layer and reason only), like the
-module's other path logs.
+These fallbacks are silent, except for the residual-scale check below, which logs.
+Layers whose bda is wrapped by ``scaled_bias_dropout_add`` (Granite
+``residual_multiplier``) also fuse: the fused path multiplies the attention/MLP
+output by the same factor before the add. That multiply is a separate elementwise
+kernel per branch (the Primus-Turbo residual RMSNorm kernels take no scale), and
+``scale * x`` is rounded to the activation dtype before the add, while the unfused
+``scaled_bias_dropout_add`` scales inside its fused function. Fused and unfused runs
+therefore agree to bf16 rounding, not bit for bit. A layer with an inconsistent or
+unreadable scale falls back to the unfused forward (logged once per distinct
+inconsistency).
 
 Skip-``y`` (optional, ``patches/primus-te-ln-skip-y-ste.patch``)
 ---------------------------------------------------------------
@@ -65,7 +71,9 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any
+from typing import Any, Optional
+
+from primus.core.utils.validation import positive_finite
 
 
 def _enabled() -> bool:
@@ -163,7 +171,8 @@ def _log(msg: str) -> None:
 _INSTALLED = False
 _LOGGED_FC1_PATH = False
 _LOGGED_MXFP4_QKV_PATH = False
-_LOGGED_SCALED_RESIDUAL = False
+_LOGGED_SCALED_RESIDUAL: set = set()  # the inconsistencies already logged
+_LOGGED_BRANCH_SCALES: set = set()  # the residual branch scales already logged
 
 
 def _identity_op_type():
@@ -299,7 +308,9 @@ def install() -> bool:
             if not _can_fuse(self):
                 # Per-layer fallback. If a carry was queued for *this* layer
                 # but the layer itself can't fuse, drop it back to a real
-                # add so the layer sees a correct hidden_states.
+                # add so the layer sees a correct hidden_states. An
+                # inconsistent residual scale takes this path too: _can_fuse
+                # returns False for it, before any layer state changes.
                 _drain_carry_into_hidden_states(self, args, kwargs)
                 return _orig_layer_forward(self, *args, **kwargs)
             try:
@@ -405,8 +416,6 @@ def _can_fuse(layer: Any) -> bool:
         return False
     if getattr(layer, "offload_mlp_norm", False):
         return False
-    if _has_scaled_residual(layer, cfg):
-        return False
 
     try:
         from primus.backends.megatron.core.extensions.primus_turbo import (
@@ -422,9 +431,12 @@ def _can_fuse(layer: Any) -> bool:
 
     pre_mlp = getattr(layer, "pre_mlp_layernorm", None)
     if isinstance(pre_mlp, PrimusTurboRMSNorm):
-        return True
+        # Checked last, so the fallback log names only layers that could otherwise fuse.
+        return _residual_scale(layer, cfg) is not None
     # Llama TE fused LN+Linear: IdentityOp pre_mlp, RMSNorm on fc1.
     if _is_identity(pre_mlp) and _fc1_fused_ln_params(layer) is not None:
+        if _residual_scale(layer, cfg) is None:
+            return False
         global _LOGGED_FC1_PATH
         if not _LOGGED_FC1_PATH:
             _log("V1 using mlp.linear_fc1.layer_norm_weight (IdentityOp pre_mlp)")
@@ -433,48 +445,122 @@ def _can_fuse(layer: Any) -> bool:
     return False
 
 
-def _has_scaled_residual(layer: Any, cfg: Any) -> bool:
-    """True when ``layer`` scales its residual branches inside the bda callables.
+_RESIDUAL_SCALE_ATTR = "_fused_residual_scale"
+# TransformerLayer's two bias-dropout-add attributes (scaled_bias_dropout_add.BDA_FIELDS; that
+# module imports Megatron, so it is imported only where a scale is computed). A test checks
+# the two are equal.
+_BDA_FIELDS = ("self_attn_bda", "mlp_bda")
 
-    The fused path adds the attention output to the residual itself without
-    ``self_attn_bda`` (and, when V2 stashes a carry, also skips ``mlp_bda``), so such a
-    layer must take the unfused forward. Checked, in order:
 
-    * a bda wrapped by ``scaled_bias_dropout_add`` (tagged ``residual_multiplier``);
-    * a ``residual_multiplier`` on the layer or its config that is not exactly 1.0. Exact
-      on purpose: ``GraniteTransformerLayer`` wraps the bda for every value != 1.0, so a
-      tolerance would fuse a layer that does scale. A value that is not a number also
-      refuses fusion.
+def _residual_scale_key(layer: Any, cfg: Any):
+    """What the scale depends on: the two bda objects themselves (compared by identity, and
+    held by the key, so a replaced bda cannot be confused with a new one at the same address)
+    and the two ``residual_multiplier`` values."""
+    return (
+        tuple(getattr(layer, name, None) for name in _BDA_FIELDS),
+        repr(getattr(layer, "residual_multiplier", None)),
+        repr(getattr(cfg, "residual_multiplier", None)),
+    )
 
-    Not cached: the answer is re-read on every call (a few getattrs), so a bda wrapped or a
-    multiplier changed after the first call is still seen. The fallback is logged once per
-    process, like the module's other path logs.
+
+def _same_key(a, b) -> bool:
+    return len(a[0]) == len(b[0]) and all(x is y for x, y in zip(a[0], b[0])) and a[1:] == b[1:]
+
+
+def _residual_scale(layer: Any, cfg: Any) -> Optional[float]:
+    """The factor the layer's bda applies to each sub-block output before the residual add
+    (the ``scaled_bias_dropout_add`` tag, else 1.0), or ``None`` to take the unfused forward
+    (the two bda disagree, or a ``residual_multiplier`` on the layer or its config is not a
+    positive finite number equal to the bda's).
+
+    Computed on the first ``_can_fuse`` call for the layer (its own forward, or the V2
+    next-layer probe that runs during the previous layer's forward) and stored on the layer
+    with what it depends on (``_residual_scale_key``). A later call recomputes it when the
+    bdas or a ``residual_multiplier`` changed, else it is a key built from four attribute
+    reads and an identity compare (once per layer per forward, in ``_can_fuse``). The fused
+    forward reads the value ``_can_fuse`` just stored (``_stored_residual_scale``), without
+    building the key again.
     """
+    key = _residual_scale_key(layer, cfg)
+    stored = getattr(layer, _RESIDUAL_SCALE_ATTR, _UNSET)
+    if stored is not _UNSET and _same_key(stored[0], key):
+        return stored[1]
+    scale = _compute_residual_scale(layer, cfg)
+    # object.__setattr__: a plain attribute, also on an nn.Module (not a buffer/child).
+    object.__setattr__(layer, _RESIDUAL_SCALE_ATTR, (key, scale))
+    return scale
+
+
+_UNSET = object()
+
+
+def _stored_residual_scale(layer: Any) -> float:
+    """The scale for ``layer``'s fused forward: the value ``_can_fuse`` just stored on the
+    layer (one attribute read, no new key). A path that reaches the fused forward without
+    ``_can_fuse`` computes it here. An inconsistent scale raises instead of adding unscaled;
+    the fused forward reads it first, before any layer state changes."""
+    stored = getattr(layer, _RESIDUAL_SCALE_ATTR, _UNSET)
+    scale = stored[1] if stored is not _UNSET else _residual_scale(layer, getattr(layer, "config", None))
+    if scale is None:
+        raise RuntimeError(
+            f"layer {getattr(layer, 'layer_number', '?')}: the fused residual forward was reached with "
+            "an inconsistent residual scale (see the fallback log); it must take the unfused forward"
+        )
+    return scale
+
+
+def _compute_residual_scale(layer: Any, cfg: Any) -> Optional[float]:
+    # Imported here: scaled_bias_dropout_add imports Megatron, and this module has no
+    # import-time Megatron dependency.
+    from primus.backends.megatron.core.fusions.scaled_bias_dropout_add import (
+        BDA_FIELDS,
+        residual_multiplier_of,
+    )
+
+    # An untagged bda (None) adds unscaled: the same as a bda tagged 1.0.
+    tags = [residual_multiplier_of(getattr(layer, name, None)) for name in BDA_FIELDS]
+    tags = [1.0 if tag is None else tag for tag in tags]
+    scale = tags[0]
     detail = None
-    for name in ("self_attn_bda", "mlp_bda"):
-        tag = getattr(getattr(layer, name, None), "residual_multiplier", None)
-        if tag is not None:
-            detail = f"{name} is a scaled residual add ({tag})"
-            break
-    if detail is None:
+    if tags[0] != tags[1]:
+        detail = f"{BDA_FIELDS[0]} scales by {tags[0]}, {BDA_FIELDS[1]} by {tags[1]}"
+    else:
         for owner, label in ((layer, "layer"), (cfg, "config")):
             multiplier = getattr(owner, "residual_multiplier", None)
             if multiplier is None:
                 continue
-            if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)):
-                scaled = True  # a bool or a non-number is not a valid multiplier: refuse fusion
-            else:
-                scaled = float(multiplier) != 1.0
-            if scaled:
-                detail = f"{label} residual_multiplier={multiplier!r}"
+            try:
+                valid = positive_finite("residual_multiplier", multiplier) == scale
+            except ValueError:
+                valid = False
+            if not valid:
+                detail = f"{label} residual_multiplier={multiplier!r}, bda scale {scale}"
                 break
     if detail is None:
-        return False
-    global _LOGGED_SCALED_RESIDUAL
-    if not _LOGGED_SCALED_RESIDUAL:
-        _log(f"layers with a scaled residual add ({detail}) use the unfused forward")
-        _LOGGED_SCALED_RESIDUAL = True
-    return True
+        return float(scale)
+    # Logged once per distinct inconsistency (not once per process): later layers with a
+    # different problem are reported too, layers repeating one already logged are not.
+    if detail not in _LOGGED_SCALED_RESIDUAL:
+        number = getattr(layer, "layer_number", "?")
+        _log(
+            f"layer {number} has an inconsistent residual scale ({detail}); it uses the unfused "
+            "forward (logged once: other layers with the same inconsistency fall back silently)"
+        )
+        _LOGGED_SCALED_RESIDUAL.add(detail)
+    return None
+
+
+def _scale_branch(x, scale: float):
+    """``scale * x`` (the scaled bda's branch scale); ``x`` itself when ``scale`` is 1.
+
+    The first use of each scale is logged (``fused forward scales the residual branch by
+    ...``), so a run shows the factor the fused path applies, not only the bda's tag."""
+    if scale == 1.0:
+        return x
+    if scale not in _LOGGED_BRANCH_SCALES:
+        _LOGGED_BRANCH_SCALES.add(scale)
+        _log(f"fused forward scales the residual branch by {scale} (scaled residual add)")
+    return x * scale
 
 
 def _v2_next_can_consume_carry(layer: Any) -> bool:
@@ -539,6 +625,12 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
     inference_context = deprecate_inference_params(
         kwargs.get("inference_context"), kwargs.get("inference_params")
     )
+
+    # The residual branch scale (Granite residual_multiplier; 1.0 otherwise). Looked up here,
+    # before the V2 carry is consumed and before attention runs: if it raises (an inconsistent
+    # scale that _can_fuse did not catch), no layer state has changed yet, so the fallback to
+    # the original forward neither loses the previous layer's carry nor runs attention twice.
+    scale = _stored_residual_scale(layer)
 
     v2_active = _v2_enabled()
 
@@ -611,6 +703,9 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
     attn_out, attn_bias = attention_output_with_bias
     if attn_bias is not None:
         attn_out = attn_out + attn_bias.to(attn_out.dtype)
+    # A scaled residual (Granite residual_multiplier): self_attn_bda would add
+    # scale * (attn_out + bias); the fused add below replaces it, so scale here.
+    attn_out = _scale_branch(attn_out, scale)
 
     # ---- V1 fuse: bda(attn_out, residual) + pre_mlp RMSNorm --------------
     nvtx_range_push(suffix="fused_residual_pre_mlp_layernorm")
@@ -655,6 +750,8 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
         mlp_out, mlp_bias = mlp_output_with_bias
         if mlp_bias is not None:
             mlp_out = mlp_out + mlp_bias.to(mlp_out.dtype)
+        # The carry replaces mlp_bda, so it holds the scaled branch (as mlp_bda adds it).
+        mlp_out = _scale_branch(mlp_out, scale)
 
         is_last = getattr(layer, "_v2_is_last_layer", False)
         if is_last:

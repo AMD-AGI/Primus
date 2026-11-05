@@ -17,14 +17,18 @@ for _var in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
 
 torch.cuda.current_device = lambda: "cpu"  # RotaryEmbedding.get_emb asks for the device
 
+# granite_builders imports megatron.training, which imports the Mamba mixer; with mamba_ssm
+# installed, its Triton layer norm queries the GPU at import. Megatron imports mamba_ssm under
+# try/except ImportError and the GPT model does not use it, so hide it in this CPU process.
+import sys as _sys  # noqa: E402
+
+for _mod in ("mamba_ssm", "causal_conv1d"):
+    _sys.modules[_mod] = None  # import raises ImportError
+
 from megatron.core import parallel_state as ps
 from megatron.core import tensor_parallel
 from megatron.core.transformer import transformer_block
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
-
-from primus.backends.megatron.core.models.granite.granite_checks import (
-    check_built_granite_model,
-)
 
 # With Transformer Engine installed, TransformerBlock asks TE for a CPU-offload context,
 # which creates a CUDA stream even when offloading is off (fails without a GPU). This test
@@ -39,13 +43,9 @@ torch.distributed.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port
 ps.initialize_model_parallel(1, 1)
 tensor_parallel.get_cuda_rng_tracker().fork = lambda *a, **k: contextlib.nullcontext()
 
-from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 
 from primus.backends.megatron.checkpoint import native_loader_granite as conv
-from primus.backends.megatron.core.models.granite.granite_layer_specs import (
-    granite_layer_spec_from,
-)
 from primus.backends.megatron.core.models.granite.granite_transformer_config import (
     GraniteTransformerConfig,
 )
@@ -151,7 +151,9 @@ cfg = GraniteTransformerConfig(
     use_mup=f["use_mup"],
     mup_embedding_mult=f["mup_embedding_mult"],
     mup_output_mult=f["mup_output_mult"],
-    attention_multiplier=f["attention_multiplier"],
+    # attention_multiplier 0.05 (head dim 16) reaches softmax_scale through upstream MuP.
+    mup_base_head_dim=f["mup_base_head_dim"],
+    mup_attn_scale_power=f["mup_attn_scale_power"],
     residual_multiplier=f["residual_multiplier"],
     bias_activation_fusion=False,
     bias_dropout_fusion=False,
@@ -162,22 +164,46 @@ cfg = GraniteTransformerConfig(
 )
 # A block spec: every layer and the final norm use Megatron's local modules. A bare layer
 # spec would make TransformerBlock pick TE's norm for the final norm when TE is installed,
-# and TE's norm needs a GPU.
+# and TE's norm needs a GPU. It is given to the Granite builder as a user spec (``args.spec``),
+# which the builder wraps with the scaled bdas, as in production.
 _layer_spec = get_gpt_layer_local_spec(normalization="RMSNorm")
-_block_spec = TransformerBlockSubmodules(
+CPU_BLOCK_SPEC = TransformerBlockSubmodules(
     layer_specs=[_layer_spec] * L, layer_norm=_layer_spec.submodules.input_layernorm
 )
-model = GPTModel(
-    config=cfg,
-    transformer_layer_spec=granite_layer_spec_from(_block_spec),
-    vocab_size=V,
-    max_sequence_length=64,
-    position_embedding_type="rope",
-    rotary_base=int(THETA),
-    share_embeddings_and_output_weights=True,
-).eval()
-# The builder's post-build check (layer type, softmax scale read back from the built attention).
-check_built_granite_model(model, cfg)
+
+# The model is built by the Granite builder itself (granite_builder), from Megatron args as
+# the converter derives them (build args the way native_loader_llama.build_margs maps the
+# HF config: tied embeddings, RoPE base, position embedding type, rotary percent).
+# Any import error here fails the test: the GPU probes of the image are avoided above
+# (mamba_ssm hidden), so a failure is a defect in the Granite code or its imports.
+from primus.backends.megatron.core.models.granite.granite_builders import (  # noqa: E402
+    granite_builder,
+)
+
+builder_args = SimpleNamespace(
+    spec=("__main__", "CPU_BLOCK_SPEC"),
+    padded_vocab_size=V,
+    max_position_embeddings=hf_cfg["max_position_embeddings"],
+    fp16_lm_cross_entropy=False,
+    untie_embeddings_and_output_weights=f["untie_embeddings_and_output_weights"],
+    position_embedding_type="rope",  # native_loader_llama.build_margs
+    rotary_percent=1.0,  # Megatron's default (full RoPE)
+    rotary_base=f["rotary_base"],  # rope_theta
+    transformer_impl="local",
+    normalization="RMSNorm",
+    swiglu=True,
+    add_bias_linear=False,
+)
+model = granite_builder(builder_args, pre_process=True, post_process=True, config=cfg).eval()
+assert model.share_embeddings_and_output_weights, "tied embeddings (tie_word_embeddings: true)"
+assert model.rotary_pos_emb.inv_freq.numel() == D // 2
+torch.testing.assert_close(
+    model.rotary_pos_emb.inv_freq, 1.0 / THETA ** (torch.arange(0, D, 2).float() / D), rtol=0, atol=0
+)
+assert abs(cfg.softmax_scale - hf_cfg["attention_multiplier"]) < 1e-12, cfg.softmax_scale
+for _layer in model.decoder.layers:
+    assert _layer.self_attention.core_attention.softmax_scale == cfg.softmax_scale
+    assert _layer.self_attn_bda.residual_multiplier == _layer.mlp_bda.residual_multiplier == 0.22
 
 
 class _Store:
@@ -220,13 +246,26 @@ pos = torch.arange(T).unsqueeze(0).expand(B, T)
 mask = torch.triu(torch.ones(T, T, dtype=torch.bool), 1).view(1, 1, T, T)
 
 
+TRANSFORMERS_SKIP = None  # why the transformers reference did not run, or None
+
+
 def transformers_forward(ids):
     """The real ``transformers`` GraniteForCausalLM (eager attention, fp32) on the same HF
-    weights, or None when the installed transformers has no Granite model."""
-    try:
-        from transformers import GraniteConfig, GraniteForCausalLM
-    except ImportError:
+    weights, or None when transformers is not installed or has no Granite model (the reason
+    is in ``TRANSFORMERS_SKIP``). Any other import error (a broken install) raises."""
+    global TRANSFORMERS_SKIP
+    import importlib.util
+
+    if importlib.util.find_spec("transformers") is None:
+        TRANSFORMERS_SKIP = "transformers is not installed"
         return None
+    import transformers
+
+    if not hasattr(transformers, "GraniteForCausalLM"):
+        TRANSFORMERS_SKIP = f"transformers {transformers.__version__} has no GraniteForCausalLM"
+        return None
+    from transformers import GraniteConfig, GraniteForCausalLM
+
     hf = GraniteForCausalLM(GraniteConfig(**{k: v for k, v in hf_cfg.items() if k != "architectures"}))
     hf.config._attn_implementation = "eager"
     hf = hf.float().eval()
@@ -246,6 +285,7 @@ result = {
     "max_abs_err_plain_torch": (got - ref).abs().max().item(),
     "ref_scale": ref.abs().max().item(),
     "transformers_available": hf_ref is not None,
+    "transformers_skip_reason": TRANSFORMERS_SKIP,
     "max_abs_err_transformers": None if hf_ref is None else (got - hf_ref).abs().max().item(),
 }
 # The parent test parses this line and checks the tolerance itself.

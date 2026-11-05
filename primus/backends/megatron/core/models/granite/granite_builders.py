@@ -4,45 +4,38 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""IBM Granite model builder and ``model_provider``.
+"""IBM Granite model builder.
 
-Granite uses upstream ``GPTModel``. Against upstream ``gpt_builder``
-(``third_party/Megatron-LM/gpt_builders.py``) the builder changes the config class
-(``GraniteTransformerConfig``, which carries ``residual_multiplier`` and
-``attention_multiplier``) and the layer module (``GraniteTransformerLayer``).
+Granite uses upstream ``GPTModel``, upstream ``TransformerLayer`` and upstream
+``model_provider``. ``get_model_provider("granite")`` returns
+``partial(model_provider, granite_builder)`` from this module (as for the other
+Primus-owned models). ``model_provider`` (defined in ``granite_model_provider``, which
+imports without Megatron) refuses ModelOpt, then calls upstream
+``model_provider`` with this builder. Against
+upstream ``gpt_builder`` (``third_party/Megatron-LM/gpt_builders.py``) the builder changes the config class
+(``GraniteTransformerConfig``, which adds ``residual_multiplier``) and the layer spec's
+bias-dropout-adds (scaled by ``residual_multiplier``, see ``granite_layer_specs``).
 
 It covers only the dense Llama-layout Granite. Upstream options that select another
-config source or layer layout are refused with an explicit error instead of being
-ignored: ``yaml_cfg`` (``core_transformer_config_from_yaml`` cannot build the Granite
-config class), ``experimental_attention_variant``, ``heterogeneous_layers_config_path``,
-``transformer_impl='inference_optimized'``, MoE (``num_experts``), MTP
-(``mtp_num_layers``), legacy models and ``apply_query_key_layer_scaling`` (with it the
-stored softmax scale is not the applied one, so the read-back check below cannot work).
-
-After the build, the softmax scale held by every built core attention (TE, local or
-Primus Turbo) is read back and must equal ``attention_multiplier``.
-
-``--spec`` accepts what upstream accepts (a ``TransformerLayer`` ``ModuleSpec`` or a
-``TransformerBlockSubmodules``); each layer module becomes ``GraniteTransformerLayer``,
-and a custom ``TransformerLayer`` subclass is refused (see ``granite_layer_spec_from``).
+config source, layer layout or builder are refused with an explicit error instead of
+being ignored (see ``granite_args.reject_unsupported_args``).
 """
-
-from typing import Optional
 
 from megatron.core.models.gpt import GPTModel
 from megatron.core.transformer.spec_utils import import_module
-from megatron.training import get_args
 from megatron.training.arguments import core_transformer_config_from_args
 
 from primus.backends.megatron.core.models.granite.granite_args import (
     reject_unsupported_args,
 )
-from primus.backends.megatron.core.models.granite.granite_checks import (
-    check_built_granite_model,
-)
 from primus.backends.megatron.core.models.granite.granite_layer_specs import (
+    built_model_summary,
+    check_scaled_residual_layers,
     get_granite_layer_spec,
     granite_layer_spec_from,
+)
+from primus.backends.megatron.core.models.granite.granite_model_provider import (
+    model_provider,
 )
 from primus.backends.megatron.core.models.granite.granite_transformer_config import (
     GraniteTransformerConfig,
@@ -65,13 +58,11 @@ def granite_builder(args, pre_process, post_process, vp_stage=None, config=None,
         )
 
     if args.spec is not None:
-        # A user spec must still use the Granite layer, or residual_multiplier is lost.
-        transformer_layer_spec = granite_layer_spec_from(import_module(args.spec))
+        # A user spec still gets the scaled bdas, or residual_multiplier is lost.
+        transformer_layer_spec = granite_layer_spec_from(import_module(args.spec), config.residual_multiplier)
     else:
         transformer_layer_spec = get_granite_layer_spec(args, config)
 
-    # GraniteTransformerConfig.__post_init__ sets softmax_scale = attention_multiplier; the
-    # value used by the built attention modules is checked after the build.
     # INFO level, so the line is in the console log at the default stderr_sink_level.
     log_rank_0(
         f"[Primus:Granite] multipliers: residual_multiplier={config.residual_multiplier} "
@@ -92,26 +83,10 @@ def granite_builder(args, pre_process, post_process, vp_stage=None, config=None,
         position_embedding_type=args.position_embedding_type,
         rotary_percent=args.rotary_percent,
         rotary_base=args.rotary_base,
-        rope_scaling=args.use_rope_scaling,
+        rope_scaling=False,  # reject_unsupported_args refuses use_rope_scaling
         vp_stage=vp_stage,
         pg_collection=pg_collection,
     )
-    check_built_granite_model(model, config)
+    check_scaled_residual_layers(model, config.residual_multiplier)
+    log_rank_0(f"[Primus:Granite] built model: {built_model_summary(model)}")
     return model
-
-
-def model_provider(
-    model_builder=None,
-    pre_process: bool = True,
-    post_process: bool = True,
-    vp_stage: Optional[int] = None,
-    config=None,
-    pg_collection=None,
-):
-    """``model_provider`` used by Megatron ``pretrain()`` (bound to ``granite_builder``)."""
-    if model_builder is None:
-        model_builder = granite_builder
-    args = get_args()
-    return model_builder(
-        args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
-    )

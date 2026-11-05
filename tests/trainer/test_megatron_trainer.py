@@ -119,6 +119,28 @@ def run_posttrain_script(
     return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
 
 
+def _granite_built_model(log: str, name: str) -> dict:
+    """The values of the Granite builder's ``built model`` line (logged on rank 0, read from
+    the built modules by granite_layer_specs.built_model_summary, not from the config),
+    checked against the Granite 4.1 3B multipliers."""
+    lines = re.findall(r"\[Primus:Granite\] built model: (.*)", log)  # logged on rank 0 only
+    assert lines, f"{name}: the Granite model builder was not used (no 'built model' line)"
+    expected = {
+        "decoder_layers": 4,  # --num_layers 4, PP=1: every layer on one stage
+        "core_attention.softmax_scale": 1.0 / 64,  # attention_multiplier
+        "layer_bda_scale": 0.22,  # residual_multiplier
+        "embedding.mup_embedding_mult": 12.0,  # embedding_multiplier
+        "output.mup_output_mult": 0.1,  # 1 / logits_scaling
+    }
+    values = dict(re.findall(r"([\w.]+)=(\S+)", lines[0]))
+    for key, value in expected.items():
+        assert key in values, f"{name}: no {key} in the Granite built-model line: {lines[0]!r}"
+        assert float(values[key]) == pytest.approx(value, rel=1e-6), f"{name}: {key}: {lines[0]!r}"
+    # The builder raises if a decoder layer does not scale its residual add.
+    assert re.search(r"\[Primus:Granite\] built 4 decoder layers with scaled residual add", log), name
+    return values
+
+
 class TestMegatronTrainer(PrimusUT):
     """One model per architecture, plus one case per feature path.
 
@@ -162,81 +184,77 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    # Granite path (model_type: granite): GPTModel with GraniteTransformerLayer (scaled
-    # residual add), MuP embedding/output multipliers and the explicit attention_multiplier
-    # softmax scale. Weekly tier while it burns in (tests/README.md); promote it to per-PR
-    # once a weekend run shows it green. The recipe ships for MI300X and MI355X, the two
-    # platforms GPU_PLATFORM can be, so a missing recipe fails the test (no skip).
-    # This case checks that the recipe's multipliers and the CLI overrides reach the built
-    # model through the Primus CLI and YAML. attention_multiplier is overridden to 0.02:
-    # the recipe's 1/64 equals MuP's own fallback 1/kv_channels (kv_channels 64), so only a
-    # value MuP cannot produce shows that attention_multiplier itself sets softmax_scale.
-    # It cannot check the multipliers' forward math (at random init the loss is near
-    # ln(vocab) with or without them); tests/unit_tests/backends/megatron/granite/ does.
+    # Checks that the recipe multipliers reach the built Granite model: the values are read
+    # from the built modules (granite_layer_specs.built_model_summary), not from the config.
+    # Weekly: tests/README.md puts new trainer cases in the weekly burn-in tier until a
+    # weekend run is green. Per-PR CPU coverage of the same code is in
+    # tests/unit_tests/backends/megatron/granite/ (test_granite_residual.py,
+    # test_granite_model_provider.py).
     @pytest.mark.weekly
     def test_granite_4_1_3b(self):
-        num_layers = 4
-        attention_multiplier = 0.02  # not 1/kv_channels (1/64) nor 1/sqrt(kv_channels) (1/8)
+        """The Granite recipe with Primus-Turbo attention (``use_turbo_attention 1``, the MI300X
+        and MI325X recipes). PrimusTurboAttention keeps the softmax_scale it passes to the
+        kernel; the test requires it to be attention_multiplier (1/64)."""
         log, _ = run_script(
             self.__class__.__name__,
-            "granite_4_1_3b",
+            "granite_4_1_3b-turbo_attn",
             exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/granite_4_1_3b-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
-                str(num_layers),
+                "4",
                 "--train_iters",
                 "3",
-                "--attention_multiplier",
-                str(attention_multiplier),
-                # Pinned: the layer-count checks below need every layer on rank 0, in one
-                # model chunk (PP=1, no virtual pipeline).
                 "--pipeline_model_parallel_size",
                 "1",
-                "--virtual_pipeline_model_parallel_size",
-                "None",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
             ],
         )
-        log = re.sub(r"\x1b\[[0-9;]*m", "", log)  # the console log has ANSI colors
-        # The Granite builder logs (on rank 0, log_rank_0) the multipliers it built the
-        # model with; every such line must match.
-        lines = re.findall(r"\[Primus:Granite\] multipliers: (.*)", log)
-        assert lines, "the Granite model builder was not used (no multipliers line)"
-        expected = {
-            "residual_multiplier": 0.22,
-            "softmax_scale": attention_multiplier,
-            "mup_embedding_mult": 12.0,
-            "mup_output_mult": 0.1,
-            "mup_width_mult": 1.0,
-        }
-        for line in lines:
-            values = dict(re.findall(r"(\w+)=(\S+)", line))
-            for key, value in expected.items():
-                assert key in values, f"no {key} in the Granite multipliers line: {line!r}"
-                assert float(values[key]) == pytest.approx(value, rel=1e-6), f"{key}: {line!r}"
-        # The decoder layers are GraniteTransformerLayer with the scaled residual add (the
-        # builder raises if any is not), and their count is the --num_layers override (PP=1
-        # and no virtual pipeline are pinned above, so rank 0 builds every layer in one chunk).
-        built = [
-            int(n)
-            for n in re.findall(r"\[Primus:Granite\] built (\d+) GraniteTransformerLayer decoder layers", log)
-        ]
-        assert built, "the Granite builder did not report GraniteTransformerLayer decoder layers"
-        assert all(n == num_layers for n in built), f"built {built} layers, expected {num_layers}"
-        # The softmax scale read back from the built attention modules: the builder logs
-        # the set of distinct values, so every layer must have the overridden value.
-        scales = re.findall(
-            r"\[Primus:Granite\] attention softmax_scale in (\d+) built layers: \[(.*?)\]", log
-        )
-        assert scales, "the Granite builder did not report the built attention softmax_scale"
-        for count, values in scales:
-            assert int(count) == num_layers, f"softmax_scale reported for {count} layers"
-            distinct = {float(v) for v in values.split(",")}
-            assert (
-                len(distinct) == 1
-            ), f"the built layers have different softmax_scale values: {sorted(distinct)}"
-            assert distinct.pop() == pytest.approx(attention_multiplier, rel=1e-9)
         # run_training_script already requires "Training completed." and finite losses.
+        log = re.sub(r"\x1b\[[0-9;]*m", "", log)  # the console log has ANSI colors
+        values = _granite_built_model(log, "turbo_attn")
+        assert values["core_attention"] == "PrimusTurboAttention", values
+        # The scale the Turbo module itself passes to the kernel.
+        assert values["core_attention.softmax_scale_from"] == "module", values
+
+    @pytest.mark.weekly
+    def test_granite_4_1_3b_fused_residual_norm(self):
+        """The Granite recipe with TE attention (``use_turbo_attention 0``, the MI355X recipe),
+        Primus-Turbo RMSNorm and the fused residual+RMSNorm patch
+        (``PRIMUS_FUSED_RESIDUAL_NORM_V2=1``). The fused forward logs the factor it multiplies
+        each residual branch by; the test requires 0.22 (residual_multiplier)."""
+        log, _ = run_script(
+            self.__class__.__name__,
+            "granite_4_1_3b-te_fused_norm",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/granite_4_1_3b-BF16-pretrain.yaml",
+            env_override={"PRIMUS_FUSED_RESIDUAL_NORM_V2": "1"},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "0",
+                "--use_turbo_rms_norm",
+                "1",
+            ],
+        )
+        # run_training_script already requires "Training completed." and finite losses.
+        log = re.sub(r"\x1b\[[0-9;]*m", "", log)  # the console log has ANSI colors
+        values = _granite_built_model(log, "te_fused_norm")
+        assert values["core_attention"] == "TEDotProductAttention", values
+        # The fused path ran on the Granite layers and applied residual_multiplier.
+        assert "patched TransformerLayer.forward" in log, "the fused patch was not installed"
+        scales = re.findall(r"fused forward scales the residual branch by (\S+)", log)
+        assert scales and all(float(x) == pytest.approx(0.22) for x in scales), scales
+        assert "inconsistent residual scale" not in log
 
     # The only dense FP8 case; every other FP8 case here is MoE.
     @pytest.mark.weekly
