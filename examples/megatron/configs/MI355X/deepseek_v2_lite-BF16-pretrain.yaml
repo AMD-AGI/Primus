@@ -84,8 +84,9 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 64
+      # ep8: DeepEP throughput keeps rising up to ~60% of the GPU's CUs (160 of
+      # MI355X's 256) and flattens beyond; 32 for ep16-64.
+      turbo_deepep_num_cu: 160
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
