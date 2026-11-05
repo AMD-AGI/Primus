@@ -3,5 +3,6 @@ extends:
 
 tokenizer_type: Llama3Tokenizer
 tokenizer_model: meta-llama/Llama-3.3-70B-Instruct
+vocab_size: 128256
 
 max_position_embeddings: 131072

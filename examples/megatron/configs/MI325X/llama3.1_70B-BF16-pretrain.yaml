@@ -5,6 +5,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 env:
   GPU_MAX_HW_QUEUES: "4"
+  PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
 
 modules:
   pre_trainer:

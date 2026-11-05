@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_EXAMPLES = _REPO_ROOT / "examples" / "deepseek-v4"
+_EXAMPLES = _REPO_ROOT / "examples" / "megatron" / "models" / "deepseek-v4"
 
 _FLASH_SCRIPT = _EXAMPLES / "run_deepseek_v4_flash.sh"
 _BASE_SCRIPT = _EXAMPLES / "run_deepseek_v4.sh"

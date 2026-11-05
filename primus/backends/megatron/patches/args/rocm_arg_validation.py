@@ -18,6 +18,10 @@ import os
 import torch
 
 from primus.core.utils import logger
+from primus.core.utils.module_utils import warning_rank_0
+
+# Environment variables read by the PyTorch caching allocator.
+ALLOC_CONF_ENVS = ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF")
 
 
 def is_last_rank():
@@ -106,6 +110,47 @@ def validate_turbo_grouped_gemm_without_padding(args) -> None:
         raise ValueError(f"{option}=True requires enable_primus_turbo=True and use_turbo_grouped_gemm=True.")
     if getattr(args, "moe_router_padding_for_quantization", False):
         raise ValueError(f"{option}=True requires moe_router_padding_for_quantization=False.")
+
+
+def validate_turbo_fp8_permute(args) -> None:
+    """The FP8 permute handoff only has one consumer: the fused grouped MLP behind Turbo DeepEP."""
+    option = "turbo_fp8_permute"
+    if not getattr(args, option, False):
+        return
+    for required in ("enable_primus_turbo", "use_turbo_deepep", "turbo_fused_grouped_gemm"):
+        if not getattr(args, required, False):
+            raise ValueError(f"{option}=True requires {required}=True.")
+    recompute_modules = getattr(args, "recompute_modules", None) or []
+    if getattr(args, "recompute_granularity", None) == "selective" and "moe_act" in recompute_modules:
+        raise ValueError(f"{option}=True does not support recompute of moe_act.")
+
+
+def expandable_segments_requested() -> bool:
+    """Return True if any allocator config env var sets ``expandable_segments:True``."""
+    for env in ALLOC_CONF_ENVS:
+        for item in os.environ.get(env, "").split(","):
+            key, _, value = item.partition(":")
+            if key.strip() == "expandable_segments" and value.strip() == "True":
+                return True
+    return False
+
+
+def warn_turbo_grouped_gemm_without_expandable_segments(args) -> None:
+    """Recommend expandable segments when PrimusTurbo grouped GEMM is enabled.
+
+    PrimusTurboGroupedLinear stores all experts of a layer in a single weight, so the
+    optimizer's fp32 grad/state buffers become few, very large blocks. Without
+    expandable segments the caching allocator cannot fit them into the fragmented
+    free pool and keeps reserving new segments, inflating peak reserved memory.
+    """
+    if not getattr(args, "use_turbo_grouped_gemm", False) or expandable_segments_requested():
+        return
+    warning_rank_0(
+        "use_turbo_grouped_gemm=True without expandable segments: the per-layer stacked expert "
+        "weights produce large optimizer buffers that fragment the caching allocator and increase "
+        "peak reserved memory. Set PYTORCH_HIP_ALLOC_CONF=expandable_segments:True to reduce "
+        "memory fragmentation."
+    )
 
 
 def validate_args_on_rocm(args):
@@ -216,6 +261,9 @@ def validate_args_on_rocm(args):
         )
 
     validate_turbo_grouped_gemm_without_padding(args)
+    validate_turbo_fp8_permute(args)
+    # After sync-free MoE, which may auto-enable use_turbo_grouped_gemm.
+    warn_turbo_grouped_gemm_without_expandable_segments(args)
 
     # turbo deepep
     if args.use_turbo_deepep:

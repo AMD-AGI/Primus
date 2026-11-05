@@ -40,7 +40,7 @@ def _needs_primus_spec_provider(ctx: PatchContext) -> bool:
     phase="before_train",
     description="Replace TESpecProvider with Primus provider for PrimusTurbo or legacy grouped GEMM",
     condition=_needs_primus_spec_provider,
-    backend_versions=["<0.17"],
+    backend_versions=["<0.21"],
     priority=41,
 )
 def patch_te_spec_provider(ctx: PatchContext):

@@ -24,6 +24,7 @@ moe_shared_expert_intermediate_size: 8192
 
 tokenizer_type: Llama4Tokenizer
 tokenizer_model: meta-llama/Llama-4-Scout-17B-16E
+vocab_size: 202048
 
 
 # parallel and optimization

@@ -4,7 +4,7 @@
     {
       "name": "deepseek-v4-projection",
       "title": "DeepSeek-V4 Projection",
-      "source": "examples/deepseek-v4/projection/site"
+      "source": "examples/megatron/models/deepseek-v4/projection/site"
     }
   ],
   "links": [

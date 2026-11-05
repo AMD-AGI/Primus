@@ -26,7 +26,6 @@ from megatron.core.num_microbatches_calculator import (  # noqa: E402
     reconfigure_num_microbatches_calculator,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection  # noqa: E402
-from megatron.core.transformer.moe.experts import TEGroupedMLPSubmodules  # noqa: E402
 from megatron.core.transformer.transformer_config import TransformerConfig  # noqa: E402
 from megatron.training.global_vars import set_args  # noqa: E402
 from primus_turbo.pytorch.core.low_precision import (  # noqa: E402
@@ -48,6 +47,13 @@ from primus.backends.megatron.core.fp8_utils import (  # noqa: E402
     MXFP8_SCALING_BLOCK_SIZE,
     SCALING_BLOCK_SIZE,
 )
+
+try:
+    from megatron.core.transformer.moe.experts import TEGroupedMLPSubmodules
+except ImportError:  # renamed in Megatron-core 0.17
+    from megatron.core.transformer.moe.experts import (
+        GroupedMLPSubmodules as TEGroupedMLPSubmodules,
+    )
 
 # `grouped_mlp_fp8` routes both recipes through `grouped_gemm_fp8_glu_impl` /
 # `grouped_gemm_fp8_dglu_impl`, which assert `is_gfx950()`. On gfx942 the fused

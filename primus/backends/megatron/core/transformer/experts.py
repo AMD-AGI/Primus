@@ -14,7 +14,14 @@ from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_r
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
-from megatron.core.transformer.moe.experts import TEGroupedMLP, TEGroupedMLPSubmodules
+from megatron.core.transformer.moe.experts import TEGroupedMLP
+
+try:
+    from megatron.core.transformer.moe.experts import TEGroupedMLPSubmodules
+except ImportError:  # renamed in Megatron-core 0.17
+    from megatron.core.transformer.moe.experts import (
+        GroupedMLPSubmodules as TEGroupedMLPSubmodules,
+    )
 from megatron.core.transformer.moe.moe_utils import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
@@ -56,6 +63,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         config: TransformerConfig,
         submodules: TEGroupedMLPSubmodules,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        **kwargs,  # e.g. name= on Megatron-core 0.19+
     ):
         args = get_args()
 
@@ -64,6 +72,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
             config,
             submodules,
             pg_collection,
+            **kwargs,
         )
 
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
@@ -219,6 +228,28 @@ class PrimusGroupedMLP(TEGroupedMLP):
             # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts
             return self.bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
 
+    def _prepare_fused_grouped_mlp_weights(self, x: torch.Tensor):
+        """Resolve fc1/fc2 weights for the fused grouped MLP op.
+
+        The fused op never calls ``linear_fc1`` / ``linear_fc2``.forward, so their
+        forward-pre-hooks must run here. With ``overlap_param_gather`` those hooks
+        wait on the expert weights' distributed-optimizer all-gather; skipping them
+        lets the op read stale shards whenever expert data parallelism exceeds one.
+        """
+        from primus.backends.megatron.patches.turbo.dense_mlp_fp4_patches import (
+            _run_module_forward_pre_hooks,
+        )
+
+        _run_module_forward_pre_hooks(self.linear_fc1, (x,))
+        _run_module_forward_pre_hooks(self.linear_fc2, (x,))
+        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x)
+        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
+        assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
+            "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
+            f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"
+        )
+        return x, w1, w2, fuse_w1_grad_accum
+
     def _forward_with_turbo_fused_grouped_mlp(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -242,13 +273,9 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 "Only support fusion of silu and gelu in PrimusGroupedMLP when `turbo_fused_grouped_gemm` is True."
             )
 
-        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(permuted_local_hidden_states)
-        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
-        assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
-            "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
-            f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"
+        x, w1, w2, fuse_wgrad_accum_pattern = self._prepare_fused_grouped_mlp_weights(
+            permuted_local_hidden_states
         )
-        fuse_wgrad_accum_pattern = fuse_w1_grad_accum
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             from primus_turbo.pytorch.ops.grouped_mlp_fp8 import grouped_mlp_fp8

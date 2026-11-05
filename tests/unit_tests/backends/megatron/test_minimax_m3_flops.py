@@ -60,6 +60,7 @@ def _args(**overrides):
         swiglu=False,
         quick_geglu=True,
         seq_length=SEQ,
+        decoder_seq_length=None,  # read by Megatron-LM main's num_floating_point_operations
         padded_vocab_size=200064,
         sparse_attention_freq="([0]*3+[1]*5)",
         sparse_block_size=128,

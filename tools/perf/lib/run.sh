@@ -1,0 +1,521 @@
+#!/bin/bash
+# shellcheck disable=SC2034  # variables are read by the sourcing runner and lib/control.sh
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Per-run helpers shared by run_batch.sh and run_batch_multinode.sh: input
+# validation, reading a config's key fields, the TRAIN_STEPS override, and the
+# system snapshot, per-run banner and footer.
+#
+# Callers source lib/common.sh first, and set PERF_MULTINODE=1 to get the
+# multi-node layout of the snapshot, banner and footer.
+###############################################################################
+
+# Input validation run before anything launches: EXTRA_ENV, the selected
+# configs, the repo and CLI paths, and TRAIN_STEPS.
+check_batch_inputs() {
+    local cli_abs
+    perf_parse_extra_env || return 1
+    perf_select_configs || return 1
+
+    if [ ! -d "$PRIMUS_PATH" ]; then
+        echo "[ERROR] PRIMUS_PATH does not exist: $PRIMUS_PATH" >&2
+        return 1
+    fi
+
+    # Resolve absolute path of the CLI (handles default './primus-cli').
+    cli_abs="$PRIMUS_PATH/${PRIMUS_CLI#./}"
+    if [ ! -x "$cli_abs" ]; then
+        echo "[ERROR] primus-cli not found or not executable at: $cli_abs" >&2
+        return 1
+    fi
+
+    if [ -n "$TRAIN_STEPS" ]; then
+        if ! [[ "$TRAIN_STEPS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "[ERROR] TRAIN_STEPS must be a positive integer, got: '$TRAIN_STEPS'" >&2
+            return 1
+        fi
+    fi
+}
+
+# Read a YAML field with yq. Returns "N/A" if absent/null/empty.
+yq_or_na() {
+    local expr="$1"
+    local file="$2"
+    local val
+    val=$(yq -r "$expr" "$file" 2>/dev/null)
+    if [ -z "$val" ] || [ "$val" = "null" ]; then
+        echo "N/A"
+    else
+        echo "$val"
+    fi
+}
+
+# Make a string safe to use in a filename (no slashes, no spaces).
+sanitize() {
+    local v="$1"
+    v="${v//\//_}"
+    v="${v// /_}"
+    echo "$v"
+}
+
+# 8-char SHA-256 fingerprint of the config file contents. Lets the filename
+# disambiguate two runs of "the same" config when its contents change between
+# batches (or when the same config name is reused with edits).
+config_fingerprint() {
+    local file="$1"
+    sha256sum "$file" | cut -c1-8
+}
+
+# Which training module a config declares. Primus experiment YAMLs carry
+# exactly one: `pre_trainer` for pretraining, `post_trainer` for the Megatron
+# Bridge SFT/LoRA recipes. Everything else keys off the answer, because the
+# module fixes both the CLI verb and the overrides path.
+#
+# Two separate yq calls on purpose: `.modules | has("a") or has("b")` binds
+# the second has() to the document root, so a post_trainer-only config would
+# test false.
+detect_train_module() {
+    local config_file="$1"
+    if [ "$(yq -r '.modules | has("pre_trainer")' "$config_file" 2>/dev/null)" = "true" ]; then
+        echo "pre_trainer"
+    elif [ "$(yq -r '.modules | has("post_trainer")' "$config_file" 2>/dev/null)" = "true" ]; then
+        echo "post_trainer"
+    else
+        echo "N/A"
+    fi
+}
+
+# `train <suite>` verb that drives a given module (primus/cli/subcommands/train.py).
+train_suite_for_module() {
+    case "$1" in
+        pre_trainer)  echo "pretrain"  ;;
+        post_trainer) echo "posttrain" ;;
+        *)            echo ""          ;;
+    esac
+}
+
+# Extract per-framework key fields from a config file. Sets globals
+# MODULE, TRAIN_SUITE, FRAMEWORK, MODEL, MBS, GBS, SEQ_LEN, STEPS for the caller.
+extract_config_fields() {
+    local config_file="$1"
+
+    MODULE=$(detect_train_module "$config_file")
+    TRAIN_SUITE=$(train_suite_for_module "$MODULE")
+
+    FRAMEWORK=$(yq_or_na ".modules.$MODULE.framework" "$config_file")
+    MODEL=$(yq_or_na ".modules.$MODULE.model" "$config_file")
+
+    case "$FRAMEWORK" in
+        megatron)
+            MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
+            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
+            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.seq_length" "$config_file")
+            STEPS=$(yq_or_na ".modules.$MODULE.overrides.train_iters" "$config_file")
+            ;;
+        torchtitan)
+            MBS=$(yq_or_na ".modules.$MODULE.overrides.training.local_batch_size" "$config_file")
+            GBS=$(yq_or_na ".modules.$MODULE.overrides.training.global_batch_size" "$config_file")
+            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.training.seq_len" "$config_file")
+            STEPS=$(yq_or_na ".modules.$MODULE.overrides.training.steps" "$config_file")
+            if [ "$GBS" = "N/A" ] && [[ "$MBS" =~ ^[0-9]+$ ]]; then
+                GBS=$(torchtitan_default_gbs "$config_file" "$MBS")
+            fi
+            ;;
+        maxtext)
+            # MaxText (JAX) uses per_device_batch_size; the effective global
+            # batch is per_device_batch_size * total_devices. The "MBS"/"GBS"
+            # columns are reused here so logs/summary stay aligned with the
+            # other frameworks; MBS == per-device batch, GBS == global batch.
+            # GPUS_PER_NODE isn't exported in the multi-node flow (primus-cli
+            # sets it inside the container), so it falls back to 8 for this
+            # display-only calculation.
+            MBS=$(yq_or_na ".modules.$MODULE.overrides.per_device_batch_size" "$config_file")
+            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.max_target_length" "$config_file")
+            STEPS=$(yq_or_na ".modules.$MODULE.overrides.steps" "$config_file")
+            if [ "$MBS" != "N/A" ]; then
+                # Float-safe multiply via awk; per_device_batch_size can be
+                # fractional in MaxText (e.g. 0.5). Print as int when whole.
+                GBS=$(awk -v m="$MBS" -v n="$NNODES" -v g="${GPUS_PER_NODE:-8}" 'BEGIN {
+                    v = m * n * g
+                    if (v == int(v)) printf "%d", v; else printf "%g", v
+                }')
+                [ -z "$GBS" ] && GBS="N/A"
+            else
+                GBS="N/A"
+            fi
+            ;;
+        maxdiffusion)
+            MBS=$(yq_or_na ".modules.$MODULE.overrides.per_device_batch_size" "$config_file")
+            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
+            SEQ_LEN="N/A"
+            STEPS=$(yq_or_na ".modules.$MODULE.overrides.max_train_steps" "$config_file")
+            ;;
+        megatron_bridge)
+            # Same override names for pretrain and for the SFT/LoRA posttrain
+            # recipes; only the module they live under differs.
+            MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
+            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
+            SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.seq_length" "$config_file")
+            STEPS=$(yq_or_na ".modules.$MODULE.overrides.train_iters" "$config_file")
+            ;;
+        *)
+            MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
+            GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
+            SEQ_LEN="N/A"
+            STEPS="N/A"
+            ;;
+    esac
+}
+
+# TorchTitan's global batch when the config leaves it unset: one local batch
+# per data-parallel rank, i.e. MBS x GPUs divided by the tensor, pipeline and
+# context parallel degrees (expert parallelism does not change it).
+torchtitan_default_gbs() {
+    local config_file="$1" mbs="$2" degree divisor=1 key
+    for key in tensor_parallel_degree pipeline_parallel_degree context_parallel_degree; do
+        degree=$(yq_or_na ".modules.$MODULE.overrides.parallelism.$key" "$config_file")
+        if [[ "$degree" =~ ^[0-9]+$ ]] && [ "$degree" -gt 1 ]; then
+            divisor=$((divisor * degree))
+        fi
+    done
+    echo $(( mbs * NNODES * ${GPUS_PER_NODE:-8} / divisor ))
+}
+
+# Everything the loop needs to know about one config. Sets config_rel,
+# config_name (path relative to the repo, shown in banners), the
+# extract_config_fields globals, YAML_STEPS, STEPS (with the TRAIN_STEPS
+# override noted), config_hash and the filename-safe *_safe parts.
+prepare_config() {
+    local config_file="$1" config_basename
+    # The extractor tolerates a path in Config Name: `_split_model_precision`
+    # takes the last segment before parsing the model name.
+    config_rel="${config_file#"$PRIMUS_PATH"/}"
+    config_name="${config_rel%.yaml}"
+    config_name="${config_name%.yml}"
+
+    # The log filename uses only the basename: the `${fw_safe}-` prefix already
+    # tells same-named YAMLs from different framework folders apart.
+    config_basename=$(basename "$config_file")
+    config_basename="${config_basename%.yaml}"
+    config_basename="${config_basename%.yml}"
+
+    extract_config_fields "$config_file"
+    YAML_STEPS="$STEPS"
+    if [ -n "$TRAIN_STEPS" ]; then
+        if train_steps_ignored "$FRAMEWORK"; then
+            STEPS="$YAML_STEPS (TRAIN_STEPS=$TRAIN_STEPS not applied to $FRAMEWORK)"
+        else
+            STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+        fi
+    fi
+
+    fw_safe=$(sanitize "$FRAMEWORK")
+    name_safe=$(sanitize "$config_basename")
+    mbs_safe=$(sanitize "$MBS")
+    gbs_safe=$(sanitize "$GBS")
+    config_hash=$(config_fingerprint "$config_file")
+}
+
+# Log path for repetition <rep> of the config last passed to prepare_config.
+# <suffix> marks a failed multi-node attempt, e.g. "-failed-attempt2".
+run_log_name() {
+    local rep="$1" suffix="${2:-}"
+    echo "${RESULT_DIR}/${fw_safe}-${name_safe}-${config_hash}-MBS${mbs_safe}-GBS${gbs_safe}-rep${rep}${suffix}_${BATCH_TS}.log"
+}
+
+# Backends whose configs keep their own training length when TRAIN_STEPS is
+# set, separated by spaces (not commas as in BACKEND). The Megatron-Bridge
+# recipes warm the learning rate up for a fixed number of iterations and, with
+# lr_decay_iters unset, decay it over train_iters, so an override no longer
+# than the warmup fails Megatron's lr_warmup_steps < lr_decay_steps assertion
+# before the first step. diffusion_dlrm's models keep the num_iterations of its
+# diffusion_bench config.
+PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion_dlrm"
+
+train_steps_ignored() {
+    [[ " $PERF_TRAIN_STEPS_IGNORED " == *" $1 "* ]]
+}
+
+# TRAIN_STEPS as the batch configuration shows it, naming the backends of this
+# batch (CONFIG_FILES, and diffusion_dlrm when it runs) that it does not reach.
+train_steps_text() {
+    local f name present=" " skipped=""
+    if [ -z "$TRAIN_STEPS" ]; then
+        echo "<unset; use YAML>"
+        return 0
+    fi
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+        present+="$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null) "
+    done
+    if [ "${PERF_RUN_DIFFUSION_DLRM:-0}" = 1 ]; then
+        present+="$PERF_DIFFUSION_DLRM_BACKEND "
+    fi
+    for name in $PERF_TRAIN_STEPS_IGNORED; do
+        if [[ "$present" == *" $name "* ]]; then
+            skipped+="${skipped:+, }$name"
+        fi
+    done
+    echo "$TRAIN_STEPS${skipped:+ (not applied to $skipped)}"
+}
+
+# TRAIN_STEPS against a Megatron config's learning-rate schedule: with
+# lr_decay_iters unset Megatron decays over train_iters and asserts
+# lr_warmup_steps < lr_decay_steps, so a TRAIN_STEPS no longer than
+# lr_warmup_iters fails during setup. Returns 1 for such a config, with the
+# reason in TRAIN_STEPS_CONFLICT. Each value comes from the experiment's
+# overrides, else from its module config file (not the files either
+# `extends`); a schedule set by fraction or by samples, or a value neither
+# sets, is not checked. CHECK_TRAIN_STEPS=0 turns this off.
+CHECK_TRAIN_STEPS="${CHECK_TRAIN_STEPS:-1}"
+TRAIN_STEPS_CONFLICT=""
+
+schedule_value() {
+    local key="$1" config_file="$2" module="$3" base="$4" value
+    value=$(yq -r ".modules.$module.overrides.$key // \"\"" "$config_file" 2>/dev/null)
+    if [ -z "$value" ] && [ -f "$base" ]; then
+        value=$(yq -r ".$key // \"\"" "$base" 2>/dev/null)
+    fi
+    # ${VAR:default}: the default, as the container sees it unless VAR is set there.
+    if [[ "$value" =~ ^\$\{[^:}]+:([^}]*)\}$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    [ "$value" = "null" ] && value=""
+    printf '%s' "$value"
+}
+
+train_steps_conflict() {
+    local config_file="$1" framework="$2" module="$3" base warmup key
+    TRAIN_STEPS_CONFLICT=""
+    [ -n "$TRAIN_STEPS" ] && [ "$CHECK_TRAIN_STEPS" = 1 ] || return 0
+    case "$framework" in megatron|megatron_bridge) ;; *) return 0 ;; esac
+    train_steps_ignored "$framework" && return 0
+    base="$PRIMUS_PATH/primus/configs/modules/$framework/$(yq_or_na ".modules.$module.config" "$config_file")"
+    for key in lr_decay_iters lr_warmup_fraction lr_decay_samples train_samples; do
+        [ -z "$(schedule_value "$key" "$config_file" "$module" "$base")" ] || return 0
+    done
+    warmup=$(schedule_value lr_warmup_iters "$config_file" "$module" "$base")
+    [[ "$warmup" =~ ^[0-9]+$ ]] && [ "$TRAIN_STEPS" -le "$warmup" ] || return 0
+    TRAIN_STEPS_CONFLICT="TRAIN_STEPS=$TRAIN_STEPS is not more than lr_warmup_iters=$warmup, and with lr_decay_iters unset Megatron's lr_warmup_steps < lr_decay_steps check fails during setup; raise TRAIN_STEPS above $warmup or set lr_decay_iters"
+    return 1
+}
+
+# A config that is not launched still gets a log for each repetition, so it
+# has results rows: the banner, and a footer with exit code 2 and
+# "not_run: <why>". Uses the config prepare_config and build_launch_argv set up.
+perf_log_not_run() {
+    local why="$1" rep result_file
+    for rep in $(seq 1 "$NUM_REPS"); do
+        result_file=$(run_log_name "$rep")
+        print_per_run_banner "$result_file" "$config_file" "$config_name" "$config_hash" \
+            "$FRAMEWORK" "$MODEL" "$MBS" "$GBS" "$SEQ_LEN" "$STEPS" "$rep" "$NUM_REPS" \
+            "$launcher_cmd" "$MODULE" "$TRAIN_SUITE" 0 "${MAX_ATTEMPTS_PER_CONFIG:-1}"
+        print_per_run_footer "$result_file" 2 0 "not_run: $why"
+    done
+}
+
+# Primus CLI override flag that sets training length for a given framework.
+# These names come from trainer tests / user-guide examples, not from the
+# backend's native argparse (e.g. TorchTitan is --training.steps, not --steps).
+train_step_override_flag() {
+    local framework="$1"
+    case "$framework" in
+        megatron|megatron_bridge) echo "--train_iters" ;;
+        torchtitan)               echo "--training.steps" ;;
+        maxtext)                  echo "--steps" ;;
+        maxdiffusion)             echo "--max_train_steps" ;;
+        *)                        echo "" ;;
+    esac
+}
+
+# Append the TRAIN_STEPS override to LAUNCH_ARGV with the flag the config's
+# framework understands. Extra tokens after --config are deep-merged into the
+# overrides of the module being trained (CLI > YAML). No-op when unset, and for
+# the backends in PERF_TRAIN_STEPS_IGNORED.
+append_train_steps_override() {
+    local config_file="$1"
+    local framework="$2"
+    local flag
+
+    if [ -z "$TRAIN_STEPS" ] || train_steps_ignored "$framework"; then
+        return 0
+    fi
+
+    flag=$(train_step_override_flag "$framework")
+    if [ -z "$flag" ]; then
+        echo "[ERROR] TRAIN_STEPS=$TRAIN_STEPS but no step-override flag for framework '$framework' (config: $config_file)" >&2
+        echo "        Known: megatron, megatron_bridge, torchtitan, maxtext, maxdiffusion." >&2
+        return 1
+    fi
+    LAUNCH_ARGV+=( "$flag" "$TRAIN_STEPS" )
+}
+
+# Collect host / git / GPU info that helps reviewers understand the run.
+collect_system_info() {
+    {
+        echo "################################################################################"
+        echo "# System / Environment Snapshot"
+        echo "################################################################################"
+        echo "# Date           : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "# Hostname       : $(hostname)"
+        echo "# Kernel         : $(uname -srm)"
+        echo "# OS             : $(grep ^PRETTY_NAME /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '\"' || echo 'unknown')"
+        echo "# User           : $(whoami)"
+        echo "# CWD            : $(pwd)"
+        echo "# PRIMUS_PATH    : $PRIMUS_PATH"
+        echo "# PRIMUS_MODE    : $PRIMUS_MODE"
+        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
+        echo "# Script         : $SCRIPT_PATH"
+        echo "# Bash           : $BASH_VERSION"
+        echo "# Python         : $(command -v python3 >/dev/null && python3 --version 2>&1 || echo 'not found')"
+        echo "# yq             : $(yq --version 2>&1 | head -1)"
+        if command -v git >/dev/null 2>&1 && git -C "$PRIMUS_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            echo "# Git branch     : $(git -C "$PRIMUS_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+            echo "# Git commit    : $(git -C "$PRIMUS_PATH" rev-parse HEAD 2>/dev/null)"
+            local dirty
+            dirty=$(git -C "$PRIMUS_PATH" status --porcelain 2>/dev/null | wc -l)
+            echo "# Git dirty?    : $([ "$dirty" -eq 0 ] && echo no || echo "yes ($dirty files modified)")"
+        else
+            echo "# Git           : not a git checkout"
+        fi
+        if [ "${PERF_MULTINODE:-0}" = 1 ]; then
+            echo "# --------------------------------------------------------------------------------"
+            echo "# SLURM job      : ${SLURM_JOB_ID:-<none>}"
+            echo "# SLURM nodes    : ${SLURM_JOB_NODELIST:-<unknown>}"
+            echo "# SLURM nnodes   : ${SLURM_NNODES:-<unknown>}"
+            echo "# NNODES (script): $NNODES"
+        fi
+        # The container's ROCm is in the batch configuration below.
+        echo "# ROCm (host)   : $(perf_rocm_version)"
+        echo "# GPU model     : $(perf_gpu_model)"
+        echo "# GPUs (local)  : $(perf_gpu_count)"
+        echo "################################################################################"
+    }
+}
+
+# Per-run banner, written to a fresh log before the run starts. The extractor
+# reads every `# key : value` line in it.
+#
+# Arguments: result_file config_file config_name config_hash framework model
+# mbs gbs seq_len steps rep total_reps launcher_cmd module suite, then attempt
+# and max_attempts for the multi-node retry loop.
+print_per_run_banner() {
+    local result_file="$1"
+    local config_file="$2"
+    local config_name="$3"
+    local config_hash="$4"
+    local framework="$5"
+    local model="$6"
+    local mbs="$7"
+    local gbs="$8"
+    local seq_len="$9"
+    local steps="${10}"
+    local rep="${11}"
+    local total_reps="${12}"
+    local launcher_cmd="${13}"
+    local module="${14}"
+    local suite="${15}"
+    local attempt="${16:-}"
+    local max_attempts="${17:-}"
+    local multinode="${PERF_MULTINODE:-0}"
+
+    {
+        echo "################################################################################"
+        if [ "$multinode" = 1 ]; then
+            echo "# Primus Multi-Node Benchmark Run"
+        else
+            echo "# Primus Benchmark Run"
+        fi
+        echo "################################################################################"
+        echo "# Timestamp        : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "# Hostname         : $(hostname)"
+        if [ "$multinode" = 1 ]; then
+            # Split across two keys so both reach the extractor's CSV; a slow run
+            # can then be pinned on a specific node.
+            echo "# SLURM job        : ${SLURM_JOB_ID:-<none>}"
+            echo "# SLURM nodes      : ${SLURM_JOB_NODELIST:-<unknown>}"
+        fi
+        echo "# Result Dir       : $RESULT_DIR"
+        echo "# Result File      : $result_file"
+        echo "# Batch Stamp      : $BATCH_TS"
+        echo "# --------------------------------------------------------------------------------"
+        echo "# Config File      : $config_file"
+        echo "# Config Name      : $config_name"
+        echo "# Config Hash      : $config_hash  (sha256, first 8 hex chars)"
+        echo "# Framework        : $framework"
+        if [ -n "$suite" ]; then
+            echo "# Train Module     : $module  (CLI verb: train $suite)"
+        else
+            echo "# Train Module     : $module"
+        fi
+        echo "# Model            : $model"
+        echo "# Micro Batch Size : $mbs"
+        echo "# Global Batch Size: $gbs"
+        echo "# Sequence Length  : $seq_len"
+        echo "# Train Steps/Iters: $steps"
+        if [ "$multinode" = 1 ]; then
+            echo "# Repetition       : $rep / $total_reps  (successful runs target)"
+            echo "# Attempt          : $attempt / $max_attempts (incl. failed)"
+        else
+            echo "# Repetition       : $rep / $total_reps"
+        fi
+        echo "# --------------------------------------------------------------------------------"
+        if [ "$multinode" = 1 ]; then
+            echo "# Cluster          : NNODES=$NNODES GPUS_PER_NODE=${GPUS_PER_NODE:-8}  (rank/master set by primus-cli)"
+        else
+            echo "# Cluster          : NNODES=$NNODES GPUS_PER_NODE=$GPUS_PER_NODE NODE_RANK=$NODE_RANK"
+            echo "# Master           : $MASTER_ADDR:$MASTER_PORT"
+        fi
+        echo "# PRIMUS_MODE      : $PRIMUS_MODE"
+        echo "# Launcher command : $launcher_cmd"
+        echo "# Run limits       : $(perf_run_limits_text)"
+        if [ -n "$FAIL_PATTERN" ]; then
+            # Not printed verbatim: the watchdog greps the run output for it,
+            # and keeping it out of the log avoids any chance of a self-match.
+            echo "# Fail pattern     : <recorded in batch_summary.txt>"
+        fi
+        if perf_uses_containers; then
+            echo "# Container label  : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
+        fi
+        echo "# GPU check        : $PERF_GPU_CHECK"
+        echo "# --------------------------------------------------------------------------------"
+        echo "# HF_TOKEN         : $([ -n "$HF_TOKEN" ] && echo '<set>' || echo '<unset>')"
+        perf_print_provenance_banner "${DOCKER_IMAGE:-}"
+        echo "################################################################################"
+        echo ""
+        echo "########################## Begin Config File Dump ##############################"
+        cat "$config_file"
+        # Some YAML files don't end with a newline; force one so the End marker
+        # below lands on its own line instead of being appended to the last
+        # config line.
+        [ -n "$(tail -c1 "$config_file")" ] && echo
+        echo "########################### End Config File Dump ###############################"
+        echo ""
+        echo "############################## Begin Run Output ################################"
+    } > "$result_file"
+}
+
+# Footer appended once the run has ended (or been interrupted). The extractor
+# reads `Exit code` and `Elapsed (sec)` from the last lines of the log;
+# `Failure reason` is "none" or "<category>: <detail>" (see
+# perf_launch_with_watchdog). <section>, when given, goes between the run
+# output and the footer (the failing rank's own log, see lib/control.sh).
+print_per_run_footer() {
+    local result_file="$1"
+    local exit_code="$2"
+    local run_elapsed="$3"
+    local failure_reason="$4"
+    local section="${5:+$5$'\n\n'}"
+    local rule="################################################################################"
+    local footer
+    # Built first and written with one printf: a signal can then not land
+    # between its lines, nor run the interrupt handler with stdout still
+    # pointing into the log.
+    printf -v footer '\n%s\n\n%s%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
+        "############################### End Run Output #################################" "$section" "$rule" \
+        "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$exit_code" "$run_elapsed" "$failure_reason" "$rule"
+    printf '%s' "$footer" >> "$result_file"
+}
