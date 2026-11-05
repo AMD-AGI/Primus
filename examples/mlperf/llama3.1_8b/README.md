@@ -91,3 +91,4 @@ bash run_and_time.sh
 
 - `log_interval: 99999999` suppresses regular Primus logs
 - `RUN_RUNTIME_TUNABLES` defaults to `0`; set `RUN_RUNTIME_TUNABLES=1` to run `runtime_tunables.sh` on the host before each trial (some steps require `sudo`).
+- `PRIMUS_TURBO_CROSS_ENTROPY=true` in `config_MI355X_1x8x1.sh` replaces TE's fused cross entropy with Primus-Turbo's, which writes the logits' gradient over the logits. Loss and gradient are bit-identical to TE's; on `rocm/primus:v26.9` forward plus backward takes 2.90 ms instead of 3.65 ms per micro-batch (MBS 2). The image's Primus-Turbo must have `primus_turbo.pytorch.ops.cross_entropy` (`v26.9` has it, `v26.6` does not).

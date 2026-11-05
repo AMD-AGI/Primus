@@ -91,6 +91,9 @@ export FP4_RECIPE=mxfp4
 export USE_HIPBLASLT=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
 
+# Turbo fused cross entropy (see the yaml); the image's Primus-Turbo must have ops.cross_entropy.
+export PRIMUS_TURBO_CROSS_ENTROPY=${PRIMUS_TURBO_CROSS_ENTROPY:-false}
+
 export SYNTH_WARMUP_STEPS=20
 export SYNTH_WARMUP_VALID_STEPS=10
 export WARMUP_RECIPE=fp8_hybrid
