@@ -1,0 +1,119 @@
+# Muse Spark EAGLE4 development runtime (image/import validation only).
+# The Muse SGLang base lacks the generic capture plugin extension APIs.
+# See docs/04-technical-guides/specforge/muse-spark-eagle4-image.md.
+# SpecForge ROCm runtime: SGLang ROCm stack + SpecForge capture plugin
+# + SpecForge (editable, --no-deps) + this Primus checkout (editable, --no-deps).
+# Do not install Primus's full dependency tree or run primus-cli deps sync.
+#
+# Build, ownership, and docker run: docs/04-technical-guides/specforge/runtime-image.md
+# Build from the Primus repository root:
+#   docker build -f examples/specforge/docker/Dockerfile.muse-spark-eagle4 \
+#     -t primus-specforge:muse-spark-eagle4-1c253f04 .
+
+# Preserve the Muse-specific SGLang runtime. The digest pins muse-spark-open.
+# No SGLang capture patches or source replacements are applied.
+ARG BASE_IMAGE=lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4
+FROM ${BASE_IMAGE}
+
+ARG SPECFORGE_REPOSITORY=https://github.com/yudigege86/SpecForge.git
+ARG SPECFORGE_REF=1c253f04c5fd0a321753a9ead28739c0a29ff7a7
+
+LABEL org.opencontainers.image.title="Primus Muse Spark EAGLE4 development runtime"
+LABEL org.opencontainers.image.description="Muse Spark ROCm base with pinned SpecForge EAGLE4 PR; capture APIs unavailable"
+LABEL io.primus.specforge.capture-plugin-compatible="false"
+LABEL io.primus.specforge.repository="${SPECFORGE_REPOSITORY}"
+LABEL io.primus.specforge.revision="${SPECFORGE_REF}"
+
+# The SGLang base image already ships git.
+RUN command -v git >/dev/null
+
+WORKDIR /workspace
+RUN git clone "${SPECFORGE_REPOSITORY}" SpecForge \
+    && git -C SpecForge checkout --detach "${SPECFORGE_REF}"
+
+WORKDIR /workspace/SpecForge
+# Keep the base image's ROCm stack. The tested image's Python is older than
+# SpecForge declares; do not resolve SpecForge's training dependency pins here.
+RUN python -m pip install -e . --no-deps --ignore-requires-python \
+    && python -m pip install -e plugins/sglang-spec-capture --no-deps
+
+# This checkout, not the published primus wheel (that wheel has no SpecForge backend).
+WORKDIR /opt/primus
+COPY pyproject.toml LICENSE README.md primus_cli.py /opt/primus/
+COPY primus /opt/primus/primus
+COPY runner /opt/primus/runner
+COPY examples/specforge /opt/primus/examples/specforge
+# hatchling is the build backend for an editable Primus install. It is not the
+# Primus runtime dependency tree (do not run primus-cli deps sync).
+# Normalize Windows checkout line endings before invoking copied shell scripts.
+RUN find /opt/primus/runner -type f -print0 | xargs -0 sed -i 's/\r$//' \
+    && ln -sfn /opt/primus/runner /opt/primus/primus/runner \
+    && python -m pip install "hatchling>=1.21" \
+    && python -m pip install -e /opt/primus --no-deps
+
+COPY examples/specforge/docker/install-light-deps.sh examples/specforge/docker/smoke-check-runtime.sh examples/specforge/docker/smoke-check-muse-eagle4.sh /tmp/
+RUN sed -i 's/\r$//' /tmp/install-light-deps.sh /tmp/smoke-check-runtime.sh /tmp/smoke-check-muse-eagle4.sh \
+    && bash /tmp/install-light-deps.sh
+
+# install-light-deps.sh uses --no-deps. SummaryWriter imports tensorboard's own
+# dependency tree, so a no-deps install leaves --report-to tensorboard broken.
+# Constrain the resolver to distributions already in the image: it may add
+# missing tensorboard dependencies, and it must not upgrade the SGLang stack
+# (numpy, protobuf, grpcio, setuptools, pillow). tensorboard 2.21 requires
+# protobuf>=6.31.1 and grpcio>=1.74; stay below that so the constraint holds.
+RUN python - <<'PY'
+import json
+import subprocess
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+watched = ["numpy", "protobuf", "grpcio", "setuptools", "pillow", "packaging"]
+before = {}
+for name in watched:
+    try:
+        before[name] = version(name)
+    except PackageNotFoundError:
+        before[name] = None
+Path("/tmp/base-versions.json").write_text(json.dumps(before), encoding="utf-8")
+
+freeze = subprocess.check_output(["python", "-m", "pip", "freeze"], text=True)
+lines = []
+for line in freeze.splitlines():
+    if not line or line.startswith("-e ") or " @ " in line:
+        continue
+    dist = line.split("==", 1)[0].strip().lower().replace("_", "-")
+    if dist in {"tensorboard", "tb-nightly"}:
+        continue
+    lines.append(line)
+Path("/tmp/base-constraints.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+RUN python -m pip install --upgrade-strategy only-if-needed \
+      -c /tmp/base-constraints.txt "tensorboard>=2.14,<2.21"
+RUN python - <<'PY'
+import json
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
+before = json.loads(Path("/tmp/base-versions.json").read_text(encoding="utf-8"))
+changed = []
+for name, old in before.items():
+    if old is None:
+        continue
+    try:
+        new = version(name)
+    except PackageNotFoundError:
+        new = None
+    if new != old:
+        changed.append(f"{name} {old} -> {new}")
+if changed:
+    raise SystemExit("tensorboard install changed base packages:\n" + "\n".join(changed))
+Path("/tmp/base-constraints.txt").unlink(missing_ok=True)
+Path("/tmp/base-versions.json").unlink(missing_ok=True)
+PY
+
+ENV SPECFORGE_ROOT=/workspace/SpecForge
+ENV PRIMUS_SPECFORGE_PIN_SGLANG=0.5.21
+RUN bash /tmp/smoke-check-muse-eagle4.sh
+
+ENV PRIMUS_PATH=/opt/primus
+WORKDIR /opt/primus

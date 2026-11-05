@@ -8,6 +8,10 @@ The published `primus` wheel does **not** include `primus/backends/specforge/`.
 The [Dockerfile](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/docker/Dockerfile)
 installs **this Primus checkout** editable with `--no-deps`.
 
+For the specialized Muse SGLang base and the unmerged EAGLE4 implementation,
+see the [Muse Spark EAGLE4 development image](muse-spark-eagle4-image.md).
+That image has separate GPU-free checks and a documented capture limitation.
+
 ## What Primus owns
 
 | Piece | Owner |

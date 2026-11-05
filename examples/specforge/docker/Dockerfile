@@ -44,8 +44,8 @@ RUN find /opt/primus/runner -type f -print0 | xargs -0 sed -i 's/\r$//' \
     && python -m pip install "hatchling>=1.21" \
     && python -m pip install -e /opt/primus --no-deps
 
-COPY examples/specforge/docker/install-light-deps.sh examples/specforge/docker/smoke-check.sh /tmp/
-RUN sed -i 's/\r$//' /tmp/install-light-deps.sh /tmp/smoke-check.sh \
+COPY examples/specforge/docker/install-light-deps.sh examples/specforge/docker/smoke-check.sh examples/specforge/docker/smoke-check-runtime.sh /tmp/
+RUN sed -i 's/\r$//' /tmp/install-light-deps.sh /tmp/smoke-check.sh /tmp/smoke-check-runtime.sh \
     && bash /tmp/install-light-deps.sh
 
 # install-light-deps.sh uses --no-deps. SummaryWriter imports tensorboard's own
