@@ -5,17 +5,21 @@
 Unit tests for Wan's attention-backward kernel selection.
 
 The ``attn_atomic_fp32`` model key exists because both attention backends
-re-read their fp32-atomic setting from the environment on every call, and
-both arrive at the trainer already forced to "0" -- Primus' launchers export
-Primus-Turbo's variable that way, and the release image pins TE's. Reading
-either variable back therefore cannot distinguish a deliberate opt-out from
-that blanket default, so the trainer writes both from the YAML key instead.
+read their fp32-atomic setting from the environment, and both arrive at the
+trainer already forced to "0" -- Primus' launchers export Primus-Turbo's
+variable that way, and the release image pins TE's. Reading either variable
+back therefore cannot distinguish a deliberate opt-out from that blanket
+default, so the trainer writes both from the YAML key instead. Primus-Turbo
+since AMD-AGI/Primus-Turbo#605 caches its variables at the first read, so its
+variable is written through Primus-Turbo's ``set_env()`` where that exists.
 
 These tests pin that plumbing, which is otherwise only observable by reading
 kernel names out of a profile.
 """
 
 import os
+import sys
+import types
 
 import pytest
 
@@ -111,6 +115,33 @@ def test_helper_is_idempotent(enabled):
     module._apply_atomic_fp32_backward(enabled)
 
     assert {name: os.environ[name] for name in module.ATTN_ATOMIC_FP32_ENVS} == first
+
+
+def test_turbo_variable_goes_through_turbo_set_env(monkeypatch):
+    """A plain os.environ write would not reach a Primus-Turbo that cached the variable."""
+    module = _trainer_module()
+    calls = []
+
+    def set_env(name, value):
+        calls.append((name, value))
+        os.environ[name] = value
+
+    monkeypatch.setitem(sys.modules, "primus_turbo.common.envs", types.SimpleNamespace(set_env=set_env))
+
+    module._apply_atomic_fp32_backward(True)
+
+    assert calls == [("PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32", "1")]
+    assert os.environ["NVTE_CK_IS_V3_ATOMIC_FP32"] == "1"
+
+
+def test_turbo_without_set_env_gets_a_plain_write(monkeypatch):
+    """Primus-Turbo before AMD-AGI/Primus-Turbo#605 has no envs module and reads os.environ."""
+    module = _trainer_module()
+    monkeypatch.setitem(sys.modules, "primus_turbo.common.envs", None)
+
+    module._apply_atomic_fp32_backward(False)
+
+    assert os.environ["PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"] == "0"
 
 
 if __name__ == "__main__":

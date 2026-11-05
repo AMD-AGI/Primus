@@ -52,6 +52,24 @@ ATTN_ATOMIC_FP32_ENVS = (
 TE_CK_BWD_V3_ENV = "NVTE_CK_USES_BWD_V3"
 
 
+def _set_attention_env(name: str, value: str) -> None:
+    """Write ``name`` where its backend will read it.
+
+    Primus-Turbo since AMD-AGI/Primus-Turbo#605 caches each of its variables at the
+    first read, and its ``set_env()`` drops that cached value; older Primus-Turbo
+    reads ``os.environ`` at every call.
+    """
+    if name.startswith("PRIMUS_TURBO_"):
+        try:
+            from primus_turbo.common.envs import set_env
+        except ImportError:
+            pass
+        else:
+            set_env(name, value)
+            return
+    os.environ[name] = value
+
+
 def _apply_atomic_fp32_backward(enabled: bool) -> None:
     """Let WAN's attention backward reach the fp32-atomic ASM kernels.
 
@@ -91,9 +109,9 @@ def _apply_atomic_fp32_backward(enabled: bool) -> None:
     value = "1" if enabled else "0"
     previous = {name: os.environ.get(name) for name in ATTN_ATOMIC_FP32_ENVS}
     for name in ATTN_ATOMIC_FP32_ENVS:
-        os.environ[name] = value
+        _set_attention_env(name, value)
     if enabled:
-        os.environ[TE_CK_BWD_V3_ENV] = "1"
+        _set_attention_env(TE_CK_BWD_V3_ENV, "1")
 
     settings = ", ".join(f"{name}={value} (was {previous[name]!r})" for name in ATTN_ATOMIC_FP32_ENVS)
     if enabled:
