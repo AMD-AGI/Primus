@@ -10,9 +10,10 @@ Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 
 - `configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml` — post-train overrides
 - `config_MI355X_1x8x1.sh` — system config and env vars (set `PRIMUS_PATH` to your Primus clone)
-- `run_with_docker.sh` — **recommended**: host-side Docker orchestration (N timed trials)
+- `run_with_docker.sh` — **recommended**: host-side Docker orchestration (N timed trials). Builds `libfakeuname.so` in the container and passes it as `LD_PRELOAD` on every `docker exec`.
 - `runtime_tunables.sh` — host CPU/THP/cache tuning before each trial
-- `run_and_time.sh` — timed MLPerf run inside the container (called by `run_with_docker.sh`)
+- `run_and_time.sh` — timed MLPerf run inside the container (called by `run_with_docker.sh`). Builds and preloads `libfakeuname.c` before `primus-cli`.
+- `libfakeuname.c` — container-only `uname` shim. Lux reports RHEL 5.14, and RCCL turns cuMem off below kernel 6.8. `LUX_FAKE_KERNEL=6.8.0-lux` keeps the copy-engine collectives on. The host kernel string is unchanged.
 - `a4w4_tuned_gemms.csv` — tuned AITER A4W4 GEMM configs
 
 ---
