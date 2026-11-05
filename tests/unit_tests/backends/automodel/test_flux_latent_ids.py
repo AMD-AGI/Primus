@@ -9,12 +9,14 @@ Unit tests for the on-device FLUX latent ids (``models/flux/latent_ids``).
 
 WHY THIS TEST EXISTS:
   The patch applies to every FLUX run with no setting, on the promise that the
-  ids are the same values AutoModel builds. So the tests pin that equality across
-  devices, dtypes and non-square shapes, and that a changed upstream method is
+  ids are the same values AutoModel builds, built on the device. So the tests pin
+  that equality across devices, dtypes and non-square shapes, that no tensor is
+  built on the host, and that an upstream method other than the pinned one is
   left alone rather than replaced.
 """
 
 import ast
+import importlib.util
 import inspect
 import logging
 import sys
@@ -27,23 +29,27 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from torch.utils._python_dispatch import TorchDispatchMode  # noqa: E402
+from torch.utils._pytree import tree_leaves  # noqa: E402
+
 from primus.backends.automodel.models.flux import latent_ids  # noqa: E402
 
 MODULE_PATH = "nemo_automodel.components.flow_matching.adapters.flux"
 LOGGER = "primus.backends.automodel.models.flux.latent_ids"
-PINNED_ADAPTER = (
-    Path(__file__).resolve().parents[4]
-    / "third_party/Automodel/nemo_automodel/components/flow_matching/adapters/flux.py"
-)
+REPO_ROOT = Path(__file__).resolve().parents[4]
+ADAPTER_FILE = Path("components") / "flow_matching" / "adapters" / "flux.py"
 
 
-def _upstream_latent_image_ids(self, batch_size, height, width, device, dtype):
-    latent_image_ids = torch.zeros(height // 2, width // 2, 3)
-    latent_image_ids[..., 1] = torch.arange(height // 2)[:, None]
-    latent_image_ids[..., 2] = torch.arange(width // 2)[None, :]
-
-    latent_image_ids = latent_image_ids.reshape(-1, 3)
-    return latent_image_ids.to(device=device, dtype=dtype)
+def _pinned_adapter_file() -> Path:
+    """AutoModel's FLUX adapter: the submodule checkout, else the installed package."""
+    packages = [REPO_ROOT / "third_party" / "Automodel" / "nemo_automodel"]
+    spec = importlib.util.find_spec("nemo_automodel")
+    if spec is not None and spec.submodule_search_locations:
+        packages.append(Path(list(spec.submodule_search_locations)[0]))
+    path = next((package / ADAPTER_FILE for package in packages if (package / ADAPTER_FILE).is_file()), None)
+    if path is None:
+        pytest.skip("neither the AutoModel submodule nor nemo_automodel is available")
+    return path
 
 
 def _body_without_docstring(function):
@@ -54,28 +60,37 @@ def _body_without_docstring(function):
 
 
 def test_the_copied_upstream_method_is_the_pinned_one():
-    """Fails when AutoModel's method changes, so the tests here keep comparing against what it builds.
+    """Fails when AutoModel's method changes, so ``install`` and the tests here keep matching what it builds.
 
-    Read from the submodule's source, which CI checks out without installing AutoModel.
+    Read from the source rather than imported, so it runs where AutoModel is
+    checked out but not installed, as in CI.
     """
-    if not PINNED_ADAPTER.is_file():
-        pytest.skip("the AutoModel submodule is not checked out")
+    path = _pinned_adapter_file()
     adapter = next(
-        node
-        for node in ast.parse(PINNED_ADAPTER.read_text()).body
-        if isinstance(node, ast.ClassDef) and node.name == "FluxAdapter"
+        (
+            node
+            for node in ast.parse(path.read_text()).body
+            if isinstance(node, ast.ClassDef) and node.name == "FluxAdapter"
+        ),
+        None,
     )
-    pinned = next(node for node in adapter.body if getattr(node, "name", None) == "_prepare_latent_image_ids")
-    copied = ast.parse(textwrap.dedent(inspect.getsource(_upstream_latent_image_ids))).body[0]
+    assert adapter is not None, f"no FluxAdapter class in {path}"
+    pinned = next(
+        (node for node in adapter.body if getattr(node, "name", None) == "_prepare_latent_image_ids"), None
+    )
+    assert pinned is not None, f"FluxAdapter in {path} has no _prepare_latent_image_ids"
+    copied = ast.parse(textwrap.dedent(inspect.getsource(latent_ids._pinned_upstream))).body[0]
 
     assert [a.arg for a in pinned.args.args] == [a.arg for a in copied.args.args]
     assert _body_without_docstring(pinned) == _body_without_docstring(copied)
 
 
-def _install_stub_adapter(monkeypatch, method):
+def _install_stub_adapter(monkeypatch, method=None):
     class FluxAdapter:
-        _prepare_latent_image_ids = method
+        pass
 
+    if method is not None:
+        FluxAdapter._prepare_latent_image_ids = method
     module = types.ModuleType(MODULE_PATH)
     module.FluxAdapter = FluxAdapter
     parts = MODULE_PATH.split(".")
@@ -93,10 +108,13 @@ def _install_stub_adapter(monkeypatch, method):
 
 @pytest.fixture
 def stub_flux_adapter(monkeypatch):
-    return _install_stub_adapter(monkeypatch, _upstream_latent_image_ids)
+    return _install_stub_adapter(monkeypatch, latent_ids._pinned_upstream)
 
 
-_DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+_DEVICES = [
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")),
+]
 
 
 @pytest.mark.parametrize("device", _DEVICES)
@@ -115,13 +133,45 @@ def test_the_ids_match_upstream(stub_flux_adapter, device, dtype, height, width)
     assert torch.equal(got, want)
 
 
-def test_the_replacement_is_idempotent(stub_flux_adapter):
-    assert latent_ids.install() is True
-    patched = stub_flux_adapter._prepare_latent_image_ids
-    assert patched is not _upstream_latent_image_ids
+class _RecordDevices(TorchDispatchMode):
+    """Records the device of every tensor an op returns."""
+
+    def __init__(self):
+        super().__init__()
+        self.devices = set()
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        out = func(*args, **(kwargs or {}))
+        self.devices.update(t.device.type for t in tree_leaves(out) if isinstance(t, torch.Tensor))
+        return out
+
+
+def test_the_ids_are_built_on_the_target_device(stub_flux_adapter):
+    """On the meta device, so it runs without a GPU: a tensor on the CPU means a build on the host."""
+    adapter = stub_flux_adapter()
+    meta = torch.device("meta")
+    with _RecordDevices() as upstream:
+        adapter._prepare_latent_image_ids(2, 32, 48, meta, torch.bfloat16)
 
     assert latent_ids.install() is True
-    assert stub_flux_adapter._prepare_latent_image_ids is patched
+    with _RecordDevices() as replacement:
+        ids = adapter._prepare_latent_image_ids(2, 32, 48, meta, torch.bfloat16)
+
+    assert "cpu" in upstream.devices
+    assert replacement.devices == {"meta"}
+    assert ids.shape == (16 * 24, 3)
+
+
+def test_the_replacement_is_idempotent(stub_flux_adapter):
+    assert latent_ids.install() is True
+    assert stub_flux_adapter._prepare_latent_image_ids is latent_ids._prepare_latent_image_ids
+
+    def rebound(self, batch_size, height, width, device, dtype):
+        return None
+
+    stub_flux_adapter._prepare_latent_image_ids = rebound
+    assert latent_ids.install() is True
+    assert stub_flux_adapter._prepare_latent_image_ids is rebound, "a second install() changes nothing"
 
 
 def test_a_method_with_a_new_signature_is_left_alone(monkeypatch, caplog):
@@ -134,7 +184,30 @@ def test_a_method_with_a_new_signature_is_left_alone(monkeypatch, caplog):
         assert latent_ids.install() is False
 
     assert adapter._prepare_latent_image_ids is changed
-    assert "has a new signature; not installed" in caplog.text
+    assert "not the pinned AutoModel's; not installed" in caplog.text
+
+
+def test_a_method_with_a_new_body_is_left_alone(monkeypatch, caplog):
+    def changed(self, batch_size, height, width, device, dtype):
+        return torch.zeros((height // 2) * (width // 2), 3, device=device, dtype=dtype)
+
+    adapter = _install_stub_adapter(monkeypatch, changed)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        assert latent_ids.install() is False
+
+    assert adapter._prepare_latent_image_ids is changed
+    assert "not the pinned AutoModel's; not installed" in caplog.text
+
+
+def test_a_missing_method_is_left_alone(monkeypatch, caplog):
+    adapter = _install_stub_adapter(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER):
+        assert latent_ids.install() is False
+
+    assert not hasattr(adapter, "_prepare_latent_image_ids")
+    assert "is missing or not the pinned AutoModel's" in caplog.text
 
 
 def test_a_missing_adapter_is_left_alone(monkeypatch, caplog):
@@ -159,11 +232,16 @@ def _ctx(transformer_cls=None):
     )
 
 
-def test_the_patch_applies_to_flux_with_no_setting():
+def test_the_patch_applies_to_flux_with_no_setting(stub_flux_adapter):
+    from primus.backends.automodel.patches.flux_latent_ids_patches import apply
     from primus.core.patches.patch_registry import PatchRegistry
 
     patch = PatchRegistry.get("automodel.models.flux.latent_ids")
 
     assert patch is not None
     assert patch.condition(_ctx("FluxTransformer2DModel")) is True
+    assert patch.condition(_ctx()) is True, "a config that names no transformer, as with from_pretrained"
     assert patch.condition(_ctx("WanTransformer3DModel")) is False, "the latent ids are FLUX's"
+
+    apply(_ctx("FluxTransformer2DModel"))
+    assert stub_flux_adapter._prepare_latent_image_ids is latent_ids._prepare_latent_image_ids
