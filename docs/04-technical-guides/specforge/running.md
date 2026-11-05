@@ -9,11 +9,15 @@
 
 `offline` train is `specforge train` on pre-captured hidden states. `online`
 train is live Mooncake + SGLang capture plus `--role producer` / `--role
-consumer`. Capture is SpecForge `scripts/prepare_hidden_states.py`, not a
-train mode.
+consumer`. Capture uses SpecForge's preparation and shard writer through a
+temporary Primus plugin transport; it is a separate mode from training.
 
 Build the image first: [runtime image](runtime-image.md). Inside the container,
 Primus is `/opt/primus` and SpecForge is `/workspace/SpecForge`.
+
+The default plugin image also supports offline capture through Primus's temporary
+compatibility module. Existing capture YAML and output formats remain unchanged.
+See [offline capture compatibility](runtime-image.md#build).
 
 ## Launch with `primus-cli`
 
@@ -30,23 +34,23 @@ Inside the image:
 ./runner/primus-cli direct -- train pretrain --config <experiment.yaml>
 ```
 
-From the host, capture or offline train:
+From the host, offline train (set `HIDDEN_STATES_PATH` to precomputed features):
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+./runner/primus-cli container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
   --shm-size 64g --volume /data:/data \
   -- train pretrain \
-  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
 
-Multi-node capture or offline train (shared output path; `-N` is the node count):
+Multi-node offline train (shared feature path; `-N` is the trainer node count):
 
 ```bash
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
   --volume /shared:/shared \
   -- train pretrain \
-  --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
+  --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
 
 Dotted CLI keys override YAML, for example
@@ -65,8 +69,10 @@ SpecForge `managed_local`: run the SpecForge CLI inside this image, not
 Capture, then train on disk hidden states. Example pair for Qwen3.5-4B DFlash
 (20-step smoke defaults).
 
-**Capture** — `specforge_mode: capture` runs SpecForge
-`scripts/prepare_hidden_states.py`. Recipe:
+**Capture** — `specforge_mode: capture` runs
+`torchrun --module primus.backends.specforge.offline_capture`. The module loads
+SpecForge's `scripts/prepare_hidden_states.py` and replaces only its target
+factory with plugin capture. Recipe:
 [qwen3.5-4b-dflash-offline-capture.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml).
 
 ```yaml
@@ -107,7 +113,7 @@ modules:
     overrides:
       specforge_mode: train
       specforge_train_mode: offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-amd.yaml}
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
       specforge_overrides:
         training.max_steps: ${MAX_STEPS:20}
@@ -145,7 +151,7 @@ modules:
     overrides:
       specforge_mode: train
       specforge_train_mode: online
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-amd.yaml}
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
       specforge_online:
         run_id: ${RUN_ID}
@@ -168,7 +174,7 @@ export MAX_STEPS=20
 cd /opt/primus
 ./runner/primus-cli slurm srun -N 2 \
   --gres=gpu:1 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
@@ -275,7 +281,7 @@ export SERVER_COUNT=8
 export SERVER_TP=1
 # SERVER_GPUS / TRAINER_GPUS default 0 → 0..7 when the counts above are 8.
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml \
