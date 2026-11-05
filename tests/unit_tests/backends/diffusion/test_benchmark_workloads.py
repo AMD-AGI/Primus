@@ -1199,20 +1199,11 @@ def test_aiter_jit_dir_follows_package_writability(monkeypatch, tmp_path):
     spec = importlib.util.spec_from_file_location("aiter_pkg_probe", init)
 
     monkeypatch.setenv("HOME", str(home))
-    # ``_import_aiter`` writes ``AITER_JIT_DIR`` with ``setdefault``, which
-    # monkeypatch does not track. ``delenv(raising=False)`` also records nothing
-    # when the variable is already absent, so a later ``setenv`` restores the
-    # temporary path after the test. That leaked value makes aiter import
-    # ``module_fmha_v3_fwd`` by its bare name while the extension was built
-    # into the package tree, and ``test_compiled_local_vs_eager`` then dies
-    # with ``ModuleNotFoundError``. Record the original value first so the
-    # undo stack clears the leak last. The five AMDB workloads still set this
-    # only when the aiter package tree is read-only.
-    if "AITER_JIT_DIR" not in os.environ:
-        monkeypatch.setenv("AITER_JIT_DIR", "")
-        os.environ.pop("AITER_JIT_DIR")
-    else:
-        monkeypatch.setenv("AITER_JIT_DIR", os.environ["AITER_JIT_DIR"])
+    # ``_import_aiter`` uses ``setdefault``, which monkeypatch does not track.
+    # Register the variable for restore (whether or not it is exported), then
+    # clear it so the first assert sees an unset variable.
+    monkeypatch.setenv("AITER_JIT_DIR", "")
+    os.environ.pop("AITER_JIT_DIR")
 
     def find_spec(name, *args, **kwargs):
         del args, kwargs

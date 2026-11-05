@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 
 import torch
@@ -42,8 +43,11 @@ def _import_aiter():
     ``AITER_JIT_DIR`` just because ``~/.aiter/jit`` exists would rebuild there
     or load a leftover ``.so`` from another image.
     """
-    user_jit = os.path.join(os.path.expanduser("~"), ".aiter", "jit")
-    if not _package_jit_writable() and os.path.isdir(user_jit):
+    # aiter creates ~/.aiter/jit itself when AITER_JIT_DIR is set, so the
+    # directory need not exist yet. Requiring it here left the first run on a
+    # fresh home without the variable and broke the first attention call.
+    if not _package_jit_writable():
+        user_jit = os.path.join(os.path.expanduser("~"), ".aiter", "jit")
         os.environ.setdefault("AITER_JIT_DIR", user_jit)
     import aiter as module
 
@@ -56,8 +60,14 @@ try:
     if hasattr(_aiter, "flash_attn_func") and hasattr(_aiter, "flash_attn_varlen_func"):
         aiter = _aiter
         AITER_FLASH_ATTN_AVAILABLE = True
-except Exception:
+except Exception as exc:
     AITER_FLASH_ATTN_AVAILABLE = False
+    # Installed but unusable is a setup problem worth surfacing. A missing
+    # package is the normal non-AITER case, so stay quiet for that.
+    if importlib.util.find_spec("aiter") is not None:
+        logging.getLogger(__name__).warning(
+            "aiter is installed but failed to import; AITER attention is disabled: %s", exc
+        )
 
 
 def _normalize_window_size(window_size: tuple[int, ...]) -> tuple[int, int, int]:
