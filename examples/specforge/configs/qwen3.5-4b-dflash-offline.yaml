@@ -1,7 +1,7 @@
 # Qwen3.5-4B DFlash draft training on pre-captured hidden states (offline).
 #
-# Image: examples/specforge/docker/README.md
-# primus-cli sketch: examples/specforge/README.md
+# Image: docs/04-technical-guides/specforge/runtime-image.md
+# primus-cli sketch: docs/04-technical-guides/specforge/running.md
 #
 #   export HIDDEN_STATES_PATH=/path/to/hidden_states
 #   export OUTPUT_DIR=/path/to/out

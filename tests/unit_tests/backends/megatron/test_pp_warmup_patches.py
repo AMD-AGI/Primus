@@ -56,6 +56,8 @@ import unittest
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from tests.utils import isolated_torchrun_env
+
 _MBS = 1
 _GBS = 16
 _PRIMUS_TOTAL_LAYERS = 4
@@ -210,7 +212,7 @@ def _build_training_cmd(
         "False",
     ]
 
-    env = os.environ.copy()
+    env = isolated_torchrun_env()
     env.update(
         {
             "MBS": str(_MBS),

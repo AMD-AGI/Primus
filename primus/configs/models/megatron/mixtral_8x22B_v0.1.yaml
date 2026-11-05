@@ -15,3 +15,4 @@ masked_softmax_fusion: false
 
 tokenizer_type: MixtralTokenizer
 tokenizer_model: mistralai/Mixtral-8x22B-v0.1
+vocab_size: 32000

@@ -24,8 +24,13 @@ Also extracts the added `examples/` recipes and submodule bumps, because a
 release that adds models needs those propagated into the model lists and the
 support matrix -- changes no version-string bump would ever notice.
 
+With `--family`, the range is that family's: its build commit and its previous
+release's, as preflight resolved them (state.json), so a family released weeks
+after the other gets its own changelog (changelog-<family>.json).
+
 Usage:
     python tools/release_docs/collect_changes.py --version v26.7
+    python tools/release_docs/collect_changes.py --version v26.9 --family jax
 """
 
 import argparse
@@ -241,12 +246,30 @@ def collect(version, previous, from_commit, to_commit):
     }
 
 
+def preflight_family(version, family):
+    """The family's entry in preflight's state.json, if preflight has run."""
+    path = C.ROOT / f"output/release-docs/{version}/state.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text()).get("families", {}).get(family, {})
+
+
 def resolve_endpoints(version, previous, args):
     """Endpoints default to the primus build commits, which are the pinned
     release commits; the JAX image is built from main at a different point and is
-    recorded separately by preflight."""
+    recorded separately by preflight. With --family, that family's commits from
+    preflight's state.json come first, then its snapshots."""
     from_commit = args.from_commit
     to_commit = args.to_commit
+    if args.family:
+        info = preflight_family(version, args.family)
+        to_commit = to_commit or info.get("build_commit")
+        from_commit = from_commit or info.get("previous_build_commit")
+        if not to_commit:
+            to_commit = (C.load_snapshot(version, args.family) or {}).get("build_commit")
+        if not from_commit and previous:
+            from_commit = (C.load_snapshot(previous, args.family) or {}).get("build_commit")
+        return from_commit, to_commit
     if not to_commit:
         snapshot = C.load_snapshot(version, "primus") or C.load_snapshot(version, "jax")
         to_commit = (snapshot or {}).get("build_commit")
@@ -262,8 +285,16 @@ def main():
     )
     parser.add_argument("--version", required=True)
     parser.add_argument("--previous")
+    parser.add_argument(
+        "--family", choices=sorted(C.FAMILIES), help="this family's range (default: the primus build commits)"
+    )
     parser.add_argument("--from", dest="from_commit", help="override the start commit")
     parser.add_argument("--to", dest="to_commit", help="override the end commit")
+    parser.add_argument(
+        "--output",
+        help="where to write the changelog (default output/release-docs/<version>/changelog.json); "
+        "use it to keep a second family's range, e.g. changelog-jax.json, beside the primus one",
+    )
     args = parser.parse_args()
 
     previous = args.previous
@@ -272,6 +303,8 @@ def main():
             {v for v, _, _ in C.available_snapshots() if v != args.version}, key=C.version_key, reverse=True
         )
         previous = others[0] if others else None
+    if args.family and not args.previous:
+        previous = preflight_family(args.version, args.family).get("previous_version") or previous
 
     from_commit, to_commit = resolve_endpoints(args.version, previous, args)
     if not from_commit or not to_commit:
@@ -281,7 +314,11 @@ def main():
         )
 
     data = collect(args.version, previous, from_commit, to_commit)
-    path = C.ROOT / f"output/release-docs/{args.version}/changelog.json"
+    data["family"] = args.family
+    name = f"changelog-{args.family}.json" if args.family else "changelog.json"
+    path = (
+        Path(args.output).resolve() if args.output else C.ROOT / f"output/release-docs/{args.version}/{name}"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n")
 
@@ -295,7 +332,7 @@ def main():
     print(f"  new recipes          {len(data['new_recipes'])}")
     for name, bump in sorted(data["submodule_bumps"].items()):
         print(f"  submodule            {name} {bump['from']}..{bump['to']}")
-    print(f"  wrote                {path.relative_to(C.ROOT)}")
+    print(f"  wrote                {path}")
     return 0
 
 

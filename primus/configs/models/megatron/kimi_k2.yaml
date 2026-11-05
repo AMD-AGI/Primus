@@ -6,6 +6,7 @@ extends:
 
 tokenizer_type: KimiK2Tokenizer
 tokenizer_model: moonshotai/Kimi-K2-Instruct
+vocab_size: 163840
 
 # model
 num_layers: 61

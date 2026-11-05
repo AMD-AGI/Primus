@@ -4,3 +4,4 @@ extends:
 # Hugging Face tokenizer variant used by native SFT checkpoint conversion.
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B
+vocab_size: 128256

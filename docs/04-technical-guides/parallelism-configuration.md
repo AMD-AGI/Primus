@@ -118,7 +118,7 @@ Exact semantics follow TorchTitan’s distributed layout; set `training.global_b
 
 ## 3. MaxText parallelism configuration
 
-MaxText (JAX) uses a **device mesh** with **ICI** (intra-node / “in-cluster interconnect”) and **DCN** (inter-node / “data center network”) axes for parallelism. Defaults and parameter names come from upstream MaxText, for example `third_party/maxtext/src/MaxText/configs/base.yml`, not from Primus presets alone.
+MaxText (JAX) uses a **device mesh** with **ICI** (intra-node / “in-cluster interconnect”) and **DCN** (inter-node / “data center network”) axes for parallelism. Defaults and parameter names come from upstream MaxText, for example `third_party/maxtext/src/maxtext/configs/base.yml`, not from Primus presets alone.
 
 ### Common parallelism keys (from `base.yml`)
 

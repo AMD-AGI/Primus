@@ -23,7 +23,7 @@ env:
   # CK_JIT_CACHE_DIR -- see the MI300X 1.3B config for why a relative path there
   # breaks TransformerEngine's CK kernel build.
   JAX_COMPILATION_CACHE_DIR: "./.jax_cache/wan2.1_1.3b"
-  MIOPEN_CUSTOM_CACHE_DIR: "./.jax_cache/wan2.1_1.3b/miopen"
+  MIOPEN_CUSTOM_CACHE_DIR: "/tmp/.jax_cache/wan2.1_1.3b/miopen"
   TOKENIZERS_PARALLELISM: "1"
   SKIP_GCS: "1"
   XLA_PYTHON_CLIENT_MEM_FRACTION: "0.95"

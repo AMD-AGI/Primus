@@ -32,9 +32,12 @@ class CudaPrefetchIterator:
     HtoD, grabs the GPU batch, kicks off the *next* prefetch, and returns.
 
     ``wait_stream()`` (not CUDA events) is used because prefetch depth is 1.
-    ``record_stream()`` is not needed because ``self._next_batch`` holds GPU
-    tensor references until consumed, and the caller holds the returned batch
-    through forward/backward.
+
+    Batches are allocated on the prefetch stream but consumed on the compute
+    stream, so each returned tensor is ``record_stream()``-ed on the consumer.
+    Without that, freeing a batch (e.g. token ids saved for the embedding
+    backward) hands its block back to the prefetch stream's pool while compute
+    kernels that read it are still queued, and the next HtoD copy overwrites it.
     """
 
     def __init__(self, iterator, compute_dtype=torch.bfloat16):
@@ -72,11 +75,15 @@ class CudaPrefetchIterator:
             self._next_batch = gpu_batch
 
     def __next__(self):
-        torch.cuda.current_stream().wait_stream(self._stream)
+        consumer = torch.cuda.current_stream()
+        consumer.wait_stream(self._stream)
         batch = self._next_batch
         self._next_batch = None
         if batch is None:
             raise StopIteration
+        for v in batch.values():
+            if isinstance(v, torch.Tensor) and v.is_cuda:
+                v.record_stream(consumer)
         self._prefetch()
         return batch
 

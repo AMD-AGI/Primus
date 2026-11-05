@@ -8,6 +8,7 @@ extends:
 tokenizer_type: HuggingFaceTokenizer
 ##### TODO update to GLM-5 tokenizer
 tokenizer_model: THUDM/glm-4-9b  # GLM-5 tokenizer requires newer transformers; use GLM-4 for mock_data testing
+vocab_size: 154880  # zai-org/GLM-5 (the tokenizer above is a stand-in)
 
 # model architecture
 num_layers: 78

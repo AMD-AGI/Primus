@@ -3,6 +3,7 @@ extends:
 
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: Qwen/Qwen2.5-72B
+vocab_size: 152064
 
 # Qwen 2.5 72B specific parameters
 hidden_size: 8192

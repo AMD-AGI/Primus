@@ -24,15 +24,14 @@ created once per dispatcher and reused every step), so the ``torch.equal``
 probe -- and the device sync it implies -- happens at most once per tensor.
 
 Gate:
-    ``MOE_SKIP_IDENTITY_SORT`` (default ``1`` / enabled; set ``0`` to disable).
+    ``moe_skip_identity_sort`` (default true; set false to disable).
 """
 
-import os
 import weakref
 
 import torch
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 # Cache the identity decision keyed on the index tensor's ``id()``. The topology
@@ -46,8 +45,8 @@ from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 _IDENTITY_CACHE: dict = {}
 
 
-def _skip_enabled(_ctx: PatchContext) -> bool:
-    return os.environ.get("MOE_SKIP_IDENTITY_SORT", "1") != "0"
+def _skip_enabled(ctx: PatchContext) -> bool:
+    return bool(getattr(get_args(ctx), "moe_skip_identity_sort", True))
 
 
 def _is_identity(idxs) -> bool:
@@ -86,7 +85,7 @@ def _make_wrapped_sort(orig_sort):
     description=(
         "Short-circuit sort_chunks_by_idxs in the MoE token dispatcher when the "
         "local-expert permutation is identity (e.g. EP=1/TP=1); gated by "
-        "MOE_SKIP_IDENTITY_SORT (default on)."
+        "moe_skip_identity_sort (default on)."
     ),
     condition=_skip_enabled,
 )

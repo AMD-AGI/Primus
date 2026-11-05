@@ -3,6 +3,7 @@ extends:
 
 tokenizer_type: Llama2Tokenizer
 tokenizer_model: meta-llama/Llama-2-7b-hf
+vocab_size: 32000
 
 group_query_attention: false
 

@@ -20,7 +20,7 @@ Provide a quick, opinionated guide for using Primus Projection to:
 - **Projection memory entrypoints**: `primus/core/projection/memory_projection/`
 - Pipeline schedulers: `primus/core/pipeline_parallel/scheduler/`
 - **Backend config adapters**: `primus/core/projection/frameworks/`
-- Example configs: `examples/megatron/configs/`, `examples/torchtitan/configs/`
+- Example configs: `examples/megatron/configs/`, `examples/torchtitan/configs/`, `examples/maxtext/configs/`
 - Hardware configs: `examples/hardware_configs/`
 
 ## Training Backends
@@ -29,11 +29,11 @@ Projection reads the `framework` field of the experiment's `pre_trainer` module 
 
 | `framework` | Benchmark modes | Simulate mode |
 |---|---|---|
-| `megatron`, `torchtitan`, `torchrec_dlrm` | Yes | Yes |
+| `megatron`, `torchtitan`, `maxtext` (alias `jax`), `torchrec_dlrm` | Yes | Yes |
 
-TorchTitan benchmarks through the same torch harness as Megatron; expert all-to-all is not timed there and is restored analytically. Architecture comes from the installed backend when present (TorchTitan's flavor table) and otherwise from the transcribed table in `primus/core/projection/frameworks/model_specs.py`, so no GPU or training checkout is needed to size a cluster in simulate mode.
+TorchTitan benchmarks through the same torch harness as Megatron. MaxText measures itself: it times a compiled `vjp` and takes activation sizes from XLA's compile-time accounting, so its attention/MLP split is apportioned analytically and its output head and loss are analytical. Expert all-to-all is not timed on either and is restored analytically. Architecture comes from the installed backend when present (TorchTitan's flavor table, MaxText's model YAMLs) and otherwise from the transcribed table in `primus/core/projection/frameworks/model_specs.py`, so no GPU or training checkout is needed to size a cluster in simulate mode.
 
-Note the vocabulary difference when reading a config: TorchTitan states parallelism as `parallelism.*_parallel_degree`, with `-1` meaning "the leftover ranks".
+Note the vocabulary differences when reading a config: TorchTitan states parallelism as `parallelism.*_parallel_degree` (with `-1` meaning "the leftover ranks") and MaxText as orthogonal `ici_*` / `dcn_*` mesh axes (with `-1` meaning the same). MaxText's `per_device_batch_size` counts every device, not every data-parallel rank.
 
 ## Projection Advisor (What users want to know)
 

@@ -43,11 +43,11 @@ def patch_turbo_mx_linear(ctx: PatchContext) -> None:
     from torchtitan.protocols.model_converter import _registry_model_converter_cls
 
     from primus.backends.torchtitan.components.quantization.mx import (
-        PrimusTubroMXConverter,
+        PrimusTurboMXConverter,
     )
 
-    _registry_model_converter_cls["mx"] = PrimusTubroMXConverter
-    torchtitan.components.quantization.mx.MXLinearConverter = PrimusTubroMXConverter
+    _registry_model_converter_cls["mx"] = PrimusTurboMXConverter
+    torchtitan.components.quantization.mx.MXLinearConverter = PrimusTurboMXConverter
 
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_mx_linear] " "Primus-Turbo MXLinear successfully installed.",

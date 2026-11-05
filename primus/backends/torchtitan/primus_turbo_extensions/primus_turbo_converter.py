@@ -31,27 +31,30 @@ def replace_turbo_attention_modules(model: torch.nn.Module, fp8_config):
             replace_turbo_attention_modules(module, fp8_config)
 
 
-class PrimusTubroConverter(ModelConverter):
+class PrimusTurboConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        from primus_turbo.pytorch.core.low_precision import (
-            Float8QuantConfig,
-            ScalingGranularity,
-        )
-
-        self.enabled = True
         self.primus_turbo_config = job_config.primus_turbo
-        self.fp8_config = (
-            Float8QuantConfig(
+        # Model configs list this converter unconditionally, but TurboAttention only matches
+        # the (q, k, v) Attention.forward installed by the turbo_attention patch, which is
+        # gated on the same two flags.
+        self.enabled = bool(
+            self.primus_turbo_config.enable_primus_turbo and self.primus_turbo_config.use_turbo_attention
+        )
+        self.fp8_config = None
+        if self.enabled and self.primus_turbo_config.enable_attention_float8:
+            from primus_turbo.pytorch.core.low_precision import (
+                Float8QuantConfig,
+                ScalingGranularity,
+            )
+
+            self.fp8_config = Float8QuantConfig(
                 granularity=ScalingGranularity.BLOCKWISE,
                 block_size=64,
             )
-            if self.primus_turbo_config.enable_attention_float8
-            else None
-        )
 
     def convert(self, model: torch.nn.Module):
-        if self.enabled == False:
-            return
+        if not self.enabled:
+            return model
 
         replace_turbo_attention_modules(model, self.fp8_config)
         return model
@@ -60,4 +63,4 @@ class PrimusTubroConverter(ModelConverter):
         return
 
 
-register_model_converter(PrimusTubroConverter, "primus_turbo")
+register_model_converter(PrimusTurboConverter, "primus_turbo")
