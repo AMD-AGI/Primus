@@ -18,11 +18,22 @@ convolutions, RMSNorm, and attention stay in BF16 or FP32.
 from __future__ import annotations
 
 import math
+import os
 from typing import List, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+# ZAYA_ATTN_FLASH=1 (default): drop a purely causal dense mask once per forward
+# and run CCA attention through flash_attn_func with native GQA, or through
+# SDPA enable_gqa when flash_attn is unavailable. ZAYA_ATTN_FLASH=0 restores
+# the dense-mask + repeat_interleave path.
+ATTN_FLASH = os.environ.get("ZAYA_ATTN_FLASH", "1") not in ("0", "false", "False", "")
+try:
+    from flash_attn import flash_attn_func as _flash_attn_func
+except Exception:  # pragma: no cover - depends on the image
+    _flash_attn_func = None
 
 
 def layer_kinds(num_layers: int, zaya_layers: Optional[Sequence] = None) -> List[str]:
@@ -315,8 +326,48 @@ class CCA(nn.Module):
         return self.o_proj(attn.reshape(seq, batch, self.latent_q))
 
 
+def is_causal_mask(mask: Optional[torch.Tensor]) -> bool:
+    """True when ``mask`` (Megatron convention, True blocks a key) is exactly causal.
+
+    Accepts any shape broadcastable to ``[..., s, s]``. One device-to-host sync.
+    """
+    if mask is None:
+        return True
+    if mask.dim() < 2 or mask.shape[-1] != mask.shape[-2]:
+        return False
+    s = mask.shape[-1]
+    ref = torch.ones(s, s, dtype=torch.bool, device=mask.device).triu_(1)
+    m = mask if mask.dtype == torch.bool else mask.bool()
+    return bool(torch.all(m == ref).item())
+
+
+def _attention_causal_gqa(query, key, value) -> torch.Tensor:
+    """Pure causal GQA without a dense mask or repeat_interleave. ``[s, b, h, d]`` in and out."""
+    if (
+        _flash_attn_func is not None
+        and query.is_cuda
+        and query.dtype in (torch.bfloat16, torch.float16)
+        and query.dtype == key.dtype == value.dtype
+        and query.shape[-1] <= 256
+    ):
+        # flash_attn layout is [b, s, h, d]; it handles h_q % h_kv == 0 natively.
+        # softmax_scale=None means 1/sqrt(d), the same as the SDPA default.
+        q = query.transpose(0, 1).contiguous()
+        k = key.transpose(0, 1).contiguous()
+        v = value.transpose(0, 1).contiguous()
+        out = _flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=True)
+        return out.transpose(0, 1)
+    q = query.permute(1, 2, 0, 3)
+    k = key.permute(1, 2, 0, 3)
+    v = value.permute(1, 2, 0, 3)
+    out = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=q.shape[1] != k.shape[1])
+    return out.permute(2, 0, 1, 3)
+
+
 def attention(query, key, value, attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
     """Causal GQA. ``attention_mask`` uses Megatron's convention: True blocks a key."""
+    if ATTN_FLASH and attention_mask is None:
+        return _attention_causal_gqa(query, key, value)
     # [s, b, h, d] -> [b, h, s, d]
     q = query.permute(1, 2, 0, 3)
     k = key.permute(1, 2, 0, 3)
@@ -553,6 +604,11 @@ class ZayaStack(nn.Module):
         return get_fp8_context(self.config)
 
     def forward(self, hidden_states, position_ids, attention_mask):
+        if ATTN_FLASH and attention_mask is not None and is_causal_mask(attention_mask):
+            # The dataloader's tril mask (reset_attention_mask=false) is plain
+            # causal: check it once here instead of materializing an additive
+            # [b, h, s, s] mask in each of the 40 CCA stages.
+            attention_mask = None
         with self._fp8_context():
             residual = None
             prev_router = None
