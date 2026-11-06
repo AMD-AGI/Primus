@@ -76,6 +76,18 @@ docker run --rm --entrypoint bash primus-specforge:muse-spark-1027-eagle4-1c253f
   /opt/primus/examples/specforge/docker/smoke-check-muse-eagle4.sh
 ```
 
-No GPU capture, target-model load, or training workload is covered by these
-image checks. Supply the intended Muse draft configuration and recipe and validate the
-workload on the target hardware separately.
+The image was also validated on MI355X GPUs with the Muse Spark Open
+816B-A42B Quark MXFP4 target and a Muse EAGLE4 draft configuration:
+
+- Two TP4 capture replicas advertised the plugin and published finite BF16
+  features through Mooncake. Layers `[1, 29, 57]` produced 24,576 auxiliary
+  channels and 8,192 final-state channels; replica parity checks passed.
+- Eight training workers completed 200 optimizer steps with an 8,192-token
+  maximum sequence length. All recorded losses were finite. The first-position
+  distillation loss changed from 11.832 at step 1 to 5.115 at step 200.
+- The final checkpoint recorded step 200, strategy `eagle4`, and world size 8,
+  with all eight rank-state files present. Capture and training exited cleanly.
+
+This is a capture-to-training integration test, not an acceptance-rate or
+inference-speed benchmark. Model weights, the draft JSON, and the training recipe
+remain runtime inputs and are not bundled in the image.
