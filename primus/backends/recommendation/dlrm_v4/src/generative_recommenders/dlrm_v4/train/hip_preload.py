@@ -78,9 +78,13 @@ DEFAULT_TABLE: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), "h
 #   hip_preload_table.jsonl            ROCm 7.2.1, torch 2.12.0+rocm7.2, FBGEMM 10b77573 (rocm/primus:v26.3 recipe)
 #   hip_preload_table_rocm10.2.jsonl   TheRock ROCm 10.2.0a20261015, torch 2.16.0a0 (kpack device code), FBGEMM
 #                                      nightly 2026.10.16 (UTD primus_rocm10.2_20261016 image)
+#   hip_preload_table_primus_v26.9.jsonl  rocm/primus:v26.9 (TheRock ROCm 10.2.0a20261020, torch 2.16.0a0, FBGEMM
+#                                      80bd3c07 built in the image); recorded with
+#                                      tools/recommendation/dlrm_v4/record_stack_tables.sh hip (13 rows, ~0.09 s)
 STACK_TABLES: Tuple[str, ...] = (
     DEFAULT_TABLE,
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "hip_preload_table_rocm10.2.jsonl"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "hip_preload_table_primus_v26.9.jsonl"),
 )
 ARMED = "armed OK: [hip-preload]"
 NOT_ARMED = "[hip-preload] NOT armed:"

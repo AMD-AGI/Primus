@@ -380,6 +380,21 @@ _SCALED_MM_PINS_ROCM102: List[ScaledMmPin] = [
 ]
 
 
+# ---- ROCm 10.2 / torch 2.16 (rocm/primus:v26.9, TheRock 10.2.0a20261020). Same hipBLASLt release
+# (1.5.0) as the UTD image, another build (cb261897), so a solution index is not guaranteed to name the
+# same kernel. The FP8 rows are taken over with three runtime checks of their own: matmulIsAlgoSupported
+# per (pin, M) (an unsupported index falls back to torch._scaled_mm), the X2L-B phase-2 bitwise
+# self-check against the pinned dgrad (fails closed unless the solution sums K in order), and the
+# 200-step throughput A/B (cluster B, 2026-11-06).
+EXPECTED_ENV_PRIMUS_V26_9: Dict[str, str] = {
+    "PT_VERSION": "2.16.0",
+    "HIP_VERSION": "717",
+    "HIPBLASLT_VERSION": "100500-cb261897",
+    "GCN_ARCH_NAME": "gfx950:sramecc+:xnack-",
+    "ROCBLAS_VERSION": "5.8.0.cb261897",
+}
+
+
 class _Stack(NamedTuple):
     name: str
     env: Dict[str, str]
@@ -391,6 +406,8 @@ _STACKS: List[_Stack] = [
     _Stack("ROCm 7.2 / torch 2.12 (rocm/primus:v26.3)", EXPECTED_ENV, _PINS, []),
     _Stack("ROCm 10.2 / torch 2.16 (UTD primus_rocm10.2_20261016)",
            EXPECTED_ENV_ROCM102, _PINS_ROCM102, _SCALED_MM_PINS_ROCM102),
+    _Stack("ROCm 10.2 / torch 2.16 (rocm/primus:v26.9)",
+           EXPECTED_ENV_PRIMUS_V26_9, _PINS_ROCM102, _SCALED_MM_PINS_ROCM102),
 ]
 
 _active: List[Tuple[str, str, str, str]] = []

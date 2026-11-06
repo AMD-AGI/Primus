@@ -23,6 +23,8 @@ RUN_START makes every library any reachable row count needs resident.
   merge  python gen_blas_replay_table.py merge <table.jsonl> <scan parts...>
   verify python gen_blas_replay_table.py verify <part> <nparts> <table.jsonl> <out.jsonl>
          (replays the table through blas_warmup's loader, then rescans with a shifted interleave: expect 0 slow)
+  filter python gen_blas_replay_table.py filter <table.jsonl> <out.jsonl> <verify parts...>
+         (keeps rows >= 500 ms whose cost does not recur at neighbouring M after the replay)
 """
 
 import json
@@ -139,7 +141,26 @@ def scan(part, nparts, out, shift=0, slow_ms=40.0, table=None):
                     del y
                     n_calls += 1
                     if ms > slow_ms:
-                        r = dict(K=k, N=n, op=op, M=m, ms=round(ms, 1), part=part, t=round(time.time(), 3))
+                        # A first use costs once; a slow kernel costs every call (hipBLASLt cb261897 picks a
+                        # 50-200 ms kernel for the 1024->256 dgrad at M >= ~0.8M, rows the dedup chain never
+                        # reaches). Only the part of the first call above a second one is a first-use cost.
+                        a = time.perf_counter()
+                        del_y = run_op(torch, bufs, k, n, op, m)
+                        torch.cuda.synchronize()
+                        ms2 = (time.perf_counter() - a) * 1e3
+                        del del_y
+                        if ms - ms2 <= slow_ms:
+                            continue
+                        r = dict(
+                            K=k,
+                            N=n,
+                            op=op,
+                            M=m,
+                            ms=round(ms, 1),
+                            ms_again=round(ms2, 1),
+                            part=part,
+                            t=round(time.time(), 3),
+                        )
                         rows.append(r)
                         print("SLOW " + json.dumps(r), flush=True)
     import torch.cuda.tunable as tunable
@@ -198,12 +219,50 @@ def merge(table, parts):
     print(f"wrote {table}: {len(rows)} rows from {len(metas)} parts")
 
 
+def filter_table(table, out, verify_parts, min_ms=500.0, window=0.05):
+    """Keep the rows a replay can fix: first call >= min_ms, and no slow call in the verify rescan (after the
+    replay) at an M within `window` of it. A cost that recurs at neighbouring M after the replay is per shape
+    (hipBLASLt cb261897: 2-3 s at every new M in some regions), not a library load; replaying it only costs init.
+    """
+    with open(table) as f:
+        lines = [json.loads(line) for line in f]
+    hdr, rows = lines[0], lines[1:]
+    slow = []
+    for p in verify_parts:
+        with open(p) as f:
+            slow += [d for d in map(json.loads, f) if "meta" not in d and d["ms"] >= min_ms]
+
+    def recurs(r):
+        return any(
+            (v["K"], v["N"], v["op"]) == (r["K"], r["N"], r["op"]) and abs(v["M"] - r["M"]) <= window * r["M"]
+            for v in slow
+        )
+
+    keep = [r for r in rows if r["ms"] >= min_ms and not recurs(r)]
+    hdr["filter"] = dict(
+        min_ms=min_ms,
+        recurrence_window=window,
+        rows_scanned=len(rows),
+        dropped_recurring=sum(1 for r in rows if r["ms"] >= min_ms and recurs(r)),
+    )
+    with open(out, "w") as f:
+        f.write(json.dumps(hdr) + "\n")
+        for r in keep:
+            f.write(json.dumps({k: r[k] for k in ("K", "N", "op", "M", "ms")}) + "\n")
+    print(
+        f"wrote {out}: {len(keep)} rows ({sum(r['ms'] for r in keep) / 1000:.1f} s of first uses), "
+        f"{hdr['filter']['dropped_recurring']} recurring rows dropped"
+    )
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "scan":
         scan(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4])
     elif cmd == "merge":
         merge(sys.argv[2], sys.argv[3:])
+    elif cmd == "filter":
+        filter_table(sys.argv[2], sys.argv[3], sys.argv[4:])
     elif cmd == "verify":
         scan(int(sys.argv[2]), int(sys.argv[3]), sys.argv[5], shift=1, table=sys.argv[4])
     else:

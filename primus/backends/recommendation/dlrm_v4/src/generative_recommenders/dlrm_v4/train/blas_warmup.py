@@ -685,7 +685,10 @@ def _prebuild_action_dedup(device: torch.device) -> None:
 # Kill switch DLRM_BLAS_REPLAY=0.
 # ----------------------------------------------------------------------------
 _BLAS_REPLAY_ENV: str = "DLRM_BLAS_REPLAY"
-_BLAS_REPLAY_TABLES: Tuple[str, ...] = ("blas_replay_table_rocm10.2.jsonl",)
+# blas_replay_table_primus_v26.9.jsonl: rocm/primus:v26.9 (hipBLASLt 100500-cb261897), recorded with
+# tools/recommendation/dlrm_v4/record_stack_tables.sh blas (rows whose cost does not recur at other M).
+_BLAS_REPLAY_TABLES: Tuple[str, ...] = (
+    "blas_replay_table_rocm10.2.jsonl", "blas_replay_table_primus_v26.9.jsonl")
 _BLAS_REPLAY_KEYS: Tuple[str, ...] = (
     "PT_VERSION", "HIP_VERSION", "HIPBLASLT_VERSION", "ROCBLAS_VERSION", "GCN_ARCH_NAME")
 _BLAS_REPLAY_SLOW_MS: float = 40.0
