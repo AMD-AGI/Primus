@@ -1,0 +1,54 @@
+extends:
+  - mamba_base.yaml
+
+# Native HyLo Llama-3.2-1B topology: 16 mixer/MLP blocks represented as
+# 32 flat HybridStack sublayers. Recipes override hybrid_attention_ratio to
+# 0.0 (GDN ILD), 1.0 (MLA ILD), or 0.25 (4MLA12GDN stage 2).
+model_type: mamba
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B-Instruct
+
+num_layers: 32
+hidden_size: 2048
+ffn_hidden_size: 8192
+num_attention_heads: 32
+
+is_hybrid_model: true
+hybrid_attention_ratio: 0.25
+# MLA blocks 1, 5, 10, and 14, matching the published 4MLA12GDN model.
+hybrid_override_pattern: "M-*-M-M-M-*-M-M-M-M-*-M-M-M-*-M-"
+
+# GDN dimensions from amd/HyLo-Llama-4MLA12GDN-8K-SFT.
+linear_conv_kernel_dim: 4
+linear_key_head_dim: 256
+linear_value_head_dim: 512
+linear_num_key_heads: 6
+linear_num_value_heads: 6
+use_short_conv: true
+
+# MLA dimensions from the released hybrid_config.json.
+group_query_attention: false
+num_query_groups: 8
+multi_latent_attention: true
+q_lora_rank: 1344
+kv_lora_rank: 128
+qk_head_dim: 32
+qk_pos_emb_head_dim: 32
+v_head_dim: 64
+
+swiglu: true
+normalization: RMSNorm
+rotary_base: 500000
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072
+original_max_position_embeddings: 2048
+rotary_scaling_factor: 4.0
+# HyLo's MLA rope_scaling sets no mscale_all_dim: the softmax scale stays
+# 1/sqrt(q_head_dim) and YaRN scales cos and sin by 0.1 * ln(factor) + 1.
+# language_model.yaml's mscale_all_dim 1.0 would move that factor, squared,
+# onto every query-key product.
+mscale: 1.0
+mscale_all_dim: 0.0
+norm_epsilon: 1.0e-5
