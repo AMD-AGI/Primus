@@ -85,6 +85,8 @@ class ModelParts:
     layers: List[Any] = field(default_factory=list)
     embedding: Optional[Any] = None
     output_layer: Optional[Any] = None
+    #: Module whose ``compute_language_model_loss(labels, logits)`` training calls.
+    loss_owner: Optional[Any] = None
 
 
 @dataclass
