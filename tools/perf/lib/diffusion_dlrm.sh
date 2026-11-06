@@ -129,7 +129,9 @@ perf_dd_prepare() {
     [ -n "$PERF_DD_GPU" ] && PERF_DD_ARGS+=( --gpu "$PERF_DD_GPU" )
     [ -n "${DOCKER_IMAGE:-}" ] && PERF_DD_ARGS+=( --image "$DOCKER_IMAGE" )
     [ -n "$DIFFUSION_DLRM_HF_CACHE" ] && PERF_DD_ARGS+=( --hf-cache "$DIFFUSION_DLRM_HF_CACHE" )
-    [ -n "$TRAIN_STEPS" ] && PERF_DD_ARGS+=( --num-iterations "$TRAIN_STEPS" )
+    if [ -n "$TRAIN_STEPS" ] && ! train_steps_ignored "$PERF_DIFFUSION_DLRM_BACKEND"; then
+        PERF_DD_ARGS+=( --num-iterations "$TRAIN_STEPS" )
+    fi
 
     # stdout is the plan; a warning on stderr must not end up in it.
     errors=$(mktemp)
@@ -160,6 +162,17 @@ perf_dd_log_name() {
     name="${name%.yaml}"
     name="${name%.yml}"
     echo "${RESULT_DIR}/${PERF_DIFFUSION_DLRM_BACKEND}-$(sanitize "$name")-$(config_fingerprint "$DIFFUSION_DLRM_CONFIG")-rep${1}_${BATCH_TS}.log"
+}
+
+# The run banner's training length.
+perf_dd_steps_text() {
+    if [ -z "$TRAIN_STEPS" ]; then
+        echo "per diffusion_bench config"
+    elif train_steps_ignored "$PERF_DIFFUSION_DLRM_BACKEND"; then
+        echo "per diffusion_bench config (TRAIN_STEPS=$TRAIN_STEPS not applied to $PERF_DIFFUSION_DLRM_BACKEND)"
+    else
+        echo "$TRAIN_STEPS (diffusion num_iterations; DLRM unchanged)"
+    fi
 }
 
 perf_dd_limits_text() {
@@ -279,7 +292,7 @@ perf_dd_print_plan() {
     perf_dd_launch_argv
     echo "[diffusion_dlrm] $(perf_dd_config_name) [$(config_fingerprint "$DIFFUSION_DLRM_CONFIG")]  (runs after the configs above)"
     echo "      $(perf_dd_summary)"
-    echo "      gpu=$(perf_dd_plan '.gpu') reps=${NUM_REPS}; $(perf_dd_limits_text)"
+    echo "      gpu=$(perf_dd_plan '.gpu') steps=$(perf_dd_steps_text) reps=${NUM_REPS}; $(perf_dd_limits_text)"
     echo "      output: $PERF_DD_OUTPUT_DIR/<gpu>_<host>_<time>/"
     echo "      log: $(perf_dd_log_name 1)"
     echo "      cmd: $(perf_display_argv "${LAUNCH_ARGV[@]}")"

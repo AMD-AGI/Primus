@@ -486,15 +486,55 @@ BENCHMARK_TRAINER: dict[str, Any] = {
     },
 }
 
-# Registered on later benchmark PRs. Reject them here so this release does not
-# build trainer defaults, or download checkpoints, for a model it cannot run.
-_UNBUILT_BENCHMARKS = {
-    "sdxl",
-    "stable-diffusion-xl",
-    "mochi-1",
-    "hunyuan-video",
-    "wan2.1-i2v",
+_SPECS: dict[str, dict[str, Any]] = {
+    "wan2.1-i2v": {
+        "modality": "video",
+        "fsdp_layers": "DiTBlock",
+        "learning_rate": 1.0e-5,
+        "lr_scheduler_type": "constant",
+        "warmup_steps": 0,
+        "gradient_checkpointing": True,
+    },
+    "sdxl": {
+        "modality": "image",
+        "fsdp_layers": "BasicTransformerBlock",
+        "learning_rate": 1.0e-4,
+        "lr_scheduler_type": "polynomial",
+        # Shorter than the default ``max_steps`` so a builder-only run leaves warmup.
+        # The MI300X and MI325X configs still set warmup_steps to 100.
+        "warmup_steps": 10,
+        "gradient_checkpointing": False,
+    },
+    "mochi-1": {
+        "modality": "video",
+        "fsdp_layers": "AsymmetricJointBlock",
+        "learning_rate": 1.0e-5,
+        "lr_scheduler_type": "constant",
+        "warmup_steps": 0,
+        "gradient_checkpointing": False,
+    },
+    "hunyuan-video": {
+        "modality": "video",
+        "fsdp_layers": "MMDoubleStreamBlock,MMSingleStreamBlock",
+        "learning_rate": 1.0e-5,
+        "lr_scheduler_type": "constant",
+        "warmup_steps": 0,
+        # Off on MI300X, MI325X, and MI355X. The 13B run stays inside memory at
+        # batch 1, and checkpointing would change the AMDB step time.
+        "gradient_checkpointing": False,
+    },
 }
+
+
+def _spec(model_name: str) -> dict[str, Any] | None:
+    if model_name == "stable-diffusion-xl":
+        model_name = "sdxl"
+    return _SPECS.get(model_name)
+
+
+# Every benchmark in this release has a builder. A name added here is rejected
+# before any checkpoint or dataset download.
+_UNBUILT_BENCHMARKS: set[str] = set()
 
 
 def _positive_image_size(value: Any) -> int:
@@ -564,11 +604,34 @@ def benchmark_defaults(
         trainer["args"]["fsdp_module_paths_to_wrap"] = flux_trainer["args"]["fsdp_module_paths_to_wrap"]
         trainer["args"]["fsdp_module_paths_no_reshard"] = flux_trainer["args"]["fsdp_module_paths_no_reshard"]
         return dataset, trainer
+    spec = _spec(model_name)
+    if spec is not None:
+        del flux_dataset, flux_trainer
+        canonical = "sdxl" if model_name == "stable-diffusion-xl" else model_name
+        dataset = {
+            "name": "amdb",
+            "config": {
+                "dataset_path": "",
+                # Lets an empty path select that model's dataset instead of failing the lookup.
+                "model_name": canonical,
+                "modality": spec["modality"],
+                "max_train_samples": -1,
+                "split": "train",
+            },
+        }
+        trainer = copy.deepcopy(BENCHMARK_TRAINER)
+        trainer["args"]["learning_rate"] = spec["learning_rate"]
+        trainer["args"]["lr_scheduler_type"] = spec["lr_scheduler_type"]
+        trainer["args"]["warmup_steps"] = spec["warmup_steps"]
+        trainer["args"]["gradient_checkpointing"] = spec["gradient_checkpointing"]
+        trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] = spec["fsdp_layers"]
+        trainer["args"]["run_name"] = model_name
+        return dataset, trainer
     if model_name in _UNBUILT_BENCHMARKS:
         raise ValueError(
             f"{model_name} has no diffusion model builder. "
-            "This release registers the flux-dev benchmark only, so the config is rejected "
-            "before any checkpoint or dataset download."
+            "This release registers flux-dev, wan2.1-i2v, sdxl, mochi-1, and hunyuan-video only, "
+            "so the config is rejected before any checkpoint or dataset download."
         )
     return None
 
@@ -596,3 +659,20 @@ def apply_benchmark_sections(
             processor["img_size"] = _square_image_size(resolution)
         if int(trainer_args.get("sp_size", 1)) != 1:
             raise ValueError("flux-dev diffusion training requires `parallelism.sp_size: 1`.")
+        return
+
+    spec = _spec(model_name)
+    if spec is None:
+        return
+    if int(trainer_args.get("sp_size", 1)) != 1:
+        raise ValueError(f"{model_name} diffusion training requires `parallelism.sp_size: 1`.")
+    dataset_cfg["model_name"] = "sdxl" if model_name == "stable-diffusion-xl" else model_name
+    dataset_cfg["modality"] = data.get("modality") or spec["modality"]
+    for key in ("max_train_samples", "revision", "split"):
+        if data.get(key) is not None:
+            dataset_cfg[key] = data[key]
+    model_cfg = normalized["model"].setdefault("config", {})
+    if isinstance(model_cfg, dict):
+        for key in ("resolution", "num_frames", "center_crop", "shift"):
+            if data.get(key) is not None:
+                model_cfg[key] = data[key]

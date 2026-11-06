@@ -20,11 +20,38 @@ import os
 import sys
 from pathlib import Path
 
+# PR 4 adds metadata.csv so prompts load next to the clips. Pin the commit:
+# ``refs/pr/4`` moves when that pull request gains another commit.
+DISNEY_DATASET_REPO = "Wild-Heart/Disney-VideoGeneration-Dataset"
+DISNEY_DATASET_REVISION = "316b85f5d7c263260cc526a25eece96cc30e0c06"
+
 _MODEL_FILES: dict[str, tuple[str, str]] = {
     "flux-dev": ("black-forest-labs/FLUX.1-dev", "flux1-dev.safetensors"),
+    "wan2.1-i2v": ("Wan-AI/Wan2.1-I2V-14B-480P-Diffusers", "transformer"),
+    "sdxl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
+    "stable-diffusion-xl": ("stabilityai/stable-diffusion-xl-base-1.0", "sd_xl_base_1.0.safetensors"),
+    "mochi-1": ("genmo/mochi-1-preview", "dit.safetensors"),
+    "hunyuan-video": ("hunyuanvideo-community/HunyuanVideo", "transformer"),
 }
+_MODEL_DOWNLOAD_PATTERNS: dict[str, list[str]] = {
+    "mochi-1": ["dit.safetensors", "encoder.safetensors"],
+}
+_MOCHI_T5_DOWNLOAD_PATTERNS = [
+    "config.json",
+    "pytorch_model*.bin",
+    "pytorch_model.bin.index.json",
+    "spiece.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+]
 _DATASETS: dict[str, tuple[str, str | None]] = {
     "flux-dev": ("frank-chieng/chinese_architecture_siheyuan", None),
+    "wan2.1-i2v": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
+    "sdxl": ("frank-chieng/chinese_architecture_siheyuan", None),
+    "stable-diffusion-xl": ("frank-chieng/chinese_architecture_siheyuan", None),
+    "mochi-1": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
+    "hunyuan-video": (DISNEY_DATASET_REPO, DISNEY_DATASET_REVISION),
 }
 
 
@@ -99,9 +126,34 @@ def _is_hf_repo(value: str) -> bool:
     if path.exists() or value.startswith(("/", "./", "../", "~")):
         return False
     parts = value.split("/")
-    if len(parts) < 2 or not all(parts[:2]):
+    if len(parts) != 2 or not all(parts):
         return False
-    return not parts[-1].endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt"))
+    return not value.endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt"))
+
+
+def _distributed_rank() -> int | None:
+    """Return the process rank, or None when distributed is not initialized."""
+    try:
+        import torch.distributed as dist
+    except ImportError:
+        return None
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return None
+
+
+def _on_rank0_then_others(download):
+    """Run ``download`` on rank 0 first so other ranks hit a warm cache."""
+    rank = _distributed_rank()
+    result = download() if rank in (None, 0) else None
+    if rank is None:
+        return result
+    import torch.distributed as dist
+
+    dist.barrier()
+    if rank != 0:
+        result = download()
+    return result
 
 
 def _snapshot(
@@ -112,36 +164,42 @@ def _snapshot(
 ) -> str:
     from huggingface_hub import snapshot_download
 
-    home = configure_huggingface_cache()
-    _log(f"Downloading {repo_id} (model) into {home / 'hub'}")
-    kwargs: dict[str, object] = {"repo_id": repo_id, "cache_dir": str(home / "hub")}
-    if revision:
-        kwargs["revision"] = revision
-    if allow_patterns:
-        kwargs["allow_patterns"] = allow_patterns
-    return snapshot_download(**kwargs)
+    def download() -> str:
+        home = configure_huggingface_cache()
+        _log(f"Downloading {repo_id} (model) into {home / 'hub'}")
+        kwargs: dict[str, object] = {"repo_id": repo_id, "cache_dir": str(home / "hub")}
+        if revision:
+            kwargs["revision"] = revision
+        if allow_patterns:
+            kwargs["allow_patterns"] = allow_patterns
+        return snapshot_download(**kwargs)
+
+    return _on_rank0_then_others(download)
 
 
 def _snapshot_dataset(repo_id: str, *, revision: str | None = None) -> str:
     """Download a dataset repo into ``datasets/<org>/<name>``, not the model hub."""
     from huggingface_hub import snapshot_download
 
-    configure_huggingface_cache()
-    local_dir = dataset_folder(repo_id)
-    local_dir.mkdir(parents=True, exist_ok=True)
-    blob_cache = dataset_root() / ".hub"
-    blob_cache.mkdir(parents=True, exist_ok=True)
-    _log(f"Downloading {repo_id} (dataset) into {local_dir}")
-    kwargs: dict[str, str] = {
-        "repo_id": repo_id,
-        "repo_type": "dataset",
-        "cache_dir": str(blob_cache),
-        "local_dir": str(local_dir),
-    }
-    if revision:
-        kwargs["revision"] = revision
-    snapshot_download(**kwargs)
-    return str(local_dir)
+    def download() -> str:
+        configure_huggingface_cache()
+        local_dir = dataset_folder(repo_id)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        blob_cache = dataset_root() / ".hub"
+        blob_cache.mkdir(parents=True, exist_ok=True)
+        _log(f"Downloading {repo_id} (dataset) into {local_dir}")
+        kwargs: dict[str, str] = {
+            "repo_id": repo_id,
+            "repo_type": "dataset",
+            "cache_dir": str(blob_cache),
+            "local_dir": str(local_dir),
+        }
+        if revision:
+            kwargs["revision"] = revision
+        snapshot_download(**kwargs)
+        return str(local_dir)
+
+    return _on_rank0_then_others(download)
 
 
 def materialize_pretrained(model_name: str, pretrained: str | None) -> str:
@@ -151,22 +209,22 @@ def materialize_pretrained(model_name: str, pretrained: str | None) -> str:
         return str(pretrained or "")
     default_repo, relative = spec
     text = str(pretrained or "").strip()
+    # YAML templates ship ``/path/to/...`` as "not set"; download the official file.
+    if not text or text.startswith("/path/to/"):
+        text = ""
     local = Path(text).expanduser() if text else None
     if local is not None and local.exists():
         return str(local)
     repo_id = default_repo
     filename = relative
-    remote_file = text.count("/") >= 2 and not text.startswith(("/", ".", "~"))
     if text and _is_hf_repo(text):
         repo_id = text
-    elif remote_file:
-        org, _, remainder = text.partition("/")
-        name, _, filename = remainder.partition("/")
-        repo_id = f"{org}/{name}"
-        filename = filename or relative
     elif text:
         raise FileNotFoundError(f"{model_name} checkpoint does not exist: {text}")
-    snapshot = _snapshot(repo_id)
+    patterns = _MODEL_DOWNLOAD_PATTERNS.get(model_name)
+    if patterns is None and filename:
+        patterns = [filename]
+    snapshot = _snapshot(repo_id, allow_patterns=patterns)
     target = Path(snapshot) / filename
     if not target.exists():
         raise FileNotFoundError(f"{repo_id} has no {filename} in {snapshot}")
@@ -178,7 +236,7 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
     """Return a local dataset directory, downloading the repo when needed."""
     default = _DATASETS.get(model_name)
     text = str(dataset_path or "").strip()
-    if text.endswith(".pt"):
+    if text.startswith("synthetic:") or text.endswith(".pt"):
         return text
     local = Path(text).expanduser() if text else None
     if local is not None and local.exists():
@@ -187,16 +245,24 @@ def materialize_dataset(model_name: str, dataset_path: str | None, revision: str
         repo_id = text
         rev = revision
     elif not text and default is not None:
-        repo_id, rev = default
+        repo_id, default_rev = default
+        # An explicit revision wins over the table, including the empty-path default.
+        rev = revision or default_rev
     else:
         return text
+    if repo_id == DISNEY_DATASET_REPO and not rev:
+        rev = DISNEY_DATASET_REVISION
     return _snapshot_dataset(repo_id, revision=rev)
 
 
-def prefetch_huggingface_repo(value: str | None) -> None:
+def prefetch_huggingface_repo(value: str | None, *, allow_patterns: list[str] | None = None) -> None:
     text = str(value or "").strip()
     if text and _is_hf_repo(text):
-        _snapshot(text)
+        if allow_patterns is None:
+            # Root weight and tokenizer files only. Nested fp16/onnx/openvino copies
+            # are not used by the SDXL CLIP encoders.
+            allow_patterns = ["*.safetensors", "*.bin", "*.json", "*.txt", "*.model", "*.tiktoken"]
+        _snapshot(text, allow_patterns=allow_patterns)
 
 
 def _blank(value: object) -> bool:
@@ -206,9 +272,23 @@ def _blank(value: object) -> bool:
 
 def _checkpoint_root(weights: str) -> Path:
     path = Path(weights)
-    if path.is_file():
+    if path.is_file() or path.name == "transformer":
         return path.parent
     return path
+
+
+def tokenizer_dir(model_path: str) -> str:
+    """Tokenizer folder for a downloaded text encoder.
+
+    Diffusers snapshots keep ``tokenizer/`` next to ``text_encoder/``.
+    """
+    path = Path(model_path)
+    if (path / "tokenizer_config.json").is_file():
+        return str(path)
+    sibling = path.parent / "tokenizer"
+    if (sibling / "tokenizer_config.json").is_file():
+        return str(sibling)
+    return str(path)
 
 
 def _require_file(path: Path, description: str) -> str:
@@ -219,16 +299,56 @@ def _require_file(path: Path, description: str) -> str:
 
 def _companion_paths(model_name: str, weights: str, encoder: dict[str, object]) -> dict[str, str]:
     """Local encoder files that belong to the downloaded checkpoint."""
-    if not weights or model_name != "flux-dev":
+    if not weights:
         return {}
     root = _checkpoint_root(weights)
-    if not _blank(encoder.get("autoencoder")):
-        return {}
-    return {"VAE_CHECKPOINT": _require_file(root / "ae.safetensors", "FLUX autoencoder")}
+    found: dict[str, str] = {}
+    if model_name == "flux-dev" and _blank(encoder.get("autoencoder")):
+        found["VAE_CHECKPOINT"] = _require_file(root / "ae.safetensors", "FLUX autoencoder")
+    elif model_name == "wan2.1-i2v":
+        needed = {
+            "TEXT_ENCODER": "t5_encoder",
+            "VAE_CHECKPOINT": "autoencoder",
+            "CLIP_CHECKPOINT": "image_encoder",
+        }
+        if any(_blank(encoder.get(key)) for key in needed.values()):
+            snapshot = _snapshot(
+                "Wan-AI/Wan2.1-I2V-14B-480P",
+                allow_patterns=[
+                    "Wan2.1_VAE.pth",
+                    "models_t5_umt5-xxl-enc-bf16.pth",
+                    "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+                ],
+            )
+            files = {
+                "TEXT_ENCODER": Path(snapshot) / "models_t5_umt5-xxl-enc-bf16.pth",
+                "VAE_CHECKPOINT": Path(snapshot) / "Wan2.1_VAE.pth",
+                "CLIP_CHECKPOINT": Path(snapshot) / "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+            }
+            for env_key, cfg_key in needed.items():
+                if _blank(encoder.get(cfg_key)):
+                    found[env_key] = _require_file(files[env_key], env_key)
+    elif model_name in {"sdxl", "stable-diffusion-xl"} and _blank(encoder.get("autoencoder")):
+        vae = Path(weights) if Path(weights).is_file() else root / "sd_xl_base_1.0.safetensors"
+        found["VAE_CHECKPOINT"] = _require_file(vae, "SDXL autoencoder")
+    elif model_name == "mochi-1" and _blank(encoder.get("autoencoder")):
+        found["VAE_CHECKPOINT"] = _require_file(root / "encoder.safetensors", "Mochi VAE encoder")
+    elif model_name == "hunyuan-video":
+        if _blank(encoder.get("llm")):
+            found["LLM_ENCODER"] = _require_file(root / "text_encoder", "HunyuanVideo LLaMA encoder")
+        # The community snapshot sometimes ships ``vae/`` and sometimes does not.
+        # Latent batches do not need it; raw video does, and the caller can set
+        # ``encoder.autoencoder`` when the folder lives somewhere else.
+        if _blank(encoder.get("autoencoder")) and (root / "vae").exists():
+            found["VAE_CHECKPOINT"] = str(root / "vae")
+    return found
 
 
 _ENCODER_ENV_KEYS = {
     "VAE_CHECKPOINT": "autoencoder",
+    "LLM_ENCODER": "llm",
+    "TEXT_ENCODER": "t5_encoder",
+    "CLIP_CHECKPOINT": "image_encoder",
 }
 
 
@@ -248,6 +368,10 @@ def stage_benchmark_assets(
     """Download benchmark weights and the dataset, and return env exports."""
     env = cache_env()
     encoder = dict(encoder or {})
+    dataset_text = str(dataset_path or "").strip()
+    if dataset_text.startswith("synthetic:"):
+        _log(f"Skipping asset downloads for pre-encoded benchmark dataset: {dataset_text}")
+        return env
     weights = materialize_pretrained(model_name, pretrained)
     if weights and _replace_with_download(pretrained):
         env["PRETRAINED_PATH"] = weights
@@ -256,7 +380,12 @@ def stage_benchmark_assets(
         env["DATASET_PATH"] = data
     if os.environ.get("BENCHMARK_DENOISER_ONLY") != "1":
         env.update(_companion_paths(model_name, weights, encoder))
-        for value in encoder.values():
+        for key, value in encoder.items():
             if isinstance(value, str):
-                prefetch_huggingface_repo(value)
+                patterns = (
+                    _MOCHI_T5_DOWNLOAD_PATTERNS
+                    if model_name == "mochi-1" and key in {"t5", "text_encoder"}
+                    else None
+                )
+                prefetch_huggingface_repo(value, allow_patterns=patterns)
     return env

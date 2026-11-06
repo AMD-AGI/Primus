@@ -95,7 +95,8 @@ def _reject_unbuilt_benchmark(model_name: str) -> None:
     if model_name in _UNBUILT_BENCHMARKS:
         _fail(
             f"{model_name} has no diffusion model builder. "
-            "This release registers flux-dev only; refusing to download its assets."
+            "This release registers flux-dev, wan2.1-i2v, sdxl, mochi-1, and hunyuan-video only; "
+            "refusing to download its assets."
         )
 
 
@@ -121,18 +122,19 @@ def _validate_local_or_hf_id(value: str | None, description: str) -> None:
         _fail(f"{description} is neither an existing path nor a Hugging Face reference: {value!r}")
 
 
-_BENCHMARK_DOWNLOADS = {"flux-dev"}
-
-# Names that have download metadata but no model builder in this release.
-# Reject them before stage_benchmark_assets so a config cannot download
-# checkpoints and then crash in get_model_builder.
-_UNBUILT_BENCHMARKS = {
+_BENCHMARK_DOWNLOADS = {
+    "flux-dev",
+    "wan2.1-i2v",
     "sdxl",
     "stable-diffusion-xl",
     "mochi-1",
     "hunyuan-video",
-    "wan2.1-i2v",
 }
+
+# Names that have download metadata but no model builder in this release.
+# Reject them before stage_benchmark_assets so a config cannot download
+# checkpoints and then crash in get_model_builder.
+_UNBUILT_BENCHMARKS: set[str] = set()
 
 
 def _stage_benchmark_downloads(
@@ -173,6 +175,45 @@ def _stage_benchmark_downloads(
         if env.get(env_key):
             encoder_cfg[cfg_key] = env[env_key]
     return env
+
+
+def _validate_benchmark_model(
+    model_name: str,
+    dataset_cfg: dict[str, Any],
+    model_cfg: dict[str, Any],
+    model: dict[str, Any],
+) -> None:
+    dataset_path = str(dataset_cfg.get("dataset_path") or "")
+    if dataset_path.startswith("synthetic:"):
+        _log(f"{model_name} denoiser-only synthetic batch: {dataset_path}")
+        return
+    if dataset_path.endswith(".pt") and Path(dataset_path).is_file():
+        _log(f"{model_name} cached AMDiffusionBenchmark encodings: {dataset_path}")
+        return
+    if not dataset_path.strip():
+        _log(f"{model_name} dataset: official default")
+    else:
+        _validate_local_or_hf_id(dataset_cfg.get("dataset_path"), f"{model_name} dataset")
+    encoder_cfg = model_cfg.get("encoder", {}) or model.get("encoder", {})
+    _require_optional_path(
+        model_cfg.get("load_from_pretrained_path"),
+        f"{model_name} initialization checkpoint",
+    )
+    if model_name in {"sdxl", "stable-diffusion-xl"}:
+        _validate_local_or_hf_id(encoder_cfg.get("clip_l"), "SDXL CLIP-L encoder")
+        _validate_local_or_hf_id(encoder_cfg.get("clip_g"), "SDXL CLIP-G encoder")
+        _require_optional_path(encoder_cfg.get("autoencoder"), "SDXL VAE checkpoint")
+    elif model_name == "wan2.1-i2v":
+        _validate_local_or_hf_id(encoder_cfg.get("tokenizer"), "Wan2.1 text tokenizer")
+        _require_optional_path(encoder_cfg.get("t5_encoder"), "Wan2.1 text encoder checkpoint")
+        _require_optional_path(encoder_cfg.get("autoencoder"), "Wan2.1 VAE checkpoint")
+        _require_optional_path(encoder_cfg.get("image_encoder"), "Wan2.1 CLIP vision checkpoint")
+    elif model_name == "mochi-1":
+        _validate_local_or_hf_id(encoder_cfg.get("t5"), "Mochi T5 encoder")
+        _require_optional_path(encoder_cfg.get("autoencoder"), "Mochi VAE encoder checkpoint")
+    elif model_name == "hunyuan-video":
+        _validate_local_or_hf_id(encoder_cfg.get("llm"), "HunyuanVideo LLaMA encoder")
+        _validate_local_or_hf_id(encoder_cfg.get("clip"), "HunyuanVideo CLIP encoder")
 
 
 def validate_diffusion_config(config_path: Path, module_name: str | None = None) -> None:
@@ -249,6 +290,8 @@ def validate_diffusion_config(config_path: Path, module_name: str | None = None)
             model_cfg.get("load_from_pretrained_path"),
             "FLUX DiT initialization checkpoint",
         )
+    elif model_name in _BENCHMARK_DOWNLOADS - {"flux-dev"}:
+        _validate_benchmark_model(model_name, dataset_cfg, model_cfg, model)
     else:
         _fail(f"unsupported diffusion model for prepare hook: {model_name!r}")
 

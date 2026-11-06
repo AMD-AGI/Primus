@@ -6,25 +6,33 @@ Training performance validation of the Primus Docker image with the Megatron bac
 
 The Primus framework with the Megatron backend is designed to enable efficient training of large-scale language models on AMD GPUs. By leveraging AMD Instinct™ MI300X/MI350X accelerators, the Primus Megatron framework delivers enhanced scalability, performance, and resource utilization for AI workloads. It is purpose-built to support models like Llama 2, Llama 3/3.1, DeepSeek V2/V3, and Mixtral MoE, enabling developers to train next-generation AI models with greater efficiency. See the GitHub repository at [AMD-AGI/Primus](https://github.com/AMD-AGI/Primus).
 
-The ROCm PyTorch training Docker image `rocm/primus:v26.8`, available through [Docker hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for pre-training a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X accelerators.
+The PyTorch for ROCm training Docker image `rocm/primus:v26.9`, available through [Docker Hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for pretraining a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X GPUs.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.7`](../01-getting-started/release-notes.md#rocmprimusv267).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
 ---
 
-## Important notes for v26.8
+## Important notes for v26.9
 
 Read this section before starting a training run. It collects the settings this release requires, the architecture-specific tuning, and the known issues. The contents change from release to release, so re-read it when you move to a new image tag.
 
 ### Required settings
 
-**Use the `release/v26.8` branch.** It is the Primus branch matching the `rocm/primus:v26.8` image. The image was built from `f487a934`, the current branch tip, so the `/workspace/Primus` copy baked into it currently matches; a checkout keeps you current if later commits land on the branch. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268). [Environment setup](#1-environment-setup) has the clone command.
+**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/primus:v26.9` image. The image was built from `db1a4160` on that branch, and the `/workspace/Primus` copy baked into it is that commit. The branch has moved since: it is now at `93dd9201`, which adds MI325X GPT-OSS-20B and ZAYA1-8B recipe tuning ([#1355](https://github.com/AMD-AGI/Primus/pull/1355)), so use the checkout rather than the in-image copy. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269). [Environment setup](#1-environment-setup) has the clone command.
 
 ### Changes you may need to act on
 
-**Hybrid configs are named `zebra_*` again.** v26.7 shipped the Zebra-Llama hybrid recipes as `hylo_*`; v26.8 restores the original name ([#1167](https://github.com/AMD-AGI/Primus/pull/1167)). For example, `examples/megatron/configs/MI300X/hylo_llama_mamba_8B_BF16-pretrain.yaml` is now `zebra_llama_mamba_8B_BF16-pretrain.yaml`, the model presets are `zebra_<mixer>_<size>_hybrid.yaml`, and the `HyloLlama*` classes are `ZebraLlama*`. Update local configs and scripts that name the old files.
+**Mock-data runs use the model's real vocabulary.** With `mock_data: true`, Primus used to size the vocabulary at 131072 for every model. It now takes `vocab_size` from the model preset (every preset that names a tokenizer sets it) or from the tokenizer's Hugging Face config, and falls back to 131072 with a warning when neither is available; an explicit `vocab_size` in your config is still kept ([#1249](https://github.com/AMD-AGI/Primus/pull/1249)). Embedding, output-layer, and logits memory now match the real model, so mock-data throughput and memory are not comparable with earlier releases: models with a smaller vocabulary (Llama 2, Mixtral) use less memory, and models with a larger one (Qwen, GPT-OSS) use more.
+
+**Turbo fusions are switched on by config keys, not environment variables.** `PRIMUS_FUSED_QK_RMSNORM_ROPE` is replaced by `use_turbo_fused_qk_rmsnorm_rope` ([#1247](https://github.com/AMD-AGI/Primus/pull/1247)), and `PRIMUS_TURBO_CROSS_ENTROPY` / `PRIMUS_TURBO_CE_OVERWRITE_INPUT` by `use_turbo_cross_entropy` / `turbo_ce_overwrite_input` ([#1245](https://github.com/AMD-AGI/Primus/pull/1245)). The MXFP4 MoE permute-quantization fusions are enabled with `moe_permute_quant_fusion`, `moe_backward_permute_quant_fusion`, and `moe_skip_identity_sort`, and no longer read environment variables ([#1241](https://github.com/AMD-AGI/Primus/pull/1241)). All of these default to `false` in `primus_turbo.yaml`; the old environment variables have no effect, so move them into your experiment YAML.
+
+**Two MI355X recipes changed model or batch settings.** `deepseek_v2_lite-BF16-pretrain.yaml` now enables multi-latent attention (`multi_latent_attention: true`), the model's real attention, and `gpt_oss_20B-FP8-pretrain.yaml` raises `global_batch_size` from 80 to 96 together with its micro-batch size ([#1252](https://github.com/AMD-AGI/Primus/pull/1252)). Results from these recipes are not directly comparable with v26.8.
+
+**A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so a job restricted to particular GPUs could land on another user's GPU on a shared node. It now keeps the value you or your scheduler set, and warns when it lists a different number of GPUs than `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
+
+**Megatron model studies and guides moved under `examples/megatron/`.** For example, `examples/deepseek-v4/` is now `examples/megatron/models/deepseek-v4/`, and `examples/moe_package/` is now `examples/megatron/guides/moe_package/`; `customer_package`, `odc`, `offline_tune`, and the tuning agent moved to `examples/megatron/guides/` as well ([#1130](https://github.com/AMD-AGI/Primus/pull/1130)). Update scripts that call the old paths. Recipe YAMLs under `examples/megatron/configs/` did not move.
 
 **The `examples/run_*` launchers are gone.** Launch with `./runner/primus-cli`, or use `runner/helpers/launch/slurm_pretrain.sh` if you rely on the `EXP` / `NNODES` / `DATA_PATH` contract ([#999](https://github.com/AMD-AGI/Primus/pull/999)).
 
@@ -38,11 +46,15 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=1
 ```
 
-**MI300X and MI325X (gfx942) — use an expandable allocator for large models.** On gfx942, large-model runs such as Llama 70B FP8 on 8 GPUs can hit an out-of-memory error caused by allocator *fragmentation* rather than by genuinely running out of HBM. An expandable allocator lets PyTorch reuse memory that is reserved but unallocated:
+**MI300X and MI325X (`gfx942`): Expandable allocator for large models.** On `gfx942`, large-model runs can hit an out-of-memory error caused by allocator *fragmentation* rather than by genuinely running out of HBM. An expandable allocator lets PyTorch reuse memory that is reserved but unallocated:
 
 ```text
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
+
+The MI325X Llama 3.1 / 3.3 70B BF16 and ZAYA1-8B recipes set it in their `env:` block (`PYTORCH_HIP_ALLOC_CONF`) ([#1318](https://github.com/AMD-AGI/Primus/pull/1318)). The MI300X Llama 3.1 / 3.3 70B recipes leave it commented out and are sized to fit without it, because expandable segments cannot run on hosts with older amdgpu drivers ([#1332](https://github.com/AMD-AGI/Primus/pull/1332))—see the next item. Only enable it on a host whose amdgpu driver supports it.
+
+A launch hook now checks the setting whenever `expandable_segments:True` is requested, from the environment or from the recipe's `env:` block: the launch fails with an error, rather than silently falling back or hanging, when PyTorch does not apply it or when a first expandable allocation does not finish ([#1257](https://github.com/AMD-AGI/Primus/pull/1257), [#1302](https://github.com/AMD-AGI/Primus/pull/1302)). Primus also warns when `use_turbo_grouped_gemm` is enabled without expandable segments, because Turbo grouped GEMM allocates a few very large gradient buffers per layer that raise peak memory on a fragmented pool ([#1257](https://github.com/AMD-AGI/Primus/pull/1257)).
 
 > **This one is not forwarded by a host `export`.** Container mode auto-forwards only `PRIMUS_*`, `NCCL_*`, `RCCL_*`, `GLOO_*`, `IONIC_*`, and `HIPBLASLT_*`, and `PYTORCH_CUDA_ALLOC_CONF` is not in the `container.options.env` allowlist in `runner/.primus.yaml`. Exporting it on the host has no effect — pass it explicitly instead.
 
@@ -65,20 +77,27 @@ For every run, add it to `container.options.env` in `runner/.primus.yaml`:
       - "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
 ```
 
-In `direct` mode inside a container, a plain `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` works, because there is no container boundary to cross.
+In `direct` mode inside a container, a plain `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` works, because there is no container boundary to cross. You can also set it in the recipe's top-level `env:` block, as the MI325X recipes do.
+
+**Hosts with an amdgpu driver older than DRM 3.64: Keep HIP memory pools off virtual memory.** The ROCm 10.x userspace waits after every virtual-memory map on a signal that these drivers do not send ([ROCm/rocm-systems#9820](https://github.com/ROCm/rocm-systems/issues/9820)). HIP memory pools map memory that way by default, and Primus Turbo's MoE permute allocates from them, so every MoE model hung on its first step. `primus-cli` now detects such a host and sets `HIP_MEM_POOL_USE_VM=0` for you, and keeps a value you set yourself ([#1302](https://github.com/AMD-AGI/Primus/pull/1302)). If you launch training outside `primus-cli` on such a host, export it yourself:
+
+```bash
+export HIP_MEM_POOL_USE_VM=0
+```
+
+Expandable segments hang on the same hosts, which is why the preceding launch hook stops the run instead.
 
 ### Known issues
 
-**DeepEP MoE recipes use the cheap fence, which can affect gradient accuracy.** The
-DeepSeek-V2-Lite, Mixtral and Qwen3-30B-A3B recipes on MI325X and MI355X set
-`PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE: "0"`, as in our performance runs. This
-re-enables a DeepEP fence that Primus-Turbo turned off by default in
-[`fb35ba7`](https://github.com/AMD-AGI/Primus-Turbo/commit/fb35ba7ef83460da8121fdffd0be7a7e9f0399be):
-it can let a rank read stale dispatch data, which can occasionally degrade gradient
-accuracy without raising an error. The safe fence costs about 2.5% of step time on MI355X and about 5% on MI325X.
+The v26.9 QA runs found no Megatron-LM issues. They covered MI300X and MI355X; the MI325X recipes were not re-run on this image.
 
-For convergence or production runs, set it to `"1"` (or delete the line) in the
-recipe's `env:` block. A host `export` does not override a recipe's `env:` value.
+**Fixed in v26.9:**
+
+- The DeepEP MoE recipes no longer set `PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE`. The v26.8 recipes forced a DeepEP fence that could let a rank read stale dispatch data; Primus-Turbo repaired that fence and made it the default, so the setting is no longer needed ([#1236](https://github.com/AMD-AGI/Primus/pull/1236)). If you copied it into your own recipe, remove it.
+- The Turbo fused grouped MLP (`turbo_fused_grouped_gemm`) skipped the DDP parameter-gather hooks under `overlap_param_gather`, so whenever expert data parallelism exceeded one (multi-node, or expert parallelism smaller than the GPUs per node) it trained on partly stale expert weights, and the loss drifted without an error. It now waits for the gather ([#1252](https://github.com/AMD-AGI/Primus/pull/1252)).
+- With DeepEP and `moe_router_force_load_balancing_type: even` (the default), most routed slots got zero weight, so the MoE output collapsed toward the shared expert. The router now applies the even remap itself, so the DeepEP and MegaMoE paths route identically ([#1243](https://github.com/AMD-AGI/Primus/pull/1243)).
+- The Turbo FP8 weight cache is stored in the padded layout the op expects ([#1333](https://github.com/AMD-AGI/Primus/pull/1333)).
+- DeepSeek-V4 hyper-connections (mHC) contracted the mixing matrix on the wrong axis, so the residual stream drifted from the inference kernels with depth. It now matches SGLang ([#1040](https://github.com/AMD-AGI/Primus/pull/1040)).
 
 ### Registry change
 
@@ -122,7 +141,8 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 - Qwen3 32B (SFT / LoRA)
 - GPT-OSS-20B
 - GPT-OSS-120B
-- ZAYA1-8B (new in v26.8; MI300X and MI355X mock-data recipes)
+- ZAYA1-8B (BF16 and FP8 mock-data recipes on MI300X, MI325X, and MI355X; FP8 and MI325X added in v26.9)
+- GLM-5.3-Flash (new in v26.9; MI355X BF16 bring-up recipe—see the [model support matrix](../06-developer-guide/model-support-matrix.md#megatron-model-configs) for its limits)
 
 ---
 
@@ -159,11 +179,11 @@ Use the following instructions to set up the environment, configure the script t
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.8
+git checkout release/v26.9
 git submodule update --init --recursive
 ```
 
-That is all the setup required. The training commands below use `primus-cli container`, which starts `rocm/primus:v26.8` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used — see [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268).
+That is all the setup required. The following training commands use `primus-cli container`, which starts `rocm/primus:v26.9` for you, mounts this checkout into it at the same path, and runs the training inside. You do not need to `docker run` or `docker exec` by hand, and the `/workspace/Primus` copy baked into the image is not used—see [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
 
 Container mode also forwards environment variables you export on the host, including `HF_TOKEN`, the gfx942 tuning variables, and the `NCCL_*` networking variables. The forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
@@ -175,12 +195,12 @@ Container mode also forwards environment variables you export on the host, inclu
 If you want an interactive shell — for debugging, or to run `primus-cli direct` yourself — start the container manually and bind your Primus checkout:
 
 ```bash
-docker pull rocm/primus:v26.8
+docker pull rocm/primus:v26.9
 docker run -it --device /dev/dri --device /dev/kfd --device /dev/infiniband \
     --network host --ipc host --group-add video --cap-add SYS_PTRACE \
     --security-opt seccomp=unconfined --privileged \
     -v $PWD:$PWD -w $PWD --shm-size 128G \
-    --name primus_training_env rocm/primus:v26.8
+    --name primus_training_env rocm/primus:v26.9
 ```
 
 Re-enter it later with `docker start primus_training_env && docker exec -it primus_training_env bash`. Inside the container, replace `primus-cli container` with `primus-cli direct` in every command below. Remember to re-export `HF_TOKEN` and any architecture or `NCCL_*` variables, since a manual `docker run` does not forward them.
@@ -224,7 +244,7 @@ export HF_TOKEN=<your_hftoken>
 
 ### 3.1 Single-node training
 
-To run model training on a single node, run the commands below from your `release/v26.8` Primus checkout on the host (recommended). When using `./runner/primus-cli container`, no additional `pip install` step is required.
+To run model training on a single node, run the following commands from your `release/v26.9` Primus checkout on the host (recommended). When using `./runner/primus-cli container`, no additional `pip install` step is required.
 
 #### MI300X performance configs
 
@@ -602,10 +622,10 @@ To run training on multiple nodes, you can use `primus-cli` (recommended) or the
 
 > **Verify NCCL / network env first.** The `primus-cli` launcher script sets sensible `NCCL_*` defaults via `base_env.sh`, but auto-detection can pick the wrong device on multi-NIC nodes. Always confirm `NCCL_IB_HCA`, `NCCL_IB_GID_INDEX`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME` (set to the same value as `NCCL_SOCKET_IFNAME`) are correct for your fabric. If necessary, you can `export` these environment variables before running.
 
-From your `release/v26.8` checkout (see [Environment setup](#1-environment-setup)), export the cluster settings:
+From your `release/v26.9` checkout (see [Environment setup](#1-environment-setup)), export the cluster settings:
 
 ```bash
-export DOCKER_IMAGE=rocm/primus:v26.8
+export DOCKER_IMAGE=rocm/primus:v26.9
 export HF_TOKEN=<your_HF_token>
 export NCCL_IB_HCA=<your_NCCL_IB_HCA> # specify which RDMA interfaces to use for communication
 export NCCL_SOCKET_IFNAME=<your_NCCL_SOCKET_IFNAME> # your network interface
@@ -615,7 +635,7 @@ export NCCL_IB_GID_INDEX=3 # Set InfiniBand GID index for NCCL communication. De
 # On MI300X/MI325X also export the gfx942 tuning variables; see "Architecture-specific settings"
 ```
 
-> **Note:** `release/v26.8` is the branch matching the `rocm/primus:v26.8` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4` — that release is now summarised under [Release notes → Earlier releases](../01-getting-started/release-notes.md#earlier-releases).
+> **Note:** `release/v26.9` is the branch matching the `rocm/primus:v26.9` image. If you are reproducing published v26.4 numbers instead, use `git checkout 236cfa9` with `rocm/primus:v26.4`—that release is now summarized under [Release notes → Earlier releases](../01-getting-started/release-notes.md#earlier-releases).
 
 For clusters using AMD AINIC, set the following environment variables:
 
