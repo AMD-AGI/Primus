@@ -20,7 +20,11 @@ eval AUC reaches 0.75.
   [docs/04-technical-guides/recommendation](../../../docs/04-technical-guides/recommendation/README.md).
 - **Image**: `rocm/primus:v26.9`. The `recommendation` hook adds `polars-u64-idx`,
   `gin-config` and the MLPerf logging package (all `--no-deps`) and links
-  `/opt/rocm` to the image's ROCm, at the first launch in a container.
+  `/opt/rocm` to the image's ROCm, at the first launch in a container. It also
+  installs FlyDSL 0.2.4 into `/opt/primus-recommendation/site-packages`, which
+  only the trainer puts first on its path: the trainer's FlyDSL kernels are
+  written for 0.2.4, and the image's 0.3.4.1 (used by aiter and Primus-Turbo)
+  removed APIs they use.
 
 ### Data
 

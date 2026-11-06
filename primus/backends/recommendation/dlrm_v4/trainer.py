@@ -23,6 +23,7 @@ train(): the trainer's launcher; with warm_cache_after_run_start, a background
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -126,10 +127,21 @@ class DlrmV4Trainer(BaseTrainer):
             )
 
         # Spawned ranks resolve the trainer package and its relative table paths
-        # (e.g. the Triton spec replay table) from the trainer root.
+        # (e.g. the Triton spec replay table) from the trainer root. The private
+        # package directory (packages whose image version the trainer cannot use,
+        # installed by the hook) goes first, ahead of the image's site-packages.
         os.chdir(self.root)
-        os.environ["PYTHONPATH"] = os.pathsep.join(
-            p for p in (str(self.root), os.environ.get("PYTHONPATH", "")) if p
+        front = [str(self.root)]
+        private = self._p("private_site")
+        if private and os.path.isdir(private):
+            front.insert(0, private)
+            sys.path.insert(0, private)
+        os.environ["PYTHONPATH"] = os.pathsep.join(front + [os.environ.get("PYTHONPATH", "")]).rstrip(
+            os.pathsep
+        )
+        flydsl = importlib.util.find_spec("flydsl")
+        log_rank_0(
+            f"[Primus:dlrm_v4] PYTHONPATH front: {front}; flydsl from {flydsl.origin if flydsl else None}"
         )
 
     def init(self):

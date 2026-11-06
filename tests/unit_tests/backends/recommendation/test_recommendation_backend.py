@@ -52,8 +52,12 @@ def test_build_env_skips_unset_and_formats_values():
 def test_every_env_param_is_in_the_module_preset():
     import yaml
 
-    preset = yaml.safe_load((PRIMUS_ROOT / "primus/configs/modules/recommendation/pre_trainer.yaml").read_text())
-    model = yaml.safe_load((PRIMUS_ROOT / "primus/configs/models/recommendation/dlrm_v4_hstu_yambda_5b.yaml").read_text())
+    preset = yaml.safe_load(
+        (PRIMUS_ROOT / "primus/configs/modules/recommendation/pre_trainer.yaml").read_text()
+    )
+    model = yaml.safe_load(
+        (PRIMUS_ROOT / "primus/configs/models/recommendation/dlrm_v4_hstu_yambda_5b.yaml").read_text()
+    )
     missing = [k for k in run_config.ENV_PARAMS if k not in preset and k not in model]
     assert not missing, f"documented nowhere: {missing}"
     # Module and model presets merge without override: no key may be in both.
@@ -191,3 +195,21 @@ def test_trainer_exposes_launch(name):
     src = (SRC_ROOT / "generative_recommenders/dlrm_v4/train/train_ranker.py").read_text()
     funcs = {n.name: n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef)}
     assert [a.arg for a in funcs[name].args.args] == ["dataset", "mode", "gin_file"]
+
+
+def test_private_packages_pin_flydsl_and_the_preset_points_at_them():
+    import yaml
+
+    hooks = PRIMUS_ROOT / "runner/helpers/hooks/train/pretrain/recommendation"
+    pins = [
+        line.strip()
+        for line in (hooks / "requirements-recommendation-private.txt").read_text().splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    assert pins == ["flydsl==0.2.4"]
+    install = (hooks / "00_install_requirements.sh").read_text()
+    assert "PRIMUS_RECOMMENDATION_SITE:-/opt/primus-recommendation/site-packages" in install
+    preset = yaml.safe_load(
+        (PRIMUS_ROOT / "primus/configs/modules/recommendation/pre_trainer.yaml").read_text()
+    )
+    assert preset["private_site"] == "${PRIMUS_RECOMMENDATION_SITE:/opt/primus-recommendation/site-packages}"
