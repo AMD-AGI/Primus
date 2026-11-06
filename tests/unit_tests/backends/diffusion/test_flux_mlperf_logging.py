@@ -90,6 +90,19 @@ def _trainer() -> BaseWanTrainer:
     trainer.logging_steps = 10
     trainer.global_step = 512
     trainer.mlperf_run_success = False
+    trainer._mlperf_block_open = False
+    trainer.sp_size = 1
+    trainer.mlperf_v61_disclosure = {
+        "lowest_numerical_precision_in_linear": "mxfp4",
+        "lowest_numerical_precision_in_attn": "bfloat16",
+        "lowest_numerical_precision_in_comm": "bfloat16",
+        "tensor_parallelism": 1,
+        "pipeline_parallelism": 1,
+        "context_parallelism": 1,
+        "expert_parallelism": 1,
+        "micro_batch_size": 64,
+        "config_filename": "config_MI355X_4x8x1x1.sh",
+    }
     return trainer
 
 
@@ -143,6 +156,8 @@ def test_mlperf_training_blocks_are_paired_at_reference_frequency():
     assert [record[1]["key"] for record in trainer.mlperf_logger.records] == [
         "block_start",
         "block_stop",
+        "block_start",
+        "block_stop",
     ]
 
 
@@ -167,3 +182,120 @@ def test_mlperf_sampler_matches_torchtitan_contiguous_shards():
 
     assert list(rank_zero) == [0, 1, 2, 3]
     assert list(rank_two) == [8, 9, 10, 11]
+
+
+def _v61_env(monkeypatch, **overrides):
+    for name in (
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR",
+        "MLLOG_CONFIG_FILENAME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    values = {
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR": "mxfp4",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN": "bfloat16",
+        "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM": "bfloat16",
+        "MLLOG_CONFIG_FILENAME": "config_MI355X_4x8x1x1.sh",
+    }
+    values.update(overrides)
+    for name, value in values.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def test_mlperf_v61_keys_follow_evaluation_frequency():
+    trainer = _trainer()
+    trainer.sp_size = 2
+    trainer.mlperf_v61_disclosure["context_parallelism"] = 2
+    trainer._mlperf_log_run_start()
+
+    keys = [record["key"] for kind, record in trainer.mlperf_logger.records if kind == "event"]
+    start = keys.index("evaluation_frequency") + 1
+    assert keys[start:] == [
+        "lowest_numerical_precision_in_linear",
+        "lowest_numerical_precision_in_attn",
+        "lowest_numerical_precision_in_comm",
+        "tensor_parallelism",
+        "pipeline_parallelism",
+        "context_parallelism",
+        "expert_parallelism",
+        "micro_batch_size",
+        "config_filename",
+    ]
+    logged = {
+        record["key"]: record["value"]
+        for kind, record in trainer.mlperf_logger.records
+        if kind == "event" and record["key"] in keys[start:]
+    }
+    assert logged["context_parallelism"] == 2
+    assert logged["micro_batch_size"] == 64
+    assert trainer.mlperf_logger.records[-1] == ("start", {"key": "init_start"})
+
+
+def test_linear_precision_alias_matches_mlperf_common(monkeypatch):
+    from primus.backends.diffusion.patches.flux_mlperf_v61_logging import (
+        mlperf_v61_disclosure,
+    )
+
+    _v61_env(
+        monkeypatch,
+        MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=None,
+        MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR="fp8",
+    )
+    disclosure = mlperf_v61_disclosure(
+        tensor_parallelism=1,
+        pipeline_parallelism=1,
+        context_parallelism=1,
+        expert_parallelism=1,
+        micro_batch_size=64,
+    )
+    assert disclosure["lowest_numerical_precision_in_linear"] == "fp8"
+
+    _v61_env(
+        monkeypatch,
+        MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR="mxfp4",
+        MLLOG_LOWEST_NUMERICAL_PRECISION_LINEAR="fp8",
+    )
+    disclosure = mlperf_v61_disclosure(
+        tensor_parallelism=1,
+        pipeline_parallelism=1,
+        context_parallelism=1,
+        expert_parallelism=1,
+        micro_batch_size=64,
+    )
+    assert disclosure["lowest_numerical_precision_in_linear"] == "mxfp4"
+
+
+def test_invalid_precision_raises_on_nonzero_rank(monkeypatch):
+    _v61_env(monkeypatch, MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM="fp4")
+    trainer = _trainer()
+    trainer.rank = 3
+
+    try:
+        trainer._setup_mlperf()
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected ValueError on rank 3")
+
+    assert "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM" in message
+    assert "fp4" in message
+
+
+def test_missing_precision_raises_before_training(monkeypatch):
+    _v61_env(monkeypatch, MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN=None)
+    trainer = _trainer()
+    trainer.rank = 1
+
+    try:
+        trainer._setup_mlperf()
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected ValueError when attn precision is unset")
+
+    assert "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN" in message

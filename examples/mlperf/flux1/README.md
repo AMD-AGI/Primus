@@ -76,12 +76,20 @@ Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `LOCAL_BATCH_SIZE`,
 `SEED`, `MASTER_PORT`, `SAVE_STRATEGY`, `SAVE_STEPS`,
 `RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
 
+Optimization flags are in `config_common.sh`, matching
+`mlperf-training-dev/flux1/primus/config_common.sh`. The launcher sources it
+before `primus-cli`. That includes MXFP4 `dgrad,wgrad` with A6W4 forward,
+fused norm/RoPE, FlyDSL attention, local AdamW, and the SDMA all-gather.
+The 6.1 disclosure defaults are mxfp4 linear, bfloat16 attention, and mxfp4
+communication.
+
 ## Files
 
 ```text
 examples/mlperf/flux1/
 ├── Dockerfile
 ├── README.md
+├── config_common.sh
 ├── flux.1_schnell_t2i-pretrain.yaml
 ├── requirements.txt
 ├── run_with_docker.sh
