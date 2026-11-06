@@ -1,0 +1,37 @@
+# Host-side primus-cli configuration. Environment-specific scheduler options
+# belong on the command line or in your own local configuration.
+slurm:
+  time: "02:00:00"
+
+container:
+  options:
+    image: primus-specforge:muse-spark-1027-eagle4-1c253f04
+    ipc: host
+    network: host
+    privileged: false
+    security-opt: seccomp=unconfined
+    group-add: [video, render]
+    ulimit: [memlock=-1:-1, nofile=1048576:1048576]
+    device: [/dev/kfd, /dev/dri]
+    env:
+      - MASTER_ADDR
+      - MASTER_PORT
+      - NNODES
+      - NODE_RANK
+      - GPUS_PER_NODE
+      - RUN_ID
+      - RUN_ROOT
+      - CONSUMER_STATE_DIR
+      - OUTPUT_DIR
+      - TARGET_MODEL
+      - TRAIN_DATA_PATH
+      - MAX_STEPS
+      - NUM_EPOCHS
+      - SAVE_INTERVAL
+      - SGLANG_USE_AITER=1
+      - SGLANG_USE_AITER_UNIFIED_ATTN=1
+      - MUSE_MOE_BACKEND=flydsl
+      - MOONCAKE_GLOBAL_SEGMENT_SIZE=68719476736
+      - MOONCAKE_LOCAL_BUFFER_SIZE=2147483648
+      - TOKENIZERS_PARALLELISM=false
+      - PYTHONUNBUFFERED=1

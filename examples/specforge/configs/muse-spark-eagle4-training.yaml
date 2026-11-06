@@ -1,0 +1,75 @@
+# SpecForge training configuration, launched through muse-spark-eagle4-online.yaml.
+# Primus replaces the example paths, run identity, topology and loopback endpoints.
+model:
+  target_model_path: amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4
+  draft_model_config: /opt/primus/examples/specforge/configs/muse-spark-eagle4.json
+  target_backend: sglang
+  trust_remote_code: true
+  embedding_key: model.language_model.embed_tokens.weight
+  lm_head_key: lm_head.weight
+  torch_dtype: bfloat16
+  use_liger_kernel: false
+  sglang_attention_backend: aiter
+  sglang_disable_radix_cache: true
+  sglang_context_length: 8704
+
+data:
+  train_data_path: /data/train.jsonl
+  max_prompts: 8192
+  max_length: 8192
+  chat_template: muse
+  is_preformatted: true
+  build_dataset_num_proc: 8
+  dataloader_num_workers: 4
+  cache_dir: /data/cache/muse-spark-eagle4
+
+training:
+  strategy: eagle4
+  num_epochs: 1
+  max_steps: 200
+  tp_size: 1
+  batch_size: 1
+  accumulation_steps: 1
+  fsdp_sharding: SHARD_GRAD_OP
+  learning_rate: 0.0001
+  lr_scheduler: constant
+  warmup_ratio: 0.04
+  max_grad_norm: 0.5
+  ttt_length: 7
+  attention_backend: flex_attention
+  save_interval: 50
+  max_checkpoints: 2
+  log_interval: 1
+  dist_timeout: 300
+  seed: 42
+  prompt_seed: 42
+
+tracking:
+  report_to: tensorboard
+
+runtime:
+  producer_lease: 2
+  producer_concurrency: 2
+  in_flight_high_watermark: 16
+  in_flight_low_watermark: 8
+
+run_id: muse-spark-eagle4
+output_dir: /data/output/muse-spark-eagle4
+
+deployment:
+  mode: disaggregated
+  trainer:
+    nnodes: 1
+    nproc_per_node: 8
+  disaggregated:
+    control_dir: /data/runs/muse-spark-eagle4/control
+    consumer_state_dir: /local/specforge/muse-spark-eagle4/consumer-state
+    backend: mooncake
+    server_urls:
+      - http://127.0.0.1:30000
+      - http://127.0.0.1:30001
+    mooncake_metadata_server: http://127.0.0.1:35880/metadata
+    mooncake_master_server_addr: 127.0.0.1:35551
+    mooncake_protocol: tcp
+    client_buffer_size: 8589934592
+    server_capture: plugin

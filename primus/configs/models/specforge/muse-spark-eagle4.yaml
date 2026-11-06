@@ -1,0 +1,5 @@
+# Primus model preset; architecture and training settings live in the example
+# draft JSON and SpecForge training YAML.
+model: muse-spark-eagle4
+target_model: amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4
+draft_algorithm: eagle4

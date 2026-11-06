@@ -38,3 +38,6 @@ pp_simulation_result
 .triton_cache_shared/
 .jax_cache/
 .cursor/
+
+# Runner link created by the editable host CLI installation.
+/primus/runner

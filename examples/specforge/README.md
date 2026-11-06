@@ -7,6 +7,7 @@ Official documentation is in
 - [Run SpecForge with Primus](../../docs/04-technical-guides/specforge/running.md)
 - [Configuration](../../docs/04-technical-guides/specforge/configuration.md)
 - [Runtime image](../../docs/04-technical-guides/specforge/runtime-image.md)
+- [Muse Spark EAGLE4: build and online training](../../docs/04-technical-guides/specforge/muse-spark-eagle4-image.md)
 
 Example YAMLs stay in [`configs/`](configs/). Build the image from the
 repository root:
