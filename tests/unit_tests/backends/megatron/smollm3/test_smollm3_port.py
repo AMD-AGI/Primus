@@ -21,7 +21,6 @@ importable, as other Megatron unit tests do with ``pytest.importorskip``).
 """
 
 import importlib
-import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +36,7 @@ from primus.backends.megatron.checkpoint import (  # noqa: E402
 )
 from tests.unit_tests.backends.megatron.checkpoint.native_loader_test_utils import (  # noqa: E402
     llama_layout_hf_tensors,
+    load_convert_hook,
     margs_args,
     require_megatron_training,
     stub_convert_pipeline,
@@ -137,11 +137,6 @@ def test_nope_pattern_rejects_wrong_length(bad):
 def test_nope_pattern_rejects_bad_depth(layers):
     with pytest.raises(ValueError, match="num_hidden_layers"):
         smol.nope_pattern({"num_hidden_layers": layers})
-
-
-def test_convert_rejects_a_family_argument():
-    with pytest.raises(TypeError, match="no 'family' argument"):
-        smol.convert("/x", "/y", family=smol)
 
 
 def test_null_vocab_size_is_ignored():
@@ -551,12 +546,18 @@ def test_missing_epsilon_defaults():
 
 
 # --------------------------------------------------------------------------- hook
-def _load_hook():
-    path = REPO / "runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py"
-    spec = importlib.util.spec_from_file_location("convert_hook_under_test", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def test_build_margs_without_ckpt_format():
+    """A build-and-load caller may pass args without ckpt_format: convert's default is used,
+    and an explicit value is kept."""
+    require_megatron_training()
+    from types import SimpleNamespace
+
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
+    fields = smol.derive_megatron_fields(SMOLLM3_CFG)
+    args = {k: v for k, v in vars(margs_args()).items() if k != "ckpt_format"}
+    assert smol.build_margs(fields, SimpleNamespace(**args)).ckpt_format == common.DEFAULT_CKPT_FORMAT
+    assert smol.build_margs(fields, margs_args()).ckpt_format == "torch"
 
 
 @pytest.mark.parametrize(
@@ -567,7 +568,7 @@ def _load_hook():
     ],
 )
 def test_hook_detects_smollm3(tmp_path, cfg):
-    hook = _load_hook()
+    hook = load_convert_hook()
     (tmp_path / "config.json").write_text(json.dumps(cfg))
     assert hook._detect_native_family(str(tmp_path)) == "smollm3"
 
@@ -575,7 +576,7 @@ def test_hook_detects_smollm3(tmp_path, cfg):
 def test_hook_dispatches_smollm3_to_its_converter(tmp_path, monkeypatch):
     """family smollm3 runs native_loader_smollm3.convert (Megatron setup is faked here;
     the conversion gates run it for real)."""
-    hook = _load_hook()
+    hook = load_convert_hook()
     from primus.backends.megatron.checkpoint import native_convert_common as common
     from primus.backends.megatron.checkpoint import native_loader_smollm3 as conv
 
@@ -590,7 +591,7 @@ def test_hook_dispatches_smollm3_to_its_converter(tmp_path, monkeypatch):
 
 def test_hook_families_each_have_a_converter_module():
     """One registry: every family in _NATIVE_FAMILIES has primus...native_loader_<family>."""
-    hook = _load_hook()
+    hook = load_convert_hook()
     ckpt = REPO / "primus/backends/megatron/checkpoint"
     for family in set(hook._NATIVE_FAMILIES.values()):
         assert (ckpt / f"native_loader_{family}.py").is_file(), family

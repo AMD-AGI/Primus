@@ -7,7 +7,24 @@
 """Shared helpers for the native-converter unit tests: the Megatron import guard, a stand-in
 for ``common.SafetensorsStore`` and a builder of Llama-layout HF tensors."""
 
+import importlib.util
+from pathlib import Path
+
 import pytest
+
+# runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py (the posttrain hook).
+CONVERT_HOOK = (
+    Path(__file__).resolve().parents[5]
+    / "runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py"
+)
+
+
+def load_convert_hook(name="convert_hook_under_test"):
+    """Import the posttrain checkpoint-conversion hook (a script, not a package module)."""
+    spec = importlib.util.spec_from_file_location(name, CONVERT_HOOK)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def require_megatron_training():
@@ -94,4 +111,5 @@ def margs_args(hf_dir="/nonexistent", save_dir="/nonexistent"):
         expert_parallel_size=1,
         seq_length=128,
         make_vocab_size_divisible_by=128,
+        ckpt_format="torch",
     )

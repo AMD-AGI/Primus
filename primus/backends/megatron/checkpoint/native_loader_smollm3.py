@@ -21,7 +21,9 @@ Megatron's ``TransformerConfig.no_rope_freq`` uses the opposite convention
 
 import sys
 import warnings
+from types import SimpleNamespace
 
+from primus.backends.megatron.checkpoint import native_convert_common as common
 from primus.backends.megatron.checkpoint import native_loader_llama as _llama
 
 # HF SmolLM3Config defaults (transformers 4.57 / 5.x). A config.json that OMITS a key gets
@@ -388,6 +390,11 @@ def build_margs(cfg_fields, args):
     # layers only, so it has num_layers entries (or an int period that divides N).
     # The Llama build_margs sets layernorm_epsilon (rms_norm_eps, 1e-6 for SmolLM3-3B);
     # check_model_eps checks it on the built model.
+    # A caller that only builds and loads the model (no save, e.g. a logprob-parity harness that
+    # calls derive_megatron_fields/build_margs/build_mcore_state_dict) may pass args without
+    # ckpt_format; give it convert's default so the Llama build_margs can read it.
+    if not hasattr(args, "ckpt_format"):
+        args = SimpleNamespace(**vars(args), ckpt_format=common.DEFAULT_CKPT_FORMAT)
     m = _llama.build_margs(cfg_fields, args)
     m.no_rope_freq = megatron_no_rope_freq(nope_pattern_for_depth(cfg_fields, int(cfg_fields["num_layers"])))
     return m
@@ -475,13 +482,11 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
 
 
 def convert(hf_dir, save_dir, **kwargs):
-    """Convert a SmolLM3 HF checkpoint to a legacy Megatron torch checkpoint.
+    """Convert a SmolLM3 HF checkpoint to a Megatron checkpoint (``ckpt_format`` as in Llama).
 
     ``native_loader_llama.convert`` (same arguments) with this module's
     ``derive_megatron_fields``, ``build_margs`` and ``build_mcore_state_dict`` (NoPE
     layers and ``layernorm_epsilon``, both checked on the built model). ``family`` is not an
     argument here: it is always this module.
     """
-    if "family" in kwargs:
-        raise TypeError("native_loader_smollm3.convert() takes no 'family' argument (it is SmolLM3)")
     return _llama.convert(hf_dir, save_dir, family=sys.modules[__name__], **kwargs)

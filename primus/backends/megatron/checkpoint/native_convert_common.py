@@ -25,19 +25,10 @@ converter):
        and save a legacy ``torch`` checkpoint.
 
 Bridge-free guarantee: this module (and its callers) import ONLY
-``megatron.core`` / ``megatron.training`` / ``megatron.legacy`` (the last only when
-present: Megatron-core 0.19+ has none). ``megatron.bridge``
-is never imported; a hard guard asserts it never leaked into ``sys.modules``.
-
-On a Megatron that still has ``megatron.legacy`` (before core 0.19), the ROCm-only
-``megatron.legacy.fused_kernels.load`` no-op that the legacy CPU init path needs is supplied
-as a Primus ``phase="convert"`` monkeypatch
-(``primus.backends.megatron.patches.checkpoint_convert_patches``), applied in-process before
-conversion -- NOT by editing the submodule. Megatron-core 0.19+ has no ``megatron.legacy``:
-``init_megatron_single_process`` then skips the kernels, and that patch does nothing.
+``megatron.core`` / ``megatron.training``. ``megatron.bridge`` is never imported;
+a hard guard asserts it never leaked into ``sys.modules``.
 """
 
-import importlib.util
 import json
 import os
 import sys
@@ -112,9 +103,8 @@ def apply_convert_patches(module_name: str | None = None, platform: str | None =
 
     Importing the ``checkpoint_convert_patches`` module triggers its
     ``@register_patch`` side effect; ``run_patches`` then applies the ones whose
-    ``condition`` matches (e.g. the ROCm fused-kernels no-op). Must be called
-    BEFORE any Megatron model build / ``fused_kernels.load`` so the monkeypatch
-    is in effect. Returns the number of patches applied.
+    ``condition`` matches. Must be called BEFORE any Megatron model build so the
+    monkeypatches are in effect. Returns the number of patches applied.
     """
     # Register the convert-phase patch(es). Import the single module rather than
     # the whole patches package to avoid pulling heavy TE/training imports into
@@ -267,15 +257,6 @@ def init_megatron_single_process(margs, master_port: int, log=print):
         pipeline_model_parallel_size=margs.pipeline_model_parallel_size,
         expert_model_parallel_size=margs.expert_model_parallel_size,
     )
-    # Legacy fused kernels: conversion never runs them. On ROCm their CUDA-only build is
-    # neutralised by the phase="convert" Primus patch (checkpoint_convert_patches) applied
-    # earlier in this process. Megatron-core 0.19+ has no megatron.legacy: nothing to build.
-    if importlib.util.find_spec("megatron.legacy") is None:
-        log("megatron.legacy not present (Megatron-core 0.19+); no legacy fused kernels to load")
-    else:
-        from megatron.legacy import fused_kernels
-
-        fused_kernels.load(margs)
     return margs
 
 

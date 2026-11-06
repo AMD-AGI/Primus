@@ -103,6 +103,7 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B_4layer_proxy.yaml` | 4-layer single-GPU MoE proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
+| `smollm3_base.yaml` | `primus/configs/models/megatron/smollm3_base.yaml` | Base fragment | — | — |
 | `smollm3_3B_Base.yaml` | `primus/configs/models/megatron/smollm3_3B_Base.yaml` | Model preset (NoPE every 4th layer, tied embeddings) | MI300X, MI325X, MI355X | BF16 |
 | `zaya1.yaml` | `primus/configs/models/megatron/zaya1.yaml` | MoE model preset (ZAYA1-8B, CCA + MoE) | MI300X, MI325X, MI355X | BF16, FP8 |
 | `zaya1_base.yaml` | `primus/configs/models/megatron/zaya1_base.yaml` | Base fragment | — | — |
