@@ -56,6 +56,19 @@ def test_slurm_gpu_count_precedence(extra_env, expected):
     assert expected in output
 
 
+def test_slurm_entry_reloads_libraries_after_functions_are_filtered():
+    # Scheduler environments can retain exported variables but omit Bash's
+    # BASH_FUNC_* entries. An inherited guard must not suppress library loading.
+    output = run_slurm_entry(
+        {
+            "__PRIMUS_COMMON_SOURCED": "1",
+            "__PRIMUS_VALIDATION_SOURCED": "1",
+            "__PRIMUS_CONFIG_SOURCED": "1",
+        }
+    )
+    assert "Dry-run mode: command not executed" in output
+
+
 def test_shared_launcher_forwards_uep_and_maps_clean(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()

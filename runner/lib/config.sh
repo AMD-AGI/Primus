@@ -31,10 +31,11 @@ PRIMUS_RUNNER_DIR="${PRIMUS_RUNNER_DIR:-${PRIMUS_ROOT_DIR}/runner}"
 # ---------------------------------------------------------------------------
 # Guard: avoid duplicate sourcing
 # ---------------------------------------------------------------------------
-if [[ -n "${__PRIMUS_CONFIG_SOURCED:-}" ]]; then
+if [[ "${__PRIMUS_CONFIG_SOURCED:-}" == "$BASHPID" ]]; then
   return 0
 fi
-export __PRIMUS_CONFIG_SOURCED=1
+__PRIMUS_CONFIG_SOURCED="$BASHPID"
+export -n __PRIMUS_CONFIG_SOURCED
 
 # Cache configuration
 PRIMUS_CONFIG_CACHE_TTL=3600  # Cache validity in seconds (1 hour)

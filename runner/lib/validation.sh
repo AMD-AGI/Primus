@@ -18,10 +18,11 @@ fi
 # ---------------------------------------------------------------------------
 # Guard: avoid duplicate sourcing
 # ---------------------------------------------------------------------------
-if [[ -n "${__PRIMUS_VALIDATION_SOURCED:-}" ]]; then
+if [[ "${__PRIMUS_VALIDATION_SOURCED:-}" == "$BASHPID" ]]; then
   return 0
 fi
-export __PRIMUS_VALIDATION_SOURCED=1
+__PRIMUS_VALIDATION_SOURCED="$BASHPID"
+export -n __PRIMUS_VALIDATION_SOURCED
 
 # ---------------------------------------------------------------------------
 # Numeric Validation

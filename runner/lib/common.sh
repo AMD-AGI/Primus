@@ -12,10 +12,13 @@
 # ---------------------------------------------------------------------------
 # Guard: avoid duplicate sourcing
 # ---------------------------------------------------------------------------
-if [[ -n "${__PRIMUS_COMMON_SOURCED:-}" ]]; then
+if [[ "${__PRIMUS_COMMON_SOURCED:-}" == "$BASHPID" ]]; then
   return 0
 fi
-export __PRIMUS_COMMON_SOURCED=1
+# Schedulers may forward variables while filtering exported Bash functions.
+# Keep the guard local to this shell so the next entry process reloads them.
+__PRIMUS_COMMON_SOURCED="$BASHPID"
+export -n __PRIMUS_COMMON_SOURCED
 
 # ---------------------------------------------------------------------------
 # Configuration and State
