@@ -141,6 +141,68 @@ Coordination and role logs are under `$RUN_ROOT/control`, including
 TensorBoard events are under `$OUTPUT_DIR`. TensorBoard is enabled by
 `tracking.report_to: tensorboard` in the training YAML.
 
+## Eight-node RDMA configuration
+
+A separate configuration uses four capture nodes and four trainer nodes, each
+with eight GPUs. Each capture node runs two TP4/EP4 target replicas; the trainer
+uses 32 FSDP ranks with local batch size 16 and accumulation 1, for an effective
+batch of 512 samples per optimizer step. The draft architecture and image are
+unchanged. This is a configuration example; batch size 16 at 8K and this topology
+have not been GPU-validated.
+
+Use the same installation, image build, paths, and preformatted dataset described
+above, with a fresh run ID. Launch using the additional
+[host launcher](../../../examples/specforge/configs/muse-spark-eagle4-8node-launcher.yaml),
+[Primus experiment](../../../examples/specforge/configs/muse-spark-eagle4-8node-online.yaml),
+and [training YAML](../../../examples/specforge/configs/muse-spark-eagle4-8node-training.yaml):
+
+```bash
+export LOG_INTERVAL=1
+export SAVE_INTERVAL=50
+primus-cli --config examples/specforge/configs/muse-spark-eagle4-8node-launcher.yaml \
+  slurm srun -N 8 -n 8 --gres=gpu:8 --cpus-per-task=32 --mem=0 \
+  -- container --image "$IMAGE" \
+  --volume "$MODEL_ROOT:$MODEL_ROOT:ro" \
+  --volume "$DATA_ROOT:$DATA_ROOT" \
+  --volume "$LOCAL_STATE_ROOT:$LOCAL_STATE_ROOT" \
+  -- train pretrain \
+  --config examples/specforge/configs/muse-spark-eagle4-8node-online.yaml
+```
+
+Logging defaults to every optimizer step, including TensorBoard metrics.
+Checkpointing defaults to every 50 optimizer steps (25,600 samples at this batch
+size), retaining the latest two checkpoints. Set `LOG_INTERVAL` and
+`SAVE_INTERVAL` before launching to change these independently. Once step times
+are measured, choose the checkpoint interval for the desired elapsed-time
+recovery window. The scheduler wall time is still two hours; adjust as needed.
+
+This recipe removes the 8,192-prompt cap. A 200-step run needs at least 102,400
+usable samples in one epoch; provide enough data or increase `NUM_EPOCHS`.
+The maximum sequence length remains 8,192. Local batch size 16 increases GPU
+activation memory and may need reducing if it does not fit.
+
+The feature queue has high/low watermarks 1,024/512. Both must be at least
+`trainer_nodes * GPUs_per_node * local_batch * accumulation_steps`. If you change
+batch size or enable further accumulation in the training YAML, recalculate both
+watermarks and storage capacity together.
+
+The launcher allocates 128 GiB of Mooncake global storage per capture writer:
+eight writers contribute 1 TiB in total, or 256 GiB per capture node. An 8K
+BF16 sample with three auxiliary states and the final state is approximately
+0.5 GiB, so 1,024 buffered samples account for approximately 512 GiB before
+in-flight work and overhead. Allocation imbalance and actual feature sizes can
+require additional headroom. Capture writers retain 2 GiB local transfer buffers;
+producer/trainer clients retain the training YAML's 8 GiB buffer per process.
+These are host-memory allocations, additional to model loading and other memory.
+
+RDMA requires accessible `/dev/infiniband`, working host drivers and container
+verbs libraries, unlimited locked memory, and connected RDMA ports on all nodes.
+The launcher exposes the devices and adds `IPC_LOCK`. Device discovery is
+automatic; optionally set `MOONCAKE_RDMA_DEVICES` when suitable devices have the
+same names across nodes. Trainer RCCL RDMA selection is separate from Mooncake;
+remove inherited `NCCL_IB_DISABLE=1` and configure communication interfaces as
+needed for your network. RDMA does not change the capture feature format.
+
 ## Capture API compatibility
 
 The unmodified `1027` base lacks the extension APIs required by the SpecForge

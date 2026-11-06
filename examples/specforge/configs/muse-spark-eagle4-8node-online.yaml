@@ -1,0 +1,50 @@
+# Primus experiment: four capture nodes (2 x TP4/EP4 each) and four 8-worker trainer nodes.
+# Launch with the Muse runtime image; see the Muse EAGLE4 guide for required env.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:muse-spark-eagle4-8node-online}
+workspace: ${RUN_ROOT}/primus
+
+modules:
+  pre_trainer:
+    framework: specforge
+    config: online.yaml
+    model: muse-spark-eagle4.yaml
+    overrides:
+      specforge_mode: train
+      specforge_train_mode: online
+      specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
+      specforge_config: ${PRIMUS_PATH}/examples/specforge/configs/muse-spark-eagle4-8node-training.yaml
+      output_dir: ${OUTPUT_DIR}
+
+      specforge_online:
+        run_id: ${RUN_ID}
+        run_root: ${RUN_ROOT}/control
+        consumer_state_dir: ${CONSUMER_STATE_DIR}
+        capture_nnodes: 4
+        trainer_nnodes: 4
+        server_count: 2
+        server_tp: 4
+        server_gpus: 0
+        trainer_gpus: 0
+        trainer_nproc: 8
+        target_model_path: ${TARGET_MODEL}
+        server_mem_fraction: 0.85
+        mooncake_protocol: rdma
+        mooncake_lease_ttl_ms: 10000
+        skip_tokenizer_init: false
+        start_timeout_s: 3600
+        peer_timeout_s: 7200
+        sglang_extra_args: >-
+          --attention-backend aiter --disable-radix-cache --ep-size 4
+          --page-size 16 --context-length 8704 --disable-cuda-graph
+
+      specforge_overrides:
+        model.target_model_path: ${TARGET_MODEL}
+        model.draft_model_config: ${PRIMUS_PATH}/examples/specforge/configs/muse-spark-eagle4.json
+        data.train_data_path: ${TRAIN_DATA_PATH}
+        data.cache_dir: ${OUTPUT_DIR}/cache
+        training.max_steps: ${MAX_STEPS:200}
+        training.num_epochs: ${NUM_EPOCHS:1}
+        training.save_interval: ${SAVE_INTERVAL:50}
+        training.log_interval: ${LOG_INTERVAL:1}
