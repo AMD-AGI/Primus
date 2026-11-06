@@ -25,13 +25,8 @@ converter):
        and save a legacy ``torch`` checkpoint.
 
 Bridge-free guarantee: this module (and its callers) import ONLY
-``megatron.core`` / ``megatron.training`` / ``megatron.legacy``. ``megatron.bridge``
-is never imported; a hard guard asserts it never leaked into ``sys.modules``.
-
-The ROCm-only ``megatron.legacy.fused_kernels.load`` no-op that the legacy CPU
-init path needs is supplied as a Primus ``phase="convert"`` monkeypatch
-(``primus.backends.megatron.patches.checkpoint_convert_patches``), applied
-in-process before conversion -- NOT by editing the submodule.
+``megatron.core`` / ``megatron.training``. ``megatron.bridge`` is never imported;
+a hard guard asserts it never leaked into ``sys.modules``.
 """
 
 import json
@@ -109,9 +104,8 @@ def apply_convert_patches(module_name: str | None = None, platform: str | None =
 
     Importing the ``checkpoint_convert_patches`` module triggers its
     ``@register_patch`` side effect; ``run_patches`` then applies the ones whose
-    ``condition`` matches (e.g. the ROCm fused-kernels no-op). Must be called
-    BEFORE any Megatron model build / ``fused_kernels.load`` so the monkeypatch
-    is in effect. Returns the number of patches applied.
+    ``condition`` matches. Must be called BEFORE any Megatron model build so the
+    monkeypatches are in effect. Returns the number of patches applied.
     """
     # Register the convert-phase patch(es). Import the single module rather than
     # the whole patches package to avoid pulling heavy TE/training imports into
@@ -251,7 +245,6 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     neutralize_nvte_attention_env()
 
     from megatron.core import mpu
-    from megatron.legacy import fused_kernels
     from megatron.training.global_vars import get_args, set_global_variables
 
     set_global_variables(margs, build_tokenizer=True)
@@ -265,10 +258,6 @@ def init_megatron_single_process(margs, master_port: int, log=print):
         pipeline_model_parallel_size=margs.pipeline_model_parallel_size,
         expert_model_parallel_size=margs.expert_model_parallel_size,
     )
-    # ROCm: legacy fused kernels are CUDA-only and their build shells out to
-    # nvcc; conversion never runs them. Neutralised by the phase="convert"
-    # Primus patch (checkpoint_convert_patches) applied earlier this process.
-    fused_kernels.load(margs)
     return margs
 
 
