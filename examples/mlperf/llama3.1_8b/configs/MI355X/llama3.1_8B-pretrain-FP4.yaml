@@ -101,6 +101,8 @@ modules:
       # logits saves ~0.75 ms per micro-batch. Needs Primus-Turbo with ops.cross_entropy.
       use_turbo_cross_entropy: ${PRIMUS_TURBO_CROSS_ENTROPY:false}
       turbo_ce_overwrite_input: ${PRIMUS_TURBO_CROSS_ENTROPY:false}
+      # Alternative to Turbo CE: keep TE's cross entropy but build its gradient in backward.
+      deferred_cross_entropy: ${PRIMUS_DEFERRED_CROSS_ENTROPY:false}
 
       # --- Mixed Precision Config ---
       fp4: e2m1

@@ -96,6 +96,8 @@ export TORCH_BLAS_PREFER_HIPBLASLT=1
 
 # Turbo fused cross entropy (see the yaml); the image's Primus-Turbo must have ops.cross_entropy.
 export PRIMUS_TURBO_CROSS_ENTROPY=${PRIMUS_TURBO_CROSS_ENTROPY:-false}
+# TE cross entropy with its gradient deferred to backward; exclusive with the Turbo CE above.
+export PRIMUS_DEFERRED_CROSS_ENTROPY=${PRIMUS_DEFERRED_CROSS_ENTROPY:-false}
 
 export SYNTH_WARMUP_STEPS=20
 export SYNTH_WARMUP_VALID_STEPS=10
