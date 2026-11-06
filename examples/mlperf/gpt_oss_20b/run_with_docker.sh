@@ -21,9 +21,11 @@
 #   export HF_TOKEN=<your_token>
 #   bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 #
-# MXFP4 recipe:
-#   export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-#   export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
+# FP8 recipe (MXFP4 is the default):
+#   export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml
+#
+# Keep the image's RCCL instead of rebuilding it for CE ReduceScatter (see README.md):
+#   PRIMUS_REBUILD_RCCL=0 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 #
 # Interactive (prompts for HF_TOKEN, image, NEXP, paths):
 #   INTERACTIVE=1 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
@@ -56,6 +58,9 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
 : "${RUN_RUNTIME_TUNABLES:=0}"
+# The RCCL in rocm/primus:v26.9 has no CE ReduceScatter; config_${DGXSYSTEM}.sh
+# rebuilds it at launch when this is 1.
+: "${PRIMUS_REBUILD_RCCL:=1}"
 
 # Map DGXSYSTEM (e.g. MI355X_1x8x1) -> PRIMUS_GPU_MODEL for primus-env when rocm-smi is unavailable in Docker.
 if [[ -z "${PRIMUS_GPU_MODEL:-}" && "${DGXSYSTEM}" =~ ^(MI[0-9]+[A-Z]*) ]]; then

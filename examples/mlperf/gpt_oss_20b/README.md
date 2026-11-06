@@ -96,12 +96,14 @@ selected.
 The MXFP4 recipe also exports the RCCL CE ReduceScatter settings
 (`RCCL_CE_REDUCESCATTER`, `RCCL_CE_REDUCE_PER_CHUNK`, ...). RCCL ignores them
 unless it implements CE ReduceScatter, and the RCCL 2.32.3 in
-`rocm/primus:v26.9` does not. Set `PRIMUS_REBUILD_RCCL=1` to build RCCL from
-ROCm/rocm-systems#15042 when the container starts and run the gradient
-ReduceScatter on the copy engines:
+`rocm/primus:v26.9` does not. `run_with_docker.sh` therefore defaults to
+`PRIMUS_REBUILD_RCCL=1`, which builds RCCL from ROCm/rocm-systems#15042 when the
+container starts and runs the gradient ReduceScatter on the copy engines. The
+config itself defaults to `0`, so only this launcher rebuilds RCCL. To keep the
+image's RCCL:
 
 ```bash
-export PRIMUS_REBUILD_RCCL=1
+export PRIMUS_REBUILD_RCCL=0
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 ```
 
@@ -112,10 +114,12 @@ trials reuse the build) and installs it over the `librccl` that PyTorch loads.
 The config then selects `MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma`. Override the
 commit with `PRIMUS_RCCL_REF` and the targets with `PRIMUS_RCCL_GPU_ARCHS`
 (default `gfx950`). Images whose RCCL already forces CE ReduceScatter for the
-default gradient group do not need the rebuild.
+default gradient group do not need the rebuild; set `PRIMUS_REBUILD_RCCL=0` for
+them.
 
-Without network access at launch, `export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma`
-alone still moves the gradient ReduceScatter onto the dedicated communicator,
+Without network access at launch, `PRIMUS_REBUILD_RCCL=0` with
+`MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma` still moves the gradient
+ReduceScatter onto the dedicated communicator,
 where the stock RCCL 2.32.3 runs it with symmetric-memory kernels instead of the
 copy engines (about 1% slower per step than the rebuilt RCCL on 8x MI355X).
 
@@ -158,7 +162,7 @@ cd /workspace/Primus
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>
-# optional: export PRIMUS_REBUILD_RCCL=1 (see above)
+export PRIMUS_REBUILD_RCCL=1  # run_with_docker.sh default; see above
 source config_MI355X_1x8x1.sh
 bash run_and_time.sh
 ```
