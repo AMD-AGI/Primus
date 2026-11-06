@@ -16,7 +16,7 @@
 #   export DATADIR=/data/gpt_oss_20b/data
 #   export MODELDIR=/data/gpt_oss_20b/model
 #   export LOGDIR=/data/gpt_oss_20b/results
-#   export CONT=rocm/primus:v26.5
+#   export CONT=rocm/primus:v26.9
 #   export DGXSYSTEM=MI355X_1x8x1
 #   export HF_TOKEN=<your_token>
 #   bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
@@ -41,7 +41,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
 # Defaults (override via env or INTERACTIVE prompts)
 : "${DGXSYSTEM:=MI355X_1x8x1}"
-: "${CONT:=rocm/primus:v26.5}"
+: "${CONT:=rocm/primus:v26.9}"
 : "${DATADIR:=${HOME}/data/gpt_oss_20b/data}"
 : "${MODELDIR:=$(dirname "${DATADIR}")/model}"
 : "${LOGDIR:=$(dirname "${DATADIR}")/results}"
@@ -208,7 +208,8 @@ fi
 # Export values from config_${DGXSYSTEM}.sh for docker exec. The config derives
 # recipe-specific settings from these host selectors, so they are visible to it.
 _config_selectors=()
-for _selector_env in EXP MEGATRON_GRAD_REDUCE_BACKEND PRIMUS_USE_PRECISION_AWARE_OPTIMIZER; do
+for _selector_env in EXP MEGATRON_GRAD_REDUCE_BACKEND PRIMUS_USE_PRECISION_AWARE_OPTIMIZER \
+    PRIMUS_REBUILD_RCCL PRIMUS_RCCL_REF PRIMUS_RCCL_GPU_ARCHS; do
     if [[ -n "${!_selector_env:-}" ]]; then
         _config_selectors+=("${_selector_env}=${!_selector_env}")
     fi
