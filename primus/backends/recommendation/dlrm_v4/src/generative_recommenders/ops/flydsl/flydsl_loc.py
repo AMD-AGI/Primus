@@ -46,14 +46,20 @@ import sys
 KILL_SWITCH = "DLRM_FLYDSL_LOC_MEMO"
 
 # sha256 of inspect.getsource() of the functions the memo reproduces, as
-# verified on dlrmv4_utd_rocm10.2.sif (FlyDSL 0.2.4, CPython 3.12.3).
+# verified on dlrmv4_utd_rocm10.2.sif (FlyDSL 0.2.4, CPython 3.12.3) and
+# rocm/primus:v26.9 (FlyDSL 0.3.4.1: its tracing stack holds (code, options)
+# tuples and it counts dropped frames, otherwise the same walk).
 _VERIFIED = {
-    "flydsl.expr.meta.capture_user_location":
-        "28c3c0c004601ea50c944218fc1ffc6433ee7a2718110a8ac8113bfb94089d65",
-    "inspect.getframeinfo":
+    "flydsl.expr.meta.capture_user_location": (
+        "28c3c0c004601ea50c944218fc1ffc6433ee7a2718110a8ac8113bfb94089d65",  # 0.2.4
+        "8a3492a2bde978847037b4a54e61a4c7bfa89e96e316b10a4f52b695fbed0c64",  # 0.3.4.1
+    ),
+    "inspect.getframeinfo": (
         "a63d872482280afddf1eea9dc12a712234adde3f4e0b890ac95755ad76181762",
-    "inspect._get_code_position":
+    ),
+    "inspect._get_code_position": (
         "da0a300e7dde76a4ce86ac7ec705390c688c995bded486af9ca2dac63a7bba8a",
+    ),
 }
 
 STATE = "not installed"
@@ -108,6 +114,8 @@ def _make_capture(meta):
     def capture_user_location():
         stack = getattr(_tls, "stack", None)
         boundary = stack[-1] if stack else None
+        if isinstance(boundary, tuple):  # FlyDSL >= 0.3: (code, options)
+            boundary = boundary[0]
         max_depth = env.debug.max_loc_depth
         ctx = ir.Context.current
         locs = []
@@ -176,7 +184,7 @@ def install() -> str:
             "inspect.getframeinfo": _source_sha(inspect.getframeinfo),
             "inspect._get_code_position": _source_sha(getattr(inspect, "_get_code_position", None)),
         }
-        bad = [k for k, v in got.items() if v != _VERIFIED[k]]
+        bad = [k for k, v in got.items() if v not in _VERIFIED[k]]
         if bad:
             STATE = "unverified (" + ",".join(bad) + ")"
             return STATE

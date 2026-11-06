@@ -53,7 +53,8 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, vector
+from flydsl.expr import arith, gpu
+from generative_recommenders.ops.flydsl._compat import buffer_ops, vector  # FlyDSL 0.2 API on 0.2 / >= 0.3
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr

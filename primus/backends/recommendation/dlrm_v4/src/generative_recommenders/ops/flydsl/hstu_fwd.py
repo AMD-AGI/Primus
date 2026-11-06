@@ -48,7 +48,6 @@ import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly, llvm, memref, scf
-from flydsl._mlir.dialects import rocdl as rocdl_raw
 from flydsl.compiler.kernel_function import CompilationContext
 try:
     # FlyDSL 0.2.4 (ROCm 10.2 UTD image) renamed fly_values to
@@ -57,7 +56,8 @@ try:
     from flydsl.compiler.protocol import extract_to_ir_values as fly_values
 except ImportError:  # FlyDSL 0.1.1 (rocm/primus:v26.3)
     from flydsl.compiler.protocol import fly_values
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, gpu, range_constexpr, rocdl
+from generative_recommenders.ops.flydsl._compat import buffer_ops, rocdl_raw, vector  # FlyDSL 0.2 API on 0.2 / >= 0.3
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
