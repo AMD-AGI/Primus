@@ -100,6 +100,22 @@ recompute_layer_ids: null
 # dataloader
 dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null
 
+# ===== MoE token dedup / co-activation expert placement =====
+# (ported from ROCm/Megatron-LM PR #165 / #166; all-to-all dispatcher only, i.e.
+# moe_token_dispatcher_type: alltoall with use_turbo_deepep: false, dropless routing)
+# Send one All-to-All row per unique (token, destination EP rank) instead of one per
+# (token, expert); the combine direction is deduplicated the same way. No-op at EP=1.
+moe_token_dedup: false
+# Apply the routing weights in the dedup combine's reduce kernel instead of inside the
+# experts (which then run with unit weights). Numerically equivalent; off by default.
+moe_token_dedup_weighted_combine: false
+# Path to a placement JSON ({"num_experts": N, "default": [perm], "layers": {"<n>": [perm]}})
+# that reorders which global expert lives on which EP rank, built offline from a route
+# capture (CMOE_CAPTURE=1) by tools/moe_expert_placement/build_expert_placement.py.
+# Checkpoints stay keyed by global expert id; use no_load_optim: true when resuming a
+# checkpoint that was saved under a different placement.
+moe_expert_placement: null
+
 # Control the force load balancing type for the MoE router.
 # If set to "even", the router will force the load balancing to be even.
 # If set to "uniform", the router will force the load balancing to be uniform. (Megatron-LM original behavior)
