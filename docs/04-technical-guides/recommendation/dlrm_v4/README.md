@@ -7,6 +7,13 @@ model on the [Yambda-5b](https://huggingface.co/datasets/yandex/yambda)
 music-recommendation dataset, sized as an MLPerf-style training benchmark inside
 the `mlcommons/training` tree.
 
+In Primus the trainer is the `recommendation` backend's `dlrm_v4` model
+(`primus/backends/recommendation/dlrm_v4/`), and the MLPerf recipe is
+[examples/mlperf/dlrm_v4](../../../../examples/mlperf/dlrm_v4/README.md). This page
+describes the benchmark: problem, data, model and quality target. The ROCm port,
+FP8 design, multi-node setup and performance history are in the other pages of
+this folder ([index](../README.md)).
+
 # 1. Problem
 
 This benchmark trains a model that predicts what a person will listen to next.
@@ -34,7 +41,7 @@ next-period generalization with no future leakage. The quality metric is
 **AUC >= 0.75**.
 
 The reference runs on 8 GPUs (validated on AMD Instinct MI350X / MI355X and
-NVIDIA B200; see [docs/training_recipe.md](docs/training_recipe.md)) and scales
+NVIDIA B200; see [examples/mlperf/dlrm_v4/README.md](../../../../examples/mlperf/dlrm_v4/README.md)) and scales
 to multi-node via SLURM.
 
 # 2. Directions
@@ -43,30 +50,12 @@ The benchmark follows the standard MLPerf reference script flow.
 
 ### Steps to configure machine
 
-The environment is the UTD TheRock **ROCm 10.2** image, used with its own GPU
-software (torch 2.16.0a0+rocm10.2, Triton 3.9.0, FlyDSL 0.2.4, FBGEMM nightly
-2026.10.16, torchrec 1.9.2). The recipe only adds `polars-u64-idx`,
-`gin-config`, MLPerf logging and an `/opt/rocm` symlink; never reinstall torch,
-FBGEMM or torchrec into it. Exact versions:
-[docs/rocm_10_port.md §1](docs/rocm_10_port.md#1-software-stack).
-
-Docker:
-
-```bash
-docker build -t recommendation .     # FROM unifiedtrainingdockers.azurecr.io/utd/nightly@sha256:da52c92f...
-docker run --rm -it --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host \
-    -v /path/to/dlrm_data:/data/mlperf_dlrm_v4 recommendation
-```
-
-Apptainer (the path all ROCm 10.2 results were measured with, e.g. cluster A):
-
-```bash
-DEF=scripts/cluster_a/dlrmv4_utd_rocm10.2.def SIF=$SCRATCH/apptainer/dlrmv4_utd_rocm10.2.sif \
-    bash scripts/cluster_a/run_dlrmv4.sh build
-```
-
-Environment variables, kernel settings and run commands per platform are in
-[docs/training_recipe.md](docs/training_recipe.md).
+Primus runs the benchmark in the published `rocm/primus` image (v26.9: ROCm 10.2,
+torch 2.16, Triton 3.9, FBGEMM, torchrec 1.9.2). The `recommendation` hook adds
+`polars-u64-idx`, `gin-config` and MLPerf logging (`--no-deps`) and links
+`/opt/rocm` to the image's ROCm at the first launch in a container; never
+reinstall torch, FBGEMM or torchrec. See
+[examples/mlperf/dlrm_v4](../../../../examples/mlperf/dlrm_v4/README.md).
 
 ### Steps to download and verify data
 
@@ -116,15 +105,15 @@ goes.
 Verify independently:
 
 ```bash
-DLRM_DATA_PATH=/data/mlperf_dlrm_v4 ./verify_dataset.sh
+DLRM_DATA_PATH=/data/mlperf_dlrm_v4 examples/mlperf/dlrm_v4/data/verify_dataset.sh
 ```
 
 This is the same script Option B uses; it detects which layout is present and
 checks what it finds. For Option A that is the two mappings and
 `item_popularity.npy` against
-[`md5sums_yambda_5b_processed.txt`](md5sums_yambda_5b_processed.txt), and the
+[`md5sums_yambda_5b_processed.txt`](../../../../examples/mlperf/dlrm_v4/data/md5sums_yambda_5b_processed.txt), and the
 sixteen cache files against
-[`sha256sums_yambda_5b_cache.txt`](sha256sums_yambda_5b_cache.txt).
+[`sha256sums_yambda_5b_cache.txt`](../../../../examples/mlperf/dlrm_v4/data/sha256sums_yambda_5b_cache.txt).
 
 Most of the transfer buys you a cache build that needs ~190 GB of RAM, which is
 the binding constraint on smaller hosts. If you would rather build it, take
@@ -135,27 +124,27 @@ routes converge on byte-identical files (see below).
 
 ```bash
 # download raw + preprocess (~53 min for 5b, ~2 min for 50m)
-DLRM_DATA_PATH=/data/mlperf_dlrm_v4 ./download_dataset.sh
+DLRM_DATA_PATH=/data/mlperf_dlrm_v4 examples/mlperf/dlrm_v4/data/download_dataset.sh
 
 # verify the preprocessed files
-DLRM_DATA_PATH=/data/mlperf_dlrm_v4 ./verify_dataset.sh
+DLRM_DATA_PATH=/data/mlperf_dlrm_v4 examples/mlperf/dlrm_v4/data/verify_dataset.sh
 ```
 
-- [`download_dataset.sh`](download_dataset.sh) wraps the preprocessing pipeline
+- [`download_dataset.sh`](../../../../examples/mlperf/dlrm_v4/data/download_dataset.sh) wraps the preprocessing pipeline
   in `generative_recommenders.dlrm_v4.preprocess_public_data` (HuggingFace
   download + temporal split + session segmentation + item-popularity counts).
   The pipeline itself is described in
   [§3 Data preprocessing](#data-preprocessing). It pulls 38.3 GB from the
   `yandex/yambda` repository — `flat/5b/multi_event.parquet` plus the two item
   mappings — not the full 195 GB repository.
-- [`verify_dataset.sh`](verify_dataset.sh) checks the preprocessed files against
-  [`md5sums_yambda_5b_processed.txt`](md5sums_yambda_5b_processed.txt). Those
+- [`verify_dataset.sh`](../../../../examples/mlperf/dlrm_v4/data/verify_dataset.sh) checks the preprocessed files against
+  [`md5sums_yambda_5b_processed.txt`](../../../../examples/mlperf/dlrm_v4/data/md5sums_yambda_5b_processed.txt). Those
   hash byte-for-byte artifacts, so they verify a copy or a download; re-running
   preprocessing elsewhere can produce logically identical parquet files with
   different bytes.
 - The flat-event cache is built on the first training run, not here. Re-run
   `verify_dataset.sh` afterwards and it will additionally check the cache
-  against [`sha256sums_yambda_5b_cache.txt`](sha256sums_yambda_5b_cache.txt).
+  against [`sha256sums_yambda_5b_cache.txt`](../../../../examples/mlperf/dlrm_v4/data/sha256sums_yambda_5b_cache.txt).
   That works because the build is deterministic: sessions are sorted by
   `(uid, session_id)`, which is a total order, and `.npy` records only dtype and
   shape, so nothing run-specific reaches the bytes. Rebuilding from the same
@@ -168,47 +157,27 @@ Budget ~313 GB of disk for the peak (raw + preprocessed + cache) and a host with
 the steady state to ~275 GB.
 
 For smaller variants (`yambda-50m` / `yambda-500m`) substitute the dataset name
-(`DATASET=yambda-50m ./download_dataset.sh`).
+(`DATASET=yambda-50m examples/mlperf/dlrm_v4/data/download_dataset.sh`).
 
 ### Steps to run and time
 
 ```bash
-DLRM_DATA_PATH=/data/mlperf_dlrm_v4 ./run_and_time.sh
+DATADIR=/data/mlperf_dlrm_v4 LOGDIR=/results bash examples/mlperf/dlrm_v4/run_with_docker.sh
 ```
 
-[`run_and_time.sh`](run_and_time.sh) runs the full-reference streaming
-train+eval sweep on a single 8-GPU host with `AUC_THRESHOLD=0.75` and MLPerf
-compliance logging, printing the elapsed time of the timed region.
+runs the streaming train+eval sweep on one 8-GPU node to `AUC_THRESHOLD=0.75`
+with MLPerf compliance logging and prints the time of the timed region; see
+[examples/mlperf/dlrm_v4](../../../../examples/mlperf/dlrm_v4/README.md) for
+the run shapes and options.
 
-### Multi-node (SLURM)
+### Multi-node
 
-For N >= 1 nodes use [`scripts/launch_slurm.sh`](scripts/launch_slurm.sh), which
-provisions the container on each node and launches the same trainer. A bare
-submit runs a small functional smoke run; set the run-shape knobs for the full
-sweep:
-
-```bash
-# smoke (fast functional check)
-sbatch --nodes=1 scripts/launch_slurm.sh
-
-# full reference sweep
-START_TS=0 NUM_TRAIN_TS=299 \
-NUM_TRAIN_BATCHES=0 NUM_EVAL_BATCHES=0 \
-EVAL_EVERY_N_WINDOWS=0 EVAL_EVERY_DATA_PCT=0.001 \
-AUC_THRESHOLD=0.75 \
-sbatch --nodes=2 scripts/launch_slurm.sh
-```
-
-On ROCm 10.2, 1-, 2- and 4-node runs are validated on cluster A with the
-Apptainer runner `scripts/cluster_a/run_dlrmv4.sh` (`submit -N <n>`, `SHAPE=rcp` for
-the MLPerf rules per node count; see
-[docs/training_recipe.md](docs/training_recipe.md)). `launch_slurm.sh`'s Docker
-path is updated for the 10.2 image but not yet run end to end.
-
-Multi-node uses real RDMA (RoCEv2); the fabric/NCCL setup is documented in
-[docs/multi_node_config.md](docs/multi_node_config.md). Keep all run outputs
-(log, checkpoints, mllog, TensorBoard) under a writable scratch path you own —
-the dataset mount is read-only.
+The trainer runs on N nodes with one Primus process per node (`NNODES`,
+`NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT`); the MLPerf RCP learning rates are
+2e-6 at 2 nodes and 4e-6 at 4 nodes. Multi-node uses RDMA (RoCEv2); the fabric
+and NCCL setup is in [multi-node.md](multi-node.md). The 1-, 2- and 4-node
+results in [rocm-port.md](rocm-port.md) were measured with the reference
+repository's launchers, before the move into Primus.
 
 ### Checkpointing and resume
 
@@ -369,8 +338,8 @@ mmap'd `anchor_ts` cache keyed by `(history_length, min_history)`.
 ### Training data order
 
 The training data is traversed in **strict wall-clock order**, not shuffled.
-`scripts/launch_slurm.sh` and `run_and_time.sh` default to
-`--mode streaming-train-eval`: the timeline is sliced into fixed-duration
+The MLPerf recipe runs `mode: streaming-train-eval`
+(`primus/configs/modules/recommendation/pre_trainer.yaml`): the timeline is sliced into fixed-duration
 **windows** (default 1 day, `get_dataset.streaming_window_seconds = 86400`), and
 the loop walks them forward:
 
@@ -434,7 +403,7 @@ writes a sidecar manifest (`ts_index_manifest_<tag>_W<sec>.json`: sizes,
 hashes, source fingerprints, verify result) and adds nothing to training time:
 
 ```bash
-T=scripts/ts_index_tool.py C="$DLRM_DATA_PATH/processed_5b/hstu_cache_L4086"
+T=tools/recommendation/dlrm_v4/ts_index_tool.py C="$DLRM_DATA_PATH/processed_5b/hstu_cache_L4086"
 python3 $T prebuild --cache-dir "$C" --history-length 4086   # refuses if present; --force rebuilds
 python3 $T verify   --cache-dir "$C" --history-length 4086   # O(N) full check vs the source
 python3 $T status   --cache-dir "$C"                         # what exists, verified or stale
@@ -443,7 +412,7 @@ python3 $T check-staged /tmp/$USER/dlrm_data/processed_5b/hstu_cache_L4086 --his
 ```
 
 `check-staged` needs only the Python standard library. `STAGE_CHECK_TS_INDEX=1`
-makes `scripts/stage_data_local.sh` run it after staging (default off), against
+makes `examples/mlperf/dlrm_v4/data/stage_data_local.sh` run it after staging (default off), against
 the sidecar in the NFS source cache (`--sidecar-dir`), with `MIN_HISTORY`
 forwarded. Stage only after the NFS index and sidecar exist: a node staged
 earlier has no index, and the first run there builds an unverified one in
@@ -881,7 +850,7 @@ start_eval_samples  = FLOOR((4480 * GBS + 135331840) / 3)
 skip_eval_epoch_pct = start_eval_samples / 2290835423
 ```
 
-![First eval_accuracy > 0.75 by global batch size, with the start-eval line](docs/images/skip_eval_start_by_gbs.png)
+![First eval_accuracy > 0.75 by global batch size, with the start-eval line](images/skip_eval_start_by_gbs.png)
 
 The figure plots, for each GBS, the epoch at which the 20 seeds first cross AUC
 0.75 — min, max, median and mean — against the start-eval line this formula

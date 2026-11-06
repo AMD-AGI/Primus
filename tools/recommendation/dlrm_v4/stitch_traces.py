@@ -69,15 +69,15 @@ Examples
 --------
 Stitch step 52, default (CPU + GPU, drop Spans), gzip output::
 
-    python scripts/stitch_traces.py <trace_dir> --step 52 --gzip
+    python tools/recommendation/dlrm_v4/stitch_traces.py <trace_dir> --step 52 --gzip
 
 GPU-only view (skip CPU thread tree entirely — useful for kernel-level analysis)::
 
-    python scripts/stitch_traces.py <trace_dir> --step 52 --include gpu --gzip
+    python tools/recommendation/dlrm_v4/stitch_traces.py <trace_dir> --step 52 --include gpu --gzip
 
 CPU-only view (host-side ops, profiler annotations, comm scheduling)::
 
-    python scripts/stitch_traces.py <trace_dir> --step 52 --include cpu --gzip
+    python tools/recommendation/dlrm_v4/stitch_traces.py <trace_dir> --step 52 --include cpu --gzip
 """
 from __future__ import annotations
 
@@ -91,7 +91,7 @@ from pathlib import Path
 
 # The shared helpers have no torch/gin imports, so this CLI runs on a login
 # host as well as in the training environment.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "primus/backends/recommendation/dlrm_v4/src"))
 from generative_recommenders.dlrm_v4.trace_postprocessing import (
     _repair_gpu_nesting,
     clip_lead_in,
@@ -118,14 +118,15 @@ _FLOW_ID_STRIDE = 1 << 40
 # Each section reserves a wide range so within-section ordering (rank, stream)
 # fits comfortably without overlapping the next section.
 _SORT_BASE = {
-    "cpu":   0,
-    "gpu":   1_000_000,
-    "other": 10_000_000,   # Traces / "" misc string-pid tracks
+    "cpu": 0,
+    "gpu": 1_000_000,
+    "other": 10_000_000,  # Traces / "" misc string-pid tracks
 }
 
 # `Spans` carries no useful content in our workloads (one X event per trace)
 # and clutters the timeline — always dropped.
 _ALWAYS_DROP_PIDS_STR = {"Spans"}
+
 
 def _apply_gpu_steps(
     events: list[dict], mode: str, step_streams: str = "main"
@@ -145,7 +146,8 @@ def _apply_gpu_steps(
         return events, None
     if mode == "drop":
         return [
-            e for e in events
+            e
+            for e in events
             if not (
                 e.get("ph") == "X"
                 and e.get("cat") == "gpu_user_annotation"
@@ -248,9 +250,9 @@ def _process_one_rank(
         if isinstance(pid, str) and pid in _ALWAYS_DROP_PIDS_STR:
             continue
         kind, stream_idx = classify.get(pid, ("other", 0))
-        if kind == "spans":          # always dropped
+        if kind == "spans":  # always dropped
             continue
-        if kind not in include:      # filtered by --include
+        if kind not in include:  # filtered by --include
             continue
 
         # Remap pid + flow id (per-rank namespace).
@@ -288,11 +290,17 @@ def _group_by_step(trace_dir: Path) -> dict[str, dict[int, Path]]:
     return dict(groups)
 
 
-def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
-               include: set[str], gzip_out: bool, verbose: bool,
-               gpu_steps: str = "rebuild",
-               rocm_layout: bool = False,
-               step_streams: str = "main") -> None:
+def stitch_one(
+    rank_to_path: dict[int, Path],
+    out_path: Path,
+    *,
+    include: set[str],
+    gzip_out: bool,
+    verbose: bool,
+    gpu_steps: str = "rebuild",
+    rocm_layout: bool = False,
+    step_streams: str = "main",
+) -> None:
     """Merge one (step, rank->path) group into a single trace file."""
     merged_events: list[dict] = []
     base: dict | None = None
@@ -342,9 +350,7 @@ def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
                         f"{sm['max_shift_ns'] / 1000:.3f} us)",
                         file=sys.stderr,
                     )
-        events, rebuild_report = _apply_gpu_steps(
-            events, gpu_steps, step_streams
-        )
+        events, rebuild_report = _apply_gpu_steps(events, gpu_steps, step_streams)
         if rebuild_report is not None:
             rebuild_reports[rank] = rebuild_report
         if base is None:
@@ -375,8 +381,7 @@ def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
     # rows open blank while another rank finishes a long kernel.
     crossing_start = lead_start = cut
     if cut is not None:
-        crossing_start, lead_start = lead_in_trace_bounds(
-            (events for _, events, _ in per_rank), cut)
+        crossing_start, lead_start = lead_in_trace_bounds((events for _, events, _ in per_rank), cut)
     for rank, events, rocm in per_rank:
         if cut is not None:
             report = clip_lead_in(events, cut, lead_start)
@@ -394,11 +399,7 @@ def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
                 )
             layout_reports[rank] = report
         rename_lead_in_steps(events)
-        merged_events.extend(
-            _process_one_rank(
-                events, rank, include, "keep"
-            )
-        )
+        merged_events.extend(_process_one_rank(events, rank, include, "keep"))
     per_rank.clear()
     base["traceEvents"] = merged_events
     # Per-rank rendering reports from the training export are superseded by
@@ -407,8 +408,7 @@ def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
     # Each rank's export window report (Profiler trim) is kept per rank below,
     # not as rank 0's unlabelled top-level copy.
     base.pop("traceCapture", None)
-    if (layout_reports or rebuild_reports or capture_notes or captures
-            or lead_reports or order_reports):
+    if layout_reports or rebuild_reports or capture_notes or captures or lead_reports or order_reports:
         base["traceRendering"] = {
             "scope": (
                 "Display-only: GPU work on each stream kept in launch "
@@ -487,7 +487,8 @@ def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
             period = (
                 f", period {flag['main_stream_period_ms']:.1f} ms vs median "
                 f"{flag['median_period_ms']:.1f} ms"
-                if "median_period_ms" in flag else ""
+                if "median_period_ms" in flag
+                else ""
             )
             print(
                 f"  rank {rank}: extended step {flag['step']} "
@@ -495,8 +496,7 @@ def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
                 f"{flag['main_stream_ms']:.1f} ms on the main stream vs median "
                 f"{flag['median_ms']:.1f} ms{period}; largest host self time "
                 + ", ".join(
-                    f"{c['name'][:48]} {c['self_ms']:.1f} ms"
-                    for c in flag.get("largest_host_self_time", [])
+                    f"{c['name'][:48]} {c['self_ms']:.1f} ms" for c in flag.get("largest_host_self_time", [])
                 ),
                 file=sys.stderr,
             )
@@ -504,7 +504,9 @@ def stitch_one(rank_to_path: dict[int, Path], out_path: Path, *,
     for step, hits in sorted(stalls.items()):
         self_ms, rank, name = max(hits)
         stall_summary[str(step)] = {
-            "rank": rank, "name": name, "self_ms": self_ms,
+            "rank": rank,
+            "name": name,
+            "self_ms": self_ms,
             "ranks_flagged": sorted(r for _, r, _ in hits),
         }
         print(
@@ -536,39 +538,59 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("trace_dir", type=Path,
-                    help="Directory containing trace_*_rank*.json files.")
-    ap.add_argument("--step", type=str, default=None,
-                    help="Stitch only the given step key (e.g. '52' or 'step52'). "
-                         "Default: stitch every step group found.")
-    ap.add_argument("--out", type=Path, default=None,
-                    help="Output path. Only valid when --step selects exactly "
-                         "one group. Default: <trace_dir>/trace_<step>.json[.gz] "
-                         "(or trace_<step>_cpu/_gpu when --include filters).")
-    ap.add_argument("--include", choices=("cpu", "gpu", "both"), default="both",
-                    help="Which sections to keep: cpu-only tracks, gpu-only "
-                         "tracks, or both (default). 'Spans' is always dropped.")
-    ap.add_argument("--gpu-steps", choices=("rebuild", "keep", "drop"),
-                    default="rebuild",
-                    help="GPU-side annotation spans. 'rebuild' (default) "
-                         "rebuilds every GPU annotation, ProfilerStep#N "
-                         "included, from the GPU work its CPU span launched "
-                         "(correlation ids), which stays correct when the host "
-                         "runs ahead of the GPU. 'keep' leaves the profiler's "
-                         "spans as emitted; 'drop' removes the GPU-side "
-                         "ProfilerStep spans.")
-    ap.add_argument("--step-streams", choices=("main", "all"),
-                    default="main",
-                    help="With --gpu-steps rebuild, where GPU-side "
-                         "ProfilerStep#N spans go. 'main' (default): one per "
-                         "step on each rank's main compute stream (the stream "
-                         "with the most non-collective GPU work time). 'all': "
-                         "one on every stream the step launched work on.")
-    ap.add_argument("--gzip", action="store_true",
-                    help="Write gzip-compressed JSON (Perfetto auto-detects).")
-    ap.add_argument("--rocm-layout", action=argparse.BooleanOptionalAction, default=True,
-                    help="Apply shared ROCm display cleanup to temporary copies "
-                         "(default: on for HIP traces; skipped for CUDA traces).")
+    ap.add_argument("trace_dir", type=Path, help="Directory containing trace_*_rank*.json files.")
+    ap.add_argument(
+        "--step",
+        type=str,
+        default=None,
+        help="Stitch only the given step key (e.g. '52' or 'step52'). "
+        "Default: stitch every step group found.",
+    )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output path. Only valid when --step selects exactly "
+        "one group. Default: <trace_dir>/trace_<step>.json[.gz] "
+        "(or trace_<step>_cpu/_gpu when --include filters).",
+    )
+    ap.add_argument(
+        "--include",
+        choices=("cpu", "gpu", "both"),
+        default="both",
+        help="Which sections to keep: cpu-only tracks, gpu-only "
+        "tracks, or both (default). 'Spans' is always dropped.",
+    )
+    ap.add_argument(
+        "--gpu-steps",
+        choices=("rebuild", "keep", "drop"),
+        default="rebuild",
+        help="GPU-side annotation spans. 'rebuild' (default) "
+        "rebuilds every GPU annotation, ProfilerStep#N "
+        "included, from the GPU work its CPU span launched "
+        "(correlation ids), which stays correct when the host "
+        "runs ahead of the GPU. 'keep' leaves the profiler's "
+        "spans as emitted; 'drop' removes the GPU-side "
+        "ProfilerStep spans.",
+    )
+    ap.add_argument(
+        "--step-streams",
+        choices=("main", "all"),
+        default="main",
+        help="With --gpu-steps rebuild, where GPU-side "
+        "ProfilerStep#N spans go. 'main' (default): one per "
+        "step on each rank's main compute stream (the stream "
+        "with the most non-collective GPU work time). 'all': "
+        "one on every stream the step launched work on.",
+    )
+    ap.add_argument("--gzip", action="store_true", help="Write gzip-compressed JSON (Perfetto auto-detects).")
+    ap.add_argument(
+        "--rocm-layout",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply shared ROCm display cleanup to temporary copies "
+        "(default: on for HIP traces; skipped for CUDA traces).",
+    )
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -586,8 +608,7 @@ def main() -> int:
 
     groups = _group_by_step(args.trace_dir)
     if not groups:
-        print(f"error: no trace_*_rank*.json files under {args.trace_dir}",
-              file=sys.stderr)
+        print(f"error: no trace_*_rank*.json files under {args.trace_dir}", file=sys.stderr)
         return 2
 
     if args.step is not None:
@@ -596,16 +617,14 @@ def main() -> int:
             wanted = args.step
         if wanted not in groups:
             print(
-                f"error: step {args.step!r} not found. "
-                f"Available: {sorted(groups)}",
+                f"error: step {args.step!r} not found. " f"Available: {sorted(groups)}",
                 file=sys.stderr,
             )
             return 2
         groups = {wanted: groups[wanted]}
 
     if args.out is not None and len(groups) != 1:
-        print("error: --out requires --step to select exactly one group",
-              file=sys.stderr)
+        print("error: --out requires --step to select exactly one group", file=sys.stderr)
         return 2
 
     for key, rank_map in sorted(groups.items()):
@@ -622,11 +641,16 @@ def main() -> int:
             # filters tag the output so they can coexist in one directory.
             suffix = "" if args.include == "both" else f"_{args.include}"
             out = args.trace_dir / f"trace_{key}{suffix}{ext}"
-        stitch_one(rank_map, out, include=include,
-                   gzip_out=args.gzip, verbose=not args.quiet,
-                   gpu_steps=args.gpu_steps,
-                   rocm_layout=args.rocm_layout,
-                   step_streams=args.step_streams)
+        stitch_one(
+            rank_map,
+            out,
+            include=include,
+            gzip_out=args.gzip,
+            verbose=not args.quiet,
+            gpu_steps=args.gpu_steps,
+            rocm_layout=args.rocm_layout,
+            step_streams=args.step_streams,
+        )
 
     return 0
 

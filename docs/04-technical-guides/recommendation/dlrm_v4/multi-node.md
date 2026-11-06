@@ -5,7 +5,7 @@ ranker on cluster D, the hard problems solved, and **exactly
 which settings are cluster/fabric-specific** so this can be reused or re-tuned
 when the underlying network changes.
 
-Companion to [`perf_opt.md`](./perf_opt.md) and [`training_recipe.md`](./training_recipe.md).
+Companion to [`perf-notes.md`](./perf_opt.md) and [`examples/mlperf/dlrm_v4/README.md`](./training_recipe.md).
 The single entry point is [`scripts/launch_slurm.sh`](../scripts/launch_slurm.sh);
 the Python side is `generative_recommenders/dlrm_v4/train/{train_ranker,utils}.py`.
 
@@ -235,7 +235,7 @@ isolate a fabric problem.
 
 ROCm 10.2 (UTD image) and v26.3 were run at 2 and 4 nodes with
 `scripts/cluster_a/run_dlrmv4.sh submit -N <n>`, not `launch_slurm.sh`. Results:
-[`rocm_10_port.md`](./rocm_10_port.md) §2.
+[`rocm-port.md`](./rocm_10_port.md) §2.
 
 | Item | cluster A |
 |---|---|

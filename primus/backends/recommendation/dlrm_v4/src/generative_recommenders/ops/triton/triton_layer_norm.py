@@ -2531,7 +2531,7 @@ _STORE_T_V2: bool = os.environ.get("DLRM_HSTU_FP8_BWD_STORE_T_V2", "0") == "1"
 # write requests per row (rocprofv3 TCC_EA0_WRREQ - WRREQ_64B; 0.6..2 on the
 # Triton 3.6 build) and up to 1.3x the v26.3 kernel time at X > 2 GiB. 64-token
 # blocks: 0 partial write requests, <= the v26.3 kernel time
-# (docs/rocm_10_port.md T21). Same per-lane work (4 rows x 16 features), 32 KiB LDS.
+# (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md T21). Same per-lane work (4 rows x 16 features), 32 KiB LDS.
 _LN_FWD_STORE_T_V2_CONFIG = (64, 8)
 # Programs per XCD taking consecutive BLOCK_N-token blocks (4 x 64 = 256 tokens
 # = two full 128-byte YT lines per group).

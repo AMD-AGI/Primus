@@ -2201,7 +2201,7 @@ def make_persistent_streaming_dataloader(
     ``Samples.pin_memory()`` on the loader's pin thread, so the per-step
     host-to-device copy is one real DMA instead of a blocking stage through a
     driver bounce buffer. Saves ~77 ms/step on 8x MI350X at bs 1024/rank
-    (666 -> 589); see docs/perf_opt.md.
+    (666 -> 589); see docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md.
 
     The copy itself stays blocking -- once the source is pinned it costs ~2 ms,
     and non_blocking=True measured no better while requiring event-based lifetime
@@ -4440,7 +4440,7 @@ def build_train_pipeline(
             # permute_2D faults or a hang, within the first 1-5 resume
             # switches). Legacy ProcessGroupNCCL (torch 2.12) stashed outputs
             # too, which hid it.
-            # docs/rocm_10_port.md T17.
+            # docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md T17.
             resume_in_flight = (
                 sparse_dist
                 and bool(self.contexts)
@@ -5933,7 +5933,7 @@ def streaming_train_eval_loop(
         # KJTAllToAll path) but never completes it; _StreamingTrainPipeline.attach
         # completes it with one wait_sparse_data_dist and stream-waits the
         # superseded pre-detach collectives before dropping them
-        # (docs/rocm_10_port.md T17).
+        # (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md T17).
         if train_pipeline is not None:
             train_pipeline.detach()
         model.eval()

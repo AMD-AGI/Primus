@@ -6,9 +6,9 @@ arm, and the two should not share a blast radius while this one is younger.
 Measured deltas are deliberately NOT quoted here. They are a property of a
 build, a library version and a host, so a number inlined in a comment is stale
 the first time any of those move, and a reader has no way to tell. They live in
-`docs/perf_opt.md` -- the evaluation row for the current figure, the
+`docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md` -- the evaluation row for the current figure, the
 FP8-backward optimization-log row for the kernel-level accounting -- and the
-mechanism and campaign history are in `docs/fp8/fp8.md` (§12).
+mechanism and campaign history are in `docs/04-technical-guides/recommendation/dlrm_v4/fp8.md` (§12).
 
 Two things live here, and they are one thing in practice.
 
@@ -74,7 +74,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 # underflow fraction by orders of magnitude and beats E4M3 at any margin.
 # Weights keep E4M3: their range is narrow, so for them the mantissa bit is the
 # better buy. The underflow table, with the measured fractions per site, is in
-# docs/fp8/fp8.md §12.
+# docs/04-technical-guides/recommendation/dlrm_v4/fp8.md §12.
 _FP8_E4M3: Optional[torch.dtype] = getattr(torch, "float8_e4m3fn", None)
 _FP8_E5M2: Optional[torch.dtype] = getattr(torch, "float8_e5m2", None)
 _E4M3_MAX: float = 448.0
@@ -1431,7 +1431,7 @@ def output_projection_dgrad(
     the cast is cheap enough here to pay for itself out of one GEMM. The wgrads
     would need both operands re-laid-out along K and do not.
 
-    Current measured delta: `docs/perf_opt.md`, FP8-backward optimization-log
+    Current measured delta: `docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md`, FP8-backward optimization-log
     row. Note it is quoted against the *pinned* BF16 baseline this site actually
     runs, which is a smaller win than against a stock GEMM.
     """

@@ -73,7 +73,7 @@ not recorded on that stack).
 
 Re-recording for a stack (e.g. the UTD ROCm 10.2 image, Triton 3.9), as for the
 3.6 rows: the SYNTHETIC dataset (dlrm_v4/train/tspec_synth_data.py --world-size
-<ranks>, then scripts/ts_index_tool.py prebuild on its cache; no training-data file
+<ranks>, then tools/recommendation/dlrm_v4/ts_index_tool.py prebuild on its cache; no training-data file
 is read), the unmodified trainer on that stack's image with DLRM_DATA_PATH=<synthetic
 root>, DL_WINDOW_INDEX=1, TRITON_SPEC_RECORD=<dir>, TRITON_SPEC_REPLAY=0, the two
 record arms (START_TS=0 NUM_TRAIN_TS=8 + final eval of window 8; START_TS=9

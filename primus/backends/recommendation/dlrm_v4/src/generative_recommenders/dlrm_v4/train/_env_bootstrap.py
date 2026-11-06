@@ -20,7 +20,7 @@ import gin
 logger: logging.Logger = logging.getLogger(__name__)
 
 # The certified FP8 HSTU forward arm: the exact knob set Plan 09 measured and
-# docs/perf_opt.md reports (-7.05% ms/step, +7.59% samples/s, samples-to-AUC
+# docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md reports (-7.05% ms/step, +7.59% samples/s, samples-to-AUC
 # identical seed for seed against the paired bf16 arm).
 #
 # It is ONE named unit rather than eighteen separate bindings because a run that
@@ -450,7 +450,7 @@ def apply_env_bootstrap(
         os.environ["TRITON_FULL_AUTOTUNE"] = "1" if TRITON_FULL_AUTOTUNE else "0"
         logger.info("env bootstrap: TRITON_FULL_AUTOTUNE=%s", os.environ["TRITON_FULL_AUTOTUNE"])
 
-    # ROCm 10.2 port (docs/rocm_10_port.md T13): Triton 3.9 codegen parity.
+    # ROCm 10.2 port (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md T13): Triton 3.9 codegen parity.
     # Triton 3.9 changed two AMD codegen defaults that every Triton kernel and
     # pinned config here was tuned without (Triton 3.6, rocm/primus:v26.3):
     # FP contraction (a*b+c -> v_fma) is now OFF by default, and async copy
@@ -1579,7 +1579,7 @@ def apply_env_bootstrap(
         "DLRM_HSTU_FP8_PIPE_STREAM_PRIO_MN", DLRM_HSTU_FP8_PIPE_STREAM_PRIO_MN
     )
     # (17b) Reference-data-only staging (yambda_5b.gin item (17b)). Read by
-    # scripts/stage_data_local.sh on the host, before this process exists:
+    # examples/mlperf/dlrm_v4/data/stage_data_local.sh on the host, before this process exists:
     # the stager parses this same gin binding itself (env wins; 1|0 only) and
     # nothing in the trainer reads the variable. Bound here so the binding is
     # a declared parameter and the trainer's environment records the mode the

@@ -41,9 +41,9 @@
 # reproduction of $SRC, so it can be deleted at any time and re-made in ~140 s;
 # nothing here is ever the only copy of anything. `--purge` removes it.
 #
-# Usage:  scripts/stage_data_local.sh [dest_root] [history_length]
-#         scripts/stage_data_local.sh --purge [dest_root]
-#         srun --nodelist=<node> ... scripts/stage_data_local.sh
+# Usage:  examples/mlperf/dlrm_v4/data/stage_data_local.sh [dest_root] [history_length]
+#         examples/mlperf/dlrm_v4/data/stage_data_local.sh --purge [dest_root]
+#         srun --nodelist=<node> ... examples/mlperf/dlrm_v4/data/stage_data_local.sh
 set -euo pipefail
 
 PURGE=0
@@ -257,7 +257,7 @@ echo "[stage] host=$(hostname -s)  src=$SRC  dest=$DEST  cache=$CACHE  jobs=$JOB
 # a lone CR are line breaks too), so a carriage return cannot hide an include
 # or a binding; the regexes are strings with no backslash in a bracket
 # expression, which gawk, mawk and busybox awk all read alike.
-STAGE_GIN=${STAGE_GIN:-$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/generative_recommenders/dlrm_v4/train/gin/yambda_5b.gin}
+STAGE_GIN=${STAGE_GIN:-$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../.." && pwd)/primus/backends/recommendation/dlrm_v4/src/generative_recommenders/dlrm_v4/train/gin/yambda_5b.gin}
 if [ ! -r "$STAGE_GIN" ]; then
   echo "[stage] FATAL: gin file $STAGE_GIN not readable (needed for DLRM_HSTU_FP8_STAGE_REF_ONLY)"
   exit 1
@@ -480,6 +480,7 @@ if [ "$n_todo" -gt 0 ]; then
   # A/B against NFS would then be measuring RAM, not NVMe. Falls back to cp if the
   # filesystem refuses O_DIRECT.
   export SRC DEST
+  # shellcheck disable=SC2016  # expanded by the inner bash, per file
   xargs -a "$todo" -P "$JOBS" -I{} bash -c '
     rel={}; s="$SRC/$rel"; d="$DEST/$rel"
     mkdir -p "$(dirname "$d")"
@@ -522,7 +523,7 @@ fi
 # STAGE_CHECK_TS_INDEX_ARGS (e.g. "--hash" to also hash the ~18 GB index).
 if [ "${STAGE_CHECK_TS_INDEX:-0}" = "1" ]; then
   # shellcheck disable=SC2086
-  python3 "$(dirname "$0")/ts_index_tool.py" check-staged "$DEST/$CACHE" \
+  python3 "$(dirname "$0")/../../../../tools/recommendation/dlrm_v4/ts_index_tool.py" check-staged "$DEST/$CACHE" \
       --history-length "$HIST" ${MIN_HISTORY:+--min-history "$MIN_HISTORY"} \
       --sidecar-dir "$SRC/$CACHE" ${STAGE_CHECK_TS_INDEX_ARGS:-} 2>&1 | sed 's/^/[stage] /' \
     || { echo "[stage] FAILED window-index check (STAGE_CHECK_TS_INDEX=1)"; exit 1; }
@@ -564,6 +565,7 @@ if [ "$REF_ONLY" = 1 ]; then
   declare -A is_ref=()
   for rel in "${REF_FILES[@]}"; do is_ref[$rel]=1; done
   extra=()
+  # shellcheck disable=SC2030  # the inner loop's f is local to it
   while IFS= read -r -d '' rel; do
     [ -n "${is_ref[$rel]:-}" ] || extra+=("$rel")
   done < <(for d in "$CACHE" processed_5b shared_metadata; do
@@ -626,6 +628,7 @@ while IFS= read -r -d '' e; do
   if [ "${es_want[$e]:-}" = 1 ]; then es_want[$e]=2; else es_left+=("$e"); fi
 done < "$es.sorted"
 for rel in "${REF_FILES[@]}"; do
+  # shellcheck disable=SC2031  # "f $rel" is a key string, not $f
   if [ "${es_want["f $rel"]}" != 2 ] || [ -L "$DEST/$rel" ] || [ ! -f "$DEST/$rel" ]; then es_miss+=("$rel"); fi
 done
 n_left=${#es_left[@]}; n_miss=${#es_miss[@]}; n_err=$(grep -c '' "$es.err" || true)

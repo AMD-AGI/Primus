@@ -21,8 +21,10 @@ set -euo pipefail
 DATASET="${DATASET:-yambda-5b}"
 : "${DLRM_DATA_PATH:?Set DLRM_DATA_PATH to the destination data root}"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${REPO_ROOT}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The trainer package (preprocessing lives in it).
+TRAINER_SRC="$(cd "${HERE}/../../../../primus/backends/recommendation/dlrm_v4/src" && pwd)"
+cd "${TRAINER_SRC}"
 
 echo "[download_dataset] dataset=${DATASET} data-path=${DLRM_DATA_PATH}"
 mkdir -p "${DLRM_DATA_PATH}"
@@ -36,4 +38,4 @@ echo "  raw/5b/multi_event.parquet"
 echo "  shared_metadata/{artist,album}_item_mapping.parquet, embeddings.parquet"
 echo "  processed_5b/{train_sessions,test_events,session_index}.parquet"
 echo "  processed_5b/item_popularity.npy, processed_5b/split_meta.json"
-echo "[download_dataset] verify integrity with: ./verify_dataset.sh"
+echo "[download_dataset] verify integrity with: ${HERE}/verify_dataset.sh"

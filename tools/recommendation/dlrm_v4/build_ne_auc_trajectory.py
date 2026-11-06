@@ -45,7 +45,7 @@ It is dependency-light (stdlib + optional matplotlib) so it runs anywhere the
 log is readable, including the head node.
 
 Usage:
-  python3 scripts/build_ne_auc_trajectory.py LOG [--out DIR] [--task listen_plus]
+  python3 tools/recommendation/dlrm_v4/build_ne_auc_trajectory.py LOG [--out DIR] [--task listen_plus]
 """
 
 import argparse
@@ -59,9 +59,7 @@ from typing import Dict, List, Optional, Tuple
 # `train - Step 201 metrics: {...}` / `eval - Step 17 metrics: {...}`
 _STEP_RE = re.compile(r"(train|eval) - Step (\d+) metrics: \{(.*)\}")
 # `metric/<prefix><name>/<task>': tensor(<value>` — value may be int/float/sci.
-_METRIC_RE = re.compile(
-    r"metric/([A-Za-z0-9_]+)/([A-Za-z0-9_+]+)'?\s*:\s*tensor\(\s*([-0-9.eE+]+)"
-)
+_METRIC_RE = re.compile(r"metric/([A-Za-z0-9_]+)/([A-Za-z0-9_+]+)'?\s*:\s*tensor\(\s*([-0-9.eE+]+)")
 # `train - Step 201 perf: local_sps=97.0 global_sps=776.2 step_ms=10553.89 `
 # `elapsed_sec=680.6 total_samples=205824`
 _PERF_RE = re.compile(
@@ -74,8 +72,16 @@ _PERF_RE = re.compile(
 _EVAL_BOUNDARY_RE = re.compile(r"\[boundary\] eval_ts=(\d+) eval first-batch")
 
 # Metrics we surface in the trajectory (others are still captured if present).
-_KEEP = ("window_ne", "lifetime_ne", "window_auc", "lifetime_auc",
-         "window_accuracy", "lifetime_accuracy", "window_gauc", "lifetime_gauc")
+_KEEP = (
+    "window_ne",
+    "lifetime_ne",
+    "window_auc",
+    "lifetime_auc",
+    "window_accuracy",
+    "lifetime_accuracy",
+    "window_gauc",
+    "lifetime_gauc",
+)
 
 
 def _parse_metrics(body: str, task: str) -> Dict[str, float]:
@@ -107,8 +113,8 @@ def parse_log(
     perf: List[Dict[str, float]] = []
 
     last_train_step = 0
-    cur_anchor: Optional[int] = None   # train global step this eval block runs at
-    cur_ts: Optional[int] = None       # eval window id (eval_ts)
+    cur_anchor: Optional[int] = None  # train global step this eval block runs at
+    cur_ts: Optional[int] = None  # eval window id (eval_ts)
     cur_row: Optional[Dict[str, float]] = None  # final row of the current block
     cur_internal: Optional[int] = None  # last eval internal step (reset detection)
 
@@ -129,14 +135,16 @@ def parse_log(
         for line in f:
             pm = _PERF_RE.search(line)
             if pm:
-                perf.append({
-                    "step": int(pm.group(1)),
-                    "local_sps": float(pm.group(2)),
-                    "global_sps": float(pm.group(3)),
-                    "step_ms": float(pm.group(4)),
-                    "elapsed_sec": float(pm.group(5)),
-                    "total_samples": int(pm.group(6)),
-                })
+                perf.append(
+                    {
+                        "step": int(pm.group(1)),
+                        "local_sps": float(pm.group(2)),
+                        "global_sps": float(pm.group(3)),
+                        "step_ms": float(pm.group(4)),
+                        "elapsed_sec": float(pm.group(5)),
+                        "total_samples": int(pm.group(6)),
+                    }
+                )
                 continue
             bm = _EVAL_BOUNDARY_RE.search(line)
             if bm:
@@ -163,8 +171,7 @@ def parse_log(
             else:  # eval — accumulate into the current block (last = most aggregated)
                 # Fallback for logs without a boundary marker: a drop in the eval
                 # internal step counter signals a fresh eval window.
-                if (cur_internal is not None and step < cur_internal
-                        and cur_anchor is None):
+                if cur_internal is not None and step < cur_internal and cur_anchor is None:
                     flush_eval()
                 if cur_anchor is None:
                     cur_anchor = last_train_step
@@ -207,19 +214,20 @@ def write_outputs(
 
     n_train = len(traj["train"])
     n_eval = len(traj["eval"])
-    print(f"Parsed {n_train} train points, {n_eval} eval points, "
-          f"{len(perf)} perf points (task={task}).", file=sys.stderr)
+    print(
+        f"Parsed {n_train} train points, {n_eval} eval points, " f"{len(perf)} perf points (task={task}).",
+        file=sys.stderr,
+    )
     print(f"Wrote {json_path}", file=sys.stderr)
     print(f"Wrote {csv_path}", file=sys.stderr)
 
     _maybe_plot(traj, out_dir, task)
 
 
-def _maybe_plot(
-    traj: Dict[str, Dict[int, Dict[str, float]]], out_dir: str, task: str
-) -> None:
+def _maybe_plot(traj: Dict[str, Dict[int, Dict[str, float]]], out_dir: str, task: str) -> None:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except Exception as e:  # noqa: BLE001
@@ -239,8 +247,7 @@ def _maybe_plot(
     for metric, marker in (("window_ne", "o"), ("lifetime_ne", "s")):
         xs, ys = series("eval", metric)
         if xs:
-            ax_ne.plot(xs, ys, marker=marker, ms=5, ls="-", lw=1.0, alpha=0.9,
-                       label=f"eval/{metric}")
+            ax_ne.plot(xs, ys, marker=marker, ms=5, ls="-", lw=1.0, alpha=0.9, label=f"eval/{metric}")
     ax_ne.set_ylabel("NE (normalized entropy)")
     ax_ne.set_title(f"yambda-5b streaming train+eval trajectory — task={task}")
     ax_ne.grid(True, alpha=0.3)
@@ -253,8 +260,7 @@ def _maybe_plot(
     for metric, marker in (("window_auc", "o"), ("lifetime_auc", "s")):
         xs, ys = series("eval", metric)
         if xs:
-            ax_auc.plot(xs, ys, marker=marker, ms=5, ls="-", lw=1.0, alpha=0.9,
-                        label=f"eval/{metric}")
+            ax_auc.plot(xs, ys, marker=marker, ms=5, ls="-", lw=1.0, alpha=0.9, label=f"eval/{metric}")
     ax_auc.set_ylabel("AUC")
     ax_auc.set_xlabel("train global step (eval points anchored to the step they ran at)")
     ax_auc.grid(True, alpha=0.3)
@@ -269,10 +275,8 @@ def _maybe_plot(
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("log", help="Path to the streaming train.log")
-    ap.add_argument("--out", default=None,
-                    help="Output dir (default: <log_dir>/<log_stem>_trajectory)")
-    ap.add_argument("--task", default="listen_plus",
-                    help="Task name to extract (default: listen_plus)")
+    ap.add_argument("--out", default=None, help="Output dir (default: <log_dir>/<log_stem>_trajectory)")
+    ap.add_argument("--task", default="listen_plus", help="Task name to extract (default: listen_plus)")
     args = ap.parse_args()
 
     if not os.path.exists(args.log):
@@ -281,17 +285,18 @@ def main() -> int:
     out_dir = args.out
     if out_dir is None:
         stem = os.path.splitext(os.path.basename(args.log))[0]
-        out_dir = os.path.join(os.path.dirname(os.path.abspath(args.log)),
-                               f"{stem}_trajectory")
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(args.log)), f"{stem}_trajectory")
 
     traj, perf = parse_log(args.log, args.task)
     if not traj["train"]:
-        print(f"ERROR: {args.log} has no 'train - Step N metrics:' lines for "
-              f"task={args.task} ({len(traj['eval'])} eval, {len(perf)} perf "
-              "points). The run likely had training metrics OFF "
-              "(METRIC_LOG_FREQ=0, the gin default); relaunch with "
-              "METRIC_LOG_FREQ=50. Eval metrics are in <LOG>.metrics.jsonl.",
-              file=sys.stderr)
+        print(
+            f"ERROR: {args.log} has no 'train - Step N metrics:' lines for "
+            f"task={args.task} ({len(traj['eval'])} eval, {len(perf)} perf "
+            "points). The run likely had training metrics OFF "
+            "(METRIC_LOG_FREQ=0, the gin default); relaunch with "
+            "METRIC_LOG_FREQ=50. Eval metrics are in <LOG>.metrics.jsonl.",
+            file=sys.stderr,
+        )
         return 1
     write_outputs(traj, perf, out_dir, args.task)
     return 0

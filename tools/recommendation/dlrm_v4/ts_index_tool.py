@@ -47,8 +47,12 @@ sys.dont_write_bytecode = True
 TOOL_VERSION = "1"
 SIDECAR_SCHEMA = 1
 BUILDER_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "generative_recommenders" / "dlrm_v4" / "datasets" / "offline_ts_indices.py"
+    Path(__file__).resolve().parents[3]
+    / "primus/backends/recommendation/dlrm_v4/src"
+    / "generative_recommenders"
+    / "dlrm_v4"
+    / "datasets"
+    / "offline_ts_indices.py"
 )
 # tempfile.TemporaryDirectory(prefix=".ts-indices-", dir=cache_dir) in the PR
 # builder: the prefix plus tempfile's 8-character random suffix.
@@ -99,6 +103,7 @@ def signals_raise():
 
 # ----------------------------------------------------------------- names ---
 
+
 def tag_for(history_length, min_history=None):
     """Same tag as build_offline_ts_indices and yambda's _positions_filename."""
     tag = f"L{history_length}"
@@ -134,6 +139,10 @@ def hash_algo_of(rec, problems, what):
 
 
 def load_builder():
+    # The builder imports its package: put the trainer source root on sys.path.
+    src = str(BUILDER_PATH.parents[3])
+    if src not in sys.path:
+        sys.path.insert(0, src)
     spec = importlib.util.spec_from_file_location("_pr907_offline_ts_indices", BUILDER_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -185,6 +194,7 @@ def source_files(cache_dir, nm):
 
 
 # ------------------------------------------------- stdlib npy header read ---
+
 
 def read_npy_header(path):
     """Parse an .npy header without numpy: (descr, fortran_order, shape, data_offset)."""
@@ -246,6 +256,7 @@ def read_int64_vector(path, n, off):
 
 # ------------------------------------------------------------- sidecar ---
 
+
 def write_json_atomic(path, obj):
     path = Path(path)
     fd, tmp = tempfile.mkstemp(prefix=TOOL_TEMP_PREFIX, suffix=".tmp", dir=path.parent)
@@ -279,6 +290,7 @@ def now_utc():
 
 # -------------------------------------------------------------- locking ---
 
+
 @contextmanager
 def try_build_lock(cache_dir):
     """Non-blocking exclusive lock on the builder's _positions_lock. Yields True
@@ -298,6 +310,7 @@ def try_build_lock(cache_dir):
 
 
 # --------------------------------------------------------- cleanup-temp ---
+
 
 def find_temps(cache_dir):
     out = []
@@ -343,16 +356,22 @@ def cleanup_temp(cache_dir, dry_run=False, log=print):
     # Removing an entry needs write+search on its parent, and emptying a temp
     # dir needs the same on the dir itself. Check all of them before deleting
     # anything, so a non-owner gets a clean usage error, not a half-emptied dir.
-    blocked = [str(q) for q in [cache_dir] + [p for p in temps if p.is_dir()]
-               if not os.access(q, os.W_OK | os.X_OK)]
+    blocked = [
+        str(q) for q in [cache_dir] + [p for p in temps if p.is_dir()] if not os.access(q, os.W_OK | os.X_OK)
+    ]
     if blocked:
-        raise ToolError(f"cleanup-temp: uid {os.getuid()} cannot remove entries in {', '.join(blocked)} "
-                        f"(run as the cache owner)", EXIT_USAGE)
+        raise ToolError(
+            f"cleanup-temp: uid {os.getuid()} cannot remove entries in {', '.join(blocked)} "
+            f"(run as the cache owner)",
+            EXIT_USAGE,
+        )
     freed = 0
     try:
         with try_build_lock(cache_dir) as held:
             if not held:
-                log(f"cleanup-temp: a build holds {cache_dir}/_positions_lock; not touching {len(temps)} temp path(s)")
+                log(
+                    f"cleanup-temp: a build holds {cache_dir}/_positions_lock; not touching {len(temps)} temp path(s)"
+                )
                 return EXIT_BUSY, 0
             for p in find_temps(cache_dir):
                 used = disk_usage(p)
@@ -363,12 +382,14 @@ def cleanup_temp(cache_dir, dry_run=False, log=print):
                 freed += used
                 log(f"cleanup-temp: removed {p} ({used:,} B on disk)")
     except OSError as e:
-        raise ToolError(f"cleanup-temp: {e} (freed {freed:,} B before the error; run as the cache owner)",
-                        EXIT_USAGE) from e
+        raise ToolError(
+            f"cleanup-temp: {e} (freed {freed:,} B before the error; run as the cache owner)", EXIT_USAGE
+        ) from e
     return EXIT_OK, freed
 
 
 # ---------------------------------------------------------------- verify ---
+
 
 def _np():
     try:
@@ -422,10 +443,16 @@ def full_check(cache_dir, nm, window_seconds, chunk_size, hash_algo="sha256", lo
     windows = (t_max - t_min) // window_seconds + 1 if count else 0
     hist = np.zeros(windows, dtype=np.int64)
     for a in range(0, count, chunk_size):
-        hist += np.bincount((ts_range(a, min(a + chunk_size, count)) - t_min) // window_seconds,
-                            minlength=windows)
-    facts.update(anchor_count=count, num_windows=windows, t_min=t_min, t_max=t_max,
-                 timestamps_source="anchor_ts" if has_anchor else "flat_timestamps")
+        hist += np.bincount(
+            (ts_range(a, min(a + chunk_size, count)) - t_min) // window_seconds, minlength=windows
+        )
+    facts.update(
+        anchor_count=count,
+        num_windows=windows,
+        t_min=t_min,
+        t_max=t_max,
+        timestamps_source="anchor_ts" if has_anchor else "flat_timestamps",
+    )
     log(f"verify: source pass {time.time() - t0:.1f}s, {count:,} anchors, {windows} windows")
 
     n_idx, _ = hdr_i
@@ -443,7 +470,9 @@ def full_check(cache_dir, nm, window_seconds, chunk_size, hash_algo="sha256", lo
         problems.append("offsets not monotone")
     bad_w = np.flatnonzero(np.diff(offsets) != hist)
     if bad_w.size:
-        problems.append(f"{bad_w.size} window count(s) differ from the source histogram, first w={int(bad_w[0])}")
+        problems.append(
+            f"{bad_w.size} window count(s) differ from the source histogram, first w={int(bad_w[0])}"
+        )
     if problems:
         return problems, facts
 
@@ -540,14 +569,18 @@ def compare_sources(cache_dir, side, nm, problems, warnings, check_mtime):
 
 # --------------------------------------------------------------- commands ---
 
+
 def make_sidecar(cache_dir, nm, args, hash_algo, facts, sources):
     builder_sha = sha256_file(BUILDER_PATH)
     return {
         "schema": SIDECAR_SCHEMA,
         "tool": "ts_index_tool.py",
         "tool_version": TOOL_VERSION,
-        "builder": {"path": "generative_recommenders/dlrm_v4/datasets/offline_ts_indices.py",
-                    "sha256": builder_sha, "upstream": "mlcommons/training#907 09612efd"},
+        "builder": {
+            "path": "generative_recommenders/dlrm_v4/datasets/offline_ts_indices.py",
+            "sha256": builder_sha,
+            "upstream": "mlcommons/training#907 09612efd",
+        },
         "created_utc": now_utc(),
         "cache_dir": str(cache_dir),
         "tag": tag_for(args.history_length, args.min_history),
@@ -558,10 +591,18 @@ def make_sidecar(cache_dir, nm, args, hash_algo, facts, sources):
         "anchor_count": facts["anchor_count"],
         "num_windows": facts["num_windows"],
         "files": {
-            "indices": {"name": nm["indices"], "size": facts["indices_size"],
-                        "hash_algo": hash_algo, "hash": facts["indices_hash"]},
-            "offsets": {"name": nm["offsets"], "size": facts["offsets_size"],
-                        "hash_algo": hash_algo, "hash": facts["offsets_hash"]},
+            "indices": {
+                "name": nm["indices"],
+                "size": facts["indices_size"],
+                "hash_algo": hash_algo,
+                "hash": facts["indices_hash"],
+            },
+            "offsets": {
+                "name": nm["offsets"],
+                "size": facts["offsets_size"],
+                "hash_algo": hash_algo,
+                "hash": facts["offsets_hash"],
+            },
         },
         "source": sources,
         "verify": {"status": "not_run"},
@@ -586,8 +627,11 @@ def cmd_prebuild(args, log=print):
         raise ToolError(f"{cache_dir} is not writable by uid {os.getuid()} (run as the cache owner)")
     exists = ip.exists() and op.exists()
     if exists and not args.force:
-        raise ToolError(f"{ip.name} and {op.name} already exist; use verify (or verify --adopt), "
-                        f"or prebuild --force to rebuild", EXIT_REFUSED)
+        raise ToolError(
+            f"{ip.name} and {op.name} already exist; use verify (or verify --adopt), "
+            f"or prebuild --force to rebuild",
+            EXIT_REFUSED,
+        )
     if sp.exists() and not args.force:
         raise ToolError(f"{sp.name} exists without a complete index; inspect, or use --force", EXIT_REFUSED)
 
@@ -599,8 +643,10 @@ def cmd_prebuild(args, log=print):
     need = 8 * len(positions) + (64 << 20)
     free = shutil.disk_usage(cache_dir).free
     if free < need:
-        raise ToolError(f"{cache_dir}: {free:,} B free, build needs {need:,} B "
-                        f"(a full disk under the builder's mmap is a SIGBUS, not an exception)")
+        raise ToolError(
+            f"{cache_dir}: {free:,} B free, build needs {need:,} B "
+            f"(a full disk under the builder's mmap is a SIGBUS, not an exception)"
+        )
     del positions
 
     srcs = source_files(cache_dir, nm)
@@ -617,8 +663,11 @@ def cmd_prebuild(args, log=print):
                 op.unlink(missing_ok=True)
             log(f"prebuild: building {ip.name} in {cache_dir} ({len(srcs)} source files)")
             builder.build_offline_ts_indices(
-                cache_dir, args.history_length, args.min_history,
-                window_seconds=args.window_seconds, chunk_size=args.chunk_size,
+                cache_dir,
+                args.history_length,
+                args.min_history,
+                window_seconds=args.window_seconds,
+                chunk_size=args.chunk_size,
             )
     except BaseException:
         # The builder's TemporaryDirectory removed its own temp dir. If we died
@@ -640,8 +689,12 @@ def cmd_prebuild(args, log=print):
         raise ToolError("source files changed during the build; index not trusted", EXIT_FAIL)
 
     with signals_raise():
-        facts = {"indices_size": ip.stat().st_size, "offsets_size": op.stat().st_size,
-                 "indices_hash": sha256_file(ip, args.hash), "offsets_hash": sha256_file(op, args.hash)}
+        facts = {
+            "indices_size": ip.stat().st_size,
+            "offsets_size": op.stat().st_size,
+            "indices_hash": sha256_file(ip, args.hash),
+            "offsets_hash": sha256_file(op, args.hash),
+        }
         offsets = np.load(op)
         facts["num_windows"] = len(offsets) - 1
         facts["anchor_count"] = int(offsets[-1])
@@ -685,8 +738,10 @@ def cmd_verify(args, log=print):
         else:
             compare_sources(cache_dir, side, nm, problems, warnings, check_mtime=False)
         if side.get("builder", {}).get("sha256") != sha256_file(BUILDER_PATH):
-            warnings.append("builder source differs from the one recorded at build time "
-                            "(content was still checked in full)")
+            warnings.append(
+                "builder source differs from the one recorded at build time "
+                "(content was still checked in full)"
+            )
     duration = round(time.time() - t0, 1)
     status = "failed" if problems else "passed"
     for w in warnings:
@@ -698,17 +753,24 @@ def cmd_verify(args, log=print):
     if not args.no_write:
         if side is None and args.adopt and not problems:
             srcs = source_files(cache_dir, nm)
-            side = make_sidecar(cache_dir, nm, args, hash_algo, facts,
-                                {n: fingerprint(cache_dir / n) for n in srcs})
+            side = make_sidecar(
+                cache_dir, nm, args, hash_algo, facts, {n: fingerprint(cache_dir / n) for n in srcs}
+            )
             side["adopted"] = True
         if side is not None:
             if args.rebind_source and not problems:
                 side["source"] = {n: fingerprint(cache_dir / n) for n in source_files(cache_dir, nm)}
-            side["verify"] = {"status": status, "time_utc": now_utc(), "duration_s": duration,
-                              "tool_version": TOOL_VERSION, "problems": problems[:20],
-                              "warnings": warnings[:20],
-                              "t_min": facts.get("t_min"), "t_max": facts.get("t_max"),
-                              "timestamps_source": facts.get("timestamps_source")}
+            side["verify"] = {
+                "status": status,
+                "time_utc": now_utc(),
+                "duration_s": duration,
+                "tool_version": TOOL_VERSION,
+                "problems": problems[:20],
+                "warnings": warnings[:20],
+                "t_min": facts.get("t_min"),
+                "t_max": facts.get("t_max"),
+                "timestamps_source": facts.get("timestamps_source"),
+            }
             try:
                 write_json_atomic(sp, side)
             except OSError as e:
@@ -734,7 +796,9 @@ def cmd_check_staged(args, log=print):
     if sp.resolve() != staged_sp.resolve() and staged_sp.exists() and sp.exists():
         try:
             if staged_sp.read_bytes() != sp.read_bytes():
-                warnings.append(f"staged sidecar {staged_sp.name} differs from {sp} (stale copy; checked against {sp})")
+                warnings.append(
+                    f"staged sidecar {staged_sp.name} differs from {sp} (stale copy; checked against {sp})"
+                )
         except OSError:
             pass
     try:
@@ -745,11 +809,15 @@ def cmd_check_staged(args, log=print):
     except (OSError, ValueError) as e:
         log(f"check-staged: FAIL sidecar {sp}: {e}")
         return EXIT_FAIL
-    if side.get("window_seconds") != args.window_seconds or side.get("tag") != tag_for(args.history_length, args.min_history):
+    if side.get("window_seconds") != args.window_seconds or side.get("tag") != tag_for(
+        args.history_length, args.min_history
+    ):
         problems.append("sidecar is for a different tag/window")
     vstat = side.get("verify", {}).get("status")
     if vstat != "passed":
-        (warnings if args.allow_unverified else problems).append(f"sidecar verify status is {vstat!r}, not 'passed'")
+        (warnings if args.allow_unverified else problems).append(
+            f"sidecar verify status is {vstat!r}, not 'passed'"
+        )
     files = side.get("files", {})
     count = side.get("anchor_count")
     nwin = side.get("num_windows")
@@ -792,8 +860,10 @@ def cmd_check_staged(args, log=print):
         log(f"check-staged: WARNING {w}")
     for p in problems:
         log(f"check-staged: FAIL {p}")
-    log(f"check-staged: {'FAILED' if problems else 'OK'} {dest} "
-        f"({'full hash' if args.hash else 'sizes+headers+offsets'}{'' if args.no_source else '+source fingerprints'})")
+    log(
+        f"check-staged: {'FAILED' if problems else 'OK'} {dest} "
+        f"({'full hash' if args.hash else 'sizes+headers+offsets'}{'' if args.no_source else '+source fingerprints'})"
+    )
     return EXIT_FAIL if problems else EXIT_OK
 
 
@@ -826,9 +896,15 @@ def cmd_status(args, log=print):
     for tag, w in sorted(keys):
         nm = names(tag, w)
         ip, op, sp = cache_dir / nm["indices"], cache_dir / nm["offsets"], cache_dir / nm["sidecar"]
-        state = "complete" if ip.exists() and op.exists() else (
-            "INCOMPLETE (offsets missing; next init rebuilds)" if ip.exists() else
-            "INCOMPLETE (indices missing; next init rebuilds)" if op.exists() else "absent")
+        state = (
+            "complete"
+            if ip.exists() and op.exists()
+            else (
+                "INCOMPLETE (offsets missing; next init rebuilds)"
+                if ip.exists()
+                else "INCOMPLETE (indices missing; next init rebuilds)" if op.exists() else "absent"
+            )
+        )
         log(f"[{tag} W{w}] {state}")
         for p in (ip, op):
             if p.exists():
@@ -837,7 +913,9 @@ def cmd_status(args, log=print):
             try:
                 side = load_sidecar(sp)
                 v = side.get("verify", {})
-                log(f"  sidecar: built {side.get('created_utc')}, verify={v.get('status')} {v.get('time_utc', '')}")
+                log(
+                    f"  sidecar: built {side.get('created_utc')}, verify={v.get('status')} {v.get('time_utc', '')}"
+                )
                 probs = []
                 for key in ("indices", "offsets"):
                     rec = side["files"][key]
@@ -872,6 +950,7 @@ def cmd_status(args, log=print):
 
 # ------------------------------------------------------------------- CLI ---
 
+
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -897,12 +976,22 @@ def build_parser():
     p = sub.add_parser("verify", help="O(N) full check; records the result in the sidecar")
     index_args(p)
     p.add_argument("--chunk-size", type=int, default=8_000_000)
-    p.add_argument("--hash", default="sha256", choices=sorted(hashlib.algorithms_guaranteed),
-                   help="hash for --adopt (an existing sidecar's algorithm wins)")
-    p.add_argument("--adopt", action="store_true",
-                   help="no sidecar: write one for the existing files if the full check passes")
-    p.add_argument("--rebind-source", action="store_true",
-                   help="after a passing full check, re-record source fingerprints")
+    p.add_argument(
+        "--hash",
+        default="sha256",
+        choices=sorted(hashlib.algorithms_guaranteed),
+        help="hash for --adopt (an existing sidecar's algorithm wins)",
+    )
+    p.add_argument(
+        "--adopt",
+        action="store_true",
+        help="no sidecar: write one for the existing files if the full check passes",
+    )
+    p.add_argument(
+        "--rebind-source",
+        action="store_true",
+        help="after a passing full check, re-record source fingerprints",
+    )
     p.add_argument("--no-write", action="store_true", help="do not record the result")
     p.set_defaults(func=cmd_verify)
 
@@ -910,12 +999,16 @@ def build_parser():
     p.add_argument("dest", help="staged cache dir, e.g. /tmp/$USER/dlrm_data/processed_5b/hstu_cache_L4086")
     index_args(p, cache_flag=False)
     p.add_argument("--sidecar", help="sidecar to compare against (default: the one in dest)")
-    p.add_argument("--sidecar-dir",
-                   help="read the sidecar named for this tag/window from this dir instead of dest "
-                        "(the stager passes the NFS source cache dir)")
+    p.add_argument(
+        "--sidecar-dir",
+        help="read the sidecar named for this tag/window from this dir instead of dest "
+        "(the stager passes the NFS source cache dir)",
+    )
     p.add_argument("--hash", action="store_true", help="also hash the full indices file (~18 GB read)")
     p.add_argument("--no-source", action="store_true", help="skip source fingerprints")
-    p.add_argument("--allow-unverified", action="store_true", help="accept a sidecar whose verify did not pass")
+    p.add_argument(
+        "--allow-unverified", action="store_true", help="accept a sidecar whose verify did not pass"
+    )
     p.set_defaults(func=cmd_check_staged)
 
     p = sub.add_parser("cleanup-temp", help="remove .ts-indices-* temp dirs left by killed builds")

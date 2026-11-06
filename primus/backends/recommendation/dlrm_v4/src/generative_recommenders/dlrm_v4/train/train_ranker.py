@@ -748,13 +748,20 @@ def get_args():  # pyre-ignore [3]
 def main() -> None:
     args = get_args()
     logger.info(args)
-    assert args.dataset in SUPPORTED_CONFIGS, f"Unsupported dataset: {args.dataset}"
-    assert args.mode in [
+    launch(args.dataset, args.mode)
+
+
+def launch(dataset: str, mode: str, gin_file: str = "") -> None:
+    """Spawn this node's ranks and train. `gin_file` replaces the dataset's
+    gin/<config> (Primus passes a generated file that includes it and adds
+    bindings); empty keeps the dataset's file."""
+    assert dataset in SUPPORTED_CONFIGS, f"Unsupported dataset: {dataset}"
+    assert mode in [
         "train",
         "eval",
         "train-eval",
         "streaming-train-eval",
-    ], f"Unsupported mode: {args.mode}"
+    ], f"Unsupported mode: {mode}"
     # Distributed topology (single-node defaults reproduce the legacy behavior):
     #   GPUS_PER_NODE  local procs to spawn on THIS node (default: all visible GPUs)
     #   NNODES/NODE_RANK  multi-node fan-out, set by the SLURM launcher
@@ -768,7 +775,7 @@ def main() -> None:
     WORLD_SIZE = NNODES * GPUS_PER_NODE
     MASTER_ADDR = os.environ.get("MASTER_ADDR", "localhost")
     MASTER_PORT = str(os.environ.get("MASTER_PORT") or get_free_port())
-    gin_path = f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[args.dataset]}"
+    gin_path = gin_file or f"{os.path.dirname(__file__)}/gin/{SUPPORTED_CONFIGS[dataset]}"
     logger.info(
         f"launching: nnodes={NNODES} node_rank={NODE_RANK} "
         f"gpus_per_node={GPUS_PER_NODE} world_size={WORLD_SIZE} "
@@ -780,7 +787,7 @@ def main() -> None:
     # ranks, it makes rocprofiler-register initialize rocprofiler-sdk during each rank's
     # `import torch`, before kineto's tool (rocprofiler_configure in libtorch_cpu.so) is
     # visible; kineto then takes the initialized SDK as configured and every trace holds CPU
-    # events only (docs/rocm_10_port.md U6). Traced runs drop that self-export (a value
+    # events only (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md U6). Traced runs drop that self-export (a value
     # already in os.environ, i.e. set before this process started, is kept); untraced runs
     # are unchanged. os.unsetenv: the export is a C-level setenv that os.environ never saw.
     if (os.environ.get("OUTPUT_TRACE", "0").strip() not in ("", "0")
@@ -796,7 +803,7 @@ def main() -> None:
             MASTER_ADDR,
             MASTER_PORT,
             gin_path,
-            args.mode,
+            mode,
         ),
         nprocs=GPUS_PER_NODE,
         join=True,

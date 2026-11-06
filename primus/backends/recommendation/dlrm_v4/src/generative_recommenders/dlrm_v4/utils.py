@@ -303,7 +303,7 @@ def _on_trace_ready_fn(
     """Create the on_trace_ready callback that exports a chrome trace to disk.
 
     Filename follows ``trace_step{step}_rank{rank}.json`` so multi-rank
-    captures don't collide and ``scripts/stitch_traces.py`` can merge them
+    captures don't collide and ``tools/recommendation/dlrm_v4/stitch_traces.py`` can merge them
     by step number.
 
     The ``{step}`` label:

@@ -1,4 +1,4 @@
-"""Unit tests for scripts/ts_index_tool.py (CPU, numpy only, no torch)."""
+"""Unit tests for tools/recommendation/dlrm_v4/ts_index_tool.py (CPU, numpy only, no torch)."""
 
 import fcntl
 import hashlib
@@ -69,7 +69,14 @@ class Base(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def idx_args(self, cache=None):
-        return ["--cache-dir", str(cache or self.cache), "--history-length", str(H), "--window-seconds", str(W)]
+        return [
+            "--cache-dir",
+            str(cache or self.cache),
+            "--history-length",
+            str(H),
+            "--window-seconds",
+            str(W),
+        ]
 
     def prebuild(self, *extra):
         return quiet(["prebuild", *self.idx_args(), *CHUNK, *extra])
@@ -103,7 +110,9 @@ class TestBuildVerify(Base):
         ip = self.path("indices")
         self.assertEqual(side["files"]["indices"]["size"], ip.stat().st_size)
         self.assertEqual(side["files"]["indices"]["hash"], hashlib.sha256(ip.read_bytes()).hexdigest())
-        self.assertEqual(side["builder"]["sha256"], hashlib.sha256(tool.BUILDER_PATH.read_bytes()).hexdigest())
+        self.assertEqual(
+            side["builder"]["sha256"], hashlib.sha256(tool.BUILDER_PATH.read_bytes()).hexdigest()
+        )
         self.assertIn(f"anchor_ts_L{H}.npy", side["source"])
         self.assertIn(f"positions_L{H}.npy", side["source"])
         self.assertEqual(list(self.cache.glob(".ts-*")), [])
@@ -211,6 +220,7 @@ class TestBuildVerify(Base):
 
         def swap(a):
             a[lo + 10], a[lo + 11] = int(a[lo + 11]), int(a[lo + 10])
+
         self.mutate_indices(swap)
         rc, out = self.verify()
         self.assertEqual(rc, 1)
@@ -226,6 +236,7 @@ class TestBuildVerify(Base):
 
         def swap(a):
             a[k], a[k + 1] = int(a[k + 1]), int(a[k])
+
         self.mutate_indices(swap)
         rc, out = self.verify()
         self.assertEqual(rc, 1)
@@ -238,6 +249,7 @@ class TestBuildVerify(Base):
 
         def swap(a):
             a[i], a[j] = int(a[j]), int(a[i])
+
         self.mutate_indices(swap)
         rc, out = self.verify()
         self.assertEqual(rc, 1)
@@ -267,8 +279,8 @@ class TestBuildVerify(Base):
         p = self.path("indices")
         raw = bytearray(p.read_bytes())
         hdr_end = raw.index(b"\n")
-        self.assertEqual(raw[hdr_end - 1:hdr_end], b" ")
-        raw[hdr_end - 1:hdr_end] = b"\t"
+        self.assertEqual(raw[hdr_end - 1 : hdr_end], b" ")
+        raw[hdr_end - 1 : hdr_end] = b"\t"
         p.write_bytes(bytes(raw))
         rc, out = self.verify()
         self.assertEqual(rc, 1)
@@ -330,8 +342,17 @@ class TestTempAndSignals(Base):
             self.assertEqual(rc, tool.EXIT_USAGE, out)
             self.assertTrue((d / "part.npy").exists())
             # CLI path: clean message, exit 2, no traceback
-            p = subprocess.run([sys.executable, str(HERE / "ts_index_tool.py"), "cleanup-temp",
-                                "--cache-dir", str(self.cache)], capture_output=True, text=True)
+            p = subprocess.run(
+                [
+                    sys.executable,
+                    str(HERE / "ts_index_tool.py"),
+                    "cleanup-temp",
+                    "--cache-dir",
+                    str(self.cache),
+                ],
+                capture_output=True,
+                text=True,
+            )
             self.assertEqual(p.returncode, tool.EXIT_USAGE, p.stderr)
             self.assertNotIn("Traceback", p.stderr)
             self.cache.chmod(0o755)
@@ -352,9 +373,11 @@ class TestTempAndSignals(Base):
         src = self.tmp / "bsrc"
         src.mkdir()
         shutil.copyfile(tool.BUILDER_PATH, src / "offline_ts_indices.py")
-        code = ("import sys; sys.path.insert(0, %r); import ts_index_tool as t; "
-                "from pathlib import Path; t.BUILDER_PATH = Path(%r); m = t.load_builder(); "
-                "assert hasattr(m, 'build_offline_ts_indices')" % (str(HERE), str(src / "offline_ts_indices.py")))
+        code = (
+            "import sys; sys.path.insert(0, %r); import ts_index_tool as t; "
+            "from pathlib import Path; t.BUILDER_PATH = Path(%r); m = t.load_builder(); "
+            "assert hasattr(m, 'build_offline_ts_indices')" % (str(HERE), str(src / "offline_ts_indices.py"))
+        )
         env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
         p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -376,7 +399,9 @@ t.load_builder = lb
 sys.exit(t.main(['prebuild', '--cache-dir', {str(self.cache)!r}, '--history-length', '{H}',
                  '--window-seconds', '{W}', '--chunk-size', '2000']))
 """
-        return subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        return subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True
+        )
 
     def _wait(self, flag, proc):
         t0 = time.time()
@@ -432,8 +457,10 @@ class TestCheckStaged(Base):
         argv = ["check-staged", str(dest), "--history-length", str(H), "--window-seconds", str(W), *extra]
         if not no_numpy:
             return quiet(argv)
-        code = ("import sys; sys.modules['numpy'] = None; "
-                f"sys.path.insert(0, {str(HERE)!r}); import ts_index_tool as t; sys.exit(t.main({argv!r}))")
+        code = (
+            "import sys; sys.modules['numpy'] = None; "
+            f"sys.path.insert(0, {str(HERE)!r}); import ts_index_tool as t; sys.exit(t.main({argv!r}))"
+        )
         p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         return p.returncode, p.stdout + p.stderr
 
@@ -452,7 +479,7 @@ class TestCheckStaged(Base):
         raw = bytearray(p.read_bytes())
         raw[-8] ^= 1
         p.write_bytes(bytes(raw))
-        self.assertEqual(self.check(dest)[0], 0)          # size-only mode cannot see it
+        self.assertEqual(self.check(dest)[0], 0)  # size-only mode cannot see it
         rc, out = self.check(dest, "--hash")
         self.assertEqual(rc, 1)
         self.assertIn("hash differs", out)

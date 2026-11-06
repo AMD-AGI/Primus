@@ -114,7 +114,7 @@ def require_run_start(what: str) -> None:
 # The reference data set (MLCommons reference b5e8e2a), relative to the data
 # root: the hstu_cache_L<N> entries of its sha256sums_yambda_5b_cache.txt
 # manifest, processed_5b/item_popularity.npy and the two shared_metadata item
-# mappings its reader opens. scripts/stage_data_local.sh REF_FILES stages
+# mappings its reader opens. examples/mlperf/dlrm_v4/data/stage_data_local.sh REF_FILES stages
 # exactly this set; dl_prestart_reference_files_test.py checks they agree.
 # "prestart" marks the files the trainer itself opens before RUN_START (dataset
 # construction, as in the reference); anchor_ts and the PR 907 window index

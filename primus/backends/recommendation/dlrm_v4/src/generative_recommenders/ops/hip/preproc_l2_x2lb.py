@@ -192,7 +192,7 @@ SOURCE_SHA256: str = "a78f4aa3611f6b6211d6f197848cc40661572390c35c6d78853d3064e5
 PINNED_ASM_NORM_SHA256: str = "57de20b6ef509eba1429f19a9486e1475c390a2cf9b851f6bda6683960511e50"
 # ROCm 10.2 (TheRock 10.2.0a20261015, AMD clang 24.0.0git bdc35841c97f): the gated .lto.s of the same source and flags,
 # same normalization (path independent), whose full C1-C18 PASS (C15 with the ROCm 10.2 lane-index extension of
-# _ISA_CHILD) was recorded with that toolchain (docs/rocm_10_port.md T15). Its code object .text is 3ccf287e1e64...
+# _ISA_CHILD) was recorded with that toolchain (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md T15). Its code object .text is 3ccf287e1e64...
 PINNED_ASM_NORM_SHA256_ROCM102: str = "e8726541453c979671b1e4520a1209589e62c52b7a7fafada259e9628eb4668e"
 LAB_CODE_OBJECT_SHA256: Dict[str, str] = {
     ".text": "1873c0cbded354588b8f08a384036bb938b63bd7d5d766aebde586472ee39334",

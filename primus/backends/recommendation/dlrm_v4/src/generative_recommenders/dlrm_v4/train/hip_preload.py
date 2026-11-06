@@ -23,7 +23,7 @@ step 1, i.e. inside the timed region (dlstart iter 34: ~1.5-2.2 s per rank, mode
 
 hipFuncGetAttributes(&attr, host_stub) on one kernel stub per needed TU does exactly that load and nothing else: it
 launches no kernel, allocates no tensor, and touches no RNG, model, optimizer or data state. The stubs come from the
-checked-in table hip_preload_table.jsonl (scripts/gen_hip_preload_table.py over the ship13 1n/2n/4n production
+checked-in table hip_preload_table.jsonl (tools/recommendation/dlrm_v4/gen_hip_preload_table.py over the ship13 1n/2n/4n production
 traces, plus the v2 rows listed in its header "amendments": step-1-only first-use code objects that steady-step traces
 cannot show, rccl iter85 S14D85 section 6), keyed by library basename + mangled symbol:
   * mode "dlsym":  dlsym in the ALREADY-LOADED library (dlopen RTLD_NOLOAD; a library that is not loaded is skipped);
@@ -33,7 +33,7 @@ cannot show, rccl iter85 S14D85 section 6), keyed by library basename + mangled 
 Every entry is fail-open: a missing library/symbol, a build-id mismatch or a HIP error is counted and skipped; a HIP
 error is cleared with hipGetLastError so no later torch launch check sees it. Never raises.
 
-Per software stack (T12, docs/rocm_10_port.md): rows name symbols, TU indices and symtab offsets of ONE build, so there
+Per software stack (T12, docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md): rows name symbols, TU indices and symtab offsets of ONE build, so there
 is one checked-in table per stack (STACK_TABLES) and DLRM_HSTU_FP8_HIP_PRELOAD=1/all picks the table whose header
 build-ids match the libraries this process has loaded (pick_table; build-ids read through dl_iterate_phdr, which also
 covers TheRock's libtorch_hip whose program header table sits at the end of the file). ROCm 10.2 (TheRock) torch keeps
@@ -460,7 +460,7 @@ def preload_entries(entries: List[Dict[str, Any]], libs_meta: Dict[str, Dict[str
 # FP8 wgrad CK kernels, ...). No checked-in table can name them (a new build per source or toolchain change), and their
 # kernels load lazily at first use like any static HIP code: measured on ROCm 10.2, dlrm_hstu_onesweep_sort_rb10.so
 # 30-48 ms per rank inside step 1. Their rows are derived from each loaded file here: one dlsym row per fat-binary
-# bundle, an exported kernel handle registered first in that bundle (the rule of scripts/gen_hip_preload_table.py).
+# bundle, an exported kernel handle registered first in that bundle (the rule of tools/recommendation/dlrm_v4/gen_hip_preload_table.py).
 EXT_MARK = os.sep + "dlrm_hstu"
 _DELETED = " (deleted)"
 _ZSTD: Any = None
@@ -706,7 +706,7 @@ def preload_from_env(rank: int = 0, world_size: int = 1, local_world_size: int =
             logger.warning("[hip-preload] table=%s matches the build-id of none of the %d table libraries loaded: "
                            "no checked-in table for this stack; its dlsym rows load whatever code objects those "
                            "symbols now belong to, its symtab rows are skipped. Regenerate the table for this stack "
-                           "(scripts/gen_hip_preload_table.py)", os.path.basename(path), builds[1])
+                           "(tools/recommendation/dlrm_v4/gen_hip_preload_table.py)", os.path.basename(path), builds[1])
     elif failed:
         logger.warning("[hip-preload] rank %d: %s", rank, msg)
     ec = ext["counts"]

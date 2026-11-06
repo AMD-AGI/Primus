@@ -24,6 +24,7 @@ RUN_START makes every library any reachable row count needs resident.
   verify python gen_blas_replay_table.py verify <part> <nparts> <table.jsonl> <out.jsonl>
          (replays the table through blas_warmup's loader, then rescans with a shifted interleave: expect 0 slow)
 """
+
 import json
 import os
 import sys
@@ -35,8 +36,8 @@ os.environ.setdefault("PYTORCH_TUNABLEOP_TUNING", "0")
 # (K = Din, N = Dout) of the dedup unique chain's FusedLinearNorm pairs: content L1 512->256, additional L1
 # 1024->256, both L2 256->512 (ops/preproc_dedup.py runs c and a through FusedLinearNormMLP on R rows).
 PAIRS = ((512, 256), (1024, 256), (256, 512))
-TRAIN_STEP, TRAIN_N = 512, 8192   # R = 2 * M_pad, M_pad <= 2^21
-EVAL_STEP, EVAL_N = 256, 8192     # eval R = M_pad (forward only)
+TRAIN_STEP, TRAIN_N = 512, 8192  # R = 2 * M_pad, M_pad <= 2^21
+EVAL_STEP, EVAL_N = 256, 8192  # eval R = M_pad (forward only)
 
 
 def grid(part, nparts, shift=0):
@@ -101,7 +102,20 @@ def scan(part, nparts, out, shift=0, slow_ms=40.0, table=None):
     torch.cuda.set_device(dev)
     t_init = time.time()
     if table is not None:
-        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+        sys.path.insert(
+            0,
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..",
+                "..",
+                "..",
+                "primus",
+                "backends",
+                "recommendation",
+                "dlrm_v4",
+                "src",
+            ),
+        )
         from generative_recommenders.dlrm_v4.train import blas_warmup
 
         rep = blas_warmup.replay_blas_table(dev, path=table)
@@ -130,10 +144,20 @@ def scan(part, nparts, out, shift=0, slow_ms=40.0, table=None):
                         print("SLOW " + json.dumps(r), flush=True)
     import torch.cuda.tunable as tunable
 
-    meta = dict(validators=dict(tunable.get_validators()), cu=torch.cuda.get_device_properties(dev).multi_processor_count,
-                arch=getattr(torch.cuda.get_device_properties(dev), "gcnArchName", "?"), calls=n_calls,
-                points=len(pts), seconds=round(time.time() - t0, 1), init_s=round(t0 - t_init, 1), part=part,
-                nparts=nparts, shift=shift, slow_ms=slow_ms, replayed=table is not None)
+    meta = dict(
+        validators=dict(tunable.get_validators()),
+        cu=torch.cuda.get_device_properties(dev).multi_processor_count,
+        arch=getattr(torch.cuda.get_device_properties(dev), "gcnArchName", "?"),
+        calls=n_calls,
+        points=len(pts),
+        seconds=round(time.time() - t0, 1),
+        init_s=round(t0 - t_init, 1),
+        part=part,
+        nparts=nparts,
+        shift=shift,
+        slow_ms=slow_ms,
+        replayed=table is not None,
+    )
     print("META " + json.dumps(meta), flush=True)
     with open(out, "w") as f:
         f.write(json.dumps(dict(meta=meta)) + "\n")
@@ -153,12 +177,19 @@ def merge(table, parts):
                 key = (d["K"], d["N"], d["op"], d["M"])
                 rows.setdefault(key, []).append(d["ms"])
     v0 = metas[0]["validators"]
-    assert all(m["validators"] == v0 and m["cu"] == metas[0]["cu"] for m in metas), "parts from different stacks"
-    hdr = dict(kind="blas_replay_table", stack=dict(validators=v0, cu=metas[0]["cu"], arch=metas[0]["arch"]),
-               generator="scripts/gen_blas_replay_table.py", pairs=[list(p) for p in PAIRS],
-               grid=dict(train=[TRAIN_STEP, TRAIN_N], eval=[EVAL_STEP, EVAL_N]),
-               scan_parts=len(metas), slow_ms=metas[0]["slow_ms"],
-               note="rows = (K, N, op, M) whose first call took > slow_ms in a dense scan; replay before RUN_START")
+    assert all(
+        m["validators"] == v0 and m["cu"] == metas[0]["cu"] for m in metas
+    ), "parts from different stacks"
+    hdr = dict(
+        kind="blas_replay_table",
+        stack=dict(validators=v0, cu=metas[0]["cu"], arch=metas[0]["arch"]),
+        generator="tools/recommendation/dlrm_v4/gen_blas_replay_table.py",
+        pairs=[list(p) for p in PAIRS],
+        grid=dict(train=[TRAIN_STEP, TRAIN_N], eval=[EVAL_STEP, EVAL_N]),
+        scan_parts=len(metas),
+        slow_ms=metas[0]["slow_ms"],
+        note="rows = (K, N, op, M) whose first call took > slow_ms in a dense scan; replay before RUN_START",
+    )
     with open(table, "w") as f:
         f.write(json.dumps(hdr) + "\n")
         for key in sorted(rows, key=lambda r: (r[3], r[0], r[1], r[2])):

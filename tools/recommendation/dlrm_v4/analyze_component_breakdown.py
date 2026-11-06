@@ -27,11 +27,11 @@ Usage
 -----
 Single trace::
 
-    python scripts/analyze_component_breakdown.py traces/mi350x/trace_step52_pipeline.json.gz
+    python tools/recommendation/dlrm_v4/analyze_component_breakdown.py traces/mi350x/trace_step52_pipeline.json.gz
 
 Compare two (second is the baseline, first is "A")::
 
-    python scripts/analyze_component_breakdown.py \\
+    python tools/recommendation/dlrm_v4/analyze_component_breakdown.py \\
         traces/b200/trace_step52_pipeline.json.gz \\
         traces/mi350x/trace_step52_pipeline.json.gz \\
         --labels B200 MI350X
@@ -55,32 +55,58 @@ _LAUNCH_CATS = {"cuda_runtime", "cuda_driver"}
 # names with ".kd" / "[clone .kd]"; both sides are matched by substring so the
 # same rule covers CUDA and HIP.
 _OP_KIND_RULES = [
-    ("attention fwd",      ["_hstu_attn_fwd", "fwd_sm100", "fmhafwd"]),
-    ("attention bwd",      ["_hstu_attn_bwd", "bwd_sm100", "bwd_preprocess",
-                            "bwd_postprocess", "fmhabwd"]),
-    ("collective",         ["ncclkernel", "nccldevkernel", "mscclkernel", "rccl"]),
-    ("GEMM",               ["nvjet", "cutlass", "cijk_", "rocblas", "splitkreduce",
-                            "gemm"]),
-    ("HSTU Triton p'wise", ["_weighted_layer_norm", "_ln_mul_dropout",
-                            "_generate_random_mask", "_add_timestamp_position",
-                            "_add_embeddings", "_jagged", "concat_2d_jagged",
-                            "split_2d_jagged", "_norm_mul_dropout"]),
-    ("embedding scatter",  ["indexfunclargeindex", "index_add", "embedding_dense",
-                            "split_embedding", "batched_embedding"]),
-    ("gather / index",     ["vectorized_gather", "gather_kernel", "index_elementwise",
-                            "index_select", "indexselect"]),
-    ("sort / scan",        ["radixsort", "radix_sort", "devicescan", "scan_kernel",
-                            "reduce_by_key", "runs_config", "lookback_scan",
-                            "unique", "encode::policy"]),
-    ("reduction",          ["reduce_kernel", "devicereduce"]),
-    ("cat / permute",      ["catarraybatchedcopy", "permute_2d", "invert_permute",
-                            "linearize_index", "_cat_"]),
-    ("copy / fill",        ["copybuffer", "fillbuffer", "direct_copy", "copy_kernel",
-                            "fillfunctor", "_copy_kernel"]),
-    ("elementwise",        ["elementwise_kernel", "silu", "dropout_kernel",
-                            "masked_scale", "cudafunctor", "multi_tensor_apply"]),
-    ("memcpy",             ["memcpy"]),
-    ("memset",             ["memset"]),
+    ("attention fwd", ["_hstu_attn_fwd", "fwd_sm100", "fmhafwd"]),
+    ("attention bwd", ["_hstu_attn_bwd", "bwd_sm100", "bwd_preprocess", "bwd_postprocess", "fmhabwd"]),
+    ("collective", ["ncclkernel", "nccldevkernel", "mscclkernel", "rccl"]),
+    ("GEMM", ["nvjet", "cutlass", "cijk_", "rocblas", "splitkreduce", "gemm"]),
+    (
+        "HSTU Triton p'wise",
+        [
+            "_weighted_layer_norm",
+            "_ln_mul_dropout",
+            "_generate_random_mask",
+            "_add_timestamp_position",
+            "_add_embeddings",
+            "_jagged",
+            "concat_2d_jagged",
+            "split_2d_jagged",
+            "_norm_mul_dropout",
+        ],
+    ),
+    (
+        "embedding scatter",
+        ["indexfunclargeindex", "index_add", "embedding_dense", "split_embedding", "batched_embedding"],
+    ),
+    (
+        "gather / index",
+        ["vectorized_gather", "gather_kernel", "index_elementwise", "index_select", "indexselect"],
+    ),
+    (
+        "sort / scan",
+        [
+            "radixsort",
+            "radix_sort",
+            "devicescan",
+            "scan_kernel",
+            "reduce_by_key",
+            "runs_config",
+            "lookback_scan",
+            "unique",
+            "encode::policy",
+        ],
+    ),
+    ("reduction", ["reduce_kernel", "devicereduce"]),
+    ("cat / permute", ["catarraybatchedcopy", "permute_2d", "invert_permute", "linearize_index", "_cat_"]),
+    (
+        "copy / fill",
+        ["copybuffer", "fillbuffer", "direct_copy", "copy_kernel", "fillfunctor", "_copy_kernel"],
+    ),
+    (
+        "elementwise",
+        ["elementwise_kernel", "silu", "dropout_kernel", "masked_scale", "cudafunctor", "multi_tensor_apply"],
+    ),
+    ("memcpy", ["memcpy"]),
+    ("memset", ["memset"]),
 ]
 
 # ---------------------------------------------------------------- modules
@@ -89,52 +115,102 @@ _OP_KIND_RULES = [
 # autograd node names, so both spellings map to one module.
 _MODULE_RULES = [
     # --- dense HSTU path ---
-    ("HSTU attention block",   ["## stu_preprocess_and_attention ##",
-                                "HSTUPreprocessAndAttentionFunction"]),
-    ("HSTU output projection", ["## stu_compute_output ##",
-                                "HSTUComputeOutputFunction"]),
-    ("HSTU input preprocess",  ["hstu_input_preprocessor", "hstu_positional_encoder",
-                                "_AddTimestampPositionEmbeddingsFunction",
-                                "_Concat2DJaggedFunction", "_Split2DJaggedFunction"]),
-    ("HSTU output postproc",   ["hstu_output_postprocessor"]),
-    ("multitask head (MLP)",   ["## multitask_module ##", "AddmmBackward0",
-                                "SwishLayerNormFunctionBackward",
-                                "LayerNormFunctionBackward"]),
+    ("HSTU attention block", ["## stu_preprocess_and_attention ##", "HSTUPreprocessAndAttentionFunction"]),
+    ("HSTU output projection", ["## stu_compute_output ##", "HSTUComputeOutputFunction"]),
+    (
+        "HSTU input preprocess",
+        [
+            "hstu_input_preprocessor",
+            "hstu_positional_encoder",
+            "_AddTimestampPositionEmbeddingsFunction",
+            "_Concat2DJaggedFunction",
+            "_Split2DJaggedFunction",
+        ],
+    ),
+    ("HSTU output postproc", ["hstu_output_postprocessor"]),
+    (
+        "multitask head (MLP)",
+        [
+            "## multitask_module ##",
+            "AddmmBackward0",
+            "SwishLayerNormFunctionBackward",
+            "LayerNormFunctionBackward",
+        ],
+    ),
     # --- sparse / embedding path ---
-    ("emb input dist (a2a)",   ["## dedup_ec_indices ##", "[splits_dist]_",
-                                "[input_dist]_", "KJTAllToAll", "KJTList",
-                                "FusedKJTListSplits", "SplitsAllToAll",
-                                "## start_sparse_data_dist",
-                                "## wait_sparse_data_dist"]),
-    ("emb lookup (TBE)",       ["[lookup]_", "SplitNoBagLookupFunction",
-                                "split_embedding"]),
-    ("emb output dist (a2a)",  ["[output_dist", "SequenceEmbeddingsAwaitable",
-                                "All2All_Seq", "## all2all_data",
-                                "## decoder", "## encoder"]),
-    ("emb jagged regather",    ["## construct_jagged_tensors ##",
-                                "IndexSelectBackward0", "index_select_backward",
-                                "JaggedToPaddedDenseOp",
-                                "EmbeddingCollectionAwaitable"]),
+    (
+        "emb input dist (a2a)",
+        [
+            "## dedup_ec_indices ##",
+            "[splits_dist]_",
+            "[input_dist]_",
+            "KJTAllToAll",
+            "KJTList",
+            "FusedKJTListSplits",
+            "SplitsAllToAll",
+            "## start_sparse_data_dist",
+            "## wait_sparse_data_dist",
+        ],
+    ),
+    ("emb lookup (TBE)", ["[lookup]_", "SplitNoBagLookupFunction", "split_embedding"]),
+    (
+        "emb output dist (a2a)",
+        [
+            "[output_dist",
+            "SequenceEmbeddingsAwaitable",
+            "All2All_Seq",
+            "## all2all_data",
+            "## decoder",
+            "## encoder",
+        ],
+    ),
+    (
+        "emb jagged regather",
+        [
+            "## construct_jagged_tensors ##",
+            "IndexSelectBackward0",
+            "index_select_backward",
+            "JaggedToPaddedDenseOp",
+            "EmbeddingCollectionAwaitable",
+        ],
+    ),
     # --- everything else ---
-    ("dense grad all-reduce",  ["nccl:all_reduce", "Reducer"]),
-    ("optimizer",              ["Optimizer.step", "AccumulateGrad"]),
-    ("H2D batch copy",         ["## copy_batch_to_gpu"]),
-    ("loss / metrics",         ["## gauc"]),
-    ("autograd glue",          ["ToCopyBackward0", "SplitWithSizesBackward0",
-                                "CatBackward0", "NativeDropoutBackward0",
-                                "MulBackward0", "SumBackward"]),
+    ("dense grad all-reduce", ["nccl:all_reduce", "Reducer"]),
+    ("optimizer", ["Optimizer.step", "AccumulateGrad"]),
+    ("H2D batch copy", ["## copy_batch_to_gpu"]),
+    ("loss / metrics", ["## gauc"]),
+    (
+        "autograd glue",
+        [
+            "ToCopyBackward0",
+            "SplitWithSizesBackward0",
+            "CatBackward0",
+            "NativeDropoutBackward0",
+            "MulBackward0",
+            "SumBackward",
+        ],
+    ),
     # Outer-scope fallbacks — only reached when nothing more specific matched.
     ("sparse preprocess misc", ["## preprocess ##"]),
-    ("HSTU body misc",         ["## user_forward ##"]),
-    ("model glue misc",        ["## main_forward ##", "DistributedDataParallel"]),
+    ("HSTU body misc", ["## user_forward ##"]),
+    ("model glue misc", ["## main_forward ##", "DistributedDataParallel"]),
 ]
 
-_HSTU_MODULES = ("HSTU attention block", "HSTU output projection",
-                 "HSTU input preprocess", "HSTU output postproc",
-                 "multitask head (MLP)", "HSTU body misc")
-_SPARSE_MODULES = ("emb input dist (a2a)", "emb lookup (TBE)",
-                   "emb output dist (a2a)", "emb jagged regather",
-                   "sparse preprocess misc")
+_HSTU_MODULES = (
+    "HSTU attention block",
+    "HSTU output projection",
+    "HSTU input preprocess",
+    "HSTU output postproc",
+    "multitask head (MLP)",
+    "HSTU body misc",
+)
+_SPARSE_MODULES = (
+    "emb input dist (a2a)",
+    "emb lookup (TBE)",
+    "emb output dist (a2a)",
+    "emb jagged regather",
+    "sparse preprocess misc",
+)
 
 
 def _load(path: str) -> tuple[list[dict], dict]:
@@ -187,8 +263,7 @@ def _launch_stacks(events: list[dict]) -> dict[int, tuple[str, ...]]:
     by_tid: dict[int, list[dict]] = defaultdict(list)
     for e in events:
         cat = e.get("cat")
-        if cat in _CPU_TREE_CATS or (cat in _LAUNCH_CATS
-                                     and "correlation" in e.get("args", {})):
+        if cat in _CPU_TREE_CATS or (cat in _LAUNCH_CATS and "correlation" in e.get("args", {})):
             if e.get("ph") == "X" and "ts" in e:
                 by_tid[e.get("tid")].append(e)
 
@@ -230,8 +305,7 @@ def _union_ms(intervals: list[tuple[float, float]]) -> float:
     return _measure(_merge(intervals))
 
 
-def _subtract_ms(a: list[tuple[float, float]],
-                 b: list[tuple[float, float]]) -> float:
+def _subtract_ms(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> float:
     """Length of merged ``a`` with merged ``b`` removed — i.e. the part of a
     that is not covered by b. Used for *exposed* communication: comm intervals
     with no compute kernel running underneath them."""
@@ -254,8 +328,7 @@ def _subtract_ms(a: list[tuple[float, float]],
     return total / 1000
 
 
-def _clip(intervals: list[tuple[float, float]],
-          lo: float, hi: float) -> list[tuple[float, float]]:
+def _clip(intervals: list[tuple[float, float]], lo: float, hi: float) -> list[tuple[float, float]]:
     out = []
     for s, e in intervals:
         s2, e2 = max(s, lo), min(e, hi)
@@ -272,13 +345,11 @@ def analyze(path: str) -> dict:
         if isinstance(pid, int) and pid >= 0:
             by_rank[pid // _PID_STRIDE].append(e)
     # Only ranks that actually ran kernels; stray metadata pids are not ranks.
-    real_ranks = {r for r, revs in by_rank.items()
-                  if any(e.get("cat") == "kernel" for e in revs)}
+    real_ranks = {r for r, revs in by_rank.items() if any(e.get("cat") == "kernel" for e in revs)}
     by_rank = {r: v for r, v in by_rank.items() if r in real_ranks}
 
     # count unique ProfilerStep names.
-    steps = {e["name"] for e in events
-             if "ProfilerStep" in str(e.get("name", "")) and e.get("ph") == "X"}
+    steps = {e["name"] for e in events if "ProfilerStep" in str(e.get("name", "")) and e.get("ph") == "X"}
     n_steps = len(steps) or 1
 
     # (module, kind, phase) -> [total_ms, count]
@@ -302,8 +373,11 @@ def analyze(path: str) -> dict:
         rank_steps: dict[int, list[tuple[float, float]]] = {rank: []}
         seen_steps: set = set()
         for e in revs:
-            if (e.get("cat") == "gpu_user_annotation" and e.get("ph") == "X"
-                    and "ProfilerStep" in str(e.get("name", ""))):
+            if (
+                e.get("cat") == "gpu_user_annotation"
+                and e.get("ph") == "X"
+                and "ProfilerStep" in str(e.get("name", ""))
+            ):
                 if e["name"] not in seen_steps:
                     seen_steps.add(e["name"])
                     rank_steps[rank].append((e["ts"], e["ts"] + e.get("dur", 0)))
@@ -419,8 +493,11 @@ def analyze(path: str) -> dict:
                 tl_buckets[k] += _measure(_clip(mv, lo, hi))
 
     for e in events:
-        if ("ProfilerStep" in str(e.get("name", "")) and e.get("ph") == "X"
-                and e.get("cat") == "gpu_user_annotation"):
+        if (
+            "ProfilerStep" in str(e.get("name", ""))
+            and e.get("ph") == "X"
+            and e.get("cat") == "gpu_user_annotation"
+        ):
             step_spans.append(e.get("dur", 0) / 1000)
 
     norm = n_ranks * n_steps
@@ -435,10 +512,16 @@ def analyze(path: str) -> dict:
         "unattributed": {k: (v[0] / norm, v[1] / norm) for k, v in unattributed.items()},
         # ms/step/rank, kernels/step/rank, kernel, TFLOP/s, mean T, ops/step/rank
         "gemm_shapes": {
-            k: (v[0] / norm, v[1] / norm, v[2],
+            k: (
+                v[0] / norm,
+                v[1] / norm,
+                v[2],
                 (v[3] / (v[0] / 1000) / 1e12) if v[0] > 0 else 0.0,
-                v[4] / v[5] if v[5] else 0, v[5] / norm)
-            for k, v in gemm_shapes.items()},
+                v[4] / v[5] if v[5] else 0,
+                v[5] / norm,
+            )
+            for k, v in gemm_shapes.items()
+        },
         "work_ms_step": sum(per_rank_work.values()) / norm,
         "busy_ms_step": sum(per_rank_busy.values()) / norm,
         "step_ms": (sum(step_spans) / len(step_spans)) if step_spans else 0.0,
@@ -463,9 +546,9 @@ def _gemm_label(M: int, N: int, K: int) -> tuple[str, int]:
     big = [i for i, d in enumerate(dims) if d >= _TOKEN_DIM_MIN]
     if len(big) != 1:
         return f"[{M},{K}]x[{K},{N}]", 0
-    if big[0] == 0:      # activation GEMM: [T,K] x [K,N]
+    if big[0] == 0:  # activation GEMM: [T,K] x [K,N]
         return f"[T,{K}]x[{K},{N}]", M
-    if big[0] == 2:      # weight-gradient GEMM: [M,T] x [T,N]
+    if big[0] == 2:  # weight-gradient GEMM: [M,T] x [T,N]
         return f"[{M},T]x[T,{N}]", K
     return f"[{M},{K}]x[{K},T]", N
 
@@ -512,21 +595,25 @@ def _print_compare(a: dict, b: dict, la: str, lb: str) -> None:
     w = 26
     print(f"\n{'='*104}\nGPU work per rank per step — {la} vs {lb}\n{'='*104}")
     for res, lab in ((a, la), (b, lb)):
-        print(f"  {lab:<8} {res['device']:<22} {res['n_ranks']} ranks x "
-              f"{res['n_steps']} steps | step {res['step_ms']:.1f} ms | "
-              f"kernel work {res['work_ms_step']:.1f} ms | "
-              f"GPU busy (union) {res['busy_ms_step']:.1f} ms "
-              f"({100*res['busy_ms_step']/res['step_ms']:.0f}% occupancy)"
-              if res["step_ms"] else f"  {lab}: {res['device']}")
+        print(
+            f"  {lab:<8} {res['device']:<22} {res['n_ranks']} ranks x "
+            f"{res['n_steps']} steps | step {res['step_ms']:.1f} ms | "
+            f"kernel work {res['work_ms_step']:.1f} ms | "
+            f"GPU busy (union) {res['busy_ms_step']:.1f} ms "
+            f"({100*res['busy_ms_step']/res['step_ms']:.0f}% occupancy)"
+            if res["step_ms"]
+            else f"  {lab}: {res['device']}"
+        )
 
     def table(title, keyfn, sort_by_a=True):
         ra, rb = _rollup(a, keyfn), _rollup(b, keyfn)
         keys = set(ra) | set(rb)
-        rows = sorted(keys, key=lambda k: -(ra.get(k, (0, 0))[0] if sort_by_a
-                                            else rb.get(k, (0, 0))[0]))
+        rows = sorted(keys, key=lambda k: -(ra.get(k, (0, 0))[0] if sort_by_a else rb.get(k, (0, 0))[0]))
         print(f"\n{title}")
-        print(f"  {'component':<{w}} {la:>9} {lb:>9} {'gap':>9} {'gap %':>8}"
-              f" {'kn/step ' + la:>12} {'kn/step ' + lb:>12}")
+        print(
+            f"  {'component':<{w}} {la:>9} {lb:>9} {'gap':>9} {'gap %':>8}"
+            f" {'kn/step ' + la:>12} {'kn/step ' + lb:>12}"
+        )
         print("  " + "-" * (w + 66))
         ta = tb = 0.0
         for k in rows:
@@ -537,26 +624,29 @@ def _print_compare(a: dict, b: dict, la: str, lb: str) -> None:
             gap = mb - ma
             pct = (gap / ma * 100) if ma > 0 else float("nan")
             pcts = f"{pct:+7.1f}%" if ma > 0 else "      —"
-            print(f"  {k:<{w}} {_fmt(ma)} {_fmt(mb)} {gap:+9.2f} {pcts}"
-                  f" {ca:12.0f} {cb:12.0f}")
+            print(f"  {k:<{w}} {_fmt(ma)} {_fmt(mb)} {gap:+9.2f} {pcts}" f" {ca:12.0f} {cb:12.0f}")
         print("  " + "-" * (w + 66))
-        print(f"  {'TOTAL':<{w}} {_fmt(ta)} {_fmt(tb)} {tb-ta:+9.2f} "
-              f"{(tb-ta)/ta*100:+7.1f}%")
+        print(f"  {'TOTAL':<{w}} {_fmt(ta)} {_fmt(tb)} {tb-ta:+9.2f} " f"{(tb-ta)/ta*100:+7.1f}%")
 
-    table("By module (all phases) — ms/step/rank",
-          lambda k: k[0])
-    table("By op kind (all modules) — ms/step/rank",
-          lambda k: k[1])
-    table("By phase — ms/step/rank",
-          lambda k: k[2])
-    table("HSTU only, by module x phase — ms/step/rank",
-          lambda k: f"{k[0]} [{k[2]}]" if k[0] in _HSTU_MODULES else None)
-    table("Sparse path + collectives, by module x kind — ms/step/rank",
-          lambda k: f"{k[0]} [{k[1]}]"
-          if (k[0] in _SPARSE_MODULES or "collective" in k[0]
-              or "all-reduce" in k[0]) else None)
-    table("GEMM only, by module x phase — ms/step/rank",
-          lambda k: f"{k[0]} [{k[2]}]" if k[1] == "GEMM" else None)
+    table("By module (all phases) — ms/step/rank", lambda k: k[0])
+    table("By op kind (all modules) — ms/step/rank", lambda k: k[1])
+    table("By phase — ms/step/rank", lambda k: k[2])
+    table(
+        "HSTU only, by module x phase — ms/step/rank",
+        lambda k: f"{k[0]} [{k[2]}]" if k[0] in _HSTU_MODULES else None,
+    )
+    table(
+        "Sparse path + collectives, by module x kind — ms/step/rank",
+        lambda k: (
+            f"{k[0]} [{k[1]}]"
+            if (k[0] in _SPARSE_MODULES or "collective" in k[0] or "all-reduce" in k[0])
+            else None
+        ),
+    )
+    table(
+        "GEMM only, by module x phase — ms/step/rank",
+        lambda k: f"{k[0]} [{k[2]}]" if k[1] == "GEMM" else None,
+    )
 
 
 def _print_single(res: dict, label: str) -> None:
@@ -573,8 +663,7 @@ def _print_single(res: dict, label: str) -> None:
         print("  " + "-" * 66)
         tot = sum(v[0] for v in roll.values())
         for k, (ms, cnt) in sorted(roll.items(), key=lambda x: -x[1][0]):
-            print(f"  {k:<28} {ms:9.2f} {100*ms/tot:7.1f}% "
-                  f"{100*ms/step:7.1f}% {cnt:9.0f}")
+            print(f"  {k:<28} {ms:9.2f} {100*ms/tot:7.1f}% " f"{100*ms/step:7.1f}% {cnt:9.0f}")
         print("  " + "-" * 66)
         print(f"  {'TOTAL':<28} {tot:9.2f} {100.0:7.1f}% {100*tot/step:7.1f}%")
 
@@ -586,10 +675,11 @@ def _print_timeline(res: dict, label: str) -> None:
         print(f"\n  {label}: no GPU step spans found; cannot decompose")
         return
     step = t["step"]
-    print(f"\n{'='*104}\nStep wall-time decomposition — {label} ({res['device']})"
-          f"\n{'='*104}")
-    print(f"  averaged over {res['n_ranks']} ranks x {res['n_steps']} steps; "
-          f"these three are additive and sum to the step")
+    print(f"\n{'='*104}\nStep wall-time decomposition — {label} ({res['device']})" f"\n{'='*104}")
+    print(
+        f"  averaged over {res['n_ranks']} ranks x {res['n_steps']} steps; "
+        f"these three are additive and sum to the step"
+    )
     print(f"\n  {'component':<34} {'ms/step':>9} {'% step':>8}")
     print("  " + "-" * 54)
     rows = [
@@ -603,13 +693,19 @@ def _print_timeline(res: dict, label: str) -> None:
     print(f"  {'STEP':<34} {step:9.2f} {100.0:7.1f}%")
 
     print(f"\n  communication detail")
-    print(f"    {'collective wall time (union)':<32} {t['comm_total']:9.2f} ms"
-          f" {100*t['comm_total']/step:6.1f}% of step")
-    print(f"    {'-> overlapped with compute':<32} "
-          f"{t['comm_total']-t['comm_exposed']:9.2f} ms"
-          f" {100*(t['comm_total']-t['comm_exposed'])/t['comm_total']:6.1f}% of comm")
-    print(f"    {'-> exposed (on critical path)':<32} {t['comm_exposed']:9.2f} ms"
-          f" {100*t['comm_exposed']/t['comm_total']:6.1f}% of comm")
+    print(
+        f"    {'collective wall time (union)':<32} {t['comm_total']:9.2f} ms"
+        f" {100*t['comm_total']/step:6.1f}% of step"
+    )
+    print(
+        f"    {'-> overlapped with compute':<32} "
+        f"{t['comm_total']-t['comm_exposed']:9.2f} ms"
+        f" {100*(t['comm_total']-t['comm_exposed'])/t['comm_total']:6.1f}% of comm"
+    )
+    print(
+        f"    {'-> exposed (on critical path)':<32} {t['comm_exposed']:9.2f} ms"
+        f" {100*t['comm_exposed']/t['comm_total']:6.1f}% of comm"
+    )
 
     buckets = dict(res["tl_buckets"])
     # Collectives are mostly hidden behind compute, so their total wall time
@@ -619,8 +715,10 @@ def _print_timeline(res: dict, label: str) -> None:
         del buckets["collective (total)"]
         buckets["collective (exposed)"] = t["comm_exposed"]
 
-    print(f"\n  compute occupancy by bucket (wall time, overlaps possible;"
-          f" collectives counted as exposed only)")
+    print(
+        f"\n  compute occupancy by bucket (wall time, overlaps possible;"
+        f" collectives counted as exposed only)"
+    )
     print(f"    {'bucket':<28} {'ms/step':>9} {'% step':>8}")
     print("    " + "-" * 48)
     for k, v in sorted(buckets.items(), key=lambda x: -x[1]):
@@ -636,14 +734,19 @@ def _print_top_kernels(res: dict, label: str, n: int = 25) -> None:
 
 
 def _print_gemms(a: dict, b: dict, la: str, lb: str, n: int = 16) -> None:
-    print(f"\n{'='*124}\nGEMM shapes (T = jagged token count of the batch) — "
-          f"ms/step/rank and achieved TFLOP/s\n{'='*124}")
+    print(
+        f"\n{'='*124}\nGEMM shapes (T = jagged token count of the batch) — "
+        f"ms/step/rank and achieved TFLOP/s\n{'='*124}"
+    )
     keys = set(a["gemm_shapes"]) | set(b["gemm_shapes"])
-    ranked = sorted(keys, key=lambda k: -(a["gemm_shapes"].get(k, (0,))[0]
-                                          + b["gemm_shapes"].get(k, (0,))[0]))[:n]
-    print(f"  {'shape':<24} {'mean T':>9} {'op/st':>5} | "
-          f"{la+' ms':>9} {lb+' ms':>9} {'gap %':>8} | "
-          f"{la+' TF/s':>10} {lb+' TF/s':>10} {'ratio':>6} | {'module':<24} phase")
+    ranked = sorted(
+        keys, key=lambda k: -(a["gemm_shapes"].get(k, (0,))[0] + b["gemm_shapes"].get(k, (0,))[0])
+    )[:n]
+    print(
+        f"  {'shape':<24} {'mean T':>9} {'op/st':>5} | "
+        f"{la+' ms':>9} {lb+' ms':>9} {'gap %':>8} | "
+        f"{la+' TF/s':>10} {lb+' TF/s':>10} {'ratio':>6} | {'module':<24} phase"
+    )
     print("  " + "-" * 138)
     for k in ranked:
         shape, mod, ph = k
@@ -651,18 +754,22 @@ def _print_gemms(a: dict, b: dict, la: str, lb: str, n: int = 16) -> None:
         gb = b["gemm_shapes"].get(k, (0.0, 0.0, "", 0.0, 0, 0.0))
         gap = (gb[0] - ga[0]) / ga[0] * 100 if ga[0] else float("nan")
         ratio = ga[3] / gb[3] if gb[3] else 0
-        print(f"  {shape:<24} {max(ga[4], gb[4]):>9.0f} {max(ga[5], gb[5]):>5.1f} | "
-              f"{ga[0]:9.2f} {gb[0]:9.2f} {gap:+7.1f}% | "
-              f"{ga[3]:10.1f} {gb[3]:10.1f} {ratio:6.2f}x | {mod:<24} {ph}")
+        print(
+            f"  {shape:<24} {max(ga[4], gb[4]):>9.0f} {max(ga[5], gb[5]):>5.1f} | "
+            f"{ga[0]:9.2f} {gb[0]:9.2f} {gap:+7.1f}% | "
+            f"{ga[3]:10.1f} {gb[3]:10.1f} {ratio:6.2f}x | {mod:<24} {ph}"
+        )
     print("  " + "-" * 138)
     for res, lab in ((a, la), (b, lb)):
         tot = sum(v[0] for v in res["gemm_shapes"].values())
         # v[3] is TFLOP/s for that row and v[0] its seconds, so the product is
         # TFLOP of real work in that row.
         tflop = sum(v[3] * v[0] / 1000 for v in res["gemm_shapes"].values())
-        print(f"  {lab:<8} shape-attributed GEMM {tot:6.2f} ms/step/rank, "
-              f"{tflop:5.2f} TFLOP/step/rank, aggregate "
-              f"{tflop/(tot/1000):6.1f} TFLOP/s")
+        print(
+            f"  {lab:<8} shape-attributed GEMM {tot:6.2f} ms/step/rank, "
+            f"{tflop:5.2f} TFLOP/step/rank, aggregate "
+            f"{tflop/(tot/1000):6.1f} TFLOP/s"
+        )
 
 
 def _print_unattributed(res: dict, label: str, n: int = 10) -> None:
@@ -674,13 +781,15 @@ def _print_unattributed(res: dict, label: str, n: int = 10) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("traces", nargs="+")
     p.add_argument("--labels", nargs="*", default=None)
     p.add_argument("--top-kernels", type=int, default=25)
-    p.add_argument("--debug-unattributed", action="store_true",
-                   help="print the CPU launch stack of the largest unattributed kernels")
+    p.add_argument(
+        "--debug-unattributed",
+        action="store_true",
+        help="print the CPU launch stack of the largest unattributed kernels",
+    )
     args = p.parse_args()
 
     labels = args.labels or [Path(t).parent.name for t in args.traces]
@@ -698,11 +807,9 @@ def main() -> None:
 
     print(f"\n{'='*104}\nUnattributed check\n{'='*104}")
     for res, lab in zip(results, labels):
-        un = sum(ms for (mod, _, _), (ms, _) in res["cells"].items()
-                 if mod.startswith("unattributed"))
+        un = sum(ms for (mod, _, _), (ms, _) in res["cells"].items() if mod.startswith("unattributed"))
         tot = sum(ms for (ms, _) in res["cells"].values())
-        print(f"  {lab:<8} unattributed {un:.2f} / {tot:.2f} ms/step/rank "
-              f"({100*un/tot:.1f}%)")
+        print(f"  {lab:<8} unattributed {un:.2f} / {tot:.2f} ms/step/rank " f"({100*un/tot:.1f}%)")
     if args.debug_unattributed:
         for res, lab in zip(results, labels):
             _print_unattributed(res, lab)

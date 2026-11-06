@@ -24,7 +24,8 @@ from generative_recommenders.dlrm_v4.train import dl_prestart
 HERE = Path(__file__).resolve()
 REC = HERE.parents[4]  # .../recommendation
 GR = REC / "generative_recommenders"
-STAGER = REC / "scripts" / "stage_data_local.sh"
+# Primus: the stager is examples/mlperf/dlrm_v4/data/ (REC = .../dlrm_v4/src).
+STAGER = REC.parents[4] / "examples" / "mlperf" / "dlrm_v4" / "data" / "stage_data_local.sh"
 GIN = GR / "dlrm_v4" / "train" / "gin" / "yambda_5b.gin"
 VERIFY = GR / "ops" / "flydsl" / "verify_integration.py"
 YAMBDA = GR / "dlrm_v4" / "datasets" / "yambda.py"

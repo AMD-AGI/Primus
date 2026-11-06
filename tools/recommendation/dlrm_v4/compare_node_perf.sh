@@ -22,8 +22,8 @@
 # same value in every arm. A log with no perf lines is reported as an error and
 # the script exits 1.
 #
-# Usage:  bash scripts/compare_node_perf.sh <log1> [log2 ...]
-#         WARMUP=3 bash scripts/compare_node_perf.sh perf_1node.log perf_2node.log
+# Usage:  bash tools/recommendation/dlrm_v4/compare_node_perf.sh <log1> [log2 ...]
+#         WARMUP=3 bash tools/recommendation/dlrm_v4/compare_node_perf.sh perf_1node.log perf_2node.log
 # =============================================================================
 set -uo pipefail
 WARMUP=${WARMUP:-3}

@@ -101,10 +101,19 @@ def _sections(elf):
         sh.append(struct.unpack_from("<IIQQQQIIQQ", elf, e_shoff + i * e_shentsize))
     names_off = sh[e_shstrndx][4] if e_shstrndx < len(sh) else 0
     out = []
-    for (n, typ, fl, addr, off, size, link, info, al, ent) in sh:
+    for n, typ, fl, addr, off, size, link, info, al, ent in sh:
         e = elf.index(b"\0", names_off + n)
-        out.append({"name": elf[names_off + n:e].decode(errors="replace"), "type": typ, "addr": addr, "off": off,
-                    "size": size, "link": link, "ent": ent})
+        out.append(
+            {
+                "name": elf[names_off + n : e].decode(errors="replace"),
+                "type": typ,
+                "addr": addr,
+                "off": off,
+                "size": size,
+                "link": link,
+                "ent": ent,
+            }
+        )
     return out
 
 
@@ -117,11 +126,12 @@ def _symbols(elf, secs, sh_type):
         stoff = secs[s["link"]]["off"]
         for k in range(s["size"] // s["ent"]):
             st_name, st_info, st_other, st_shndx, st_value, _sz = struct.unpack_from(
-                "<IBBHQQ", elf, s["off"] + k * s["ent"])
+                "<IBBHQQ", elf, s["off"] + k * s["ent"]
+            )
             if not st_value or not st_shndx:
                 continue
             e = elf.index(b"\0", stoff + st_name)
-            nm = elf[stoff + st_name:e].decode(errors="replace")
+            nm = elf[stoff + st_name : e].decode(errors="replace")
             out.setdefault(nm, (st_value, st_info >> 4, st_other & 3, st_info & 0xF))
     return out
 
@@ -133,10 +143,10 @@ def build_id(elf, secs):
         q, end = s["off"], s["off"] + s["size"]
         while q + 12 <= end:
             namesz, descsz, ntype = struct.unpack_from("<III", elf, q)
-            name = elf[q + 12:q + 12 + namesz]
+            name = elf[q + 12 : q + 12 + namesz]
             dq = q + 12 + ((namesz + 3) & ~3)
             if ntype == 3 and name.rstrip(b"\0") == b"GNU":
-                return elf[dq:dq + descsz].hex()
+                return elf[dq : dq + descsz].hex()
             q = dq + ((descsz + 3) & ~3)
     return None
 
@@ -168,7 +178,12 @@ def _zstd_libzstd(payload, size_hint=None):
         _LIBZSTD.ZSTD_getFrameContentSize.restype = ctypes.c_ulonglong
         _LIBZSTD.ZSTD_getFrameContentSize.argtypes = [ctypes.c_char_p, ctypes.c_size_t]
         _LIBZSTD.ZSTD_decompress.restype = ctypes.c_size_t
-        _LIBZSTD.ZSTD_decompress.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]
+        _LIBZSTD.ZSTD_decompress.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_char_p,
+            ctypes.c_size_t,
+        ]
         _LIBZSTD.ZSTD_isError.restype = ctypes.c_uint
         _LIBZSTD.ZSTD_isError.argtypes = [ctypes.c_size_t]
     n = _LIBZSTD.ZSTD_getFrameContentSize(payload, len(payload))
@@ -205,8 +220,11 @@ def _msgpack(buf, q=0):
     if b >= 0xE0:
         return b - 0x100, q + 1
     if 0x80 <= b <= 0x8F or b in (0xDE, 0xDF):
-        n, q = (b & 0x0F, q + 1) if b <= 0x8F else (
-            struct.unpack_from(">H" if b == 0xDE else ">I", buf, q + 1)[0], q + (3 if b == 0xDE else 5))
+        n, q = (
+            (b & 0x0F, q + 1)
+            if b <= 0x8F
+            else (struct.unpack_from(">H" if b == 0xDE else ">I", buf, q + 1)[0], q + (3 if b == 0xDE else 5))
+        )
         out = {}
         for _ in range(n):
             k, q = _msgpack(buf, q)
@@ -214,8 +232,11 @@ def _msgpack(buf, q=0):
             out[k] = v
         return out, q
     if 0x90 <= b <= 0x9F or b in (0xDC, 0xDD):
-        n, q = (b & 0x0F, q + 1) if b <= 0x9F else (
-            struct.unpack_from(">H" if b == 0xDC else ">I", buf, q + 1)[0], q + (3 if b == 0xDC else 5))
+        n, q = (
+            (b & 0x0F, q + 1)
+            if b <= 0x9F
+            else (struct.unpack_from(">H" if b == 0xDC else ">I", buf, q + 1)[0], q + (3 if b == 0xDC else 5))
+        )
         out = []
         for _ in range(n):
             v, q = _msgpack(buf, q)
@@ -226,8 +247,8 @@ def _msgpack(buf, q=0):
             n, q = b & 0x1F, q + 1
         else:
             w = {0xD9: 1, 0xDA: 2, 0xDB: 4, 0xC4: 1, 0xC5: 2, 0xC6: 4}[b]
-            n, q = int.from_bytes(buf[q + 1:q + 1 + w], "big"), q + 1 + w
-        raw = bytes(buf[q:q + n])
+            n, q = int.from_bytes(buf[q + 1 : q + 1 + w], "big"), q + 1 + w
+        raw = bytes(buf[q : q + n])
         return (raw if b in (0xC4, 0xC5, 0xC6) else raw.decode()), q + n
     fixed = {0xCC: ">B", 0xCD: ">H", 0xCE: ">I", 0xCF: ">Q", 0xD0: ">b", 0xD1: ">h", 0xD2: ">i", 0xD3: ">q"}
     if b in fixed:
@@ -268,7 +289,9 @@ def walk_kpack(lib, elf, secs):
     name = ref["kernel_name"]
     path = None
     for sp in ref.get("kpack_search_paths") or []:
-        cand = os.path.normpath(os.path.join(os.path.dirname(os.path.realpath(lib)), sp.replace("@GFXARCH@", GFX)))
+        cand = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.realpath(lib)), sp.replace("@GFXARCH@", GFX))
+        )
         if os.path.exists(cand):
             path = cand
             break
@@ -297,9 +320,15 @@ def walk_kpack(lib, elf, secs):
             r.update(compressed=0, uncompressed=0, co_bytes=0, kernels_mangled=[])
         else:
             off, sz = frames[e["ordinal"]]
-            co = _zstd_d(bytes(kp[off:off + sz]), e["original_size"])
-            r.update(compressed=sz, uncompressed=len(co), co_bytes=len(co), kernels_mangled=kd_symbols(co),
-                     co_size=len(co), co_mid=_mid_sample(co))
+            co = _zstd_d(bytes(kp[off : off + sz]), e["original_size"])
+            r.update(
+                compressed=sz,
+                uncompressed=len(co),
+                co_bytes=len(co),
+                kernels_mangled=kd_symbols(co),
+                co_size=len(co),
+                co_mid=_mid_sample(co),
+            )
         rows.append(r)
     if [r["tu"] for r in rows] != list(range(len(rows))):
         raise SystemExit(f"{lib}: HIPK wrapper indices are not 0..N-1 in section order")
@@ -310,7 +339,7 @@ def _mid_sample(co):
     """32 bytes at the middle of a code object (hex): with the size, the key that matches a code object logged by
     the load monitor (tools: coload_shim 'reader' lines carry size and an FNV-1a hash; see match_loads)."""
     h = len(co) // 2
-    return co[h:h + 32].hex()
+    return co[h : h + 32].hex()
 
 
 def fnv1a64(b):
@@ -327,7 +356,7 @@ def _parse_offload_bundle(ub):
     for _ in range(n):
         eoff, esz, tl = struct.unpack_from("<QQQ", ub, q)
         q += 24
-        out.append((ub[q:q + tl].decode(errors="replace"), eoff, esz))
+        out.append((ub[q : q + tl].decode(errors="replace"), eoff, esz))
         q += tl
         end = max(end, eoff + esz, q)
     return out, end
@@ -347,7 +376,7 @@ def walk_fatbin(lib):
     fb = [s for s in secs if s["name"] == ".hip_fatbin" and s["type"] != 8]  # 8 = SHT_NOBITS
     if not fb:
         return elf, secs, []
-    sec = elf[fb[0]["off"]:fb[0]["off"] + fb[0]["size"]]
+    sec = elf[fb[0]["off"] : fb[0]["off"] + fb[0]["size"]]
     rows, pos = [], 0
     while True:
         m = MAGIC.search(sec, pos)
@@ -355,7 +384,7 @@ def walk_fatbin(lib):
             break
         o = m.start()
         r = {"index": len(rows), "offset": o, "vaddr": fb[0]["addr"] + o}
-        if sec[o:o + 4] == b"CCOB":
+        if sec[o : o + 4] == b"CCOB":
             ver, _meth = struct.unpack_from("<HH", sec, o + 4)
             if ver == 3:
                 tot, unc, _h = struct.unpack_from("<QQQ", sec, o + 8)
@@ -365,21 +394,21 @@ def walk_fatbin(lib):
                 hdr = 24
             else:
                 raise SystemExit(f"{lib}: unsupported CCOB version {ver} at {o}")
-            ub = _zstd_d(sec[o + hdr:o + tot])
+            ub = _zstd_d(sec[o + hdr : o + tot])
             r.update(kind="ccob", compressed=tot, uncompressed=unc)
             pos = o + tot
         else:
             ents, end = _parse_offload_bundle(sec[o:])
-            ub = sec[o:o + end]
+            ub = sec[o : o + end]
             r.update(kind="plain", compressed=None, uncompressed=end)
             pos = o + end
         ents, _ = _parse_offload_bundle(ub)
         co = [(eo, es) for t, eo, es in ents if GFX in t]
         r["co_bytes"] = co[0][1] if co else 0
-        r["kernels_mangled"] = kd_symbols(ub[co[0][0]:co[0][0] + co[0][1]]) if co else []
+        r["kernels_mangled"] = kd_symbols(ub[co[0][0] : co[0][0] + co[0][1]]) if co else []
         r["vaddr_end"] = fb[0]["addr"] + pos
         if co:
-            r["co_size"], r["co_mid"] = co[0][1], _mid_sample(ub[co[0][0]:co[0][0] + co[0][1]])
+            r["co_size"], r["co_mid"] = co[0][1], _mid_sample(ub[co[0][0] : co[0][0] + co[0][1]])
         rows.append(r)
     return elf, secs, rows
 
@@ -416,7 +445,8 @@ def candidates(name, ctxs, libs):
     """(lib, first bundle) pairs a launched kernel name can load. A demangled name found in several libraries (rocprim
     templates; their host stubs are not exported, so no cross-library interposition) is attributed by the launching
     op: fbgemm::* -> the fbgemm libraries, any other op -> the non-fbgemm libraries (libtorch_hip); no usable context
-    -> every candidate. Ambiguity left inside one group is kept as a union (an extra preload is untimed init)."""
+    -> every candidate. Ambiguity left inside one group is kept as a union (an extra preload is untimed init).
+    """
     cands = [(lib, L["name_first"][name]) for lib, L in libs.items() if name in L["name_first"]]
     if len(cands) <= 1:
         return cands
@@ -444,8 +474,10 @@ def mlperf_run_start_s(path):
     raise SystemExit(f"{path}: no run_start")
 
 
-_LOAD_RE = re.compile(r"^(?P<t>\d+\.\d+) (?P<kind>kpack|reader|load|freeze) dur_ms=(?P<ms>[-\d.]+) rc=(?P<rc>-?\d+) "
-                      r"tid=(?P<tid>\d+)(?P<rest>.*)$")
+_LOAD_RE = re.compile(
+    r"^(?P<t>\d+\.\d+) (?P<kind>kpack|reader|load|freeze) dur_ms=(?P<ms>[-\d.]+) rc=(?P<rc>-?\d+) "
+    r"tid=(?P<tid>\d+)(?P<rest>.*)$"
+)
 
 
 def parse_load_logs(paths):
@@ -453,7 +485,8 @@ def parse_load_logs(paths):
     'coload.<pid>.log'; lines '<wall s> kpack|reader|load|freeze dur_ms=<ms> rc=<rc> tid=<tid> key=value...').
     kpack: TheRock kpack_load_code_object (bin=<library path> idx=<TU>); reader:
     hsa_code_object_reader_create_from_memory (size=, lib=<dladdr library or ->, off=<address - load base>);
-    load: hsa_executable_load_agent_code_object. Returns [{pid, t, kind, ms, rc, tid, **fields}] in file order."""
+    load: hsa_executable_load_agent_code_object. Returns [{pid, t, kind, ms, rc, tid, **fields}] in file order.
+    """
     out = []
     for p in paths:
         m = re.search(r"coload\.(\d+)\.log$", p)
@@ -463,8 +496,14 @@ def parse_load_logs(paths):
                 mm = _LOAD_RE.match(line.rstrip("\n"))
                 if not mm:
                     continue
-                ev = {"pid": pid, "t": float(mm["t"]), "kind": mm["kind"], "ms": float(mm["ms"]), "rc": int(mm["rc"]),
-                      "tid": int(mm["tid"])}
+                ev = {
+                    "pid": pid,
+                    "t": float(mm["t"]),
+                    "kind": mm["kind"],
+                    "ms": float(mm["ms"]),
+                    "rc": int(mm["rc"]),
+                    "tid": int(mm["tid"]),
+                }
                 for kv in mm["rest"].split():
                     if "=" in kv:
                         k, v = kv.split("=", 1)
@@ -530,8 +569,16 @@ def match_loads(events, libs, t_run_start):
         elif lib == "-":
             cands = by_size.get(size, [])
         if not cands:
-            unmatched.append({"pid": ev["pid"], "after_s": round(after, 3), "size": size, "lib": lib,
-                              "ms": ev["ms"], "kd": ev.get("kd", "-")})
+            unmatched.append(
+                {
+                    "pid": ev["pid"],
+                    "after_s": round(after, 3),
+                    "size": size,
+                    "lib": lib,
+                    "ms": ev["ms"],
+                    "kd": ev.get("kd", "-"),
+                }
+            )
             open_hits[key_t] = [unmatched[-1]]
             continue
         open_hits[key_t] = []
@@ -545,10 +592,16 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--lib", action="append", required=True)
     ap.add_argument("--trace", action="append", default=[], help="SET=GLOB")
-    ap.add_argument("--loads", action="append", default=[],
-                    help="SET=GLOB of code-object load logs (coload.<pid>.log); needs --run-start SET=<mlperf.log>")
+    ap.add_argument(
+        "--loads",
+        action="append",
+        default=[],
+        help="SET=GLOB of code-object load logs (coload.<pid>.log); needs --run-start SET=<mlperf.log>",
+    )
     ap.add_argument("--run-start", action="append", default=[], help="SET=<mlperf.log> of the --loads run")
-    ap.add_argument("--stack", default=None, help="stack label recorded in the header (e.g. rocm10.2-torch2.16)")
+    ap.add_argument(
+        "--stack", default=None, help="stack label recorded in the header (e.g. rocm10.2-torch2.16)"
+    )
     ap.add_argument("--out", required=True)
     ap.add_argument("--jobs", type=int, default=min(16, os.cpu_count() or 1))
     ap.add_argument("--summary", default=None, help="optional json with the per-set bundle census")
@@ -581,13 +634,24 @@ def main(argv=None):
             if bind == 1 and vis in (0, 3) and typ == 2:
                 anchor = {"sym": nm, "value": v}
                 break
-        libs[base] = {"path": lib, "rows": rows, "dyn": dyn, "tab": tab, "first": first, "name_first": name_first,
-                      "dem": dem,
-                      "build_id": build_id(elf, secs), "size": len(elf), "anchor": anchor,
-                      "has_symtab": any(s["type"] == 2 for s in secs)}
-        print(f"{base}: {len(rows)} bundles, {sum(r['co_bytes'] for r in rows) / 2**20:.1f} MiB {GFX} code, "
-              f"{len(flat)} kernels, dynsym {len(dyn)}, symtab {len(tab)}, build-id {libs[base]['build_id']}",
-              flush=True)
+        libs[base] = {
+            "path": lib,
+            "rows": rows,
+            "dyn": dyn,
+            "tab": tab,
+            "first": first,
+            "name_first": name_first,
+            "dem": dem,
+            "build_id": build_id(elf, secs),
+            "size": len(elf),
+            "anchor": anchor,
+            "has_symtab": any(s["type"] == 2 for s in secs),
+        }
+        print(
+            f"{base}: {len(rows)} bundles, {sum(r['co_bytes'] for r in rows) / 2**20:.1f} MiB {GFX} code, "
+            f"{len(flat)} kernels, dynsym {len(dyn)}, symtab {len(tab)}, build-id {libs[base]['build_id']}",
+            flush=True,
+        )
         del elf
 
     # traces
@@ -631,14 +695,25 @@ def main(argv=None):
             raise SystemExit(f"--loads {label}=... needs --run-start {label}=<mlperf.log>")
         t_rs = mlperf_run_start_s(run_start[label])
         hits, unmatched = match_loads(parse_load_logs(fs), libs, t_rs)
-        load_sets[label] = {"files": len(fs), "glob_example": fs[0], "run_start_ms": int(round(t_rs * 1e3)),
-                            "bundles": len(hits), "unmatched_after_run_start": len(unmatched)}
+        load_sets[label] = {
+            "files": len(fs),
+            "glob_example": fs[0],
+            "run_start_ms": int(round(t_rs * 1e3)),
+            "bundles": len(hits),
+            "unmatched_after_run_start": len(unmatched),
+        }
         unmatched_loads[label] = unmatched
         for key, evs in hits.items():
             L = libs[key[0]]
-            ks = [L["dem"].get(m, m) for m in L["rows"][key[1]]["kernels_mangled"] if L["first"].get(m) == key[1]]
+            ks = [
+                L["dem"].get(m, m)
+                for m in L["rows"][key[1]]["kernels_mangled"]
+                if L["first"].get(m) == key[1]
+            ]
             touched[key]["sets"].add(label)
-            touched[key]["names"].add("first use after RUN_START (load log): " + (sorted(ks)[0] if ks else "?"))
+            touched[key]["names"].add(
+                "first use after RUN_START (load log): " + (sorted(ks)[0] if ks else "?")
+            )
             touched[key]["loads"] += evs
         sets.setdefault(label, [])  # a load-log set; keep the trace files of a --trace set of the same label
 
@@ -669,15 +744,26 @@ def main(argv=None):
             est = max(0.0, COST_LIBTORCH[0] + COST_LIBTORCH[1] * unc / 2**20)
         else:
             est = COST_FBGEMM * co / 2**20
-        meta = {"lib": lib, "bundle": b, "unc_mib": round(unc / 2**20, 3), "co_mib": round(co / 2**20, 3),
-                "est_ms": round(est, 1), "sets": sorted(t["sets"]), "example": sorted(t["names"])[0][:160]}
-        if t["loads"]:  # measured first-use loads after RUN_START: (seconds after RUN_START, load ms), over processes
+        meta = {
+            "lib": lib,
+            "bundle": b,
+            "unc_mib": round(unc / 2**20, 3),
+            "co_mib": round(co / 2**20, 3),
+            "est_ms": round(est, 1),
+            "sets": sorted(t["sets"]),
+            "example": sorted(t["names"])[0][:160],
+        }
+        if t[
+            "loads"
+        ]:  # measured first-use loads after RUN_START: (seconds after RUN_START, load ms), over processes
             meta["first_use_s"] = round(min(x[0] for x in t["loads"]), 3)
             meta["load_ms_max"] = round(max(x[1] for x in t["loads"]), 2)
             meta["load_ms_med"] = round(sorted(x[1] for x in t["loads"])[len(t["loads"]) // 2], 2)
             meta["load_procs"] = len(t["loads"])
         if pick is None:
-            uncovered.append(meta | {"reason": "no host symbol (stripped library or no kernel registered first here)"})
+            uncovered.append(
+                meta | {"reason": "no host symbol (stripped library or no kernel registered first here)"}
+            )
             continue
         entries.append({"kind": "entry"} | pick | meta)
 
@@ -692,27 +778,54 @@ def main(argv=None):
         "kind": "header",
         "format": 1,
         "stack": a.stack,
-        "generator": "scripts/gen_hip_preload_table.py",
-        "note": ("one host kernel stub per statically registered HIP fat-binary bundle (translation unit) launched by "
-                 "the listed production traces or first loaded after RUN_START in the listed load logs (a TheRock "
-                 "kpack library: one TU = one HIPK wrapper = one code object of its .kpack archive); "
-                 "kernel/symbol names, sizes and build ids only, no data, no binaries. "
-                 "hipFuncGetAttributes on the stub = deferred code-object load of that bundle on the current device "
-                 "(dlrm_v4/train/hip_preload.py). Regenerate after any torch/fbgemm/ROCm rebuild or trainer op change."),
+        "generator": "tools/recommendation/dlrm_v4/gen_hip_preload_table.py",
+        "note": (
+            "one host kernel stub per statically registered HIP fat-binary bundle (translation unit) launched by "
+            "the listed production traces or first loaded after RUN_START in the listed load logs (a TheRock "
+            "kpack library: one TU = one HIPK wrapper = one code object of its .kpack archive); "
+            "kernel/symbol names, sizes and build ids only, no data, no binaries. "
+            "hipFuncGetAttributes on the stub = deferred code-object load of that bundle on the current device "
+            "(dlrm_v4/train/hip_preload.py). Regenerate after any torch/fbgemm/ROCm rebuild or trainer op change."
+        ),
         "arch": GFX,
-        "libs": {lib: {"build_id": L["build_id"], "size": L["size"], "bundles": len(L["rows"]),
-                       "anchor": L["anchor"], "path_at_generation": L["path"]}
-                 | ({"kpack": L["rows"][0].get("kpack")} if L["rows"] and L["rows"][0].get("kind") == "kpack" else {})
-                 for lib, L in libs.items()},
-        "traces": {lab: ({"files": len(fs), "glob_example": fs[0] if fs else None}
-                         | ({"loads": load_sets[lab]} if lab in load_sets else {}))
-                   for lab, fs in sets.items()},
-        "cost_model": ({"measured": "est_ms = the row's median first-use load after RUN_START over processes "
-                                    "(kpack/reader + HSA load, load logs), else the median of every such load",
-                        "median_first_use_load_ms": load_ms_med, "loads": len(load_ms_all)} if load_ms_all else
-                       {"libtorch_ms_per_unc_mib": COST_LIBTORCH[1], "libtorch_ms_offset": COST_LIBTORCH[0],
-                        "fbgemm_ms_per_co_mib": COST_FBGEMM, "kpack_ms_offset": COST_KPACK[0],
-                        "kpack_ms_per_co_mib": COST_KPACK[1]}),
+        "libs": {
+            lib: {
+                "build_id": L["build_id"],
+                "size": L["size"],
+                "bundles": len(L["rows"]),
+                "anchor": L["anchor"],
+                "path_at_generation": L["path"],
+            }
+            | (
+                {"kpack": L["rows"][0].get("kpack")}
+                if L["rows"] and L["rows"][0].get("kind") == "kpack"
+                else {}
+            )
+            for lib, L in libs.items()
+        },
+        "traces": {
+            lab: (
+                {"files": len(fs), "glob_example": fs[0] if fs else None}
+                | ({"loads": load_sets[lab]} if lab in load_sets else {})
+            )
+            for lab, fs in sets.items()
+        },
+        "cost_model": (
+            {
+                "measured": "est_ms = the row's median first-use load after RUN_START over processes "
+                "(kpack/reader + HSA load, load logs), else the median of every such load",
+                "median_first_use_load_ms": load_ms_med,
+                "loads": len(load_ms_all),
+            }
+            if load_ms_all
+            else {
+                "libtorch_ms_per_unc_mib": COST_LIBTORCH[1],
+                "libtorch_ms_offset": COST_LIBTORCH[0],
+                "fbgemm_ms_per_co_mib": COST_FBGEMM,
+                "kpack_ms_offset": COST_KPACK[0],
+                "kpack_ms_per_co_mib": COST_KPACK[1],
+            }
+        ),
         "n_entries": len(entries),
         "n_dlsym": sum(1 for e in entries if e["mode"] == "dlsym"),
         "n_symtab": sum(1 for e in entries if e["mode"] == "symtab"),
@@ -727,11 +840,16 @@ def main(argv=None):
             f.write(json.dumps(e, sort_keys=True) + "\n")
     shutil.move(a.out + ".tmp", a.out)
     if a.summary:
-        json.dump({"header": header, "unmapped": unmapped.most_common(), "unmatched_loads": unmatched_loads},
-                  open(a.summary, "w"), indent=1)
-    print(f"wrote {a.out}: {len(entries)} entries ({header['n_dlsym']} dlsym, {header['n_symtab']} symtab), "
-          f"uncovered {len(uncovered)}, by set {json.dumps(header['entries_by_set'])}, "
-          f"unmapped names {len(unmapped)}, {time.time() - t0:.0f} s")
+        json.dump(
+            {"header": header, "unmapped": unmapped.most_common(), "unmatched_loads": unmatched_loads},
+            open(a.summary, "w"),
+            indent=1,
+        )
+    print(
+        f"wrote {a.out}: {len(entries)} entries ({header['n_dlsym']} dlsym, {header['n_symtab']} symtab), "
+        f"uncovered {len(uncovered)}, by set {json.dumps(header['entries_by_set'])}, "
+        f"unmapped names {len(unmapped)}, {time.time() - t0:.0f} s"
+    )
     return 0
 
 

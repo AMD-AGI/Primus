@@ -1,6 +1,6 @@
 # pyre-strict
 """CPU tests for the per-stack BLAS first-use replay table (blas_warmup.replay_blas_table) and its generator
-(scripts/gen_blas_replay_table.py). The GPU behaviour (every row count of the dedup chain fast after the replay)
+(tools/recommendation/dlrm_v4/gen_blas_replay_table.py). The GPU behaviour (every row count of the dedup chain fast after the replay)
 is checked by the generator's `verify` mode on the stack the table was recorded on."""
 
 import importlib.util
@@ -16,7 +16,7 @@ from generative_recommenders.dlrm_v4.train import blas_warmup
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TRAIN = os.path.dirname(_HERE)
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_TRAIN)))
-_GEN = os.path.join(_ROOT, "scripts", "gen_blas_replay_table.py")
+_GEN = os.path.join(_ROOT, *[".."] * 5, "tools", "recommendation", "dlrm_v4", "gen_blas_replay_table.py")
 
 
 def _load_gen():  # pyre-ignore[3]

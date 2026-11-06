@@ -86,7 +86,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 #   "flydsl" (default) — production Triton FORWARD + the FlyDSL gfx950 BACKWARD
 #                        (ops/flydsl/). Same signature, same forward, so only the
 #                        gradient kernel changes. 2.10x on the kernel, −10.8%
-#                        ms/step end to end; see docs/perf_opt.md.
+#                        ms/step end to end; see docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md.
 #   "triton"           — the production fused Triton fwd+bwd, and the numerical
 #                        reference the FlyDSL backward is judged against. Required
 #                        on any non-gfx950 host.

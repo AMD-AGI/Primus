@@ -1,13 +1,13 @@
 # Performance Optimizations — MI355X
 
 MI355X (`gfx950`, 8 GPU/node) on top of the MI350X tree: cluster B and, from ship17, a second MI355X cluster, "cluster C" (hosts `c*`). The Hosts column of the latest evaluations tells their rows apart.
-Companion to `perf_opt.md`.
+Companion to `perf-notes.md`.
 
 - **Base:** the MI350X tree at the commit in the mapping below, same recipe as MI350X:
   - LR 1e-6 / 2e-6 / 4e-6;
   - local batch 1024;
   - same eval cadence and skip.
-- **Comparison:** time to target vs the MI350X rows in `perf_opt.md` for the same base, at equal samples to target.
+- **Comparison:** time to target vs the MI350X rows in `perf-notes.md` for the same base, at equal samples to target.
 - **Run conditions:**
   - fresh container per run;
   - cold page cache;
@@ -49,7 +49,7 @@ Each row is measured on the MI355X commit built on the MI350X base it names (see
 | ship14 `c68395d` | `b87bc0d` | 2 | b186, b080 | 865.7 s | **726.3 s** | **1.192×** | 208875 | Done |
 | ship14 `c68395d` | `b87bc0d` | 4 | b174, b150, b217, b022 | 577.6 s | **528.4 s** | **1.093×** | 209193 | Done |
 
-- **MI350X** = the cold, same-seed rows of that ship in `perf_opt.md`.
+- **MI350X** = the cold, same-seed rows of that ship in `perf-notes.md`.
 - **"+ fixes"** = rows 2–4, plus row 7 (GDR flush) at 2n/4n; row 1 is the default since ship14; no tag check (row 5).
 - **cluster C rows:** the second MI355X cluster (hosts `c*`, Ubuntu 6.8 kernel, 6.8.0-60 where checked; its own scheduler, so its job IDs are not cluster B's). Same ship17 trainer plus row 8, same recipe, seed and samples to target, and the same "+ fixes" except: row 3 through this cluster's runner (per-file `posix_fadvise` DONTNEED flush verified at 0.00% resident before INIT, no global `drop_caches`; timed warm read after `run_start`); row 4's fabric env with this fabric's RoCE traffic classes (TC 104 / FIFO TC 192), HCAs `rdma0`–`rdma7` and no overlay libs; plus `HSA_USERPTR_FOR_PAGED_MEM=0`. Pre-run check, bus bandwidth at 256 MB: all_to_all 89 GB/s and all_reduce 371 GB/s on the 2n hosts, 57 / 288 GB/s on the 4n hosts.
 - **cluster B rows:** hosts `b*` in rank order, from each run's driver logs; "—" where no run reached `run_start`. Kernel 6.8.0-107 maps the sealed memfd `MAP_SHARED` (ship17 1n ran m4 on `377e04d`), so cluster B runs without row 8.
@@ -59,7 +59,7 @@ Each row is measured on the MI355X commit built on the MI350X base it names (see
 
 ## Reference traces
 
-Step-52 profiler traces of the cluster C ship17 build (the `e2a61f98` trainer, captured at `a59be9d`), stitched across all ranks like the MI350X ship17 traces that `perf_opt.md` links (`traces/mi350x/<n>_n/trace_step52.json.gz`). They open in Perfetto or `chrome://tracing`.
+Step-52 profiler traces of the cluster C ship17 build (the `e2a61f98` trainer, captured at `a59be9d`), stitched across all ranks like the MI350X ship17 traces that `perf-notes.md` links (`traces/mi350x/<n>_n/trace_step52.json.gz`). They open in Perfetto or `chrome://tracing`.
 
 | Nodes | Trace | Job | Hosts | Ranks | Steps | Events | Size | GPU step (median per rank-step) | MI350X ship17 trace | Speedup |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -67,7 +67,7 @@ Step-52 profiler traces of the cluster C ship17 build (the `e2a61f98` trainer, c
 | 2 | **[trace_step52.json.gz](../traces/mi355x/2_n/trace_step52.json.gz)** | 9024 | c23, c41 | 16 | 52–56 | 782,169 | 16.1 MB | **100.23 ms** | 117.15 ms | **1.169×** |
 | 4 | **[trace_step52.json.gz](../traces/mi355x/4_n/trace_step52.json.gz)** | 9039 | c23, c25, c41, c42 | 32 | 52–56 | 1,622,016 | 33.3 MB | **109.95 ms** | 125.84 ms | **1.144×** |
 
-- **Capture:** the MI350X trace-arm recipe: seed 79275716, batch 1024 per GPU, page cache flushed on every node, no eval (`SKIP_EVAL_EPOCH_PCT=0`, `EVAL_EVERY_DATA_PCT=0`), `START_TS=0`, `NUM_TRAIN_TS=38` (44 at 4 nodes), gin `Profiler.trace_steps = [41, 51]`; the window exported as step 52 is stitched with `scripts/stitch_traces.py --step 52 --gzip`. Run settings as in the cluster C ship17 rows: `DL_FAST_BATCH=1`, `NUM_WORKERS=8`, `HSA_USERPTR_FOR_PAGED_MEM=0`; 2n/4n add `IONIC_LOCKFREE=all`, `HSA_NO_SCRATCH_RECLAIM=1` and the RCCL settings (GDR flush on, `RCCL_MSCCL_ENABLE=0`).
+- **Capture:** the MI350X trace-arm recipe: seed 79275716, batch 1024 per GPU, page cache flushed on every node, no eval (`SKIP_EVAL_EPOCH_PCT=0`, `EVAL_EVERY_DATA_PCT=0`), `START_TS=0`, `NUM_TRAIN_TS=38` (44 at 4 nodes), gin `Profiler.trace_steps = [41, 51]`; the window exported as step 52 is stitched with `tools/recommendation/dlrm_v4/stitch_traces.py --step 52 --gzip`. Run settings as in the cluster C ship17 rows: `DL_FAST_BATCH=1`, `NUM_WORKERS=8`, `HSA_USERPTR_FOR_PAGED_MEM=0`; 2n/4n add `IONIC_LOCKFREE=all`, `HSA_NO_SCRATCH_RECLAIM=1` and the RCCL settings (GDR flush on, `RCCL_MSCCL_ENABLE=0`).
 - **GPU step:** `scripts/cluster_b/trace_compare.py` on the two published traces: per rank, the GPU span of each `ProfilerStep` on the main compute stream, median over the 40 / 80 / 160 rank-steps; GPU idle inside a step is 0.1–0.2 ms on both at every scale. It is not the paired median of the MI350X rows (steps 43–45 and 53–55), which reads the MI350X 1n trace as 113.5 ms.
 - **By category** (ms per rank-step, MI350X → MI355X): attention 34.93 → 27.39 (1n), 35.08 → 28.51 (2n) and 37.11 → 29.55 (4n), led by `bwd_dkdv_kernel_0` (1.31× / 1.28× / 1.30×). At 1n, communication rises 7.19 → 13.61 ms: the int64 MSCCL all-reduce kernel (`mscclKernel_Sum_int64_t_LL`) shows 8.49 against 2.24 ms. That is kernel time, which includes spinning while ranks arrive and overlaps compute; the step span still drops 1.154×. MSCCL is off at 2n/4n, where communication is 1.16× / 1.14× faster than on MI350X.
 - **Node balance (4n):** g42 was excluded from the later RCP lanes for slow eval passes, and g25 is in the ship17 exclusion list after an earlier host-memory exhaustion (both clean when the trace ran), so the trace was checked for a straggler node. Median compute per node (non-collective kernel union per rank-step) is 102.07–103.59 ms, a 1.5% spread against 1.3% in the MI350X 4n trace; g42 is at 103.06 ms. g25 is the slowest, and its ranks spend about 2.5 ms less in collectives than the other nodes'. GPU idle is 0.11–0.15 ms and the step span 109.9–110.0 ms on every node.

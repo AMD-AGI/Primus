@@ -513,7 +513,7 @@ def enable_segment_reduce(
     against an fp64 `index_add_` reference instead and the segment kernel's max
     error is 0.61x the incumbent's -- better conditioned than what it replaces.
     It carries a 3-seed convergence gate (delta 0) for that reason; see
-    `docs/perf_opt.md`.
+    `docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md`.
 
     Args:
       seg_hist: log the `reverse_indices` segment-length distribution.

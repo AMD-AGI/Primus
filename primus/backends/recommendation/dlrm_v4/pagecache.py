@@ -1,4 +1,12 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 """Page-cache control for the staged yambda-5b cache (C1, MLPerf-legal cold start).
+
+  python pagecache.py flush|resident|drop|warm DIR   (trainer.py runs flush and warm)
 
   flush DIR   sync + global drop_caches (privileged container) + per-file
               eviction, then VERIFY with mincore; exit 3 if >1% still resident.
@@ -28,10 +36,18 @@ from concurrent.futures import ThreadPoolExecutor
 CHUNK = 64 << 20
 # Read order: what the per-sample path touches, hottest first; the rest after.
 PRIORITY = [
-    "positions_L4086.npy", "ts_offsets_L4086_W86400.npy", "ts_indices_L4086_W86400.npy",
-    "flat_uid.npy", "user_start.npy", "flat_item_ids.npy", "flat_timestamps.npy",
-    "flat_is_listen_plus.npy", "flat_is_like.npy", "flat_is_skip.npy",
-    "flat_played_ratio.npy", "flat_event_types.npy",
+    "positions_L4086.npy",
+    "ts_offsets_L4086_W86400.npy",
+    "ts_indices_L4086_W86400.npy",
+    "flat_uid.npy",
+    "user_start.npy",
+    "flat_item_ids.npy",
+    "flat_timestamps.npy",
+    "flat_is_listen_plus.npy",
+    "flat_is_like.npy",
+    "flat_is_skip.npy",
+    "flat_played_ratio.npy",
+    "flat_event_types.npy",
 ]
 
 
@@ -62,9 +78,17 @@ def resident(d, quiet=False):
     on a PROT_READ/MAP_SHARED mapping: inspects residency without faulting any
     page in, so measuring does not warm the cache."""
     import ctypes
+
     libc = ctypes.CDLL("libc.so.6", use_errno=True)
     libc.mmap.restype = ctypes.c_void_p
-    libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+    libc.mmap.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_long,
+    ]
     libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
     libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
     pg = os.sysconf("SC_PAGE_SIZE")
@@ -89,8 +113,11 @@ def resident(d, quiet=False):
         tot += size
         res += min(size, r * pg)
     if not quiet:
-        print(f"[pagecache] resident {res / 1e9:.2f} of {tot / 1e9:.1f} GB "
-              f"({100 * res / max(1, tot):.2f}%) under {d}", flush=True)
+        print(
+            f"[pagecache] resident {res / 1e9:.2f} of {tot / 1e9:.1f} GB "
+            f"({100 * res / max(1, tot):.2f}%) under {d}",
+            flush=True,
+        )
     return res, tot
 
 
@@ -110,8 +137,11 @@ def flush(d, max_resident_pct=1.0):
     drop(d)
     res, tot = resident(d)
     if 100 * res / max(1, tot) > max_resident_pct:
-        print(f"[pagecache] FAIL: {100 * res / tot:.2f}% of the dataset still resident "
-              f"(> {max_resident_pct}%) -- not a cold start", flush=True)
+        print(
+            f"[pagecache] FAIL: {100 * res / tot:.2f}% of the dataset still resident "
+            f"(> {max_resident_pct}%) -- not a cold start",
+            flush=True,
+        )
         sys.exit(3)
 
 
@@ -137,8 +167,11 @@ def warm(d, threads=16):
     # tasks are consumed in submission order, so priority files land first
     with ThreadPoolExecutor(threads) as ex:
         total = sum(ex.map(read, tasks))
-    print(f"[pagecache] warmed {total / 1e9:.1f} GB under {d} in {time.time() - t0:.1f}s "
-          f"({total / 1e9 / max(1e-9, time.time() - t0):.1f} GB/s)", flush=True)
+    print(
+        f"[pagecache] warmed {total / 1e9:.1f} GB under {d} in {time.time() - t0:.1f}s "
+        f"({total / 1e9 / max(1e-9, time.time() - t0):.1f} GB/s)",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

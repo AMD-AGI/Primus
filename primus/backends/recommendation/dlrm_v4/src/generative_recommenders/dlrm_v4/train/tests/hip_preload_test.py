@@ -144,7 +144,7 @@ class TableTest(unittest.TestCase):
 
 
 def _census(rows: List[Dict[str, Any]], labels: List[str]) -> Dict[str, Dict[str, Any]]:
-    """The per-set census rule of scripts/gen_hip_preload_table.py (header entries_by_set)."""
+    """The per-set census rule of tools/recommendation/dlrm_v4/gen_hip_preload_table.py (header entries_by_set)."""
     out: Dict[str, Dict[str, Any]] = collections.OrderedDict()
     for lab in labels:
         rs = [x for x in rows if lab in x["sets"]]
@@ -387,7 +387,7 @@ class HookOrderTest(unittest.TestCase):
 
 class GeneratorTest(unittest.TestCase):
     def _gen(self) -> Any:
-        path = os.path.join(_REPO, "scripts", "gen_hip_preload_table.py")
+        path = os.path.join(_REPO, *[".."] * 5, "tools", "recommendation", "dlrm_v4", "gen_hip_preload_table.py")
         spec = importlib.util.spec_from_file_location("gen_hip_preload_table", path)
         assert spec is not None and spec.loader is not None
         mod = importlib.util.module_from_spec(spec)
@@ -528,7 +528,7 @@ class StackTablesTest(unittest.TestCase):
 
 
 class GeneratorKpackTest(unittest.TestCase):
-    """scripts/gen_hip_preload_table.py on TheRock kpack libraries and code-object load logs (CPU, synthetic)."""
+    """tools/recommendation/dlrm_v4/gen_hip_preload_table.py on TheRock kpack libraries and code-object load logs (CPU, synthetic)."""
 
     def setUp(self) -> None:
         self.g = GeneratorTest()._gen()

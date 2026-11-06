@@ -671,7 +671,7 @@ def _prebuild_action_dedup(device: torch.device) -> None:
 # hipBLASLt (100202) keeps those solutions in files it loads at init, so the
 # cost and the table are per stack.
 #
-# The table (blas_replay_table_<stack>.jsonl, scripts/gen_blas_replay_table.py)
+# The table (blas_replay_table_<stack>.jsonl, tools/recommendation/dlrm_v4/gen_blas_replay_table.py)
 # lists the (K, N, op, M) calls whose FIRST use was slow in a dense scan of every
 # row count the dedup chain can produce (training R = 512 * [1, 8192], eval R =
 # 256 * [1, 8192]: preproc_dedup's structural bounds, not data). Replaying them

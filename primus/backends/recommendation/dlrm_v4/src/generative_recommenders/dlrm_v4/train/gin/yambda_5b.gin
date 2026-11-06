@@ -70,7 +70,7 @@ make_model.hammer_kernel = "TRITON"
 # pinned constants in ops/triton/_autotune_pinning.py call sites.
 apply_env_bootstrap.TRITON_FULL_AUTOTUNE = False
 
-# ROCm 10.2 port (docs/rocm_10_port.md T13): Triton 3.9 codegen parity.
+# ROCm 10.2 port (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md T13): Triton 3.9 codegen parity.
 # Triton 3.9 turned FP contraction OFF by default and async copy (with block
 # pingpong) ON for gfx950. Every Triton kernel and pinned config here was
 # tuned on Triton 3.6, where it is the other way round: without these, 18 of
@@ -83,7 +83,7 @@ apply_env_bootstrap.TRITON_FULL_AUTOTUNE = False
 # Parity, not tuning: on MI355X, async copy OFF makes 3.9's _ecix_wgrad 2x
 # slower (160 vs 80 us at M=262144; 3.6: 80 us) and is neutral for _ecix_fwd
 # and the LN*U*dropout backward, so TRITON_HIP_USE_ASYNC_COPY=1 is the first
-# trainer A/B to run (docs/rocm_10_port.md T11/T13).
+# trainer A/B to run (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md T11/T13).
 apply_env_bootstrap.TRITON_DEFAULT_FP_FUSION = "1"
 apply_env_bootstrap.TRITON_HIP_USE_ASYNC_COPY = "0"
 
@@ -180,7 +180,7 @@ apply_env_bootstrap.GR_PIN_BF16_BLAS_SOLUTIONS = "uvqk_fwd,uvqk_wgrad,out_fwd,ou
 # TRITON_CC and TRITON_INFERENCE paths, which never reach this dispatch.
 #   "flydsl" — the gfx950 FlyDSL backward (ops/flydsl/). 2.10x on the kernel
 #              (75.06 -> 35.35 ms) and -10.8% ms/step end to end; converges to
-#              AUC 0.75 inside the frozen RCP range. See docs/perf_opt.md.
+#              AUC 0.75 inside the frozen RCP range. See docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md.
 #   "triton" — the production fused Triton backward, and the numerical reference
 #              the FlyDSL one is judged against.
 # gfx950-ONLY. Anywhere else this must be "triton" — an unsupported host RAISES
@@ -314,7 +314,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_ARM_PRINT_ATOMIC = True
 # clean pass. It is NOT free headroom: the residual is the quantized copies that
 # have no bf16 tensor to replace, it does not shrink with the fusions, and a
 # longer max_seq_len, a bigger batch, or a larger HBM_CAP_GB spends the margin
-# that makes it acceptable. See docs/perf_opt.md and the Plan 09 provenance.
+# that makes it acceptable. See docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md and the Plan 09 provenance.
 #
 # gfx950-ONLY, and it FAILS CLOSED (see FAIL_CLOSED below) rather than falling
 # back. Every knob honors its env var over the preset, so a per-run A/B or a
@@ -324,7 +324,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_ARM_PRINT_ATOMIC = True
 # section is inert and nothing is exported. Turn it off per-run via
 # $DLRM_HSTU_FP8_FWD=0.
 #
-# Default-on since 2026-09-10, on the evidence in docs/perf_opt.md: the arm is a
+# Default-on since 2026-09-10, on the evidence in docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md: the arm is a
 # measured step-time win and three paired seeds reach AUC 0.75 at identical
 # sample counts. It is gfx950-only and fails closed, which is the same contract
 # HSTU_ATTN_BWD=flydsl above already carries as a default -- a non-gfx950
@@ -363,7 +363,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_BWD_QK_MFMA = "fp8"
 # (launch_slurm.sh forwards every DLRM_HSTU_FP8_* name). The DLRM_HSTU_FP8_
 # prefix on the non-FP8 knobs (GC_FREEZE, FLYDSL_CURRENT_STREAM, SYNCFREE) is
 # for that forwarding only. Measurements for every item, with job ids, are in
-# docs/perf_opt.md (Optimization log, the six 2026-10-03 rows; Latest
+# docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md (Optimization log, the six 2026-10-03 rows; Latest
 # evaluations for the stack).
 #
 # Cumulative convergence of all six vs trunk e0849f8 (seed 79275716, same
@@ -399,7 +399,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_BWD_QK_MFMA = "fp8"
 #     the block header.
 #     EVIDENCE: microbench bwd_dkdv 31.41 -> 26.10 ms/call; dO quantizer
 #     1.29 -> 0.87 ms/call; ladder +1.32/+0.98/+2.12% at 1n/2n/4n. Root
-#     cause, fix and convergence: docs/perf_opt.md, C8 row.
+#     cause, fix and convergence: docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md, C8 row.
 #     ARMED log: "FULL-FP8 backward ARMED ... do_blk=1 ... sat=1". Opt out:
 #     DLRM_HSTU_FP8_BWD_FULL=0.
 apply_env_bootstrap.DLRM_HSTU_FP8_BWD_FULL = True
@@ -414,7 +414,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_BWD_FULL = True
 #     the block header (not converged alone).
 #     EVIDENCE: job 51101 +0.85% (3/3 rounds), dropout kernels
 #     -1.80 ms/rank-step; ladder +0.33/+0.89/+1.50% at 1n/2n/4n
-#     (docs/perf_opt.md, C4 row). ARMED log: "armed OK: dropout mask16 ACTIVE".
+#     (docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md, C4 row). ARMED log: "armed OK: dropout mask16 ACTIVE".
 #     Opt out: DLRM_HSTU_FP8_MASK16=0.
 apply_env_bootstrap.DLRM_HSTU_FP8_MASK16 = True
 #
@@ -427,7 +427,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_MASK16 = True
 #     WHY SAFE: identical formula; only f32 operation order differs.
 #     EVIDENCE: target -0.84 to -1.16 ms/rank-step; prototype bwd_dkdv
 #     54.47 -> 53.02 ms/rank-step in-model; ladder +0.25/+0.27/-0.02% at
-#     1n/2n/4n (docs/perf_opt.md, C5 row). Opt out:
+#     1n/2n/4n (docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md, C5 row). Opt out:
 #     DLRM_HSTU_FP8_BWD_EPILOGUE=legacy.
 #     "reuse_pk" (item (12)) is the same "reuse" chain on packed f32
 #     (v_pk_mul/add/fma_f32): bitwise equal outputs, fewer registers, no spills.
@@ -449,7 +449,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_BWD_EPILOGUE = "reuse_pk"
 #     crossing). The ladder increment (+0.18% at 1n from rerun job 55521;
 #     +1.60/+2.24% at 2n/4n from jobs 55473/55474) is measured over an
 #     all-off tree that stalls more than trunk; vs trunk it is ~0 at 1n
-#     (docs/perf_opt.md, GC freeze row). ARMED log: "armed OK: gc_freeze
+#     (docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md, GC freeze row). ARMED log: "armed OK: gc_freeze
 #     ACTIVE". Opt out:
 #     DLRM_HSTU_FP8_GC_FREEZE=0 (logs "gc_freeze OFF").
 apply_env_bootstrap.DLRM_HSTU_FP8_GC_FREEZE = True
@@ -465,7 +465,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_GC_FREEZE = True
 #     stream run (+4-7 us host time per launch). It is the prerequisite for
 #     (6): a launch issued while a side stream is current raced its own
 #     producers, 20/20 wrong -> 0/20 with the fix (job 53750). Ladder
-#     -0.04/+0.21/-0.57% at 1n/2n/4n, i.e. ~0 (docs/perf_opt.md, FlyDSL
+#     -0.04/+0.21/-0.57% at 1n/2n/4n, i.e. ~0 (docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md, FlyDSL
 #     current-stream row). Logs "[flydsl] launch stream: current|legacy" once.
 #     Opt out: DLRM_HSTU_FP8_FLYDSL_CURRENT_STREAM=0 (exact trunk launch
 #     arguments); refused at startup while DLRM_HSTU_FP8_SYNCFREE=1.
@@ -495,7 +495,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_FLYDSL_CURRENT_STREAM = True
 #     G vs the stream-priority rule at 2n: -0.34% ROBUST, narrowly outside
 #     the 0.33% mean control spread; 0.00% all-interval, within it.
 #     Stack ladder increment +7.14/+7.51/+6.20% at 1n/2n/4n
-#     (docs/perf_opt.md, host-sync-free row).
+#     (docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md, host-sync-free row).
 #     CPU ProfilerStep spans cannot see this mechanism (profiler
 #     launch cost sets the traced host time); use GPU-iteration traces.
 #     Opt out: DLRM_HSTU_FP8_SYNCFREE=0.
@@ -551,8 +551,8 @@ apply_env_bootstrap.DLRM_HSTU_FP8_SYNCFREE = True
 #     THROUGHPUT RULE: any 200-step / ladder / rate perf run must set
 #     METRIC_LOG_FREQ explicitly in EVERY arm, with the same value in control
 #     and candidate (the "Step N perf" lines read by
-#     scripts/compare_node_perf.sh and the train curve read by
-#     scripts/build_ne_auc_trajectory.py exist only with METRIC_LOG_FREQ>0;
+#     tools/recommendation/dlrm_v4/compare_node_perf.sh and the train curve read by
+#     tools/recommendation/dlrm_v4/build_ne_auc_trajectory.py exist only with METRIC_LOG_FREQ>0;
 #     both fail loudly on an OFF log). An arm that relies on the default
 #     measures a different logging cost, not the candidate.
 #
@@ -655,7 +655,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_AUTOTUNE_PIN_POSENC_CONCAT = True
 # the code default when the binding is absent is OFF, and a pre-set env var of
 # the same name still wins per knob (A/B or opt-out: set it to 0). Measured
 # evidence (stacked throughput rungs, per-rung traces, convergence pairs) is in
-# docs/perf_opt.md (optimization log, 2026-10-07 rows) -- this file states what
+# docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md (optimization log, 2026-10-07 rows) -- this file states what
 # each item does and its numerics class, not its numbers.
 #
 # (11) Caching-allocator pre-grow before RUN_START.
@@ -910,7 +910,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_COLSUM = True
 #     item (18) below (streaming section). NUMERICS: none.
 #     Opt out (development only, not a compliant timed run): CLEAR_CACHES=0.
 #
-# (17b) Reference-data-only staging (scripts/stage_data_local.sh,
+# (17b) Reference-data-only staging (examples/mlperf/dlrm_v4/data/stage_data_local.sh,
 #     run by launch_slurm.sh on every node before the container step). The
 #     stager reads THIS binding from this file on the host (awk, no gin
 #     import): the trainer does not exist yet when it runs. A missing or
@@ -1077,7 +1077,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_STAGE_REF_ONLY = True
 #     ON with the table recorded on this tree at 1n/2n/4n on synthetic data
 #     (start windows 0-7 + final eval of window 8, late windows 9-10 + final
 #     eval of window 11; tspec_synth_data.py builds the dataset on each
-#     node and scripts/ts_index_tool.py prebuild builds its PR 907 window
+#     node and tools/recommendation/dlrm_v4/ts_index_tool.py prebuild builds its PR 907 window
 #     index from that synthetic cache; the unmodified trainer reads both
 #     through DLRM_DATA_PATH with DL_WINDOW_INDEX=1 (the production path),
 #     TRITON_SPEC_RECORD=<dir> and TRITON_SPEC_REPLAY=0), merged into
@@ -4535,7 +4535,7 @@ apply_env_bootstrap.DLRM_HSTU_FP8_LAB_FWD_SPF = True
 #   (105)'s kernel: VALU 296 -> 152 per trip); CPU pricer -1.13 J/call
 #   (unfolded base: item (105) takes part of it) before the unpriced LDS
 #   gather energy; to be measured on the ship17 ladder (L21); the measured
-#   results are in docs/perf_opt.md (ship17 log row (120)). Kernel name
+#   results are in docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md (ship17 log row (120)). Kernel name
 #   unchanged (fwd_kernel_0); compile key gains lut=13. With item (105) on,
 #   the code object is the lut-alone one (ISA 9f537d700151): the fold is
 #   subsumed.
@@ -6580,7 +6580,7 @@ ecbo/env_int.default = 1
 # gradient's dtype, matching the shipped backward exactly. It still owed a
 # convergence gate, being the only arm of the three that reorders an
 # accumulation, and it passed: 3 seeds, samples-to-AUC-0.75 delta 0 seed for
-# seed, MLPerf compliance SUCCESS and RCP PASS. See docs/perf_opt.md.
+# seed, MLPerf compliance SUCCESS and RCP PASS. See docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md.
 #
 # REQUIRES ec_bf16_output=1 -- the kernel replaces the backward of the HOISTED
 # expand, so with the hoist off it is never reached. make_model RAISES on that
@@ -6835,10 +6835,10 @@ get_dataset.streaming_sort_within_window = False
 # Offline time-window index (ts_indices_*/ts_offsets_*.npy, int64, 8 bytes per
 # anchor, ~18.3 GB for hstu_cache_L4086). Without it every window boundary masks
 # the whole 17 GiB timestamp array (~2.7 s per boundary per rank on 8x MI350X,
-# see docs/perf_opt.md); with it the lookup is a slice and window/sample counts
+# see docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md); with it the lookup is a slice and window/sample counts
 # are offset arithmetic. Built once per
 # (positions file, window_seconds) during dataset init, before RUN_START, or
-# beforehand (verified, with a sidecar) with `scripts/ts_index_tool.py prebuild`.
+# beforehand (verified, with a sidecar) with `tools/recommendation/dlrm_v4/ts_index_tool.py prebuild`.
 # Default ON here (upstream default is False). $DL_WINDOW_INDEX=0 restores the
 # full-scan path, for rollback or to reproduce pre-index runs.
 # MIN_HISTORY=0/1: e93c4a4 fell back to the full scan there (>2^32 anchors);
@@ -6897,7 +6897,7 @@ make_persistent_streaming_dataloader.prefetch_factor = %prefetch_factor
 # batch ahead, instead of on the critical path.
 #
 # Saves ~77 ms/step on 8x MI350X at bs 1024/rank (666 -> 589); see
-# docs/perf_opt.md. Set DL_PIN_MEMORY=0 to reproduce pre-pinning runs.
+# docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md. Set DL_PIN_MEMORY=0 to reproduce pre-pinning runs.
 pin_memory = @pin/env_int()
 pin/env_int.key     = "DL_PIN_MEMORY"
 pin/env_int.default = 1
@@ -7142,7 +7142,7 @@ db/env_int.default = 1
 #     load, cold first reads) into untimed initialization or overlapped I/O, so a
 #     run that starts from a FLUSHED page cache (item (17), launcher) is faster
 #     to the target than the old warm-cache run. Measured evidence (cold
-#     same-allocation pairs, startup timeline) is in docs/perf_opt.md.
+#     same-allocation pairs, startup timeline) is in docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md.
 #   (a) DataLoader pre-start (prestart_streaming_loaders, $DL_PRESTART).
 #     WHAT: build the streaming dataset object and fork the train pool(s) (item
 #     (37): one chained pool) and the persistent eval pool BEFORE
@@ -7520,7 +7520,7 @@ dlfb/env_int.default = 1
 # pipeline prefetches across window boundaries instead of draining and refilling
 # at each one — it needs DOUBLE_BUFFER=1. A num_train_batches cap is folded into
 # the chained stream's own read limit, so truncated windows are warm-kept too.
-# See docs/perf_opt.md.
+# See docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md.
 streaming_train_eval_loop.use_pipeline = @tp/env_int()
 tp/env_int.key = "TRAIN_PIPELINE"
 tp/env_int.default = 1
@@ -8042,7 +8042,7 @@ Profiler.warmup = 1
 # when CPU step 52 begins (~110-145 ms at 1/2/4n), so trimming 51 by launch
 # would leave the compute stream blank at the top of the export. The dropped
 # head step is kept as a labelled lead-in instead (`ProfilerStep#51 (lead-in,
-# not exported)`, args.lead_in); scripts/stitch_traces.py clips it at the
+# not exported)`, args.lead_in); tools/recommendation/dlrm_v4/stitch_traces.py clips it at the
 # earliest exported CPU step start across ranks, so the stitched trace opens
 # with step 51's tail running into step 52 rather than a gap.
 # Profiler warns at construction if a sync-free window has no unexported head

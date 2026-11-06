@@ -437,7 +437,7 @@ with **every** pair positive and a median whole-step p50 reduction of at least
 lost to an unrelated host OOM (2.37 TiB consumed by other containers on the
 node) before any measured pair ran, leaving no verdict.
 
-What shipped was instead validated by the ordinary `perf_opt.md` protocol —
+What shipped was instead validated by the ordinary `perf-notes.md` protocol —
 four arms, three interleaved 200-step rounds, one host, 57 matched steps — which
 measures **−4.63%** on the current trunk, with wall clock to AUC 0.75 at 1.036×
 and samples-to-threshold identical to the sample on all three convergence seeds.

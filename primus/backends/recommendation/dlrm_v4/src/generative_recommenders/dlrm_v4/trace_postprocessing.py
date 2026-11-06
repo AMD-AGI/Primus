@@ -521,7 +521,7 @@ def _trim_warmup_from_trace(
     ``args.lead_in = true`` and ``args.owner_step = N``, and its
     ``ProfilerStep#N`` annotations are renamed ``ProfilerStep#N (lead-in, not
     exported)`` so step counting, ``step_wall`` and the one-step-per-step
-    layout ignore it. ``scripts/stitch_traces.py`` then clips the lead-in to
+    layout ignore it. ``tools/recommendation/dlrm_v4/stitch_traces.py`` then clips the lead-in to
     one trace start across ranks (:func:`lead_in_trace_bounds`,
     :func:`clip_lead_in`), from which every rank keeps its head-step GPU
     work (whole) and CPU events; a per-rank file keeps the whole head step.

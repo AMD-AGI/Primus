@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # pyre-strict
 """yambda_5b.gin item (17b): DLRM_HSTU_FP8_STAGE_REF_ONLY (reference-data-only
-staging in scripts/stage_data_local.sh; knob rule 2026-10-13: every feature is
+staging in examples/mlperf/dlrm_v4/data/stage_data_local.sh; knob rule 2026-10-13: every feature is
 a gin binding, env only the kill switch, gin default = shipped behaviour).
 
   GIN   exactly one binding, "= True", right after the item (17) block; the
@@ -39,7 +39,8 @@ REC = HERE.parents[4]  # .../recommendation
 TRAIN = HERE.parents[1]
 GIN = TRAIN / "gin" / "yambda_5b.gin"
 BOOT = TRAIN / "_env_bootstrap.py"
-STAGER = REC / "scripts" / "stage_data_local.sh"
+# Primus: the stager is examples/mlperf/dlrm_v4/data/ (REC = .../dlrm_v4/src).
+STAGER = REC.parents[4] / "examples" / "mlperf" / "dlrm_v4" / "data" / "stage_data_local.sh"
 HIST = 4086
 CACHE = f"processed_5b/hstu_cache_L{HIST}"
 # Plain, scoped and module-qualified forms: gin resolves each to the same
