@@ -35,6 +35,75 @@ try:
 except Exception:  # pragma: no cover - depends on the image
     _flash_attn_func = None
 
+# ZAYA_FUSE_NORM=1 (default): run each stage's fp32 elementwise chain
+# (ResidualScaling affine, residual merge, RMSNorm) as one torch.compile'd
+# region instead of ~12 eager kernels over [tokens, hidden] fp32 tensors, fwd
+# and bwd, in all 80 stages. ZAYA_FUSE_CCA=1 (default) does the same for the
+# CCA query/key post-processing (grouped means, qk-norm, temperature, partial
+# RoPE). Both are free functions with tensor arguments, so every layer shares
+# one graph (no per-module recompiles). Set either to 0 for the eager path.
+def _env_on(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default) not in ("0", "false", "False", "")
+
+
+FUSE_NORM = _env_on("ZAYA_FUSE_NORM")
+FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
+
+
+def _maybe_compile(fn, enabled: bool):
+    """torch.compile ``fn``; fall back to eager for good if the first compiled call fails."""
+    if not enabled or not hasattr(torch, "compile"):
+        return fn
+    try:
+        # emulate_precision_casts keeps the explicit bf16 round-trips of the
+        # eager code (merged.to(bf16) before RMSNorm, q/k .to(bf16) before
+        # RoPE), so the fused forward matches eager bit for bit.
+        compiled = torch.compile(
+            fn, dynamic=False, fullgraph=True, options={"emulate_precision_casts": True}
+        )
+    except Exception:  # pragma: no cover - depends on the image
+        return fn
+    state = {"ok": True}
+
+    def wrapper(*args, **kwargs):
+        if state["ok"]:
+            try:
+                return compiled(*args, **kwargs)
+            except Exception as exc:  # pragma: no cover - depends on the image
+                state["ok"] = False
+                import warnings
+
+                warnings.warn(f"ZAYA1: torch.compile of {fn.__name__} failed ({exc!r}); using eager.")
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    xf = x.float()
+    inv = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
+    return (xf * inv * weight.float()).to(dtype=x.dtype)
+
+
+def _scale_merge_norm_res(hidden, residual, h_bias, h_scale, r_bias, r_scale, norm_w, eps: float):
+    """ResidualScaling (with residual) + merge_residual + RMSNorm, same op order as eager."""
+    target_dtype = hidden.dtype
+    h = (hidden.float() + h_bias.float()) * h_scale.float()
+    r = (residual.float() + r_bias.float()) * r_scale.float()
+    merged = r + h
+    return merged, _rms(merged.to(dtype=target_dtype), norm_w, eps)
+
+
+def _scale_merge_norm_first(hidden, h_bias, h_scale, norm_w, eps: float):
+    """Stage 0: no incoming residual, so merged is the scaled mixer input."""
+    target_dtype = hidden.dtype
+    merged = (hidden.float() + h_bias.float()) * h_scale.float()
+    return merged, _rms(merged.to(dtype=target_dtype), norm_w, eps)
+
+
+_fused_smn_res = _maybe_compile(_scale_merge_norm_res, FUSE_NORM)
+_fused_smn_first = _maybe_compile(_scale_merge_norm_first, FUSE_NORM)
+
 
 def layer_kinds(num_layers: int, zaya_layers: Optional[Sequence] = None) -> List[str]:
     """Return ``"a"`` for CCA and ``"m"`` for MoE, one entry per stage.
@@ -190,6 +259,71 @@ def merge_residual(residual: Optional[torch.Tensor], hidden_states: torch.Tensor
     return residual.float() + hidden_states.float()
 
 
+def _cca_qk_post(
+    query_conv, key_conv, query_pre, key_base, temp, position_ids,
+    num_q_heads: int, num_k_heads: int, gqa_groups: int, head_dim: int,
+    clamp_temp: bool, rotary_dim: int, rope_base: float,
+):
+    """CCA._grouped_means + _qk_norm_and_temp + _rope as one function of tensors.
+
+    Mirrors the eager methods op for op so a torch.compile of it is shared by all
+    40 CCA stages. Output dtype is ``query_pre.dtype``.
+    """
+    dtype = query_pre.dtype
+    seq, batch = query_pre.shape[0], query_pre.shape[1]
+    # _grouped_means
+    key_base_f = key_base.float()
+    query_pre_g = query_pre.view(seq, batch, num_k_heads, gqa_groups, head_dim).float()
+    query_conv_g = query_conv.view_as(query_pre_g).float()
+    query = query_conv_g + 0.5 * query_pre_g + 0.5 * key_base_f.unsqueeze(-2)
+    query = query.reshape(seq, batch, num_q_heads, head_dim)
+    query_mean = query_pre_g.mean(dim=-2)
+    key = key_conv.float() + 0.5 * query_mean + 0.5 * key_base_f
+    # _qk_norm_and_temp
+    eps = 1e-12
+    scale = math.sqrt(head_dim)
+    query = query.float() * (torch.rsqrt(query.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
+    key = key.float() * (torch.rsqrt(key.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
+    t = temp.float().view(1, 1, num_k_heads, 1)
+    if clamp_temp:
+        t = torch.exp(torch.clamp(t, 1e-7, 2.0))
+    key = key * t
+    query = query.to(dtype)
+    key = key.to(dtype)
+    # _rope
+    if rotary_dim == 0:
+        return query, key
+    if position_ids is None:
+        pos = torch.arange(seq, device=query.device)
+    else:
+        pos = position_ids.transpose(0, 1).to(device=query.device)
+    freq_idx = torch.arange(0, rotary_dim, 2, device=query.device, dtype=torch.float32)
+    inv_freq = 1.0 / (rope_base ** (freq_idx / rotary_dim))
+    if pos.dim() == 1:
+        freqs = torch.outer(pos.float(), inv_freq)
+        cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, None, None, :]
+        sin = torch.cat((freqs.sin(), freqs.sin()), dim=-1)[:, None, None, :]
+    else:
+        freqs = torch.einsum("sb,d->sbd", pos.float(), inv_freq)
+        cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, :, None, :]
+        sin = torch.sin(freqs)
+        sin = torch.cat((sin, sin), dim=-1)[:, :, None, :]
+
+    def _apply(x):
+        rot, rest = x[..., :rotary_dim], x[..., rotary_dim:]
+        rot_f = rot.float()
+        half = rot_f.shape[-1] // 2
+        x1, x2 = rot_f[..., :half], rot_f[..., half:]
+        rotated = torch.cat((-x2, x1), dim=-1)
+        out = rot_f * cos + rotated * sin
+        return torch.cat((out, rest.float()), dim=-1).to(dtype=x.dtype)
+
+    return _apply(query), _apply(key)
+
+
+_fused_cca_qk = _maybe_compile(_cca_qk_post, FUSE_CCA)
+
+
 class CCA(nn.Module):
     """Compressed convolutional attention projection plus partial RoPE and GQA."""
 
@@ -308,15 +442,22 @@ class CCA(nn.Module):
         key_base = k_raw.view(seq, batch, self.num_k_heads, self.head_dim)
         query_conv = qk_out[..., : self.latent_q].view(seq, batch, self.num_q_heads, self.head_dim)
         key_conv = qk_out[..., self.latent_q :].view(seq, batch, self.num_k_heads, self.head_dim)
-        query, key = self._grouped_means(query_conv, key_conv, query_pre, key_base)
-        query, key = self._qk_norm_and_temp(query, key)
+        dtype = hidden_states.dtype
+        if FUSE_CCA:
+            query, key = _fused_cca_qk(
+                query_conv, key_conv, query_pre, key_base, self.temp, position_ids,
+                self.num_q_heads, self.num_k_heads, self.gqa_groups, self.head_dim,
+                self.clamp_temp, self.rotary_dim, self.rope_base,
+            )
+        else:
+            query, key = self._grouped_means(query_conv, key_conv, query_pre, key_base)
+            query, key = self._qk_norm_and_temp(query, key)
+            query, key = self._rope(query.to(dtype), key.to(dtype), position_ids)
 
         shifted = F.pad(hidden_states[:-1], (0, 0, 0, 0, 1, 0))
         v1 = self.val_proj1(hidden_states)
         v2 = self.val_proj2(shifted)
         value = torch.cat((v1, v2), dim=-1).view(seq, batch, self.num_k_heads, self.head_dim)
-        dtype = hidden_states.dtype
-        query, key = self._rope(query.to(dtype), key.to(dtype), position_ids)
         return query, key, value.to(dtype)
 
     def forward(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor], attention_mask):
@@ -582,10 +723,23 @@ class ZayaStage(nn.Module):
 
     def forward(self, hidden_states, residual, prev_router, position_ids, attention_mask):
         target_dtype = hidden_states.dtype
-        if self.res_scale is not None:
-            residual, hidden_states = self.res_scale(residual, hidden_states)
-        residual = merge_residual(residual, hidden_states)
-        normed = self.input_norm(residual.to(dtype=target_dtype))
+        rs = self.res_scale
+        if FUSE_NORM and rs is not None and (residual is None or rs.has_residual):
+            if residual is None:
+                residual, normed = _fused_smn_first(
+                    hidden_states, rs.hidden_states_bias, rs.hidden_states_scale,
+                    self.input_norm.weight, self.input_norm.eps,
+                )
+            else:
+                residual, normed = _fused_smn_res(
+                    hidden_states, residual, rs.hidden_states_bias, rs.hidden_states_scale,
+                    rs.residual_bias, rs.residual_scale, self.input_norm.weight, self.input_norm.eps,
+                )
+        else:
+            if rs is not None:
+                residual, hidden_states = rs(residual, hidden_states)
+            residual = merge_residual(residual, hidden_states)
+            normed = self.input_norm(residual.to(dtype=target_dtype))
         if self.kind == "a":
             hidden_states = self.self_attn(normed, position_ids, attention_mask)
         else:
@@ -636,7 +790,14 @@ class ZayaStack(nn.Module):
                     hidden_states, residual, prev_router, position_ids, attention_mask
                 )
             target_dtype = hidden_states.dtype
-            if self.res_scale is not None:
-                residual, hidden_states = self.res_scale(residual, hidden_states)
+            rs = self.res_scale
+            if FUSE_NORM and rs is not None and residual is not None:
+                _, normed = _fused_smn_res(
+                    hidden_states, residual, rs.hidden_states_bias, rs.hidden_states_scale,
+                    rs.residual_bias, rs.residual_scale, self.final_norm.weight, self.final_norm.eps,
+                )
+                return normed
+            if rs is not None:
+                residual, hidden_states = rs(residual, hidden_states)
             merged = merge_residual(residual, hidden_states)
             return self.final_norm(merged.to(dtype=target_dtype))
