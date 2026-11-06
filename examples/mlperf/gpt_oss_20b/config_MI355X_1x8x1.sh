@@ -174,5 +174,17 @@ if [[ "${_linear_precision}" == mxfp4 ]]; then
     export RCCL_DDA_ENABLE=1
     export NCCL_CUMEM_ENABLE=1
     export NCCL_LOCAL_REGISTER=0
+
+    # rocm/primus:v26.9 ships RCCL 2.32.3, which has no CE ReduceScatter.
+    # PRIMUS_REBUILD_RCCL=1 rebuilds RCCL at launch
+    # (runner/helpers/patches/12_rebuild_rccl.sh) and runs the gradient
+    # ReduceScatter on the dedicated zero-CTA communicator, which that RCCL
+    # puts on the copy engines.
+    if [[ "${PRIMUS_REBUILD_RCCL:-0}" == 1 ]]; then
+        # Head of ROCm/rocm-systems#15042 (finite per-chunk CE ReduceScatter).
+        export PRIMUS_RCCL_REF="${PRIMUS_RCCL_REF:-96020c5874c6252079ed63d84c8264e6c0057971}"
+        export PRIMUS_RCCL_GPU_ARCHS="${PRIMUS_RCCL_GPU_ARCHS:-gfx950}"
+        export MEGATRON_GRAD_REDUCE_BACKEND="${MEGATRON_GRAD_REDUCE_BACKEND:-rccl_sdma}"
+    fi
 fi
 unset _linear_precision

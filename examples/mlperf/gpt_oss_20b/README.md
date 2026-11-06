@@ -8,9 +8,10 @@ using Primus. The layout matches `examples/mlperf/llama3.1_8b`.
 ### Configuration
 
 - **Model**: GPT-OSS 20B (2880 hidden, 24 layers, 64 heads, 32 experts)
-- **Training**: 1.2M iteration ceiling, GBS=32, MBS=4, LR=8e-4
-- **Default precision**: FP8 + Turbo attention (`gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml`)
-- **Optional precision**: MXFP4 grouped GEMM, QKVO BF16, weight de-oscillation
+- **Training**: 1.2M iteration ceiling, GBS=32, MBS=4
+- **Default precision**: MXFP4 grouped GEMM, QKVO BF16, weight de-oscillation
+  (`gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml`; LR 5.7e-4, 117 warmup steps)
+- **Optional precision**: FP8 + Turbo attention (`gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml`; LR 4e-4)
 - **Data**: C4 dataset (tokenized, same as Llama 3.1 8B)
 
 ### Data
@@ -45,7 +46,7 @@ export MODELDIR=/data/gpt_oss_20b/model
 export LOGDIR=/data/gpt_oss_20b/results
 
 # Optional; these are the defaults.
-export CONT=rocm/primus:v26.5
+export CONT=rocm/primus:v26.9
 export DGXSYSTEM=MI355X_1x8x1
 export NEXP=1
 
@@ -90,49 +91,66 @@ needed before model construction. The launcher raises Docker's `memlock` and
 ReduceScatter continues to use its original process group unless separately
 selected.
 
-To opt into the CE gradient ReduceScatter tested with the large GPT-OSS bucket,
-use an image containing the corresponding RCCL implementation and export:
+### RCCL copy-engine gradient ReduceScatter
+
+The MXFP4 recipe also exports the RCCL CE ReduceScatter settings
+(`RCCL_CE_REDUCESCATTER`, `RCCL_CE_REDUCE_PER_CHUNK`, ...). RCCL ignores them
+unless it implements CE ReduceScatter, and the RCCL 2.32.3 in
+`rocm/primus:v26.9` does not. Set `PRIMUS_REBUILD_RCCL=1` to build RCCL from
+ROCm/rocm-systems#15042 when the container starts and run the gradient
+ReduceScatter on the copy engines:
 
 ```bash
-export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma
-export RCCL_CE_REDUCESCATTER=1
-export RCCL_FORCE_CE_REDUCESCATTER=1
-export RCCL_CE_REDUCE_PER_CHUNK=1
-export RCCL_CE_REDUCE_MAX_BLOCKS=64
+export PRIMUS_REBUILD_RCCL=1
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 ```
+
+`run_and_time.sh` passes `runner/helpers/patches/12_rebuild_rccl.sh` to
+`primus-cli direct --patch`. The patch builds RCCL under `/tmp/primus_rccl`
+(about a minute on an MI355X node for the first trial in a container; later
+trials reuse the build) and installs it over the `librccl` that PyTorch loads.
+The config then selects `MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma`. Override the
+commit with `PRIMUS_RCCL_REF` and the targets with `PRIMUS_RCCL_GPU_ARCHS`
+(default `gfx950`). Images whose RCCL already forces CE ReduceScatter for the
+default gradient group do not need the rebuild.
+
+Without network access at launch, `export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma`
+alone still moves the gradient ReduceScatter onto the dedicated communicator,
+where the stock RCCL 2.32.3 runs it with symmetric-memory kernels instead of the
+copy engines (about 1% slower per step than the rebuilt RCCL on 8x MI355X).
 
 Keep the default `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma`, leave
 `NCCL_CTA_POLICY` unset, and do not disable `RCCL_DDA_ENABLE`; the gradient
 path reuses the parameter path's dedicated zero-CTA group and symmetric-memory
-pool. The gradient selector is off by default.
+pool.
 
-### MXFP4 recipe
+### FP8 recipe
 
-Override `EXP` to switch from the default FP8 Turbo-attention yaml:
+Override `EXP` to switch from the default MXFP4 yaml. The config derives the
+learning-rate schedule and the MLLOG precision from the yaml name:
 
 ```bash
-export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
-# Optional scale rounding for Turbo MXFP4 quant: 0=RTE, 1=RZ, 2=stochastic
-# export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING=0
+export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml
 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 ```
+
+For MXFP4, `PRIMUS_TURBO_MXFP4_SCALE_ROUNDING` selects the Turbo quant scale
+rounding (0=RTE, 1=RZ, 2=stochastic; default 2).
 
 ## Run inside an existing container
 
 ### Start Docker Image
 
 ```bash
-docker run -it     --device /dev/dri     --device /dev/kfd     --device /dev/infiniband     --network host --ipc host     --group-add video     --cap-add SYS_PTRACE     --security-opt seccomp=unconfined     --privileged     -v $HOME:$HOME   --shm-size 128G     --name primus_training_env rocm/primus:v26.5
+docker run -it     --device /dev/dri     --device /dev/kfd     --device /dev/infiniband     --network host --ipc host     --group-add video     --cap-add SYS_PTRACE     --security-opt seccomp=unconfined     --privileged     -v $HOME:$HOME   --shm-size 128G     --name primus_training_env rocm/primus:v26.9
 
 cd /workspace/Primus
 ```
 
 ### Key Files
 
-- `configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml` — default FP8 + Turbo attention
-- `configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml` — MXFP4 grouped GEMM, QKVO BF16, de-oscillation
+- `configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml` — default MXFP4 grouped GEMM, QKVO BF16, de-oscillation
+- `configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml` — FP8 + Turbo attention
 - `configs/MI355/gpt_oss_20B-MXFP4-qkvo-bf16.yaml` — TE precision matcher (not a runnable experiment)
 - `config_MI355X_1x8x1.sh` — system config and env vars
 - `run_and_time.sh` — timed training entry
@@ -140,9 +158,8 @@ cd /workspace/Primus
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>
+# optional: export PRIMUS_REBUILD_RCCL=1 (see above)
 source config_MI355X_1x8x1.sh
-# optional MXFP4:
-# export EXP=${PRIMUS_PATH}/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
 bash run_and_time.sh
 ```
 
