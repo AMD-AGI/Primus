@@ -519,11 +519,13 @@ CONTAINER_SCRIPT="\
     echo [container ${NODE_RANK:-0}][INFO]: finished at \$(date +%Y.%m.%d) \$(date +%H:%M:%S)"
 
 # Build complete command array
+CONTAINER_LAUNCH_ID="primus-${BASHPID}-${RANDOM}-${RANDOM}"
 CMD=(
     "${CONTAINER_RUNTIME}"
     run
     --rm
     "${OPTION_ARGS[@]}"
+    --label "io.primus.launch=$CONTAINER_LAUNCH_ID"
     "$DOCKER_IMAGE"
     /bin/bash
     -c
@@ -584,4 +586,6 @@ if [[ -n "${DOCKER_LOGIN_KEY:-}" ]]; then
 fi
 
 LOG_INFO "[container] Executing command..."
-"${CMD[@]}"
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/container_lifecycle.sh"
+run_container_with_cleanup "$CONTAINER_LAUNCH_ID" "${CMD[@]}"
