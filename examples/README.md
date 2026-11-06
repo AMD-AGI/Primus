@@ -72,7 +72,8 @@ examples/
 ```
 
 `mlperf/` and `hardware_configs/` sit at the top level because they are not tied to a
-single backend: MLPerf submissions cover Megatron, Megatron-Bridge and diffusion, and
+single backend: MLPerf submissions cover Megatron, Megatron-Bridge, diffusion and
+recommendation (DLRMv4), and
 the hardware configs are consumed by `primus projection`.
 
 

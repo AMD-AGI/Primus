@@ -1,0 +1,36 @@
+# MLPerf Training dlrmv4: HSTU ranker on yambda-5b to eval AUC 0.75.
+# Defaults are the 1-node MLPerf run; config_MI355X_1x8x1.sh sets the system
+# environment. An unset variable below (empty default) keeps the trainer's gin value.
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:dlrm_v4-yambda5b-mlperf}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: recommendation
+    config: pre_trainer.yaml
+    model: dlrm_v4_hstu_yambda_5b.yaml
+    overrides:
+      data_path: ${DLRM_DATA_PATH:/data}
+      output_dir: ${DLRM_OUTPUT_DIR:}
+
+      # --- run shape ---
+      seed: ${SEED:}
+      batch_size: ${BATCH_SIZE:}
+      dense_lr: ${DENSE_LR:}
+      sparse_lr: ${SPARSE_LR:}
+      skip_eval_epoch_pct: ${SKIP_EVAL_EPOCH_PCT:}
+      eval_every_data_pct: ${EVAL_EVERY_DATA_PCT:}
+      auc_threshold: ${AUC_THRESHOLD:}
+      num_train_ts: ${NUM_TRAIN_TS:}
+      metric_log_freq: ${METRIC_LOG_FREQ:}
+      run_name: ${RUN_NAME:}
+      output_trace: ${OUTPUT_TRACE:}
+
+      # --- MLPerf ---
+      mlperf_logging: ${MLPERF_LOGGING:true}
+      mlperf_log_path: ${MLPERF_LOG_PATH:}
+      submission_platform: ${MLLOG_SUBMISSION_PLATFORM:MI355X}
+      clear_caches: ${CLEAR_CACHES:true}
+      warm_cache_after_run_start: ${WARM_CACHE_AFTER_RUN_START:true}

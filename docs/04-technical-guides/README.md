@@ -17,6 +17,7 @@ Deep technical topics for advanced users.
 - [Fault tolerance and elastic training](fault-tolerance-and-elastic-training.md): graceful exit, auto-resume, in-process restart, torchft
 - [Determinism and reproducibility](determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
+- [Recommendation models](recommendation/README.md): DLRMv4 (HSTU on yambda-5b) for MLPerf Training: benchmark, ROCm port, FP8 kernels, multi-node and performance notes
 - [Hybrid models](hybrid-models/README.md): Zebra-Llama hybrid recurrent-attention (Mamba/KDA/GDN + MLA) models, FLA-parity recipes, and checkpoint conversion
 - [Native SFT and LoRA](native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 - [SpecForge](specforge/introduction.md): speculative-decoding draft training — capture, offline train, and online train through `primus-cli`

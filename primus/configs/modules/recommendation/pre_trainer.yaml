@@ -1,0 +1,57 @@
+extends:
+  - ../module_base.yaml
+
+stage: pretrain
+
+# Recommendation models: the model preset sets model_family (dlrm_v4), which
+# picks the trainer. The parameters below are those of the dlrm_v4 trainer.
+
+# streaming-train-eval: train window T, evaluate on window T+1, stop at the AUC
+# target (the MLPerf benchmark). The trainer also has train / eval / train-eval.
+mode: streaming-train-eval
+
+# Dataset root: processed_5b/hstu_cache_L<history_length>/ and shared_metadata/.
+data_path: ${DLRM_DATA_PATH:}
+# Where the generated gin file and the MLPerf log go (default <workspace>/<exp>/dlrm_v4).
+output_dir: null
+# Another checkout of the trainer source (the folder holding generative_recommenders/);
+# null: the in-tree primus/backends/recommendation/dlrm_v4/src.
+trainer_src: null
+
+# Run shape. null keeps the gin file's value; each maps to the environment
+# variable in primus/backends/recommendation/dlrm_v4/run_config.py (ENV_PARAMS).
+seed: null                  # -1 in the gin file: a fresh random seed
+batch_size: null            # per GPU (1024)
+dense_lr: null
+sparse_lr: null
+lr_warmup_steps: null
+skip_eval_epoch_pct: null
+eval_every_data_pct: null   # 0.001: the full eval set every 0.1% of the data
+eval_every_n_windows: null
+auc_threshold: null         # 0.75
+start_ts: null
+num_train_ts: null          # 299 windows: the full sweep
+num_train_batches: null
+num_eval_batches: null
+num_workers: null
+prefetch_factor: null
+eval_num_workers: null
+hbm_cap_gb: null
+metric_log_freq: null
+run_name: null
+ckpt_path: null
+output_trace: null
+
+# MLPerf logging (mlcommons/logging) and the "data state at start of run" rules.
+mlperf_logging: true
+mlperf_log_path: null       # default <output_dir>/mlperf_dlrm_v4.log
+submission_platform: null   # $MLPERF_SUBMISSION_PLATFORM, e.g. MI355X
+# Evict the dataset from the page cache before INIT and verify it (MLPerf: the
+# cache must be flushed before a timed run).
+clear_caches: false
+# After run_start, stream the dataset into the page cache in the background:
+# cold random reads cannot feed 8 MI355X GPUs on network-attached NVMe.
+warm_cache_after_run_start: false
+
+# Extra gin bindings appended after the dataset's gin file (later bindings win).
+gin_bindings: []

@@ -38,3 +38,9 @@ pp_simulation_result
 .triton_cache_shared/
 .jax_cache/
 .cursor/
+
+# DLRMv4 trainer run outputs (written under its source root)
+primus/backends/recommendation/dlrm_v4/src/results/
+primus/backends/recommendation/dlrm_v4/src/tmp/
+primus/backends/recommendation/dlrm_v4/src/exps/
+primus/backends/recommendation/dlrm_v4/src/ckpts/
