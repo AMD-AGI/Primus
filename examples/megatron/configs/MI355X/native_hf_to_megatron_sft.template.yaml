@@ -85,6 +85,8 @@ modules:
       hf_path: <HF_MODEL_DIR>            # dir with *.safetensors + config.json + tokenizer
       tokenizer_model: <HF_MODEL_DIR>
       # native_ckpt_out: <OUT_DIR>       # optional; default: ${DATA_PATH}/megatron_checkpoints/<name>_native_<format>
+      #                                  # needs free space for the whole model in the converted dtype (bf16: 2 bytes
+      #                                  # per parameter); the converter checks it before writing
       # native_ckpt_dtype: bf16          # optional; default inferred from config.json torch_dtype
       # native_ckpt_format: torch_dist   # optional; default: the experiment's ckpt_format
 

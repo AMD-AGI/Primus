@@ -16,8 +16,10 @@ modules, so the tests need neither the Megatron-LM submodule nor a GPU.
 """
 
 import argparse
+import errno
 import importlib.machinery
 import importlib.util
+import io
 import json
 import sys
 import types
@@ -163,6 +165,84 @@ def test_incomplete_mapping_saves_nothing(tmp_path, fake_save_checkpoint):
             log=lambda *a: None,
         )
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# native_convert_common: disk space for the save
+# ---------------------------------------------------------------------------
+class _DiskFullStream(io.RawIOBase):
+    """A writable stream on a disk that fills after ``room`` bytes (``ENOSPC``)."""
+
+    def __init__(self, room):
+        self.room = room
+
+    def writable(self):
+        return True
+
+    def write(self, b):
+        n = memoryview(b).nbytes
+        if n > self.room:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        self.room -= n
+        return n
+
+
+# room for the records torch.save writes before a tensor's data (704 bytes), not for the data
+_ROOM_BEFORE_DATA = 720
+
+
+def _free_space(monkeypatch, free):
+    usage = SimpleNamespace(total=free, used=0, free=free)
+    monkeypatch.setattr(common.shutil, "disk_usage", lambda path: usage)
+
+
+def test_torch_reports_a_full_disk_as_unexpected_pos():
+    """The failure seen when converting a large model into a small /tmp: torch.save of a
+    tensor whose data write hits a full disk raises "unexpected pos <n> vs <m>" (the
+    OSError is lost), the same numbers for any tensor (its data record starts at the same
+    offset). Newer torch may report the OSError itself."""
+    for t in (torch.zeros(64, 64, dtype=torch.bfloat16), torch.zeros(1000, 3)):
+        with pytest.raises((RuntimeError, OSError), match="unexpected pos|No space left on device"):
+            torch.save(t, _DiskFullStream(room=_ROOM_BEFORE_DATA))
+
+
+def test_save_refused_before_writing_when_disk_too_small(tmp_path, fake_save_checkpoint, monkeypatch):
+    state, calls = fake_save_checkpoint
+    _free_space(monkeypatch, free=32)  # the 4x4 fp32 weight needs 64 bytes plus overhead
+    with pytest.raises(RuntimeError, match="not enough disk space"):
+        _save(tmp_path, state, "torch_dist")
+    assert calls == []
+    assert not (tmp_path / "out" / "iter_0000001").exists()
+
+
+@pytest.mark.parametrize("ckpt_format", ["torch_dist", "torch"])
+def test_failed_write_names_directory_and_free_space(
+    tmp_path, fake_save_checkpoint, monkeypatch, ckpt_format
+):
+    """A write that fails part-way (the disk filled after the check) is re-raised with the
+    directory and its free space, the torch error chained, instead of the bare
+    "unexpected pos" (or a CheckpointException, which is a BaseException)."""
+    state, _ = fake_save_checkpoint
+
+    def save_checkpoint(iteration, models, optimizer, scheduler, num_floating_point_operations_so_far):
+        torch.save(models[0].weight, _DiskFullStream(room=_ROOM_BEFORE_DATA))
+
+    monkeypatch.setattr(sys.modules["megatron.training.checkpointing"], "save_checkpoint", save_checkpoint)
+    with pytest.raises(RuntimeError, match="free there now") as err:
+        _save(tmp_path, state, ckpt_format)
+    assert str(tmp_path / "out") in str(err.value)
+    assert err.value.__cause__ is not None
+
+
+def test_checkpoint_bytes_counts_each_tensor_once():
+    model = torch.nn.Module()
+    model.a = torch.nn.Linear(8, 4, bias=False)  # 32 fp32 values
+    model.b = torch.nn.Linear(8, 4, bias=False)
+    model.b.weight = model.a.weight  # tied: written once
+    model.register_buffer("scale", torch.zeros(3, dtype=torch.bfloat16))
+    data = 32 * 4 + 3 * 2
+    n_tensors = len([t for t in model.state_dict().values() if torch.is_tensor(t)])
+    assert common.checkpoint_bytes(model) == data + n_tensors * common._SAVE_OVERHEAD_PER_TENSOR
 
 
 def test_saved_ckpt_format_missing_or_incomplete(tmp_path):

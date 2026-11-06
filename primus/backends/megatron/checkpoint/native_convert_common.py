@@ -36,6 +36,7 @@ in-process before conversion -- NOT by editing the submodule.
 
 import json
 import os
+import shutil
 import sys
 
 import torch
@@ -296,7 +297,10 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     (``finalize_release_layout``).
 
     Raises ``RuntimeError`` if the mapping is not complete/exact so the caller
-    (conversion hook) fails loudly instead of writing a silently-wrong ckpt.
+    (conversion hook) fails loudly instead of writing a silently-wrong ckpt, and
+    before writing anything if ``save_dir`` has less free space than the checkpoint
+    needs (``check_free_space``). A write that fails anyway is re-raised as a
+    ``RuntimeError`` that names the directory and its free space.
     """
     missing, unexpected = model.load_state_dict(sd, strict=False)
     missing_non_extra = [k for k in missing if "_extra_state" not in k]
@@ -331,17 +335,76 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
         raise RuntimeError(
             f"{save_dir} already has a 'release' directory; remove it or convert into an empty directory."
         )
+    check_free_space(model, save_dir, log)
     log(f"saving {ckpt_format} checkpoint to {save_dir} ...")
-    save_checkpoint(
-        margs.iteration,
-        [model],
-        None,
-        None,
-        num_floating_point_operations_so_far=0,
-    )
+    # torch's DCP CheckpointException derives from BaseException, not Exception
+    try:
+        save_checkpoint(
+            margs.iteration,
+            [model],
+            None,
+            None,
+            num_floating_point_operations_so_far=0,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as e:
+        raise RuntimeError(
+            f"writing the {ckpt_format} checkpoint to {save_dir} failed ({e!r}); "
+            f"{_gib(shutil.disk_usage(save_dir).free)} free there now. A write that fails part-way "
+            "(most often a full disk) is reported by torch as '[enforce fail at inline_container.cc] "
+            "unexpected pos <n> vs <m>'. Set native_ckpt_out (or DATA_PATH) to a volume with room."
+        ) from e
     if ckpt_format == "torch_dist":
         finalize_release_layout(save_dir, margs.iteration)
     log(f"DONE. Converted {ckpt_format} checkpoint at: {save_dir}")
+
+
+# Per-tensor overhead of the files a save writes: each tensor is its own small zip
+# archive (torch.save: pickle, version records, 64-byte aligned data) in torch_dist,
+# plus the checkpoint metadata. Measured at ~1.6 KiB per tensor; 4 KiB leaves room.
+_SAVE_OVERHEAD_PER_TENSOR = 4096
+
+
+def _gib(n: int) -> str:
+    return f"{n / 2**30:.1f} GiB"
+
+
+def checkpoint_bytes(model) -> int:
+    """Bytes a save of ``model``'s weights writes, in either format: every tensor of its
+    state dict at its own size (``torch_dist`` writes each tensor's data; legacy ``torch``
+    each storage once), plus a small per-tensor file overhead."""
+    total, seen = 0, set()
+    for t in model.state_dict().values():
+        if not torch.is_tensor(t):
+            continue
+        total += _SAVE_OVERHEAD_PER_TENSOR
+        key = (t.data_ptr(), tuple(t.shape), t.dtype)
+        if key in seen:  # the same tensor under two names (tied weights)
+            continue
+        seen.add(key)
+        total += t.numel() * t.element_size()
+    return total
+
+
+def check_free_space(model, save_dir: str, log=print) -> None:
+    """Refuse a save that cannot fit in ``save_dir``, before anything is written.
+
+    A full disk otherwise surfaces only as a torn checkpoint: torch reports the failed
+    write of a tensor's data as ``[enforce fail at inline_container.cc] unexpected pos
+    <n> vs <m>`` (the ``OSError`` behind it is lost), after minutes of writing, and a
+    retry fails the same way. The converted checkpoint of a large model is hundreds of
+    GiB (bf16), more than a node's local ``/tmp`` often has.
+    """
+    need = checkpoint_bytes(model)
+    os.makedirs(save_dir, exist_ok=True)
+    free = shutil.disk_usage(save_dir).free
+    log(f"checkpoint needs ~{_gib(need)}; {_gib(free)} free in {save_dir}")
+    if free < need:
+        raise RuntimeError(
+            f"not enough disk space for the converted checkpoint in {save_dir}: needs ~{_gib(need)}, "
+            f"{_gib(free)} free. Set native_ckpt_out (or DATA_PATH) to a volume with room."
+        )
 
 
 def read_hf_config(hf_dir: str) -> dict:
