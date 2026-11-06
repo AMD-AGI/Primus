@@ -62,15 +62,22 @@ def get_sdma_process_group(
         else:
             raise ValueError(f"MEGATRON_RCCL_SDMA_CTA_POLICY must be 0 or 2, got {cta_policy}")
         options.config.split_share = 0
+        # nccl2 initializes its communicator eagerly, before the process group
+        # name is assigned, and publishes that comm under an empty name.
+        # symm_mem.rendezvous then misses it ("NCCL host communicator for group
+        # N not found"). nccl-lazy creates the comm on the first collective,
+        # after the name exists, so the rendezvous lookup succeeds.
+        backend = os.getenv("MEGATRON_RCCL_SDMA_GROUP_BACKEND", "nccl-lazy")
         _SDMA_GROUP = dist.new_group(
             ranks=list(range(dist.get_world_size())),
-            backend="nccl",
+            backend=backend,
             pg_options=options,
             group_desc=f"MEGATRON_RCCL_SDMA_PARAM_GATHER_POLICY_{cta_policy}",
         )
         if dist.get_rank() == 0:
             print(
-                "[RCCL-SDMA:Megatron] created dedicated zero-CTA group " f"name={_SDMA_GROUP.group_name}",
+                "[RCCL-SDMA:Megatron] created dedicated zero-CTA group "
+                f"name={_SDMA_GROUP.group_name} backend={backend}",
                 flush=True,
             )
     return _SDMA_GROUP
