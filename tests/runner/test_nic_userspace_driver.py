@@ -267,6 +267,44 @@ def test_ionic_finds_codename_deb_in_nested_bundle_before_repo(tmp_path, monkeyp
     assert all(c.kind != "download" for c in nud.IonicFamily().candidates(ctx))
 
 
+def _host_sw_pkg_bundle(path: Path, bundle_version: str, deb_version: str = "50.0.26.08.28.001-1~ubu24.04") -> None:
+    """An unversioned host_sw_pkg.tar.gz, as AMD ships it: no release in the filename, a top-level
+    VERSION.json naming the bundle, and libionic1 nested under ionic_driver/deb/libionic-debs.tar.xz."""
+    version_json = (
+        '{"sw": {"version": "%s", "modules": {"linux-ionic": {"version": "26.08.17.001"}}}}' % bundle_version
+    ).encode()
+    _tar(
+        path,
+        {
+            "host_sw_pkg/VERSION.json": version_json,
+            "host_sw_pkg/ionic_driver/deb/libionic-debs.tar.xz": _tar_bytes(
+                {f"noble/libionic1_{deb_version}_amd64.deb": b"d"}
+            ),
+        },
+    )
+
+
+def test_ionic_accepts_unversioned_bundle_matching_version_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(nud, "os_codename", lambda: "noble")
+    bundles = tmp_path / "bundles"
+    _host_sw_pkg_bundle(bundles / "host_sw_pkg.tar.gz", "1.117.5-a-196")
+
+    ctx = _ctx(tmp_path, version="1.117.5-a-196", search_path=[bundles])
+    cands = [c for c in nud.IonicFamily().candidates(ctx) if c.kind == "deb"]
+    assert len(cands) == 1
+    assert cands[0].member == "noble/libionic1_50.0.26.08.28.001-1~ubu24.04_amd64.deb"
+    assert cands[0].version == "1.117.5-a-196"
+
+
+def test_ionic_rejects_unversioned_bundle_for_a_different_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(nud, "os_codename", lambda: "noble")
+    bundles = tmp_path / "bundles"
+    _host_sw_pkg_bundle(bundles / "host_sw_pkg.tar.gz", "1.117.5-a-77")
+
+    ctx = _ctx(tmp_path, version="1.117.5-a-196", search_path=[bundles])
+    assert [c for c in nud.IonicFamily().candidates(ctx) if c.kind == "deb"] == []
+
+
 def _tar_bytes(members: dict) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
