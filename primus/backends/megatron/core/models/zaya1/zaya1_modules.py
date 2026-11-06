@@ -483,12 +483,14 @@ class ZayaRouter(nn.Module):
             total = counts.sum().clamp_min(1.0)
             grad = counts / total - (1.0 / self.num_scored)
             self.balance_step += 1
-            step = int(self.balance_step.item())
+            # Bias corrections stay on device (fp64 pow, then cast to fp32) so
+            # this per-MoE-layer update does not force a host sync via .item().
+            step = self.balance_step.double()
             b1, b2 = self.balance_beta1, self.balance_beta2
             self.balance_m.mul_(b1).add_(grad, alpha=1.0 - b1)
             self.balance_v.mul_(b2).addcmul_(grad, grad, value=1.0 - b2)
-            mhat = self.balance_m / (1.0 - b1**step)
-            vhat = self.balance_v / (1.0 - b2**step)
+            mhat = self.balance_m / (1.0 - torch.pow(b1, step)).float()
+            vhat = self.balance_v / (1.0 - torch.pow(b2, step)).float()
             if self.balance_wd != 0.0:
                 self.balancing_biases.mul_(1.0 - self.balance_lr * self.balance_wd)
             self.balancing_biases.addcdiv_(mhat, vhat.sqrt().add_(1e-8), value=-self.balance_lr)
@@ -529,16 +531,33 @@ class ZayaMoE(nn.Module):
         flat = hidden_states.reshape(-1, hidden_states.shape[-1])
         flat_idx = idx.reshape(-1)
         flat_prob = prob.reshape(-1, 1).to(dtype=flat.dtype)
-        out = flat.new_zeros(flat.shape)
+        # Sort-based dispatch. A stable sort keeps the original token order
+        # inside each expert group, so every expert sees exactly the rows (in
+        # the same order) that the old boolean-mask loop gave it. The group
+        # sizes cross to the host once per layer instead of one torch.any plus
+        # two nonzero syncs per expert in forward and more in backward. Integer
+        # index_select / index_copy have sync-free backwards.
+        num_groups = self.router.num_scored
+        sorted_idx, perm = torch.sort(flat_idx, stable=True)
+        counts = torch.bincount(sorted_idx, minlength=num_groups).tolist()
+        x_sorted = flat.index_select(0, perm)
+        p_sorted = flat_prob.index_select(0, perm)
+        x_chunks = torch.split(x_sorted, counts, dim=0)
+        p_chunks = torch.split(p_sorted, counts, dim=0)
+        pieces = []
         for expert_id, expert in enumerate(self.local_experts):
-            chosen = flat_idx == expert_id
-            if not torch.any(chosen):
+            # Experts with no tokens are skipped exactly as before: their
+            # params get no autograd grad and their main_grad stays zero.
+            if counts[expert_id] == 0:
                 continue
-            out[chosen] = expert(flat[chosen]) * flat_prob[chosen]
-        if self.router.use_mod:
-            skip = flat_idx == self.num_real_experts
-            if torch.any(skip):
-                out[skip] = flat[skip] * flat_prob[skip]
+            pieces.append(expert(x_chunks[expert_id]) * p_chunks[expert_id])
+        if self.router.use_mod and counts[self.num_real_experts] > 0:
+            # Mixture-of-depths skip slot: identity scaled by its probability.
+            pieces.append(x_chunks[self.num_real_experts] * p_chunks[self.num_real_experts])
+        # Every token lands in exactly one group (real expert or MoD skip), so
+        # the concatenation covers all rows in sorted order.
+        out_sorted = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
+        out = flat.new_zeros(flat.shape).index_copy(0, perm, out_sorted)
         out = out.view_as(hidden_states)
         return out, next_router
 
