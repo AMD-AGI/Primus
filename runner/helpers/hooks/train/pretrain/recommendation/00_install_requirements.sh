@@ -18,7 +18,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REQ_FILE="${SCRIPT_DIR}/requirements-recommendation.txt"
 PRIVATE_REQ_FILE="${SCRIPT_DIR}/requirements-recommendation-private.txt"
-PRIVATE_SITE="${PRIMUS_RECOMMENDATION_SITE:-/opt/primus-recommendation/site-packages}"
+# Set and empty: no private packages (the trainer then uses the image's versions).
+PRIVATE_SITE="${PRIMUS_RECOMMENDATION_SITE-/opt/primus-recommendation/site-packages}"
 MLPERF_LOGGING_REF="${MLPERF_LOGGING_REF:-6.1.0-rc2}"
 
 if [[ ! -e /opt/rocm/bin/hipcc ]]; then
@@ -42,7 +43,9 @@ fi
 
 # The private directory: one marker per requirements file content, so an edit reinstalls.
 private_marker="${PRIVATE_SITE}/.installed-$(sha256sum "$PRIVATE_REQ_FILE" | cut -c1-16)"
-if [[ -f "$private_marker" ]]; then
+if [[ -z "$PRIVATE_SITE" ]]; then
+    echo "[INFO] recommendation: PRIMUS_RECOMMENDATION_SITE is empty: no private packages"
+elif [[ -f "$private_marker" ]]; then
     echo "[INFO] recommendation: private packages already in $PRIVATE_SITE"
 else
     echo "[+] Installing private recommendation packages into $PRIVATE_SITE (--no-deps)..."

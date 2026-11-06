@@ -208,7 +208,7 @@ def test_private_packages_pin_flydsl_and_the_preset_points_at_them():
     ]
     assert pins == ["flydsl==0.2.4"]
     install = (hooks / "00_install_requirements.sh").read_text()
-    assert "PRIMUS_RECOMMENDATION_SITE:-/opt/primus-recommendation/site-packages" in install
+    assert "PRIMUS_RECOMMENDATION_SITE-/opt/primus-recommendation/site-packages" in install
     preset = yaml.safe_load(
         (PRIMUS_ROOT / "primus/configs/modules/recommendation/pre_trainer.yaml").read_text()
     )
