@@ -13,6 +13,8 @@ repos:
     rev: v4.0.1
     hooks:
       - id: trailing-whitespace
+        # Unified diffs use a space-only line to represent blank context.
+        exclude: ^examples/specforge/docker/patches/.*\.patch$
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files

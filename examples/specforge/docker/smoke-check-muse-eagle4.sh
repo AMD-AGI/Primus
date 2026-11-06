@@ -59,6 +59,8 @@ assert model.lm_head.weight.device.type == "cpu"
 root = Path(os.environ["SPECFORGE_ROOT"])
 revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
 issues = capture_plugin_issues()
+if issues:
+    raise RuntimeError("Capture API backport checks failed: " + "; ".join(issues))
 report = {
     "specforge_revision": revision,
     "sglang": version("sglang"),
@@ -72,8 +74,7 @@ report = {
 }
 Path("/opt/primus/muse-spark-eagle4-image.json").write_text(json.dumps(report, indent=2) + "\n")
 print(json.dumps(report, indent=2))
-if issues:
-    print("Capture unavailable in this Muse base; Primus capture preflight remains enforced.")
+
 PY
 
-echo "Muse Spark EAGLE4 image checks passed (GPU-free; capture compatibility reported separately)."
+echo "Muse Spark EAGLE4 image checks passed (GPU-free; capture APIs verified)."

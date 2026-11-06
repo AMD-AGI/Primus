@@ -9,13 +9,13 @@ Build from the Primus repository root:
 
 ```bash
 docker build -f examples/specforge/docker/Dockerfile.muse-spark-eagle4 \
-  -t primus-specforge:muse-spark-eagle4-1c253f04 .
+  -t primus-specforge:muse-spark-1027-eagle4-1c253f04 .
 ```
 
 The defaults pin:
 
-- Base: `lmsysorg/sglang-rocm:muse-spark-open` at digest
-  `sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4`.
+- Base: `lmsysorg/sglang-rocm:muse-spark-open-1027` at digest
+  `sha256:7184d3ae2bfdc75a5bb8eb497b768e370ef7b213879cb4d97fbaaa3e8e5f5040`.
 - SpecForge repository: `https://github.com/yudigege86/SpecForge.git`.
 - SpecForge commit: `1c253f04c5fd0a321753a9ead28739c0a29ff7a7`
   from the PR's `feat/eagle4-draft` branch.
@@ -31,25 +31,32 @@ uses the same protected lightweight dependency and constrained TensorBoard
 installation as the [generic runtime](runtime-image.md). Do not run
 `primus-cli deps sync` in this environment.
 
-## Validation and capture limitation
+## Capture API backport
+
+The unmodified `1027` base lacks the generic SGLang APIs required by the
+SpecForge capture plugin. This Dockerfile applies a version-specific
+[API backport](../../../examples/specforge/docker/patches/README.md) derived
+from SGLang PRs #43449 and #43450 before installing SpecForge. It adds target
+auxiliary-state capture, forward observers, deferred responses, and a native
+Muse EAGLE3 capture hook while preserving the Muse ROCm kernels and AITER patches.
+SpecForge's plugin owns feature publication and metadata; there is no legacy
+capture backend or patch fallback.
+
+Primus selects the EAGLE3 capture convention for EAGLE3/EAGLE4 draft configs
+and DFLASH for DFlash drafts. Capture layer IDs still come from the draft JSON.
+The Muse hook captures zero-based decoder layer outputs and the final normalized
+target state. The configured IDs must match the intended draft feature layout.
+The target model and draft JSON are supplied at run time, outside the image.
+
+## Validation
 
 Build-time checks cover CLI imports, the HIP Torch build, a TensorBoard event
-write, capture plugin entry-point discovery, EAGLE4 algorithm registration,
-and a tiny EAGLE4 forward/backward pass on CPU. The tiny model checks software
-compatibility; it is not a Muse draft architecture or model validation.
-
-On 2026-11-04, both build-time and post-build GPU-free checks passed for these
-pins. A comparison against the base confirmed unchanged installed versions of
-SGLang, Torch, Transformers, Triton, NumPy, protobuf, grpcio, Pillow, and packaging.
-
-The pinned base contains SGLang `0.5.21+gc722c0a1` and lacks
-`ModelRunner.forward_observer` and `deferred_output.ResponseCompletion`.
-Installing the capture plugin does not supply those server APIs. This image
-does not patch or replace the Muse-specific SGLang source. Consequently,
-**Primus online and plugin-backed offline capture are unavailable in this
-image**. The normal capture preflight still rejects this stack. A compatible
-Muse runtime or a separately validated API backport is needed before capture.
-Training from existing features is not blocked by these capture checks.
+write, plugin entry-point discovery and extension APIs, EAGLE4 registration,
+and a tiny EAGLE4 forward/backward pass on CPU. Missing capture APIs fail the
+build. The tiny model checks software compatibility; it is not a Muse draft
+architecture or model validation. The backport also passed 76 upstream CPU
+checks for auxiliary capture, token-row alignment, forward observers, deferred
+completion, cancellation, and failed publication.
 
 The image sets `PRIMUS_SPECFORGE_PIN_SGLANG=0.5.21` to match its specialized
 base. This changes the version expectation only; it does not bypass capture
@@ -58,17 +65,17 @@ capability checks or enable a patch fallback.
 Read the installed revision and capability report without GPU access:
 
 ```bash
-docker run --rm --entrypoint cat primus-specforge:muse-spark-eagle4-1c253f04 \
+docker run --rm --entrypoint cat primus-specforge:muse-spark-1027-eagle4-1c253f04 \
   /opt/primus/muse-spark-eagle4-image.json
 ```
 
 Repeat the GPU-free checks with:
 
 ```bash
-docker run --rm --entrypoint bash primus-specforge:muse-spark-eagle4-1c253f04 \
+docker run --rm --entrypoint bash primus-specforge:muse-spark-1027-eagle4-1c253f04 \
   /opt/primus/examples/specforge/docker/smoke-check-muse-eagle4.sh
 ```
 
 No GPU capture, target-model load, or training workload is covered by these
-image checks. Prepare the Muse draft configuration and recipe, resolve capture
-compatibility, and validate those workloads separately.
+image checks. Supply the intended Muse draft configuration and recipe and validate the
+workload on the target hardware separately.

@@ -65,6 +65,26 @@ def test_plugin_launch_preserves_layers_and_server_settings(recipe):
     assert not any(arg.startswith("--spec-capture") or arg == "--enable-spec-capture" for arg in argv)
 
 
+@pytest.mark.parametrize("architecture", ["LlamaForCausalLMEagle3", "LlamaForCausalLMEagle4"])
+def test_eagle_drafts_select_eagle_capture_convention(recipe, architecture):
+    import json
+    from pathlib import Path
+
+    path = Path(recipe.specforge_root) / "configs/draft.json"
+    path.write_text(
+        json.dumps(
+            {
+                "architectures": [architecture],
+                "eagle_config": {"eagle_aux_hidden_state_layer_ids": [1, 5, 9]},
+            }
+        )
+    )
+    settings = online_settings(recipe, env={})
+    argv = sglang_server_argv(0, settings)
+    assert argv[argv.index("--speculative-algorithm") + 1] == "EAGLE3"
+    assert settings["capture_layer_ids"] == (1, 5, 9)
+
+
 @pytest.mark.parametrize(
     "extra",
     [

@@ -1,0 +1,1022 @@
+diff --git a/python/sglang/srt/arg_groups/field_order.py b/python/sglang/srt/arg_groups/field_order.py
+index 0e80eaf..be3f5a0 100644
+--- a/python/sglang/srt/arg_groups/field_order.py
++++ b/python/sglang/srt/arg_groups/field_order.py
+@@ -522,5 +522,8 @@ POSITIONAL_FIELD_ORDER = (
+     "enable_decoder_swa_bounded_replay",
+     "enable_response_store",
+     "disaggregation_decode_host_receive_threshold",
++    "enable_return_aux_hidden_states",
++    "aux_hidden_state_capture",
++    "return_aux_hidden_state_layer_ids",
+ )
+ # fmt: on
+diff --git a/python/sglang/srt/arg_groups/fields/exec_.py b/python/sglang/srt/arg_groups/fields/exec_.py
+index 51e1d56..b9bcbdd 100644
+--- a/python/sglang/srt/arg_groups/fields/exec_.py
++++ b/python/sglang/srt/arg_groups/fields/exec_.py
+@@ -123,6 +123,38 @@ class ExecFeatures(msgspec.Struct):
+             choices=["last", "full"],
+         ),
+     ] = None
++    # Changes what --speculative-algorithm means: with this flag it only names
++    # the capture convention (EAGLE3, DFLASH or DSPARK) and
++    # handle_aux_hidden_state_capture resets it to None, so no draft is loaded,
++    # nothing is reserved for one, and the speculative stack stays off.
++    enable_return_aux_hidden_states: A[
++        bool,
++        "Capture auxiliary hidden states on the target model without running a "
++        "speculative draft. --speculative-algorithm then only names the capture "
++        "convention (EAGLE3, DFLASH or DSPARK) and is reset to None. Requests "
++        "with return_hidden_states receive the concatenated aux hidden states in "
++        "place of the last-layer hidden states. Sets --return-hidden-states-mode "
++        "to full when unset. Requires pp_size == 1.",
++    ] = False
++    # The capture convention behind --enable-return-aux-hidden-states, taken from
++    # --speculative-algorithm. It stays an enum because the models' capture hooks
++    # still differ by draft family (layer-id conventions, mHC contraction).
++    # TODO: unify the per-family capture hooks, then collapse this to the bool.
++    aux_hidden_state_capture: A[
++        Optional[str],
++        Arg(
++            help="Resolved from --enable-return-aux-hidden-states and "
++            "--speculative-algorithm.",
++            no_cli=True,
++            resolvable=True,
++        ),
++    ] = None
++    return_aux_hidden_state_layer_ids: A[
++        Optional[List[int]],
++        "Target-model layer ids for the selected capture convention. These may "
++        "differ from draft-checkpoint layer ids. Required for DFLASH and DSPARK; "
++        "EAGLE3 defaults to the model's EAGLE3 layers.",
++    ] = None
+     enable_return_routed_experts: A[
+         bool, "Enable returning routed experts of each layer with responses."
+     ] = False
+diff --git a/python/sglang/srt/arg_groups/pipeline.py b/python/sglang/srt/arg_groups/pipeline.py
+index 2949043..861e729 100644
+--- a/python/sglang/srt/arg_groups/pipeline.py
++++ b/python/sglang/srt/arg_groups/pipeline.py
+@@ -80,6 +80,7 @@ def run_resolution_pipeline(server_args: Any) -> None:
+     run_hook(handle_offload_compatibility, server_args)
+     from sglang.srt.arg_groups.validation_hook import (
+         default_unset_prefill_decode_interval,
++        handle_aux_hidden_state_capture,
+         validate_experimental_sgl_marlin,
+         validate_prefill_decode_interval,
+         validate_response_store,
+@@ -89,6 +90,8 @@ def run_resolution_pipeline(server_args: Any) -> None:
+     run_hook(validate_prefill_decode_interval, server_args)
+     run_hook(validate_response_store, server_args)
+     run_hook(validate_sampling_mask_max_tokens, server_args)
++    # Before any reader of speculative_algorithm: the flag may reset it.
++    run_hook(handle_aux_hidden_state_capture, server_args)
+ 
+     # Reject an explicitly enabled but incompatible hardware runtime before
+     # model path resolution, downloads, or the dummy-model short circuit.
+diff --git a/python/sglang/srt/arg_groups/resolution_hooks.py b/python/sglang/srt/arg_groups/resolution_hooks.py
+index 79c4174..4b11df7 100644
+--- a/python/sglang/srt/arg_groups/resolution_hooks.py
++++ b/python/sglang/srt/arg_groups/resolution_hooks.py
+@@ -24,6 +24,7 @@ _OVERRIDABLE_HOOKS: FrozenSet[str] = frozenset(
+         "default_unset_prefill_decode_interval",
+         "validate_response_store",
+         "validate_sampling_mask_max_tokens",
++        "handle_aux_hidden_state_capture",
+         "validate_prefill_cp_platform",
+         "handle_hardware_runtime_validation",
+         "handle_model_source_paths",
+diff --git a/python/sglang/srt/arg_groups/serving_hook.py b/python/sglang/srt/arg_groups/serving_hook.py
+index c04056e..680af31 100644
+--- a/python/sglang/srt/arg_groups/serving_hook.py
++++ b/python/sglang/srt/arg_groups/serving_hook.py
+@@ -695,7 +695,7 @@ def handle_return_hidden_states_mode(server_args: Any):
+             "return_hidden_states_mode must be one of: None, 'last', or 'full'."
+         )
+     if cfg.return_hidden_states_mode is None:
+-        if cfg.enable_return_hidden_states:
++        if cfg.enable_return_hidden_states or cfg.enable_return_aux_hidden_states:
+             declare_resolution(
+                 server_args,
+                 "_handle_return_hidden_states_mode",
+diff --git a/python/sglang/srt/arg_groups/validation_hook.py b/python/sglang/srt/arg_groups/validation_hook.py
+index 1c929ef..7c96076 100644
+--- a/python/sglang/srt/arg_groups/validation_hook.py
++++ b/python/sglang/srt/arg_groups/validation_hook.py
+@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
+ from sglang.srt.arg_groups.choices import BUILT_IN_SAMPLING_BACKENDS
+ from sglang.srt.arg_groups.overrides import (
+     _hisparse_validation,
++    declare_resolution,
+     resolved_view,
+     resolving_view,
+     run_post_process_pass,
+@@ -688,6 +689,68 @@ def validate_sampling_mask_max_tokens(server_args: Any):
+         )
+ 
+ 
++_AUX_HIDDEN_STATE_CAPTURE_METHODS = ("EAGLE3", "DFLASH", "DSPARK")
++
++
++def handle_aux_hidden_state_capture(server_args: Any):
++    """--enable-return-aux-hidden-states: aux capture on a target without a draft.
++
++    Must run before anything reads speculative_algorithm: with the flag, that
++    argument only names the capture convention and is reset to None here, so
++    the speculative stack stays off.
++    """
++    cfg = resolving_view(server_args)
++    if not cfg.enable_return_aux_hidden_states:
++        if cfg.return_aux_hidden_state_layer_ids is not None:
++            raise ValueError(
++                "--return-aux-hidden-state-layer-ids requires "
++                "--enable-return-aux-hidden-states."
++            )
++        return
++    method = (cfg.speculative_algorithm or "").upper()
++    if method not in _AUX_HIDDEN_STATE_CAPTURE_METHODS:
++        raise ValueError(
++            "--enable-return-aux-hidden-states needs --speculative-algorithm "
++            "EAGLE3, DFLASH or DSPARK to name the capture convention, got "
++            f"{cfg.speculative_algorithm!r}."
++        )
++    if cfg.speculative_draft_model_path is not None:
++        raise ValueError(
++            "--enable-return-aux-hidden-states captures without a draft; drop "
++            "--speculative-draft-model-path."
++        )
++    if cfg.pp_size != 1:
++        raise ValueError(
++            "--enable-return-aux-hidden-states only supports pp_size == 1: the "
++            "capture hooks only see the layers on the last pipeline rank."
++        )
++    layer_ids = cfg.return_aux_hidden_state_layer_ids
++    if method != "EAGLE3" and not layer_ids:
++        raise ValueError(
++            f"--enable-return-aux-hidden-states with {method} requires "
++            "--return-aux-hidden-state-layer-ids."
++        )
++    if layer_ids is not None:
++        if len(layer_ids) == 0:
++            raise ValueError("--return-aux-hidden-state-layer-ids must not be empty.")
++        if any(layer_id < 0 for layer_id in layer_ids):
++            raise ValueError(
++                "--return-aux-hidden-state-layer-ids must be non-negative, got "
++                f"{list(layer_ids)}."
++            )
++        if len(set(layer_ids)) != len(layer_ids):
++            raise ValueError(
++                "--return-aux-hidden-state-layer-ids must not repeat a layer, got "
++                f"{list(layer_ids)}."
++            )
++    declare_resolution(
++        server_args,
++        "_handle_aux_hidden_state_capture",
++        speculative_algorithm=None,
++        aux_hidden_state_capture=method.lower(),
++    )
++
++
+ def check_two_batch_overlap(server_args: Any):
+     # With no EP a2a backend, two-batch-overlap is only valid on the non-EP
+     # DP TP-MoE path (overlapping the DP all_gatherv / reduce_scatterv with
+diff --git a/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py
+index abbe52d..08c4446 100644
+--- a/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py
++++ b/python/sglang/srt/hardware_backend/npu/graph_runner/npu_graph_runner.py
+@@ -434,6 +434,11 @@ class NPUGraphRunner(DecodeCudaGraphRunner):
+                     if output.hidden_states is not None
+                     else None
+                 ),
++                last_hidden_states=(
++                    output.last_hidden_states[: self.raw_num_token]
++                    if output.last_hidden_states is not None
++                    else None
++                ),
+             )
+         else:
+             assert isinstance(output, PPProxyTensors)
+diff --git a/python/sglang/srt/layers/logits_processor.py b/python/sglang/srt/layers/logits_processor.py
+index a257117..8e79af3 100644
+--- a/python/sglang/srt/layers/logits_processor.py
++++ b/python/sglang/srt/layers/logits_processor.py
+@@ -228,6 +228,12 @@ class LogitsProcessorOutput:
+     # Original flattened token indices when only a subset of hidden rows is captured.
+     hidden_states_token_indices: Optional[torch.Tensor] = None
+ 
++    # Post-norm last-layer hidden states of every token, kept under full capture
++    # when `hidden_states` holds the aux hidden states
++    # (--enable-return-aux-hidden-states).
++    # For in-process consumers of this output; not copied into the response path.
++    last_hidden_states: Optional[torch.Tensor] = None
++
+     ## Part 2: This part will be assigned in python/sglang/srt/layers/sampler.py::Sampler
+     # he log probs of output tokens, if SGLANG_RETURN_ORIGINAL_LOGPROB = True, will get the log probs before applying temperature. If False, will get the log probs before applying temperature.
+     next_token_logprobs: Optional[torch.Tensor] = None
+@@ -492,6 +498,17 @@ class LogitsProcessor(nn.Module):
+ 
+         self.return_full_logits = return_full_logits
+         self.enable_mis = get_exec().features.enable_mis
++        features = get_exec().features
++        self.keep_last_hidden_states = features.aux_hidden_state_capture is not None
++        # Capture-only mode: how many layers the model must capture, when
++        # --return-aux-hidden-state-layer-ids names them.
++        layer_ids = features.return_aux_hidden_state_layer_ids
++        self.expected_aux_hidden_states = (
++            len(layer_ids)
++            if self.keep_last_hidden_states and layer_ids is not None
++            else None
++        )
++        self._aux_hidden_states_checked = False
+         self.rl_on_policy_target = get_exec().deterministic.rl_on_policy_target
+ 
+         self._logits_gatherer = triton_symm_mem_ag.MultimemAllGatherer(
+@@ -548,6 +565,11 @@ class LogitsProcessor(nn.Module):
+             forward_mode=logits_metadata.forward_mode,
+         )
+ 
++        if self.expected_aux_hidden_states is not None:
++            self._check_aux_hidden_states(
++                aux_hidden_states, hidden_states, logits_metadata
++            )
++
+         # Setwise scoring (CausalLM): read label-token logprobs AT each anchor
+         # position instead of the last token. Takes precedence over the MIS
+         # delimiter path; the two are mutually exclusive for generation.
+@@ -599,6 +621,9 @@ class LogitsProcessor(nn.Module):
+             sample_indices,
+             logits_metadata,
+         )
++        last_hidden_states_to_store = self._get_last_hidden_states_to_store(
++            hidden_states, aux_hidden_states, logits_metadata
++        )
+         del hidden_states
+ 
+         if not logits_metadata.extend_return_logprob:
+@@ -612,6 +637,7 @@ class LogitsProcessor(nn.Module):
+             return LogitsProcessorOutput(
+                 next_token_logits=sampled_logits,
+                 hidden_states=hidden_states_to_store,
++                last_hidden_states=last_hidden_states_to_store,
+                 mm_input_embeds=logits_metadata.mm_input_embeds,
+             )
+ 
+@@ -629,6 +655,7 @@ class LogitsProcessor(nn.Module):
+         logits_output = LogitsProcessorOutput(
+             next_token_logits=sampled_logits,
+             hidden_states=hidden_states_to_store,
++            last_hidden_states=last_hidden_states_to_store,
+             mm_input_embeds=logits_metadata.mm_input_embeds,
+         )
+         logprobs_result.write_input_to(logits_output)
+@@ -873,6 +900,53 @@ class LogitsProcessor(nn.Module):
+ 
+         return hidden_states_to_store
+ 
++    def _get_last_hidden_states_to_store(
++        self,
++        hidden_states: torch.Tensor,
++        aux_hidden_states: Optional[AuxHiddenStates],
++        logits_metadata: LogitsMetadata,
++    ) -> Optional[torch.Tensor]:
++        if (
++            self.keep_last_hidden_states
++            and aux_hidden_states is not None
++            and logits_metadata.capture_hidden_mode.is_full()
++        ):
++            return hidden_states
++        return None
++
++    def _check_aux_hidden_states(
++        self,
++        aux_hidden_states: Optional[AuxHiddenStates],
++        hidden_states: torch.Tensor,
++        logits_metadata: LogitsMetadata,
++    ) -> None:
++        """Fail at the first forward if the model captured fewer layers than asked.
++
++        Most models cannot capture their last layer: the hooks capture a layer's
++        output as the next layer's input, and nothing follows the last one.
++        """
++        if (
++            self._aux_hidden_states_checked
++            or logits_metadata.forward_mode.is_idle()
++            or hidden_states.shape[0] == 0
++        ):
++            return
++        expected = self.expected_aux_hidden_states
++        if aux_hidden_states is None:
++            captured = 0
++        elif isinstance(aux_hidden_states, torch.Tensor):
++            captured = aux_hidden_states.shape[-1] / hidden_states.shape[-1]
++        else:
++            captured = len(aux_hidden_states)
++        if captured != expected:
++            raise ValueError(
++                f"The model captured {captured:g} aux hidden states, but "
++                f"--return-aux-hidden-state-layer-ids names {expected} layers. A "
++                "layer this model cannot capture, usually its last layer, is the "
++                "likely cause."
++            )
++        self._aux_hidden_states_checked = True
++
+     def _get_logits(
+         self,
+         hidden_states: torch.Tensor,
+diff --git a/python/sglang/srt/managers/deferred_output.py b/python/sglang/srt/managers/deferred_output.py
+new file mode 100644
+index 0000000..3860363
+--- /dev/null
++++ b/python/sglang/srt/managers/deferred_output.py
+@@ -0,0 +1,27 @@
++"""Completion contract for ``Scheduler.defer_response(req, completion)``.
++
++One completion holds each response; ``concurrent.futures.Future[None]`` works.
++The scheduler polls it while busy, idle or paused, then calls ``result`` before
++streaming; errors abort the response. Cancellation retires responses even if
++work continues; completions must not cancel work needed by sibling requests.
++
++Completions own payloads after KV release. Held responses do not affect
++``Scheduler.is_fully_idle``: only the output rank holds them, so TP ranks must
++agree on idle-gated operations. PD disaggregation is unsupported.
++"""
++
++from typing import Protocol
++
++
++class ResponseCompletion(Protocol):
++    def done(self) -> bool:
++        """Whether ``result`` can be called without blocking."""
++        ...
++
++    def result(self) -> None:
++        """Finalize metadata on the scheduler thread, or raise on failure."""
++        ...
++
++    def cancel(self) -> bool:
++        """Attempt to cancel work without blocking; never emit a response."""
++        ...
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+index 45ff08e..6979384 100644
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -1151,6 +1151,8 @@ class Req(ReqDllmMixin):
+         self.finished_len = None
+         # Whether this request has finished output
+         self.finished_output = None
++        # Owned by Scheduler.defer_response until its completion is retired.
++        self.defer_output = False
+         # If we want to abort the request in the middle of the event loop,
+         # set to_finish instead of directly setting finished_reason.
+         # Note: We should never set finished_reason in the middle, the req will get filtered and never respond
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 1744fa8..8c31d48 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -117,6 +117,7 @@ from sglang.srt.layers.quantization.fp8_utils import initialize_fp8_gemm_config
+ from sglang.srt.layers.quantization.unquant import initialize_bf16_gemm_config
+ from sglang.srt.lora.lora_drainer import LoRADrainer
+ from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
++from sglang.srt.managers.deferred_output import ResponseCompletion
+ from sglang.srt.managers.disagg_service import maybe_create_ascend_config_store
+ from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
+ from sglang.srt.managers.io_struct import (
+@@ -456,6 +457,8 @@ class Scheduler(
+     # overrides init_load_publisher (which would otherwise not set it).
+     _last_stall_publish_ts: float = float("-inf")
+     kv_checksum_computer: Optional[KvChecksumComputer] = None
++    # Allocate per instance only when a consumer first defers a response.
++    _deferred_responses: Optional[Dict[str, Tuple[Req, ResponseCompletion]]] = None
+ 
+     def __init__(
+         self,
+@@ -2587,6 +2590,70 @@ class Scheduler(
+     def get_output_streamer_class(self) -> type[SchedulerOutputStreamer]:
+         return SchedulerOutputStreamer
+ 
++    def send_abort_output(self, abort_req: AbortReq, req: Req) -> None:
++        """Send deferred-response failures through the active frontend."""
++        if self.rust_server is not None:
++            self.rust_server.push_abort(abort_req, req)
++        else:
++            self.ipc_channels.send_to_tokenizer.send_output(abort_req, req)
++
++    def defer_response(self, req: Req, completion: ResponseCompletion) -> None:
++        """Hold a finished response until completion; see deferred_output."""
++        if self.disaggregation_mode != DisaggregationMode.NULL:
++            raise ValueError("deferred responses do not support PD disaggregation")
++        if not req.finished() or req.finished_output:
++            raise ValueError("only finished, unstreamed responses can be deferred")
++        if self._deferred_responses is None:
++            self._deferred_responses = {}
++        if req.rid in self._deferred_responses:
++            raise ValueError(f"response {req.rid!r} is already deferred")
++        self._deferred_responses[req.rid] = (req, completion)
++        req.defer_output = True
++        self.output_streamer.defer_outputs = True
++
++    def stream_released_deferred_outputs(self) -> None:
++        ready = []
++        for rid, (req, completion) in list((self._deferred_responses or {}).items()):
++            if not completion.done():
++                continue
++            del self._deferred_responses[rid]
++            req.defer_output = False
++            try:
++                completion.result()
++            except Exception as exc:
++                logger.exception("Deferred response failed for %s", rid)
++                self._abort_deferred_response(
++                    req, FINISH_ABORT(str(exc), status_code=500).to_json()
++                )
++            else:
++                ready.append(req)
++        if ready:
++            self.output_streamer.stream_output(
++                ready, any(req.return_logprob for req in ready)
++            )
++
++    def has_pending_deferred_outputs(self) -> bool:
++        return bool(self._deferred_responses)
++
++    def _abort_deferred_response(
++        self, req: Req, finished_reason: Optional[FinishReasonDict]
++    ) -> None:
++        req.defer_output = False
++        req.finished_output = True
++        self.send_abort_output(
++            _make_abort_req(req, finished_reason=finished_reason), req
++        )
++
++    def _abort_deferred_responses(self, recv_req: AbortReq) -> None:
++        for rid, (req, completion) in list((self._deferred_responses or {}).items()):
++            if recv_req.abort_all or rid.startswith(recv_req.rid):
++                del self._deferred_responses[rid]
++                try:
++                    completion.cancel()
++                except Exception:
++                    logger.exception("Failed to cancel deferred work for %s", rid)
++                self._abort_deferred_response(req, recv_req.finished_reason)
++
+     def init_beam_coordinator(self) -> None:
+         self.beam_coordinator = BeamCoordinator(
+             model_config=self.model_config,
+@@ -4939,7 +5006,10 @@ class Scheduler(
+         logits_output = result.logits_output
+         if (
+             logits_output is None
+-            or logits_output.auxiliary_device_output is None
++            or (
++                logits_output.auxiliary_device_output is None
++                and result.forward_auxiliary_output is None
++            )
+             or result.auxiliary_host_output is not None
+         ):
+             return
+@@ -5018,6 +5088,8 @@ class Scheduler(
+         batch: ScheduleBatch,
+         result: Union[GenerationBatchResult, EmbeddingBatchResult],
+     ):
++        if self._deferred_responses:
++            self.stream_released_deferred_outputs()
+         # Flush async trace ops here: in overlap mode this CPU work runs while
+         # the next batch's GPU forward is in flight, giving free overlap.
+         flush_trace_batch(batch.reqs)
+@@ -5167,6 +5239,8 @@ class Scheduler(
+     def on_idle(self):
+         """Idle housekeeping: guard, check, metrics, reset, sleep."""
+         self.dp_attn_adapter.drop_sync_wait_carry()
++        if self._deferred_responses:
++            self.stream_released_deferred_outputs()
+         # Flush any health-check signal deferred while the engine was busy.
+         self.maybe_send_health_check_signal()
+ 
+@@ -5191,9 +5265,11 @@ class Scheduler(
+                 self.enable_hicache_storage
+                 or self.disaggregation_mode != DisaggregationMode.NULL
+                 or self.enable_lmcache
++                or self._deferred_responses
+             ):
+-                # Storage and transfer workers need the GIL between I/O calls.
+-                # Singleton PD polls no longer yield through a collective.
++                # Storage, transfer, and deferred-output workers need the GIL
++                # between I/O calls. Singleton PD polls no longer yield through
++                # a collective.
+                 time.sleep(0)
+             return
+         self.metrics_reporter.record_scheduler_idle()
+@@ -5250,11 +5326,19 @@ class Scheduler(
+             self.load_inquirer.get_loads, force=True, snapshot=snapshot
+         )
+ 
+-        # sleep until next event
+-        self.maybe_sleep_on_idle()
++        if self.has_pending_deferred_outputs():
++            # Held responses are released by polling, not by a socket event:
++            # keep polling, and yield the GIL to the completion's worker.
++            time.sleep(0)
++        else:
++            # sleep until next event
++            self.maybe_sleep_on_idle()
+         self.metrics_reporter.record_scheduler_idle()
+ 
+     def _record_scheduler_state_for_paused_engine(self) -> None:
++        if self._deferred_responses:
++            self.stream_released_deferred_outputs()
++            time.sleep(0)
+         if self.is_fully_idle():
+             self.metrics_reporter.record_scheduler_idle()
+         else:
+@@ -5523,6 +5607,7 @@ class Scheduler(
+             *self.collect_inflight_reqs(),
+             *self.waiting_queue,
+             *([self.chunked_req] if self.chunked_req is not None else []),
++            *(req for req, _ in (self._deferred_responses or {}).values()),
+         }
+         if self.hisparse_coordinator is not None:
+             live_reqs.update(
+@@ -5552,6 +5637,8 @@ class Scheduler(
+         return inflight_batches
+ 
+     def abort_request(self, recv_req: AbortReq):
++        if self._deferred_responses:
++            self._abort_deferred_responses(recv_req)
+         if (chunked_req := self.chunked_req) is not None:
+             if recv_req.abort_all or chunked_req.rid.startswith(recv_req.rid):
+                 self._pending_chunked_abort_req = chunked_req
+diff --git a/python/sglang/srt/managers/scheduler_components/output_streamer.py b/python/sglang/srt/managers/scheduler_components/output_streamer.py
+index 9fb430f..d0c992e 100644
+--- a/python/sglang/srt/managers/scheduler_components/output_streamer.py
++++ b/python/sglang/srt/managers/scheduler_components/output_streamer.py
+@@ -62,6 +62,8 @@ class SchedulerOutputStreamer:
+     # Rust egress ring via `rust_server.push_generation` instead of the zmq
+     # detokenizer. None otherwise. (Rust-specific state lives in RustServer.)
+     rust_server: Optional[RustServer] = None
++    # Set when the scheduler first defers a response; see deferred_output.
++    defer_outputs: bool = False
+     _test_stream_output_count: int = 0
+ 
+     def __post_init__(self) -> None:
+@@ -123,6 +125,9 @@ class SchedulerOutputStreamer:
+         skip_req: Optional[Req] = None,
+     ):
+         """Stream the output to detokenizer."""
++        if self.defer_outputs:
++            # The scheduler releases held requests after their work completes.
++            reqs = [req for req in reqs if not req.defer_output]
+         if self.is_generation:
+             self._stream_output_generation(reqs, return_logprob, skip_req)
+         else:  # embedding or reward model
+diff --git a/python/sglang/srt/managers/tp_worker.py b/python/sglang/srt/managers/tp_worker.py
+index bd962fe..0b2a7aa 100644
+--- a/python/sglang/srt/managers/tp_worker.py
++++ b/python/sglang/srt/managers/tp_worker.py
+@@ -680,6 +680,16 @@ class TpModelWorker(BaseTpWorker):
+                     else self.model_runner.kv_index_translator.own_plan(batch)
+                 ),
+             )
++            if (
++                batch is not None
++                and (observer := self.model_runner.forward_observer) is not None
++            ):
++                batch_result.forward_auxiliary_output = observer.after_forward(
++                    batch,
++                    forward_batch,
++                    logits_output,
++                    can_run_graph=can_run_cuda_graph,
++                )
+ 
+             capture_pre_sample_logits(batch, forward_batch, logits_output)
+ 
+diff --git a/python/sglang/srt/managers/utils.py b/python/sglang/srt/managers/utils.py
+index 1a0b2ad..a9d0f52 100644
+--- a/python/sglang/srt/managers/utils.py
++++ b/python/sglang/srt/managers/utils.py
+@@ -16,6 +16,7 @@ from sglang.srt.layers.logits_processor import (
+     SamplingMaskOutput,
+ )
+ from sglang.srt.managers import io_struct
++from sglang.srt.managers.auxiliary_output import append_auxiliary_output
+ from sglang.srt.managers.schedule_batch import Req
+ from sglang.srt.model_executor.forward_batch_info import PPProxyTensors
+ from sglang.srt.runtime_context import get_spec, max_speculative_num_draft_tokens
+@@ -25,7 +26,7 @@ from sglang.srt.utils.common import async_d2h as _async_d2h
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.managers.async_d2h_copy_worker import HostCopyDone
+-    from sglang.srt.managers.auxiliary_output import HostAuxiliaryOutput
++    from sglang.srt.managers.auxiliary_output import DeviceAuxiliaryOutput, HostAuxiliaryOutput
+     from sglang.srt.managers.scheduler import GenerationBatchResult
+     from sglang.srt.mem_cache.kv_loc_plan import KVLocPlan
+     from sglang.srt.speculative.spec_info import SpecInput
+@@ -149,6 +150,8 @@ class GenerationBatchResult:
+     fpm_start_event: Optional[torch.cuda.Event] = None
+     fpm_end_event: Optional[torch.cuda.Event] = None
+ 
++    # Forward observer payloads join the existing auxiliary host-copy path.
++    forward_auxiliary_output: Optional[DeviceAuxiliaryOutput] = None
+     auxiliary_host_output: Optional[HostAuxiliaryOutput] = None
+ 
+     @property
+@@ -229,10 +232,13 @@ class GenerationBatchResult:
+     def copy_auxiliary_output_to_cpu(self) -> None:
+         if self.logits_output is None or self.auxiliary_host_output is not None:
+             return
+-        device_output = self.logits_output.auxiliary_device_output
++        device_output = append_auxiliary_output(
++            self.forward_auxiliary_output, self.logits_output.auxiliary_device_output
++        )
+         if device_output is not None:
+             self.auxiliary_host_output = device_output.copy_to_host(_async_d2h)
+             self.logits_output.auxiliary_device_output = None
++            self.forward_auxiliary_output = None
+ 
+     @classmethod
+     def from_pp_proxy(
+diff --git a/python/sglang/srt/model_executor/cpu_graph_runner.py b/python/sglang/srt/model_executor/cpu_graph_runner.py
+index ad8a0e4..ef168f7 100644
+--- a/python/sglang/srt/model_executor/cpu_graph_runner.py
++++ b/python/sglang/srt/model_executor/cpu_graph_runner.py
+@@ -1000,6 +1000,11 @@ class CPUGraphRunner:
+                 if output.hidden_states is not None
+                 else None
+             ),
++            last_hidden_states=(
++                output.last_hidden_states[: self.raw_num_token]
++                if output.last_hidden_states is not None
++                else None
++            ),
+         )
+ 
+     def get_spec_info(self, num_tokens: int):
+diff --git a/python/sglang/srt/model_executor/encoder_swa_replay.py b/python/sglang/srt/model_executor/encoder_swa_replay.py
+index 10df46d..ca557a7 100644
+--- a/python/sglang/srt/model_executor/encoder_swa_replay.py
++++ b/python/sglang/srt/model_executor/encoder_swa_replay.py
+@@ -43,32 +43,36 @@ def apply_folded_extend(folded: FoldedExtend, forward_batch) -> None:
+     forward_batch.encoder_swa_compress_rows = folded.keep_rows
+ 
+ 
+-def drop_folded_rows(*, logits_output, folded: FoldedExtend) -> None:
++def drop_folded_rows(*, logits_output, folded: FoldedExtend, tail_lens: Optional[list[int]] = None) -> None:
+     """Hand downstream consumers (the DSpark draft) only the original extend rows."""
+     hidden = logits_output.hidden_states
+     token_indices = logits_output.hidden_states_token_indices
+     if token_indices is not None:
+         # Decoder-SWA tail rows index the folded extend; keep those on original rows.
+         keep = _tail_rows_on_original(
+-            folded=folded, num_tail_rows=token_indices.shape[0]
++            folded=folded, tail_lens=tail_lens, num_tail_rows=token_indices.shape[0]
+         ).to(token_indices.device, non_blocking=True)
+         logits_output.hidden_states_token_indices = folded.scheduled_row[
+             token_indices[keep]
+         ]
+         if hidden is not None:
+             logits_output.hidden_states = hidden[keep]
++            if logits_output.last_hidden_states is not None:
++                logits_output.last_hidden_states = logits_output.last_hidden_states[keep]
+     elif hidden is not None and hidden.shape[0] >= folded.num_rows:
+         # MLP-sync padding rows, if any, follow the real rows and are dropped too.
+         logits_output.hidden_states = hidden[folded.keep_rows]
++        if logits_output.last_hidden_states is not None:
++            logits_output.last_hidden_states = logits_output.last_hidden_states[folded.keep_rows]
+ 
+ 
+-def _tail_rows_on_original(*, folded: FoldedExtend, num_tail_rows: int):
+-    # Each request's tail is its last SWA_WINDOW folded rows; replay rows lead it.
+-    from sglang.srt.layers.attention.deepseek_v4_backend import SWA_WINDOW
+-
++def _tail_rows_on_original(*, folded: FoldedExtend, num_tail_rows: int, tail_lens: Optional[list[int]] = None):
++    # Preserve this image's callers that use the fixed encoder replay window.
++    if tail_lens is None:
++        from sglang.srt.layers.attention.deepseek_v4_backend import SWA_WINDOW
++        tail_lens = [min(SWA_WINDOW, n) for n in folded.batch.extend_lens]
+     keep, off = [], 0
+-    for n, r in zip(folded.batch.extend_lens, folded.replay_lens):
+-        tail = min(SWA_WINDOW, n)
++    for n, r, tail in zip(folded.batch.extend_lens, folded.replay_lens, tail_lens):
+         keep.append(torch.arange(off + max(0, tail - (n - r)), off + tail))
+         off += tail
+     assert off == num_tail_rows, (off, num_tail_rows)
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index dae1ff0..b8de8d4 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -2155,6 +2155,15 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+             if logits_output.hidden_states is not None:
+                 logits_output.hidden_states = logits_output.hidden_states[:num_tokens]
+ 
++        # Full aux capture keeps both outputs on the same token rows.
++        if (
++            logits_output.hidden_states is not None
++            and logits_output.last_hidden_states is not None
++        ):
++            logits_output.last_hidden_states = logits_output.last_hidden_states[
++                : logits_output.hidden_states.shape[0]
++            ]
++
+     @property
+     def can_run_tbo(self):
+         return self.tbo_split_seq_index is not None
+diff --git a/python/sglang/srt/model_executor/forward_observer.py b/python/sglang/srt/model_executor/forward_observer.py
+new file mode 100644
+index 0000000..e8d88ca
+--- /dev/null
++++ b/python/sglang/srt/model_executor/forward_observer.py
+@@ -0,0 +1,34 @@
++"""Forward-time auxiliary output for ``ModelRunner.forward_observer``.
++
++Outputs are copied to the host with generation results and consumed before
++the batch is streamed.
++"""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Optional, Protocol
++
++if TYPE_CHECKING:
++    from sglang.srt.layers.logits_processor import LogitsProcessorOutput
++    from sglang.srt.managers.auxiliary_output import DeviceAuxiliaryOutput
++    from sglang.srt.managers.schedule_batch import ScheduleBatch
++    from sglang.srt.model_executor.forward_batch_info import ForwardBatch
++
++
++class ForwardObserver(Protocol):
++    def after_forward(
++        self,
++        batch: ScheduleBatch,
++        forward_batch: ForwardBatch,
++        logits_output: LogitsProcessorOutput,
++        *,
++        can_run_graph: bool,
++    ) -> Optional[DeviceAuxiliaryOutput]:
++        """Return device output for later scheduler-side copying, or ``None``.
++
++        Runs on the scheduler thread and forward stream after forward launch.
++        Snapshot needed ``batch`` fields here; it may change before consumption.
++        With ``can_run_graph``, copy any retained logits-output views: a later
++        replay can overwrite the underlying CUDA graph buffers.
++        """
++        ...
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index 6818ad7..fdabcfc 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -114,6 +114,7 @@ from sglang.srt.model_executor.forward_context import (
+     forward_context,
+     has_forward_context,
+ )
++from sglang.srt.model_executor.forward_observer import ForwardObserver
+ from sglang.srt.model_executor.graph_memory_usage import (
+     replace_graph_memory_usage,
+     replace_graph_time_usage,
+@@ -193,6 +194,7 @@ from sglang.srt.runtime_context import (
+     assert_published,
+     get_context,
+     get_device,
++    get_disagg,
+     get_exec,
+     get_global_dwdp_manager,
+     get_lora,
+@@ -336,6 +338,32 @@ class ModelRunner:
+         """Whether this runner's sampling path publishes observer output."""
+         return get_exec().dllm.dllm_algorithm is None and self.spec_algorithm.is_none()
+ 
++    @property
++    def forward_observer(self) -> Optional[ForwardObserver]:
++        return self._forward_observer
++
++    @forward_observer.setter
++    def forward_observer(self, observer: Optional[ForwardObserver]) -> None:
++        if observer is not None and not self.supports_forward_observer():
++            raise ValueError(
++                "forward observers are not supported by the configured forward path"
++            )
++        self._forward_observer = observer
++
++    def supports_forward_observer(self) -> bool:
++        """Whether this runner's forward path publishes forward-observer output."""
++        from sglang.srt.hardware_backend.mlx.runtime import use_mlx
++
++        return (
++            not self.is_draft_worker
++            and self.is_generation
++            and not use_mlx()
++            and not get_disagg().enable_pdmux
++            and get_exec().dllm.dllm_algorithm is None
++            and self.spec_algorithm.is_none()
++            and get_parallel().pp_size == 1
++        )
++
+     def __init__(
+         self,
+         model_config: ModelConfig,
+@@ -407,6 +435,7 @@ class ModelRunner:
+         # space and must not construct a second sparse coordinator.
+         self.enable_hisparse = get_memory().enable_hisparse and not is_draft_worker
+         self._sampling_observer: Optional[SamplingObserver] = None
++        self._forward_observer: Optional[ForwardObserver] = None
+         self.sampling_prewarm_result = SamplingPrewarmResult()
+ 
+         self.init_startup_observability()
+@@ -415,7 +444,7 @@ class ModelRunner:
+ 
+         self.init_msprobe()
+ 
+-        # auxiliary hidden capture mode. TODO: expose this to server args?
++        # Auxiliary hidden capture: from the draft, or --enable-return-aux-hidden-states.
+         self.init_spec_aux_hidden_state()
+ 
+         # Apply the rank zero filter to logger
+@@ -1093,7 +1122,7 @@ class ModelRunner:
+             eagle_aux_hidden_state_layer_ids=self.spec_aux_config.eagle_aux_hidden_state_layer_ids,
+             dflash_use_aux_hidden_state=self.spec_aux_config.dflash_use_aux_hidden_state,
+             dflash_target_layer_ids=self.spec_aux_config.dflash_target_layer_ids,
+-            is_dspark=self.spec_algorithm.is_dspark(),
++            is_dspark=self.spec_aux_config.is_dspark,
+         )
+         # Resolve before building: backends read the pair off the runner while
+         # they construct (the FlashInfer KV-access check).
+diff --git a/python/sglang/srt/model_executor/model_runner_components/attention_backend_setup.py b/python/sglang/srt/model_executor/model_runner_components/attention_backend_setup.py
+index dd4544d..309d6dd 100644
+--- a/python/sglang/srt/model_executor/model_runner_components/attention_backend_setup.py
++++ b/python/sglang/srt/model_executor/model_runner_components/attention_backend_setup.py
+@@ -52,6 +52,12 @@ def configure_aux_hidden_state_capture(
+     include aux hidden state output paths.
+     """
+     if eagle_use_aux_hidden_state:
++        if not hasattr(model, "set_eagle3_layers_to_capture"):
++            raise ValueError(
++                f"Model {model.__class__.__name__} does not implement "
++                "set_eagle3_layers_to_capture, which EAGLE3 aux hidden-state "
++                "capture requires."
++            )
+         model.set_eagle3_layers_to_capture(eagle_aux_hidden_state_layer_ids)
+     if dflash_use_aux_hidden_state:
+         if is_dspark and hasattr(model, "set_dspark_layers_to_capture"):
+diff --git a/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py b/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
+index d8a70ce..7d288de 100644
+--- a/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
++++ b/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
+@@ -7,6 +7,7 @@ import msgspec
+ 
+ from sglang.srt.configs.model_config import ModelConfig, is_deepseek_v4
+ from sglang.srt.runtime_context import (
++    get_exec,
+     get_model,
+     get_parallel,
+     get_spec,
+@@ -52,6 +53,8 @@ class SpecAuxHiddenStateConfig(msgspec.Struct, kw_only=True):
+     # EAGLE draft pool is sized by `eagle_draft_num_layers` instead.
+     draft_model_config: Optional[ModelConfig] = None
+     draft_kv_num_layers: Optional[int] = None
++    # Route the DFLASH-family capture to the model's DSPARK hook when it has one.
++    is_dspark: bool = False
+ 
+ 
+ def resolve_spec_aux_hidden_state_config(
+@@ -61,7 +64,13 @@ def resolve_spec_aux_hidden_state_config(
+     spec_algorithm: SpeculativeAlgorithm,
+     is_draft_worker: bool,
+ ) -> SpecAuxHiddenStateConfig:
+-    config = SpecAuxHiddenStateConfig()
++    config = SpecAuxHiddenStateConfig(is_dspark=spec_algorithm.is_dspark())
++    _resolve_capture_only_aux_hidden_state(
++        config=config,
++        model_config=model_config,
++        spec_algorithm=spec_algorithm,
++        is_draft_worker=is_draft_worker,
++    )
+     _resolve_eagle_aux_hidden_state(
+         config=config,
+         server_args=server_args,
+@@ -79,6 +88,54 @@ def resolve_spec_aux_hidden_state_config(
+     return config
+ 
+ 
++def _resolve_capture_only_aux_hidden_state(
++    *,
++    config: SpecAuxHiddenStateConfig,
++    model_config: ModelConfig,
++    spec_algorithm: SpeculativeAlgorithm,
++    is_draft_worker: bool,
++) -> None:
++    """--enable-return-aux-hidden-states: aux capture on a target without a draft.
++
++    No draft layer counts are set, so the KV pool reserves nothing for a draft.
++    """
++    features = get_exec().features
++    method = features.aux_hidden_state_capture
++    if method is None or is_draft_worker or not spec_algorithm.is_none():
++        return
++    layer_ids = features.return_aux_hidden_state_layer_ids
++    if layer_ids is not None:
++        _check_capture_layer_ids_in_range(layer_ids, model_config)
++    if method == "eagle3":
++        config.eagle_use_aux_hidden_state = True
++        config.eagle_aux_hidden_state_layer_ids = (
++            list(layer_ids) if layer_ids is not None else None
++        )
++    else:
++        config.dflash_use_aux_hidden_state = True
++        config.dflash_target_layer_ids = list(layer_ids)
++        config.is_dspark = method == "dspark"
++
++
++def _check_capture_layer_ids_in_range(layer_ids, model_config: ModelConfig) -> None:
++    num_layers = getattr(model_config.hf_text_config, "num_hidden_layers", None)
++    if num_layers is None:
++        raise ValueError(
++            "--return-aux-hidden-state-layer-ids requires target num_hidden_layers "
++            "in config."
++        )
++    # Loop models: target layer ids span num_hidden_layers * num_loops.
++    num_layers = int(num_layers) * int(
++        getattr(model_config.hf_text_config, "num_loops", 1)
++    )
++    out_of_range = [layer_id for layer_id in layer_ids if layer_id >= num_layers]
++    if out_of_range:
++        raise ValueError(
++            f"--return-aux-hidden-state-layer-ids {out_of_range} out of range for a "
++            f"target with {num_layers} layers."
++        )
++
++
+ def _resolve_eagle_aux_hidden_state(
+     *,
+     config: SpecAuxHiddenStateConfig,
+diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+index ed3ec3c..dfb5394 100644
+--- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -1653,6 +1653,11 @@ class DecodeCudaGraphRunner(BaseCudaGraphRunner):
+                     if output.hidden_states is not None
+                     else None
+                 ),
++                last_hidden_states=(
++                    output.last_hidden_states[: self.raw_num_token]
++                    if output.last_hidden_states is not None
++                    else None
++                ),
+             )
+         else:
+             assert isinstance(output, PPProxyTensors)
+diff --git a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
+index c093f6e..425b36e 100644
+--- a/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py
+@@ -2248,6 +2248,11 @@ class PrefillCudaGraphRunner(BaseCudaGraphRunner):
+                 if output.hidden_states is not None
+                 else None
+             ),
++            last_hidden_states=(
++                output.last_hidden_states[: self.raw_num_tokens]
++                if output.last_hidden_states is not None
++                else None
++            ),
+             input_token_logprobs=output.input_token_logprobs,
+             input_top_logprobs_val=output.input_top_logprobs_val,
+             input_top_logprobs_idx=output.input_top_logprobs_idx,
+diff --git a/python/sglang/srt/models/inkling.py b/python/sglang/srt/models/inkling.py
+index 32fd576..cef2598 100644
+--- a/python/sglang/srt/models/inkling.py
++++ b/python/sglang/srt/models/inkling.py
+@@ -1145,7 +1145,7 @@ class InklingForConditionalGeneration(nn.Module):
+         # The MTP chain needs the undivided hidden (the mup division is
+         # lm_head-only); passed unconditionally because the target
+         # verify/prefill forwards never set return_hidden_states_before_norm.
+-        return self.llm.logits_processor(
++        output = self.llm.logits_processor(
+             input_ids,
+             hidden_states_for_logits,
+             self.llm.lm_head,
+@@ -1157,6 +1157,10 @@ class InklingForConditionalGeneration(nn.Module):
+                 None if aux_hidden_states is not None else hidden_states
+             ),
+         )
++        if output.last_hidden_states is not None:
++            # Auxiliary capture returns post-norm states before LM-head scaling.
++            output.last_hidden_states = hidden_states
++        return output
+ 
+     def _load_regular_param(
+         self,
+diff --git a/python/sglang/srt/rocm_muse_spark/model.py b/python/sglang/srt/rocm_muse_spark/model.py
+index 7adfa9a..829daad 100644
+--- a/python/sglang/srt/rocm_muse_spark/model.py
++++ b/python/sglang/srt/rocm_muse_spark/model.py
+@@ -1863,6 +1863,13 @@ class MuseSparkTextForCausalLM(nn.Module):
+             input_ids, hidden_states, self.lm_head, forward_batch, aux_hidden_states
+         )
+ 
++    def set_eagle3_layers_to_capture(self, layer_ids: list[int] | None = None) -> None:
++        """EAGLE training captures post-layer residuals, indexed from zero."""
++        if layer_ids is None:
++            depth = len(self.model.language_model.layers)
++            layer_ids = [1, depth // 2 - 1, depth - 4]
++        self.set_dflash_layers_to_capture(layer_ids)
++
+     def set_dflash_layers_to_capture(self, layer_ids: list[int]) -> None:
+         """Capture the residual stream after each listed decoder layer.
+ 

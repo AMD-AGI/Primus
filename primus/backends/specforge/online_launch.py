@@ -362,6 +362,9 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         flatten_overrides(getattr(params, "specforge_overrides", None)).get(CAPTURE_BACKEND_KEY)
     )
     model = _model_section(params, environ)
+    draft = _existing_draft_config(params, environ, model=model)
+    draft_data = json.loads(draft.read_text(encoding="utf-8")) if draft else {}
+    capture_method = "EAGLE3" if _is_eagle_draft(draft_data) else "DFLASH"
     run_id = raw.get("run_id") or environ.get("RUN_ID") or environ.get("DISAGG_STORE_ID")
     run_root = raw.get("run_root") or environ.get("RUN_ROOT") or environ.get("DISAGG_RUN_ROOT")
     consumer_state = (
@@ -416,6 +419,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         "capture_layer_ids": resolve_capture_layer_ids(
             params, environ, target_model_path=str(target), model=model
         ),
+        "capture_method": capture_method,
         "target_model_path": str(target),
         "sglang_extra_args": extra,
         "skip_tokenizer_init": _as_bool(
@@ -728,7 +732,7 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         "--chunked-prefill-size",
         "-1",
         "--speculative-algorithm",
-        "DFLASH",
+        str(settings.get("capture_method", "DFLASH")),
         "--enable-return-aux-hidden-states",
         "--return-aux-hidden-state-layer-ids",
         *[str(i) for i in settings["capture_layer_ids"]],

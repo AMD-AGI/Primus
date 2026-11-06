@@ -12,5 +12,5 @@ docker build -f examples/specforge/docker/Dockerfile \
 
 For the Muse Spark base and SpecForge EAGLE4 PR, use
 [`Dockerfile.muse-spark-eagle4`](Dockerfile.muse-spark-eagle4).
-Its [build instructions and capture limitation](../../../docs/04-technical-guides/specforge/muse-spark-eagle4-image.md)
+Its [build instructions and capture API backport](../../../docs/04-technical-guides/specforge/muse-spark-eagle4-image.md)
 describe the separate GPU-free validation scope.

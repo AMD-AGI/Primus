@@ -1,5 +1,4 @@
-# Muse Spark EAGLE4 development runtime (image/import validation only).
-# The Muse SGLang base lacks the generic capture plugin extension APIs.
+# Muse Spark EAGLE4 runtime with backported generic capture extension APIs.
 # See docs/04-technical-guides/specforge/muse-spark-eagle4-image.md.
 # SpecForge ROCm runtime: SGLang ROCm stack + SpecForge capture plugin
 # + SpecForge (editable, --no-deps) + this Primus checkout (editable, --no-deps).
@@ -8,19 +7,26 @@
 # Build, ownership, and docker run: docs/04-technical-guides/specforge/runtime-image.md
 # Build from the Primus repository root:
 #   docker build -f examples/specforge/docker/Dockerfile.muse-spark-eagle4 \
-#     -t primus-specforge:muse-spark-eagle4-1c253f04 .
+#     -t primus-specforge:muse-spark-1027-eagle4-1c253f04 .
 
-# Preserve the Muse-specific SGLang runtime. The digest pins muse-spark-open.
-# No SGLang capture patches or source replacements are applied.
-ARG BASE_IMAGE=lmsysorg/sglang-rocm:muse-spark-open@sha256:72065dfc0b87818ab415f96c0fc08848233d25f22b002ac8f28c33fad6ec82a4
+# Preserve the Muse-specific SGLang runtime. The digest pins muse-spark-open-1027.
+# Backport generic SGLang APIs; SpecForge keeps ownership of capture transport.
+ARG BASE_IMAGE=lmsysorg/sglang-rocm:muse-spark-open-1027@sha256:7184d3ae2bfdc75a5bb8eb497b768e370ef7b213879cb4d97fbaaa3e8e5f5040
 FROM ${BASE_IMAGE}
+
+COPY examples/specforge/docker/patches/sglang-muse-1027-capture-api.patch /tmp/capture-api.patch
+RUN cd /sgl-workspace/sglang \
+    && git apply --check /tmp/capture-api.patch \
+    && git apply /tmp/capture-api.patch \
+    && python -m compileall -q python/sglang \
+    && rm /tmp/capture-api.patch
 
 ARG SPECFORGE_REPOSITORY=https://github.com/yudigege86/SpecForge.git
 ARG SPECFORGE_REF=1c253f04c5fd0a321753a9ead28739c0a29ff7a7
 
 LABEL org.opencontainers.image.title="Primus Muse Spark EAGLE4 development runtime"
-LABEL org.opencontainers.image.description="Muse Spark ROCm base with pinned SpecForge EAGLE4 PR; capture APIs unavailable"
-LABEL io.primus.specforge.capture-plugin-compatible="false"
+LABEL org.opencontainers.image.description="Muse Spark ROCm base with generic capture API backport and SpecForge EAGLE4 plugin"
+LABEL io.primus.specforge.capture-plugin-compatible="true"
 LABEL io.primus.specforge.repository="${SPECFORGE_REPOSITORY}"
 LABEL io.primus.specforge.revision="${SPECFORGE_REF}"
 

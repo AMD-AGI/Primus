@@ -6,3 +6,5 @@ primus/_thirdparty.lock text eol=lf
 
 # Docker helper scripts must remain executable by Bash on Windows checkouts too.
 examples/specforge/docker/*.sh text eol=lf
+# Blank context lines in unified diffs intentionally contain one space.
+examples/specforge/docker/patches/*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof

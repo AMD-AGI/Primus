@@ -10,7 +10,7 @@ installs **this Primus checkout** editable with `--no-deps`.
 
 For the specialized Muse SGLang base and the unmerged EAGLE4 implementation,
 see the [Muse Spark EAGLE4 development image](muse-spark-eagle4-image.md).
-That image has separate GPU-free checks and a documented capture limitation.
+That image has separate GPU-free checks and a Muse-specific capture API backport.
 
 ## What Primus owns
 
