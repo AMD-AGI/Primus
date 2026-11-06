@@ -20,12 +20,12 @@ What the report asks for
 Why this is a patch and not a new optimizer
 -------------------------------------------
 Upstream already has the exact hook the report needs:
-:meth:`megatron.core.optimizer.muon.TensorParallelMuon.orthogonalize`
-(``muon.py:110-162``), which upstream itself documents as *the* override point for
+:meth:`megatron.core.optimizer.emerging_optimizers.TensorParallelMuon.orthogonalize`,
+which upstream itself documents as *the* override point for
 "splitting fused parameters" (``orthogonalized_optimizer.py:63-86``). It already
 carries a ``split_qkv`` branch that splits a **fused** ``linear_qkv.weight`` into
-Q/K/V and orthogonalizes each of the three *as a whole matrix*
-(``muon.py:136-159``). Per-head blocking is the same idea one level finer, so it
+Q/K/V and orthogonalizes each of the three *as a whole matrix*.
+Per-head blocking is the same idea one level finer, so it
 belongs in that method rather than in a parallel optimizer that would have to
 re-derive master weights, TP groups, param groups and checkpointing.
 
@@ -34,7 +34,7 @@ monkeypatch from :mod:`primus.backends.megatron.patches.per_head_muon_patches`.
 
 Why Kimi K3 needs this at all
 -----------------------------
-``muon.py:248-250`` sets ``param.is_qkv`` only for ``'linear_qkv.weight' in name``,
+``get_megatron_optimizer`` sets ``param.is_qkv`` only for ``'linear_qkv.weight' in name``,
 under a ``# TODO(deyuf): support MLA``. **Kimi K3 has no such parameter**: its full
 attention layers are MLA (``linear_q_down_proj`` / ``linear_q_up_proj`` /
 ``linear_kv_down_proj`` / ``linear_kv_up_proj``) and its linear-attention layers are
@@ -104,7 +104,7 @@ which makes the TP case correct by construction.
 Concretely, for a ``head_axis=0`` parameter the per-block call passes
 ``partition_dim=None``, which sends ``newton_schulz_tp`` down its no-communication
 fallback (``muon_utils.py:199-201``) and makes ``get_muon_scale_factor`` see the true
-logical block shape (``muon.py:78-80`` would otherwise multiply the partitioned dim by
+logical block shape (``scaled_orthogonalize_fn`` would otherwise multiply the partitioned dim by
 the TP size). For an opt-in ``head_axis=1`` parameter the blocks are *not* locally
 complete, so the original ``partition_dim`` is passed straight through and upstream's
 TP machinery handles it — supported in principle, **untested**: this module's
@@ -114,8 +114,7 @@ Update scale
 ------------
 This changes the update *magnitude*, not only its direction, and that is inherent to
 the method rather than a choice made here. ``scaled_orthogonalize_fn`` derives the
-Muon scale factor from the shape of whatever tensor it is handed (``muon.py:78-80,
-89``), so a ``[D, N]`` block gets ``get_muon_scale_factor(D, N)`` instead of
+Muon scale factor from the shape of whatever tensor it is handed (``scaled_orthogonalize_fn``), so a ``[D, N]`` block gets ``get_muon_scale_factor(D, N)`` instead of
 ``get_muon_scale_factor(H*D, N)``. Under the default ``spectral`` mode that is
 ``sqrt(max(D,N))`` instead of ``sqrt(max(H*D,N))``. Equalising the per-head update
 scale is the report's stated goal, and upstream's ``split_qkv`` branch already
@@ -215,7 +214,7 @@ class PerHeadMuonConfig:
             **Default True** (separate K and V blocks) for two reasons: leaving them
             fused preserves inside each head exactly the cross-matrix coupling the
             report objects to, and upstream's own ``split_qkv`` already separates K
-            from V before orthogonalizing (``muon.py:145-159``).
+            from V before orthogonalizing (``emerging_optimizers.py``).
         include_output_proj: ``muon_per_head_include_output_proj``. Also block
             ``linear_proj`` / ``o_proj`` (heads on dim 1). **Default False** — the
             report names only Q, K and V.
@@ -393,7 +392,7 @@ def _split_into_components(grad: torch.Tensor, spec: HeadBlockSpec) -> Tuple[int
 
     For ``head_axis == 1`` the component stacks are ``[H, M, r_i]`` instead; the
     caller keeps the orientation, because two of the three Muon scale modes are not
-    symmetric in ``(size_out, size_in)`` (``muon.py:140-149``).
+    symmetric in ``(size_out, size_in)`` (``get_muon_scale_factor``).
     """
     num_heads = spec.num_heads(grad.shape)
     rph = spec.rows_per_head
@@ -440,7 +439,7 @@ def orthogonalize_per_head(
         spec: how to cut it.
         scaled_orthogonalize_fn: ``TensorParallelMuon``'s closure, i.e. Newton-Schulz
             followed by the Muon scale factor for the shape it was handed
-            (``muon.py:67-90``).
+            (``scaled_orthogonalize_fn``).
         tp_group: forwarded to ``scaled_orthogonalize_fn``.
         partition_dim: forwarded. For ``head_axis == 0`` the caller is expected to
             pass ``None``, because head blocks are locally complete along the
@@ -489,7 +488,7 @@ def _orthogonalize_component_batched(
     extra_scale_factor = float(kwargs.get("extra_scale_factor", 1.0))
 
     orth = batched_newton_schulz(component.contiguous(), steps=steps, coefficient_type=coefficient_type)
-    # Identical shape bookkeeping to muon.py:78, 89 -- the scale factor sees the block.
+    # Identical shape bookkeeping to scaled_orthogonalize_fn -- the scale factor sees the block.
     scale_factor = get_muon_scale_factor(component.shape[-2], component.shape[-1], mode=scale_mode)
     return orth * scale_factor * extra_scale_factor
 
@@ -665,7 +664,7 @@ def propagate_specs_to_master_weights(
     ``main_param`` and copies only ``shared`` plus the five keys in
     ``_MODEL_PARALLEL_ATTRIBUTE_DEFAULTS`` (``optimizer.py:675-684``,
     ``tensor_parallel/layers.py:60-66``). Under bf16 — which is what
-    ``get_megatron_muon_optimizer`` builds (``muon.py:292-303``) — ``orthogonalize``
+    ``get_megatron_optimizer`` builds — ``orthogonalize``
     receives that clone, so without this step the spec would never be seen.
 
     Returns:
@@ -695,7 +694,7 @@ def make_per_head_orthogonalize(
 
     The wrapper is a strict superset of the original: a parameter without a
     :class:`HeadBlockSpec` is handed straight to ``original_orthogonalize``, so the
-    whole-matrix path and the fused-QKV ``split_qkv`` path (``muon.py:136-159``) are
+    whole-matrix path and the fused-QKV ``split_qkv`` path are
     bit-identical to upstream.
     """
 
@@ -704,7 +703,7 @@ def make_per_head_orthogonalize(
         if spec is None or not spec.matches(grad.shape):
             return original_orthogonalize(self, p, grad, **kwargs)
 
-        # Same tp_group selection as muon.py:123-130.
+        # Same tp_group selection as TensorParallelMuon.orthogonalize.
         pg_collection = getattr(self, "pg_collection", None)
         if pg_collection is not None:
             tp_group = pg_collection.expt_tp if getattr(p, "expert_tp", False) else pg_collection.tp
@@ -714,7 +713,7 @@ def make_per_head_orthogonalize(
         if spec.head_axis == 0:
             # Heads are the partitioned dim, so each rank owns whole head blocks and
             # no communication is needed. Passing None also keeps
-            # get_muon_scale_factor on the true logical block shape (muon.py:78-80).
+            # get_muon_scale_factor on the true logical block shape (see scaled_orthogonalize_fn).
             partition_dim: Optional[int] = None
         else:
             partition_dim = getattr(p, "partition_dim", None)
