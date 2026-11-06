@@ -215,6 +215,19 @@ fi
 sleep 3
 docker exec "${_cont_name}" true
 
+# --uts=host makes the container see the host kernel. RCCL turns cuMem off
+# below 6.8, and Lux reports RHEL 5.14, so the copy-engine collectives would
+# fall back to the compute units. Build the shim once and pass it to every
+# docker exec. The host utsname is unchanged.
+_fakeuname_so="/tmp/libfakeuname.so"
+docker exec "${_cont_name}" gcc -shared -fPIC -O2 -o "${_fakeuname_so}" \
+    "${_code_mount}/libfakeuname.c" -ldl
+_base_exec_env+=(
+    "--env=LUX_FAKE_KERNEL=${LUX_FAKE_KERNEL:-6.8.0-lux}"
+    "--env=LD_PRELOAD=${_fakeuname_so}${LD_PRELOAD:+:${LD_PRELOAD}}"
+)
+echo "[INFO] cuMem uname shim:  ${_fakeuname_so} (LUX_FAKE_KERNEL=${LUX_FAKE_KERNEL:-6.8.0-lux})"
+
 # Editable Primus from the host mount, plus the exact MLPerf logging stack used by this ruleset.
 _setup_env=("${_base_exec_env[@]}")
 docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
