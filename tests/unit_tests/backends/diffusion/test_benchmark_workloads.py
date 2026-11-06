@@ -1108,6 +1108,137 @@ def test_mochi_downloads_only_required_model_and_t5_files(monkeypatch, tmp_path)
     ]
 
 
+def test_hunyuan_denoiser_only_downloads_the_transformer(monkeypatch, tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    calls = []
+    data = tmp_path / "data"
+    data.mkdir()
+
+    def fake_snapshot(repo_id, *, revision=None, allow_patterns=None):
+        del revision
+        calls.append((repo_id, allow_patterns))
+        root = tmp_path / "hunyuan"
+        (root / "transformer").mkdir(parents=True, exist_ok=True)
+        return str(root)
+
+    monkeypatch.setenv("PRIMUS_HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.setenv("BENCHMARK_DENOISER_ONLY", "1")
+    monkeypatch.setattr(download, "_snapshot", fake_snapshot)
+    env = download.stage_benchmark_assets("hunyuan-video", dataset_path=str(data), pretrained="")
+    assert calls == [("hunyuanvideo-community/HunyuanVideo", ["transformer/*"])]
+    assert "LLM_ENCODER" not in env
+    assert "VAE_CHECKPOINT" not in env
+
+
+def test_hunyuan_full_run_still_fetches_encoder_and_vae(monkeypatch, tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    calls = []
+    data = tmp_path / "data"
+    data.mkdir()
+
+    def fake_snapshot(repo_id, *, revision=None, allow_patterns=None):
+        del revision
+        calls.append((repo_id, allow_patterns))
+        root = tmp_path / "hunyuan"
+        (root / "transformer").mkdir(parents=True, exist_ok=True)
+        if allow_patterns and "text_encoder/*" in allow_patterns:
+            (root / "text_encoder").mkdir(exist_ok=True)
+            (root / "tokenizer").mkdir(exist_ok=True)
+        if allow_patterns and "vae/*" in allow_patterns:
+            (root / "vae").mkdir(exist_ok=True)
+        return str(root)
+
+    monkeypatch.setenv("PRIMUS_HF_HOME", str(tmp_path / "hf"))
+    monkeypatch.delenv("BENCHMARK_DENOISER_ONLY", raising=False)
+    monkeypatch.setattr(download, "_snapshot", fake_snapshot)
+    env = download.stage_benchmark_assets("hunyuan-video", dataset_path=str(data), pretrained="")
+    assert calls == [
+        ("hunyuanvideo-community/HunyuanVideo", ["transformer/*"]),
+        (
+            "hunyuanvideo-community/HunyuanVideo",
+            ["text_encoder/*", "tokenizer/*", "vae/*"],
+        ),
+    ]
+    assert env["LLM_ENCODER"] == str(tmp_path / "hunyuan" / "text_encoder")
+    assert env["VAE_CHECKPOINT"] == str(tmp_path / "hunyuan" / "vae")
+
+
+def test_hunyuan_companions_already_on_disk_are_not_redownloaded(monkeypatch, tmp_path):
+    import primus.backends.diffusion.utils.download as download
+
+    root = tmp_path / "snap"
+    (root / "transformer").mkdir(parents=True)
+    (root / "text_encoder").mkdir()
+    (root / "vae").mkdir()
+    monkeypatch.setattr(
+        download, "_snapshot", lambda *_args, **_kwargs: pytest.fail("companions are already local")
+    )
+    env = download._companion_paths("hunyuan-video", str(root / "transformer"), {})
+    assert env["LLM_ENCODER"] == str(root / "text_encoder")
+    assert env["VAE_CHECKPOINT"] == str(root / "vae")
+
+
+def test_aiter_jit_dir_follows_package_writability(monkeypatch, tmp_path):
+    import importlib.util
+    import os
+    import sys
+    import types
+
+    import primus.backends.diffusion.attention.aiter as aiter_backend
+
+    home = tmp_path / "home"
+    user_jit = home / ".aiter" / "jit"
+    user_jit.mkdir(parents=True)
+    package = tmp_path / "aiter_pkg"
+    package_jit = package / "jit"
+    package_jit.mkdir(parents=True)
+    init = package / "__init__.py"
+    init.write_text("")
+    spec = importlib.util.spec_from_file_location("aiter_pkg_probe", init)
+
+    monkeypatch.setenv("HOME", str(home))
+    # ``_import_aiter`` uses ``setdefault``, which monkeypatch does not track.
+    # Register the variable for restore (whether or not it is exported), then
+    # clear it so the first assert sees an unset variable.
+    monkeypatch.setenv("AITER_JIT_DIR", "")
+    os.environ.pop("AITER_JIT_DIR")
+
+    def find_spec(name, *args, **kwargs):
+        del args, kwargs
+        return spec if name == "aiter" else None
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    fake = types.ModuleType("aiter")
+    monkeypatch.setitem(sys.modules, "aiter", fake)
+
+    # The torch unit-test container runs as root. os.access(W_OK) is true for
+    # uid 0 even on a mode 0555 directory, so chmod cannot stand in for a
+    # read-only aiter package there.
+    state = {"writable": False}
+    real_access = os.access
+
+    def access(path, mode):
+        if os.path.abspath(path) == str(package_jit) and mode == os.W_OK:
+            return state["writable"]
+        return real_access(path, mode)
+
+    monkeypatch.setattr(os, "access", access)
+
+    aiter_backend._import_aiter()
+    assert os.environ["AITER_JIT_DIR"] == str(user_jit)
+
+    monkeypatch.setenv("AITER_JIT_DIR", "/already/set")
+    aiter_backend._import_aiter()
+    assert os.environ["AITER_JIT_DIR"] == "/already/set"
+
+    monkeypatch.delenv("AITER_JIT_DIR")
+    state["writable"] = True
+    aiter_backend._import_aiter()
+    assert "AITER_JIT_DIR" not in os.environ
+
+
 def test_synthetic_mochi_dataset_skips_asset_downloads(monkeypatch, tmp_path):
     import primus.backends.diffusion.utils.download as download
 
@@ -1155,6 +1286,8 @@ def test_mochi_packed_attention_excludes_padding_tokens():
         },
     )
     assert torch.equal(dit.packed_indices["cu_seqlens_kv"], torch.tensor([0, 3, 5]))
+    # torch.equal ignores dtype. AITER's varlen kernel rejects int64 boundaries.
+    assert dit.packed_indices["cu_seqlens_kv"].dtype == torch.int32
     assert dit.packed_indices["max_seqlen_in_batch_kv"] == 3
     assert torch.equal(dit.packed_indices["valid_token_indices_kv"], torch.tensor([0, 1, 2, 4, 5]))
 
@@ -1345,7 +1478,7 @@ def test_even_batch_loader_is_full_size_and_mlperf_keeps_the_tail(tmp_path, monk
     assert [len(batch) for batch in mlperf.dataloader] == [16, 4]
 
 
-def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path):
+def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path, monkeypatch):
     import primus.backends.diffusion.utils.download as download
 
     args = _finalize(
@@ -1369,6 +1502,11 @@ def test_hunyuan_keeps_checkpointing_off_and_makes_the_vae_optional(tmp_path):
     (root / "text_encoder").mkdir()
     (root / "tokenizer").mkdir()
     (root / "tokenizer" / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        download,
+        "_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("a local Hunyuan snapshot must not be re-downloaded"),
+    )
     env = download._companion_paths("hunyuan-video", str(root / "transformer"), {})
     assert env["LLM_ENCODER"] == str(root / "text_encoder")
     assert "VAE_CHECKPOINT" not in env
