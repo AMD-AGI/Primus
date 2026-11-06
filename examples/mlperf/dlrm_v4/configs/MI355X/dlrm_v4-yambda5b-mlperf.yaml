@@ -6,6 +6,14 @@ user_name: ${USER:root}
 exp_name: ${EXP_NAME:dlrm_v4-yambda5b-mlperf}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# Applied before the trainer starts, over Primus' runner default
+# (runner/helpers/envs/base_env.sh sets GPU_MAX_HW_QUEUES=2). The HIP default of 4
+# hardware queues is +0.43% 200-step throughput for DLRMv4 on MI355X (cluster B,
+# 2026-11-06, 2 runs each). Keep Primus' TORCH_NCCL_HIGH_PRIORITY=1: with 2 queues,
+# normal-priority NCCL streams cost -5.1%; with 4 the priority makes no difference.
+env:
+  GPU_MAX_HW_QUEUES: "4"
+
 modules:
   pre_trainer:
     framework: recommendation
