@@ -159,9 +159,11 @@ hybrid_stack_spec = ModuleSpec(
                     submodules=MLASelfAttentionSubmodules(
                         linear_q_proj=TEColumnParallelLinear,
                         linear_q_down_proj=TELinear,
-                        linear_q_up_proj=TELayerNormColumnParallelLinear,
+                        # Unfused: q/kv_layernorm is the only norm between the LoRA projections, as in
+                        # FLA; a fused LayerNorm+Linear normalizes twice (Megatron-LM main rejects it).
+                        linear_q_up_proj=TEColumnParallelLinear,
                         linear_kv_down_proj=TELinear,
-                        linear_kv_up_proj=TELayerNormColumnParallelLinear,
+                        linear_kv_up_proj=TEColumnParallelLinear,
                         core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=TERowParallelLinear,
                         # FLA's MLA wraps every LoRA projection in
@@ -218,9 +220,11 @@ gdn_hybrid_stack_spec = ModuleSpec(
                     submodules=MLASelfAttentionSubmodules(
                         linear_q_proj=TEColumnParallelLinear,
                         linear_q_down_proj=TELinear,
-                        linear_q_up_proj=TELayerNormColumnParallelLinear,
+                        # Unfused: q/kv_layernorm is the only norm between the LoRA projections, as in
+                        # FLA; a fused LayerNorm+Linear normalizes twice (Megatron-LM main rejects it).
+                        linear_q_up_proj=TEColumnParallelLinear,
                         linear_kv_down_proj=TELinear,
-                        linear_kv_up_proj=TELayerNormColumnParallelLinear,
+                        linear_kv_up_proj=TEColumnParallelLinear,
                         core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=TERowParallelLinear,
                         # FLA's MLA applies `RMSNorm(dtype=fp32)` between every
@@ -531,9 +535,11 @@ kda_hybrid_stack_spec = ModuleSpec(
                     submodules=MLASelfAttentionSubmodules(
                         linear_q_proj=TEColumnParallelLinear,
                         linear_q_down_proj=TELinear,
-                        linear_q_up_proj=TELayerNormColumnParallelLinear,
+                        # Unfused: q/kv_layernorm is the only norm between the LoRA projections, as in
+                        # FLA; a fused LayerNorm+Linear normalizes twice (Megatron-LM main rejects it).
+                        linear_q_up_proj=TEColumnParallelLinear,
                         linear_kv_down_proj=TELinear,
-                        linear_kv_up_proj=TELayerNormColumnParallelLinear,
+                        linear_kv_up_proj=TEColumnParallelLinear,
                         core_attention=_MLA_CORE_ATTENTION,
                         linear_proj=TERowParallelLinear,
                         # FLA's MLA applies `RMSNorm(dtype=fp32)` between LoRA

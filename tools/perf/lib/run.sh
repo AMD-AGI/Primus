@@ -206,7 +206,11 @@ prepare_config() {
     extract_config_fields "$config_file"
     YAML_STEPS="$STEPS"
     if [ -n "$TRAIN_STEPS" ]; then
-        STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+        if train_steps_ignored "$FRAMEWORK"; then
+            STEPS="$YAML_STEPS (TRAIN_STEPS=$TRAIN_STEPS not applied to $FRAMEWORK)"
+        else
+            STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+        fi
     fi
 
     fw_safe=$(sanitize "$FRAMEWORK")
@@ -221,6 +225,96 @@ prepare_config() {
 run_log_name() {
     local rep="$1" suffix="${2:-}"
     echo "${RESULT_DIR}/${fw_safe}-${name_safe}-${config_hash}-MBS${mbs_safe}-GBS${gbs_safe}-rep${rep}${suffix}_${BATCH_TS}.log"
+}
+
+# Backends whose configs keep their own training length when TRAIN_STEPS is
+# set, separated by spaces (not commas as in BACKEND). The Megatron-Bridge
+# recipes warm the learning rate up for a fixed number of iterations and, with
+# lr_decay_iters unset, decay it over train_iters, so an override no longer
+# than the warmup fails Megatron's lr_warmup_steps < lr_decay_steps assertion
+# before the first step. diffusion_dlrm's models keep the num_iterations of its
+# diffusion_bench config.
+PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion_dlrm"
+
+train_steps_ignored() {
+    [[ " $PERF_TRAIN_STEPS_IGNORED " == *" $1 "* ]]
+}
+
+# TRAIN_STEPS as the batch configuration shows it, naming the backends of this
+# batch (CONFIG_FILES, and diffusion_dlrm when it runs) that it does not reach.
+train_steps_text() {
+    local f name present=" " skipped=""
+    if [ -z "$TRAIN_STEPS" ]; then
+        echo "<unset; use YAML>"
+        return 0
+    fi
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+        present+="$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null) "
+    done
+    if [ "${PERF_RUN_DIFFUSION_DLRM:-0}" = 1 ]; then
+        present+="$PERF_DIFFUSION_DLRM_BACKEND "
+    fi
+    for name in $PERF_TRAIN_STEPS_IGNORED; do
+        if [[ "$present" == *" $name "* ]]; then
+            skipped+="${skipped:+, }$name"
+        fi
+    done
+    echo "$TRAIN_STEPS${skipped:+ (not applied to $skipped)}"
+}
+
+# TRAIN_STEPS against a Megatron config's learning-rate schedule: with
+# lr_decay_iters unset Megatron decays over train_iters and asserts
+# lr_warmup_steps < lr_decay_steps, so a TRAIN_STEPS no longer than
+# lr_warmup_iters fails during setup. Returns 1 for such a config, with the
+# reason in TRAIN_STEPS_CONFLICT. Each value comes from the experiment's
+# overrides, else from its module config file (not the files either
+# `extends`); a schedule set by fraction or by samples, or a value neither
+# sets, is not checked. CHECK_TRAIN_STEPS=0 turns this off.
+CHECK_TRAIN_STEPS="${CHECK_TRAIN_STEPS:-1}"
+TRAIN_STEPS_CONFLICT=""
+
+schedule_value() {
+    local key="$1" config_file="$2" module="$3" base="$4" value
+    value=$(yq -r ".modules.$module.overrides.$key // \"\"" "$config_file" 2>/dev/null)
+    if [ -z "$value" ] && [ -f "$base" ]; then
+        value=$(yq -r ".$key // \"\"" "$base" 2>/dev/null)
+    fi
+    # ${VAR:default}: the default, as the container sees it unless VAR is set there.
+    if [[ "$value" =~ ^\$\{[^:}]+:([^}]*)\}$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    [ "$value" = "null" ] && value=""
+    printf '%s' "$value"
+}
+
+train_steps_conflict() {
+    local config_file="$1" framework="$2" module="$3" base warmup key
+    TRAIN_STEPS_CONFLICT=""
+    [ -n "$TRAIN_STEPS" ] && [ "$CHECK_TRAIN_STEPS" = 1 ] || return 0
+    case "$framework" in megatron|megatron_bridge) ;; *) return 0 ;; esac
+    train_steps_ignored "$framework" && return 0
+    base="$PRIMUS_PATH/primus/configs/modules/$framework/$(yq_or_na ".modules.$module.config" "$config_file")"
+    for key in lr_decay_iters lr_warmup_fraction lr_decay_samples train_samples; do
+        [ -z "$(schedule_value "$key" "$config_file" "$module" "$base")" ] || return 0
+    done
+    warmup=$(schedule_value lr_warmup_iters "$config_file" "$module" "$base")
+    [[ "$warmup" =~ ^[0-9]+$ ]] && [ "$TRAIN_STEPS" -le "$warmup" ] || return 0
+    TRAIN_STEPS_CONFLICT="TRAIN_STEPS=$TRAIN_STEPS is not more than lr_warmup_iters=$warmup, and with lr_decay_iters unset Megatron's lr_warmup_steps < lr_decay_steps check fails during setup; raise TRAIN_STEPS above $warmup or set lr_decay_iters"
+    return 1
+}
+
+# A config that is not launched still gets a log for each repetition, so it
+# has results rows: the banner, and a footer with exit code 2 and
+# "not_run: <why>". Uses the config prepare_config and build_launch_argv set up.
+perf_log_not_run() {
+    local why="$1" rep result_file
+    for rep in $(seq 1 "$NUM_REPS"); do
+        result_file=$(run_log_name "$rep")
+        print_per_run_banner "$result_file" "$config_file" "$config_name" "$config_hash" \
+            "$FRAMEWORK" "$MODEL" "$MBS" "$GBS" "$SEQ_LEN" "$STEPS" "$rep" "$NUM_REPS" \
+            "$launcher_cmd" "$MODULE" "$TRAIN_SUITE" 0 "${MAX_ATTEMPTS_PER_CONFIG:-1}"
+        print_per_run_footer "$result_file" 2 0 "not_run: $why"
+    done
 }
 
 # Primus CLI override flag that sets training length for a given framework.
@@ -239,13 +333,14 @@ train_step_override_flag() {
 
 # Append the TRAIN_STEPS override to LAUNCH_ARGV with the flag the config's
 # framework understands. Extra tokens after --config are deep-merged into the
-# overrides of the module being trained (CLI > YAML). No-op when unset.
+# overrides of the module being trained (CLI > YAML). No-op when unset, and for
+# the backends in PERF_TRAIN_STEPS_IGNORED.
 append_train_steps_override() {
     local config_file="$1"
     local framework="$2"
     local flag
 
-    if [ -z "$TRAIN_STEPS" ]; then
+    if [ -z "$TRAIN_STEPS" ] || train_steps_ignored "$framework"; then
         return 0
     fi
 
@@ -406,19 +501,21 @@ print_per_run_banner() {
 # Footer appended once the run has ended (or been interrupted). The extractor
 # reads `Exit code` and `Elapsed (sec)` from the last lines of the log;
 # `Failure reason` is "none" or "<category>: <detail>" (see
-# perf_launch_with_watchdog).
+# perf_launch_with_watchdog). <section>, when given, goes between the run
+# output and the footer (the failing rank's own log, see lib/control.sh).
 print_per_run_footer() {
     local result_file="$1"
     local exit_code="$2"
     local run_elapsed="$3"
     local failure_reason="$4"
+    local section="${5:+$5$'\n\n'}"
     local rule="################################################################################"
     local footer
     # Built first and written with one printf: a signal can then not land
     # between its lines, nor run the interrupt handler with stdout still
     # pointing into the log.
-    printf -v footer '\n%s\n\n%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
-        "############################### End Run Output #################################" "$rule" \
+    printf -v footer '\n%s\n\n%s%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
+        "############################### End Run Output #################################" "$section" "$rule" \
         "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$exit_code" "$run_elapsed" "$failure_reason" "$rule"
     printf '%s' "$footer" >> "$result_file"
 }

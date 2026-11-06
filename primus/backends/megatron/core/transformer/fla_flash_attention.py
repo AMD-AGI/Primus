@@ -59,6 +59,8 @@ import torch
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.module import MegatronModule
 
+from primus.backends.megatron.core.utils import get_megatron_arg
+
 # TransformerEngine's pinned flash-attn version range.  When the installed
 # `flash_attn` is newer (e.g. 2.8.3 in the production container), TE silently
 # falls back to its Composable-Kernel backend, which is ~30 ms/MLA-block
@@ -100,12 +102,7 @@ def is_enabled() -> bool:
       3. ``""`` / unset → auto-enable whenever the installed flash-attn
          version is outside TE's supported range (> 2.8.1).
     """
-    try:
-        from megatron.training import get_args
-
-        val = getattr(get_args(), "fla_mla_attn", "")
-    except Exception:
-        val = ""
+    val = get_megatron_arg("fla_mla_attn", "")
     if val:
         return val == "1"
     return _flash_attn_exceeds_te_range()
@@ -221,9 +218,8 @@ class FLAFlashAttention(MegatronModule):
                 _ver = getattr(_fa, "__version__", "unknown")
             except Exception:
                 _ver = "unknown"
-            from megatron.training import get_args as _ga
 
-            _mla_val = getattr(_ga(), "fla_mla_attn", "")
+            _mla_val = get_megatron_arg("fla_mla_attn", "")
             if _mla_val == "1":
                 _reason = "args.fla_mla_attn='1'"
             elif not _mla_val:

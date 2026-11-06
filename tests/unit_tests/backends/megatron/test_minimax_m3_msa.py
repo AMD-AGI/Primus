@@ -57,6 +57,9 @@ def _config(**overrides):
         sparse_init_block=0,
         use_gemma_norm=False,
         minimax_sparse_attention=False,  # skip the swigluoai/quick_geglu requirement
+        # Matches minimax_m3.yaml; the specs fill q/k_layernorm, which Megatron-LM main
+        # rejects unless qk_layernorm is on.
+        qk_layernorm=True,
     )
     return MSATransformerConfig(**{**base, **overrides})
 
@@ -369,6 +372,7 @@ def _msa_config(**overrides):
         activation_func=quick_gelu,
         gated_linear_unit=True,
         sparse_num_index_heads=N_INDEX,
+        qk_layernorm=True,  # as in minimax_m3.yaml; see _config
     )
     return MSATransformerConfig(**{**base, **overrides})
 
@@ -428,7 +432,7 @@ class TestMinimaxSparseAttentionModule:
         pass
 
     @staticmethod
-    def _build(**overrides):
+    def _build(name=None, **overrides):
         from megatron.core.models.gpt.gpt_layer_specs import (
             get_gpt_layer_with_transformer_engine_spec,
         )
@@ -451,6 +455,8 @@ class TestMinimaxSparseAttentionModule:
             sparse_topk_blocks=TOPK,
             params_dtype=torch.float32,
             bf16=False,
+            # as in minimax_m3.yaml; hipBLASLt on gfx1250 has no fp32 GEMM with a fused bias gradient
+            add_bias_linear=False,
             **overrides,
         )
         upstream = get_gpt_layer_with_transformer_engine_spec(qk_layernorm=True)
@@ -458,7 +464,8 @@ class TestMinimaxSparseAttentionModule:
         submodules = _widen_submodules(attn_spec.submodules)
         assert isinstance(submodules, MinimaxSparseAttentionSubmodules)
 
-        return config, MinimaxSparseAttention(config, submodules, layer_number=1).cuda()
+        kwargs = {} if name is None else {"name": name}
+        return config, MinimaxSparseAttention(config, submodules, layer_number=1, **kwargs).cuda()
 
     @staticmethod
     def _rope(config, rotary_percent=0.5):
@@ -479,6 +486,12 @@ class TestMinimaxSparseAttentionModule:
         output, bias = attention(hidden, rotary_pos_emb=rotary_pos_emb)
 
         assert output.shape == (SQ, 2, config.hidden_size)
+        assert torch.isfinite(output).all()
+
+    def test_builds_with_the_module_name(self):
+        """TransformerLayer passes `name=` to its self_attention from Megatron-core 0.19 on."""
+        config, attention = self._build(name="decoder.layers.0.self_attention")
+        output, _ = attention(torch.randn(SQ, 2, config.hidden_size, device="cuda"))
         assert torch.isfinite(output).all()
 
     def test_partial_rope_rotates_only_the_leading_dims(self):
@@ -584,14 +597,27 @@ class TestMinimaxSparseAttentionModule:
             MSA_INDEXER_LOSS_NAME,
         )
 
+        try:
+            from megatron.core.transformer.moe.moe_utils import get_moe_metrics_tracker
+        except ImportError:  # older Megatron: the legacy dict is the tracker itself
+            get_moe_metrics_tracker = None
+
+        def clear():
+            if get_moe_metrics_tracker is not None:
+                get_moe_metrics_tracker().clear()
+            else:
+                get_moe_layer_wise_logging_tracker().pop(MSA_INDEXER_LOSS_NAME, None)
+
         config, attention = self._build(sparse_indexer_loss_coeff=1.0e-2)
         attention.train()
-        tracker = get_moe_layer_wise_logging_tracker()
-        tracker.pop(MSA_INDEXER_LOSS_NAME, None)
+        clear()
 
         attention(torch.randn(SQ, 2, config.hidden_size, device="cuda"))
 
-        values = tracker.pop(MSA_INDEXER_LOSS_NAME)["values"]
+        # Megatron-LM main returns a fresh view on every call, over tensors that clear()
+        # zeroes in place.
+        values = get_moe_layer_wise_logging_tracker()[MSA_INDEXER_LOSS_NAME]["values"].clone()
+        clear()
         assert values.shape == (config.num_layers,)
         # layer_number=1 writes slot 0 and nothing else.
         assert values[0] > 0

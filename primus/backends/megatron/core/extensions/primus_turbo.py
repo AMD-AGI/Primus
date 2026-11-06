@@ -3,6 +3,8 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+from __future__ import annotations
+
 import gc
 import os
 from contextlib import contextmanager, nullcontext
@@ -19,11 +21,24 @@ from megatron.core.extensions.transformer_engine import (
     TEGroupedLinear,
     TELayerNormColumnParallelLinear,
     TELinear,
-    TEQuantizationParams,
-    TEQuantizationRecipe,
     TERowParallelLinear,
     condition_init_method,
 )
+
+try:
+    from megatron.core.extensions.transformer_engine import (
+        TEQuantizationParams,
+        TEQuantizationRecipe,
+    )
+except ImportError:
+
+    class TEQuantizationParams:  # Bridge Megatron-LM has no TE quantization config types
+        pass
+
+    class TEQuantizationRecipe:
+        pass
+
+
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -66,7 +81,6 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
-from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -221,12 +235,22 @@ def _bridge_activation_grad(
     return PrimusTurboQuantizedTensorPair(data=rowwise, data_t=colwise)
 
 
+try:
+    # Primus-Turbo since AMD-AGI/Primus-Turbo#605 caches each environment variable at its first
+    # read; set_env() writes os.environ and drops that cached value
+    from primus_turbo.common.envs import set_env as _set_turbo_env
+except ImportError:  # older Primus-Turbo reads os.environ at every dispatch
+
+    def _set_turbo_env(name: str, value: str) -> None:
+        os.environ[name] = value
+
+
 @lru_cache(maxsize=1)
 def _apply_turbo_gemm_backend_env() -> None:
     """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
     backend = getattr(get_args(), "turbo_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GEMM_BACKEND] = backend
+        _set_turbo_env("PRIMUS_TURBO_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
 
 
@@ -235,7 +259,7 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
     """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
     backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GROUPED_GEMM_BACKEND] = backend
+        _set_turbo_env("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
@@ -1186,6 +1210,7 @@ class PrimusTurboLinear(TELinear):
         is_expert: bool = False,
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1206,6 +1231,7 @@ class PrimusTurboLinear(TELinear):
             is_expert=is_expert,
             symmetric_ar_type=symmetric_ar_type,
             tp_group=tp_group,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -1393,6 +1419,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         if not input_is_parallel:
             raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
@@ -1414,6 +1441,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -1603,6 +1631,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1623,6 +1652,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
             stride=stride,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -1829,6 +1859,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1849,6 +1880,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
             stride=stride,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2103,6 +2135,8 @@ def _make_primus_turbo_norm_te_column_parallel_linear():
             tp_comm_buffer_name: Optional[str] = None,
             tp_group: Optional[torch.distributed.ProcessGroup] = None,
             stride: int = 1,
+            name: Optional[str] = None,  # passed by Megatron-core >= 0.19
+            pg_collection: Optional[ProcessGroupCollection] = None,  # passed by Megatron-LM main
         ):
             super().__init__()
             self.config = config
@@ -2129,6 +2163,8 @@ def _make_primus_turbo_norm_te_column_parallel_linear():
                 skip_weight_param_allocation=skip_weight_param_allocation,
                 tp_comm_buffer_name=tp_comm_buffer_name,
                 tp_group=tp_group,
+                **({"name": name} if name is not None else {}),
+                **({"pg_collection": pg_collection} if pg_collection is not None else {}),
             )
 
         def finish_init(self, quantization_config):
@@ -2248,6 +2284,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         is_expert: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_grouped_gemm_backend_env()
 
@@ -2267,6 +2304,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2483,6 +2521,7 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -2496,6 +2535,7 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2528,6 +2568,7 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -2541,6 +2582,7 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2659,9 +2701,16 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         return _get_fp8_dtype(fmt, True), _get_fp8_dtype(fmt, False)
 
     def dispatch_preprocess(
-        self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        routing_map: torch.Tensor,
+        probs: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
     ):
         """Initializes routing metadata and prepares tensors for fused dispatch.
+
+        ``padding_mask`` is what Megatron-LM main passes to flex dispatchers. Upstream only
+        consumes it on the HybridEP backend; DeepEP ignores it, and so does this dispatcher.
 
         This method reshapes input tensors and processes routing information into a
         unified format, where the routing map is expanded to cover the TPxEP communication domain,

@@ -523,6 +523,7 @@ def test_dedicated_group_gets_zero_cta_without_mutating_original(monkeypatch):
     monkeypatch.setattr(rccl_sdma_param_gather.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(rccl_sdma_param_gather.dist, "new_group", fake_new_group)
     monkeypatch.delenv("MEGATRON_RCCL_SDMA_CTA_POLICY", raising=False)
+    monkeypatch.delenv("MEGATRON_RCCL_SDMA_GROUP_BACKEND", raising=False)
     rccl_sdma_param_gather.reset_runtime_state_for_tests()
 
     try:
@@ -532,7 +533,7 @@ def test_dedicated_group_gets_zero_cta_without_mutating_original(monkeypatch):
 
     assert result is dedicated_group
     assert captured["ranks"] == list(range(8))
-    assert captured["backend"] == "nccl"
+    assert captured["backend"] == "nccl-lazy"
     assert captured["pg_options"].config.cta_policy == 2
     assert captured["pg_options"].config.split_share == 0
     assert "PARAM_GATHER_POLICY_2" in captured["group_desc"]
