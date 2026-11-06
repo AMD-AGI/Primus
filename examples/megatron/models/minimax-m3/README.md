@@ -157,8 +157,9 @@ pipeline parallel; one node; uniform routing and mock data; sequence 4096 only.
 The results in this section predate the kernel changes in the later sections. For the launcher's
 current defaults, see Baseline with the current defaults.
 
-Results on `ctheliosr-rck-g02-e15-02` with this branch on `dev/mi455x_v3` c19456f1, one run at a time
-on the four otherwise idle GPUs. Every run finished 10 iterations with 0 NaN.
+Results on node A, one of the two shared 4x MI455X nodes these runs used, with this branch on
+`dev/mi455x_v3` c19456f1, one run at a time on the four otherwise idle GPUs. Every run finished 10
+iterations with 0 NaN.
 
 | Layers | MBS / GBS | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -219,7 +220,7 @@ Switches on the baseline, one run each:
 ## Results on `dev/mi455x_v3` c19456f1
 
 c19456f1 has Megatron-LM core_v0.19.2 (4b4acac9) and Primus's Triton AdamW. These runs use the
-defaults (HIP fused Adam, NaN check off) on the shared 4x MI455X node `ctheliosr-rck-g02-e15-01`, one
+defaults (HIP fused Adam, NaN check off) on node B, the other shared 4x MI455X node, one
 run at a time on an otherwise idle node. Every run finished 10 iterations with 0 NaN, and the fused
 Adam patch logged that it was enabled.
 
@@ -234,7 +235,7 @@ Repeats were within 0.4%: 142.4–142.9 ms on one GPU over three runs (two of th
 the other GPUs), 130.1–130.2 ms on EP2, 121.6 ms twice at EP4 and 254.9–255.1 ms with 8 layers. On
 the same node with the same defaults, the old base (a624bb95 plus this example, Megatron-LM d3528a21)
 ran at 142.3, 130.5, 121.9 and 255.5 ms with the same losses to the last logged digit, and used 4–9 GB
-more memory per GPU. The node matters more than the base: on `ctheliosr-rck-g02-e15-02` the defaults
+more memory per GPU. The node matters more than the base: on node A the defaults
 ran at 133.8 ms on one GPU and 126.8 ms on EP2 (old base), and 132.3 ms on one GPU (this branch merged
 into `dev/mi455x_v3` db5fe1fd). Compare runs on one node.
 
@@ -279,7 +280,7 @@ module).
 
 ## FlyDSL attention in the dense layers
 
-One GPU of `ctheliosr-rck-g02-e15-02` (4 layers, EP1, GBS 8, so 8 micro-batches per step as on the
+One GPU of node A (4 layers, EP1, GBS 8, so 8 micro-batches per step as on the
 baseline), this branch at 6ee53b2c, with the image's Primus-Turbo or Primus-Turbo `dev/mi455x_v3`
 ff4898e4 through `TURBO_DIR`. The runs alternated, one at a time; every one finished 10 iterations
 with 0 NaN.
@@ -464,7 +465,7 @@ End to end, one GPU, 4 layers, GBS 8, the launcher's defaults on 105e9f33 plus t
 ## Primus-Turbo 4c74631 image
 
 The launcher defaults to `amdprimus/amdprimus:tas-20261019-turbo-4c74631`, which needs no `TURBO_DIR`
-for FlyDSL dense attention. One GPU of `ctheliosr-rck-g02-e15-01` (4 layers, EP1, GBS 8), the
+for FlyDSL dense attention. One GPU of node B (4 layers, EP1, GBS 8), the
 launcher's defaults on c7034e33 apart from the image, against dc23c84c, the tree before FlyDSL
 attention in the dense layers. The runs alternated one at a time on one GPU, Triton experts last; the
 c7034e33 runs with tas-20261019's own Primus-Turbo ran earlier the same day. Every run finished 10
@@ -480,7 +481,7 @@ iterations with 0 NaN.
 
 - The 4c74631 image runs 1.0% faster than ff4898e4 through `TURBO_DIR` (527.4 against 532.5 ms) with
   the same memory; the losses agree to five digits, as between repeats with FlyDSL dense attention.
-- Against dc23c84c, c7034e33 takes 37.7% less time per step, as on `ctheliosr-rck-g02-e15-02`
+- Against dc23c84c, c7034e33 takes 37.7% less time per step, as on node A
   (824.0 against 513–515 ms). This node is 3.6–3.7% slower on both trees; compare runs on one node.
 - FlyDSL experts are 10.6% faster than Triton's on 4c74631 (527.4 against 590.2 ms).
 - The unit tests in Results on `dev/mi455x_v3` c19456f1, with `test_flydsl_grouped_gemm_patches.py`,
@@ -488,7 +489,7 @@ iterations with 0 NaN.
 
 ## Baseline with the current defaults
 
-The baseline (EP4, 8 layers, GBS 32) on the four GPUs of `ctheliosr-rck-g02-e15-01`: the launcher's
+The baseline (EP4, 8 layers, GBS 32) on the four GPUs of node B: the launcher's
 defaults on d6c953a9 (the 4c74631 image, FlyDSL dense attention and experts, the hipBLASLt tuning
 file, and the MSA kernel changes above) against those of dc23c84c (tas-20261019, TE dense attention,
 Triton experts, hipBLASLt's own kernels). One run at a time, each started only when no other process
@@ -512,7 +513,7 @@ finished 10 iterations with 0 NaN.
 - With TE's dense attention, d6c953a9's loss is within 1e-6 of dc23c84c's (8.195952 against
   8.195951). With FlyDSL's, whose dQ uses fp32 atomics, the losses differ in the fifth decimal
   between repeats.
-- dc23c84c is 2.5% slower here than on `ctheliosr-rck-g02-e15-02` (1575.4 against 1537.4 ms,
+- dc23c84c is 2.5% slower here than on node A (1575.4 against 1537.4 ms,
   Baseline); compare runs on one node.
 - During the first run of each tree, short-lived processes of another user were on the GPUs; those
   runs are within 0.5% of the second ones.
@@ -564,7 +565,7 @@ model preset `primus/configs/models/megatron/minimax_m3.1_flash.yaml` extends `m
 so the launcher runs it with `EXP` set (see Run). With no dense attention layer, `USE_TURBO_ATTENTION`
 has nothing to act on, and the recomputed first layer is an MSA layer.
 
-The baseline shape (EP4, 8 layers, GBS 32) on `ctheliosr-rck-g02-e15-01`, the launcher's defaults,
+The baseline shape (EP4, 8 layers, GBS 32) on node B, the launcher's defaults,
 the two models alternating one at a time on the four otherwise idle GPUs. Every run finished 10
 iterations with 0 NaN. These ran before the preset took its current file name in a79087ef; after the
 rename, one GPU gives the same loss and grad norm at every iteration.
@@ -614,7 +615,7 @@ step 1301 ms instead of 1106.
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's
-FusedAdam and the NaN check on unless noted, on `ctheliosr-rck-g02-e15-02`. Every run finished with
+FusedAdam and the NaN check on unless noted, on node A. Every run finished with
 0 NaN.
 
 **Optimizer.** Megatron's step reads and writes the FP32 gradients and parameters (10.9 B on the
@@ -726,8 +727,7 @@ Accepted, but they do nothing on this model (loss identical to the defaults):
 
 - `--use_turbo_fused_qk_rmsnorm_rope True` (158.6 ms): the fused op takes full, non-interleaved RoPE
   only, and M3's `rotary_percent: 0.5` falls back to Megatron's path.
-- `--use_turbo_mega_moe True` (158.5 ms): applies only at EP 2 to 8, where it does not build (Known
-  issues).
+- `--use_turbo_mega_moe True` (158.5 ms): applies only at EP 2 to 8 (Known issues).
 - `turbo_sync_free_moe_stage: 1`: sets `moe_use_fused_router_with_aux_score` and `moe_permute_fusion`,
   which the yaml already sets.
 
@@ -740,7 +740,7 @@ Do not run:
 - `--fp8 e4m3 --fp8_recipe blockwise` and `--fp8_recipe mxfp8` stop at TE's arch check (`Device arch
   gfx94x or gfx95x is required for FP8 block scaling execution.`, `Device arch gfx95x or newer is
   required for MXFP8 execution.`). TE 2.19.0.dev0 leaves gfx1250 as a TODO until its GEMM is available.
-- `--use_turbo_deepep True`, sync-free stages 2 and 3, and MegaMoE: Known issues.
+- `--use_turbo_deepep True` and sync-free stages 2 and 3: Known issues.
 - Primus-Turbo attention with its default backend: `invalid argument for fmha_bwd`, so the launcher
   always sets `PRIMUS_TURBO_ATTN_BACKEND`.
 - `moe_use_legacy_grouped_gemm`, `PRIMUS_TP` above 1, context parallel, a dataloader attention mask,
@@ -755,7 +755,7 @@ Do not run:
 - Pipeline parallel. The launcher allows `PRIMUS_PP`, but no PP run has been done. Tensor parallel
   and context parallel are not implemented for MSA.
 - EP8 and more than one node.
-- DeepEP and MegaMoE, which do not run on gfx1250 yet (see Known issues).
+- DeepEP, which does not run on gfx1250 yet, and MegaMoE with the default image (see Known issues).
 - A real dataset and real routing. These runs are mock data with uniform routing.
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).
@@ -786,9 +786,11 @@ Do not run:
   routing: 128 on one GPU and 512 at EP4 at sequence 4096. One GPU at `PRIMUS_SEQ_LENGTH=2048` or
   less stops in the first forward; use `TURBO_GROUPED_GEMM_BACKEND=default` there. tas-20261019's
   Primus-Turbo runs 64-row experts.
-- **MegaMoE.** `--use_turbo_mega_moe True` takes effect only at EP 2 to 8. At EP2 its FlyDSL
-  `dispatch_prologue_kernel` does not build for gfx1250 (`lld invocation failed`, then `All autotune
-  configs failed`) in the first forward.
+- **MegaMoE.** `--use_turbo_mega_moe True` takes effect only at EP 2 to 8. With tas-20261019's
+  Primus-Turbo, its FlyDSL `dispatch_prologue_kernel` does not build for gfx1250 at EP2 (`lld
+  invocation failed`, then `All autotune configs failed`) in the first forward. The default image's
+  Primus-Turbo (4c74631) has the gfx1250 BF16 MegaMoE kernels (Primus-Turbo #582); they have not been
+  run with M3.
 - **gfx1250 MSA kernels.** `msa_backend=flydsl` on gfx1250 needs the wave32 WMMA port. It does not
   use `v_permlane32_swap`, MFMA, or `ds_read_tr16`. gfx950 still uses the original kernels; only the
   dispatch changed. The kernels address buffers with 32-bit offsets, so each tensor must stay under
