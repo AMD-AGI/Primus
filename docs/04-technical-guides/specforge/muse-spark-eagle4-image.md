@@ -203,6 +203,68 @@ same names across nodes. Trainer RCCL RDMA selection is separate from Mooncake;
 remove inherited `NCCL_IB_DISABLE=1` and configure communication interfaces as
 needed for your network. RDMA does not change the capture feature format.
 
+### Which file to adjust
+
+- `muse-spark-eagle4-8node-launcher.yaml` controls the host CLI: scheduler wall
+  time, Docker devices and capabilities, forwarded environment variables, and
+  capture-side Mooncake memory allocations. Pass site-specific scheduler options
+  on the command line or keep them in private local configuration.
+- `muse-spark-eagle4-8node-online.yaml` controls Primus orchestration: the four/four
+  node split, two target replicas per capture node, GPU placement, and capture
+  server arguments. Its `specforge_overrides` section supplies the resolved model,
+  dataset, output paths, and environment-driven training settings to SpecForge.
+- `muse-spark-eagle4-8node-training.yaml` controls the training objective, local
+  batch size, accumulation, optimizer, sequence length, producer concurrency,
+  feature-queue watermarks, and trainer-client buffers. Primus replaces its
+  placeholder endpoints and trainer rendezvous address at launch; launch this
+  recipe through the Primus experiment rather than directly with SpecForge.
+- `muse-spark-eagle4.json` is shared with the two-node example. Change it only when
+  changing the draft architecture or capture layers, rather than run duration,
+  batch size, or logging frequency.
+
+### Adjustments for a full training run
+
+1. **Choose the data and training budget.** Supply Muse-formatted JSONL with
+   assistant responses, and check the number of usable samples after filtering.
+   Set `MAX_STEPS` and `NUM_EPOCHS` for the intended run. Both constrain duration;
+   increasing `MAX_STEPS` does not repeat a one-epoch dataset. The default 200
+   optimizer steps are an example budget, not a convergence target. Keep cache
+   and output directories specific to the dataset and experiment.
+2. **Confirm memory before scaling the batch.** Local batch 16 at length 8,192
+   is unvalidated. If activation memory does not fit, a local batch of 4 with
+   `training.accumulation_steps: 4` preserves the same effective batch of 512.
+   Changing the effective batch requires recalculating both queue watermarks
+   and the Mooncake storage budget described above. Also account for model
+   loading, per-process transfer buffers, dataset workers, and pinned receive
+   buffers in the host RAM request.
+3. **Choose optimizer settings for the effective batch.** The YAML retains
+   learning rate `0.0001`, a constant schedule, warmup ratio `0.04`, and gradient
+   clipping `0.5` from the small-run configuration. These are starting values;
+   increasing the global batch does not establish that the same learning rate
+   or schedule is suitable. Set `training.learning_rate`, `lr_scheduler`,
+   `warmup_ratio`, and `max_grad_norm` deliberately. The pinned version supports
+   `constant` and `cosine` schedules.
+4. **Keep logs frequent initially.** `LOG_INTERVAL=1` records each optimizer
+   step and makes loss, accuracy, and throughput changes visible in TensorBoard.
+   After checking logging overhead, increase it if needed. For example,
+   `LOG_INTERVAL=10` records every 5,120 samples at the default effective batch.
+   Logging and checkpoint intervals count optimizer steps, including when
+   accumulation is enabled.
+5. **Choose checkpoints by recovery time.** Begin with `SAVE_INTERVAL=50`, then
+   use measured optimizer-step time to set a desired checkpoint period:
+   `interval ~= desired_period_seconds / seconds_per_optimizer_step`, rounded
+   to a positive integer. Include checkpoint-write time when judging overhead.
+   Adjust `training.max_checkpoints` for the required retention window and
+   available shared storage; the default keeps only two recent checkpoints.
+   A value of zero for `SAVE_INTERVAL` disables periodic checkpoints.
+6. **Prepare the allocation and network.** All eight nodes need the same image,
+   checkout, model, and shared-data paths. Consumer-state directories must be on
+   node-local storage, with a fresh run ID. Check RDMA connectivity and RCCL
+   networking independently. Set scheduler wall time and host-memory requests
+   for the actual workload, and adjust Primus startup/peer timeouts if necessary.
+   Confirm capture throughput can keep all 32 trainers supplied before assuming
+   additional trainer capacity will improve end-to-end throughput.
+
 ## Capture API compatibility
 
 The unmodified `1027` base lacks the extension APIs required by the SpecForge
