@@ -187,6 +187,39 @@ def test_init_blocks_are_always_selected():
         assert 0 in indices[0, :, q].tolist()[0] or 0 in indices[0, :, q].tolist()[1]
 
 
+def test_repeated_selection_is_unchanged():
+    """The forced-block ids are cached after the first call."""
+    config = _config(sparse_init_block=1)
+    first, _ = _select(config, _scores())
+    again, _ = _select(config, _scores())
+    assert torch.equal(first, again)
+
+
+# ---------------------------------------------------------------------------
+# RoPE
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("rotary_dim", [8, 16])
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_rope_tables_are_bitwise_upstream(dtype, rotary_dim, interleaved):
+    """RopeTables shares cos/sin across calls; each call must still equal upstream's bit for bit."""
+    from megatron.core.models.common.embeddings.rope_utils import (
+        _apply_rotary_pos_emb_bshd,
+    )
+
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    torch.manual_seed(0)
+    freqs = torch.randn(SQ, 1, 1, rotary_dim) * 10
+    rope = RopeTables(freqs)
+    for heads in (4, 1):
+        t = torch.randn(SQ, 2, heads, 16, dtype=dtype)
+        expected = _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=interleaved)
+        assert torch.equal(rope.apply(t, interleaved), expected)
+
+
 # ---------------------------------------------------------------------------
 # Eager attention
 # ---------------------------------------------------------------------------
@@ -432,7 +465,7 @@ class TestMinimaxSparseAttentionModule:
         pass
 
     @staticmethod
-    def _build(**overrides):
+    def _build(name=None, **overrides):
         from megatron.core.models.gpt.gpt_layer_specs import (
             get_gpt_layer_with_transformer_engine_spec,
         )
@@ -455,6 +488,8 @@ class TestMinimaxSparseAttentionModule:
             sparse_topk_blocks=TOPK,
             params_dtype=torch.float32,
             bf16=False,
+            # as in minimax_m3.yaml; hipBLASLt on gfx1250 has no fp32 GEMM with a fused bias gradient
+            add_bias_linear=False,
             **overrides,
         )
         upstream = get_gpt_layer_with_transformer_engine_spec(qk_layernorm=True)
@@ -462,7 +497,8 @@ class TestMinimaxSparseAttentionModule:
         submodules = _widen_submodules(attn_spec.submodules)
         assert isinstance(submodules, MinimaxSparseAttentionSubmodules)
 
-        return config, MinimaxSparseAttention(config, submodules, layer_number=1).cuda()
+        kwargs = {} if name is None else {"name": name}
+        return config, MinimaxSparseAttention(config, submodules, layer_number=1, **kwargs).cuda()
 
     @staticmethod
     def _rope(config, rotary_percent=0.5):
@@ -483,6 +519,12 @@ class TestMinimaxSparseAttentionModule:
         output, bias = attention(hidden, rotary_pos_emb=rotary_pos_emb)
 
         assert output.shape == (SQ, 2, config.hidden_size)
+        assert torch.isfinite(output).all()
+
+    def test_builds_with_the_module_name(self):
+        """TransformerLayer passes `name=` to its self_attention from Megatron-core 0.19 on."""
+        config, attention = self._build(name="decoder.layers.0.self_attention")
+        output, _ = attention(torch.randn(SQ, 2, config.hidden_size, device="cuda"))
         assert torch.isfinite(output).all()
 
     def test_partial_rope_rotates_only_the_leading_dims(self):
