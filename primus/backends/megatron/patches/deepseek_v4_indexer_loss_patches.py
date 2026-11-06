@@ -8,10 +8,10 @@
 
 The loss is written into Megatron's MoE aux-loss tracker, which already handles
 the pipeline reduction and the per-layer slots. But ``training_log`` passes
-``track_moe_metrics`` an explicit ``track_names`` list built from the MoE router
-options, and ``reduce_aux_losses_tracker_across_ranks`` iterates exactly that
-list -- so a key outside it is written every step and then zeroed, never
-reported. This appends the key to that list.
+``MoEMetricsTracker.report`` an explicit ``track_names`` list built from the MoE
+router options, and the report reduces exactly that list -- so a key outside it
+is written every step and then zeroed, never reported. This appends the key to
+that list.
 
 Gated on both the model type and the coefficient so it cannot affect any other
 model. Both predicates read ``args``, which is identical on every rank, so the
@@ -44,7 +44,7 @@ def _indexer_distill_enabled(ctx: PatchContext) -> bool:
 
 
 def _make_tracked_with_indexer_loss(original_fn):
-    """Wrap ``track_moe_metrics`` so it also reduces and reports our key."""
+    """Wrap ``MoEMetricsTracker.report`` so it also reduces and reports our key."""
 
     def wrapped(*args, track_names=None, **kwargs):
         # ``None`` means "every key currently in the tracker", which already
@@ -70,20 +70,14 @@ def _make_tracked_with_indexer_loss(original_fn):
     condition=_indexer_distill_enabled,
 )
 def patch_indexer_distill_loss_logging(ctx: PatchContext):
-    """Extend ``track_moe_metrics``'s key list with the distillation loss."""
-    import megatron.training.training as training_module
+    """Extend ``MoEMetricsTracker.report``'s key list with the distillation loss."""
+    from megatron.core.transformer.moe.moe_logging import MoEMetricsTracker
 
-    original_fn = getattr(training_module, "track_moe_metrics", None)
-    if original_fn is None:
-        log_rank_0(
-            "[Patch:megatron.deepseek_v4.indexer_distill_loss_logging][SKIP] "
-            "training.track_moe_metrics not found"
-        )
-        return
+    original_fn = MoEMetricsTracker.report
     if getattr(original_fn, "_v4_indexer_loss_patched", False):
         return
 
-    training_module.track_moe_metrics = _make_tracked_with_indexer_loss(original_fn)
+    MoEMetricsTracker.report = _make_tracked_with_indexer_loss(original_fn)
     log_rank_0(
         "[Patch:megatron.deepseek_v4.indexer_distill_loss_logging] "
         f"'{_LOSS_NAME}' will be reported alongside the MoE aux losses"
