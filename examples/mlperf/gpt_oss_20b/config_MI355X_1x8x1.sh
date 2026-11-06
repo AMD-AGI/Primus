@@ -60,7 +60,9 @@ export PRIMUS_TURBO_MXFP4_SCALE_ROUNDING="${PRIMUS_TURBO_MXFP4_SCALE_ROUNDING:-2
 export HSA_ENABLE_INTERRUPT=0
 export HSA_NO_SCRATCH_RECLAIM=1
 export HSA_ENABLE_SDMA=1
-export GPU_MAX_HW_QUEUES=2
+# With 2 queues the FlyDSL attention-backward side stream shares a hardware
+# queue with the RCCL copy-engine ReduceScatter chain and stalls behind it.
+export GPU_MAX_HW_QUEUES=4
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HIP_FORCE_DEV_KERNARG=1
 export HSA_FORCE_FINE_GRAIN_PCIE=1
