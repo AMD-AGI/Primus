@@ -1,0 +1,81 @@
+# Primus EXP — FLUX.1-schnell T2I pretrain at 256x256 with Primus-Turbo FP8
+# linears, AutoModel backend, 8x MI355X.
+#
+# The fastest FLUX.1-schnell recipe measured on this backend: mbs 64 / gbs 512,
+# activation checkpointing off, per-block torch.compile on FSDP2, and
+#   - FP8: compile-friendly tensorwise linears, delayed scaling, casts Inductor
+#     fuses into their producers, one cast per shared input, and FlyDSL as the
+#     default FP8 GEMM backend (quantization/_fp8_traceable.py);
+#   - non-deterministic bf16 attention backward, and train-loop host syncs
+#     deferred to logging steps.
+# Each is a setting below. The FP8 ones build on each other: the others need
+# fp8_linear_traceable, the cast and the shared input scales also need
+# fp8_linear_delayed_scaling, and the shared input scales only pay off with the
+# Inductor cast. Leaving a setting on without one it needs stops the run, so an
+# A/B arm turns the dependent ones off too.
+#
+# Data: a pre-encoded 256x256 cache with T5 at 256 tokens (the MLPerf
+# FLUX-schnell operating point), built as in flux_1_dev-pretrain.yaml with
+# --resolution_preset 256p. The model directory needs transformer/config.json
+# with guidance_embeds: false (FLUX.1-schnell); pretraining starts from random
+# weights.
+#
+# Launch (inside the Primus container, 8 GPUs). The two Inductor settings tune
+# the generated pointwise and reduction kernels; the first compile takes longer
+# and is cached:
+#   TORCHINDUCTOR_COORDINATE_DESCENT_TUNING=1 TORCHINDUCTOR_MAX_AUTOTUNE_POINTWISE=1 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/automodel/configs/MI355X/diffusion/flux_1_schnell-sq256-fp8.yaml \
+#       data.dataloader.cache_dir=/path/to/flux_cache_256
+#
+# fp8_linear_gemm_backend: flydsl keeps the FP8 GEMMs off hipBLASLt, whose FP8
+# backward intermittently gives this model a NaN gradient norm, except for the
+# shapes FlyDSL cannot run (K <= 128). FlyDSL builds each new GEMM shape on
+# first use, so the first steps are slower. PRIMUS_TURBO_AUTO_TUNE=1 overrides
+# it with a per-shape choice, which measured slower here and picks hipBLASLt
+# for some shapes.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_schnell-sq256-fp8}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: automodel
+    config: flux_pre_trainer.yaml
+    model: flux_1_schnell.yaml
+
+    overrides:
+      # The model preset's float32 storage with bfloat16 compute stays: FSDP2 casts
+      # the parameters as it gathers them, so AdamW keeps fp32 master weights for
+      # about 8 GB more memory and well under 1% of throughput.
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 64
+        global_batch_size: 512
+      data:
+        dataloader:
+          cache_dir: /path/to/flux_cache_256
+          base_resolution: [256, 256]
+          # One shape for torch.compile; a short last batch would recompile.
+          drop_last: true
+      flow_matching:
+        adapter_kwargs:
+          use_guidance_embeds: false
+      fsdp:
+        activation_checkpointing: false
+        enable_compile: true
+      checkpoint:
+        enabled: false
+
+      primus_turbo:
+        fp8_linear: true
+        fp8_linear_traceable: true
+        fp8_linear_delayed_scaling: true
+        fp8_linear_inductor_cast: true
+        fp8_linear_shared_input_scales: true
+        fp8_linear_gemm_backend: flydsl
+        nondeterministic_attention: true
+      primus_train:
+        defer_host_sync: true
