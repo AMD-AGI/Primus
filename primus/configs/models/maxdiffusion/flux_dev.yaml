@@ -28,8 +28,15 @@ save_config_to_gcs: False
 log_period: 100
 
 pretrained_model_name_or_path: 'black-forest-labs/FLUX.1-dev'
-clip_model_name_or_path: 'ariG23498/clip-vit-large-patch14-text-flax'
-t5xxl_model_name_or_path: 'ariG23498/t5-v1-1-xxl-flax'
+# CLIP-L and T5-XXL come from the same first-party FLUX.1-dev repo as the rest
+# of the pipeline. The third-party mirrors these replaced hold Flax weights
+# only, which the PyTorch text encoders cannot read.
+clip_model_name_or_path: 'black-forest-labs/FLUX.1-dev'
+clip_model_subfolder: 'text_encoder'
+clip_tokenizer_subfolder: 'tokenizer'
+t5xxl_model_name_or_path: 'black-forest-labs/FLUX.1-dev'
+t5xxl_model_subfolder: 'text_encoder_2'
+t5xxl_tokenizer_subfolder: 'tokenizer_2'
 
 # Flux params
 flux_name: "flux-dev"

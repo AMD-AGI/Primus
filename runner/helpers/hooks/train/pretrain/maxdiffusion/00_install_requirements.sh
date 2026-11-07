@@ -17,8 +17,9 @@
 # so nothing here has to mutate the vendored third_party/maxdiffusion checkout.
 #
 # requirements-maxdiffusion.txt is deliberately separate from requirements-jax.txt
-# (which MaxText installs): it pins transformers 4.x for MaxDiffusion's Flax code,
-# and that pin must not be forced onto MaxText runs.
+# (which MaxText installs): it carries the transformers floor and the torchax pin
+# that MaxDiffusion's text encoders need, and those must not be forced onto
+# MaxText runs.
 #
 # torch is installed here from a ROCm wheel source, which needs
 # --index-url/--find-links and therefore cannot live in the PyPI resolve of
