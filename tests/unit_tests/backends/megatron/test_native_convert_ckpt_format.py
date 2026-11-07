@@ -348,7 +348,6 @@ def _experiment(tp=1, pp=1, ep=1, ckpt_format="torch_dist"):
         (None, _experiment(tp=2), "torch_dist"),
         (None, _experiment(pp=2, ep=8), "torch_dist"),
         (None, _experiment(ckpt_format="torch"), "torch"),  # TP1 legacy experiments: unchanged
-        (None, _experiment(ckpt_format="torch_dcp"), "torch_dist"),
         ("torch_dist", _experiment(tp=4), "torch_dist"),
         ("torch", _experiment(), "torch"),
     ],
@@ -365,6 +364,10 @@ def test_resolve_format(requested, experiment, expected):
         ("torch", _experiment(ep=8), "cannot be loaded at TP=1 PP=1 EP=8"),
         ("torch_dist", _experiment(ckpt_format="torch"), "set ckpt_format: torch_dist"),
         ("zarr", _experiment(), "is not supported"),
+        # a run format the converter does not write
+        (None, _experiment(ckpt_format="torch_dcp"), "ckpt_format: torch_dcp is not a format"),
+        (None, _experiment(ckpt_format="fsdp_dtensor"), "ckpt_format: fsdp_dtensor is not a format"),
+        ("torch_dist", _experiment(ckpt_format="torch_dcp"), "fine-tune without FSDP"),
     ],
 )
 def test_resolve_format_refuses_unloadable(requested, experiment, message, capsys):
