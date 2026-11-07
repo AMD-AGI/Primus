@@ -39,18 +39,22 @@ Bridge-free guarantee: this module imports ONLY ``megatron.core`` /
 into ``sys.modules``.
 """
 
+import sys
 from types import SimpleNamespace
 
 import torch
 
 from primus.backends.megatron.checkpoint import native_convert_common as common
 
+LOG_NAME = "llama"  # log prefix in convert
+
 
 # ---------------------------------------------------------------------------
 # HF config.json -> Megatron args
 # ---------------------------------------------------------------------------
-def derive_megatron_fields(cfg):
-    """Translate a Llama (2/3/3.1) HF config dict into Megatron arg values."""
+def derive_megatron_fields(cfg, log=None):
+    """Translate a Llama (2/3/3.1) HF config dict into Megatron arg values (``log`` is
+    unused here; a family module's version may log to it)."""
     num_heads = cfg["num_attention_heads"]
     # Standard MHA when num_key_value_heads is absent or equals num_attention_heads;
     # GQA otherwise. Either way num_query_groups drives the mcore fused-QKV layout.
@@ -87,6 +91,8 @@ def build_margs(cfg_fields, args):
     m.num_attention_heads = cfg_fields["num_attention_heads"]
     m.num_layers = cfg_fields["num_layers"]
     m.norm_epsilon = cfg_fields["norm_epsilon"]
+    # --norm-epsilon has dest layernorm_epsilon (the TransformerConfig field the model reads).
+    m.layernorm_epsilon = cfg_fields["norm_epsilon"]
     m.ffn_hidden_size = cfg_fields["ffn_hidden_size"]
     m.untie_embeddings_and_output_weights = cfg_fields["untie_embeddings_and_output_weights"]
     m.max_position_embeddings = max(cfg_fields["max_position_embeddings"], args.seq_length)
@@ -247,6 +253,11 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
 # ---------------------------------------------------------------------------
 # In-process entrypoint
 # ---------------------------------------------------------------------------
+def extra_log_fields(cfg_fields):
+    """Fields ``convert`` adds to its arch log line (none for Llama)."""
+    return {}
+
+
 def convert(
     hf_dir,
     save_dir,
@@ -259,16 +270,37 @@ def convert(
     make_vocab_size_divisible_by=128,
     master_port=29563,
     log=None,
+    family=None,
 ):
     """Convert a Llama (2/3/3.1) HF checkpoint to a legacy Megatron torch ckpt.
 
     Single process, CPU-only. Assumes the ``phase="convert"`` patches have
     already been applied in this process (the conversion hook does so).
+
+    ``family``: the module of a Llama-layout family that reuses these steps
+    (default: this module). It provides what this module does:
+    ``LOG_NAME``, ``derive_megatron_fields(cfg, log=None)``,
+    ``extra_log_fields(cfg_fields)``, ``build_margs(cfg_fields, args)`` and
+    ``build_mcore_state_dict(model, store, margs, cfg_fields, log)``.
     """
+    family = family or sys.modules[__name__]
+    missing = [
+        n
+        for n in (
+            "LOG_NAME",
+            "derive_megatron_fields",
+            "extra_log_fields",
+            "build_margs",
+            "build_mcore_state_dict",
+        )
+        if not hasattr(family, n)
+    ]
+    if missing:
+        raise TypeError(f"family module {getattr(family, '__name__', repr(family))} lacks {missing}")
     if log is None:
 
         def log(*a):
-            print("[llama-convert]", *a, flush=True)
+            print(f"[{family.LOG_NAME}-convert]", *a, flush=True)
 
     common.ensure_megatron_on_path()
     common.assert_bridge_free("entry")
@@ -285,20 +317,21 @@ def convert(
     )
 
     log(f"reading HF config from {hf_dir}")
-    cfg = common.read_hf_config(hf_dir)
-    cfg_fields = derive_megatron_fields(cfg)
+    cfg_fields = family.derive_megatron_fields(common.read_hf_config(hf_dir), log=log)
+    extra = "".join(f" {k}={v}" for k, v in family.extra_log_fields(cfg_fields).items())
     log(
         f"arch: L={cfg_fields['num_layers']} h={cfg_fields['hidden_size']} "
         f"heads={cfg_fields['num_attention_heads']} kv_groups={cfg_fields['num_query_groups']} "
         f"head_dim={cfg_fields['kv_channels']} ffn={cfg_fields['ffn_hidden_size']} "
         f"rope_theta={cfg_fields['rotary_base']} "
-        f"tie_emb={not cfg_fields['untie_embeddings_and_output_weights']}"
+        f"tie_emb={not cfg_fields['untie_embeddings_and_output_weights']}{extra}"
     )
 
-    margs = build_margs(cfg_fields, args)
+    margs = family.build_margs(cfg_fields, args)
     log(
         f"megatron: TP={margs.tensor_model_parallel_size} PP={margs.pipeline_model_parallel_size} "
-        f"EP={margs.expert_model_parallel_size} dtype={margs.params_dtype}"
+        f"EP={margs.expert_model_parallel_size} dtype={margs.params_dtype} "
+        f"layernorm_epsilon={getattr(margs, 'layernorm_epsilon', None)}"
     )
 
     margs = common.init_megatron_single_process(margs, master_port, log=log)
@@ -310,7 +343,7 @@ def convert(
 
     store = common.SafetensorsStore(hf_dir)
     log("mapping HF safetensors -> mcore parameters ...")
-    sd, consumed = build_mcore_state_dict(model, store, margs, cfg_fields, log)
+    sd, consumed = family.build_mcore_state_dict(model, store, margs, cfg_fields, log)
 
     common.load_validate_save(model, sd, consumed, store, margs, save_dir, log)
     common.assert_bridge_free("post-save")

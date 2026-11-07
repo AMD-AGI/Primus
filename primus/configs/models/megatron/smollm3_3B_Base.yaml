@@ -1,0 +1,14 @@
+extends:
+  - smollm3_base.yaml
+
+# HuggingFaceTB/SmolLM3-3B-Base: 36 layers (NoPE at layers 3, 7, ..., 35).
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: HuggingFaceTB/SmolLM3-3B-Base
+
+hidden_size: 2048
+ffn_hidden_size: 11008
+num_layers: 36
+num_attention_heads: 16
+num_query_groups: 4
+kv_channels: 128
+max_position_embeddings: 65536
