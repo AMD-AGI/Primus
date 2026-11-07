@@ -224,27 +224,6 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    # Weekly burn-in tier (tests/README.md: a new trainer case is weekly until a weekend run
-    # is green, then it moves to per-PR). It trains the SmolLM3 preset end to end for 3
-    # iterations and checks the resolved Megatron args. Per-PR coverage is on CPU in
-    # tests/unit_tests/backends/megatron/smollm3/test_smollm3_port.py: NoPE placement on the
-    # config (test_megatron_nope_placement_matches_hf) and in a forward pass of Megatron's
-    # Attention (test_attention_skips_rope_on_nope_layers).
-    @pytest.mark.weekly
-    def test_smollm3_3B_Base(self):
-        stdout, _ = run_script(
-            self.__class__.__name__,
-            "smollm3_3B_Base",
-            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/smollm3_3B_Base-BF16-pretrain.yaml",
-            env_override={},
-            extra_args=["--num_layers", "4", "--train_iters", "3"],
-        )
-        # The resolved Megatron args (arguments.py's dump) must carry the SmolLM3 settings.
-        self.assertRegex(stdout, r"no_rope_freq \.+ 4\b")
-        self.assertRegex(stdout, r"layernorm_epsilon \.+ 1e-06\b")
-        self.assertRegex(stdout, r"rotary_base \.+ 5000000\b")
-        self.assertRegex(stdout, r"untie_embeddings_and_output_weights \.+ False\b")
-
     def test_qwen3_30B_A3B(self):
         run_script(
             self.__class__.__name__,

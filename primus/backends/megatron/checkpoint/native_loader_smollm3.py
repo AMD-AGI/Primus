@@ -46,16 +46,6 @@ HF_SMOLLM3_DEFAULTS = {
     "hidden_act": "silu",
     "no_rope_layer_interval": 4,
 }
-# Keys whose missing value changes the built model: a config.json without them is warned
-# about. These are the shape keys (the HF defaults are the 3B shapes), rms_norm_eps,
-# tie_word_embeddings, no_rope_layer_interval, and rope_theta / max_position_embeddings,
-# the two whose HF defaults differ from the SmolLM3-3B release (2e6 vs 5e6, 32768 vs
-# 65536). Not warned: the bias / activation defaults (the only supported values), and
-# vocab_size, which the converter does not use (Megatron sizes the vocab from the
-# tokenizer; the checkpoint's embedding rows are padded or trimmed to it).
-_WARN_IF_MISSING = tuple(
-    k for k in HF_SMOLLM3_DEFAULTS if k not in ("attention_bias", "mlp_bias", "hidden_act", "vocab_size")
-)
 HF_DEFAULT_NO_ROPE_LAYER_INTERVAL = HF_SMOLLM3_DEFAULTS["no_rope_layer_interval"]
 # HF default for a MISSING num_key_value_heads (an explicit null means plain MHA, so it
 # is not in HF_SMOLLM3_DEFAULTS, whose null handling differs; see with_hf_defaults).
@@ -66,6 +56,15 @@ _NULL_MEANS_FALSE = ("attention_bias", "mlp_bias")
 _NULL_RESOLVED_ELSEWHERE = ("rope_theta", "no_rope_layer_interval")
 # Keys the converter does not use (Megatron sizes the vocab from the tokenizer): a null is ignored.
 _UNUSED = ("vocab_size",)
+# Keys whose missing value changes the built model: a config.json without them is warned
+# about. These are the shape keys (the HF defaults are the 3B shapes), rms_norm_eps,
+# tie_word_embeddings, no_rope_layer_interval, and rope_theta / max_position_embeddings,
+# the two whose HF defaults differ from the SmolLM3-3B release (2e6 vs 5e6, 32768 vs
+# 65536). Not warned: the bias / activation defaults (the only supported values), and
+# vocab_size, which the converter does not use (Megatron sizes the vocab from the
+# tokenizer; the checkpoint's embedding rows are padded or trimmed to it).
+_NOT_WARNED = _NULL_MEANS_FALSE + _UNUSED + ("hidden_act",)
+_WARN_IF_MISSING = tuple(k for k in HF_SMOLLM3_DEFAULTS if k not in _NOT_WARNED)
 
 LOG_NAME = "smollm3"  # log prefix in convert
 
@@ -390,9 +389,11 @@ def build_margs(cfg_fields, args):
     # layers only, so it has num_layers entries (or an int period that divides N).
     # The Llama build_margs sets layernorm_epsilon (rms_norm_eps, 1e-6 for SmolLM3-3B);
     # check_model_eps checks it on the built model.
-    # A caller that only builds and loads the model (no save, e.g. a logprob-parity harness that
-    # calls derive_megatron_fields/build_margs/build_mcore_state_dict) may pass args without
-    # ckpt_format; give it convert's default so the Llama build_margs can read it.
+    # A caller that only builds and loads the model (no save) may pass args without
+    # ckpt_format: the external log-prob parity check of the converter contract (Primer's
+    # l3-logprob-parity) calls derive_megatron_fields/build_margs/build_mcore_state_dict
+    # that way, and failed when this fallback was removed. Give it convert's default so
+    # the Llama build_margs can read it.
     if not hasattr(args, "ckpt_format"):
         args = SimpleNamespace(**vars(args), ckpt_format=common.DEFAULT_CKPT_FORMAT)
     m = _llama.build_margs(cfg_fields, args)

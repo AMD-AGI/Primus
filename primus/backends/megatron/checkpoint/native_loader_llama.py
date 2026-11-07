@@ -296,7 +296,7 @@ def convert(
         if not hasattr(family, n)
     ]
     if missing:
-        raise TypeError(f"family module {family.__name__} lacks {missing}")
+        raise TypeError(f"family module {getattr(family, '__name__', repr(family))} lacks {missing}")
     if log is None:
 
         def log(*a):

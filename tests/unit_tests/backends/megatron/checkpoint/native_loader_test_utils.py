@@ -9,6 +9,7 @@ for ``common.SafetensorsStore`` and a builder of Llama-layout HF tensors."""
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,8 +101,6 @@ def stub_convert_pipeline(monkeypatch, cfg, tensors, build_model, save):
 def margs_args(hf_dir="/nonexistent", save_dir="/nonexistent"):
     """The ``args`` a converter's ``build_margs`` takes (as ``convert`` builds it), for a small
     fp32 single-rank model."""
-    from types import SimpleNamespace
-
     return SimpleNamespace(
         hf_dir=hf_dir,
         save_dir=save_dir,

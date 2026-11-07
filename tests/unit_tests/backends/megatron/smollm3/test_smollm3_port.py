@@ -573,9 +573,24 @@ def test_hook_detects_smollm3(tmp_path, cfg):
     assert hook._detect_native_family(str(tmp_path)) == "smollm3"
 
 
+def test_registry_selects_smollm3_for_released_config():
+    """native_families/smollm3.py registers the family for the checkpoint's config.json."""
+    from primus.backends.megatron.checkpoint import native_registry
+
+    fam = native_registry.family_for_config(
+        {"architectures": ["SmolLM3ForCausalLM"], "model_type": "smollm3"}
+    )
+    assert fam is not None and fam.name == "smollm3"
+    assert fam.converter == "primus.backends.megatron.checkpoint.native_loader_smollm3"
+    assert fam.model_type == "gpt"
+    assert native_registry.family_for_config({"model_type": "smollm3"}).name == "smollm3"
+    assert "SmolLM3" in native_registry.supported_text()
+    assert fam.converter_module().convert is not None
+
+
 def test_hook_dispatches_smollm3_to_its_converter(tmp_path, monkeypatch):
-    """family smollm3 runs native_loader_smollm3.convert (Megatron setup is faked here;
-    the conversion gates run it for real)."""
+    """family smollm3 runs native_loader_smollm3.convert with the hook's layout and the
+    family's convert_kwargs (Megatron setup is faked here; the conversion gates run it for real)."""
     hook = load_convert_hook()
     from primus.backends.megatron.checkpoint import native_convert_common as common
     from primus.backends.megatron.checkpoint import native_loader_smollm3 as conv
@@ -583,18 +598,17 @@ def test_hook_dispatches_smollm3_to_its_converter(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(common, "ensure_megatron_on_path", lambda: None)
     monkeypatch.setattr(common, "apply_convert_patches", lambda **k: 0)
-    monkeypatch.setattr(hook, "_native_dtype_from_config", lambda path, dtype: "bf16")
-    monkeypatch.setattr(conv, "convert", lambda hf, out, **k: calls.append((hf, out)))
-    hook.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), {"family": "smollm3"})
-    assert calls == [(str(tmp_path), str(tmp_path / "out"))]
-
-
-def test_hook_families_each_have_a_converter_module():
-    """One registry: every family in _NATIVE_FAMILIES has primus...native_loader_<family>."""
-    hook = load_convert_hook()
-    ckpt = REPO / "primus/backends/megatron/checkpoint"
-    for family in set(hook._NATIVE_FAMILIES.values()):
-        assert (ckpt / f"native_loader_{family}.py").is_file(), family
+    monkeypatch.setattr(hook, "_native_dtype_from_config", lambda path, dtype, family=None: "bf16")
+    monkeypatch.setattr(conv, "convert", lambda hf, out, **k: calls.append((hf, out, k)))
+    hook.native_convert_checkpoint(
+        str(tmp_path),
+        str(tmp_path / "out"),
+        {"family": "smollm3", "tensor_parallel_size": 2, "convert_kwargs": {"probe": 1}},
+    )
+    assert len(calls) == 1
+    hf, out, kwargs = calls[0]
+    assert (hf, out) == (str(tmp_path), str(tmp_path / "out"))
+    assert kwargs["tensor_parallel_size"] == 2 and kwargs["dtype"] == "bf16" and kwargs["probe"] == 1
 
 
 # --------------------------------------------------------------------------- convert driver
