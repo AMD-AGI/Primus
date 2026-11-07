@@ -11,6 +11,7 @@ recommendation models. A model preset's `model_family` picks the trainer.
 
 - [Benchmark](dlrm_v4/README.md): problem, dataset, preprocessing, model, quality target, data order
 - [ROCm 10.2 port](dlrm_v4/rocm-port.md): software stack, results on MI355X, every change and its measured effect, open items
+- [On rocm/primus:v26.9](dlrm_v4/primus-v26.9.md): what differs from the validated stack, the A/B results, re-recording the per-stack tables after an image update
 - [FP8](dlrm_v4/fp8.md): the FP8 HSTU kernels and their numerics
 - [Multi-node](dlrm_v4/multi-node.md): RDMA fabric and RCCL settings
 - [Performance notes](dlrm_v4/perf-notes.md), [MI355X performance notes](dlrm_v4/perf-notes-mi355.md): the optimization log

@@ -22,9 +22,9 @@ eval AUC reaches 0.75.
   `gin-config` and the MLPerf logging package (all `--no-deps`) and links
   `/opt/rocm` to the image's ROCm, at the first launch in a container. It also
   installs FlyDSL 0.2.4 into `/opt/primus-recommendation/site-packages`, which
-  only the trainer puts first on its path: the trainer's FlyDSL kernels are
-  written for 0.2.4, and the image's 0.3.4.1 (used by aiter and Primus-Turbo)
-  removed APIs they use.
+  only the trainer puts first on its path. The kernels also run on the image's
+  FlyDSL 0.3.4.1 (`PRIMUS_RECOMMENDATION_SITE=` uses it), but its newer compiler
+  makes them 0.19% slower.
 
 ### Data
 
@@ -129,12 +129,18 @@ or directly: `./primus-cli direct -- train pretrain --config examples/mlperf/dlr
   `/tmp/dlrm_hstu_*` before `run_start` (init ~3-7 min); later runs reuse them.
   Use a fresh container (or `/tmp`) after changing the image: builds are reused
   when the sources match, even across stacks.
-- **Per-stack tables**: the Triton spec replay, BLAS replay and HIP preload
-  tables in the trainer are recorded for one software stack and turn themselves
-  off on another (first-use compiles and library loads then happen inside the
-  timed region). Re-record them after an image change
-  (`tools/recommendation/dlrm_v4/gen_blas_replay_table.py`,
-  `gen_hip_preload_table.py`).
+- **Per-stack tables and pins**: the Triton spec replay, BLAS replay and HIP
+  preload tables and the FP8 BLAS solution pins are recorded for one software
+  stack and turn themselves off on another: library loads then stall the timed
+  region (five 3-6 s stalls, ~19 s, before the v26.9 tables) and the X2L-B
+  fused backward fails closed. After an image change, re-record them with
+  `tools/recommendation/dlrm_v4/record_stack_tables.sh` and check the m4 lines of
+  a full run; see
+  [primus-v26.9.md](../../../docs/04-technical-guides/recommendation/dlrm_v4/primus-v26.9.md).
+- **GPU hardware queues**: the experiment yaml sets `GPU_MAX_HW_QUEUES=4` (the HIP
+  default) over Primus' runner default of 2 (+0.44%). Keep
+  `TORCH_NCCL_HIGH_PRIORITY=1` (Primus' default): with 2 queues, normal-priority
+  NCCL streams cost 5%.
 - **Multi-node**: the trainer supports it (`NNODES`, `NODE_RANK`, `MASTER_ADDR`,
   `MASTER_PORT`; MLPerf RCP LR 2e-6 at 2 nodes, 4e-6 at 4 nodes); this recipe has
   been validated on one node.
