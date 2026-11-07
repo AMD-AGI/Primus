@@ -17,8 +17,14 @@ upstream ``gpt_builder`` (``third_party/Megatron-LM/gpt_builders.py``) the build
 bias-dropout-adds (scaled by ``residual_multiplier``, see ``granite_layer_specs``).
 
 It covers only the dense Llama-layout Granite. Upstream options that select another
-config source, layer layout or builder are refused with an explicit error instead of
-being ignored (see ``granite_args.reject_unsupported_args``).
+config source or builder, and the layout args the converter maps weights to (norm, biases,
+QK norm, RoPE, attention variants), are refused with an explicit error instead of being
+ignored (see ``granite_args.reject_unsupported_args``).
+
+A user layer spec (``--spec``) is accepted as given: its bias-dropout-adds are scaled by
+``residual_multiplier`` (``granite_layer_spec_from``), but the modules it names (norm class,
+core attention, QK norm, biases) are not checked against the Granite layout. A spec is code
+the user chose; the build logs a warning that the Granite layout checks do not cover it.
 """
 
 from megatron.core.models.gpt import GPTModel
@@ -58,7 +64,13 @@ def granite_builder(args, pre_process, post_process, vp_stage=None, config=None,
         )
 
     if args.spec is not None:
-        # A user spec still gets the scaled bdas, or residual_multiplier is lost.
+        # A user spec still gets the scaled bdas, or residual_multiplier is lost. Its modules
+        # are not checked against the Granite layout (module docstring).
+        log_rank_0(
+            f"[Primus:Granite] WARNING: user layer spec {args.spec}: its modules (norm, core "
+            "attention, QK norm, biases) are not checked against the Granite layout the "
+            "converter maps weights to; only its bias-dropout-adds are scaled"
+        )
         transformer_layer_spec = granite_layer_spec_from(import_module(args.spec), config.residual_multiplier)
     else:
         transformer_layer_spec = get_granite_layer_spec(args, config)

@@ -49,7 +49,22 @@ def test_positive_finite_huge_int_is_value_error_not_overflow():
 def test_positive_finite_message_shows_the_value_as_given(value, shown):
     with pytest.raises(ValueError) as e:
         positive_finite("m", value)
-    assert str(e.value).endswith(shown)
+    assert shown in str(e.value)
+
+
+def test_positive_finite_string_message_hints_at_yaml_float_syntax():
+    # PyYAML reads 1e-2 (no dot) as the string '1e-2'.
+    with pytest.raises(ValueError, match=r"got '1e-2' \(a string: .*1\.0e-2\)"):
+        positive_finite("m", "1e-2")
+
+
+def test_positive_finite_real_whose_float_raises_type_error_is_value_error():
+    class BadReal(float):
+        def __float__(self):
+            raise TypeError("no float")
+
+    with pytest.raises(ValueError, match="positive finite"):
+        positive_finite("m", BadReal(1.0))
 
 
 def test_positive_finite_rejects_numpy_nan_and_zero():

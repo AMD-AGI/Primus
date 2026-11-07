@@ -21,7 +21,7 @@ def positive_finite(name, value, where=""):
     if not isinstance(value, bool) and isinstance(value, numbers.Real):
         try:
             number = float(value)
-        except (OverflowError, ValueError):
+        except (OverflowError, ValueError, TypeError):
             number = math.nan
         if number > 0.0 and math.isfinite(number):
             return number
@@ -29,4 +29,8 @@ def positive_finite(name, value, where=""):
         shown = repr(value)
     except Exception:  # e.g. an int above Python's integer-string limit
         shown = f"a {type(value).__name__} that cannot be shown"
-    raise ValueError(f"{where}{name} must be a positive finite number, got {shown}")
+    hint = ""
+    if isinstance(value, str):
+        # PyYAML (YAML 1.1) reads 1e-2 (no dot) as a string; 1.0e-2 is a float.
+        hint = " (a string: write the number unquoted, with a dot in scientific notation, e.g. 1.0e-2)"
+    raise ValueError(f"{where}{name} must be a positive finite number, got {shown}{hint}")

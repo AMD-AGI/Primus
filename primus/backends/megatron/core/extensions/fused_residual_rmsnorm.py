@@ -311,8 +311,7 @@ def install() -> bool:
                 # add so the layer sees a correct hidden_states. An
                 # inconsistent residual scale takes this path too: _can_fuse
                 # returns False for it, before any layer state changes.
-                _drain_carry_into_hidden_states(self, args, kwargs)
-                return _orig_layer_forward(self, *args, **kwargs)
+                return _unfused_forward(_orig_layer_forward, self, args, kwargs)
             try:
                 return _do_fused_forward(self, *args, **kwargs)
             except Exception as exc:
@@ -321,7 +320,10 @@ def install() -> bool:
                     f"falling back to original forward for all layers"
                 )
                 TransformerLayer.forward = _orig_layer_forward
-                return _orig_layer_forward(self, *args, **kwargs)
+                # A carry still queued for this layer (the raise came before the fused
+                # forward consumed it, e.g. from the residual-scale lookup) is added back
+                # into hidden_states, as on the per-layer fallback above.
+                return _unfused_forward(_orig_layer_forward, self, args, kwargs)
 
         TransformerLayer.forward = _fused_layer_forward
         TransformerLayer._fused_residual_patched = True
@@ -392,6 +394,14 @@ def _drain_carry_into_hidden_states(layer: Any, args: tuple, kwargs: dict) -> No
         kwargs["hidden_states"] = new_hs
         return
     kwargs["hidden_states"] = new_hs
+
+
+def _unfused_forward(orig_forward, layer: Any, args: tuple, kwargs: dict):
+    """Run the original ``TransformerLayer.forward`` for ``layer``, after adding a V2 carry
+    still queued for it into ``hidden_states`` (``_drain_carry_into_hidden_states``). Used by
+    both fallbacks of the fused forward: the per-layer one and the one after a raise."""
+    _drain_carry_into_hidden_states(layer, args, kwargs)
+    return orig_forward(layer, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -473,13 +483,8 @@ def _residual_scale(layer: Any, cfg: Any) -> Optional[float]:
     (the two bda disagree, or a ``residual_multiplier`` on the layer or its config is not a
     positive finite number equal to the bda's).
 
-    Computed on the first ``_can_fuse`` call for the layer (its own forward, or the V2
-    next-layer probe that runs during the previous layer's forward) and stored on the layer
-    with what it depends on (``_residual_scale_key``). A later call recomputes it when the
-    bdas or a ``residual_multiplier`` changed, else it is a key built from four attribute
-    reads and an identity compare (once per layer per forward, in ``_can_fuse``). The fused
-    forward reads the value ``_can_fuse`` just stored (``_stored_residual_scale``), without
-    building the key again.
+    The result is cached on the layer and recomputed when the bdas or a
+    ``residual_multiplier`` change (``_residual_scale_key``).
     """
     key = _residual_scale_key(layer, cfg)
     stored = getattr(layer, _RESIDUAL_SCALE_ATTR, _UNSET)
@@ -628,8 +633,10 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
 
     # The residual branch scale (Granite residual_multiplier; 1.0 otherwise). Looked up here,
     # before the V2 carry is consumed and before attention runs: if it raises (an inconsistent
-    # scale that _can_fuse did not catch), no layer state has changed yet, so the fallback to
-    # the original forward neither loses the previous layer's carry nor runs attention twice.
+    # scale that _can_fuse did not catch), the carry is still on the layer and attention has
+    # not run, so the wrapper's fallback drains the carry into hidden_states
+    # (_drain_carry_into_hidden_states), runs the original forward for this call, and
+    # permanently reverts TransformerLayer.forward for all layers.
     scale = _stored_residual_scale(layer)
 
     v2_active = _v2_enabled()

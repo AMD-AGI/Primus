@@ -56,6 +56,9 @@ GRANITE_ATTENTION_OFF = {
     "no_rope_freq": "NoPE layers; HF Granite applies RoPE on every layer",
     "apply_query_key_layer_scaling": "scales QK^T by the layer number; HF Granite does not",
     "use_sink_attention": "learned attention sinks; HF Granite has none",
+    # TransformerConfig.softmax_type: 'off-by-one' adds 1 to the softmax denominator and
+    # 'learnable' adds a learned sink logit per head; HF Granite uses the plain softmax.
+    "softmax_type": "non-vanilla softmax (off-by-one / learnable sink); HF Granite uses the plain softmax",
 }
 
 
@@ -70,6 +73,8 @@ _OFF_SENTINELS = {
     and v[0] == -1
     and v[1] in (-1, 0),
     "no_rope_freq": lambda v: isinstance(v, (list, tuple)) and all(_is_int(x) and x == 0 for x in v),
+    # Upstream's default softmax.
+    "softmax_type": lambda v: v == "vanilla",
 }
 
 # Options for which only None is off. TransformerConfig fills softmax_scale from MuP only
@@ -87,7 +92,7 @@ def _is_on(key, value):
     Off: None. For ``softmax_scale`` nothing else (``_ONLY_NONE_IS_OFF``). For the other
     options also False, a number equal to 0, an empty list / tuple, and the option's own off
     sentinel (``_OFF_SENTINELS``: ``window_size: [-1, -1]`` or ``[-1, 0]``,
-    ``no_rope_freq: [0, ...]``). Anything else is on. A string is on, also ``'false'`` /
+    ``no_rope_freq: [0, ...]``, ``softmax_type: 'vanilla'``). Anything else is on. A string is on, also ``'false'`` /
     ``'0'``: Megatron reads the value as given (a non-empty string is true), so a quoted
     ``'false'`` would enable the option; write it unquoted.
     """

@@ -22,6 +22,9 @@ pytest.importorskip("torch")
 pytest.importorskip("megatron")
 
 from primus.backends.megatron.checkpoint import (  # noqa: E402
+    native_convert_common as common,
+)
+from primus.backends.megatron.checkpoint import (  # noqa: E402
     native_loader_granite as conv,
 )
 
@@ -35,7 +38,7 @@ def _checkpoint_dir(path, iteration=1):
     path.mkdir(parents=True, exist_ok=True)
     (path / f"iter_{iteration:07d}").mkdir(exist_ok=True)
     (path / f"iter_{iteration:07d}" / "common.pt").write_text("weights")  # a checkpoint file
-    (path / conv.TRACKER_FILE).write_text(str(iteration))  # Megatron writes it last
+    (path / common.TRACKER_FILENAME).write_text(str(iteration))  # Megatron writes it last
     return path
 
 
@@ -140,6 +143,179 @@ def test_a_checkpoint_without_the_copy_loads_unchecked_with_a_warning(tmp_path):
     assert conv.check_args_against_checkpoint(args, log=logs.append) is None
 
 
+def _training_save(path, args, iteration=50):
+    """A legacy ``torch`` checkpoint as Megatron's save writes it: the rank-0 file holds the
+    run's args (``generate_state_dict``), and no HF config copy."""
+    import argparse
+
+    import torch
+
+    _checkpoint_dir(path, iteration)
+    rank_dir = path / f"iter_{iteration:07d}" / "mp_rank_00"
+    rank_dir.mkdir()
+    torch.save({"args": argparse.Namespace(**args), "iteration": iteration}, rank_dir / "model_optim_rng.pt")
+    return str(path)
+
+
+def test_a_resume_without_a_copy_is_checked_against_the_saved_args(tmp_path):
+    # A Granite training save (no copy) resumed without pretrained_checkpoint: the args
+    # Megatron saved with it carry residual_multiplier and the MuP fields; the run's must match.
+    saved = {**shipped_preset(), "residual_multiplier": 0.22}
+    ckpt = _training_save(tmp_path / "pretrain", saved)
+    logs = []
+    ok = SimpleNamespace(**{**shipped_preset(), "load": ckpt, "pretrained_checkpoint": None})
+    assert conv.check_args_against_checkpoint(ok, log=logs.append)["residual_multiplier"] == 0.22
+    assert "args saved in" in logs[-1]
+    for change, needle in (
+        ({"residual_multiplier": 0.5}, "residual_multiplier: preset 0.5, the checkpoint gives 0.22"),
+        ({"mup_embedding_mult": 1.0}, "mup_embedding_mult"),
+        ({"use_mup": False}, "use_mup"),
+        ({"mup_base_head_dim": 4.0}, "softmax scale"),
+        ({"rotary_base": 10000}, "rotary_base"),
+    ):
+        bad = SimpleNamespace(**{**shipped_preset(), "load": ckpt, "pretrained_checkpoint": None, **change})
+        with pytest.raises(ValueError, match="do not match the args saved") as e:
+            conv.check_args_against_checkpoint(bad)
+        assert needle in str(e.value)
+
+
+def test_a_conversion_killed_before_its_copy_is_still_checked(tmp_path, monkeypatch):
+    # The tracker exists but the copy was never written (the converter was killed between the
+    # two): the converted checkpoint's saved args (build_margs sets the Granite fields) are used.
+    from megatron.core import dist_checkpointing
+
+    ckpt = tmp_path / "converted"
+    ckpt.mkdir()
+    (ckpt / "release").mkdir()
+    (ckpt / common.TRACKER_FILENAME).write_text("release")
+    margs = conv.derive_megatron_fields(GRANITE_HF)
+    margs.update(group_query_attention=True, normalization="RMSNorm", swiglu=True, add_bias_linear=False)
+    margs.update(position_embedding_type="rope")
+    seen = []
+    monkeypatch.setattr(dist_checkpointing, "check_is_distributed_checkpoint", lambda d: True)
+    monkeypatch.setattr(
+        dist_checkpointing,
+        "load_common_state_dict",
+        lambda d: seen.append(d) or {"args": SimpleNamespace(**margs)},
+    )
+    args = SimpleNamespace(**{**shipped_preset(), "load": None, "pretrained_checkpoint": str(ckpt)})
+    assert conv.check_args_against_checkpoint(args, log=lambda m: None)["residual_multiplier"] == 0.22
+    assert seen == [str(ckpt / "release")]
+    args.residual_multiplier = 0.5
+    with pytest.raises(ValueError, match="residual_multiplier: preset 0.5"):
+        conv.check_args_against_checkpoint(args)
+
+
+@pytest.mark.parametrize(
+    "change, accepted",
+    [
+        ({}, True),
+        # The same softmax scale written another way (sqrt(1) / 64): both paths accept it.
+        ({"mup_base_head_dim": 1.0}, True),
+        ({"mup_attn_scale_power": None}, True),
+        # Another scale: both refuse it.
+        ({"mup_base_head_dim": 4.0}, False),
+        # A quoted 'false' is not a boolean: both refuse it.
+        ({"group_query_attention": "false"}, False),
+        # Options the Granite builder or attention check refuses: both refuse them.
+        ({"softmax_scale": 0.015625}, False),
+        ({"window_size": [128, 0]}, False),
+        ({"num_experts": 8}, False),
+        ({"qk_layernorm": True}, False),
+    ],
+)
+def test_both_checks_accept_and_refuse_the_same_args(tmp_path, change, accepted):
+    # The HF-config copy and the args Megatron saved describe the same model: a run's args are
+    # accepted by one check exactly when the other accepts them (one model_mismatches).
+    converted = SimpleNamespace(
+        **{
+            **shipped_preset(),
+            "load": None,
+            "pretrained_checkpoint": _converted_checkpoint(tmp_path),
+            **change,
+        }
+    )
+    saved = SimpleNamespace(
+        **{
+            **shipped_preset(),
+            "load": _training_save(tmp_path / "saved", shipped_preset()),
+            "pretrained_checkpoint": None,
+            **change,
+        }
+    )
+    for args in (converted, saved):
+        if accepted:
+            assert conv.check_args_against_checkpoint(args, log=lambda m: None) is not None
+        else:
+            with pytest.raises(ValueError):
+                conv.check_args_against_checkpoint(args)
+
+
+def test_iteration_dir_reads_the_tracker_like_saved_ckpt_format(tmp_path):
+    # iteration_dir reads the tracker as native_convert_common.saved_ckpt_format does;
+    # None without a usable tracker.
+    assert conv.iteration_dir(str(tmp_path)) is None
+    (tmp_path / common.TRACKER_FILENAME).write_text("release\n")
+    assert conv.iteration_dir(str(tmp_path)) == tmp_path / "release"
+    assert common.saved_ckpt_format(str(tmp_path)) is None  # no release directory yet
+    (tmp_path / common.TRACKER_FILENAME).write_text("42")
+    assert conv.iteration_dir(str(tmp_path)) == tmp_path / "iter_0000042"
+    (tmp_path / "iter_0000042").mkdir()
+    (tmp_path / "iter_0000042" / "metadata.json").write_text("{}")
+    assert common.saved_ckpt_format(str(tmp_path)) == "torch_dist"
+    (tmp_path / common.TRACKER_FILENAME).write_text("garbage")
+    assert conv.iteration_dir(str(tmp_path)) is None
+    assert common.saved_ckpt_format(str(tmp_path)) is None
+
+
+def test_preset_mismatches_needs_no_vocab_when_told(tmp_path):
+    # The run's check does not compare vocab_size, so a copy without it is accepted as is
+    # (no stand-in value), and a preset vocab_size is not compared.
+    cfg = {k: v for k, v in GRANITE_HF.items() if k != "vocab_size"}
+    assert conv.preset_mismatches(cfg, {**shipped_preset(), "vocab_size": 7}, check_vocab=False) == []
+    with pytest.raises(ValueError, match="vocab_size"):
+        conv.preset_mismatches(cfg, shipped_preset())
+    assert "vocab_size" in " ".join(conv.preset_mismatches(GRANITE_HF, {**shipped_preset(), "vocab_size": 7}))
+
+
+def test_unreadable_saved_args_raise(tmp_path):
+    ckpt = _checkpoint_dir(tmp_path / "broken", 3)
+    rank_dir = ckpt / "iter_0000003" / "mp_rank_00"
+    rank_dir.mkdir()
+    (rank_dir / "model_optim_rng.pt").write_text("not a torch file")
+    args = SimpleNamespace(**{**shipped_preset(), "load": str(ckpt), "pretrained_checkpoint": None})
+    with pytest.raises(ValueError, match="cannot read the args Megatron saved"):
+        conv.check_args_against_checkpoint(args)
+
+
+def test_saved_args_of_another_model_are_not_compared(tmp_path):
+    # Saved args without residual_multiplier (a non-Granite run, Megatron-Bridge): warning only.
+    ckpt = _training_save(tmp_path / "llama", {"hidden_size": 4096})
+    logs = []
+    args = SimpleNamespace(**{**shipped_preset(), "load": ckpt, "pretrained_checkpoint": None})
+    assert conv.check_args_against_checkpoint(args, log=logs.append) is None
+    assert "WARNING" in logs[0]
+
+
+def test_build_margs_fills_in_a_null_ckpt_format(monkeypatch):
+    # An explicit ckpt_format=None (an unset argparse option) takes the default; no
+    # duplicate-keyword TypeError.
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
+    seen = {}
+    monkeypatch.setattr(
+        conv.llama, "build_margs", lambda fields, args: seen.update(vars(args)) or SimpleNamespace()
+    )
+    fields = conv.derive_megatron_fields(GRANITE_HF)
+    m = conv.build_margs(fields, SimpleNamespace(ckpt_format=None, x=1))
+    assert seen == {"ckpt_format": common.DEFAULT_CKPT_FORMAT, "x": 1}
+    assert m.model_type == "granite" and m.residual_multiplier == 0.22
+    conv.build_margs(fields, SimpleNamespace(x=2))
+    assert seen["ckpt_format"] == common.DEFAULT_CKPT_FORMAT
+    conv.build_margs(fields, SimpleNamespace(ckpt_format="torch"))
+    assert seen["ckpt_format"] == "torch"
+
+
 def test_a_checkpoint_with_an_unreadable_tracker_is_not_checked(tmp_path):
     # No fallback to a copy at the checkpoint root: it is not tied to any iteration. Megatron
     # itself reports the unreadable tracker when it loads.
@@ -147,7 +323,7 @@ def test_a_checkpoint_with_an_unreadable_tracker_is_not_checked(tmp_path):
 
     ckpt = tmp_path / "c"
     ckpt.mkdir()
-    (ckpt / conv.TRACKER_FILE).write_text("garbage")
+    (ckpt / common.TRACKER_FILENAME).write_text("garbage")
     (ckpt / conv.HF_CONFIG_COPY).write_text(json.dumps({**GRANITE_HF, "model_type": "llama"}))
     logs = []
     args = SimpleNamespace(**{**shipped_preset(), "load": str(ckpt)})
@@ -199,7 +375,7 @@ def test_ckpt_step_selects_the_iteration_checked(tmp_path):
     assert conv.check_args_against_checkpoint(older, log=lambda m: None) == GRANITE_HF
 
 
-def test_iter_dir_name_is_megatrons(tmp_path):
+def test_iteration_dir_is_megatrons(tmp_path):
     # The naming rule matches Megatron's own get_checkpoint_name (run where megatron.training
     # imports, i.e. on a GPU node).
     import torch
@@ -208,18 +384,25 @@ def test_iter_dir_name_is_megatrons(tmp_path):
         pytest.skip("megatron.training.checkpointing probes the GPU at import")
     from megatron.training.checkpointing import get_checkpoint_name
 
-    for iteration, release in ((1, False), (1234567, False), (0, True)):
-        expected = get_checkpoint_name(str(tmp_path), iteration, release=release, return_base_dir=True)
-        assert str(tmp_path / conv._iter_dir_name(iteration, release)) == expected
+    ckpt = tmp_path / "c"
+    ckpt.mkdir()
+    for iteration in (1, 1234567):
+        expected = get_checkpoint_name(str(ckpt), iteration, release=False, return_base_dir=True)
+        assert str(conv.iteration_dir(str(ckpt), ckpt_step=iteration)) == expected
+        (ckpt / common.TRACKER_FILENAME).write_text(str(iteration))
+        assert str(conv.iteration_dir(str(ckpt))) == expected
+    (ckpt / common.TRACKER_FILENAME).write_text("release")
+    expected = get_checkpoint_name(str(ckpt), 0, release=True, return_base_dir=True)
+    assert str(conv.iteration_dir(str(ckpt))) == expected
 
 
 def test_iteration_dir_follows_megatron_naming(tmp_path):
     ckpt = tmp_path / "c"
     ckpt.mkdir()
     assert conv.iteration_dir(str(ckpt)) is None  # no tracker
-    (ckpt / conv.TRACKER_FILE).write_text("release")
+    (ckpt / common.TRACKER_FILENAME).write_text("release")
     assert conv.iteration_dir(str(ckpt)) == ckpt / "release"
-    (ckpt / conv.TRACKER_FILE).write_text("42\n")
+    (ckpt / common.TRACKER_FILENAME).write_text("42\n")
     assert conv.iteration_dir(str(ckpt)) == ckpt / "iter_0000042"
     assert conv.iteration_dir(str(ckpt), ckpt_step=7) == ckpt / "iter_0000007"
 
@@ -307,6 +490,27 @@ def test_any_failure_of_the_check_stops_the_run(monkeypatch, error):
         patch.patch_granite_checkpoint_args(_patch_ctx({"model_type": "granite"}, {}))
 
 
+def test_a_failed_import_of_the_check_stops_the_run(monkeypatch):
+    # The import of the check is inside the try: a broken loader module stops the run too.
+    import builtins
+
+    from primus.backends.megatron.patches import (
+        granite_checkpoint_args_patches as patch,
+    )
+
+    real_import = builtins.__import__
+
+    def failing_import(name, *a, **k):
+        if name.endswith("native_loader_granite"):
+            raise ImportError("broken loader")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(patch, "log_rank_0", lambda *a, **k: None)
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+    with pytest.raises(SystemExit, match="ImportError: broken loader"):
+        patch.patch_granite_checkpoint_args(_patch_ctx({"model_type": "granite"}, {}))
+
+
 @pytest.mark.parametrize(
     "params, backend, expected",
     [
@@ -369,6 +573,36 @@ def test_granite_convert_runs_the_granite_steps(monkeypatch, tmp_path):
     assert not list(tmp_path.rglob(conv.HF_CONFIG_COPY + "*.tmp"))
 
 
+def test_granite_convert_writes_the_copy_into_the_release_layout(monkeypatch, tmp_path):
+    # torch_dist (main's default) is saved in the release/ layout: the copy goes there, where
+    # the fine-tuning run looks for it through the tracker file.
+    import json
+
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
+    margs = SimpleNamespace(params_dtype="bf16", iteration=1)
+    seen = {}
+    monkeypatch.setattr(common, "ensure_megatron_on_path", lambda: None)
+    monkeypatch.setattr(common, "assert_bridge_free", lambda where: None)
+    monkeypatch.setattr(common, "read_hf_config", lambda d: GRANITE_HF)
+    monkeypatch.setattr(conv, "build_margs", lambda fields, args: seen.update(fmt=args.ckpt_format) or margs)
+    monkeypatch.setattr(common, "init_megatron_single_process", lambda m, port, log: m)
+    monkeypatch.setattr(conv, "build_model", lambda m: "model")
+    monkeypatch.setattr(common, "SafetensorsStore", lambda d: "store")
+    monkeypatch.setattr(conv, "build_mcore_state_dict", lambda *a: ({}, set()))
+
+    def save(*a):
+        (tmp_path / "release").mkdir()
+        (tmp_path / common.TRACKER_FILENAME).write_text("release")
+
+    monkeypatch.setattr(common, "load_validate_save", save)
+    conv.convert("hf", str(tmp_path), log=lambda *a: None)
+    assert seen["fmt"] == common.DEFAULT_CKPT_FORMAT == "torch_dist"
+    assert json.loads((tmp_path / "release" / conv.HF_CONFIG_COPY).read_text()) == GRANITE_HF
+    with pytest.raises(ValueError, match="unsupported native checkpoint format"):
+        conv.convert("hf", str(tmp_path / "x"), ckpt_format="zarr", log=lambda *a: None)
+
+
 def test_granite_convert_writes_no_copy_when_the_mapping_fails(monkeypatch, tmp_path):
     from primus.backends.megatron.checkpoint import native_convert_common as common
 
@@ -413,4 +647,4 @@ def test_granite_convert_removes_the_tracker_when_the_copy_fails(monkeypatch, tm
     with pytest.raises(OSError, match="No space"):
         conv.convert("hf", str(tmp_path), log=lambda *a: None)
     # Without the tracker, the conversion hook converts again instead of skipping.
-    assert not (tmp_path / conv.TRACKER_FILE).exists()
+    assert not (tmp_path / common.TRACKER_FILENAME).exists()

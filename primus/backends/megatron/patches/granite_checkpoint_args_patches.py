@@ -12,7 +12,8 @@ preset with a wrong multiplier would train a different model on the loaded weigh
 ``build_args`` patch below runs ``native_loader_granite.check_args_against_checkpoint`` once
 per run, before the trainer and the model are built, and stops the run on a mismatch. It keeps
 no state and wraps no Megatron function. A checkpoint without the converter's
-``granite_hf_config.json`` is loaded unchecked, with a warning.
+``granite_hf_config.json`` is checked against the args Megatron saved in it when they are a
+Granite run's; only a checkpoint with neither is loaded unchecked, with a warning.
 """
 
 from types import SimpleNamespace
@@ -51,15 +52,16 @@ def is_granite_run(ctx: PatchContext) -> bool:
     condition=is_granite_run,
 )
 def patch_granite_checkpoint_args(ctx: PatchContext):
-    from primus.backends.megatron.checkpoint.native_loader_granite import (
-        check_args_against_checkpoint,
-    )
-
     # ``run_patches`` swallows exceptions (stop_on_error=False) and the run would go on
     # training a model that differs from the checkpoint. Escalate to a hard abort, as the
     # other must-not-continue patches do: ``SystemExit`` is not caught by ``run_patches``.
-    # No collective has run yet, so every rank stops the same way.
+    # No collective has run yet, so every rank stops the same way. The import is inside the
+    # try: a failed import would also leave the run unchecked.
     try:
+        from primus.backends.megatron.checkpoint.native_loader_granite import (
+            check_args_against_checkpoint,
+        )
+
         check_args_against_checkpoint(_granite_args(ctx), log=log_rank_0)
     except Exception as e:  # noqa: BLE001 - any failure leaves the run unchecked: stop it
         log_rank_0(f"[Patch:megatron.granite.checkpoint_args] FATAL: {type(e).__name__}: {e}")

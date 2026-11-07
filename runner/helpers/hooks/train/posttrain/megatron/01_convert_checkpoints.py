@@ -197,7 +197,7 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # Native (bridge-free) conversion path
 # ---------------------------------------------------------------------------
-# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama, Granite): this
+# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
 # it (Primus-managed converters), producing a legacy ``torch`` checkpoint WITHOUT
 # ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
@@ -219,24 +219,11 @@ _NATIVE_FAMILIES = {
     "deepseek": "deepseek",
     "llama": "llama",
     "llamaforcausallm": "llama",
-    # Dense Granite. The model_type "granite" is shared by task heads
-    # (GraniteForSequenceClassification, ...) that the native converter does not build, so it
-    # names the family only when config.json lists no architectures (_detect_native_family).
-    "graniteforcausallm": "granite",
-    "granite": "granite",
 }
-
-# model_types that name a native family only when config.json lists no architectures.
-_MODEL_TYPE_ONLY_WITHOUT_ARCHITECTURES = {"granite"}
 
 
 def _detect_native_family(hf_path: str) -> str | None:
-    """Return 'qwen3' | 'deepseek' | 'llama' | 'granite' | None from the HF config.json.
-
-    An architecture in ``_NATIVE_FAMILIES`` wins; else the ``model_type``. A model_type in
-    ``_MODEL_TYPE_ONLY_WITHOUT_ARCHITECTURES`` (granite) counts only when config.json lists no
-    architectures, so Granite task heads are not sent to the causal-LM converter. (The
-    model_type fallback of the other families is unchanged.)"""
+    """Return 'qwen3' | 'deepseek' | 'llama' | None from the HF config.json."""
     import json
 
     cfg_file = os.path.join(hf_path, "config.json")
@@ -245,14 +232,11 @@ def _detect_native_family(hf_path: str) -> str | None:
     with open(cfg_file) as f:
         cfg = json.load(f)
 
-    architectures = cfg.get("architectures", []) or []
-    for arch in architectures:
+    for arch in cfg.get("architectures", []) or []:
         fam = _NATIVE_FAMILIES.get(str(arch).lower())
         if fam:
             return fam
     mt = str(cfg.get("model_type", "")).lower()
-    if architectures and mt in _MODEL_TYPE_ONLY_WITHOUT_ARCHITECTURES:
-        return None
     return _NATIVE_FAMILIES.get(mt)
 
 
@@ -284,7 +268,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     if family is None:
         raise ValueError(
             f"native_ckpt_convert requested but no native converter for HF model at {hf_path} "
-            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1, dense Granite)"
+            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1)"
         )
 
     # Ensure the Megatron-LM source tree is importable in this standalone hook
@@ -309,14 +293,8 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
     elif family == "llama":
         from primus.backends.megatron.checkpoint import native_loader_llama as conv
-    elif family == "granite":
-        from primus.backends.megatron.checkpoint import native_loader_granite as conv
-    elif family == "deepseek":
-        from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
     else:
-        # A family in _NATIVE_FAMILIES needs its own branch here; never fall back to another
-        # family's converter.
-        raise ValueError(f"native conversion: no converter branch for family {family!r}")
+        from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
 
     conv.convert(
         hf_path,
@@ -492,7 +470,7 @@ def main():
 
     # ---- Choose conversion backend --------------------------------------
     # Native (bridge-free) conversion is the DEFAULT for supported families
-    # (Qwen3, DeepSeek, Llama, Granite). ``native_ckpt_convert: false`` forces the legacy
+    # (Qwen3, DeepSeek, Llama). ``native_ckpt_convert: false`` forces the legacy
     # Megatron-Bridge path; ``native_ckpt_convert: true`` forces native.
     native_opts = read_native_opts(config_file)
     native_family = _detect_native_family(hf_path)
@@ -507,7 +485,7 @@ def main():
         if native_family is None:
             log_error(
                 "native_ckpt_convert=true but no native converter matches the HF "
-                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama, dense Granite). "
+                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama). "
                 "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)

@@ -87,9 +87,11 @@ def get_granite_layer_spec(args, config):
     dense GPT layer spec.
 
     It calls ``gpt_builders._get_transformer_layer_spec`` (private upstream) on purpose:
-    that is the function Primus patches and upstream ``gpt_builder`` uses, so Granite gets
-    the same TE / local / Primus Turbo spec as a GPT model with the same args. A rename
-    upstream fails here with ``AttributeError`` at build time, not silently.
+    upstream ``gpt_builder`` uses it, so Granite gets the same TE / local spec as a GPT model
+    with the same args, and the Primus Turbo spec through Primus's ``TESpecProvider`` swap
+    (``turbo/te_spec_provider_patches.py``), which this function reads. Primus does not patch
+    this function itself. A rename upstream fails here with ``AttributeError`` at build time,
+    not silently.
     """
     import gpt_builders  # third_party/Megatron-LM, on sys.path at runtime
 

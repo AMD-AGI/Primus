@@ -247,7 +247,9 @@ For MoE and hybrid architectures (LLaMA 4, Qwen3-MoE, large `moe_*.yaml` templat
 
 The native HF-to-Megatron converter for IBM Granite dense is
 `primus.backends.megatron.checkpoint.native_loader_granite`, with the model preset
-`granite_4_1_3b.yaml`. The post-train hook (`01_convert_checkpoints.py`) detects Granite from
+`granite_4_1_3b.yaml`. The family is registered in
+`primus/backends/megatron/checkpoint/native_families/granite.py` (`native_registry`). The
+post-train hook (`01_convert_checkpoints.py`) detects Granite from
 `config.json` (`architectures: [GraniteForCausalLM]`, or `model_type: granite` with no
 `architectures`; task heads such as `GraniteForSequenceClassification` are not converted
 natively) and converts it natively; set `hf_path` to a local HF checkpoint directory. The pinned
@@ -262,11 +264,13 @@ latest; `native_loader_granite.check_args_against_checkpoint`), and stops on a m
 or long-context run may set its own. The check reads only the config saved with the checkpoint,
 so it works when `hf_path` / `tokenizer_model` is a hub id. Checkpoints saved by training carry
 no `granite_hf_config.json`. A resume of a fine-tuning run (`load` holds its saves) is checked
-against the copy in its `pretrained_checkpoint`, the converted checkpoint its weights come from,
-so keep `pretrained_checkpoint` set when you resume. A checkpoint with no copy and no such
-`pretrained_checkpoint` (a pretraining resume, a Megatron-Bridge conversion, a checkpoint from
-another tool) loads as usual, unchecked, with a warning. To check it, copy the HF `config.json`
-of its weights into the loaded iteration's directory as `granite_hf_config.json`.
+against the copy in its `pretrained_checkpoint`, the converted checkpoint its weights come from.
+Without a copy (a resume without `pretrained_checkpoint`, a conversion stopped before it wrote
+the copy), the model args are checked against the args Megatron saved in the loaded checkpoint
+when those carry `residual_multiplier` (every save of a Granite run and of the converter). Only
+a checkpoint with neither (a Megatron-Bridge conversion, a checkpoint from another tool) loads
+unchecked, with a warning. To check it, copy the HF `config.json` of its weights into the loaded
+iteration's directory as `granite_hf_config.json`.
 
 - Granite settings (`model_type: granite`, set by `granite_4_1_3b.yaml`): `residual_multiplier`
   (required, a positive finite number; `1.0` means no scaling) scales each attention and MLP

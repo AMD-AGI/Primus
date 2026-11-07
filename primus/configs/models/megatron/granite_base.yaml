@@ -1,0 +1,32 @@
+# IBM Granite dense decoder family (GraniteForCausalLM): Llama layout plus four scalar
+# multipliers. Model code: primus/backends/megatron/core/models/granite/.
+# A release preset extends this base and sets its sizes and its multipliers:
+#   embedding_multiplier -> mup_embedding_mult
+#   logits_scaling       -> mup_output_mult = 1 / logits_scaling
+#   attention_multiplier -> softmax_scale, set by upstream MuP:
+#                           sqrt(mup_base_head_dim or 1) / kv_channels ** mup_attn_scale_power
+#                           (1 / kv_channels with the defaults below)
+#   residual_multiplier  -> residual_multiplier (scaled bias-dropout-add in the layer spec)
+extends:
+  - llama_base.yaml
+
+model_type: granite
+# Inherited from llama_base.yaml / language_model.yaml and kept: RMSNorm, SwiGLU, RoPE
+# (rotary_percent 1.0), no linear or QKV biases, no QK norm, apply_rope_fusion.
+
+group_query_attention: true
+untie_embeddings_and_output_weights: false
+rotary_base: 10000000           # rope_theta (rope_scaling: null)
+norm_epsilon: 1.0e-5            # rms_norm_eps
+
+# muP-style multipliers (upstream Megatron TransformerConfig fields).
+# use_mup is upstream's only switch for mup_embedding_mult, mup_output_mult and the
+# 1/d attention scale. With mup_base_hidden_size null (= hidden_size, mup_width_mult 1.0)
+# its init and optimizer effects are no-ops. MuP width scaling is refused by
+# GraniteTransformerConfig: it would change init, lr and logits away from the HF model.
+use_mup: true
+mup_base_hidden_size: null
+mup_base_head_dim: null         # null: softmax_scale = 1 / kv_channels = attention_multiplier
+mup_attn_scale_power: 1.0
+
+masked_softmax_fusion: false

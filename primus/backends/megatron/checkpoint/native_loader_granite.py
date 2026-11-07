@@ -87,15 +87,25 @@ def _check_top_level_config(cfg):
 
 
 def _check_model_type(cfg):
-    """Dense Granite only: ``model_type`` must be 'granite' and ``architectures``, when
-    given, must be exactly ``["GraniteForCausalLM"]``. granitemoe / granitemoehybrid and
-    task heads share the multiplier keys but not the layout."""
+    """Dense Granite only: ``architectures``, when given, must name exactly
+    ``GraniteForCausalLM`` (a list of it, or the name as a string, which the conversion hook
+    also accepts; an empty list counts as none, as in the hook), and ``model_type`` must be
+    'granite' (or absent when ``architectures``
+    names GraniteForCausalLM: the hook routes such a config here; an explicit null is refused). granitemoe /
+    granitemoehybrid and task heads share the multiplier keys but not the layout."""
     model_type = cfg.get("model_type")
     architectures = cfg.get("architectures")
+    if isinstance(architectures, str):
+        architectures = [architectures]
+    if not architectures:
+        # None, absent or an empty list: no architectures, as the conversion hook reads it.
+        architectures = None
+    if architectures is not None and architectures != ["GraniteForCausalLM"]:
+        raise ValueError(f"not a dense Granite config: architectures={cfg.get('architectures')!r}")
+    if "model_type" not in cfg and architectures:
+        return
     if model_type != "granite":
         raise ValueError(f"not a dense Granite config: model_type={model_type!r} (expected 'granite')")
-    if architectures is not None and architectures != ["GraniteForCausalLM"]:
-        raise ValueError(f"not a dense Granite config: architectures={architectures!r}")
 
 
 def _positive_int(cfg, key):
@@ -105,7 +115,7 @@ def _positive_int(cfg, key):
     return value
 
 
-def _check_llama_layout(cfg):
+def _check_llama_layout(cfg, require_vocab=True):
     """The Llama mapping's assumptions: SiLU-gated MLP (SwiGLU), full rotary, integer
     shapes with GQA groups dividing the heads, and a positive integer head_dim.
 
@@ -123,6 +133,8 @@ def _check_llama_layout(cfg):
         "vocab_size",
         "max_position_embeddings",
     ):
+        if key == "vocab_size" and not require_vocab and cfg.get(key) is None:
+            continue  # the caller does not use it (the run's tokenizer gives it)
         _positive_int(cfg, key)
     heads = cfg["num_attention_heads"]
     if cfg.get("num_key_value_heads") is not None:  # absent or null: MHA, as in HF
@@ -207,7 +219,7 @@ def _rope_theta(cfg):
 _MULTIPLIER_KEYS = ("embedding_multiplier", "logits_scaling", "attention_multiplier", "residual_multiplier")
 
 
-def check_supported(cfg):
+def check_supported(cfg, require_vocab=True):
     """Raise if this converter cannot convert the HF config ``cfg`` exactly; else return
     a normalised copy of ``cfg``: resolved ``rope_theta``, ``rms_norm_eps`` and the four
     multipliers; a null ``head_dim`` becomes ``hidden_size // num_attention_heads`` and a
@@ -221,7 +233,7 @@ def check_supported(cfg):
     """
     _check_top_level_config(cfg)
     _check_model_type(cfg)
-    _check_llama_layout(cfg)
+    _check_llama_layout(cfg, require_vocab=require_vocab)
     _check_no_bias(cfg)
     _check_plain_rope(cfg)
     resolved = {"rope_theta": _rope_theta(cfg), "rms_norm_eps": _rms_norm_eps(cfg)}
@@ -327,7 +339,103 @@ def _head_dim(values):
         return None
 
 
-def preset_mismatches(hf_cfg, preset):
+def _mup_softmax_scale(values, kv):
+    """The softmax scale upstream MuP derives from ``values``:
+    ``sqrt(mup_base_head_dim or 1) / kv ** mup_attn_scale_power`` (a null power is Megatron's
+    1.0); None when it cannot be computed."""
+    base, power = values.get("mup_base_head_dim"), values.get("mup_attn_scale_power")
+    power = 1.0 if power is None else power
+    try:
+        return math.sqrt(1.0 if base is None else float(base)) / float(kv) ** float(power)
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return None
+
+
+def _resolved_preset_values(preset, fields=None, source="config.json"):
+    """``(values, problems)``: each ``PRESET_KEYS`` value as Megatron builds it from the args
+    ``preset`` (an unset key takes the Megatron default; ``num_query_groups`` is
+    ``num_attention_heads`` without ``group_query_attention``; ``kv_channels`` defaults to
+    hidden / heads), and the keys that cannot be resolved (a ``_REQUIRED`` key not set, a
+    non-boolean ``group_query_attention``)."""
+    problems = []
+    values = {}
+    gqa = preset.get("group_query_attention")
+    gqa = False if gqa is None else gqa
+    for key, default in PRESET_KEYS.items():
+        if key == "num_query_groups":
+            if not isinstance(gqa, bool):
+                problems.append(f"group_query_attention: preset {gqa!r}, must be true or false (a boolean)")
+                continue
+            if not gqa:
+                # Without GQA Megatron builds one group per head, whatever num_query_groups
+                # says (also when it is not set).
+                values[key] = values.get("num_attention_heads")
+                continue
+        value = preset.get(key)
+        if value is None:
+            if default is _REQUIRED:
+                given = f", {source} gives {fields[key]!r}" if fields is not None else ""
+                problems.append(f"{key}: not set in the preset{given}")
+                continue
+            # Unset or explicit null: Megatron uses its default (an unset store_true flag
+            # such as untie_embeddings_and_output_weights is False), as granite_args does.
+            value = _head_dim(values) if key == "kv_channels" else default
+        values[key] = value
+    return values, problems
+
+
+def model_mismatches(fields, attention_multiplier, preset, vocab_size=None, source="config.json"):
+    """Where the args ``preset`` build another model than the one described by ``fields``
+    (each ``PRESET_KEYS`` value of the checkpoint's model) and ``attention_multiplier`` (its
+    softmax scale); an empty list when they build the same model.
+
+    The one comparison behind both checks of ``check_args_against_checkpoint``: against the
+    HF config (``preset_mismatches``, ``fields`` from ``derive_megatron_fields``) and against
+    the args saved in the checkpoint (``saved_args_mismatches``, ``fields`` resolved from
+    those args the way Megatron builds them). ``vocab_size`` is compared only when given."""
+    values, out = _resolved_preset_values(preset, fields, source)
+    for key in PRESET_KEYS:
+        if key not in values:
+            continue
+        value = values[key]
+        if not _same(value, fields[key]):
+            if key == "num_query_groups" and not preset.get("group_query_attention"):
+                out.append(
+                    f"num_query_groups: group_query_attention is not true in the preset, so "
+                    f"Megatron builds {value!r} groups (one per head); {source} gives {fields[key]!r}"
+                )
+            else:
+                out.append(f"{key}: preset {value!r}, {source} gives {fields[key]!r}")
+    layout = layout_problems(preset.get)
+    for key, _, value, want in layout:
+        out.append(f"{key}: preset {value!r}, the Granite (Llama) layout needs {want!r}")
+    attention = attention_problems(preset.get)
+    for key, reason, value in attention:
+        out.append(f"{key}: preset {value!r}, must be unset or off ({reason})")
+    # The other options the Granite builder refuses (the builder's own list).
+    for label in builder_problems(preset.get):
+        out.append(f"{label}: set in the preset, the Granite builder refuses it")
+    if (
+        vocab_size is not None
+        and preset.get("vocab_size") is not None
+        and not _same(preset["vocab_size"], vocab_size)
+    ):
+        out.append(f"vocab_size: preset {preset['vocab_size']!r}, {source} gives {vocab_size!r}")
+    kv = values.get("kv_channels")
+    # mup_base_head_dim / mup_attn_scale_power only matter through the softmax scale they
+    # give, compared with attention_multiplier.
+    if values.get("use_mup") and kv:
+        scale = _mup_softmax_scale(preset, kv)
+        if not _same(scale, attention_multiplier):
+            out.append(
+                f"softmax scale: the preset gives {scale!r} (sqrt(mup_base_head_dim or 1) / "
+                f"kv_channels ** mup_attn_scale_power), {source} attention_multiplier is "
+                f"{attention_multiplier!r}"
+            )
+    return out
+
+
+def preset_mismatches(hf_cfg, preset, check_vocab=True):
     """Where the model preset ``preset`` (a dict of Megatron args, e.g. the post_trainer
     params) disagrees with the HF Granite config ``hf_cfg``; an empty list when it matches.
 
@@ -354,75 +462,23 @@ def preset_mismatches(hf_cfg, preset):
 
     Training builds from the preset, not from config.json, so a mismatch trains a
     different model on the converted weights. Raises ``ValueError`` / ``NotImplementedError``
-    (from ``check_supported``) when ``hf_cfg`` itself is not a supported Granite config."""
-    resolved = check_supported(hf_cfg)
-    fields = _fields_from_checked(resolved)
-    out = []
-    values = {}
-    gqa = preset.get("group_query_attention")
-    gqa = False if gqa is None else gqa
-    for key, default in PRESET_KEYS.items():
-        if key == "num_query_groups":
-            if not isinstance(gqa, bool):
-                out.append(f"group_query_attention: preset {gqa!r}, must be true or false (a boolean)")
-                continue
-            if not gqa:
-                # Without GQA Megatron builds one group per head, whatever num_query_groups
-                # says (also when it is not set): compare that.
-                value = values.get("num_attention_heads")
-                values[key] = value
-                if not _same(value, fields[key]):
-                    out.append(
-                        f"num_query_groups: group_query_attention is not true in the preset, so "
-                        f"Megatron builds {value!r} groups (one per head); config.json gives {fields[key]!r}"
-                    )
-                continue
-        value = preset.get(key)
-        if value is None:
-            if default is _REQUIRED:
-                out.append(f"{key}: not set in the preset, config.json gives {fields[key]!r}")
-                continue
-            # Unset or explicit null: Megatron uses its default (an unset store_true flag
-            # such as untie_embeddings_and_output_weights is False), as granite_args does.
-            value = _head_dim(values) if key == "kv_channels" else default
-        values[key] = value
-        if not _same(value, fields[key]):
-            out.append(f"{key}: preset {value!r}, config.json gives {fields[key]!r}")
-    layout = layout_problems(preset.get)
-    for key, _, value, want in layout:
-        out.append(f"{key}: preset {value!r}, the Granite (Llama) layout needs {want!r}")
-    attention = attention_problems(preset.get)
-    for key, reason, value in attention:
-        out.append(f"{key}: preset {value!r}, must be unset or off ({reason})")
-    # The other options the Granite builder refuses (the builder's own list).
-    for label in builder_problems(preset.get):
-        out.append(f"{label}: set in the preset, the Granite builder refuses it")
-    if preset.get("vocab_size") is not None and not _same(preset["vocab_size"], resolved.get("vocab_size")):
-        out.append(
-            f"vocab_size: preset {preset['vocab_size']!r}, config.json gives {resolved.get('vocab_size')!r}"
-        )
-    kv = values.get("kv_channels")
-    # mup_base_head_dim / mup_attn_scale_power only matter through the softmax scale they
-    # give, compared with attention_multiplier (a null power is Megatron's 1.0).
-    base, power = preset.get("mup_base_head_dim"), preset.get("mup_attn_scale_power")
-    power = 1.0 if power is None else power
-    if values.get("use_mup") and kv:
-        try:
-            scale = math.sqrt(1.0 if base is None else float(base)) / float(kv) ** float(power)
-        except (TypeError, ValueError, OverflowError, ZeroDivisionError):
-            scale = None
-        if not _same(scale, resolved["attention_multiplier"]):
-            out.append(
-                f"softmax scale: the preset gives {scale!r} (sqrt(mup_base_head_dim or 1) / "
-                f"kv_channels ** mup_attn_scale_power), config.json attention_multiplier is "
-                f"{resolved['attention_multiplier']!r}"
-            )
-    return out
+    (from ``check_supported``) when ``hf_cfg`` itself is not a supported Granite config.
+    ``check_vocab=False`` neither requires ``vocab_size`` in ``hf_cfg`` nor compares it (the
+    run's tokenizer gives it).
+
+    The comparison itself is ``model_mismatches``."""
+    resolved = check_supported(hf_cfg, require_vocab=check_vocab)
+    return model_mismatches(
+        _fields_from_checked(resolved),
+        resolved["attention_multiplier"],
+        preset,
+        vocab_size=resolved.get("vocab_size") if check_vocab else None,
+    )
 
 
-def check_preset(hf_cfg, preset, where="the model preset"):
+def check_preset(hf_cfg, preset, where="the model preset", check_vocab=True):
     """Raise ``ValueError`` listing every ``preset_mismatches`` entry."""
-    bad = preset_mismatches(hf_cfg, preset)
+    bad = preset_mismatches(hf_cfg, preset, check_vocab=check_vocab)
     if bad:
         raise ValueError(
             f"{where} does not match the Granite checkpoint's config.json ({len(bad)} value(s)): "
@@ -436,13 +492,14 @@ def check_preset(hf_cfg, preset, where="the model preset"):
 HF_CONFIG_COPY = "granite_hf_config.json"
 
 
-# Megatron's tracker file: a directory holds a checkpoint when it has one
-# (megatron.training.checkpointing.checkpoint_exists).
-TRACKER_FILE = "latest_checkpointed_iteration.txt"
-
-
 def _holds_checkpoint(directory):
-    return isinstance(directory, str) and bool(directory) and (Path(directory) / TRACKER_FILE).is_file()
+    # A directory holds a checkpoint when it has Megatron's tracker file
+    # (megatron.training.checkpointing.checkpoint_exists).
+    return (
+        isinstance(directory, str)
+        and bool(directory)
+        and (Path(directory) / common.TRACKER_FILENAME).is_file()
+    )
 
 
 def checkpoint_to_load(args):
@@ -456,30 +513,19 @@ def checkpoint_to_load(args):
     return pretrained if _holds_checkpoint(pretrained) else None
 
 
-def _iter_dir_name(iteration, release=False):
-    """Megatron's checkpoint directory name (``checkpointing.get_checkpoint_name(...,
-    return_base_dir=True)``): ``release``, or ``iter_{:07d}``. Megatron's own function is not
-    imported here because ``megatron.training.checkpointing`` imports torch and probes the
-    GPU, and this module runs before distributed init (build_args) and in CPU-only hooks."""
-    return "release" if release else "iter_{:07d}".format(int(iteration))
-
-
 def iteration_dir(checkpoint_dir, ckpt_step=None):
     """The directory of the one checkpoint Megatron loads from ``checkpoint_dir``:
-    ``ckpt_step``'s when set, else the tracker file's iteration (``release`` when the tracker
-    says so). None when the tracker cannot be read."""
+    ``ckpt_step``'s when set (``iter_{:07d}``, Megatron's ``get_checkpoint_name`` naming),
+    else the one the tracker file names (``native_convert_common.tracked_ckpt_dir``). None
+    when there is no tracker, it names neither an iteration nor ``release``, or it cannot be
+    read."""
     if ckpt_step:
-        return Path(checkpoint_dir) / _iter_dir_name(ckpt_step)
+        return Path(checkpoint_dir) / f"iter_{int(ckpt_step):07d}"
     try:
-        meta = (Path(checkpoint_dir) / TRACKER_FILE).read_text().strip()
+        tracked = common.tracked_ckpt_dir(str(checkpoint_dir))
     except OSError:
         return None
-    if meta == "release":
-        return Path(checkpoint_dir) / _iter_dir_name(0, release=True)
-    try:
-        return Path(checkpoint_dir) / _iter_dir_name(meta)
-    except ValueError:
-        return None
+    return Path(tracked) if tracked is not None else None
 
 
 def _read_hf_config_copy(copy):
@@ -513,7 +559,8 @@ def config_copy_for(args):
       there (its tracker's iteration). The resumed weights were trained from it with the args
       that were checked when that run started, so a resume with other Granite multipliers is
       refused too;
-    * else none: Megatron loads the checkpoint as usual and the check is skipped."""
+    * else none (``check_args_against_checkpoint`` then reads the args Megatron saved in the
+      loaded checkpoint)."""
     source = checkpoint_to_load(args)
     if source is None:
         return None, None
@@ -528,10 +575,66 @@ def config_copy_for(args):
     return None, f"the checkpoint loaded from {source}"
 
 
+def saved_megatron_args(checkpoint_dir, ckpt_step=None):
+    """The args Megatron saved in the iteration it loads from ``checkpoint_dir`` (a dict), or
+    None when that iteration is not a ``torch_dist`` or legacy ``torch`` checkpoint.
+
+    Every Megatron save stores its args (``generate_state_dict``): a training save and the
+    converter's save (``build_margs`` sets the Granite fields on them) alike. ``torch_dist``:
+    the common state (``dist_checkpointing.load_common_state_dict``, no process group needed);
+    legacy ``torch``: the rank-0 file, memory-mapped so its tensors are not read. Raises
+    ``ValueError`` when the checkpoint is there but its args cannot be read."""
+    it_dir = iteration_dir(checkpoint_dir, ckpt_step)
+    if it_dir is None or not it_dir.is_dir():
+        return None
+    try:
+        common.ensure_megatron_on_path()  # build_args runs before the trainer sets the path
+        from megatron.core import dist_checkpointing
+
+        if dist_checkpointing.check_is_distributed_checkpoint(str(it_dir)):
+            state = dist_checkpointing.load_common_state_dict(str(it_dir))
+        else:
+            files = sorted(it_dir.glob("mp_rank_00*/model_optim_rng.pt"))
+            if not files:
+                return None
+            import torch
+
+            # As Megatron loads it (weights_only with Megatron's safe globals, registered by
+            # the megatron.core import above).
+            state = torch.load(files[0], map_location="cpu", mmap=True)
+    except Exception as e:  # noqa: BLE001 - any read failure is reported with the directory
+        raise ValueError(f"cannot read the args Megatron saved in {it_dir}: {type(e).__name__}: {e}") from e
+    saved = state.get("args") if isinstance(state, dict) else None
+    if saved is None:
+        return None
+    return dict(saved) if isinstance(saved, dict) else dict(vars(saved))
+
+
+def saved_args_mismatches(saved, run):
+    """Where the run's model args ``run`` build another model than the args ``saved`` with
+    the checkpoint (both dicts); an empty list when they build the same Granite model.
+
+    The checkpoint's model is resolved from ``saved`` as Megatron builds it
+    (``_resolved_preset_values``, the softmax scale from its MuP fields, or its explicit
+    ``softmax_scale``), then the run's args go through the same ``model_mismatches`` as the
+    HF-config check: the derived softmax scale, the layout, the attention options and the
+    builder's refusals. Raises ``ValueError`` when ``saved`` itself does not resolve (an
+    unset required field, a non-boolean ``group_query_attention``)."""
+    fields, problems = _resolved_preset_values(saved, source="the checkpoint")
+    if problems:
+        raise ValueError("the args saved in the checkpoint do not resolve: " + "; ".join(problems))
+    scale = saved.get("softmax_scale")
+    if scale is None:
+        scale = _mup_softmax_scale(saved, fields["kv_channels"]) if fields.get("use_mup") else None
+    if scale is None:
+        scale = 1.0 / math.sqrt(fields["kv_channels"])  # Megatron's default (no MuP)
+    return model_mismatches(fields, scale, run, source="the checkpoint")
+
+
 def check_args_against_checkpoint(args, log=print):
-    """Raise ``ValueError`` when the model args differ from the HF config of the checkpoint
-    this run loads (``preset_mismatches``); return that config, or None when there is nothing
-    to check.
+    """Raise ``ValueError`` when the model args differ from the model of the checkpoint this
+    run loads; return what they were checked against (the HF config or the saved args), or
+    None when there is nothing to check.
 
     Called once per run by the ``build_args`` patch
     ``patches/granite_checkpoint_args_patches.py``, before the trainer and the model are
@@ -539,34 +642,53 @@ def check_args_against_checkpoint(args, log=print):
     check a preset with, for example, a wrong ``residual_multiplier`` would train a
     different model on the loaded weights without an error.
 
-    The config is the ``HF_CONFIG_COPY`` file ``config_copy_for`` finds: the one in the
-    loaded iteration's directory (``convert`` writes it), or, for a resume of a fine-tuning
-    run, the one of its ``pretrained_checkpoint``. A local ``hf_path`` / ``tokenizer_model``
-    directory may hold another model or revision and is never used. When there is no copy
-    (a resume without ``pretrained_checkpoint``, a Megatron-Bridge conversion, a checkpoint
-    from another tool), Megatron loads the checkpoint as usual: the check is skipped with a
-    warning, and nothing is refused. An unreadable copy raises."""
+    In order:
+
+    1. the ``HF_CONFIG_COPY`` file ``config_copy_for`` finds (the converter writes it into
+       the converted iteration; a resume of a fine-tuning run without one uses the copy of
+       its ``pretrained_checkpoint``), compared with ``preset_mismatches``;
+    2. else the args Megatron saved in the loaded iteration (``saved_megatron_args``) when
+       they carry ``residual_multiplier`` (a Granite checkpoint saved by Primus: a training
+       save, or a conversion stopped before its copy was written), compared with
+       ``saved_args_mismatches``;
+    3. else (a Megatron-Bridge conversion, a checkpoint from another tool) Megatron loads it
+       as usual: the check is skipped with a warning.
+
+    A local ``hf_path`` / ``tokenizer_model`` directory may hold another model or revision
+    and is never used. An unreadable copy or unreadable saved args raise."""
     copy, how = config_copy_for(args)
     if copy is None:
-        if how is not None:
-            log(
-                f"[Primus:Granite] WARNING: {how} has no {HF_CONFIG_COPY} in its iteration directory "
-                "(and no pretrained_checkpoint with one), so the Granite model args (residual_multiplier "
-                "and the MuP multipliers) are not checked against its weights. Checkpoints made by the "
-                "Granite converter carry it; for another checkpoint, copy the HF config.json of its "
-                f"weights there as {HF_CONFIG_COPY} to enable the check"
-            )
+        if how is None:
+            return None
+        source = checkpoint_to_load(args)
+        saved = saved_megatron_args(source, getattr(args, "ckpt_step", None))
+        if saved is not None and saved.get("residual_multiplier") is not None:
+            bad = saved_args_mismatches(saved, dict(vars(args)))
+            if bad:
+                raise ValueError(
+                    f"the Granite model args do not match the args saved in {how} "
+                    f"({len(bad)} value(s)): " + "; ".join(bad)
+                )
+            log(f"[Primus:Granite] model args match the args saved in {how}")
+            return saved
+        log(
+            f"[Primus:Granite] WARNING: {how} has no {HF_CONFIG_COPY} in its iteration directory "
+            "(and no pretrained_checkpoint with one), and its saved args have no Granite "
+            "residual_multiplier, so the Granite model args (residual_multiplier and the MuP "
+            "multipliers) are not checked against its weights. Checkpoints made by the Granite "
+            "converter or saved by a Granite run are checked; for another checkpoint, copy the HF "
+            f"config.json of its weights there as {HF_CONFIG_COPY} to enable the check"
+        )
         return None
     hf_cfg = _read_hf_config_copy(copy)
-    values = dict(vars(args))
     # vocab_size is not compared here: the tokenizer gives the padded vocab, as at
     # conversion time (both use make_vocab_size_divisible_by), and loading the checkpoint
     # checks the embedding shape.
-    values.pop("vocab_size", None)
     check_preset(
-        hf_cfg if hf_cfg.get("vocab_size") is not None else {**hf_cfg, "vocab_size": 1},
-        values,
+        hf_cfg,
+        dict(vars(args)),
         where=f"the Granite model args (checked against the config of {how}: {copy})",
+        check_vocab=False,
     )
     log(f"[Primus:Granite] model args match the HF config {copy} ({how})")
     return hf_cfg
@@ -593,6 +715,10 @@ def build_margs(cfg_fields, args):
     args (the MuP fields by upstream ``TransformerConfig``, ``residual_multiplier`` by the
     Granite config class, which checks it).
     """
+    if getattr(args, "ckpt_format", None) is None:
+        # Callers that build margs without saving (parity tools) need not name a format; an
+        # explicit None (an unset argparse option) takes the default too.
+        args = SimpleNamespace(**{**vars(args), "ckpt_format": common.DEFAULT_CKPT_FORMAT})
     m = llama.build_margs(cfg_fields, args)
     for key in GRANITE_EXTRA_FIELDS:
         setattr(m, key, cfg_fields[key])
@@ -604,7 +730,7 @@ def build_model(margs):
     """Build the Granite ``GPTModel`` with the Granite builder that training uses
     (``get_model_provider("granite")``), so the converted parameter names and the config
     class match SFT."""
-    return common.build_mcore_gpt_model(margs, model_type="granite")
+    return common.build_mcore_gpt_model(margs, family="granite")
 
 
 # ---------------------------------------------------------------------------
@@ -640,12 +766,17 @@ def convert(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
     expert_parallel_size=1,
+    ckpt_format=common.DEFAULT_CKPT_FORMAT,
     seq_length=4096,
     make_vocab_size_divisible_by=128,
     master_port=29563,
     log=None,
 ):
-    """Convert a Granite HF checkpoint to a legacy Megatron torch checkpoint.
+    """Convert a Granite HF checkpoint to a Megatron checkpoint.
+
+    ``ckpt_format`` is ``"torch_dist"`` (default; ``release/`` layout, Megatron reshards it on
+    load) or ``"torch"`` (legacy, TP = PP = EP = 1 only); see
+    ``native_convert_common.CKPT_FORMATS``.
 
     Single process, CPU-only, same options as ``native_loader_llama.convert``. Assumes the
     ``phase="convert"`` patches are applied in this process (the conversion hook does so).
@@ -665,6 +796,7 @@ def convert(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         expert_parallel_size=expert_parallel_size,
+        ckpt_format=common.check_ckpt_format(ckpt_format),
         seq_length=seq_length,
         make_vocab_size_divisible_by=make_vocab_size_divisible_by,
     )
@@ -697,14 +829,17 @@ def convert(
     # The fine-tuning run checks its model args against this copy (check_args_against_checkpoint).
     # Megatron writes its tracker file last inside save_checkpoint, so the copy follows it. If
     # writing the copy fails, the tracker is removed: the conversion hook skips a directory whose
-    # tracker exists, so without it the next run converts again instead of loading unchecked.
-    it_dir = Path(save_dir) / _iter_dir_name(margs.iteration)
+    # tracker exists, so without it the next run converts again. A process killed between the
+    # two writes leaves the tracker without the copy; the run is then checked against the args
+    # Megatron saved in the checkpoint (check_args_against_checkpoint), not left unchecked.
+    # The tracker names ``release`` (torch_dist) or the saved iteration (torch).
+    it_dir = iteration_dir(save_dir)
     try:
-        if not it_dir.is_dir():
+        if it_dir is None or not it_dir.is_dir():
             raise RuntimeError(f"no checkpoint for iteration {margs.iteration} in {save_dir} after the save")
         _write_json_atomically(hf_cfg, it_dir / HF_CONFIG_COPY)
     except Exception:
-        tracker = Path(save_dir) / TRACKER_FILE
+        tracker = Path(save_dir) / common.TRACKER_FILENAME
         if tracker.exists():
             tracker.unlink()
         raise

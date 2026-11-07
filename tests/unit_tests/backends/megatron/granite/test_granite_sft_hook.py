@@ -35,6 +35,16 @@ def _write(tmp_path, cfg):
     return str(tmp_path)
 
 
+def _fake_common():
+    """A stand-in for native_convert_common with what the hook calls before convert()."""
+    common = types.ModuleType(f"{_PKG}.native_convert_common")
+    common.ensure_megatron_on_path = lambda: None
+    common.apply_convert_patches = lambda module_name: 0
+    common.DEFAULT_CKPT_FORMAT = "torch_dist"
+    common.check_ckpt_format = lambda fmt: fmt
+    return common
+
+
 @pytest.mark.parametrize(
     "cfg, family",
     [
@@ -49,10 +59,41 @@ def _write(tmp_path, cfg):
         ({"model_type": "qwen3"}, "qwen3"),
         ({"architectures": ["DeepseekV3ForCausalLM"]}, "deepseek"),
         ({"model_type": "granitemoehybrid"}, None),
+        # A single architecture written as a string is one name, not a list of letters.
+        ({"architectures": "GraniteForCausalLM", "model_type": "granite"}, "granite"),
+        ({"architectures": "GraniteForSequenceClassification", "model_type": "granite"}, None),
     ],
 )
 def test_detect_native_family(tmp_path, cfg, family):
     assert _hook()._detect_native_family(_write(tmp_path, cfg)) == family
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"architectures": ["GraniteForCausalLM"]},
+        {"architectures": ["GraniteForCausalLM"], "model_type": "granite"},
+        {"architectures": "GraniteForCausalLM", "model_type": "granite"},
+        {"model_type": "granite"},
+        {"model_type": "granite", "architectures": []},
+        {"model_type": "granite", "architectures": None},
+        {"architectures": ["GraniteForSequenceClassification"], "model_type": "granite"},
+        {"model_type": "granitemoehybrid"},
+        {"model_type": "granite", "architectures": ["LlamaForCausalLM"]},
+    ],
+)
+def test_hook_and_converter_agree_on_granite_configs(tmp_path, cfg):
+    # One rule: a config the hook sends to the Granite converter passes the converter's
+    # model-type check (an empty architectures list counts as none in both), and a Granite
+    # config the hook does not send there is refused by it.
+    conv = importlib.import_module(f"{_PKG}.native_loader_granite")
+    routed = _hook()._detect_native_family(_write(tmp_path, cfg)) == "granite"
+    try:
+        conv._check_model_type(cfg)
+        accepted = True
+    except ValueError:
+        accepted = False
+    assert routed == accepted
 
 
 _LOADERS = {
@@ -78,9 +119,7 @@ def test_native_convert_dispatches_to_the_family_converter(tmp_path, monkeypatch
     # Each family reaches its own loader's convert(): a Granite checkpoint must not fall
     # through to another family's converter.
     calls = []
-    common = types.ModuleType(f"{_PKG}.native_convert_common")
-    common.ensure_megatron_on_path = lambda: None
-    common.apply_convert_patches = lambda module_name: 0
+    common = _fake_common()
     monkeypatch.setitem(sys.modules, common.__name__, common)
     for fam, name in _LOADERS.items():
         loader = types.ModuleType(f"{_PKG}.{name}")
@@ -95,6 +134,7 @@ def test_native_convert_dispatches_to_the_family_converter(tmp_path, monkeypatch
     assert [c[0] for c in calls] == [family]
     assert calls[0][1:3] == (hf_path, str(tmp_path / "out"))
     assert calls[0][3]["dtype"] == "bf16"
+    assert calls[0][3]["ckpt_format"] == "torch_dist"
 
 
 @pytest.mark.parametrize("name", ["native_loader_granite", "native_loader_llama"])
@@ -105,9 +145,7 @@ def test_the_hook_calls_convert_with_its_real_signature(tmp_path, monkeypatch, n
     real = importlib.import_module(f"{_PKG}.{name}").convert
     signature = inspect.signature(real)
     bound = []
-    common = types.ModuleType(f"{_PKG}.native_convert_common")
-    common.ensure_megatron_on_path = lambda: None
-    common.apply_convert_patches = lambda module_name: 0
+    common = _fake_common()
     monkeypatch.setitem(sys.modules, common.__name__, common)
     loader = types.ModuleType(f"{_PKG}.{name}")
     loader.convert = lambda *a, **kw: bound.append(signature.bind(*a, **kw))
@@ -124,17 +162,13 @@ def test_the_hook_calls_convert_with_its_real_signature(tmp_path, monkeypatch, n
     assert len(bound) == 1
 
 
-def test_native_convert_refuses_a_family_without_a_branch(tmp_path, monkeypatch):
-    # A family added to the detection map without a dispatch branch raises instead of being
-    # converted by another family's loader.
-    hook = _hook()
-    common = types.ModuleType(f"{_PKG}.native_convert_common")
-    common.ensure_megatron_on_path = lambda: None
-    common.apply_convert_patches = lambda module_name: 0
-    monkeypatch.setitem(sys.modules, common.__name__, common)
-    pkg = importlib.import_module(_PKG)
-    monkeypatch.setattr(pkg, "native_convert_common", common, raising=False)
-    monkeypatch.setitem(hook._NATIVE_FAMILIES, "newfamily", "newfamily")
-    hf_path = _write(tmp_path, {"model_type": "newfamily"})
-    with pytest.raises(ValueError, match="no converter branch for family 'newfamily'"):
-        hook.native_convert_checkpoint(hf_path, str(tmp_path / "out"), {"dtype": "bf16"})
+def test_granite_is_registered_with_the_native_registry():
+    # native_families/granite.py registers the family: the converter, the granite model
+    # provider, and the model_type rule the converter's _check_model_type also applies.
+    registry = importlib.import_module(f"{_PKG}.native_registry")
+    family = registry.get_family("granite")
+    assert family.converter == f"{_PKG}.native_loader_granite"
+    assert family.model_type == "granite"
+    assert registry.model_type_for("granite") == "granite"
+    assert family.model_type_needs_no_architectures
+    assert "Granite" in registry.supported_text()

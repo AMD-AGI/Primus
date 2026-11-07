@@ -524,13 +524,19 @@ def test_fused_residual_rmsnorm_scale_is_cached_per_layer(fused_rmsnorm_guard, m
     assert can_fuse(layer) and frr._stored_residual_scale(layer) == pytest.approx(0.5)
 
 
-def test_fused_forward_checks_the_scale_before_changing_layer_state(fused_rmsnorm_guard):
+@pytest.mark.parametrize("enable", ["patch", "env"])
+def test_fused_forward_checks_the_scale_before_changing_layer_state(fused_rmsnorm_guard, monkeypatch, enable):
     # An inconsistent scale must raise before the V2 carry is consumed and before attention
     # runs, so the fallback to the original forward sees the layer unchanged (no lost carry,
-    # no second attention call).
+    # no second attention call). V2 is on: the carry branch is the one that would consume it.
     pytest.importorskip("megatron.core.utils")
     from primus.backends.megatron.core.extensions import fused_residual_rmsnorm as frr
 
+    if enable == "env":
+        monkeypatch.setenv("PRIMUS_FUSED_RESIDUAL_NORM_V2", "1")
+    else:
+        monkeypatch.setattr(frr, "_v2_enabled", lambda: True)
+    assert frr._v2_enabled()
     _, make = fused_rmsnorm_guard
     calls = []
     carry = ("mlp_out", "residual")
@@ -544,6 +550,29 @@ def test_fused_forward_checks_the_scale_before_changing_layer_state(fused_rmsnor
         frr._do_fused_forward(layer, hidden_states=torch.zeros(2, 1, 4))
     assert calls == []
     assert layer._v2_carry is carry
+
+
+def test_fused_forward_fallback_adds_the_queued_carry():
+    # Both fallbacks of the fused forward (per layer, and after a raise) run the original
+    # forward through _unfused_forward, which first adds a carry queued for the layer into
+    # hidden_states: the previous layer's deferred MLP add is not lost.
+    from primus.backends.megatron.core.extensions import fused_residual_rmsnorm as frr
+
+    mlp_out, residual = torch.full((2, 1, 4), 2.0), torch.full((2, 1, 4), 3.0)
+    layer = SimpleNamespace(_v2_carry=(mlp_out, residual))
+    seen = []
+
+    def orig_forward(lay, *args, **kwargs):
+        seen.append(kwargs["hidden_states"])
+        return "out", None
+
+    stale = torch.zeros(2, 1, 4)
+    assert frr._unfused_forward(orig_forward, layer, (), {"hidden_states": stale}) == ("out", None)
+    assert torch.equal(seen[0], mlp_out + residual)
+    assert layer._v2_carry is None
+    # Without a carry, hidden_states is passed through unchanged.
+    frr._unfused_forward(orig_forward, layer, (), {"hidden_states": stale})
+    assert seen[1] is stale
 
 
 def test_fused_residual_rmsnorm_bda_fields_match():
@@ -986,6 +1015,25 @@ def test_converter_rejects_other_granite_families(override):
         conv.derive_megatron_fields({**GRANITE_HF, **override})
 
 
+@pytest.mark.parametrize(
+    "override, ok",
+    [
+        # What the conversion hook routes to this converter, it converts.
+        ({"architectures": "GraniteForCausalLM"}, True),
+        ({"architectures": ["GraniteForCausalLM"], "model_type": None}, True),  # key absent
+        ({"architectures": "GraniteForSequenceClassification"}, False),
+        ({"architectures": None, "model_type": None}, False),
+    ],
+)
+def test_converter_accepts_what_the_hook_routes(override, ok):
+    cfg = {k: v for k, v in {**GRANITE_HF, **override}.items() if v is not None}
+    if ok:
+        assert conv.derive_megatron_fields(cfg)["residual_multiplier"] == 0.22
+    else:
+        with pytest.raises(ValueError, match="dense Granite"):
+            conv.derive_megatron_fields(cfg)
+
+
 def _convert_args():
     return SimpleNamespace(
         hf_dir="/nonexistent",
@@ -1075,6 +1123,7 @@ _BUILDER_BASE = dict(
     no_rope_freq=None,
     apply_query_key_layer_scaling=False,
     use_sink_attention=False,
+    softmax_type="vanilla",
 )
 
 
@@ -1119,6 +1168,8 @@ _BUILDER_BASE = dict(
         ("no_rope_freq", [0, 1], "no_rope_freq"),
         ("apply_query_key_layer_scaling", True, "apply_query_key_layer_scaling"),
         ("use_sink_attention", True, "use_sink_attention"),
+        ("softmax_type", "learnable", "softmax_type"),
+        ("softmax_type", "off-by-one", "softmax_type"),
     ],
 )
 def test_builder_rejects_unsupported_upstream_options(key, value, name):
@@ -1254,6 +1305,8 @@ def test_preset_max_position_embeddings_is_not_compared(value):
         ({"no_rope_freq": 4}, "no_rope_freq"),
         ({"apply_query_key_layer_scaling": True}, "apply_query_key_layer_scaling"),
         ({"use_sink_attention": True}, "use_sink_attention"),
+        ({"softmax_type": "learnable"}, "softmax_type"),
+        ({"softmax_type": "off-by-one"}, "softmax_type"),
         # Everything else the builder refuses (granite_args.unsupported_problems).
         ({"mup_base_hidden_size": 1280}, "mup_base_hidden_size != hidden_size"),
         ({"use_rope_scaling": True}, "use_rope_scaling"),
@@ -1666,6 +1719,8 @@ def test_preset_check_refuses_what_the_builder_refuses():
         ("no_rope_freq", 0),
         ("attention_output_gate", False),
         ("softmax_scale", None),
+        ("softmax_type", "vanilla"),  # upstream's default
+        ("softmax_type", None),
     ],
 )
 def test_granite_attention_off_values_are_accepted(key, value):
@@ -1691,6 +1746,8 @@ def test_granite_attention_off_values_are_accepted(key, value):
         ("no_rope_freq", [0, 1]),
         ("attention_output_gate", "false"),  # a quoted string is true to Megatron
         ("use_sink_attention", "0"),
+        ("softmax_type", "learnable"),
+        ("softmax_type", "off-by-one"),
     ],
 )
 def test_granite_attention_on_values_are_refused(key, value):
