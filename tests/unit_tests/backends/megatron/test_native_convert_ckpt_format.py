@@ -397,6 +397,33 @@ def test_read_experiment_checkpoint_settings(monkeypatch):
     }
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["train", "posttrain", "--tensor_model_parallel_size", "2", "expert_model_parallel_size=8"],
+        ["train", "posttrain", "tensor_model_parallel_size=2", "--expert_model_parallel_size=8"],
+    ],
+)
+def test_read_experiment_checkpoint_settings_applies_command_line_overrides(monkeypatch, capsys, argv):
+    """The training run applies the command line's overrides to the config, so the
+    layout and format the conversion is checked against include them."""
+    monkeypatch.setenv("RANK", "0")
+    params = SimpleNamespace(tensor_model_parallel_size=1, ckpt_format="torch")
+    monkeypatch.setattr(hook, "load_primus_config", lambda path, cli: SimpleNamespace())
+    monkeypatch.setattr(
+        hook,
+        "get_module_config",
+        lambda cfg, name: SimpleNamespace(params=params) if name == "post_trainer" else None,
+    )
+
+    settings = hook.read_experiment_checkpoint_settings("exp.yaml", argv + ["--ckpt_format", "torch_dist"])
+
+    assert settings == {"tp": 2, "pp": 1, "ep": 8, "ckpt_format": "torch_dist"}
+    out = capsys.readouterr().out
+    assert "command line overrides tensor_model_parallel_size: 1 -> 2" in out
+    assert "invalid override" not in out
+
+
 # ---------------------------------------------------------------------------
 # Conversion hook: cache path and reuse
 # ---------------------------------------------------------------------------

@@ -28,6 +28,8 @@
 #     TP=1, PP=1, EP=1, and the hook refuses it for other layouts. The hook also
 #     refuses any other ckpt_format (torch_dcp, fsdp_dtensor): an FSDP run
 #     (use_torch_fsdp2, use_megatron_fsdp) cannot load a converted checkpoint.
+#     Command-line overrides (e.g. --tensor_model_parallel_size 2) count, as
+#     they do for training.
 #   - Do NOT hardcode machine-specific paths in a committed config. Replace every
 #     <...> below, and prefer ${ENV_VAR} / CLI overrides for real paths.
 #   - When launching, unset the TE attention-backend env vars so a ROCm image's
