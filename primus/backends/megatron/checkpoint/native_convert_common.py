@@ -261,16 +261,22 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     return margs
 
 
-def build_mcore_gpt_model(margs):
+def build_mcore_gpt_model(margs, model_type: str | None = None, *, family: str | None = None):
     """Build the mcore ``GPTModel`` via Primus' own model-provider resolver.
 
-    Using ``get_model_provider('gpt')`` (the same shim native SFT uses) means the
-    produced parameter names match exactly what SFT will build, and keeps us off
-    the ``tools/checkpoint`` directory layout.
+    Using ``get_model_provider(model_type)`` (the same shim native SFT uses) means
+    the produced parameter names match exactly what SFT will build, and keeps us
+    off the ``tools/checkpoint`` directory layout. ``model_type`` is the type
+    training builds the model with: given explicitly, else the ``model_type`` the
+    registered native ``family`` declares (``native_registry``), else ``"gpt"``.
     """
     from primus.core.utils.import_utils import get_model_provider
 
-    model_provider = get_model_provider(model_type="gpt")
+    if model_type is None:
+        from primus.backends.megatron.checkpoint import native_registry
+
+        model_type = native_registry.model_type_for(family)
+    model_provider = get_model_provider(model_type=model_type)
     model = model_provider(pre_process=True, post_process=True)
     return model.to(margs.params_dtype)
 
@@ -439,6 +445,25 @@ def finalize_release_layout(save_dir: str, iteration: int) -> None:
         f.write("release")
 
 
+def tracked_ckpt_dir(save_dir: str) -> str | None:
+    """The checkpoint directory the tracker file in ``save_dir`` names.
+
+    ``<save_dir>/release`` or ``<save_dir>/iter_<7 digits>``, whether or not it
+    exists; ``None`` when there is no tracker file or it holds neither.
+    """
+    tracker = os.path.join(save_dir, TRACKER_FILENAME)
+    if not os.path.isfile(tracker):
+        return None
+    with open(tracker) as f:
+        content = f.read().strip()
+    if content == "release":
+        return os.path.join(save_dir, "release")
+    try:
+        return os.path.join(save_dir, f"iter_{int(content):07d}")
+    except ValueError:
+        return None
+
+
 def saved_ckpt_format(save_dir: str) -> str | None:
     """Format of the checkpoint the tracker file in ``save_dir`` points at.
 
@@ -447,19 +472,8 @@ def saved_ckpt_format(save_dir: str) -> str | None:
     when there is no tracker file or the checkpoint it names is missing or
     incomplete.
     """
-    tracker = os.path.join(save_dir, TRACKER_FILENAME)
-    if not os.path.isfile(tracker):
-        return None
-    with open(tracker) as f:
-        content = f.read().strip()
-    if content == "release":
-        ckpt_dir = os.path.join(save_dir, "release")
-    else:
-        try:
-            ckpt_dir = os.path.join(save_dir, f"iter_{int(content):07d}")
-        except ValueError:
-            return None
-    if not os.path.isdir(ckpt_dir):
+    ckpt_dir = tracked_ckpt_dir(save_dir)
+    if ckpt_dir is None or not os.path.isdir(ckpt_dir):
         return None
     if os.path.isfile(os.path.join(ckpt_dir, "metadata.json")):
         return "torch_dist"

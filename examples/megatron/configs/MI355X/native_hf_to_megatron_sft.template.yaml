@@ -19,7 +19,10 @@
 # REQUIREMENTS
 #   - An HF model directory containing: *.safetensors, config.json, tokenizer files.
 #   - Supported families: Qwen3 (dense + MoE), DeepSeek-V2/V3 (MLA + MoE),
-#     Llama 2/3/3.1. (Detected automatically from config.json "architectures".)
+#     Llama 2/3/3.1, and the families registered under
+#     primus/backends/megatron/checkpoint/native_families/. (Detected
+#     automatically from config.json "architectures" / "model_type".) List them:
+#       python -m primus.backends.megatron.checkpoint.native_registry
 #   - Any TP / PP / EP with ckpt_format: torch_dist (below). The converter writes
 #     the experiment's ckpt_format; the legacy `torch` format loads only at
 #     TP=1, PP=1, EP=1, and the hook refuses it for other layouts.
@@ -31,7 +34,7 @@
 #
 # --- USAGE A (recommended): let the post-train hook convert automatically ---
 #   Just set `hf_path` below and launch via the POST-TRAIN entrypoint. Native
-#   conversion is the DEFAULT for supported families (Qwen3 / DeepSeek / Llama)
+#   conversion is the DEFAULT for every registered family (see REQUIREMENTS)
 #   -- no extra flag is needed:
 #       ./runner/primus-cli direct train posttrain --config <path/to/this/file>
 #   That entrypoint runs the post-train hooks (dispatch_framework.sh ->
@@ -50,8 +53,9 @@
 #       # Apply the phase="convert" patches FIRST (ROCm fused-kernels no-op, etc.);
 #       # convert() assumes they are already active in this process.
 #       common.apply_convert_patches(module_name="checkpoint_convert")
-#       # pick the module for your family: native_loader_qwen3 | native_loader_deepseek | native_loader_llama
-#       from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
+#       # pick your family's converter (python -m ...checkpoint.native_registry lists them)
+#       from primus.backends.megatron.checkpoint import native_registry
+#       conv = native_registry.get_family("qwen3").converter_module()
 #       conv.convert("<HF_MODEL_DIR>", "<OUT_DIR>", dtype="bf16", ckpt_format="torch_dist")
 #       PY
 #   Step 2 - set `pretrained_checkpoint: <OUT_DIR>` (and drop `native_ckpt_convert`
@@ -78,8 +82,8 @@ modules:
       stage: sft
 
       # ---- Native bridge-free HF -> Megatron conversion (Usage A) ----------
-      # Native conversion is the DEFAULT for supported families (Qwen3/DeepSeek/
-      # Llama) -- just set hf_path below and launch. Optional overrides:
+      # Native conversion is the DEFAULT for the registered families (see
+      # REQUIREMENTS) -- just set hf_path below and launch. Optional overrides:
       #   native_ckpt_convert: false   # force the legacy Megatron-Bridge path
       #   native_ckpt_convert: true    # force native (error out if family unsupported)
       hf_path: <HF_MODEL_DIR>            # dir with *.safetensors + config.json + tokenizer
@@ -89,6 +93,8 @@ modules:
       #                                  # per parameter); the converter checks it before writing
       # native_ckpt_dtype: bf16          # optional; default inferred from config.json torch_dtype
       # native_ckpt_format: torch_dist   # optional; default: the experiment's ckpt_format
+      # A family may add its own native_ckpt_* options (python -m
+      # primus.backends.megatron.checkpoint.native_registry lists them).
 
       # ---- Usage B alternative: comment out the three lines above and set: --
       # pretrained_checkpoint: <OUT_DIR>

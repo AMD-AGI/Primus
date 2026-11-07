@@ -233,7 +233,7 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # Native (bridge-free) conversion path
 # ---------------------------------------------------------------------------
-# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama): this
+# DEFAULT conversion path for the registered families (``native_registry``): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
 # it (Primus-managed converters), producing a ``torch_dist`` checkpoint that
 # Megatron reshards to the experiment's TP / PP / EP on load (or a legacy
@@ -243,73 +243,47 @@ def _unset_nvte_attention_env():
 # "convert")`` so they take effect for the single-process conversion; the
 # Megatron-LM submodule stays pristine. Set ``native_ckpt_convert: false`` to
 # force the legacy Megatron-Bridge path (or ``true`` to force native).
+#
+# Families, their HF names, converter modules and options are registered in
+# ``primus.backends.megatron.checkpoint.native_registry`` (built-ins) and in one
+# module per added family under ``.../checkpoint/native_families/``; nothing
+# here is family-specific.
 
-# HF architectures / model_type -> Primus native converter family.
-_NATIVE_FAMILIES = {
-    "qwen3": "qwen3",
-    "qwen3_moe": "qwen3",
-    "qwen3forcausallm": "qwen3",
-    "qwen3moeforcausallm": "qwen3",
-    "deepseek_v2": "deepseek",
-    "deepseek_v3": "deepseek",
-    "deepseekv2forcausallm": "deepseek",
-    "deepseekv3forcausallm": "deepseek",
-    "deepseek": "deepseek",
-    "llama": "llama",
-    "llamaforcausallm": "llama",
-}
+
+def _registry():
+    from primus.backends.megatron.checkpoint import native_registry
+
+    return native_registry
 
 
 def _detect_native_family(hf_path: str) -> str | None:
-    """Return 'qwen3' | 'deepseek' | 'llama' | None from the HF config.json."""
-    import json
-
-    cfg_file = os.path.join(hf_path, "config.json")
-    if not os.path.isfile(cfg_file):
-        return None
-    with open(cfg_file) as f:
-        cfg = json.load(f)
-
-    for arch in cfg.get("architectures", []) or []:
-        fam = _NATIVE_FAMILIES.get(str(arch).lower())
-        if fam:
-            return fam
-    mt = str(cfg.get("model_type", "")).lower()
-    return _NATIVE_FAMILIES.get(mt)
+    """The registered native family of the HF model at ``hf_path`` (its name), or None."""
+    family = _registry().detect_family(hf_path)
+    return family.name if family is not None else None
 
 
-def _native_dtype_from_config(hf_path: str, override: str | None) -> str:
-    if override:
-        return override
-    import json
-
-    cfg_file = os.path.join(hf_path, "config.json")
-    if os.path.isfile(cfg_file):
-        with open(cfg_file) as f:
-            td = str(json.load(f).get("torch_dtype", "")).lower()
-        if "bfloat16" in td:
-            return "bf16"
-        if "float16" in td:
-            return "fp16"
-        if "float32" in td:
-            return "fp32"
-    return "bf16"
+def _native_dtype_from_config(hf_path: str, override: str | None, family: str | None = None) -> str:
+    """``override``, else the HF config's dtype (``bf16`` / ``fp16`` / ``fp32``; ``bf16`` if unknown)."""
+    registry = _registry()
+    fam = registry.get_family(family) if family else None
+    return registry.dtype_from_hf_config(hf_path, override, fam)
 
 
 def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     """Convert a HF checkpoint to a Megatron checkpoint, bridge-free.
 
     ``opts["ckpt_format"]`` selects ``torch_dist`` (default) or legacy ``torch``.
+    ``opts["convert_kwargs"]`` (the family's options and its ``prepare`` plan)
+    are passed on to the family's ``convert()``.
 
     Applies the ``phase="convert"`` patches in this process, then runs the
     Primus-managed native converter for the detected family, all single-process.
     """
-    family = opts.get("family") or _detect_native_family(hf_path)
-    if family is None:
-        raise ValueError(
-            f"native_ckpt_convert requested but no native converter for HF model at {hf_path} "
-            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1)"
-        )
+    registry = _registry()
+    family_name = opts.get("family") or _detect_native_family(hf_path)
+    if family_name is None:
+        raise ValueError(f"native_ckpt_convert requested but {registry.unknown_model_text(hf_path)}")
+    family = registry.get_family(family_name)
 
     # Ensure the Megatron-LM source tree is importable in this standalone hook
     # process (run_pretrain.sh's PYTHONPATH does not include it), and register +
@@ -320,23 +294,20 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     applied = common.apply_convert_patches(module_name="checkpoint_convert")
     log_info(f"Applied {applied} convert-phase patch(es)")
 
-    dtype = _native_dtype_from_config(hf_path, opts.get("dtype"))
+    dtype = _native_dtype_from_config(hf_path, opts.get("dtype"), family.name)
     tp = int(opts.get("tensor_parallel_size", 1))
     pp = int(opts.get("pipeline_parallel_size", 1))
     ep = int(opts.get("expert_parallel_size", 1))
     ckpt_format = common.check_ckpt_format(opts.get("ckpt_format") or common.DEFAULT_CKPT_FORMAT)
+    extra = dict(opts.get("convert_kwargs") or {})
 
-    log_info(f"Native ({family}) conversion: dtype={dtype} TP={tp} PP={pp} EP={ep} format={ckpt_format}")
+    log_info(f"Native ({family.name}) conversion: dtype={dtype} TP={tp} PP={pp} EP={ep} format={ckpt_format}")
+    if extra:
+        log_info(f"  {family.label} options: {extra}")
     log_info(f"  Source: {hf_path}")
     log_info(f"  Target: {megatron_path}")
 
-    if family == "qwen3":
-        from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
-    elif family == "llama":
-        from primus.backends.megatron.checkpoint import native_loader_llama as conv
-    else:
-        from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
-
+    conv = family.converter_module()
     conv.convert(
         hf_path,
         megatron_path,
@@ -345,6 +316,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         pipeline_parallel_size=pp,
         expert_parallel_size=ep,
         ckpt_format=ckpt_format,
+        **extra,
     )
 
     # Hard evidence for the bridge-free guarantee.
@@ -479,7 +451,81 @@ def _resolve_native_ckpt_format(requested: str | None, experiment: dict) -> str:
     return ckpt_format
 
 
-def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None):
+def _config_reader(config_file: str | None):
+    """``value(name)``: ``name`` from the experiment's ``sft_trainer`` / ``post_trainer``
+    module, its params first (``None`` when unset, or when there is no config file).
+    An explicit ``0`` / ``False`` is a value. The config is loaded on the first read,
+    so a family without options or a ``prepare`` step does not load it again."""
+    if not config_file:
+        return lambda name: None
+    loaded = []
+
+    def value(name: str):
+        if not loaded:
+            cfg = load_primus_config(Path(config_file), None)
+            loaded.append(
+                next(
+                    (
+                        m
+                        for m in (get_module_config(cfg, n) for n in ("sft_trainer", "post_trainer"))
+                        if m is not None
+                    ),
+                    None,
+                )
+            )
+        module = loaded[0]
+        params = getattr(module, "params", None)
+        found = _first_config_value(params, name)
+        return found if found is not None else _first_config_value(module, name)
+
+    return value
+
+
+def _prepare_native_family(
+    hf_path: str, family: str, native_opts: dict, experiment: dict, config_file: str | None, argv
+):
+    """Run the registered family's option reading and ``prepare`` step.
+
+    Sets ``native_opts["convert_kwargs"]`` (the family's options, then the plan's
+    keywords) and returns ``(experiment, plan)``: the experiment settings to check
+    the format against (the plan may replace them) and the family's
+    ``ConvertPlan``. A ``NativeConvertRefused`` from the family exits with its
+    reason.
+    """
+    registry = _registry()
+    fam = registry.get_family(family)
+    config_value = _config_reader(config_file)
+    options = registry.read_options(fam, config_value)
+    plan = None
+    prepare = fam.hook("prepare")
+    if prepare is not None:
+        ctx = registry.ConvertContext(
+            hf_path=hf_path,
+            hf_config=registry.read_config(hf_path) or {},
+            family=fam,
+            experiment=dict(experiment),
+            options=dict(options),
+            argv=list(argv or []),
+            config_value=config_value,
+        )
+        try:
+            plan = prepare(ctx)
+        except registry.NativeConvertRefused as e:
+            log_error(str(e))
+            sys.exit(1)
+    plan = plan or registry.ConvertPlan()
+    native_opts["convert_kwargs"] = {**options, **plan.convert_kwargs}
+    return (plan.experiment if plan.experiment is not None else experiment), plan
+
+
+def _native_main(
+    hf_path: str,
+    native_opts: dict,
+    experiment: dict | None = None,
+    *,
+    config_file: str | None = None,
+    argv: list | None = None,
+):
     """Bridge-free native conversion branch of main().
 
     Mirrors the Bridge path's skip-if-exists / rank-0-converts-others-wait
@@ -494,16 +540,25 @@ def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None
     part of the default output path and is checked against an existing
     checkpoint before it is reused, so a checkpoint of one format is never
     handed to a run that needs the other.
+
+    The family's registration (``native_registry``) adds its options, and its
+    ``prepare`` step (``config_file`` and ``argv``, the hook's command line, are
+    passed to it) may add converter keywords, a suffix of the default output
+    path, a check of an existing checkpoint before it is reused, and a step
+    before the conversion. Its ``wait`` replaces how other nodes wait.
     """
     from primus.backends.megatron.checkpoint import native_convert_common as common
 
     family = _detect_native_family(hf_path)
     if family is None:
-        log_error(f"native_ckpt_convert: true but no native converter matches HF model at {hf_path}")
+        log_error(f"native_ckpt_convert: true but {_registry().unknown_model_text(hf_path)}")
         sys.exit(1)
     native_opts["family"] = family
+    experiment, plan = _prepare_native_family(
+        hf_path, family, native_opts, dict(experiment or {}), config_file, argv
+    )
 
-    ckpt_format = _resolve_native_ckpt_format(native_opts.get("ckpt_format"), experiment or {})
+    ckpt_format = _resolve_native_ckpt_format(native_opts.get("ckpt_format"), experiment)
     native_opts["ckpt_format"] = ckpt_format
 
     # Output path. torch_dist: <out>/release/ (metadata.json, .metadata, *.distcp);
@@ -513,6 +568,8 @@ def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None
     else:
         data_path = Path(os.environ.get("DATA_PATH", PRIMUS_ROOT / "data"))
         megatron_path = data_path / "megatron_checkpoints" / f"{Path(hf_path).name}_native_{ckpt_format}"
+        if plan.path_suffix:
+            megatron_path = megatron_path.with_name(megatron_path.name + plan.path_suffix)
 
     log_info(f"HF Model: {hf_path}  (native family: {family}, format: {ckpt_format})")
     log_info(f"Megatron Path: {megatron_path}")
@@ -525,6 +582,11 @@ def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None
                 f"{ckpt_format}. Remove it, or set native_ckpt_out to another directory."
             )
             sys.exit(1)
+        if plan.check_existing is not None:
+            reason = plan.check_existing(megatron_path)
+            if reason:
+                log_error(reason)
+                sys.exit(1)
         log_info(f"Native {ckpt_format} checkpoint already exists at {megatron_path}, skipping conversion")
         _emit_native_checkpoint_args(megatron_path)
         return
@@ -538,6 +600,8 @@ def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None
         megatron_path.parent.mkdir(parents=True, exist_ok=True)
         lock_file.touch()
         try:
+            if plan.before_convert is not None:
+                plan.before_convert(megatron_path)
             native_convert_checkpoint(hf_path, str(megatron_path), native_opts)
             done_file.touch()
             log_success(f"Checkpoint prepared at {megatron_path}")
@@ -545,7 +609,11 @@ def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None
             lock_file.unlink(missing_ok=True)
     else:
         log_info(f"[RANK {node_rank}] Waiting for rank 0 to complete native conversion...")
-        wait_for_conversion(done_file, lock_file)
+        wait = _registry().get_family(family).hook("wait")
+        if wait is not None:
+            wait(megatron_path, done_file, lock_file, node_rank)
+        else:
+            wait_for_conversion(done_file, lock_file)
         log_success(f"[RANK {node_rank}] Checkpoint ready at {megatron_path}")
 
     _emit_native_checkpoint_args(megatron_path)
@@ -554,7 +622,7 @@ def _native_main(hf_path: str, native_opts: dict, experiment: dict | None = None
 def main():
     parser = argparse.ArgumentParser(description="Convert HF checkpoint to Megatron format")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
-    args, _ = parser.parse_known_args()
+    args, unknown_args = parser.parse_known_args()
 
     # Get config file path
     config_file = args.config
@@ -577,8 +645,8 @@ def main():
         return
 
     # ---- Choose conversion backend --------------------------------------
-    # Native (bridge-free) conversion is the DEFAULT for supported families
-    # (Qwen3, DeepSeek, Llama). ``native_ckpt_convert: false`` forces the legacy
+    # Native (bridge-free) conversion is the DEFAULT for the registered families
+    # (native_registry). ``native_ckpt_convert: false`` forces the legacy
     # Megatron-Bridge path; ``native_ckpt_convert: true`` forces native.
     native_opts = read_native_opts(config_file)
     native_family = _detect_native_family(hf_path)
@@ -592,12 +660,17 @@ def main():
     if use_native:
         if native_family is None:
             log_error(
-                "native_ckpt_convert=true but no native converter matches the HF "
-                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama). "
+                f"native_ckpt_convert=true but {_registry().unknown_model_text(hf_path)}. "
                 "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)
-        _native_main(hf_path, native_opts, read_experiment_checkpoint_settings(config_file))
+        _native_main(
+            hf_path,
+            native_opts,
+            read_experiment_checkpoint_settings(config_file),
+            config_file=config_file,
+            argv=unknown_args,
+        )
         return
 
     log_info("Using Megatron-Bridge conversion path (native disabled or unsupported family)")
