@@ -35,13 +35,12 @@ export MLLOG_SUBMISSION_PLATFORM=MI355X
 MLLOG_CONFIG_FILENAME=$(basename "${BASH_SOURCE[0]}")
 export MLLOG_CONFIG_FILENAME
 
-# Recipe environment (the trainer's docs/training_recipe.md). The image sets the
-# two HIP device-queue knobs to 1; every validated result ran with 0 (neutral).
+# Recipe environment. The image's HIP device-queue settings (GPU_USE_DEVICE_QUEUE=1,
+# DEBUG_CLR_AQL_DEV_QUEUE=1) are kept: +0.23% 200-step throughput over 0 on v26.9
+# (MI355X, 2 runs each; the ROCm 10.2 port measured 0 vs 1 as neutral and ran 0).
 export HSTU_HAMMER_KERNEL=TRITON
 export FLYDSL_GPU_ARCH=gfx950
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export FBGEMM_TBE_ROCM_HIP_BACKWARD_KERNEL=1
-export GPU_USE_DEVICE_QUEUE=0
-export DEBUG_CLR_AQL_DEV_QUEUE=0
 # numpy's transparent huge pages stall every rank on a fragmented host (T29).
 export NUMPY_MADVISE_HUGEPAGE=0

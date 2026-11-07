@@ -10,14 +10,15 @@ same node and data for every comparison, 2026-11-06.
 
 | | validated stack (UTD image, original repo) | Primus + rocm/primus:v26.9 |
 |---|---|---|
-| 200-step median `global_sps` | 84,177 | 84,390-84,455 (+0.3-0.5%) |
-| time to target, seed 731542219 | 917.0 s, 5 evals | 917.1 s, 5 evals |
-| time to target, seed 1234567 | 967.5 s, 6 evals (other node) | 961.2 s, 6 evals |
-| time to target, seed 20261103 | 1054.2 s, 8 evals; eval 7 at 1009.4 s (other node) | 1050.4 s, 8 evals; eval 7 at 1006.0 s |
+| 200-step median `global_sps` | 84,177-84,323 | 84,506-84,533 (+0.3%) |
+| time to target, seed 731542219 | 917.0 s, 5 evals | **913.3 s**, 5 evals (-0.4%) |
+| time to target, seed 1234567 | 961.6 s, 6 evals | **955.1 s**, 6 evals (-0.7%) |
+| time to target, seed 20261103 | 1051.9 s, 8 evals | **1041.0 s**, 8 evals (-1.0%) |
 | `run_with_docker.sh`, seed 20261103 | | 1000.2 s, 7 evals |
 | MLPerf 6.1.0 compliance | SUCCESS | SUCCESS (all four runs) |
 
-Seed 20261103's seventh eval lands within 0.0003 of the 0.75 target, so it needs a
+Training time is the same on both stacks; every eval pass is ~1.1 s faster (12.7-13.1 s vs 14.0-14.2 s), from the
+image's HIP device queues. Seed 20261103's seventh eval lands within 0.0003 of the 0.75 target, so it needs a
 seventh or an eighth eval from run to run on either stack.
 
 Before the changes below, the Primus run took 939.6-941.8 s for seed 731542219
@@ -31,7 +32,7 @@ Before the changes below, the Primus run took 939.6-941.8 s for seed 731542219
 | hipBLASLt 100500-cb261897 vs -3dc098eb | every stack-gated table and pin turned itself off: FP8 ScaledGemm pins (and with them the X2L-B fused backward, which fails closed), BLAS replay table, HIP preload table | v26.9 stack added to `ops/blas_solution_pins.py` (solution 33058 verified at run time by X2L-B's bitwise self-check), tables re-recorded (`tools/recommendation/dlrm_v4/record_stack_tables.sh`) |
 | Primus `base_env.sh`: `GPU_MAX_HW_QUEUES=2` (HIP default 4) | -0.44% throughput | experiment yaml `env: GPU_MAX_HW_QUEUES: "4"` |
 | image `TORCH_DIST_USE_NCCL2=0` (legacy c10d `ProcessGroupNCCL`; the UTD image used nccl2) | none: nccl2 + the deferred-wait DDP hook (T23) is 0.12% slower here | keeps the image's legacy process group |
-| image `GPU_USE_DEVICE_QUEUE=1`, `DEBUG_CLR_AQL_DEV_QUEUE=1` | (as validated: set to 0) | `config_MI355X_1x8x1.sh` sets 0 |
+| image `GPU_USE_DEVICE_QUEUE=1`, `DEBUG_CLR_AQL_DEV_QUEUE=1` (the validated runs set 0) | +0.23% 200-step; eval passes ~1.1 s faster each, -0.4 to -1.0% time to target | kept (the config no longer forces 0) |
 
 200-step A/B (2 runs each, interleaved; on the FP8 pins + HIP table baseline):
 
@@ -44,6 +45,9 @@ Before the changes below, the Primus run took 939.6-941.8 s for seed 731542219
 | `GPU_MAX_HW_QUEUES=4` | 84,390 | +0.44% |
 | `TORCH_NCCL_HIGH_PRIORITY=0` with 2 queues | 79,717 | **-5.1%** |
 | `GPU_MAX_HW_QUEUES=4` + `TORCH_NCCL_HIGH_PRIORITY=0` | 84,455 | +0.52% |
+| `GPU_MAX_HW_QUEUES=8` / `=3` (vs 4) | 79,758 / 83,900 | -5.4% / -0.5% |
+| image device queues on (vs 0, with 4 HW queues) | 84,519 | +0.23% |
+| `RCCL_WARP_SPEED_AUTO=1` (vs Primus' 0) | 84,323 | neutral |
 
 ## One-time costs in the timed region (T26 / T12 on v26.9)
 

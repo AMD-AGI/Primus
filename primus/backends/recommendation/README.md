@@ -40,5 +40,9 @@ naming `scripts/launch_slurm.sh`, `scripts/cluster_a/...` or `scripts/cluster_b/
 refer to that repository's launchers, which were not imported.
 
 The package is excluded from the pre-commit formatters (kept diffable with its
-origin; some kernel tests compare source text). License: Apache-2.0
+origin). Some of its tests are text-sensitive: `ops/tests/outproj_mx6_seam_test.py`
+allow-lists exact bytes of `ops/triton/bwd_fp8.py`, and
+`dlrm_v4/train/tests/stage_ref_only_gin_test.py` limits the (17b) block of
+`yambda_5b.gin` to 80 columns. Even a comment edit there needs the package's
+tests run again (in the image, on a GPU node). License: Apache-2.0
 (`dlrm_v4/src/LICENSE`).
