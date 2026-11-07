@@ -1,0 +1,5 @@
+extends:
+  - glm4_7.yaml
+
+# Single-node proxy: keep the GLM-4.7 attention and MoE architecture, reduce depth.
+num_layers: 4
