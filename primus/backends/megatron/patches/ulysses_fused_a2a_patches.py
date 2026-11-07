@@ -71,6 +71,16 @@ def _has_bias(linear) -> bool:
     return isinstance(bias, torch.Tensor) and bias.numel() > 0
 
 
+def _run_forward_pre_hooks(module):
+    # The fused path reads the module's weights without calling it, so run its forward pre-hooks the way
+    # nn.Module.__call__ would; with overlap_param_gather, DDP waits there for the weights' all-gather.
+    for hook_id, hook in module._forward_pre_hooks.items():
+        if hook_id in module._forward_pre_hooks_with_kwargs:
+            hook(module, (), {})
+        else:
+            hook(module, ())
+
+
 class _NoCPGroup:
     """RoPE's cp_group stand-in after the all-to-all: q and k already span the whole sequence."""
 
@@ -176,6 +186,7 @@ def _make_fused_forward(original_forward):
 
         hq, hkv, d = cfg.num_attention_heads, cfg.num_query_groups, cfg.kv_channels
         x = hidden_states
+        _run_forward_pre_hooks(self.linear_qkv)
         ln_weight = getattr(self.linear_qkv, "layer_norm_weight", None)
         if ln_weight is not None:
             # the input RMSNorm fused into linear_qkv
@@ -201,6 +212,7 @@ def _make_fused_forward(original_forward):
             causal=True,
         )
         o = o.permute(1, 0, 2, 3).contiguous()
+        _run_forward_pre_hooks(self.linear_proj)
         y = o_op(o, self.linear_proj.weight, None, cp_group, "sbhd")
         return y, None
 
