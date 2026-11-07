@@ -49,6 +49,23 @@ def _env_on(name: str, default: str = "1") -> bool:
 FUSE_NORM = _env_on("ZAYA_FUSE_NORM")
 FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
 
+# ZAYA_MOE_GEMM=split (default): per-expert nn.Linear GEMMs over host-sized
+# chunks (one counts.tolist() sync per MoE layer). ZAYA_MOE_GEMM=turbo: the 16
+# experts' weights live in two stacked [E, out, in] parameters and run as two
+# primus_turbo grouped GEMMs whose group sizes stay on device, so a MoE layer
+# never syncs with the host. BF16 only (FP8 keeps the split path). Checkpoint
+# keys stay local_experts.N.linear_fc{1,2}.weight in both modes; the
+# distributed-optimizer state is shaped per parameter, so it does not carry
+# across a mode switch (load with --no-load-optim when switching).
+MOE_GEMM = os.environ.get("ZAYA_MOE_GEMM", "split").strip().lower()
+# ZAYA_ROUTER_DEFER_AR=1: accumulate each router's token counts during the
+# forward and apply all balancing-bias updates after the decoder's backward
+# (or, failing that, at the start of the next forward) with one all-reduce for
+# all MoE layers instead of one per layer. The bias only feeds topk before its
+# own update, so with one microbatch per step (or non-pipelined microbatches)
+# the bias each forward sees is bit-identical to the per-layer path.
+ROUTER_DEFER_AR = _env_on("ZAYA_ROUTER_DEFER_AR", "0")
+
 
 def _maybe_compile(fn, enabled: bool, dynamic: bool = False):
     """torch.compile ``fn``; fall back to eager for good if the first compiled call fails."""
@@ -736,6 +753,10 @@ class ZayaRouter(nn.Module):
         if self.use_mod:
             with torch.no_grad():
                 self.balancing_biases[-1] = -1.0
+        # Deferred-update state (ZAYA_ROUTER_DEFER_AR). Not a buffer: it is
+        # always flushed before the next forward reads balancing_biases.
+        self.defer_bias_update = ROUTER_DEFER_AR
+        self._pending_counts: Optional[torch.Tensor] = None
 
     def _apply(self, fn, recurse=True):
         # Float16Module casts the whole module to bf16. The PID moments are
@@ -771,7 +792,7 @@ class ZayaRouter(nn.Module):
             _, index = torch.topk(biased, k=self.topk, dim=-1)
         route_prob = torch.gather(probs, dim=-1, index=index)
         if self.training and self.balance_lr != 0.0 and self.topk == 1:
-            self._update_biases(index.reshape(-1))
+            self._record_bias_update(index.reshape(-1))
         route_prob = route_prob.to(dtype=hidden_states.dtype).view(seq, batch, self.topk)
         index = index.view(seq, batch, self.topk)
         return route_prob, index, next_router
@@ -792,14 +813,30 @@ class ZayaRouter(nn.Module):
             logits, self.balancing_biases, self.topk, self.high_prec, hidden_states.dtype
         )
         if self.training and self.balance_lr != 0.0 and self.topk == 1:
-            self._update_biases(index.reshape(-1))
+            self._record_bias_update(index.reshape(-1))
         return route_prob.view(seq, batch, self.topk), index.view(seq, batch, self.topk), next_router
 
-    def _update_biases(self, index: torch.Tensor) -> None:
+    def _record_bias_update(self, index: torch.Tensor) -> None:
+        if self.defer_bias_update:
+            counts = self._local_counts(index)
+            self._pending_counts = counts if self._pending_counts is None else self._pending_counts + counts
+        else:
+            self._update_biases(index)
+
+    def _local_counts(self, index: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             counts = torch.zeros(self.num_scored, device=index.device, dtype=torch.float32)
             counts.scatter_add_(0, index, torch.ones_like(index, dtype=torch.float32))
-            _allreduce_dp(counts)
+        return counts
+
+    def _update_biases(self, index: torch.Tensor) -> None:
+        counts = self._local_counts(index)
+        _allreduce_dp(counts)
+        self._apply_bias_update(counts)
+
+    def _apply_bias_update(self, counts: torch.Tensor) -> None:
+        """PID/Adam step on the balancing bias from DP-summed token counts."""
+        with torch.no_grad():
             total = counts.sum().clamp_min(1.0)
             grad = counts / total - (1.0 / self.num_scored)
             self.balance_step += 1
@@ -816,6 +853,23 @@ class ZayaRouter(nn.Module):
             self.balancing_biases.addcdiv_(mhat, vhat.sqrt().add_(1e-8), value=-self.balance_lr)
 
 
+def flush_router_bias_updates(routers: Sequence["ZayaRouter"]) -> None:
+    """Apply every pending deferred bias update with a single DP all-reduce.
+
+    Counts are small integers held in fp32, so summing them in one
+    concatenated all-reduce is exact and matches the per-layer reduces.
+    """
+    pending = [r for r in routers if r._pending_counts is not None]
+    if not pending:
+        return
+    with torch.no_grad():
+        flat = torch.cat([r._pending_counts for r in pending])
+        _allreduce_dp(flat)
+        for r, counts in zip(pending, flat.split([r.num_scored for r in pending])):
+            r._pending_counts = None
+            r._apply_bias_update(counts)
+
+
 def _allreduce_dp(tensor: torch.Tensor) -> None:
     if not torch.distributed.is_available() or not torch.distributed.is_initialized():
         return
@@ -829,21 +883,138 @@ def _allreduce_dp(tensor: torch.Tensor) -> None:
     torch.distributed.all_reduce(tensor, group=group)
 
 
+class _ZeroGradFor(torch.autograd.Function):
+    """Identity on ``x``; backward passes ``x``'s grad through and gives ``param`` zeros."""
+
+    @staticmethod
+    def forward(ctx, x, param):
+        ctx.param_meta = (param.shape, param.dtype, param.device)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        shape, dtype, device = ctx.param_meta
+        return grad, torch.zeros(shape, dtype=dtype, device=device)
+
+
+def _turbo_grouped_gemm(a, b, group_lens, group_offs):
+    """``a[rows of group g] @ b[g].T`` with device-resident group sizes.
+
+    Rows past ``group_offs[-1]`` (the MoD skip slot) come back as zeros, and
+    so does their input gradient. Tests swap this for a CPU reference.
+    """
+    from primus_turbo.pytorch.ops import grouped_gemm
+
+    return grouped_gemm(a, b, group_lens, group_offs, trans_b=True)
+
+
+def _expert_key(prefix: str, expert_id: int, fc: str) -> str:
+    return f"{prefix}local_experts.{expert_id}.linear_{fc}.weight"
+
+
 class ZayaMoE(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         self.num_real_experts = int(config.num_moe_experts)
         intermediate = int(getattr(config, "moe_ffn_hidden_size", None) or config.ffn_hidden_size)
         self.router = ZayaRouter(config)
-        self.local_experts = nn.ModuleList(
-            [
-                SwiGLUExpert(int(config.hidden_size), intermediate, config)
-                for _ in range(self.num_real_experts)
-            ]
-        )
+        experts = [
+            SwiGLUExpert(int(config.hidden_size), intermediate, config)
+            for _ in range(self.num_real_experts)
+        ]
+        self.use_turbo_gemm = MOE_GEMM == "turbo" and not _fp8_requested(config)
+        if self.use_turbo_gemm:
+            # Built from the same per-expert modules (same init RNG stream),
+            # then stacked into [E, out, in] (nn.Linear layout per expert, so
+            # the grouped GEMM runs with trans_b=True). The per-expert copies
+            # are dropped; state_dict hooks keep the per-expert keys.
+            with torch.no_grad():
+                self.fc1_weight = nn.Parameter(torch.stack([e.linear_fc1.weight for e in experts]))
+                self.fc2_weight = nn.Parameter(torch.stack([e.linear_fc2.weight for e in experts]))
+            del experts
+            self.local_experts = None
+            self._register_state_dict_hook(ZayaMoE._unstack_state_dict)
+            self._register_load_state_dict_pre_hook(self._stack_state_dict)
+        else:
+            self.local_experts = nn.ModuleList(experts)
+
+    @staticmethod
+    def _unstack_state_dict(module, state_dict, prefix, local_metadata):
+        # Views share the stacked storage, so torch.save writes it once.
+        for fc in ("fc1", "fc2"):
+            stacked = state_dict.pop(f"{prefix}{fc}_weight").detach()
+            for expert_id in range(module.num_real_experts):
+                state_dict[_expert_key(prefix, expert_id, fc)] = stacked[expert_id]
+        return state_dict
+
+    def _stack_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        for fc in ("fc1", "fc2"):
+            keys = [_expert_key(prefix, i, fc) for i in range(self.num_real_experts)]
+            if all(k in state_dict for k in keys):
+                state_dict[f"{prefix}{fc}_weight"] = torch.stack([state_dict.pop(k) for k in keys])
+
+    def _forward_turbo(self, flat, flat_idx, flat_prob):
+        """Grouped-GEMM experts with no host sync.
+
+        Tokens are stably sorted by routed group; the MoD skip slot has the
+        largest index, so its rows form the tail past the last real expert's
+        offset. The grouped GEMMs leave that tail zero, and the skip rows add
+        their identity input there instead, which reproduces the split path's
+        per-group results (``expert(x) * p`` or ``x * p``) row for row.
+        """
+        num_groups = self.router.num_scored
+        E = self.num_real_experts
+        sorted_idx, perm = torch.sort(flat_idx, stable=True)
+        # scatter_add instead of bincount: CUDA bincount reads max() on host.
+        counts = torch.zeros(num_groups, dtype=torch.int64, device=flat.device)
+        counts.scatter_add_(0, sorted_idx, torch.ones_like(sorted_idx, dtype=torch.int64))
+        group_lens = counts[:E].contiguous()
+        group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
+        if FUSE_MOE:
+            # Same permute / fused SwiGLU / fused gather*prob unpermute as
+            # _dispatch_fused, with the per-expert loop replaced by two
+            # grouped GEMMs.
+            inv_perm = torch.empty_like(perm)
+            inv_perm.scatter_(0, perm, torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype))
+            x_sorted = _PermuteRows.apply(flat, perm, inv_perm)
+            gate_up = _turbo_grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
+            y = _turbo_grouped_gemm(_fused_swiglu(gate_up), self.fc2_weight, group_lens, group_offs)
+            if self.router.use_mod:
+                y = torch.where((sorted_idx == E).unsqueeze(-1), x_sorted, y)
+            return _UnpermuteScale.apply(y, perm, inv_perm, flat_prob)
+        x_sorted = flat.index_select(0, perm)
+        p_sorted = flat_prob.index_select(0, perm)
+        gate_up = _turbo_grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
+        y = _turbo_grouped_gemm(_swiglu(gate_up), self.fc2_weight, group_lens, group_offs)
+        if self.router.use_mod:
+            # Skip rows take the identity input; the GEMM left them zero.
+            y = torch.where((sorted_idx == E).unsqueeze(-1), x_sorted, y)
+        out_sorted = y * p_sorted
+        return flat.new_zeros(flat.shape).index_copy(0, perm, out_sorted)
 
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
+        if (
+            self.use_turbo_gemm
+            and self.router.use_eda
+            and prev_router is None
+            and torch.is_grad_enabled()
+            and self.router.router_states_scale.requires_grad
+        ):
+            # First MoE layer: no previous router state, so the EDA scale is
+            # unused. Give it an exact-zero grad (identity forward) so every
+            # parameter gets a grad each step, which Megatron DDP's
+            # --overlap_grad_reduce per-bucket hook count requires. Together
+            # with the stacked experts (every expert weight is in each grouped
+            # GEMM, empty groups get a zero wgrad) turbo mode leaves no
+            # parameter without a grad.
+            hidden_states = _ZeroGradFor.apply(hidden_states, self.router.router_states_scale)
         probs, index, next_router = self.router(hidden_states, prev_router)
+        if self.use_turbo_gemm:
+            prob = probs[..., 0]
+            flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+            flat_prob = prob.reshape(-1, 1).to(dtype=flat.dtype)
+            out = self._forward_turbo(flat, index[..., 0].reshape(-1), flat_prob)
+            return out.view_as(hidden_states), next_router
         # Top-1 is the released configuration. The mix weight is the unbiased
         # gathered probability.
         prob = probs[..., 0]
@@ -975,7 +1146,28 @@ class ZayaStack(nn.Module):
 
         return get_fp8_context(self.config)
 
+    def _routers(self) -> List[ZayaRouter]:
+        return [layer.zaya_block.router for layer in self.layers if layer.zaya_block is not None]
+
+    def flush_router_bias_updates(self) -> None:
+        flush_router_bias_updates(self._routers())
+
     def forward(self, hidden_states, position_ids, attention_mask):
+        # Deferred router updates from a forward whose backward never ran (or
+        # had no grad path to the stack input) land before any topk reads the
+        # bias. A no-op when nothing is pending; no host sync either way.
+        self.flush_router_bias_updates()
+        if self.training and torch.is_grad_enabled() and hidden_states.requires_grad and any(
+            r.defer_bias_update for r in self._routers()
+        ):
+            # Fires once the stack input's gradient is known, i.e. after every
+            # stage's backward: one all-reduce for all routers, applied before
+            # the optimizer step and any checkpoint save.
+            def _flush_after_backward(grad, stack=self):
+                stack.flush_router_bias_updates()
+                return None
+
+            hidden_states.register_hook(_flush_after_backward)
         if ATTN_FLASH and attention_mask is not None and is_causal_mask(attention_mask):
             # The dataloader's tril mask (reset_attention_mask=false) is plain
             # causal: check it once here instead of materializing an additive
