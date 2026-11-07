@@ -22,6 +22,10 @@ from megatron.core.models.common.language_module.language_module import Language
 from megatron.core.transformer.enums import ModelType
 from torch import Tensor
 
+from primus.backends.megatron.core.models.zaya1.zaya1_chunked_ce import (
+    chunked_ce_enabled,
+    chunked_linear_cross_entropy,
+)
 from primus.backends.megatron.core.models.zaya1.zaya1_modules import ZayaStack
 from primus.backends.megatron.core.models.zaya1.zaya1_transformer_config import (
     Zaya1TransformerConfig,
@@ -100,6 +104,18 @@ class Zaya1Model(LanguageModule):
         if self.pre_process or self.post_process:
             self.setup_embeddings_and_output_layer()
 
+    def _use_chunked_ce(self) -> bool:
+        """Chunked CE (``ZAYA_CHUNKED_CE``, default on) needs TP=1 and no TE CE fusion."""
+        if not chunked_ce_enabled():
+            return False
+        if getattr(self.config, "cross_entropy_loss_fusion", False) and (
+            getattr(self.config, "cross_entropy_fusion_impl", "native") == "te"
+        ):
+            return False
+        tp = getattr(self.pg_collection, "tp", None) if self.pg_collection is not None else None
+        tp_size = tp.size() if tp is not None and hasattr(tp, "size") else 1
+        return tp_size == 1 and not getattr(self.config, "sequence_parallel", False)
+
     def set_input_tensor(self, input_tensor: Tensor) -> None:
         """Pipeline hook. This port only runs with pipeline size 1."""
         if not isinstance(input_tensor, list):
@@ -155,6 +171,15 @@ class Zaya1Model(LanguageModule):
         output_weight = None
         if self.share_embeddings_and_output_weights:
             output_weight = self.shared_embedding_or_output_weight()
+
+        if labels is not None and self._use_chunked_ce():
+            # Output projection + CE in token chunks: the full [s*b, vocab]
+            # logits (bf16) and their fp32 upcast / softmax are never resident.
+            weight = output_weight if output_weight is not None else self.output_layer.weight
+            logit_scale = None
+            if getattr(self.config, "use_mup", False) and self.config.mup_output_mult != 1.0:
+                logit_scale = float(self.config.mup_output_mult)
+            return chunked_linear_cross_entropy(hidden_states, weight, labels, logit_scale=logit_scale)
 
         logits, _ = self.output_layer(
             hidden_states,
