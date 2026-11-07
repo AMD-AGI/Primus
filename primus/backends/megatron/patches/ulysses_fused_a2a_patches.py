@@ -149,6 +149,8 @@ def _make_fused_forward(original_forward):
             or packed_seq_params is not None
             or attention_bias is not None
             or cfg.attention_output_gate
+            or getattr(self.linear_qkv, "bias", None) is not None
+            or getattr(self.linear_proj, "bias", None) is not None
         ):
             return original_forward(
                 self,
