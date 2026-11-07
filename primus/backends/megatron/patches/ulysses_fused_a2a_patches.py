@@ -44,6 +44,10 @@ def _enabled(ctx: PatchContext) -> bool:
             f"(got TP={tp}, CP={cp}), keeping the stock path"
         )
         return False
+    # MLA keeps its own forward and YaRN RoPE slicing, which would disagree with the contiguous split
+    if getattr(args, "multi_latent_attention", False):
+        warning_rank_0("[Patch:megatron.ulysses_fused_a2a] MLA is not supported, keeping the stock path")
+        return False
     return True
 
 
