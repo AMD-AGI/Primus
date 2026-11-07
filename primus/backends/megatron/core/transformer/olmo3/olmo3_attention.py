@@ -16,8 +16,9 @@ Differences from upstream ``SelfAttention``:
   TP, which is right for replicated per-head norms and wrong for sharded ones.
   ``FullWidthRMSNorm.sharded_state_dict`` marks the weight TP-sharded on dim 0,
   so distributed (``torch_dist``) checkpoints save and reshard it across TP sizes.
-  The native HF converter writes TP=PP=EP=1 legacy ``torch`` checkpoints only; to load
-  converted weights at TP > 1, convert them to ``torch_dist`` first.
+  The native HF converter writes ``torch_dist`` by default, which Megatron reshards on load
+  to the run's TP / PP; the posttrain hook pads the vocabulary for the run's TP (a legacy
+  ``torch`` checkpoint loads only at TP = PP = 1).
 * per-layer RoPE: the model hands every layer a stacked ``[2, s, 1, 1, d]``
   embedding (index 0 = plain RoPE, index 1 = YaRN). Full-attention layers take
   YaRN; sliding layers take plain RoPE (``olmo3_rope_layout: per_type``) or
@@ -151,7 +152,8 @@ class FullWidthRMSNorm(torch.nn.Module):
             set_tensor_model_parallel_attributes(self.weight, True, 0, 1)
 
     def _weight_view(self, x: Tensor) -> Tensor:
-        # x: [s, b, heads_local, head_dim]; normalised in place of its layout (no reshape copy)
+        # x: [s, b, heads_local, head_dim]; view the weight as [heads, head_dim] so x is normalised
+        # in its own layout (no reshape copy)
         heads, head_dim = x.shape[-2:]
         if heads * head_dim != self.local_width:
             raise ValueError(f"FullWidthRMSNorm: got width {heads * head_dim}, expected {self.local_width}")
@@ -242,12 +244,9 @@ class Olmo3SelfAttention(SelfAttention):
             raise ValueError(f"OLMo-3 olmo3_rope_layout must be one of {OLMO3_ROPE_LAYOUTS}, got {layout!r}")
         # YaRN off (factor 1): every layer uses plain RoPE, as olmo3_layer_plan logs it.
         self.olmo3_use_yarn = olmo3_layer_uses_yarn(config, self.olmo3_sliding)
-        # No private config copy: every layer shares ``config``. Upstream core attention (TE and
-        # local) already applies ``config.window_size`` = (W - 1, 0) per layer through
-        # is_layer_window_attention(window_size, window_attn_skip_freq, layer_number), the same
-        # rule as olmo3_layer_is_sliding, so full-attention layers get no window.
-        # window_size == (olmo3_sliding_window - 1, 0) is set by Olmo3TransformerConfig and
-        # re-checked by olmo3_builder for a supplied config, the only way this layer is built.
+        # Upstream core attention applies config.window_size = (W - 1, 0) per layer through
+        # is_layer_window_attention (the same rule as olmo3_layer_is_sliding), so the shared
+        # config is correct for full and sliding layers.
 
         # Upstream default softmax scale: 1/sqrt(head_dim), with head_dim = kv_channels (as Attention
         # sets hidden_size_per_attention_head).

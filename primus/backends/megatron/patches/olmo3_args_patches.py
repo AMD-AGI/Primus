@@ -30,7 +30,7 @@ from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-__all__ = ["is_olmo3_model_type", "patch_olmo3_args"]
+__all__ = ["is_olmo3_model_type", "patch_olmo3_args", "patch_olmo3_preset_needs_olmo3_model"]
 
 
 def is_olmo3_model_type(ctx: PatchContext) -> bool:
@@ -58,6 +58,34 @@ def patch_olmo3_args(ctx: PatchContext):
     args.olmo3_sliding_window = w
     args.window_attn_skip_freq = skip
     log_rank_0(
-        f"[Patch:megatron.olmo3.args] sliding_window={w}: window_size {before!r} -> {ws} (Megatron/TE) "
+        f"[Patch:megatron.olmo3.args] sliding_window={w}: window_size {before!r} -> {ws} (Megatron/TE); "
         f"window_attn_skip_freq={skip}"
+    )
+
+
+def _olmo3_keys_without_olmo3_model(ctx: PatchContext) -> bool:
+    """The OLMo-3 preset (``olmo3_sliding_window`` set) with a ``model_type`` that is not ``olmo3``."""
+    args = get_args(ctx)
+    return (
+        getattr(args, "olmo3_sliding_window", None) is not None
+        and getattr(args, "model_type", None) != "olmo3"
+    )
+
+
+@register_patch(
+    "megatron.olmo3.preset_needs_olmo3_model",
+    backend="megatron",
+    phase="before_train",
+    description="OLMo-3 preset with model_type overridden away from olmo3: refuse (window_size is W, not a pair).",
+    condition=_olmo3_keys_without_olmo3_model,
+)
+def patch_olmo3_preset_needs_olmo3_model(ctx: PatchContext):
+    """The OLMo-3 preset writes ``window_size: W`` (an int) next to ``olmo3_sliding_window``; only
+    the OLMo-3 model turns it into the Megatron / TE pair ``(W - 1, 0)``. Another model would get an
+    int where Megatron expects a pair, or would drop the post-norms and full-width QK-norm. Refuse."""
+    args = get_args(ctx)
+    raise ValueError(
+        f"the OLMo-3 preset (olmo3_sliding_window={args.olmo3_sliding_window}) needs model_type: olmo3, "
+        f"got model_type={getattr(args, 'model_type', None)!r}; the OLMo-3 window, norms and RoPE are built "
+        "only by the olmo3 model"
     )

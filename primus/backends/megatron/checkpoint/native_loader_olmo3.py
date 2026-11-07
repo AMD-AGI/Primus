@@ -20,6 +20,7 @@ Layout differences from Llama / Qwen3 (see ``core/models/olmo3``):
 
 import argparse
 import math
+import socket
 from types import SimpleNamespace
 
 import torch
@@ -35,7 +36,7 @@ from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
 
 def check_single_shard_layout(tp, pp, ep) -> None:
     """Refuse a layout other than TP = PP = EP = 1: the native convert hook builds the model in a
-    1-rank world and saves a single-shard legacy checkpoint."""
+    1-rank world (a torch_dist checkpoint is resharded by Megatron when training loads it)."""
     if tuple(int(x) for x in (tp, pp, ep)) != (1, 1, 1):
         raise ValueError(
             "the OLMo-3 converter writes single-shard TP=PP=EP=1 checkpoints (it runs in a 1-rank "
@@ -51,10 +52,10 @@ def check_single_shard_layout(tp, pp, ep) -> None:
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 
 
-def set_converter_runtime_args(margs, save_dir) -> None:
+def set_converter_runtime_args(margs, save_dir, ckpt_format=common.DEFAULT_CKPT_FORMAT) -> None:
     """Set the converter runtime args on ``margs`` (after the layout and the dtype), before
-    ``validate_args``: a CPU build without init, the TE implementation, fusions off, and a legacy
-    ``torch`` checkpoint at ``save_dir`` without optimizer / RNG state. It only sets attributes.
+    ``validate_args``: a CPU build without init, the TE implementation, fusions off, and a
+    ``ckpt_format`` checkpoint (default ``torch_dist``) at ``save_dir`` without optimizer / RNG state. It only sets attributes.
     The save iteration is set after ``validate_args`` by :func:`set_save_iteration`."""
     margs.use_cpu_initialization = True
     margs.perform_initialization = False
@@ -68,7 +69,7 @@ def set_converter_runtime_args(margs, save_dir) -> None:
     margs.apply_query_key_layer_scaling = False
 
     margs.save = save_dir
-    margs.ckpt_format = "torch"
+    margs.ckpt_format = common.check_ckpt_format(ckpt_format)
     margs.no_save_optim = True
     margs.no_save_rng = True
     margs.no_load_optim = True
@@ -92,8 +93,9 @@ def _apply_runtime_margs(m, args) -> None:
     """The converter's runtime Megatron args: 1 iteration of batch 1; TP = PP = EP = 1 in a 1-rank
     world (the converter writes a single-shard checkpoint); one dtype from :data:`DTYPES` (an
     unknown dtype raises; at most one of ``bf16`` / ``fp16`` is True); CPU build without init;
-    fusions off; a legacy ``torch`` checkpoint saved to ``args.save_dir`` without optimizer / RNG
-    state. The dtype and the layout are checked before ``m`` changes."""
+    fusions off; an ``args.ckpt_format`` checkpoint (default ``torch_dist``) saved to
+    ``args.save_dir`` without optimizer / RNG state. The dtype and the layout are checked before ``m`` changes.
+    """
     if args.dtype not in DTYPES:
         raise ValueError(f"converter dtype must be one of {sorted(DTYPES)}, got {args.dtype!r}")
     check_single_shard_layout(
@@ -114,7 +116,7 @@ def _apply_runtime_margs(m, args) -> None:
     m.bf16 = args.dtype == "bf16"
     m.fp16 = args.dtype == "fp16"
     m.params_dtype = DTYPES[args.dtype]
-    set_converter_runtime_args(m, args.save_dir)
+    set_converter_runtime_args(m, args.save_dir, getattr(args, "ckpt_format", common.DEFAULT_CKPT_FORMAT))
 
 
 def _window_fields(cfg):
@@ -372,12 +374,13 @@ def _rope_config(cfg):
     Handles the flat ``rope_scaling`` / ``rope_parameters`` dict (transformers 4.57 checkpoints)
     and the per-layer-type form ``{"full_attention": {...}, "sliding_attention": {...}}``
     (transformers 5.x). In the per-type form the sliding layers' own ``rope_type`` gives the
-    layout (``default`` -> ``per_type``, ``yarn`` -> ``yarn_all``); the flat form gives none.
+    layout (``default`` or no ``sliding_attention`` entry -> ``per_type``, ``yarn`` -> ``yarn_all``);
+    the flat form gives none.
     Unknown nesting or unsupported RoPE types raise ``ValueError``.
     """
     raw = _rope_source(cfg)
     layout = None
-    yf = None
+    sliding = None
     if any(isinstance(v, dict) for v in raw.values()):
         unknown = set(raw) - set(_LAYER_TYPES)
         if unknown or "full_attention" not in raw:
@@ -396,7 +399,11 @@ def _rope_config(cfg):
                 )
         if full is None:
             raise ValueError("OLMo-3 rope parameters: 'full_attention' is null")
-        if sliding is not None:
+        yf = _yarn_params(full, cfg)
+        if sliding is None:
+            # transformers 5.x: no sliding_attention entry means default RoPE on sliding layers
+            layout = "per_type"
+        else:
             st = _rope_type(sliding)
             if st == "yarn" and _rope_type(full) == "yarn":
                 layout = "yarn_all"
@@ -407,7 +414,6 @@ def _rope_config(cfg):
             # yarn_all builds one YaRN table (and attention factor) for every layer: the sliding
             # layers' YaRN values must be the full layers' ones, not silently replaced by them.
             ys = _yarn_params(sliding, cfg)
-            yf = _yarn_params(full, cfg)
             if ys is not None and ys != yf:
                 diff = sorted(k for k in ys if ys[k] != yf[k])
                 raise ValueError(
@@ -416,15 +422,14 @@ def _rope_config(cfg):
                 )
     else:
         full = raw
-    # validated (once) here, so an unsupported rope type fails before the rope_theta checks below,
-    # with the message that names it
-    if yf is None:
+        # validated here, so an unsupported rope type fails before the rope_theta checks below,
+        # with the message that names it
         yf = _yarn_params(full, cfg)
     # One rope_theta for every layer: the top level, full_attention and sliding_attention values
     # that are given must agree (transformers 5.x may write ``rope_theta: null`` at the top level
     # and the value in the rope parameters; None or a missing key counts as not given).
     given = {"top level": cfg.get("rope_theta"), "full_attention": full.get("rope_theta")}
-    if layout is not None:
+    if sliding is not None:
         given["sliding_attention"] = sliding.get("rope_theta")
     given = {
         k: _positive_number({"rope_theta": v}, "rope_theta", f"config.json ({k})")
@@ -455,8 +460,8 @@ def derive_megatron_fields(cfg, rope_layout=None, default_layout="auto"):
     transformers' ``Olmo3ForCausalLM``. Everything that trains or saves passes a concrete
     layout: :func:`convert` refuses ``auto`` and uses ``per_type`` (the trained model) for a
     flat config, the model preset sets ``per_type``, and the OLMo-3 args patch refuses
-    ``auto``. ``yarn_all`` on a config without YaRN is refused when asked for explicitly; when
-    ``auto`` resolves to it, the layout is ``per_type`` (the same model). The result is always
+    ``auto``. ``yarn_all`` without YaRN scaling (factor > 1) raises when passed as ``rope_layout``;
+    when it comes from ``default_layout`` or ``auto``, the layout is ``per_type`` (the same model). The result is always
     a concrete layout.
     """
     from primus.backends.megatron.core.models.olmo3.olmo3_transformer_config import (
@@ -467,6 +472,10 @@ def derive_megatron_fields(cfg, rope_layout=None, default_layout="auto"):
     yarn, cfg_layout, rotary_base = _rope_config(cfg)
     yarn_scales = yarn is not None and yarn["factor"] > 1.0
     explicit = rope_layout is not None and rope_layout != "auto"
+    if cfg_layout == "yarn_all" and not yarn_scales:
+        # YaRN entries with factor <= 1 are plain RoPE (attention factor 1): the same model as
+        # per_type, which is what the flat form gives for it too
+        cfg_layout = "per_type"
     if cfg_layout is not None:
         if explicit and rope_layout != cfg_layout:
             raise ValueError(
@@ -481,11 +490,10 @@ def derive_megatron_fields(cfg, rope_layout=None, default_layout="auto"):
                 raise ValueError("olmo3_rope_layout 'yarn_all' needs YaRN rope parameters (factor > 1)")
             layout = "per_type"
     sliding_window, skip_freq = _window_fields(cfg)
-    nh = cfg["num_attention_heads"]
     return dict(
         hidden_size=cfg["hidden_size"],
         vocab_size=cfg.get("vocab_size"),
-        num_attention_heads=nh,
+        num_attention_heads=cfg["num_attention_heads"],
         num_layers=cfg["num_hidden_layers"],
         max_position_embeddings=cfg["max_position_embeddings"],
         norm_epsilon=cfg["rms_norm_eps"],
@@ -590,7 +598,7 @@ def build_model(margs):
     Kept as a module-level entry point: the parity tooling builds a family's own model through
     ``<converter>.build_model``; the plain GPT model would not have the OLMo-3 layers.
     """
-    return common.build_mcore_gpt_model(margs, model_type="olmo3")
+    return common.build_mcore_gpt_model(margs, family="olmo3")
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +678,13 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
     return sd, consumed
 
 
+def _free_port() -> int:
+    """A TCP port free on this host now, for the one-rank conversion world."""
+    with socket.socket() as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
 # ---------------------------------------------------------------------------
 # In-process entrypoint
 # ---------------------------------------------------------------------------
@@ -681,19 +696,25 @@ def convert(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
     expert_parallel_size=1,
+    ckpt_format=common.DEFAULT_CKPT_FORMAT,
     seq_length=4096,
     make_vocab_size_divisible_by=128,
     master_port=None,
     rope_layout=None,
+    expected_padded_vocab_size=None,
     log=None,
 ):
-    """Convert an OLMo-3 HF checkpoint to a legacy Megatron torch ckpt (single process, CPU).
+    """Convert an OLMo-3 HF checkpoint to a Megatron checkpoint (single process; the weights are
+    built and mapped on the CPU). The process needs a visible GPU: on ROCm, importing
+    ``megatron.training`` (through ``mamba_ssm``) reads GPU 0's properties. The posttrain hook runs it
+    on a training node.
 
-    Writes a single-shard legacy torch checkpoint (TP = PP = EP = 1). Megatron cannot reshard a
-    legacy checkpoint: load it at TP = PP = 1, re-save it as torch_dist, then load that with the
-    target parallelism. A training run that loads it with TP or PP > 1 is refused before the model
-    is built (``olmo3_validation.check_olmo3_checkpoint_layout``). The saved args carry a concrete
-    ``olmo3_rope_layout``, never ``auto`` (refused): the layout the config's
+    The model is built at TP = PP = EP = 1. ``ckpt_format`` is ``"torch_dist"`` (default; Megatron
+    reshards it on load to the run's TP / PP; pass ``make_vocab_size_divisible_by`` times the run's
+    TP, as the posttrain hook does, so the vocabulary padding matches) or ``"torch"`` (legacy, single shard:
+    a training run that loads it with TP or PP > 1 is refused before the model is built,
+    ``olmo3_validation.check_olmo3_checkpoint_layout``); see
+    ``native_convert_common.CKPT_FORMATS``. The saved args carry a concrete ``olmo3_rope_layout``, never ``auto`` (refused): the layout the config's
     per-layer-type rope parameters declare (transformers 5.x; a different
     ``rope_layout`` raises), else ``rope_layout`` if given, else ``per_type``
     (the trained model; flat 4.57-style configs).
@@ -707,6 +728,8 @@ def convert(
         def log(*a):
             print("[olmo3-convert]", *a, flush=True)
 
+    # the layout is refused before Megatron is imported or initialised
+    check_single_shard_layout(tensor_parallel_size, pipeline_parallel_size, expert_parallel_size)
     common.ensure_megatron_on_path()
     common.assert_bridge_free("entry")
     args = SimpleNamespace(
@@ -716,6 +739,7 @@ def convert(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         expert_parallel_size=expert_parallel_size,
+        ckpt_format=common.check_ckpt_format(ckpt_format),
         seq_length=seq_length,
         make_vocab_size_divisible_by=make_vocab_size_divisible_by,
     )
@@ -723,8 +747,14 @@ def convert(
     cfg_fields = derive_megatron_fields(cfg, rope_layout=rope_layout, default_layout="per_type")
     log(f"arch: {cfg_fields}")
     margs = build_margs(cfg_fields, args)
-    # a private 127.0.0.1 world; master_port None: a free port bound by the store
-    margs = common.init_megatron_single_process(margs, master_port, log=log)
+    # master_port None: a port free on this host now (several conversions may share a node)
+    margs = common.init_megatron_single_process(margs, master_port or _free_port(), log=log)
+    if expected_padded_vocab_size is not None and margs.padded_vocab_size != expected_padded_vocab_size:
+        # the posttrain hook keys its checkpoint cache on this size (from config.json vocab_size)
+        raise ValueError(
+            f"OLMo-3 converter: the tokenizer pads the vocabulary to {margs.padded_vocab_size}, "
+            f"the caller expects {expected_padded_vocab_size} (config.json vocab_size)"
+        )
     common.assert_bridge_free("post-init")
     model = build_model(margs)
     store = common.SafetensorsStore(hf_dir)

@@ -26,7 +26,7 @@ An int ``k`` with ``2 <= k <= num_layers`` (every k-th layer is full attention),
 quoted YAML string (``"4"``, ``"([1]*3 + [0])*8"``) use the grammar of Megatron's
 ``--window-attn-skip-freq`` (int and list literals, ``+``, ``*``, parentheses; spaces allowed). They
 are read by :func:`_skip_freq_value`: Megatron's character check, then an ``ast`` evaluator that
-checks each list's length before it builds the list (Megatron's ``eval`` has no bound, so
+checks the length of every ``+`` / ``*`` result before it builds it (a list literal is bounded by the input text and checked after parsing) (Megatron's ``eval`` has no bound, so
 ``[1]*10**10`` would exhaust memory).
 
 Other string values are read with Primus's shared CLI reader (``arg_utils.parse_cli_overrides``,
@@ -86,11 +86,15 @@ def is_unset(v):
     return v is None or (isinstance(v, str) and (not v.strip() or _read(v) is None))
 
 
+# every integer up to this magnitude is exact as a float; beyond it a float may not be the int meant
+_MAX_EXACT_FLOAT_INT = 2**53
+
+
 def _as_int(v, what):
     """An int, or an integral float (``4.0``), after :func:`_read`; anything else (a bool,
     ``4.5``, ``"two"``, an unresolved ``"${TP:1}"``) raises ValueError naming ``what``."""
     r = _read(v)
-    if isinstance(r, float) and r.is_integer() and abs(r) <= 2**53:
+    if isinstance(r, float) and r.is_integer() and abs(r) <= _MAX_EXACT_FLOAT_INT:
         r = int(r)
     if isinstance(r, bool) or not isinstance(r, int):
         raise ValueError(f"OLMo-3 {what} must be an integer, got {v!r}")
@@ -179,7 +183,7 @@ def _skip_freq_value(text, max_len=_MAX_PATTERN):
     (``moe_freq_type``): ``"4"``, or a list expression of int / list literals with ``+``, ``*`` and
     parentheses (spaces allowed). Megatron checks the characters and runs ``eval``. Here the
     expression is parsed with ``ast`` and evaluated by :func:`_eval_pattern`, which checks every
-    list's length against ``max_len`` before it builds the list (Megatron's parser has no bound, so
+    ``+`` / ``*`` result's length against ``max_len`` before it builds it (a list literal is bounded by the input text and checked after parsing) (Megatron's parser has no bound, so
     ``[1]*10**10`` would exhaust memory). The caller checks the result (an int's bound, a list's
     length ``num_layers`` and 0 / 1 entries)."""
     s = text.strip()
@@ -273,9 +277,16 @@ def _parse_window(ws):
         ws = inner.split(",")  # an empty entry ("4096,,0", "(4096,0,)") is refused below
     if not isinstance(ws, (list, tuple)):
         raise ValueError(f"OLMo-3 window_size must be a (left, 0) pair, got {ws!r}")
+    if len(ws) != 2:
+        raise ValueError(
+            f"OLMo-3 window_size must be a (left, 0) pair, i.e. (W - 1, 0), got {tuple(ws)!r} "
+            f"({len(ws)} entries). Set the window W in olmo3_sliding_window (window_size: null)."
+        )
     ws = tuple(_strict_int(v, "window_size entry") for v in ws)
-    if len(ws) != 2 or ws[1] != 0:
-        raise ValueError(f"OLMo-3 window_size must be (W, 0) (causal, no future keys), got {ws}")
+    if ws[1] != 0:
+        raise ValueError(
+            f"OLMo-3 window_size must be a (left, 0) pair, i.e. (W - 1, 0) (causal, no future keys), got {ws}"
+        )
     return ws
 
 
@@ -304,6 +315,9 @@ def _window_value(ws):
         return ("keys", ws)
     if isinstance(ws, str) and re.fullmatch(r"\s*-?\d+\s*", ws):
         return ("keys", int(ws))
+    if isinstance(ws, float) or (isinstance(ws, str) and isinstance(_read(ws), float)):
+        # a scalar that is not an integer W ("4096.0", 4096.5): say so, not "must be a pair"
+        raise ValueError(f"OLMo-3 window_size W must be an integer, got {ws!r}")
     return ("te", _parse_window(ws))
 
 
@@ -335,7 +349,7 @@ def olmo3_window_from_settings(window_size, sliding_window):
                 f"{w} (W, as the preset writes it), the Megatron/TE pair {[w - 1, 0]}, or unset. To "
                 "change the window, set olmo3_sliding_window and window_size: null (or the new W)."
             )
-    return olmo3_te_window(w), w
+    return (w - 1, 0), w
 
 
 # ---------------------------------------------------------------------------
@@ -572,17 +586,11 @@ def check_olmo3_kv_heads_per_tp(obj):
     tp, ng = _as_int(tp, "tensor_model_parallel_size"), _as_int(ng, "num_query_groups")
     if tp <= 1:
         return
-    if ng % tp and tp % ng:
+    if ng % tp:
         raise ValueError(
-            f"OLMo-3: num_query_groups ({ng}) and tensor_model_parallel_size ({tp}) must divide one "
-            "another (Megatron shards whole KV heads over TP)"
-        )
-    if ng < tp:
-        raise ValueError(
-            f"OLMo-3 full-width k_norm needs num_query_groups >= tensor_model_parallel_size "
-            f"(got num_query_groups={ng}, tensor_model_parallel_size={tp}): with fewer KV heads than "
-            "TP ranks Megatron replicates KV heads across ranks, which the cross-rank k_norm "
-            "statistic does not support. Use a smaller tensor_model_parallel_size."
+            f"OLMo-3: tensor_model_parallel_size ({tp}) must divide num_query_groups ({ng}): Megatron "
+            "shards whole KV heads over TP, and the full-width k_norm statistic needs each KV head on "
+            "exactly one TP rank (no replication when num_query_groups < TP)"
         )
 
 
@@ -602,6 +610,8 @@ def check_olmo3_cp(obj):
 
 # the tracker file Megatron writes next to its iter_* directories (checkpointing.py:
 # get_checkpoint_tracker_filename)
+# The same name as native_convert_common.TRACKER_FILENAME (a test keeps them equal); kept here so
+# this module stays light (no torch import for the args patch).
 CHECKPOINT_TRACKER_FILENAME = "latest_checkpointed_iteration.txt"
 
 
@@ -641,8 +651,9 @@ def _checkpoint_megatron_loads(args):
 
 
 def check_olmo3_checkpoint_layout(args):
-    """Fail fast before the model is built: the native OLMo-3 converter (posttrain hook) writes a
-    single-shard legacy ``torch`` checkpoint (``mp_rank_00``, TP = PP = 1). Megatron cannot reshard
+    """Fail fast before the model is built: with ``ckpt_format: torch`` the native OLMo-3 converter
+    (posttrain hook) writes a single-shard legacy ``torch`` checkpoint (``mp_rank_00``, TP = PP = 1;
+    its default ``torch_dist`` is resharded on load and passes). Megatron cannot reshard
     a legacy checkpoint, so loading one with tensor or pipeline parallel size > 1 is refused here
     with the fix, instead of failing later on a missing ``mp_rank_*`` file. Only the checkpoint
     Megatron will actually load is inspected (:func:`_checkpoint_megatron_loads`)."""

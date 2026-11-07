@@ -37,4 +37,4 @@ def fuse_qkv(q, k, v, *, heads: int, groups: int, head_dim: int) -> torch.Tensor
         k.reshape(groups, head_dim, hidden),
         v.reshape(groups, head_dim, hidden),
     )
-    return torch.cat(parts, dim=1).reshape(-1, hidden).contiguous()
+    return torch.cat(parts, dim=1).reshape(-1, hidden)

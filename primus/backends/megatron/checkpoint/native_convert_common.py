@@ -25,16 +25,10 @@ converter):
        and save a legacy ``torch`` checkpoint.
 
 Bridge-free guarantee: this module (and its callers) import ONLY
-``megatron.core`` / ``megatron.training`` / ``megatron.legacy`` (when present). ``megatron.bridge``
-is never imported; a hard guard asserts it never leaked into ``sys.modules``.
-
-The ROCm-only ``megatron.legacy.fused_kernels.load`` no-op that the legacy CPU
-init path needs is supplied as a Primus ``phase="convert"`` monkeypatch
-(``primus.backends.megatron.patches.checkpoint_convert_patches``), applied
-in-process before conversion -- NOT by editing the submodule.
+``megatron.core`` / ``megatron.training``. ``megatron.bridge`` is never imported;
+a hard guard asserts it never leaked into ``sys.modules``.
 """
 
-import errno
 import json
 import os
 import sys
@@ -114,9 +108,8 @@ def apply_convert_patches(module_name: str | None = None, platform: str | None =
 
     Importing the ``checkpoint_convert_patches`` module triggers its
     ``@register_patch`` side effect; ``run_patches`` then applies the ones whose
-    ``condition`` matches (e.g. the ROCm fused-kernels no-op). Must be called
-    BEFORE any Megatron model build / ``fused_kernels.load`` so the monkeypatch
-    is in effect. Returns the number of patches applied.
+    ``condition`` matches. Must be called BEFORE any Megatron model build so the
+    monkeypatches are in effect. Returns the number of patches applied.
     """
     # Register the convert-phase patch(es). Import the single module rather than
     # the whole patches package to avoid pulling heavy TE/training imports into
@@ -242,61 +235,17 @@ def pad_vocab(t: torch.Tensor, padded_vocab_size: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Single-process Megatron init (real trivial gloo groups, TP=PP=EP=1)
 # ---------------------------------------------------------------------------
-def _address_in_use(error) -> bool:
-    """True if a TCPStore bind failed because the port is taken (EADDRINUSE)."""
-    text = str(error).lower()
-    return (
-        getattr(error, "errno", None) == errno.EADDRINUSE
-        or "address already in use" in text
-        or "eaddrinuse" in text
-    )
-
-
-def _private_store(master_port, log=print):
-    """A TCPStore for a private one-rank world, always on 127.0.0.1 (never an inherited
-    ``MASTER_ADDR``, which may name another host). ``master_port`` is tried first; only when it is
-    taken (EADDRINUSE, e.g. another conversion on this host) does the store bind a free port chosen
-    by the OS while binding (also for ``master_port`` 0 / None), so no other process can take it
-    between choosing and binding. Any other bind error is raised."""
-    port = int(master_port or 0)
-    try:
-        return torch.distributed.TCPStore(
-            "127.0.0.1", port, world_size=1, is_master=True, wait_for_workers=False
-        )
-    except (RuntimeError, OSError) as e:
-        if port == 0 or not _address_in_use(e):
-            raise
-        log(f"master port {port} is in use on 127.0.0.1; binding a free port instead")
-        return torch.distributed.TCPStore(
-            "127.0.0.1", 0, world_size=1, is_master=True, wait_for_workers=False
-        )
-
-
-def init_megatron_single_process(margs, master_port=None, log=print):
+def init_megatron_single_process(margs, master_port: int, log=print):
     """Initialise Megatron globals + a trivial single-rank gloo world.
 
     ``build_tokenizer=True`` so ``padded_vocab_size`` is derived from the HF
     tokenizer's real vocab, identical to how Primus native SFT sizes the model.
-    Without a process group, the world is private to this process: its store is on
-    127.0.0.1 (see :func:`_private_store`; ``master_port`` 0 / None: a free port) and the
-    rendezvous env vars are set to it. A process group that already exists is kept and its
-    env vars are left as they are; it must have one rank (the converters build TP = PP = EP = 1).
     """
-    store = None
-    if torch.distributed.is_initialized():
-        world = torch.distributed.get_world_size()
-        if world != 1:
-            raise RuntimeError(
-                f"init_megatron_single_process needs a one-rank world; the existing process group has "
-                f"{world} ranks (run the conversion in its own process)"
-            )
-    else:
-        store = _private_store(master_port, log)
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(store.port)
-        os.environ["RANK"] = "0"
-        os.environ["WORLD_SIZE"] = "1"
-        os.environ["LOCAL_RANK"] = "0"
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ["MASTER_PORT"] = str(master_port)
+    os.environ["RANK"] = "0"
+    os.environ["WORLD_SIZE"] = "1"
+    os.environ["LOCAL_RANK"] = "0"
     neutralize_nvte_attention_env()
 
     from megatron.core import mpu
@@ -306,42 +255,26 @@ def init_megatron_single_process(margs, master_port=None, log=print):
     margs = get_args()
     log(f"padded_vocab_size (from tokenizer) = {margs.padded_vocab_size}")
 
-    if store is not None:
-        torch.distributed.init_process_group(backend="gloo", store=store, world_size=1, rank=0)
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="gloo", world_size=1, rank=0)
     mpu.initialize_model_parallel(
         tensor_model_parallel_size=margs.tensor_model_parallel_size,
         pipeline_model_parallel_size=margs.pipeline_model_parallel_size,
         expert_model_parallel_size=margs.expert_model_parallel_size,
     )
-    # ROCm: legacy fused kernels are CUDA-only and their build shells out to
-    # nvcc; conversion never runs them. Neutralised by the phase="convert"
-    # Primus patch (checkpoint_convert_patches) applied earlier this process.
-    # Megatron-LM trees without ``megatron.legacy`` (core 0.19+) have no such
-    # kernels to build, so there is nothing to load.
-    try:
-        import megatron.legacy.fused_kernels as fused_kernels
-    except ModuleNotFoundError as e:
-        # only the absence of the module itself; a missing dependency inside it is an error
-        if e.name not in ("megatron.legacy", "megatron.legacy.fused_kernels"):
-            raise
-        log(f"{e.name} not present; no legacy fused kernels to load")
-    else:
-        fused_kernels.load(margs)
     return margs
 
 
-def build_mcore_gpt_model(margs, model_type="gpt"):
+def build_mcore_gpt_model(margs):
     """Build the mcore ``GPTModel`` via Primus' own model-provider resolver.
 
-    Using ``get_model_provider(model_type)`` (the same shim native SFT uses) means the
+    Using ``get_model_provider('gpt')`` (the same shim native SFT uses) means the
     produced parameter names match exactly what SFT will build, and keeps us off
-    the ``tools/checkpoint`` directory layout. ``model_type`` (default ``'gpt'``) selects the
-    model through the same resolver, e.g. ``'olmo3'`` for the Primus-owned OLMo-3 model (a
-    ``GPTModel`` subclass); it must be the ``model_type`` training uses, so the names match.
+    the ``tools/checkpoint`` directory layout.
     """
     from primus.core.utils.import_utils import get_model_provider
 
-    model_provider = get_model_provider(model_type=model_type)
+    model_provider = get_model_provider(model_type="gpt")
     model = model_provider(pre_process=True, post_process=True)
     return model.to(margs.params_dtype)
 

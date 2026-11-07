@@ -25,6 +25,22 @@ _CONVERT_HOOK = _HOOK_DIR / "01_convert_checkpoints.py"
 _INSTALL_HOOK = _HOOK_DIR / "00_install_requirements.sh"
 
 
+_NEEDS_GPU_FIXTURE = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the init_parallel_state fixture imports megatron.training (mamba_ssm / fla need a GPU)",
+)
+
+
+def _olmo3_builders():
+    """``olmo3_builders`` (imports megatron.training, whose mamba_ssm / fla imports query GPU 0):
+    skips the calling test on a host without a GPU; with a GPU an import error fails it."""
+    if not torch.cuda.is_available():
+        pytest.skip("megatron.training (mamba_ssm / fla) needs a GPU to import")
+    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+
+    return olmo3_builders
+
+
 def _cfg(**kw):
     from primus.backends.megatron.core.models.olmo3.olmo3_transformer_config import (
         Olmo3TransformerConfig,
@@ -297,7 +313,11 @@ def test_preset_window_has_one_source():
     config.json states sliding_window); the args patch sets window_size to Megatron/TE (W - 1, 0)."""
     import yaml
 
-    preset = yaml.safe_load(open(_REPO_ROOT / "primus/configs/models/megatron/olmo_3_1025_7B.yaml"))
+    presets = _REPO_ROOT / "primus/configs/models/megatron"
+    preset = yaml.safe_load(open(presets / "olmo_base.yaml"))  # the family base
+    size = yaml.safe_load(open(presets / "olmo_3_1025_7B.yaml"))
+    assert size["extends"] == ["olmo_base.yaml"] and not (set(size) - {"extends"}) & set(preset)
+    preset.update({k: v for k, v in size.items() if k != "extends"})
     assert preset["olmo3_sliding_window"] == 4096 and preset["window_size"] == 4096
     assert "olmo3_window_size_form" not in preset
     # derived from the factor (0.1 * ln(8) + 1 = the HF attention_factor), so a factor override moves it
@@ -323,8 +343,8 @@ def test_preset_window_has_one_source():
 
 
 def test_args_patch_window_size_forms():
-    """window_size is Megatron/TE (left, 0) as for every model; next to olmo3_sliding_window W it
-    may also be [W, 0]. The result is (W - 1, 0) with no marker on the args, and a re-run on the
+    """window_size is Megatron/TE (W - 1, 0) as for every model; next to olmo3_sliding_window W it
+    may also be the int W. The result is (W - 1, 0) with no marker on the args, and a re-run on the
     output (or args rebuilt from a checkpoint) keeps it."""
     a = _run_args_patch(window_size=4096, window_attn_skip_freq=[1, 1, 1, 0], num_layers=4)
     assert a.window_size == (4095, 0) and a.window_attn_skip_freq == [1, 1, 1, 0]
@@ -358,10 +378,6 @@ def test_args_patch_window_size_forms():
         dict(window_size=4096, window_attn_skip_freq=[0, 0, 0, 0], num_layers=4),
         dict(window_size=4096, window_attn_skip_freq=[1, 1, 0], num_layers=4),
         dict(window_size=4096, window_attn_skip_freq=4, context_parallel_size=2, cp_comm_type="p2p"),
-        # non-integer windows are not truncated
-        dict(window_size=[4096.7, 0], window_attn_skip_freq=4),
-        dict(window_size="(4096.5, 0)", window_attn_skip_freq=4),
-        dict(window_size=[True, 0], window_attn_skip_freq=4),
         # window_size disagrees with olmo3_sliding_window
         dict(window_size=[4000, 0], olmo3_sliding_window=4096, window_attn_skip_freq=4),
         # bad skip-freq strings
@@ -375,6 +391,33 @@ def test_args_patch_window_size_forms():
 def test_args_patch_refuses_bad_window(kw):
     with pytest.raises(ValueError, match="OLMo-3|olmo3|window"):
         _run_args_patch(**kw)
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        # each would agree with W after int() truncation: only the integer check refuses it
+        dict(window_size=[4095.7, 0], window_attn_skip_freq=4),
+        dict(window_size=[4095.0, 0], window_attn_skip_freq=4),
+        dict(window_size="(4095.5, 0)", window_attn_skip_freq=4),
+        dict(window_size=[True, 0], olmo3_sliding_window=2, window_attn_skip_freq=4),
+        dict(window_size="4096.0", window_attn_skip_freq=4),
+        dict(window_size=4096.0, window_attn_skip_freq=4),
+    ],
+)
+def test_args_patch_does_not_truncate_non_integer_windows(kw):
+    """Non-integer window entries are refused as such, not truncated to a value that agrees."""
+    with pytest.raises(ValueError, match="must be an integer"):
+        _run_args_patch(**kw)
+
+
+def test_window_size_messages_name_the_pair_form():
+    """A one-element window_size points at olmo3_sliding_window; a bad pair names (W - 1, 0)."""
+    with pytest.raises(ValueError, match=r"olmo3_sliding_window") as one:
+        _run_args_patch(window_size=(4096,), window_attn_skip_freq=4)
+    assert "(W - 1, 0)" in str(one.value) and "1 entries" in str(one.value)
+    with pytest.raises(ValueError, match=r"\(W - 1, 0\)"):
+        _run_args_patch(window_size=[4095, 5], window_attn_skip_freq=4)
 
 
 def test_args_patch_cp_comm_type():
@@ -522,6 +565,28 @@ def test_window_rule():
         )
     )
     assert (a.window_size, a.olmo3_sliding_window) == ((4095, 0), 4096)
+
+
+def test_olmo3_preset_with_another_model_type_is_refused():
+    """The OLMo-3 preset (olmo3_sliding_window set, window_size an int W) with model_type
+    overridden away from olmo3 is refused at before_train, so no other model reads the int W
+    window_size; without the OLMo-3 keys the patch does not apply."""
+    from primus.backends.megatron.patches import olmo3_args_patches as ap
+    from primus.core.patches import PatchContext
+
+    def ctx(**kw):
+        return PatchContext(
+            backend="megatron",
+            phase="before_train",
+            extra={"module_config": SimpleNamespace(params=SimpleNamespace(**kw))},
+        )
+
+    bad = ctx(model_type="gpt", olmo3_sliding_window=4096, window_size=4096)
+    assert ap._olmo3_keys_without_olmo3_model(bad)
+    with pytest.raises(ValueError, match="needs model_type: olmo3"):
+        ap.patch_olmo3_preset_needs_olmo3_model(bad)
+    assert not ap._olmo3_keys_without_olmo3_model(ctx(model_type="olmo3", olmo3_sliding_window=4096))
+    assert not ap._olmo3_keys_without_olmo3_model(ctx(model_type="gpt", window_size=None))
 
 
 def test_olmo3_patch_condition_selects_olmo3_only():
@@ -810,15 +875,10 @@ _SHARED_REFUSALS = [
 
 @pytest.mark.parametrize("name, value", _SHARED_REFUSALS)
 def test_shared_refusal_table(name, value):
+    """The args patch, check_olmo3_unsupported and the config refuse every table entry (no GPU
+    needed; the builder path is test_shared_refusal_table_builder)."""
     from megatron.core.transformer.transformer_config import TransformerConfig
 
-    try:
-        # megatron.training imports mamba_ssm, which queries GPU 0 at import time
-        from primus.backends.megatron.core.models.olmo3 import olmo3_builders
-    except RuntimeError as e:
-        if torch.cuda.is_available():
-            raise
-        pytest.skip(f"megatron.training needs a GPU to import here: {e}")
     from primus.backends.megatron.core.models.olmo3.olmo3_validation import (
         OLMO3_UNSUPPORTED,
         check_olmo3_unsupported,
@@ -828,16 +888,26 @@ def test_shared_refusal_table(name, value):
     # args patch (YAML values and CLI strings)
     with pytest.raises(ValueError, match=name):
         _run_args_patch(window_size=4096, window_attn_skip_freq=4, **{name: value})
-    # builder (same table, before any config is built)
     args = SimpleNamespace(use_legacy_models=False, spec=None, mtp_num_layers=None, **{name: value})
-    with pytest.raises(ValueError, match=name):
-        olmo3_builders.olmo3_builder(args, True, True, config=_cfg())
     with pytest.raises(ValueError, match=name):
         check_olmo3_unsupported(args)
     # config, when it is a config field
     if name in TransformerConfig.__dataclass_fields__ or name.startswith("olmo3_"):
         with pytest.raises(ValueError, match="OLMo-3|olmo3"):
             _cfg(**{name: value})
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="megatron.training imports mamba_ssm, which needs a GPU"
+)
+@pytest.mark.parametrize("name, value", _SHARED_REFUSALS)
+def test_shared_refusal_table_builder(name, value):
+    """The builder refuses the same table before any config is built."""
+    olmo3_builders = _olmo3_builders()
+
+    args = SimpleNamespace(use_legacy_models=False, spec=None, mtp_num_layers=None, **{name: value})
+    with pytest.raises(ValueError, match=name):
+        olmo3_builders.olmo3_builder(args, True, True, config=_cfg())
 
 
 def test_shared_refusal_table_accepts_olmo3_values():
@@ -880,6 +950,9 @@ def test_shared_refusal_table_accepts_olmo3_values():
     check_olmo3_unsupported(_cfg())
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="megatron.training imports mamba_ssm / fla, which need a GPU"
+)
 def test_config_from_converter_margs_passes_table():
     """Config built by core_transformer_config_from_args from the converter's margs passes the table."""
     from megatron.training.arguments import core_transformer_config_from_args
@@ -941,7 +1014,7 @@ def test_config_from_converter_margs_passes_table():
 
 
 def test_builder_validates_before_config_and_supplied_config(monkeypatch):
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    olmo3_builders = _olmo3_builders()
 
     built = []
     monkeypatch.setattr(olmo3_builders, "core_transformer_config_from_args", lambda *a, **k: built.append(1))
@@ -973,7 +1046,7 @@ def test_upstream_model_provider_import_errors(monkeypatch):
     """No model_provider module (older Megatron): None. A dependency of it missing: re-raised."""
     import builtins
 
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    olmo3_builders = _olmo3_builders()
 
     real_import = builtins.__import__
 
@@ -995,7 +1068,7 @@ def test_upstream_model_provider_import_errors(monkeypatch):
 
 def test_model_provider_delegates_to_upstream(monkeypatch):
     """model_provider runs upstream's model_provider (record_memory_history, ...) with the OLMo-3 builder."""
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    olmo3_builders = _olmo3_builders()
 
     calls = []
 
@@ -1011,11 +1084,27 @@ def test_model_provider_delegates_to_upstream(monkeypatch):
     assert olmo3_builders.model_provider(None, True, False, 1) == "model"
     assert calls == [(olmo3_builders.olmo3_builder, True, False, 1, None, None)]
 
+    # no upstream model_provider: record_memory_history is refused, else the builder runs directly
+    monkeypatch.setattr(olmo3_builders, "_upstream_model_provider", lambda: None)
+    with pytest.raises(ValueError, match="record_memory_history"):
+        olmo3_builders.model_provider(None, True, False, 1)
+    args.record_memory_history = False
+    direct = []
+
+    def builder(a, pre, post, vp, config=None, pg_collection=None):
+        direct.append((a, pre, post, vp, config, pg_collection))
+        return "direct"
+
+    assert (
+        olmo3_builders.model_provider(builder, True, False, 1, config="cfg", pg_collection="pg") == "direct"
+    )
+    assert direct == [(args, True, False, 1, "cfg", "pg")]
+
 
 def test_model_provider_checks_before_upstream(monkeypatch):
     """model_provider checks the args before upstream (whose ModelOpt branch skips the builder);
     olmo3_builder checks again for direct callers. The config is never built first."""
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    olmo3_builders = _olmo3_builders()
 
     checks = []
     args = SimpleNamespace(yaml_cfg="x.yaml")
@@ -1307,6 +1396,10 @@ def test_converter_checks_vocab_rows_against_config_and_tokenizer():
         check_vocab_rows("model.embed_tokens.weight", 100278, 100278, 100224)
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="the init_parallel_state fixture imports megatron.training (needs a GPU)",
+)
 def test_qk_norm_modules_run_their_hooks(init_parallel_state, monkeypatch):
     """Running the OLMo-3 attention fires forward pre-hooks registered on q_norm and k_norm
     (Megatron DDP's overlap_param_gather wait is such a hook)."""
@@ -1485,6 +1578,24 @@ def test_converter_per_layer_type_rope_parameters():
         assert f["olmo3_rope_layout"] == layout
 
 
+def test_converter_per_type_without_sliding_entry():
+    """A per-layer-type rope_parameters with only full_attention means default RoPE on the sliding
+    layers (transformers 5.x): the layout is per_type, and yarn_all is refused."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
+    )
+
+    yarn = dict(_HF_CFG["rope_scaling"], rope_theta=500000)
+    base = {k: v for k, v in _HF_CFG.items() if k not in ("rope_scaling", "rope_theta")}
+    cfg = {**base, "rope_parameters": {"full_attention": yarn}}
+    for asked in (None, "auto", "per_type"):
+        f = derive_megatron_fields(cfg, rope_layout=asked)
+        assert f["olmo3_rope_layout"] == "per_type"
+        assert f["olmo3_yarn_rotary_scaling_factor"] == 8.0 and f["rotary_base"] == 500000.0
+    with pytest.raises(ValueError, match="declares"):
+        derive_megatron_fields(cfg, rope_layout="yarn_all")
+
+
 def test_converter_yarn_original_max_defaults_to_max_position_embeddings():
     from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
         derive_megatron_fields,
@@ -1589,7 +1700,7 @@ def test_converter_stores_concrete_rope_layout(monkeypatch):
     "par", [dict(tensor_parallel_size=2), dict(pipeline_parallel_size=2), dict(expert_parallel_size=2)]
 )
 def test_converter_single_shard_only(par, tmp_path):
-    """Refused by build_margs (the one layout check) before Megatron is initialised."""
+    """Refused by convert() (check_single_shard_layout) before Megatron is imported or initialised."""
     import json
 
     from primus.backends.megatron.checkpoint import native_loader_olmo3 as conv
@@ -1716,9 +1827,185 @@ def test_convert_hook_routes_olmo3_to_its_converter(monkeypatch, tmp_path):
                 tensor_parallel_size=1,
                 pipeline_parallel_size=1,
                 expert_parallel_size=1,
+                ckpt_format="torch_dist",
             ),
         )
     ]
+
+
+def test_per_type_yarn_without_scaling_is_per_type():
+    """Per-layer-type YaRN entries with factor 1.0 on both layer types are plain RoPE: the layout
+    is per_type, as the flat form gives, and an explicit yarn_all is refused."""
+    from primus.backends.megatron.checkpoint.native_loader_olmo3 import (
+        derive_megatron_fields,
+    )
+
+    base = {k: v for k, v in _HF_CFG.items() if k not in ("rope_scaling", "rope_theta")}
+    y1 = {"rope_type": "yarn", "factor": 1.0, "rope_theta": 500000}
+    cfg = {**base, "rope_parameters": {"full_attention": y1, "sliding_attention": dict(y1)}}
+    assert derive_megatron_fields(cfg, rope_layout="per_type")["olmo3_rope_layout"] == "per_type"
+    assert derive_megatron_fields(cfg)["olmo3_rope_layout"] == "per_type"
+    with pytest.raises(ValueError, match="declares"):
+        derive_megatron_fields(cfg, rope_layout="yarn_all")
+
+
+def _olmo3_prepare(hf_config, params, tp=1):
+    """The family's prepare step for an experiment whose sft_trainer params are ``params``."""
+    from primus.backends.megatron.checkpoint import native_registry
+
+    fam = native_registry.get_family("olmo3")
+    ctx = native_registry.ConvertContext(
+        hf_path="/hf",
+        hf_config=hf_config,
+        family=fam,
+        experiment={"tp": tp, "pp": 1, "ep": 1, "ckpt_format": "torch_dist"},
+        options={},
+        config_value=lambda name: getattr(params, name, None),
+    )
+    return fam.hook("prepare")(ctx)
+
+
+def test_olmo3_prepare_forwards_the_experiments_settings():
+    """The family's prepare step reads the fine-tune's seq_length and olmo3_rope_layout and passes
+    them to native_loader_olmo3.convert, with the vocabulary divisor times the run's TP (training
+    pads to make_vocab_size_divisible_by * TP; the converter runs at TP = 1) and the padded size."""
+    params = SimpleNamespace(seq_length=8192, make_vocab_size_divisible_by=64, olmo3_rope_layout="yarn_all")
+    plan = _olmo3_prepare({"vocab_size": 100278}, params, tp=2)
+    assert plan.convert_kwargs == {
+        "seq_length": 8192,
+        "make_vocab_size_divisible_by": 128,
+        "rope_layout": "yarn_all",
+        "expected_padded_vocab_size": 100352,
+    }
+    assert plan.path_suffix == "_vocab100352"
+    # unset keys: converter defaults, divisor 128 * TP (TP 32 -> 4096: 102400 rows, as training)
+    plan = _olmo3_prepare({"vocab_size": 100278}, SimpleNamespace(), tp=32)
+    assert plan.convert_kwargs == {"make_vocab_size_divisible_by": 4096, "expected_padded_vocab_size": 102400}
+    # no vocab_size: refused with a reason
+    from primus.backends.megatron.checkpoint import native_registry
+
+    with pytest.raises(native_registry.NativeConvertRefused, match="vocab_size"):
+        _olmo3_prepare({}, SimpleNamespace())
+
+
+def test_olmo3_family_dtype_from_the_dtype_key():
+    """The released config.json has ``dtype`` (transformers >= 4.56), not ``torch_dtype``."""
+    from primus.backends.megatron.checkpoint import native_registry
+
+    fam = native_registry.get_family("olmo3")
+    assert fam.hook("dtype_from_config")({"dtype": "float32"}) == "float32"
+
+
+def _olmo3_hook_world(mod, monkeypatch, tmp_path, params):
+    """An OLMo-3 HF dir (vocab_size 100278), an experiment with ``params`` and a fake converter that
+    writes a torch_dist checkpoint; returns (hf_dir, convert calls)."""
+    import json
+
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
+    hf = tmp_path / "hf" / "Olmo-3"
+    hf.mkdir(parents=True)
+    (hf / "config.json").write_text(
+        json.dumps({"model_type": "olmo3", "torch_dtype": "bfloat16", "vocab_size": 100278})
+    )
+    module = SimpleNamespace(params=params)
+    monkeypatch.setattr(mod, "load_primus_config", lambda path, cli: SimpleNamespace())
+    monkeypatch.setattr(mod, "get_module_config", lambda cfg, name: module if name == "sft_trainer" else None)
+    monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
+    monkeypatch.setenv("NODE_RANK", "0")
+    calls = []
+
+    def fake_native_convert(hf_path, megatron_path, opts):
+        calls.append(dict(opts))
+        out = Path(megatron_path) / "release"
+        out.mkdir(parents=True)
+        (out / "metadata.json").write_text("{}")
+        (Path(megatron_path) / common.TRACKER_FILENAME).write_text("release")
+
+    monkeypatch.setattr(mod, "native_convert_checkpoint", fake_native_convert)
+    return hf, calls
+
+
+def test_convert_hook_main_passes_olmo3_settings(monkeypatch, tmp_path, capsys):
+    """main() for an OLMo-3 hf_path runs the family's prepare step and hands its settings to the
+    converter, with the padded vocabulary size the converter must reproduce."""
+    mod = _load_convert_hook(monkeypatch)
+    params = SimpleNamespace(seq_length=8192, olmo3_rope_layout="per_type", tensor_model_parallel_size=2)
+    hf, calls = _olmo3_hook_world(mod, monkeypatch, tmp_path, params)
+    params.hf_path = str(hf)
+    monkeypatch.setattr(sys, "argv", ["hook", "--config", str(tmp_path / "exp.yaml")])
+    mod.main()
+    want = {
+        "seq_length": 8192,
+        "rope_layout": "per_type",
+        "make_vocab_size_divisible_by": 256,
+        "expected_padded_vocab_size": 100352,
+    }
+    assert len(calls) == 1 and calls[0]["convert_kwargs"] == want and calls[0]["family"] == "olmo3"
+    out = capsys.readouterr().out
+    assert "extra.pretrained_checkpoint=" in out and "_vocab100352" in out
+
+
+def test_olmo3_checkpoint_cache_is_keyed_on_the_padded_vocabulary(monkeypatch, tmp_path, capsys):
+    """Runs whose settings pad the vocabulary alike (any seq_length, TP 1..16 for 100278 tokens)
+    share one converted checkpoint; a run that pads differently (TP 32: 102400) gets its own, and a
+    checkpoint of another padding at an explicit native_ckpt_out is refused instead of reused."""
+    from primus.backends.megatron.checkpoint import olmo3_convert_hooks as hooks
+
+    mod = _load_convert_hook(monkeypatch)
+    params = SimpleNamespace()
+    hf, calls = _olmo3_hook_world(mod, monkeypatch, tmp_path, params)
+
+    def run(out=None, tp=1, **settings):
+        for k in ("seq_length", "olmo3_rope_layout"):
+            setattr(params, k, settings.get(k))
+        mod._native_main(
+            str(hf),
+            {"out": out, "ckpt_format": None},
+            {"tp": tp, "pp": 1, "ep": 1, "ckpt_format": None},
+            config_file="exp.yaml",
+        )
+
+    run(seq_length=8192)
+    run(seq_length=4096, tp=2)  # TP 2, other seq_length: same padding
+    run(seq_length=65536, tp=16, olmo3_rope_layout="per_type")
+    assert len(calls) == 1
+    run(seq_length=8192, tp=32)  # TP 32 pads to 102400
+    assert len(calls) == 2 and calls[1]["convert_kwargs"]["expected_padded_vocab_size"] == 102400
+    dirs = sorted(p.name for p in (tmp_path / "data" / "megatron_checkpoints").iterdir() if p.is_dir())
+    assert dirs == ["Olmo-3_native_torch_dist_vocab100352", "Olmo-3_native_torch_dist_vocab102400"]
+
+    out = tmp_path / "explicit"
+    run(out=str(out))
+    assert hooks.read_settings(out) == {"padded_vocab_size": 100352}
+    with pytest.raises(SystemExit):
+        run(out=str(out), tp=32)
+    assert "was converted with settings" in capsys.readouterr().err
+    assert len(calls) == 3
+    # a checkpoint without the key file (an older Primus) is refused for an OLMo-3 run
+    (out / hooks.CONVERT_SETTINGS_FILE).unlink()
+    with pytest.raises(SystemExit):
+        run(out=str(out))
+    assert "no converter settings file" in capsys.readouterr().err
+
+
+def test_convert_hook_writes_olmo3_settings_before_converting(monkeypatch, tmp_path):
+    """The key file exists before the converter writes the tracker file, so a late node or a
+    concurrent job that sees the tracker always sees the key it was converted with."""
+    from primus.backends.megatron.checkpoint import olmo3_convert_hooks as hooks
+
+    mod = _load_convert_hook(monkeypatch)
+    hf, calls = _olmo3_hook_world(mod, monkeypatch, tmp_path, SimpleNamespace(seq_length=4096))
+    seen = []
+    inner = mod.native_convert_checkpoint
+
+    def convert_and_look(hf_path, megatron_path, opts):
+        seen.append(hooks.read_settings(Path(megatron_path)))
+        inner(hf_path, megatron_path, opts)
+
+    monkeypatch.setattr(mod, "native_convert_checkpoint", convert_and_look)
+    mod._native_main(str(hf), {"out": None, "ckpt_format": None}, {"tp": 1}, config_file="exp.yaml")
+    assert seen == [{"padded_vocab_size": 100352}] and len(calls) == 1
 
 
 def test_convert_hook_refuses_unknown_family(monkeypatch, tmp_path):
@@ -2088,8 +2375,15 @@ def test_layer_sharded_state_dict_torch_dist_roundtrip(init_parallel_state, tmp_
         torch.testing.assert_close(after[name], before[name], rtol=0, atol=0)
 
 
+def test_checkpoint_tracker_name_matches_the_converter():
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+    from primus.backends.megatron.core.models.olmo3 import olmo3_validation
+
+    assert olmo3_validation.CHECKPOINT_TRACKER_FILENAME == common.TRACKER_FILENAME
+
+
 def test_builder_refuses_spec_and_mtp_and_dispatch():
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    olmo3_builders = _olmo3_builders()
     from primus.core.utils.import_utils import get_model_provider
 
     prov = get_model_provider("olmo3")
@@ -2105,10 +2399,10 @@ def test_builder_refuses_spec_and_mtp_and_dispatch():
         olmo3_builders.olmo3_builder(
             SimpleNamespace(**{**base, "use_legacy_models": True}), True, True, config=cfg
         )
-    with pytest.raises(TypeError):
-        from megatron.core.transformer.transformer_config import TransformerConfig
+    from megatron.core.transformer.transformer_config import TransformerConfig
 
-        plain = TransformerConfig(num_layers=2, hidden_size=64, num_attention_heads=4)
+    plain = TransformerConfig(num_layers=2, hidden_size=64, num_attention_heads=4)
+    with pytest.raises(TypeError, match="Olmo3TransformerConfig"):
         olmo3_builders.olmo3_builder(SimpleNamespace(**base), True, True, config=plain)
 
 
@@ -2117,7 +2411,7 @@ def test_builder_builds_olmo3_model_forward(init_parallel_state, monkeypatch):
     # LanguageModule (attention_backend auto) refuses preset NVTE_* backend variables
     for var in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
         monkeypatch.delenv(var, raising=False)
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+    olmo3_builders = _olmo3_builders()
     from primus.backends.megatron.core.models.olmo3.olmo3_model import Olmo3Model
     from primus.backends.megatron.core.transformer.olmo3.olmo3_attention import (
         Olmo3SelfAttention,
@@ -2351,7 +2645,8 @@ def test_logits_match_tiny_hf_olmo3(init_parallel_state, monkeypatch, yarn, kv_h
         build_mcore_state_dict,
         derive_megatron_fields,
     )
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+
+    olmo3_builders = _olmo3_builders()
 
     if use_hf:
         hf = _tiny_hf_olmo3(transformers, yarn=yarn, kv_heads=kv_heads)
@@ -2525,6 +2820,7 @@ def _cpu_cfg(**kw):
     return _cfg(**base)
 
 
+@_NEEDS_GPU_FIXTURE
 def test_layer_forward_window_yarn_and_post_norms_cpu(init_parallel_state, monkeypatch):
     """CPU twin of the GPU layer test: seq (32) > window (4) on the local attention path."""
     from megatron.core.transformer.spec_utils import build_module
@@ -2581,6 +2877,7 @@ def test_layer_forward_window_yarn_and_post_norms_cpu(init_parallel_state, monke
     [(False, 4, "per_type"), (True, 2, "per_type"), (True, 2, "yarn_all"), (True, 4, "per_type")],
 )
 @pytest.mark.parametrize("source", ["weights", "transformers"])
+@_NEEDS_GPU_FIXTURE
 def test_logits_match_tiny_hf_olmo3_cpu(init_parallel_state, monkeypatch, yarn, kv_heads, layout, source):
     """CPU end-to-end parity: HF config + HF-named weights -> derive_megatron_fields +
     build_mcore_state_dict -> Olmo3Model logits, against an HF-formula reference forward. It needs
@@ -2591,7 +2888,8 @@ def test_logits_match_tiny_hf_olmo3_cpu(init_parallel_state, monkeypatch, yarn, 
         build_mcore_state_dict,
         derive_megatron_fields,
     )
-    from primus.backends.megatron.core.models.olmo3 import olmo3_builders
+
+    olmo3_builders = _olmo3_builders()
     from primus.backends.megatron.core.models.olmo3.olmo3_model import Olmo3Model
 
     _cpu_numerics(monkeypatch)
@@ -2788,6 +3086,7 @@ mod._tp2_worker(int(sys.argv[4]), int(sys.argv[2]), sys.argv[3])
 """
 
 
+@_NEEDS_GPU_FIXTURE
 def test_full_width_qk_norm_tp2_real_allreduce(init_parallel_state, monkeypatch, tmp_path):
     """Real TP=2 (two gloo processes, no mocked all-reduce): the attention layer with full-width
     QK-norm matches the TP=1 layer on the same weights, forward and backward, on a sliding (RoPE,
@@ -2900,10 +3199,14 @@ def test_converter_runtime_margs_dtype_flags_are_exclusive():
         )
         common._apply_runtime_margs(m, args)
         assert m.params_dtype is want and m.bf16 == (dtype == "bf16") and m.fp16 == (dtype == "fp16")
-    # a 1-rank, single-shard legacy torch save
+    # a 1-rank save; torch_dist unless args asks for another format
     layout = (m.tensor_model_parallel_size, m.pipeline_model_parallel_size, m.expert_model_parallel_size)
     assert layout == (1, 1, 1) and m.expert_tensor_parallel_size == 1
-    assert (m.world_size, m.rank, m.save, m.ckpt_format) == (1, 0, "/tmp/x", "torch")
+    assert (m.world_size, m.rank, m.save, m.ckpt_format) == (1, 0, "/tmp/x", "torch_dist")
+    common._apply_runtime_margs(m, SimpleNamespace(**dict(vars(args), ckpt_format="torch")))
+    assert m.ckpt_format == "torch"
+    with pytest.raises(ValueError, match="native checkpoint format"):
+        common._apply_runtime_margs(m, SimpleNamespace(**dict(vars(args), ckpt_format="zarr")))
     # the save iteration is set after validate_args (build_margs), not before it
     assert not hasattr(m, "iteration") and common.set_save_iteration(m).iteration == 1
     with pytest.raises(ValueError, match="dtype"):
@@ -3050,7 +3353,7 @@ def test_olmo3_converter_runtime_args_match_the_table():
     from primus.backends.megatron.checkpoint import native_loader_olmo3 as conv
 
     m = SimpleNamespace()
-    conv.set_converter_runtime_args(m, "/tmp/x")
+    conv.set_converter_runtime_args(m, "/tmp/x", "torch")
     conv.set_save_iteration(m)
     assert {k: getattr(m, k) for k in _BASE_CONVERTER_RUNTIME_ARGS} == _BASE_CONVERTER_RUNTIME_ARGS
     assert set(vars(m)) == set(_BASE_CONVERTER_RUNTIME_ARGS)  # nothing else
@@ -3108,14 +3411,13 @@ def test_olmo3_converter_runtime_args_match_the_table():
         ),
     ],
 )
+@_NEEDS_GPU_FIXTURE
 def test_other_converters_keep_their_runtime_args(family, hf, monkeypatch):
     """Llama / Qwen3 / DeepSeek build_margs (their own inline runtime blocks; they do not call
     native_loader_olmo3.set_converter_runtime_args / set_save_iteration) give the runtime / save
     args above after validate_args; test_olmo3_converter_runtime_args_match_the_table checks that
-    the OLMo-3 helpers set the same table. Runs without a GPU: DeepSeek turns on moe_grouped_gemm, for which
-    Megatron's validate_args reads torch.cuda.get_device_capability(); on a CPU-only node the test
-    answers that probe with a capability validate_args accepts (the args under test do not depend
-    on it)."""
+    the OLMo-3 helpers set the same table. Needs a GPU to import megatron.training (mamba_ssm /
+    fla); the capability probe below covers a GPU that reports no compute capability."""
     import importlib
 
     if not torch.cuda.is_available():
@@ -3131,6 +3433,7 @@ def test_other_converters_keep_their_runtime_args(family, hf, monkeypatch):
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
         expert_parallel_size=1,
+        ckpt_format="torch",
     )
     margs = conv.build_margs(conv.derive_megatron_fields(hf), args)
     got = {k: getattr(margs, k) for k in _BASE_CONVERTER_RUNTIME_ARGS}
@@ -3155,21 +3458,21 @@ def test_converter_refuses_attention_factor_with_factor_one():
 
 
 def test_convert_hook_dispatches_every_family_and_refuses_unknown_ones(monkeypatch, tmp_path):
-    """Run the hook for every family in _NATIVE_FAMILIES: each reaches its own converter's
-    convert(); a family without a converter branch raises instead of using the DeepSeek one."""
-    import importlib
+    """Run the hook for every registered family: each reaches its own converter's convert();
+    an unregistered family raises."""
+    from primus.backends.megatron.checkpoint import native_registry
 
     mod = _load_convert_hook(monkeypatch)
     (tmp_path / "config.json").write_text("{}")
-    families = sorted(set(mod._NATIVE_FAMILIES.values()))
+    families = [f.name for f in native_registry.families()]
     assert "olmo3" in families
     for fam in families:
-        conv = importlib.import_module(f"primus.backends.megatron.checkpoint.native_loader_{fam}")
+        conv = native_registry.get_family(fam).converter_module()
         calls = []
         monkeypatch.setattr(conv, "convert", lambda *a, _c=calls, **k: _c.append(a))
         mod.native_convert_checkpoint(str(tmp_path), str(tmp_path / "out"), {"family": fam, "dtype": "bf16"})
         assert calls == [(str(tmp_path), str(tmp_path / "out"))], fam
-    with pytest.raises(ValueError, match="no native converter module for family 'mistral'"):
+    with pytest.raises(ValueError, match="no native converter family 'mistral'"):
         mod.native_convert_checkpoint(
             str(tmp_path), str(tmp_path / "out"), {"family": "mistral", "dtype": "bf16"}
         )

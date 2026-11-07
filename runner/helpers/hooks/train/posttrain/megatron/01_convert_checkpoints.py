@@ -197,7 +197,7 @@ def _unset_nvte_attention_env():
 # ---------------------------------------------------------------------------
 # Native (bridge-free) conversion path
 # ---------------------------------------------------------------------------
-# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama, OLMo-3): this
+# DEFAULT conversion path for supported families (Qwen3, DeepSeek, Llama): this
 # hook builds the mcore model in-process and copies HF safetensors weights onto
 # it (Primus-managed converters), producing a legacy ``torch`` checkpoint WITHOUT
 # ever importing ``megatron.bridge``. The convert-time monkeypatches (ROCm
@@ -219,13 +219,11 @@ _NATIVE_FAMILIES = {
     "deepseek": "deepseek",
     "llama": "llama",
     "llamaforcausallm": "llama",
-    "olmo3": "olmo3",
-    "olmo3forcausallm": "olmo3",
 }
 
 
 def _detect_native_family(hf_path: str) -> str | None:
-    """Return 'qwen3' | 'deepseek' | 'llama' | 'olmo3' | None from the HF config.json."""
+    """Return 'qwen3' | 'deepseek' | 'llama' | None from the HF config.json."""
     import json
 
     cfg_file = os.path.join(hf_path, "config.json")
@@ -270,7 +268,7 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
     if family is None:
         raise ValueError(
             f"native_ckpt_convert requested but no native converter for HF model at {hf_path} "
-            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1, OLMo-3)"
+            "(supported: Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1)"
         )
 
     # Ensure the Megatron-LM source tree is importable in this standalone hook
@@ -295,12 +293,8 @@ def native_convert_checkpoint(hf_path: str, megatron_path: str, opts: dict):
         from primus.backends.megatron.checkpoint import native_loader_qwen3 as conv
     elif family == "llama":
         from primus.backends.megatron.checkpoint import native_loader_llama as conv
-    elif family == "olmo3":
-        from primus.backends.megatron.checkpoint import native_loader_olmo3 as conv
-    elif family == "deepseek":
-        from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
     else:
-        raise ValueError(f"no native converter module for family {family!r}")
+        from primus.backends.megatron.checkpoint import native_loader_deepseek as conv
 
     conv.convert(
         hf_path,
@@ -476,7 +470,7 @@ def main():
 
     # ---- Choose conversion backend --------------------------------------
     # Native (bridge-free) conversion is the DEFAULT for supported families
-    # (Qwen3, DeepSeek, Llama, OLMo-3). ``native_ckpt_convert: false`` forces the legacy
+    # (Qwen3, DeepSeek, Llama). ``native_ckpt_convert: false`` forces the legacy
     # Megatron-Bridge path; ``native_ckpt_convert: true`` forces native.
     native_opts = read_native_opts(config_file)
     native_family = _detect_native_family(hf_path)
@@ -491,7 +485,7 @@ def main():
         if native_family is None:
             log_error(
                 "native_ckpt_convert=true but no native converter matches the HF "
-                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama, OLMo-3). "
+                f"model at {hf_path} (supported: Qwen3, DeepSeek-V2/V3, Llama). "
                 "Set native_ckpt_convert: false to use the Megatron-Bridge path."
             )
             sys.exit(1)

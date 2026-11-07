@@ -1,11 +1,5 @@
 
 # logging
-# log_first_iteration_ends_interval (default false: upstream logging). When true, the first logged
-# iteration of a run (or of a resumed run) ends its log interval: the loss sums, counters and timers
-# are reset after it as after any other logged iteration, so the next logged lm loss / timings cover
-# their own iterations only. The first iteration's iteration-time (start-up overhead) still stays
-# out of TensorBoard / W&B, as upstream. Ignored with mlperf_mode.
-log_first_iteration_ends_interval: false
 disable_tensorboard: true
 disable_wandb: true
 disable_mlflow: true

@@ -19,8 +19,10 @@ modules:
 
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-      # each logged lm loss covers its own iterations (also the first after a load / resume)
-      log_first_iteration_ends_interval: true
+      # Megatron does not reset its loss sums after the first logged iteration of a run (or of a
+      # resumed run). With log_interval 2 the interval after it ends on the same step as in an
+      # uninterrupted run, so a resumed run logs the same lm loss at each even step.
+      log_interval: 2
 
       train_iters: 50
       micro_batch_size: 1

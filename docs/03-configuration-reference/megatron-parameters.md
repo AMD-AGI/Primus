@@ -615,7 +615,7 @@ config and builder) refuse settings the model does not implement; the error name
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `olmo3_sliding_window` | `null` | Sliding window W in the HF convention (keys incl. the current token); 4096 in the preset. Required. |
-| `window_size` | `null` (upstream) | Read only next to `olmo3_sliding_window` and checked against it: an int is W, a pair is the Megatron / TE `(W - 1, 0)`. The args patch sets `(W - 1, 0)`. To change the window, set both keys (or `window_size: null`). |
+| `window_size` | `null` (upstream) | Upstream Megatron key (a `(left, right)` pair). **OLMo-3 only:** with `model_type: olmo3` it is checked against `olmo3_sliding_window` W, and an int means W itself while a pair means the Megatron / TE `(W - 1, 0)` (so `4096` and `[4095, 0]` are the same window; `[4096, 0]` is refused). The OLMo-3 args patch sets `(W - 1, 0)`. To change the window, set `olmo3_sliding_window` and `window_size: null` (or the new W). |
 | `window_attn_skip_freq` | `null` (upstream) | Which layers are full attention: an int k (every k-th layer) or a 0/1 list per layer (1 = sliding). The preset sets `4`. |
 | `olmo3_yarn_rotary_scaling_factor` | `1.0` | YaRN factor (HF `rope_scaling.factor`; `8.0` in the preset). `1.0` means no YaRN. |
 | `olmo3_yarn_original_max_position_embeddings` | `null` | YaRN original context (`8192` in the preset). Required when the factor is > 1. |
@@ -632,8 +632,6 @@ Notes:
   multi-latent attention, which OLMo-3 does not use.
 - `window_attn_skip_freq` may also be written as a quoted list expression such as `"([1]*3 + [0])*8"`;
   it needs at least one sliding and one full layer.
-- The OLMo-3 example experiments set the Primus option `log_first_iteration_ends_interval: true`
-  (see §11.5).
 
 ---
 
@@ -715,12 +713,6 @@ Notes:
 |-----------|---------|-------------|
 | `pp_warmup` | `false` | *Primus:* warm-up PP stages to reduce first-iteration latency. |
 | `dump_pp_data` | `false` | *Primus:* dump PP tensors for debugging. |
-
-### 11.5 Logging (`primus_megatron_module.yaml`)
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `log_first_iteration_ends_interval` | `false` | *Primus* (`primus_megatron_module.yaml`, every model): end the log interval at the first logged iteration of a run (also after a load / resume), so the next logged `lm loss` and timings average only their own iterations. The first iteration's `iteration-time` still stays out of TensorBoard / W&B, as upstream. Ignored with `mlperf_mode`; skipped with a warning if upstream `training_log` cannot be found. |
 
 ---
 

@@ -15,7 +15,8 @@ OLMo-3 (HF ``model_type: olmo3``) differs from the Llama layout in four ways:
   per head;
 * sliding-window attention on three of every four layers
   (``window_attn_skip_freq``) and full attention on the rest;
-* plain RoPE on the sliding layers and YaRN RoPE on the full layers.
+* plain RoPE on the sliding layers and YaRN RoPE on the full layers (the default
+  ``olmo3_rope_layout: per_type``; ``yarn_all`` uses YaRN on every layer).
 
 Window: ``olmo3_sliding_window`` is the HF ``sliding_window`` W (visible keys
 including the current token, 4096 for OLMo-3). ``window_size`` holds the upstream

@@ -142,7 +142,9 @@ def test_full_width_k_norm_needs_disjoint_kv_heads_per_tp_rank():
     for tp, ng in ((1, 32), (2, 32), (8, 32), (32, 32), (2, 2)):
         check_olmo3_unsupported(SimpleNamespace(tensor_model_parallel_size=tp, num_query_groups=ng))
     for tp, ng in ((4, 2), (8, 4), (2, 1)):
-        with pytest.raises(ValueError, match="num_query_groups >= tensor_model_parallel_size"):
+        with pytest.raises(
+            ValueError, match=r"tensor_model_parallel_size \(\d+\) must divide num_query_groups"
+        ):
             check_olmo3_unsupported(SimpleNamespace(tensor_model_parallel_size=tp, num_query_groups=ng))
     # num_query_groups unset means MHA (num_attention_heads)
     check_olmo3_unsupported(SimpleNamespace(tensor_model_parallel_size=8, num_attention_heads=32))
@@ -192,8 +194,7 @@ def test_missing_window_message_names_window_size_only_when_given():
 
 def test_kv_heads_check_follows_group_query_attention():
     """With group_query_attention off (MHA), Megatron ignores num_query_groups (default 1) and uses
-    num_attention_heads, so the check does too; with it on, num_query_groups must divide or be a
-    multiple of TP and be >= TP."""
+    num_attention_heads, so the check does too; with it on, TP must divide num_query_groups."""
     NS = SimpleNamespace
     for tp in (2, 8):
         check_olmo3_unsupported(
@@ -205,16 +206,18 @@ def test_kv_heads_check_follows_group_query_attention():
             )
         )
     check_olmo3_unsupported(NS(tensor_model_parallel_size=4, num_query_groups=8, group_query_attention=True))
-    with pytest.raises(ValueError, match="divide one another"):
+    with pytest.raises(
+        ValueError, match=r"tensor_model_parallel_size \(4\) must divide num_query_groups \(6\)"
+    ):
         check_olmo3_unsupported(
             NS(tensor_model_parallel_size=4, num_query_groups=6, group_query_attention=True)
         )
-    with pytest.raises(ValueError, match="num_query_groups >= tensor_model_parallel_size"):
+    with pytest.raises(ValueError, match=r"tensor_model_parallel_size \(\d+\) must divide num_query_groups"):
         check_olmo3_unsupported(
             NS(tensor_model_parallel_size=4, num_query_groups=2, group_query_attention=True)
         )
     # a config object (no group_query_attention attribute) holds the real KV head count
-    with pytest.raises(ValueError, match="num_query_groups >= tensor_model_parallel_size"):
+    with pytest.raises(ValueError, match=r"tensor_model_parallel_size \(\d+\) must divide num_query_groups"):
         check_olmo3_unsupported(NS(tensor_model_parallel_size=4, num_query_groups=2))
 
 

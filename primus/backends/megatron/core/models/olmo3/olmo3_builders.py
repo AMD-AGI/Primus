@@ -6,8 +6,9 @@
 
 """OLMo-3 builder + ``model_provider`` (dispatched by ``get_model_provider('olmo3')``).
 
-``model_provider`` delegates to Megatron's own ``model_provider`` (``record_memory_history``,
-OOM snapshots, ...) with :func:`olmo3_builder` as the builder. ``olmo3_builder`` follows
+``model_provider`` delegates to Megatron's own ``model_provider`` when Megatron has one
+(``record_memory_history``, OOM snapshots, ...), else calls the builder directly (and refuses
+``record_memory_history``); the builder is the caller's, :func:`olmo3_builder` by default. ``olmo3_builder`` follows
 upstream ``gpt_builder``: validate, build or check the config, pick the spec, build the model.
 """
 
@@ -152,7 +153,9 @@ def model_provider(
 ):
     """``model_provider`` entry point used by Megatron's ``pretrain()``.
 
-    Delegates to upstream ``model_provider`` so its setup (``record_memory_history``, ...) runs.
+    Delegates to upstream ``model_provider`` when Megatron has one (so ``record_memory_history``,
+    ... runs); otherwise calls ``model_builder`` (default :func:`olmo3_builder`) directly and raises
+    ``ValueError`` if ``record_memory_history`` is set.
     """
     if model_builder is None:
         model_builder = olmo3_builder
