@@ -63,6 +63,8 @@ class DlrmV4Trainer(BaseTrainer):
             backend_args if isinstance(backend_args, dict) else nested_namespace_to_dict(backend_args)
         )
         self.root: Optional[Path] = None
+        self.out: Optional[Path] = None
+        self._launch_cwd: Optional[str] = None
         self.gin_path: str = ""
         self.mlperf_log: str = ""
         self._warm_stop = threading.Event()
@@ -99,7 +101,8 @@ class DlrmV4Trainer(BaseTrainer):
 
     def setup(self):
         self.root = self._backend_root()
-        out = self._output_dir()
+        # Resolved before the chdir below: a relative workspace is relative to the launch directory.
+        self.out = out = self._output_dir()
 
         env = run_config.build_env(self.params)
         if self._p("mlperf_logging", True) and "MLPERF_LOG_PATH" not in env:
@@ -130,6 +133,7 @@ class DlrmV4Trainer(BaseTrainer):
         # (e.g. the Triton spec replay table) from the trainer root. The private
         # package directory (packages whose image version the trainer cannot use,
         # installed by the hook) goes first, ahead of the image's site-packages.
+        self._launch_cwd = os.getcwd()
         os.chdir(self.root)
         front = [str(self.root)]
         private = self._p("private_site")
@@ -151,7 +155,7 @@ class DlrmV4Trainer(BaseTrainer):
             raise FileNotFoundError(f"[Primus:dlrm_v4] gin file not found: {base}")
         bindings = self._p("gin_bindings", []) or []
         if bindings:
-            path = self._output_dir() / "dlrm_v4.gin"
+            path = self.out / "dlrm_v4.gin"
             path.write_text(run_config.gin_file_text(str(base), bindings))
             self.gin_path = str(path)
             log_rank_0(f"[Primus:dlrm_v4] gin: {path} (includes {base}, {len(bindings)} bindings)")
@@ -188,6 +192,8 @@ class DlrmV4Trainer(BaseTrainer):
 
     def cleanup(self, on_error: bool = False):
         self._warm_stop.set()
+        if self._launch_cwd:  # the ranks are gone; Primus continues where it started
+            os.chdir(self._launch_cwd)
 
     # ------------------------------------------------------------- page cache
 

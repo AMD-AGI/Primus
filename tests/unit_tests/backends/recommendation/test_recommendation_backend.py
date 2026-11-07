@@ -213,3 +213,76 @@ def test_private_packages_pin_flydsl_and_the_preset_points_at_them():
         (PRIMUS_ROOT / "primus/configs/modules/recommendation/pre_trainer.yaml").read_text()
     )
     assert preset["private_site"] == "${PRIMUS_RECOMMENDATION_SITE:/opt/primus-recommendation/site-packages}"
+
+
+def _fake_trainer_tree(tmp_path):
+    src = tmp_path / "src"
+    gin = src / "generative_recommenders" / "dlrm_v4" / "train" / "gin"
+    gin.mkdir(parents=True)
+    (src / "generative_recommenders" / "__init__.py").write_text("")
+    (gin / "yambda_5b.gin").write_text("batch_size = 1\n")
+    data = tmp_path / "data"
+    (data / "processed_5b" / "hstu_cache_L4086").mkdir(parents=True)
+    (data / "shared_metadata").mkdir()
+    for name in ("album_item_mapping.parquet", "artist_item_mapping.parquet"):
+        (data / "shared_metadata" / name).write_bytes(b"")
+    return src, data
+
+
+def test_trainer_setup_and_init_keep_paths_of_the_launch_directory(tmp_path, monkeypatch):
+    from primus.backends.recommendation.dlrm_v4 import trainer as T
+
+    src, data = _fake_trainer_tree(tmp_path)
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+    real_exists = os.path.exists
+    monkeypatch.setattr(T.os.path, "exists", lambda p: p == "/opt/rocm/bin/hipcc" or real_exists(p))
+    for name in (
+        "DLRM_DATA_PATH",
+        "SEED",
+        "MLPERF_LOG_PATH",
+        "PYTHONPATH",
+        "MLPERF_CACHE_CLEARED",
+        "MLPERF_LOGGING",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    params = {
+        "trainer_src": str(src),
+        "data_path": str(data),
+        "seed": 7,
+        "output_dir": "rel_out",  # relative: to the launch directory, not the trainer root
+        "gin_bindings": ["a.b = 2"],
+        "private_site": str(tmp_path / "missing_site"),
+        "mlperf_logging": True,
+    }
+    saved = list(sys.path)
+    try:
+        t = T.DlrmV4Trainer(backend_args=params)
+        t.setup()
+        assert os.getcwd() == str(src) and os.environ["SEED"] == "7"
+        assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(src)  # no private dir: not added
+        assert os.environ["MLPERF_LOG_PATH"] == str(launch / "rel_out" / "mlperf_dlrm_v4.log")
+        t.init()
+        gin = launch / "rel_out" / "dlrm_v4.gin"
+        assert t.gin_path == str(gin) and "a.b = 2" in gin.read_text()
+        assert os.environ["MLPERF_CACHE_CLEARED"] == "0"
+        t.cleanup()
+        assert os.getcwd() == str(launch)
+    finally:
+        sys.path[:] = saved
+        os.chdir(launch)
+
+
+def test_trainer_refuses_missing_data(tmp_path, monkeypatch):
+    from primus.backends.recommendation.dlrm_v4 import trainer as T
+
+    src, _ = _fake_trainer_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    t = T.DlrmV4Trainer(backend_args={"trainer_src": str(src), "data_path": str(tmp_path / "nodata")})
+    saved = list(sys.path)
+    try:
+        with pytest.raises(FileNotFoundError, match="dataset not ready"):
+            t.setup()
+    finally:
+        sys.path[:] = saved
