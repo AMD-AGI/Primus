@@ -5,6 +5,7 @@
 ###############################################################################
 
 
+import math
 import os
 import re
 import subprocess
@@ -119,6 +120,59 @@ def run_posttrain_script(
     return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
 
 
+OLMO3_HF_VOCAB_SIZE = 100278  # allenai/Olmo-3-1025-7B config.json vocab_size
+# From the same config.json: sliding_window, and layer_types of the first 4 layers (the run below
+# has 4). Pinned here, not read from the preset, so a wrong preset value fails the plan check.
+OLMO3_HF_SLIDING_WINDOW = 4096
+OLMO3_HF_FIRST_LAYER_TYPES = ("sliding_attention",) * 3 + ("full_attention",)
+OLMO3_HF_ROPE_LAYOUT = "per_type"  # YaRN on the full-attention layers only
+
+
+def _olmo3_bad_loss_report(stdout: str, train_iters: int, vocab_size: int | None = None) -> list[str]:
+    """Problems in Megatron's per-iteration lines (run with --log_interval 1, so one line per
+    iteration). Megatron prints 'lm loss' only when the interval average is > 0, so a NaN (or a
+    zero / negative) loss shows as a line *without* 'lm loss'; every line must have a finite,
+    positive one. Also refuses nonzero skipped / nan iteration counts and missing iterations.
+
+    With ``vocab_size``: a freshly initialised model predicts close to uniform, so the first loss
+    must be within 1.5 of ln(vocab_size) (a broken norm, scale or embedding moves it far away), and
+    no later loss may exceed the first by more than 0.5 (training must not diverge)."""
+    problems = []
+    lines = {}
+    for line in stdout.splitlines():
+        m = re.search(r"iteration\s+(\d+)/\s*(\d+)\s*\|", line)
+        if m and int(m.group(2)) == train_iters:
+            lines[int(m.group(1))] = line
+    missing = sorted(set(range(1, train_iters + 1)) - set(lines))
+    if missing:
+        problems.append(f"no iteration line for iterations {missing}")
+    for it, line in sorted(lines.items()):
+        m = re.search(r"lm loss:\s*(\S+)", line)
+        if m is None:
+            problems.append(f"iteration {it}: no 'lm loss' (NaN, inf or <= 0)")
+        else:
+            try:
+                value = float(m.group(1))
+            except ValueError:
+                value = float("nan")
+            if not (math.isfinite(value) and value > 0):
+                problems.append(f"iteration {it}: lm loss {m.group(1)!r}")
+        for what in ("nan", "skipped"):
+            c = re.search(rf"number of {what} iterations:\s*(\d+)", line)
+            if c is None or int(c.group(1)):
+                problems.append(
+                    f"iteration {it}: number of {what} iterations: {c.group(1) if c else 'missing'}"
+                )
+    if vocab_size and not problems:
+        losses = [float(re.search(r"lm loss:\s*(\S+)", lines[it]).group(1)) for it in sorted(lines)]
+        expected = math.log(vocab_size)
+        if abs(losses[0] - expected) > 1.5:
+            problems.append(f"first lm loss {losses[0]} is not near ln(vocab_size) = {expected:.2f}")
+        if max(losses) > losses[0] + 0.5:
+            problems.append(f"lm loss rises from {losses[0]} to {max(losses)}")
+    return problems
+
+
 class TestMegatronTrainer(PrimusUT):
     """One model per architecture, plus one case per feature path.
 
@@ -161,6 +215,83 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
             ],
         )
+
+    # Primus-owned OLMo-3 model (its own architecture: post-norm, full-width q/k norm, sliding
+    # window + YaRN on full layers). Marked weekly: the Primus model-port rule puts every new
+    # model's trainer E2E in the weekly tier (PR CI deselects it with -m 'not weekly'); per PR, the
+    # OLMo-3 provider, args patch, builder and layer math are covered by the CPU/GPU unit tests in
+    # tests/unit_tests/backends/megatron/olmo3/.
+    # A smoke test: 4 layers, 3 iterations, mock data. No download: mock data uses NullTokenizer,
+    # pinned here with the OLMo-3 vocab size, so the HF tokenizer in the preset is never loaded.
+    # It checks that the OLMo-3 provider, args patch and builder ran (no silent fallback to the GPT
+    # spec), the layer plan the builder logs from the effective (merged, overridden) config, and
+    # the losses (see _olmo3_bad_loss_report). The per-layer window / RoPE / softmax scale of the
+    # built modules are checked in tests/unit_tests/backends/megatron/olmo3/.
+    @pytest.mark.weekly
+    def test_olmo_3_1025_7B(self):
+        # The expected plan comes from the HF config (pinned above), not from the preset, so a
+        # wrong preset window / skip pattern / RoPE layout makes the plan check fail.
+        # The preset has no vocab size (the HF tokenizer gives it at run time); the mock-data run
+        # uses NullTokenizer, so it is set here: vocab_size of allenai/Olmo-3-1025-7B config.json.
+        num_layers, vocab = len(OLMO3_HF_FIRST_LAYER_TYPES), OLMO3_HF_VOCAB_SIZE
+        w = OLMO3_HF_SLIDING_WINDOW
+        full = [t == "full_attention" for t in OLMO3_HF_FIRST_LAYER_TYPES]
+        self.assertTrue(any(full) and not all(full), "the 4-layer run must mix sliding and full layers")
+        seq_length = w + 256  # above the window, so the sliding window acts (and is cheap)
+        stdout, _ = run_script(
+            self.__class__.__name__,
+            "olmo_3_1025_7B",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/olmo_3_1025_7B-BF16-pretrain.yaml",
+            env_override={},
+            # Pinned so the cost does not follow the example yaml.
+            # log_interval 1: one iteration line per iteration (the loss check reads each one).
+            extra_args=[
+                "--num_layers",
+                str(num_layers),
+                "--train_iters",
+                "3",
+                "--seq_length",
+                str(seq_length),
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--log_interval",
+                "1",
+                "--tokenizer_type",
+                "NullTokenizer",
+                "--vocab_size",
+                str(vocab),
+                # pinned, not taken from the example yaml: mock data, Megatron's attention
+                # backend selection (auto: TE picks flash / fused), Turbo off
+                "--mock_data",
+                "1",
+                "--attention_backend",
+                "auto",
+                "--enable_primus_turbo",
+                "0",
+                "--use_turbo_attention",
+                "0",
+                # parallel layout pinned too (one GPU's worth of model, data parallel on the rest)
+                "--tensor_model_parallel_size",
+                "1",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--context_parallel_size",
+                "1",
+            ],
+        )
+        self.assertIn("Loaded OLMo-3 model_provider", stdout)
+        self.assertIn("[Patch:megatron.olmo3.args]", stdout)
+        self.assertIn("[Primus:OLMo-3] building Olmo3Model", stdout)
+        plan = " ".join("F+yarn" if f else "S" for f in full)
+        # the whole logged plan, to the end of the line: exactly num_layers entries, so it proves
+        # the --num_layers override reached the built model (a 32-layer plan does not match)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", stdout)  # the rank logger colours its lines
+        plans = re.findall(r"\[Primus:OLMo-3\] layer plan: (.*?)\s*$", plain, flags=re.M)
+        self.assertTrue(plans, "no OLMo-3 layer plan in the log")
+        self.assertEqual(set(plans), {f"W={w} rope={OLMO3_HF_ROPE_LAYOUT} {plan}"})
+        self.assertEqual(_olmo3_bad_loss_report(stdout, train_iters=3, vocab_size=vocab), [])
 
     # The only dense FP8 case; every other FP8 case here is MoE.
     @pytest.mark.weekly
