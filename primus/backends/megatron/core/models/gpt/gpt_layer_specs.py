@@ -75,7 +75,6 @@ def get_gpt_decoder_layer_specs(
         moe_grouped_gemm=False,
         qk_layernorm=config.qk_layernorm,
         multi_latent_attention=config.multi_latent_attention,
-        moe_use_legacy_grouped_gemm=config.moe_use_legacy_grouped_gemm,
         qk_l2_norm=qk_l2_norm,
         use_kitchen=config.use_kitchen,
         use_te_activation_func=config.use_te_activation_func,
@@ -87,7 +86,6 @@ def get_gpt_decoder_layer_specs(
         moe_grouped_gemm=config.moe_grouped_gemm,
         qk_layernorm=config.qk_layernorm,
         multi_latent_attention=config.multi_latent_attention,
-        moe_use_legacy_grouped_gemm=config.moe_use_legacy_grouped_gemm,
         qk_l2_norm=qk_l2_norm,
         use_kitchen=config.use_kitchen,
         use_te_activation_func=config.use_te_activation_func,
@@ -99,7 +97,6 @@ def get_gpt_decoder_layer_specs(
         moe_grouped_gemm=False,
         qk_layernorm=config.qk_layernorm,
         multi_latent_attention=config.multi_latent_attention,
-        moe_use_legacy_grouped_gemm=config.moe_use_legacy_grouped_gemm,
         qk_l2_norm=qk_l2_norm,
         use_kitchen=config.use_kitchen,
         use_te_activation_func=config.use_te_activation_func,
@@ -111,7 +108,6 @@ def get_gpt_decoder_layer_specs(
         moe_grouped_gemm=config.moe_grouped_gemm,
         qk_layernorm=config.qk_layernorm,
         multi_latent_attention=config.multi_latent_attention,
-        moe_use_legacy_grouped_gemm=config.moe_use_legacy_grouped_gemm,
         qk_l2_norm=qk_l2_norm,
         use_kitchen=config.use_kitchen,
         use_te_activation_func=config.use_te_activation_func,
@@ -162,7 +158,6 @@ def get_lfm_layer_with_transformer_engine_spec(
     qk_layernorm: Optional[bool] = False,
     multi_latent_attention: Optional[bool] = False,
     fp8: Optional[str] = None,  # pylint: disable=unused-argument
-    moe_use_legacy_grouped_gemm: Optional[bool] = False,
     qk_l2_norm: Optional[bool] = False,
     use_te_op_fuser: Optional[bool] = False,
     use_kitchen: bool = False,
@@ -179,8 +174,6 @@ def get_lfm_layer_with_transformer_engine_spec(
         qk_layernorm (bool, optional): To use layernorm for queries/keys. Defaults to False.
         multi_latent_attention (bool, optional): To use MLA. Defaults to False.
         fp8 (str, optional): Deprecated. For temporary Nemo compatibility.
-        moe_use_legacy_grouped_gemm (bool, optional): Force use the legacy GroupedMLP.
-                                                      Defaults to False.
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
         use_te_op_fuser (bool, optional): Use Transformer Engine's operation-based API, which may
                                           enable certain operation fusions. Defaults to False.
@@ -214,7 +207,6 @@ def get_lfm_layer_with_transformer_engine_spec(
         backend=backend,
         num_experts=num_experts,
         moe_grouped_gemm=moe_grouped_gemm,
-        moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
         use_te_op_fuser=use_te_op_fuser,
         use_te_activation_func=use_te_activation_func,
     )
