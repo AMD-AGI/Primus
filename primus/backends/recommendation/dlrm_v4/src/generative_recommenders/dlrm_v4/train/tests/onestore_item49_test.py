@@ -332,10 +332,11 @@ class OneStoreItem49Test(unittest.TestCase):
             self.assertEqual(dsmod.fast_batch_onestore_knob_source(), "code default")
             with self.assertNoLogs(tu.logger, level="WARNING"):
                 tu._log_fast_batch_onestore(0)
-        self.assertIn(
-            "${DL_FAST_BATCH_ONESTORE:+-e DL_FAST_BATCH_ONESTORE=$DL_FAST_BATCH_ONESTORE}",
-            _LAUNCHER.read_text(),
-        )
+        if _LAUNCHER.exists():  # not in Primus (primus-cli launches the trainer)
+            self.assertIn(
+                "${DL_FAST_BATCH_ONESTORE:+-e DL_FAST_BATCH_ONESTORE=$DL_FAST_BATCH_ONESTORE}",
+                _LAUNCHER.read_text(),
+            )
 
     def _prestart_eval_pass(self, env_level, single=True):
         """prestart_streaming_loaders under the shipped items (32) + (61) +

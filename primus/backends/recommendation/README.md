@@ -41,8 +41,10 @@ refer to that repository's launchers, which were not imported.
 
 The package is excluded from the pre-commit formatters (kept diffable with its
 origin). Some of its tests are text-sensitive: `ops/tests/outproj_mx6_seam_test.py`
-allow-lists exact bytes of `ops/triton/bwd_fp8.py`, and
-`dlrm_v4/train/tests/stage_ref_only_gin_test.py` limits the (17b) block of
-`yambda_5b.gin` to 80 columns. Even a comment edit there needs the package's
-tests run again (in the image, on a GPU node). License: Apache-2.0
+allow-lists exact bytes of `ops/triton/bwd_fp8.py`, and several gin tests check
+the comment blocks of `yambda_5b.gin` (80 columns, item headers). Both files keep
+their imported text, including doc paths of the original repository
+(`docs/perf_opt.md` is now `docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md`,
+`docs/rocm_10_port.md` -> `rocm-port.md`, `docs/fp8/fp8.md` -> `fp8.md`). Even a
+comment edit in the package needs its tests run again (in the image, on a GPU node). License: Apache-2.0
 (`dlrm_v4/src/LICENSE`).

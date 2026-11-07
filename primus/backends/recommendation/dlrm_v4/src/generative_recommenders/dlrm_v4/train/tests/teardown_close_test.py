@@ -529,6 +529,8 @@ class TeardownCloseTest(unittest.TestCase):
         # be dropped silently. ${X:+...} forwards a name only when the caller
         # set it, so an unset name changes nothing.
         src = pathlib.Path(__file__).resolve().parents[4] / "scripts" / "launch_slurm.sh"
+        if not src.exists():
+            self.skipTest("no scripts/launch_slurm.sh in this tree (Primus launches with primus-cli)")
         text = src.read_text()
         lines = [s.strip() for s in text.splitlines()]
         # The worker `docker exec` that starts the trainer.
