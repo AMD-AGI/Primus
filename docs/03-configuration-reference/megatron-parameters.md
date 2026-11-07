@@ -122,7 +122,7 @@ models:
 | `inference_rng_tracker` | `false` | Separate RNG tracker for inference FP8. |
 | `fp4` | `null` | FP4 mode; `null` disables. |
 | `fp4_recipe` | `nvfp4` | FP4 recipe name. |
-| `fp4_param` | `false` | Store parameters in FP4. |
+| `fp4_param_gather` | `false` | Store parameters in FP4. |
 | `first_last_layers_bf16` | `false` | Keep first/last layers in BF16 for stability. |
 | `num_layers_at_start_in_bf16` | `1` | Count of early layers forced to BF16 when enabled. |
 | `num_layers_at_end_in_bf16` | `1` | Count of final layers forced to BF16 when enabled. |
@@ -169,7 +169,7 @@ models:
 | `muon_fp32_matmul_prec` | `"medium"` | Muon matmul precision hint. |
 | `muon_num_ns_steps` | `5` | Muon Newton–Schulz iterations. |
 | `muon_tp_mode` | `"blockwise"` | Muon tensor-parallel mode. |
-| `muon_use_nesterov` | `false` | Muon Nesterov momentum. |
+| `muon_nesterov` | `false` | Muon Nesterov momentum. |
 | `muon_split_qkv` | `true` | Split QKV for Muon. |
 | `muon_momentum` | `0.95` | Muon momentum. |
 | `muon_weight_decay` | `0.01` | Muon-specific decay. |
@@ -211,7 +211,6 @@ models:
 | `overlap_param_gather` | `false` | Overlap param all-gather (distributed optimizer). |
 | `overlap_param_gather_with_optimizer_step` | `false` | Overlap param gather with optimizer step. |
 | `align_param_gather` | `true` | Align param gather for distributed optimizer. |
-| `scatter_gather_tensors_in_pipeline` | `true` | Scatter/gather tensors across PP ranks. |
 | `use_ring_exchange_p2p` | `false` | Ring-exchange P2P for PP. |
 | `local_rank` | `null` | Local rank override (normally from launcher). |
 | `lazy_mpu_init` | `null` | Defer Megatron parallel state init. |
@@ -445,7 +444,7 @@ models:
 | `profile_step_end` | `12` | Last step to profile. |
 | `iterations_to_skip` | `null` | Skip listed iterations in profiling. |
 | `result_rejected_tracker_filename` | `null` | Log rejected samples to this file. |
-| `enable_gloo_process_groups` | `true` | Create auxiliary Gloo groups for CPU-side ops. |
+| `use_gloo_process_groups` | `true` | Create auxiliary Gloo groups for CPU-side ops. |
 | `record_memory_history` | `false` | Record CUDA memory history (debug). |
 | `memory_snapshot_path` | `snapshot.pickle` | Path for memory snapshot dumps. |
 | `disable_profiler_activity_cpu` | `false` | *Primus:* omit CPU activities from profiler traces. |
@@ -533,7 +532,6 @@ the defaults). `granite_4_1_3b.yaml` sets all of them; see
 | `vocab_extra_ids` | `0` | Extra reserved token slots. |
 | `tiktoken_pattern` | `null` | Regex pattern for tiktoken. |
 | `tiktoken_num_special_tokens` | `1000` | Special token count for tiktoken setup. |
-| `tiktoken_special_tokens` | `null` | Serialized special tokens for tiktoken. |
 | `legacy_tokenizer` | `false` | Legacy tokenizer behavior. |
 | `trust_remote_code` | `false` | `trust_remote_code` for Hugging Face tokenizers. |
 

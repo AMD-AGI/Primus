@@ -104,6 +104,7 @@ class Lfm2ShortConv(MegatronModule, ABC):
         attention_type: str | None = None,
         cp_comm_type: str | None = None,
         pg_collection: ProcessGroupCollection | None = None,
+        name: str | None = None,
     ):
         super().__init__(config=config)
 
@@ -144,6 +145,7 @@ class Lfm2ShortConv(MegatronModule, ABC):
             bias=self.bias,
             skip_bias_add=True,
             skip_weight_param_allocation=False,
+            name=(name + ".in_proj") if name is not None else None,
         )
 
         # Out projection.
@@ -157,6 +159,7 @@ class Lfm2ShortConv(MegatronModule, ABC):
             bias=self.bias,
             skip_bias_add=True,
             skip_weight_param_allocation=False,
+            name=(name + ".out_proj") if name is not None else None,
         )
 
         self.attn_mask_type = attn_mask_type
