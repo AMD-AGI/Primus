@@ -50,7 +50,7 @@ FUSE_NORM = _env_on("ZAYA_FUSE_NORM")
 FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
 
 
-def _maybe_compile(fn, enabled: bool):
+def _maybe_compile(fn, enabled: bool, dynamic: bool = False):
     """torch.compile ``fn``; fall back to eager for good if the first compiled call fails."""
     if not enabled or not hasattr(torch, "compile"):
         return fn
@@ -59,7 +59,7 @@ def _maybe_compile(fn, enabled: bool):
         # eager code (merged.to(bf16) before RMSNorm, q/k .to(bf16) before
         # RoPE), so the fused forward matches eager bit for bit.
         compiled = torch.compile(
-            fn, dynamic=False, fullgraph=True, options={"emulate_precision_casts": True}
+            fn, dynamic=dynamic, fullgraph=True, options={"emulate_precision_casts": True}
         )
     except Exception:  # pragma: no cover - depends on the image
         return fn
@@ -76,6 +76,7 @@ def _maybe_compile(fn, enabled: bool):
                 warnings.warn(f"ZAYA1: torch.compile of {fn.__name__} failed ({exc!r}); using eager.")
         return fn(*args, **kwargs)
 
+    wrapper.compiled_ok = lambda: state["ok"]
     return wrapper
 
 
@@ -591,6 +592,100 @@ def attention(query, key, value, attention_mask: Optional[torch.Tensor]) -> torc
     return out.permute(2, 0, 1, 3)
 
 
+# ZAYA_FUSE_MOE=1 (default): fuse the MoE-stage elementwise chains that
+# ZAYA_FUSE_NORM/ZAYA_FUSE_CCA do not cover: the expert SwiGLU (silu * up, one
+# kernel fwd and bwd, dynamic token count), the router EDA add + RMSNorm and
+# the fp32 softmax/bias/top-k/gather/cast, and the gate multiply + unpermute
+# (one gather*prob kernel replacing the per-expert multiplies, the zero fill
+# and index_copy). Dispatch/unpermute backwards are gathers by the inverse
+# permutation instead of zero fill + atomic index_add. =0 restores eager.
+FUSE_MOE = _env_on("ZAYA_FUSE_MOE")
+
+
+def _swiglu(fc1_out: torch.Tensor) -> torch.Tensor:
+    gate, up = fc1_out.chunk(2, dim=-1)
+    return F.silu(gate) * up
+
+
+def _eda_norm(routed, prev, scale, norm_w, eps: float):
+    """Router EDA (``routed + prev * scale``) followed by the router RMSNorm."""
+    routed = routed + prev * scale
+    return routed, _rms(routed, norm_w, eps)
+
+
+def _route_select(logits, balancing_biases, topk: int, high_prec: bool, out_dtype: torch.dtype):
+    """Softmax, biased top-k (no grad through the bias), gather, cast."""
+    if high_prec:
+        probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
+    else:
+        probs = torch.softmax(logits, dim=-1)
+    biased = probs.detach().float() + balancing_biases.float()
+    _, index = torch.topk(biased, k=topk, dim=-1)
+    route_prob = torch.gather(probs, dim=-1, index=index)
+    return route_prob.to(dtype=out_dtype), index
+
+
+def _unpermute_scale_fwd(out_sorted, inv_perm, prob):
+    return out_sorted.index_select(0, inv_perm) * prob
+
+
+def _unpermute_scale_bwd(grad, out_sorted, perm, inv_perm, prob):
+    d_sorted = (grad * prob).index_select(0, perm)
+    d_prob = (grad * out_sorted.index_select(0, inv_perm)).sum(dim=-1, keepdim=True)
+    return d_sorted, d_prob
+
+
+def _unpermute_scale_bwd_noprob(grad, perm, prob):
+    return (grad * prob).index_select(0, perm)
+
+
+# Expert token counts change every layer and step: compile SwiGLU with dynamic
+# shapes so it is one graph instead of a recompile per count.
+_fused_swiglu = _maybe_compile(_swiglu, FUSE_MOE, dynamic=True)
+_fused_eda_norm = _maybe_compile(_eda_norm, FUSE_MOE)
+_fused_route_select = _maybe_compile(_route_select, FUSE_MOE)
+_fused_unpermute_fwd = _maybe_compile(_unpermute_scale_fwd, FUSE_MOE)
+_fused_unpermute_bwd = _maybe_compile(_unpermute_scale_bwd, FUSE_MOE)
+_fused_unpermute_bwd_noprob = _maybe_compile(_unpermute_scale_bwd_noprob, FUSE_MOE)
+
+
+class _PermuteRows(torch.autograd.Function):
+    """``x.index_select(0, perm)`` for a permutation; backward gathers by ``inv_perm``.
+
+    Same values as the eager index_select backward (zero fill + index_add with
+    unique indices), but one gather instead of a fill and an atomic scatter.
+    """
+
+    @staticmethod
+    def forward(ctx, x, perm, inv_perm):
+        ctx.save_for_backward(inv_perm)
+        return x.index_select(0, perm)
+
+    @staticmethod
+    def backward(ctx, grad):
+        (inv_perm,) = ctx.saved_tensors
+        return grad.index_select(0, inv_perm), None, None
+
+
+class _UnpermuteScale(torch.autograd.Function):
+    """``out[t] = out_sorted[inv_perm[t]] * prob[t]`` as one fused gather*scale."""
+
+    @staticmethod
+    def forward(ctx, out_sorted, perm, inv_perm, prob):
+        ctx.save_for_backward(out_sorted, perm, inv_perm, prob)
+        return _fused_unpermute_fwd(out_sorted, inv_perm, prob)
+
+    @staticmethod
+    def backward(ctx, grad):
+        out_sorted, perm, inv_perm, prob = ctx.saved_tensors
+        grad = grad.contiguous()
+        if ctx.needs_input_grad[3]:
+            d_sorted, d_prob = _fused_unpermute_bwd(grad, out_sorted, perm, inv_perm, prob)
+        else:
+            d_sorted, d_prob = _fused_unpermute_bwd_noprob(grad, perm, prob), None
+        return d_sorted, None, None, d_prob
+
+
 class SwiGLUExpert(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int, config) -> None:
         super().__init__()
@@ -598,6 +693,8 @@ class SwiGLUExpert(nn.Module):
         self.linear_fc2 = _linear(intermediate_size, hidden_size, False, config)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        if FUSE_MOE:
+            return self.linear_fc2(_fused_swiglu(self.linear_fc1(hidden)))
         gate, up = self.linear_fc1(hidden).chunk(2, dim=-1)
         return self.linear_fc2(F.silu(gate) * up)
 
@@ -654,6 +751,8 @@ class ZayaRouter(nn.Module):
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         seq, batch, _ = hidden_states.shape
         routed = self.down_proj(hidden_states.reshape(seq * batch, self.hidden_size))
+        if FUSE_MOE:
+            return self._forward_fused(routed, hidden_states, prev_router)
         if self.use_eda and prev_router is not None:
             routed = routed + prev_router.reshape(seq * batch, self.width) * self.router_states_scale
         # EDA state is the post-add, pre-norm router hidden. RMSNorm and the
@@ -676,6 +775,25 @@ class ZayaRouter(nn.Module):
         route_prob = route_prob.to(dtype=hidden_states.dtype).view(seq, batch, self.topk)
         index = index.view(seq, batch, self.topk)
         return route_prob, index, next_router
+
+    def _forward_fused(self, routed, hidden_states, prev_router):
+        seq, batch, _ = hidden_states.shape
+        if self.use_eda and prev_router is not None:
+            routed, logits = _fused_eda_norm(
+                routed, prev_router.reshape(seq * batch, self.width), self.router_states_scale,
+                self.rmsnorm_eda.weight, self.rmsnorm_eda.eps,
+            )
+        else:
+            logits = self.rmsnorm_eda(routed)
+        next_router = routed.view(seq, batch, self.width)
+        for stage in self.router_mlp:
+            logits = stage(logits)
+        route_prob, index = _fused_route_select(
+            logits, self.balancing_biases, self.topk, self.high_prec, hidden_states.dtype
+        )
+        if self.training and self.balance_lr != 0.0 and self.topk == 1:
+            self._update_biases(index.reshape(-1))
+        return route_prob.view(seq, batch, self.topk), index.view(seq, batch, self.topk), next_router
 
     def _update_biases(self, index: torch.Tensor) -> None:
         with torch.no_grad():
@@ -742,6 +860,8 @@ class ZayaMoE(nn.Module):
         num_groups = self.router.num_scored
         sorted_idx, perm = torch.sort(flat_idx, stable=True)
         counts = torch.bincount(sorted_idx, minlength=num_groups).tolist()
+        if FUSE_MOE:
+            return self._dispatch_fused(hidden_states, flat, flat_prob, perm, counts), next_router
         x_sorted = flat.index_select(0, perm)
         p_sorted = flat_prob.index_select(0, perm)
         x_chunks = torch.split(x_sorted, counts, dim=0)
@@ -762,6 +882,24 @@ class ZayaMoE(nn.Module):
         out = flat.new_zeros(flat.shape).index_copy(0, perm, out_sorted)
         out = out.view_as(hidden_states)
         return out, next_router
+
+    def _dispatch_fused(self, hidden_states, flat, flat_prob, perm, counts):
+        """Same rows, order and math as the eager loop, with the gate multiply
+        moved after the unpermute so it is one fused gather*prob over all tokens."""
+        inv_perm = torch.empty_like(perm)
+        inv_perm.scatter_(0, perm, torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype))
+        x_sorted = _PermuteRows.apply(flat, perm, inv_perm)
+        x_chunks = torch.split(x_sorted, counts, dim=0)
+        pieces = []
+        for expert_id, expert in enumerate(self.local_experts):
+            if counts[expert_id] == 0:
+                continue
+            pieces.append(expert(x_chunks[expert_id]))
+        if self.router.use_mod and counts[self.num_real_experts] > 0:
+            pieces.append(x_chunks[self.num_real_experts])
+        out_sorted = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
+        out = _UnpermuteScale.apply(out_sorted, perm, inv_perm, flat_prob)
+        return out.view_as(hidden_states)
 
 
 class ZayaStage(nn.Module):
