@@ -65,6 +65,12 @@ def _contiguous_cp_split(batch, cp_group):
     return batch
 
 
+def _has_bias(linear) -> bool:
+    # TE linears without a bias may still carry an empty `bias` tensor
+    bias = getattr(linear, "bias", None)
+    return isinstance(bias, torch.Tensor) and bias.numel() > 0
+
+
 class _NoCPGroup:
     """RoPE's cp_group stand-in after the all-to-all: q and k already span the whole sequence."""
 
@@ -149,8 +155,8 @@ def _make_fused_forward(original_forward):
             or packed_seq_params is not None
             or attention_bias is not None
             or cfg.attention_output_gate
-            or getattr(self.linear_qkv, "bias", None) is not None
-            or getattr(self.linear_proj, "bias", None) is not None
+            or _has_bias(self.linear_qkv)
+            or _has_bias(self.linear_proj)
         ):
             return original_forward(
                 self,
