@@ -323,6 +323,56 @@ def _cca_qk_post(
 
 _fused_cca_qk = _maybe_compile(_cca_qk_post, FUSE_CCA)
 
+# ZAYA_CONV_GEMM=1 (default): run CCA's two causal Conv1d layers without MIOpen.
+# The depthwise kernel-2 conv and the per-head grouped kernel-2 conv otherwise
+# hit naive_conv_ab_nonpacked fwd/bwd kernels (double accumulation) plus NCL
+# transposes in all 40 CCA stages. Here the depthwise conv is a fused
+# elementwise two-tap filter emitted directly in the [groups, tokens, 2*cg]
+# layout, and the grouped conv is one baddbmm per stage. Same parameters, same
+# math (fp32 accumulation, bf16 output). Set to 0 for nn.Conv1d.
+CONV_GEMM = _env_on("ZAYA_CONV_GEMM")
+
+
+def _cca_conv_taps(qk, w0, b0, groups: int):
+    """Depthwise causal conv (kernel 2, left pad 2) and the grouped conv's two taps.
+
+    ``qk`` is ``[s, b, C]``. With ``xp`` the input left-padded by two zeros, the
+    depthwise output is ``y[u] = w0[:,0,0]*xp[u] + w0[:,0,1]*xp[u+1] + b0`` for
+    ``u in 0..s``, so ``y[0] = b0`` and ``y[t+1]`` reads ``x[t-1], x[t]``. The
+    grouped conv output at ``t`` reads ``y[t]`` (tap 0) and ``y[t+1]`` (tap 1).
+    Returns ``[groups, s*b, 2*cg]`` holding ``(y[t], y[t+1])`` per group.
+    """
+    seq, batch, ch = qk.shape
+    cg = ch // groups
+    dtype = qk.dtype
+    xf = qk.float()
+    x_prev = F.pad(xf[:-1], (0, 0, 0, 0, 1, 0))
+    w = w0.float()
+    bias = b0.float()
+    # Round to the conv's output dtype exactly where nn.Conv1d does.
+    y_cur = (x_prev * w[:, 0, 0] + xf * w[:, 0, 1] + bias).to(dtype)
+    y_first = bias.to(dtype).expand(1, batch, ch)
+    y_prev = torch.cat((y_first, y_cur[:-1]), dim=0)
+    taps = torch.cat(
+        (y_prev.reshape(seq * batch, groups, cg), y_cur.reshape(seq * batch, groups, cg)), dim=-1
+    )
+    return taps.transpose(0, 1).contiguous()
+
+
+_fused_conv_taps = _maybe_compile(_cca_conv_taps, CONV_GEMM)
+
+
+def cca_causal_conv(qk: torch.Tensor, conv0: nn.Conv1d, conv1: nn.Conv1d) -> torch.Tensor:
+    """``conv1(conv0(pad(qk)))`` for CCA's kernel-2 convs, in ``[s, b, C]`` layout."""
+    seq, batch, ch = qk.shape
+    groups = conv1.groups
+    cg = ch // groups
+    taps = _fused_conv_taps(qk, conv0.weight, conv0.bias, groups)  # [G, N, 2cg]
+    # conv1.weight is [C_out, cg, 2]; output channel g*cg+o reads its own group.
+    w = conv1.weight.view(groups, cg, cg, 2).permute(0, 3, 2, 1).reshape(groups, 2 * cg, cg)
+    out = torch.baddbmm(conv1.bias.view(groups, 1, cg).to(taps.dtype), taps, w.to(taps.dtype))
+    return out.transpose(0, 1).reshape(seq, batch, ch)
+
 
 class CCA(nn.Module):
     """Compressed convolutional attention projection plus partial RoPE and GQA."""
@@ -370,6 +420,14 @@ class CCA(nn.Module):
         for conv in self.conv_qk:
             _init_weight(conv.weight, config)
             nn.init.zeros_(conv.bias)
+        # The GEMM conv path covers the released shape: kernel 2 for both convs
+        # (left pad 2) and conv1 groups that split channels evenly.
+        self._conv_gemm_ok = (
+            CONV_GEMM
+            and self.cca_time0 == 2
+            and self.cca_time1 == 2
+            and in_ch % (self.num_q_heads + self.num_k_heads) == 0
+        )
         # Ones, not zeros: a zero default is the pre-checkpoint initialization, and a
         # raw temperature of zero would wipe the keys at step 0.
         self.temp = nn.Parameter(torch.ones(self.num_k_heads))
@@ -436,8 +494,11 @@ class CCA(nn.Module):
         q_raw = self.linear_q(hidden_states)
         k_raw = self.linear_k(hidden_states)
         qk = torch.cat((q_raw, k_raw), dim=-1)
-        qk_ncl = F.pad(qk.permute(1, 2, 0), (self.total_padding, 0))
-        qk_out = self.conv_qk(qk_ncl).permute(2, 0, 1)
+        if self._conv_gemm_ok:
+            qk_out = cca_causal_conv(qk, self.conv_qk[0], self.conv_qk[1])
+        else:
+            qk_ncl = F.pad(qk.permute(1, 2, 0), (self.total_padding, 0))
+            qk_out = self.conv_qk(qk_ncl).permute(2, 0, 1)
         query_pre = q_raw.view(seq, batch, self.num_q_heads, self.head_dim)
         key_base = k_raw.view(seq, batch, self.num_k_heads, self.head_dim)
         query_conv = qk_out[..., : self.latent_q].view(seq, batch, self.num_q_heads, self.head_dim)
