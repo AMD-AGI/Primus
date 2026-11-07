@@ -130,7 +130,9 @@ def test_real_iterator_still_gets_prefetched(stub_megatron, monkeypatch):
 
     # plain (non-tensor) batch values keep _prefetch() off the GPU path
     upstream = iter([{"batch": 1}])
-    result = stub_megatron.train_step(None, upstream, None, None, None, None, forward_backward_func, iteration=1)
+    result = stub_megatron.train_step(
+        None, upstream, None, None, None, None, forward_backward_func, iteration=1
+    )
 
     assert result == "ok"
     pf = dfp.get_prefetch_state()["iter"]
