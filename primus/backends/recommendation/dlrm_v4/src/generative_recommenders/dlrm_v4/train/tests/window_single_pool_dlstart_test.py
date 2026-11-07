@@ -290,6 +290,8 @@ class SinglePoolFastBatchTrainTest(unittest.TestCase):
     def test_launcher_forwards_both_patches(self) -> None:
         """scripts/launch_slurm.sh forwards the single-pool knobs (item (37)
         and its diagnostics) and dlstart's loader knobs."""
+        if not _fbe._LAUNCHER.exists():
+            self.skipTest("no scripts/launch_slurm.sh in this tree (Primus launches with primus-cli)")
         text = _fbe._LAUNCHER.read_text()
         for k in ("DL_SINGLE_POOL", "DL_WBND_DIAG", "DLQ_LOG_EVERY",
                   "DL_PRESTART", "DL_FAST_BATCH", "DL_FAST_BATCH_EVAL", "DL_COLD_PREFETCH",

@@ -233,10 +233,11 @@ class PinFreeShmItem48Test(unittest.TestCase):
             self.assertEqual(dsmod.pin_free_shm_knob_source(), "code default")
             with self.assertNoLogs(tu.logger, level="WARNING"):
                 tu._log_pin_free_shm(0)
-        self.assertIn(
-            "${DL_PIN_FREE_SHM:+-e DL_PIN_FREE_SHM=$DL_PIN_FREE_SHM}",
-            _LAUNCHER.read_text(),
-        )
+        if _LAUNCHER.exists():  # not in Primus (primus-cli launches the trainer)
+            self.assertIn(
+                "${DL_PIN_FREE_SHM:+-e DL_PIN_FREE_SHM=$DL_PIN_FREE_SHM}",
+                _LAUNCHER.read_text(),
+            )
 
     def test_prestart_installs_before_pin_threads(self) -> None:
         """prestart_streaming_loaders under the shipped items (32) + (61) +

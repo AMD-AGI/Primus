@@ -538,6 +538,8 @@ class WiringTest(unittest.TestCase):
         self.assertIs(main.body[-1], guard)
 
     def test_launcher_forwards_switch_once(self) -> None:
+        if not (_REPO / "scripts" / "launch_slurm.sh").exists():
+            self.skipTest("no scripts/launch_slurm.sh in this tree (Primus launches with primus-cli)")
         text = (_REPO / "scripts" / "launch_slurm.sh").read_text()
         lines = [s.strip() for s in text.splitlines()]
         fwd = "${%s:+-e %s=$%s}" % (ce.ENV, ce.ENV, ce.ENV)

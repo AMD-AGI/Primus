@@ -910,8 +910,9 @@ apply_env_bootstrap.DLRM_HSTU_FP8_COLSUM = True
 #     item (18) below (streaming section). NUMERICS: none.
 #     Opt out (development only, not a compliant timed run): CLEAR_CACHES=0.
 #
-# (17b) Reference-data-only staging (examples/mlperf/dlrm_v4/data/stage_data_local.sh,
-#     run by launch_slurm.sh on every node before the container step). The
+# (17b) Reference-data-only staging (stage_data_local.sh, in Primus
+#     examples/mlperf/dlrm_v4/data/; run by launch_slurm.sh on every node
+#     before the container step). The
 #     stager reads THIS binding from this file on the host (awk, no gin
 #     import): the trainer does not exist yet when it runs. A missing or
 #     unreadable gin file, anything but exactly one `= True|False` binding

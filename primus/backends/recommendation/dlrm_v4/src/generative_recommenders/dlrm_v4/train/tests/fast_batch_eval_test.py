@@ -439,6 +439,8 @@ class FastBatchEvalTest(unittest.TestCase):
         )
 
     def test_launcher_forwards_knobs(self) -> None:
+        if not _LAUNCHER.exists():
+            self.skipTest("no scripts/launch_slurm.sh in this tree (Primus launches with primus-cli)")
         text = _LAUNCHER.read_text()
         for k in _KNOBS:
             self.assertIn("${%s:+-e %s=$%s}" % (k, k, k), text)

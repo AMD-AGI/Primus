@@ -306,8 +306,9 @@ class OrderTest(unittest.TestCase):
         self.assertLess(boot[0][0], hook[0][0])
         parse = [ln for ln, c in calls(fns["_main_func"], "parse_config_file")]
         self.assertTrue(parse and min(parse) < boot[0][0])  # gin bindings parsed before the bootstrap
-        # every rank process is a _main_func: main() spawns it once per local GPU
-        spawn = calls(fns["main"], "start_processes")
+        # every rank process is a _main_func: launch() (main()'s body, which Primus calls)
+        # spawns it once per local GPU
+        spawn = calls(fns.get("launch", fns["main"]), "start_processes")
         self.assertEqual(len(spawn), 1)
         self.assertEqual(getattr(spawn[0][1].args[0], "id", None), "_main_func")
 
