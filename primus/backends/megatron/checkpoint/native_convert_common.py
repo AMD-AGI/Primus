@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import sys
+import time
 
 import torch
 
@@ -287,9 +288,9 @@ def build_mcore_gpt_model(margs, model_type: str | None = None, *, family: str |
 def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     """Apply ``sd`` to ``model`` (strict=False), assert an exact mapping, save.
 
-    The checkpoint is written in ``margs.ckpt_format`` (see ``CKPT_FORMATS``).
-    A ``torch_dist`` checkpoint is moved to the ``release/`` layout afterwards
-    (``finalize_release_layout``).
+    The checkpoint is written in ``margs.ckpt_format`` (see ``CKPT_FORMATS``), a
+    ``torch_dist`` one straight into ``release/`` (``set_aside_interrupted_release``
+    makes way for it first).
 
     Raises ``RuntimeError`` if the mapping is not complete/exact so the caller
     (conversion hook) fails loudly instead of writing a silently-wrong ckpt, and
@@ -326,10 +327,9 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
 
     ckpt_format = check_ckpt_format(margs.ckpt_format)
     os.makedirs(save_dir, exist_ok=True)
-    if ckpt_format == "torch_dist" and os.path.exists(os.path.join(save_dir, "release")):
-        raise RuntimeError(
-            f"{save_dir} already has a 'release' directory; remove it or convert into an empty directory."
-        )
+    release = ckpt_format == "torch_dist"
+    if release:
+        set_aside_interrupted_release(save_dir, log)
     check_free_space(model, save_dir, log)
     log(f"saving {ckpt_format} checkpoint to {save_dir} ...")
     # torch's DCP CheckpointException derives from BaseException, not Exception
@@ -340,6 +340,7 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
             None,
             None,
             num_floating_point_operations_so_far=0,
+            release=release,
         )
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -350,8 +351,6 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
             "(most often a full disk) is reported by torch as '[enforce fail at inline_container.cc] "
             "unexpected pos <n> vs <m>'. Set native_ckpt_out (or DATA_PATH) to a volume with room."
         ) from e
-    if ckpt_format == "torch_dist":
-        finalize_release_layout(save_dir, margs.iteration)
     log(f"DONE. Converted {ckpt_format} checkpoint at: {save_dir}")
 
 
@@ -431,18 +430,30 @@ def check_ckpt_format(ckpt_format: str) -> str:
     return ckpt_format
 
 
-def finalize_release_layout(save_dir: str, iteration: int) -> None:
-    """Move the checkpoint saved at ``iteration`` to ``<save_dir>/release``.
+def set_aside_interrupted_release(save_dir: str, log=print) -> None:
+    """Make way for a ``torch_dist`` save into ``<save_dir>/release``.
 
-    A converted model is a starting point, not a training step. Megatron's
-    loader finds ``release`` through the tracker file, and Primus' LoRA pre-wrap
-    loader looks for a ``torch_dist`` checkpoint in ``<path>/release`` (the
-    layout the Megatron-Bridge conversion path produces).
+    A converted model is saved as Megatron's ``release`` checkpoint: it is a
+    starting point, not a training step. Megatron's loader finds ``release``
+    through the tracker file, and Primus' LoRA pre-wrap loader looks for a
+    ``torch_dist`` checkpoint in ``<path>/release`` (the layout the
+    Megatron-Bridge conversion path produces).
+
+    Megatron writes the tracker file after the checkpoint, so a ``release/``
+    without one is what an interrupted save leaves: it is moved to
+    ``release.incomplete-<unix time>`` and the conversion runs again. A
+    ``release/`` with a tracker file beside it is refused.
     """
-    iter_dir = os.path.join(save_dir, f"iter_{iteration:07d}")
-    os.rename(iter_dir, os.path.join(save_dir, "release"))
-    with open(os.path.join(save_dir, TRACKER_FILENAME), "w") as f:
-        f.write("release")
+    release_dir = os.path.join(save_dir, "release")
+    if not os.path.exists(release_dir):
+        return
+    if tracked_ckpt_dir(save_dir) is not None:
+        raise RuntimeError(
+            f"{save_dir} already has a 'release' directory; remove it or convert into an empty directory."
+        )
+    aside = f"{release_dir}.incomplete-{int(time.time())}"
+    os.rename(release_dir, aside)
+    log(f"WARNING: {release_dir} has no tracker file (an interrupted save); moved it to {aside}")
 
 
 def tracked_ckpt_dir(save_dir: str) -> str | None:
