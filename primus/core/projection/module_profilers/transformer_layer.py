@@ -8,6 +8,7 @@ import logging
 import os
 from typing import Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import LAYER
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -209,6 +210,20 @@ def _deepep_overlap_efficiency(config) -> float:
     return _get_deepep_overlap_efficiency(model_config)
 
 
+def _record_layer_terms(tp_ar_ms: float, ln_res_fwd_ms: float, ln_res_bwd_ms: float) -> tuple:
+    """A layer's TP all-reduces (two per direction) and norm/residual passes, as recorded."""
+    position = kernel_report.mark()
+    tp_ar_fwd_ms = kernel_report.term("tp_allreduce", "fwd", tp_ar_ms, kind="comm")
+    tp_ar_bwd_ms = kernel_report.term("tp_allreduce", "bwd", tp_ar_ms, kind="comm")
+    kernel_report.repeat_since(position, 2)
+    return (
+        tp_ar_fwd_ms,
+        tp_ar_bwd_ms,
+        kernel_report.term("norm_residual", "fwd", ln_res_fwd_ms),
+        kernel_report.term("norm_residual", "bwd", ln_res_bwd_ms),
+    )
+
+
 def _deepep_exposed_a2a_ms(a2a_ms: float, overlap_window_ms: float, efficiency: float) -> float:
     """Exposed (non-overlapped) A2A after DeepEP hides part behind compute.
 
@@ -358,8 +373,11 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
+        tp_ar_fwd_ms, tp_ar_bwd_ms, ln_res_fwd_ms, ln_res_bwd_ms = _record_layer_terms(
+            tp_ar_ms, ln_res_fwd_ms, ln_res_bwd_ms
+        )
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_fwd_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_bwd_ms + ln_res_bwd_ms
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd
@@ -506,8 +524,13 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_fwd_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_bwd_ms + ln_res_bwd_ms
+        tp_ar_fwd_ms, tp_ar_bwd_ms, ln_res_fwd_ms, ln_res_bwd_ms = _record_layer_terms(
+            tp_ar_ms, ln_res_fwd_ms, ln_res_bwd_ms
+        )
+        moe_a2a_fwd_ms = kernel_report.term("moe_a2a_exposed", "fwd", moe_a2a_fwd_ms, kind="comm")
+        moe_a2a_bwd_ms = kernel_report.term("moe_a2a_exposed", "bwd", moe_a2a_bwd_ms, kind="comm")
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_fwd_ms + moe_a2a_fwd_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_bwd_ms + moe_a2a_bwd_ms + ln_res_bwd_ms
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd

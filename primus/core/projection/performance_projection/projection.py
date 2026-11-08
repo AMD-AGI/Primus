@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from primus.core.launcher.parser import load_primus_config
+from primus.core.projection import kernel_report
 from primus.core.projection.bench_harness import get_bench_runner, resolve_model_adapter
 from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
@@ -3214,6 +3215,7 @@ def _run_layer_simulation(primus_config, args):
         gpu_clock_mhz=gpu_clock_mhz,
     )
     sdpa_backend = get_sdpa_simulation_backend(gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock_mhz)
+    gemm_backend, sdpa_backend = kernel_report.wrap_backends(gemm_backend, sdpa_backend)
 
     # ---- Build profiler tree (no model needed) ----
     if is_rank_0:
@@ -3970,21 +3972,37 @@ def _run_multinode_projection(
             )
         optimizer_step_ms = _measured_opt_ms
 
+    grad_ar_per_iteration_ms = kernel_report.term(
+        "dp_grad_reduce", "step", grad_ar_per_iteration_ms, kind="comm", scope_name="iteration"
+    )
+    optimizer_step_ms = kernel_report.term(
+        "optimizer", "step", optimizer_step_ms, kind="optimizer", scope_name="iteration"
+    )
+    engine_step_ms = kernel_report.extras("iteration", "step")
+
     # Build full iteration time:
     #   compute (per-microbatch) × num_microbatches + gradient allreduce + optimizer step
     if time_includes_all_microbatches:
-        full_iteration_time_ms = projected_time_ms + grad_ar_per_iteration_ms + optimizer_step_ms
+        full_iteration_time_ms = (
+            projected_time_ms + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms
+        )
         time_breakdown_str = f"{full_iteration_time_ms:.3f} ms (from pipeline simulation"
         if grad_ar_per_iteration_ms > 0:
             time_breakdown_str += f" + {grad_ar_per_iteration_ms:.1f} ms grad AR"
-        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer)"
+        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer"
+        if engine_step_ms > 0:
+            time_breakdown_str += f" + {engine_step_ms:.1f} ms calibrated per-step engine work"
+        time_breakdown_str += ")"
     else:
         compute_total = projected_time_ms * target_microbatches_per_gpu
-        full_iteration_time_ms = compute_total + grad_ar_per_iteration_ms + optimizer_step_ms
+        full_iteration_time_ms = compute_total + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms
         time_breakdown_str = f"{full_iteration_time_ms:.3f} ms ({target_microbatches_per_gpu} microbatches × {projected_time_ms:.3f} ms"
         if grad_ar_per_iteration_ms > 0:
             time_breakdown_str += f" + {grad_ar_per_iteration_ms:.1f} ms grad AR"
-        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer)"
+        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer"
+        if engine_step_ms > 0:
+            time_breakdown_str += f" + {engine_step_ms:.1f} ms calibrated per-step engine work"
+        time_breakdown_str += ")"
 
     # Calculate tokens/s/GPU (tokens processed per second per GPU)
     tokens_per_iter = global_batch * seq_len
@@ -4057,6 +4075,29 @@ def _run_multinode_projection(
         "iteration_time_ms": full_iteration_time_ms,
         "tokens_per_sec_per_gpu": target_tokens_per_sec_per_gpu,
     }
+
+
+_KERNEL_ENV = {
+    "kernel_report": "PRIMUS_KERNEL_REPORT",
+    "kernel_calibration": "PRIMUS_KERNEL_CALIBRATION",
+    "kernel_speedups": "PRIMUS_KERNEL_SPEEDUPS",
+}
+
+
+def _kernel_option(args, name: str) -> str:
+    """A kernel-report path from the CLI, or else from its environment variable."""
+    return getattr(args, name, None) or os.getenv(_KERNEL_ENV[name], "")
+
+
+def _activate_kernel_ledger(args) -> Optional[kernel_report.Ledger]:
+    """Start recording the simulated kernels when a report, calibration or speedups was asked for."""
+    if not any(_kernel_option(args, name) for name in _KERNEL_ENV):
+        return None
+    ledger = kernel_report.Ledger.from_paths(
+        _kernel_option(args, "kernel_calibration"), _kernel_option(args, "kernel_speedups")
+    )
+    kernel_report.activate(ledger)
+    return ledger
 
 
 def launch_projection_from_cli(args, overrides):
@@ -4207,6 +4248,7 @@ def launch_projection_from_cli(args, overrides):
     # Skip when: bg==ep (no reduction), simulation mode, --profile-only,
     # or --load-benchmark (the artifact already has the merged compute).
     profiling_mode = getattr(args, "profiling_mode", "benchmark")
+    kernel_ledger = _activate_kernel_ledger(args) if profiling_mode == "simulate" else None
     _auto_bg1_results = None
     _auto_bg1_meta = None
     need_auto_hybrid = (
@@ -4897,6 +4939,7 @@ def launch_projection_from_cli(args, overrides):
 
     # Run multinode projection if target_nodes > min_nodes_required (scaling up)
     # or always run to show performance summary
+    result = None
     if target_nodes >= min_nodes_required:
         if is_rank_0:
             print("" + "=" * 100)
@@ -5157,7 +5200,7 @@ def launch_projection_from_cli(args, overrides):
 
         # Run multinode projection
         benchmark_ep = reduction_info.get("benchmark_ep", reduction_info.get("original_ep", None))
-        _run_multinode_projection(
+        result = _run_multinode_projection(
             training_config,
             benchmarked_time_ms,
             profiling_results,
@@ -5166,3 +5209,28 @@ def launch_projection_from_cli(args, overrides):
             time_includes_all_microbatches,
             benchmark_ep=benchmark_ep,
         )
+
+    if kernel_ledger is not None:
+        kernel_report.activate(None)
+        kernel_ledger.result.update(result or {})
+        report_path = _kernel_option(args, "kernel_report")
+        if report_path:
+            kernel_report.write_report(
+                kernel_ledger,
+                convert_primus_config_to_projection_config(primus_config_original),
+                target_world_size,
+                report_path,
+                provenance={
+                    "config": getattr(args, "config", None),
+                    "gpu_arch": getattr(args, "gpu_arch", None),
+                    "profiling_mode": profiling_mode,
+                    "simulated_parallelism": {
+                        k: v for k, v in reduction_info.items() if k.startswith("benchmark_")
+                    },
+                    "calibration": _kernel_option(args, "kernel_calibration") or None,
+                    "speedups": _kernel_option(args, "kernel_speedups") or None,
+                },
+            )
+            if is_rank_0:
+                print(f"[Primus:Performance Projection] Kernel report written to: {report_path}")
+    return result

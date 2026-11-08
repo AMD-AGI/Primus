@@ -6,6 +6,7 @@
 
 from typing import Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 _FALLBACK_HBM_BW_GBPS = 5300.0
@@ -81,7 +82,11 @@ class LossProfiler(BaseModuleProfiler):
 
         fwd_ms = 3.0 * tensor_bytes / (eff_bw * 1e6)
         bwd_ms = 3.0 * tensor_bytes / (eff_bw * 1e6)
-        return fwd_ms, bwd_ms
+        dims = {"tokens": tokens, "vocab": vocab_per_rank}
+        return (
+            kernel_report.term("cross_entropy", "fwd", fwd_ms, kind="loss", **dims),
+            kernel_report.term("cross_entropy", "bwd", bwd_ms, kind="loss", **dims),
+        )
 
     def estimated_forward_time(self, batch_size: int, seq_len: int) -> float:
         fwd, _ = self._loss_time_ms(batch_size, seq_len)
