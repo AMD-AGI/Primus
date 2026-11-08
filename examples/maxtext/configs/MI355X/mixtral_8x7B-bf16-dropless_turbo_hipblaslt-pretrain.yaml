@@ -1,0 +1,63 @@
+# MI355X (gfx950) dropless MoE with the Primus-Turbo grouped GEMM: backend hipblaslt, bf16, FSDP 8 (no expert parallelism), seq 4096.
+# Measured on 8x MI355X (rocm/jax-training:maxtext-v26.9): 9,878 tokens/s/GPU (shipped MI355X recipe 10,887: -9%) at per_device_batch_size 32.
+# Needs hipBLASLt with grouped bf16 kernels for gfx950: the stock library has none (build with scripts/build_hipblaslt_gfx950.sh,
+# then HBSWAP=1 / scripts/83_swap_hb.sh). The kernel for every shape is chosen once by timing (PRIMUS_TURBO_HB_GG_TUNE).
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B-bf16-dropless_turbo_hipblaslt-pretrain}
+workspace: ./output
+
+env:
+  PRIMUS_TURBO_HB_GG_TUNE: "subprocess"   # time the candidate kernels once per shape, cached in ~/.cache/primus_turbo
+  # XLA's GEMM autotuner at level >= 2 intermittently faults on this ROCm stack; level 1 still autotunes.
+  XLA_GPU_AUTOTUNE_LEVEL: "1"
+  # Smaller collective combine thresholds than Primus's 8 GB default, so FSDP gathers each weight separately
+  # and XLA can overlap them with compute. Set here, this replaces an XLA_FLAGS_APPEND from the shell.
+  XLA_FLAGS_APPEND: "--xla_gpu_all_gather_combine_threshold_bytes=1073741824 --xla_gpu_reduce_scatter_combine_threshold_bytes=1073741824 --xla_gpu_enable_pipelined_all_gather=true --xla_gpu_enable_pipelined_reduce_scatter=true --xla_gpu_enable_pipelined_all_reduce=true --xla_gpu_executable_terminate_timeout=900 --xla_gpu_executable_warn_stuck_timeout=120"
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: mixtral_8x7B.yaml
+    overrides:
+      run_name: "mixtral_8x7B_bf16_dropless_turbo_hipblaslt_training"
+      base_output_directory: "./output"
+      steps: 50
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy: all 8 experts on every GPU, so the grouped GEMM sees 8 groups and
+      # no ragged all-to-all is needed (it dominates the dropless path under expert parallelism on ROCm).
+      ici_fsdp_parallelism: 8
+      ici_data_parallelism: 1
+      ici_expert_parallelism: 1
+
+      # dropless MoE through the Primus-Turbo grouped GEMM
+      sparse_matmul: true
+      megablox: false
+      capacity_factor: -1
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: "hipblaslt"
+
+      max_target_length: 4096
+      per_device_batch_size: 32
+      # Keep the attention context and the expert down-projection output (24 KB per token and layer; the
+      # recipe's save_dot_with_context_except_mlp keeps 28 KB) and recompute the q/k/v and output projections:
+      # skipping the down-projection grouped GEMM in the backward pass saves the most time per byte.
+      remat_policy: "custom"
+      context: "device"
+      moe_mlpwo: "device"
