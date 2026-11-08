@@ -24,8 +24,8 @@ Backends
     [tokens, C, hidden]`` batched GEMM, which hipBLASLt runs with tiny fp32
     tiles on gfx1250. Equal to ``eager`` up to fp32 rounding.
 ``flydsl``
-    One fused FlyDSL kernel per direction (:mod:`._flydsl_v1`), gfx950 / CDNA4
-    only, loaded LAZILY via :func:`load_flydsl_attn_res_backend`.
+    One fused FlyDSL kernel per direction (:mod:`._flydsl_v1`), gfx950 (CDNA4)
+    and gfx1250 only, loaded LAZILY via :func:`load_flydsl_attn_res_backend`.
 
 Why a kernel at all — the measurement
 -------------------------------------
@@ -59,8 +59,8 @@ from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._eager i
 ATTN_RES_BACKENDS = ("eager", "eager_bcast", "flydsl")
 
 
-def _require_gfx950() -> None:
-    """Raise :class:`ImportError` unless a gfx950 (CDNA4) device is visible.
+def _require_flydsl_arch() -> None:
+    """Raise :class:`ImportError` unless a gfx950 (CDNA4) or gfx1250 device is visible.
 
     Same rationale as ``kda_kernels.__init__._require_gfx950``: the kernel
     builder asserts the arch, but that assert fires at *build* time deep inside
@@ -83,7 +83,7 @@ def load_flydsl_attn_res_backend():
     """Lazily import the fused-FlyDSL mixer (:mod:`._flydsl_v1`).
 
     The backend hard-depends on the installed ``flydsl`` pip package and on
-    gfx950 / CDNA4. Deferring the import keeps selecting ``eager`` free of it
+    gfx950 (CDNA4) or gfx1250. Deferring the import keeps selecting ``eager`` free of it
     and keeps ``import ...attn_res_kernels`` working on a build or GPU without
     flydsl.
 
@@ -94,15 +94,15 @@ def load_flydsl_attn_res_backend():
     dependency); it must not be hoisted to module scope.
     """
     try:
-        _require_gfx950()
+        _require_flydsl_arch()
         from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1 import (
             flydsl_attn_res_mix,
         )
     except ImportError as exc:
         raise ImportError(
             "attn_res_backend = 'flydsl' requires the fused FlyDSL attention-residual "
-            f"kernel (the `flydsl` pip package on gfx950 / CDNA4), which is unavailable: "
-            f"{exc}. Select a different backend (eager)."
+            f"kernel (the `flydsl` pip package on gfx950 / CDNA4 or gfx1250), which is unavailable: "
+            f"{exc}. Select a different backend (eager or eager_bcast)."
         ) from exc
     return flydsl_attn_res_mix
 
