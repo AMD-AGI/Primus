@@ -112,3 +112,12 @@ def test_moe_pattern_str_expression_is_evaluated():
 def test_padded_vocab_size_defaulted_when_missing():
     args = megatron_derive_default_args(_make_megatron_args(padded_vocab_size=None))
     assert args.padded_vocab_size == 100352
+
+
+def test_padded_vocab_size_pads_the_model_vocab_like_megatron():
+    args = megatron_derive_default_args(_make_megatron_args(vocab_size=201088))
+    assert args.padded_vocab_size == 201088
+    args = megatron_derive_default_args(
+        _make_megatron_args(vocab_size=50257, tensor_model_parallel_size=2, make_vocab_size_divisible_by=128)
+    )
+    assert args.padded_vocab_size == 50432

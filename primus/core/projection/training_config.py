@@ -393,9 +393,16 @@ def megatron_derive_default_args(args):
     args.sequence_length = args.seq_length
     args.context_model_parallel_size = args.context_parallel_size
 
-    # Use model's vocab size if set, otherwise default to 100352
+    # Use model's vocab size if set (padded as Megatron pads it), otherwise default to 100352
     if not hasattr(args, "padded_vocab_size") or args.padded_vocab_size is None:
-        args.padded_vocab_size = 100352
+        vocab_size = getattr(args, "vocab_size", None)
+        if vocab_size:
+            multiple = (
+                getattr(args, "make_vocab_size_divisible_by", None) or 128
+            ) * args.tensor_model_parallel_size
+            args.padded_vocab_size = -(-int(vocab_size) // multiple) * multiple
+        else:
+            args.padded_vocab_size = 100352
 
     return args
 
