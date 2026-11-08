@@ -1,0 +1,96 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Llama-2-70B LoRA SFT on one node of 4x MI455X (gfx1250), pretrained weights, FP8 (TE hybrid).
+# Same as llama2_70B-BF16-lora-sft.yaml plus fp8: hybrid.
+#
+# All 80 layers of meta-llama/Llama-2-70b-hf, LoRA (dim 16, alpha 32) on qkv / proj / fc1 / fc2,
+# Alpaca. TP=PP=1 and 4-way data parallel: every GPU holds the full BF16 base model (~138 GB of
+# 432 GB) and the frozen weights carry no optimizer state.
+#
+# PRIMUS_HF_PATH must point at a local Llama-2-70b-hf snapshot (config.json, safetensors,
+# tokenizer). The posttrain hook converts it once to a Megatron checkpoint under
+# $DATA_PATH/megatron_checkpoints/<snapshot dir name>_native and reuses it afterwards.
+# The 4-layer random-init smoke test of the same shapes is llama2_70B-BF16-lora-sft-1gpu-proxy.yaml.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_70B-FP8-lora-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: llama2_70B_hf.yaml
+    overrides:
+      stage: sft
+      hf_path: ${PRIMUS_HF_PATH:meta-llama/Llama-2-70b-hf}
+      # The snapshot is stored in fp16; convert straight to the training dtype.
+      native_ckpt_dtype: bf16
+
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      disable_wandb: true
+      disable_tensorboard: true
+      stderr_sink_level: DEBUG
+      log_interval: 1
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 10
+
+      train_iters: 20
+      micro_batch_size: 1
+      global_batch_size: 8
+      num_workers: 2
+      seq_length: 2048
+
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 2
+      lr_decay_iters: 20
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      finetune: true
+      save: null
+      disable_last_saving: true
+      ckpt_format: torch
+      auto_detect_ckpt_format: false
+      eval_iters: 0
+
+      bf16: true
+      fp8: hybrid
+      no_fp8_weight_transpose_cache: true
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      lora:
+        enabled: true
+        dim: 16
+        alpha: 32
+        dropout: 0.0
+        dropout_position: pre
+        lora_A_init_method: xavier
+        lora_B_init_method: zero
+        target_modules:
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2

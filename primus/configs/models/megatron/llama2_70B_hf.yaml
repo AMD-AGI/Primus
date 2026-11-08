@@ -1,0 +1,8 @@
+extends:
+  - llama2_70B.yaml
+
+# Hugging Face tokenizer variant used by native SFT checkpoint conversion. PRIMUS_HF_PATH points
+# at a local Llama-2-70b-hf snapshot; the repo id needs an approved HF token.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: ${PRIMUS_HF_PATH:meta-llama/Llama-2-70b-hf}
+vocab_size: 32000
