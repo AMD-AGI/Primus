@@ -238,6 +238,11 @@ def build_mcore_state_dict(model, store, margs, cfg_fields, log):
         )
         sd[p + "mlp.linear_fc2.weight"] = get(h + "mlp.down_proj.weight")
 
+        # Older exports (e.g. meta-llama/Llama-2-70b-hf) store the RoPE frequency buffer per
+        # layer. It is not a parameter; mcore recomputes it from the rotary config.
+        if store.has(h + "self_attn.rotary_emb.inv_freq"):
+            consumed.add(h + "self_attn.rotary_emb.inv_freq")
+
         if L % 5 == 0 or L == margs.num_layers - 1:
             log(f"  mapped layer {L:2d} (dense)")
 

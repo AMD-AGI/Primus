@@ -250,8 +250,12 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     neutralize_nvte_attention_env()
 
     from megatron.core import mpu
-    from megatron.legacy import fused_kernels
     from megatron.training.global_vars import get_args, set_global_variables
+
+    try:
+        from megatron.legacy import fused_kernels
+    except ImportError:  # megatron.legacy was removed in Megatron-core 0.19
+        fused_kernels = None
 
     set_global_variables(margs, build_tokenizer=True)
     margs = get_args()
@@ -267,7 +271,8 @@ def init_megatron_single_process(margs, master_port: int, log=print):
     # ROCm: legacy fused kernels are CUDA-only and their build shells out to
     # nvcc; conversion never runs them. Neutralised by the phase="convert"
     # Primus patch (checkpoint_convert_patches) applied earlier this process.
-    fused_kernels.load(margs)
+    if fused_kernels is not None:
+        fused_kernels.load(margs)
     return margs
 
 
