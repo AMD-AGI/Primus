@@ -48,6 +48,9 @@ def _run(backend, ps, br, nw, pw, dout):
 def _assert_close(ref, got, rel):
     names = ("out", "d_prefix_sum", "d_block_residual", "d_norm_weight", "d_proj_weight")
     for name, a, b in zip(names, ref, got):
+        assert a.shape == b.shape, f"{name}: shape {tuple(b.shape)} != {tuple(a.shape)}"
+        if a.numel() == 0:
+            continue
         err = ((a - b).abs().max() / a.abs().max().clamp_min(1e-30)).item()
         assert err < rel, f"{name}: relative error {err:.2e} >= {rel:.0e}"
 
