@@ -102,6 +102,18 @@ Replace the `EXP=` path with any yaml from the table below.
 | Llama3-8B | BF16 | SQuAD packed (Bridge-aligned) | `llama3_8B-BF16-sft-packed-bridge_aligned.yaml` |
 | Llama3-8B | BF16 | Alpaca + LoRA only | `llama3_8B-BF16-lora-sft.yaml` |
 | Llama3-8B | BF16 | OpenAI messages multi-turn | `llama3_8B-BF16-multiturn-sft.yaml` |
+
+#### MI455X (gfx1250)
+
+Under `examples/megatron/configs/MI455X/`. The image, launcher and commands are in
+[`examples/megatron/guides/mi455x_package`](../../examples/megatron/guides/mi455x_package/).
+
+| Model | Precision | Data | GPUs | yaml file |
+|---|---|---|---|---|
+| Llama2-70B (pretrained, 80 layers) | BF16 | Alpaca + LoRA | 4 | `llama2_70B-BF16-lora-sft.yaml` |
+| Llama2-70B (pretrained, 80 layers) | **FP8 hybrid** | Alpaca + LoRA | 4 | `llama2_70B-FP8-lora-sft.yaml` |
+| Llama2-70B 4-layer proxy (random init) | BF16 | Alpaca + LoRA | 1 | `llama2_70B-BF16-lora-sft-1gpu-proxy.yaml` |
+| Llama2-70B 4-layer proxy (random init) | **FP8 hybrid** | Alpaca + LoRA | 1 | `llama2_70B-FP8-lora-sft-1gpu-proxy.yaml` |
 | DeepSeek-V2-Lite | BF16 | Alpaca packed | `deepseek_v2_lite-BF16-sft-packed.yaml` |
 | Qwen3-30B-A3B (MoE) | BF16 | Alpaca packed | `qwen3_30B_A3B-BF16-sft-packed.yaml` |
 | Qwen3-235B-A22B (MoE) | BF16 | Alpaca | `qwen3_235B_A22B-BF16-sft.yaml` |
