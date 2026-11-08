@@ -147,6 +147,7 @@ def use_vector_kernel(hidden: int, elem_dtype: str, inject: str = "") -> bool:
         and os.environ.get("K3P_ATTNRES_VEC", "1") != "0"
     )
 
+
 #: Widest workgroup used. 256 threads is one output element per thread for
 #: ``H = 256`` and a clean strided slice for every larger multiple.
 MAX_BLOCK = 256
@@ -599,7 +600,6 @@ def build_attn_res_mixer_fwd(
 
         tok = arith.index_cast(T.index, gpu.block_idx.x)
         tid = arith.index_cast(T.index, gpu.thread_idx.x)
-        I_BLOCK = arith.index(BLOCK)
         I_H = arith.index(H)
         I_C = arith.index(C)
         I_VEC = arith.index(VEC)
