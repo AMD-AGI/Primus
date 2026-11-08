@@ -77,8 +77,8 @@ from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1.attn_res_mixer_kernel import (
     VEC,
     VEC_BLOCK,
-    block_sums,
     block_size_for,
+    block_sums,
     supports_mixer_geometry,
     use_vector_kernel,
 )
@@ -455,7 +455,6 @@ def build_attn_res_mixer_bwd(
 
         tok = arith.index_cast(T.index, gpu.block_idx.x)
         tid = arith.index_cast(T.index, gpu.thread_idx.x)
-        I_BLOCK = arith.index(BLOCK)
         I_H = arith.index(H)
         I_C = arith.index(C)
         I_VEC = arith.index(VEC)
@@ -504,12 +503,16 @@ def build_attn_res_mixer_bwd(
         d_dot = []
         two_d_ss = []
         for c in range_constexpr(C):
-            ds = arith.MulFOp(probs[c], arith.SubFOp(dps_red[c], dot_p, fastmath=fm).result, fastmath=fm).result
+            ds = arith.MulFOp(
+                probs[c], arith.SubFOp(dps_red[c], dot_p, fastmath=fm).result, fastmath=fm
+            ).result
             d_dot.append(arith.MulFOp(ds, rs[c], fastmath=fm).result)
             d_r = arith.MulFOp(ds, dots[c], fastmath=fm).result
             r2 = arith.MulFOp(rs[c], rs[c], fastmath=fm).result
             r3 = arith.MulFOp(r2, rs[c], fastmath=fm).result
-            d_ss = arith.MulFOp(arith.MulFOp(d_r, r3, fastmath=fm).result, c_neg_half_inv_h, fastmath=fm).result
+            d_ss = arith.MulFOp(
+                arith.MulFOp(d_r, r3, fastmath=fm).result, c_neg_half_inv_h, fastmath=fm
+            ).result
             two_d_ss.append(arith.MulFOp(c_two, d_ss, fastmath=fm).result)
 
         save_c = tid % I_C
