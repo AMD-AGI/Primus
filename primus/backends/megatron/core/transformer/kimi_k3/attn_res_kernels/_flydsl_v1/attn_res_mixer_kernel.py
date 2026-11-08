@@ -100,8 +100,8 @@ _LLVM_GEP_DYNAMIC = -2147483648  # LLVM kDynamicIndex sentinel
 #: elements per step (16-byte bf16 loads and stores) and keeps its slice of every
 #: candidate in registers between the reduction and the mix, so ``v`` is read once.
 #: The scalar layout above moves 2 bytes per lane per load and reads ``v`` twice,
-#: which leaves it several times below HBM bandwidth on gfx1250. Built for bf16 when
-#: ``H % (VEC_BLOCK * VEC) == 0`` and no test defect is requested;
+#: which leaves it several times below HBM bandwidth on gfx1250. Built on gfx1250 for
+#: bf16 when ``H % (VEC_BLOCK * VEC) == 0`` and no test defect is requested;
 #: ``K3P_ATTNRES_VEC=0`` keeps the scalar kernel.
 VEC = 8
 VEC_BLOCK = 128
@@ -138,10 +138,11 @@ def block_sums(vals, tid, block, lds_get, lds_put, fm):
     return out
 
 
-def use_vector_kernel(hidden: int, elem_dtype: str, inject: str = "") -> bool:
-    """Whether the forward / backward builders take the vectorised layout."""
+def use_vector_kernel(hidden: int, elem_dtype: str, inject: str = "", arch: str = "") -> bool:
+    """Whether the forward / backward builders take the vectorised layout (gfx1250 only)."""
     return (
-        elem_dtype == "bf16"
+        arch.startswith("gfx1250")
+        and elem_dtype == "bf16"
         and not inject
         and hidden % (VEC_BLOCK * VEC) == 0
         and os.environ.get("K3P_ATTNRES_VEC", "1") != "0"
@@ -305,7 +306,8 @@ def build_attn_res_mixer_fwd(
     """
     ensure_usable_lld()
     arch = get_rocm_arch()
-    # No MFMA / wave intrinsics: every reduction goes through LDS, so gfx1250's wave32 runs it as is.
+    # The scalar kernels use no MFMA or wave intrinsics (every reduction goes through LDS), so they run on
+    # gfx950 and gfx1250 alike; the vector kernels assume 32-lane waves and are built on gfx1250 only.
     if not arch.startswith(("gfx950", "gfx1250")):
         raise RuntimeError(f"attn_res_mixer targets gfx950 (CDNA4) and gfx1250; got {arch!r}")
 
@@ -320,7 +322,7 @@ def build_attn_res_mixer_fwd(
     if inject and inject not in _ALL_FWD_VARIANTS:
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(_ALL_FWD_VARIANTS)}")
 
-    vec_path = use_vector_kernel(H, elem_dtype, inject)
+    vec_path = use_vector_kernel(H, elem_dtype, inject, arch)
     BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK  # hidden elements per thread
     EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
