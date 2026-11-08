@@ -158,19 +158,31 @@ class Ledger:
         """One call of ``scope``'s modelled time in ``phase`` (``fwd``, ``bwd`` or ``step``), before calibration and speedups."""
         seen = {}
         for row in self.rows:
-            if row.scope == scope and row.src != "calibration" and direction(row.phase) == phase:
+            if row.scope == scope and not row.src.startswith("calibration") and direction(row.phase) == phase:
                 seen.setdefault(
                     (row.op, row.phase, json.dumps(row.dims, sort_keys=True)), row.base_ms * row.per_layer
                 )
         return sum(seen.values())
 
     def extras(self, scope: str, phase: str) -> float:
-        """The engine's own time in ``scope``'s ``phase`` (a share of its modelled time), recorded."""
+        """The engine's own time in ``scope``'s ``phase`` (a share of its modelled time, sped up), recorded."""
         added = 0.0
         for extra in self.calibration.get("extras") or []:
             if extra.get("scope") == scope and extra.get("phase") == phase:
-                ms = float(extra["share"]) * self.modelled_ms(scope, phase)
-                self.rows.append(Row(scope, str(extra["op"]), phase, "engine", ms, ms, "calibration", {}))
+                base = float(extra["share"]) * self.modelled_ms(scope, phase)
+                term = {
+                    "scope": scope,
+                    "op": str(extra["op"]),
+                    "phase": phase,
+                    "kind": "engine",
+                    "dtype": None,
+                    "dims": {},
+                }
+                fast = _best(self.speedups.get("speedups") or [], term)
+                speedup = _speedup(fast) if fast is not None else 0.0
+                ms = base / speedup if speedup > 0 else base
+                src = f"calibration+x{speedup:g}" if speedup > 0 else "calibration"
+                self.rows.append(Row(scope, term["op"], phase, "engine", ms, base, src, {}))
                 added += ms
         return added
 
@@ -508,6 +520,7 @@ def build_report(ledger: Ledger, training_config, num_gpus: int, provenance: Opt
             "microbatches": microbatches,
             "seq_length": getattr(rt, "sequence_length", None),
             "stage_layers": stages,
+            "layer_scopes": scope_of,
         },
         "iteration": dict(ledger.result),
         "provenance": dict(provenance or {}),

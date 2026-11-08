@@ -171,6 +171,23 @@ def test_extras_are_a_share_of_the_modelled_time(ledger):
     assert ledger.rows[-1].op == "fp8_cast" and ledger.rows[-1].src == "calibration"
 
 
+def test_a_speedup_applies_to_an_extra_without_moving_the_others(ledger):
+    ledger.calibration = {
+        "extras": [
+            {"scope": "output", "phase": "fwd", "op": "cross_entropy", "share": 1.0},
+            {"scope": "output", "phase": "fwd", "op": "elementwise", "share": 0.5},
+        ]
+    }
+    ledger.speedups = {"speedups": [{"op": "cross_entropy", "speedup": 4.0}]}
+    with kernel_report.scope("output"):
+        kernel_report.term("lm_head", "fwd", 8.0, kind="gemm")
+    assert kernel_report.extras("output", "fwd") == pytest.approx(2.0 + 4.0)
+    assert [(r.op, r.base_ms, r.src) for r in ledger.rows[-2:]] == [
+        ("cross_entropy", 8.0, "calibration+x4"),
+        ("elementwise", 4.0, "calibration"),
+    ]
+
+
 def test_report_counts_calls_per_stage(ledger):
     with kernel_report.scope("moe"):
         start = kernel_report.mark()
