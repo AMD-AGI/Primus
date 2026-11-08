@@ -372,6 +372,36 @@ def _add_performance_args(parser):
         ),
     )
     parser.add_argument(
+        "--kernel-report",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "Write every kernel one training iteration runs, as simulate mode priced it, to this JSON\n"
+            "file (primus.kernel_report). Defaults to PRIMUS_KERNEL_REPORT.\n"
+        ),
+    )
+    parser.add_argument(
+        "--kernel-calibration",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "A primus.kernel_calibration JSON built from a profile of the same stack: per-op factors and\n"
+            "the engine's own kernels, applied in simulate mode. Defaults to PRIMUS_KERNEL_CALIBRATION.\n"
+        ),
+    )
+    parser.add_argument(
+        "--kernel-speedups",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "A primus.kernel_speedups JSON of measured kernel speedups (per op, optionally per shape),\n"
+            "applied in simulate mode. Defaults to PRIMUS_KERNEL_SPEEDUPS.\n"
+        ),
+    )
+    parser.add_argument(
         "--gpu-clock-mhz",
         type=int,
         required=False,

@@ -6,6 +6,7 @@
 
 from typing import Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import EMBEDDING
 
@@ -59,6 +60,12 @@ class EmbeddingProfiler(BaseModuleProfiler):
         bw_bytes_per_ms = 4e9  # ~4 TB/s → bytes/ms
         fwd_time = max(0.01, output_bytes / bw_bytes_per_ms)
         bwd_time = fwd_time  # Gradient scatter is similar cost
+        fwd_time = kernel_report.term(
+            "embedding", "fwd", fwd_time, kind="embedding", tokens=tokens, hidden=hidden
+        )
+        bwd_time = kernel_report.term(
+            "embedding", "bwd", bwd_time, kind="embedding", tokens=tokens, hidden=hidden
+        )
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 

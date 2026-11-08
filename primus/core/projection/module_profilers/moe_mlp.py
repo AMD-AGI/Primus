@@ -7,6 +7,7 @@
 import os
 from typing import Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import MOE
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -369,16 +370,34 @@ class MoEMLPProfiler(BaseModuleProfiler):
             # ── Turbo model: batched GEMM (all experts in parallel) ──
             B = num_local_experts
             if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                gate_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_gate", "fwd", M, F, H, gemm_dtype, batch=B
+                )
+                up_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "fwd", M, F, H, gemm_dtype, batch=B
+                )
+                down_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "fwd", M, H, F, gemm_dtype, batch=B
+                )
                 expert_fwd_ms = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
+                gate_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_gate", "dgrad", M, H, F, gemm_dtype, batch=B
+                )
+                gate_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_gate", "wgrad", H, F, M, gemm_dtype, batch=B
+                )
+                up_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "dgrad", M, H, F, gemm_dtype, batch=B
+                )
+                up_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "wgrad", H, F, M, gemm_dtype, batch=B
+                )
+                down_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "dgrad", M, F, H, gemm_dtype, batch=B
+                )
+                down_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "wgrad", F, H, M, gemm_dtype, batch=B
+                )
                 expert_bwd_ms = (
                     gate_dg.forward_time_ms
                     + gate_wg.forward_time_ms
@@ -388,13 +407,25 @@ class MoEMLPProfiler(BaseModuleProfiler):
                     + down_wg.forward_time_ms
                 )
             else:
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "fwd", M, F, H, gemm_dtype, batch=B
+                )
+                down_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "fwd", M, H, F, gemm_dtype, batch=B
+                )
                 expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
+                up_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "dgrad", M, H, F, gemm_dtype, batch=B
+                )
+                up_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "wgrad", H, F, M, gemm_dtype, batch=B
+                )
+                down_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "dgrad", M, F, H, gemm_dtype, batch=B
+                )
+                down_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "wgrad", F, H, M, gemm_dtype, batch=B
+                )
                 expert_bwd_ms = (
                     up_dg.forward_time_ms
                     + up_wg.forward_time_ms
@@ -406,17 +437,36 @@ class MoEMLPProfiler(BaseModuleProfiler):
             expert_bwd = expert_bwd_ms
         else:
             # ── Legacy model: individual GEMM × num_local_experts ──
+            _legacy_rows = kernel_report.mark()
             if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                gate_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_gate", "fwd", M, F, H, gemm_dtype, batch=1
+                )
+                up_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "fwd", M, F, H, gemm_dtype, batch=1
+                )
+                down_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "fwd", M, H, F, gemm_dtype, batch=1
+                )
                 expert_fwd_ms = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
+                gate_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_gate", "dgrad", M, H, F, gemm_dtype, batch=1
+                )
+                gate_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_gate", "wgrad", H, F, M, gemm_dtype, batch=1
+                )
+                up_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "dgrad", M, H, F, gemm_dtype, batch=1
+                )
+                up_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "wgrad", H, F, M, gemm_dtype, batch=1
+                )
+                down_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "dgrad", M, F, H, gemm_dtype, batch=1
+                )
+                down_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "wgrad", F, H, M, gemm_dtype, batch=1
+                )
                 expert_bwd_ms = (
                     gate_dg.forward_time_ms
                     + gate_wg.forward_time_ms
@@ -426,13 +476,25 @@ class MoEMLPProfiler(BaseModuleProfiler):
                     + down_wg.forward_time_ms
                 )
             else:
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                up_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "fwd", M, F, H, gemm_dtype, batch=1
+                )
+                down_fwd = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "fwd", M, H, F, gemm_dtype, batch=1
+                )
                 expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
+                up_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "dgrad", M, H, F, gemm_dtype, batch=1
+                )
+                up_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_up", "wgrad", H, F, M, gemm_dtype, batch=1
+                )
+                down_dg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "dgrad", M, F, H, gemm_dtype, batch=1
+                )
+                down_wg = kernel_report.gemm(
+                    self._gemm_backend, "moe_expert_down", "wgrad", F, H, M, gemm_dtype, batch=1
+                )
                 expert_bwd_ms = (
                     up_dg.forward_time_ms
                     + up_wg.forward_time_ms
@@ -442,6 +504,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
             expert_fwd = expert_fwd_ms * num_local_experts
             expert_bwd = expert_bwd_ms * num_local_experts
+            kernel_report.repeat_since(_legacy_rows, num_local_experts)
 
             # NOTE: Legacy grouped GEMM is not properly modelled. Origami
             # simulates ideal single-kernel execution
@@ -473,8 +536,8 @@ class MoEMLPProfiler(BaseModuleProfiler):
             moe_ovh_fwd = float(os.getenv("PRIMUS_MOE_EXPERT_OVH_FWD_MS", "0.19"))
             moe_ovh_bwd = float(os.getenv("PRIMUS_MOE_EXPERT_OVH_BWD_MS", "0.66"))
             _ovh_arch_scale = _ovh_ref_hbm / _tgt_hbm
-            expert_fwd += num_local_experts * moe_ovh_fwd * _ovh_arch_scale
-            expert_bwd += num_local_experts * moe_ovh_bwd * _ovh_arch_scale
+            ovh_fwd_ms = num_local_experts * moe_ovh_fwd * _ovh_arch_scale
+            ovh_bwd_ms = num_local_experts * moe_ovh_bwd * _ovh_arch_scale
         else:
             ovh_fwd_ms, ovh_bwd_ms = self._expert_overhead_first_principles(
                 topk_tokens=topk_tokens,
@@ -485,15 +548,17 @@ class MoEMLPProfiler(BaseModuleProfiler):
                 peak_hbm=_tgt_hbm,
                 batched=use_turbo,
             )
-            expert_fwd += ovh_fwd_ms
-            expert_bwd += ovh_bwd_ms
+        expert_fwd += kernel_report.term("moe_expert_overhead", "fwd", ovh_fwd_ms, kind="quantize")
+        expert_bwd += kernel_report.term("moe_expert_overhead", "bwd", ovh_bwd_ms, kind="quantize")
 
         fwd_time = expert_fwd
         bwd_time = expert_bwd
 
         # ── 2. Router overhead ──
         # Gate linear: [batch_tokens, num_experts, hidden_size]
-        router_gemm = self._gemm_backend.simulate_gemm(batch_tokens, num_experts, hidden_size, gemm_dtype)
+        router_gemm = kernel_report.gemm(
+            self._gemm_backend, "moe_router", "fwd", batch_tokens, num_experts, hidden_size, gemm_dtype
+        )
         router_fwd_ms = router_gemm.forward_time_ms
         # Softmax + top-K over the gate logits [batch_tokens, num_experts]: a
         # memory-bound reduction (read logits, softmax, write top-K weights),
@@ -503,7 +568,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
         _peak_hbm = getattr(self._gemm_backend, "hbm_bandwidth_gbps", None) or _FALLBACK_HBM_BW_GBPS
         _topk_eff_bw = _peak_hbm * _ACTIVATION_BW_FRACTION  # GB/s
         topk_overhead_ms = 3.0 * batch_tokens * num_experts * 4 / (_topk_eff_bw * 1e6)
-        router_fwd_ms += topk_overhead_ms
+        router_fwd_ms += kernel_report.term(
+            "moe_topk", "fwd", topk_overhead_ms, tokens=batch_tokens, experts=num_experts
+        )
         # Backward: dgrad + wgrad for gate linear (+ the same top-K traffic).
         # NOTE: the first ``num_hash_layers`` MoE layers STILL run the learned
         # gate GEMM (``v4_hash_router.py:214`` F.linear over all experts); only
@@ -511,7 +578,13 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # layers, zero ONLY ``topk_overhead_ms`` (keep ``router_gemm``) at the
         # model roll-up (per-layer index is not available here).  ~0.01 ms/layer,
         # negligible; do NOT zero the whole router term (that drops a live GEMM).
-        router_bwd_ms = 2.0 * router_gemm.forward_time_ms + topk_overhead_ms
+        router_bwd_ms = (
+            kernel_report.term("moe_router", "dgrad", router_gemm.forward_time_ms, kind="gemm")
+            + kernel_report.term("moe_router", "wgrad", router_gemm.forward_time_ms, kind="gemm")
+            + kernel_report.term(
+                "moe_topk", "bwd", topk_overhead_ms, tokens=batch_tokens, experts=num_experts
+            )
+        )
 
         fwd_time += router_fwd_ms
         bwd_time += router_bwd_ms
@@ -552,6 +625,10 @@ class MoEMLPProfiler(BaseModuleProfiler):
             combine_bwd = combine_bytes / (permute_eff_bw_gbps * 1e6)
             dispatch_bwd = combine_fwd = 0.0
 
+        dispatch_fwd = kernel_report.term("moe_permute", "fwd", dispatch_fwd, kind="permute")
+        dispatch_bwd = kernel_report.term("moe_permute", "bwd", dispatch_bwd, kind="permute")
+        combine_fwd = kernel_report.term("moe_unpermute", "fwd", combine_fwd, kind="permute")
+        combine_bwd = kernel_report.term("moe_unpermute", "bwd", combine_bwd, kind="permute")
         permute_fwd_ms = dispatch_fwd + combine_fwd
         permute_bwd_ms = dispatch_bwd + combine_bwd
         fwd_time += permute_fwd_ms
@@ -564,20 +641,21 @@ class MoEMLPProfiler(BaseModuleProfiler):
             act_bytes = 2 * topk_tokens * moe_ffn * bytes_per_el  # read + write
         activation_ms = act_bytes / (activation_bw_gbps * 1e6)
 
-        fwd_time += activation_ms
-        bwd_time += activation_ms
+        fwd_time += kernel_report.term("moe_activation", "fwd", activation_ms)
+        bwd_time += kernel_report.term("moe_activation", "bwd", activation_ms)
 
         # ── 5. Shared experts (if any) ──
         _brk_shared_f = _brk_shared_b = 0.0
         shared_sz = self.config.model_config.moe_shared_expert_intermediate_size
         if shared_sz:
-            shared_result = self._gemm_backend.simulate_mlp_gemms(
-                batch_tokens=batch_tokens,
-                hidden_size=hidden_size,
-                ffn_hidden_size=shared_sz,
-                dtype=gemm_dtype,
-                swiglu=self.config.model_config.swiglu,
-            )
+            with kernel_report.module("moe_shared"):
+                shared_result = self._gemm_backend.simulate_mlp_gemms(
+                    batch_tokens=batch_tokens,
+                    hidden_size=hidden_size,
+                    ffn_hidden_size=shared_sz,
+                    dtype=gemm_dtype,
+                    swiglu=self.config.model_config.swiglu,
+                )
             _brk_shared_f = shared_result.forward_time_ms
             _brk_shared_b = shared_result.backward_time_ms
             fwd_time += _brk_shared_f
@@ -602,16 +680,20 @@ class MoEMLPProfiler(BaseModuleProfiler):
             mhc_fwd = (expand_f + collapse_f) / (eta_mhc * peak_hbm * 1e6)
             mhc_bwd = (expand_b + collapse_b) / (eta_mhc * peak_hbm * 1e6)
             dt_mhc = gemm_dtype_from_config(self.config.model_config)
-            cw = self._gemm_backend.simulate_gemm(
-                M2, hc * hc + 2 * hc, hc * hidden_size, dt_mhc
+            cw = kernel_report.gemm(
+                self._gemm_backend, "ffn_mhc_mapping", "fwd", M2, hc * hc + 2 * hc, hc * hidden_size, dt_mhc
             ).forward_time_ms
             cw_mem = 2.0 * M2 * hc * hidden_size * mbpe  # RMS over K*D-wide input
-            mhc_fwd += cw + cw_mem / (eta_mhc * peak_hbm * 1e6)
-            mhc_bwd += 2.0 * cw + 1.5 * cw_mem / (eta_mhc * peak_hbm * 1e6)
             n_iters = int(os.getenv("PRIMUS_HC_SINKHORN_ITERS", "20"))
             sink_ms = (1.0 + 2.0 * max(0, n_iters - 1)) * 0.75 / 1e3
-            mhc_fwd += sink_ms
-            mhc_bwd += sink_ms
+            mhc_fwd = cw + kernel_report.term(
+                "ffn_mhc_mix", "fwd", mhc_fwd + cw_mem / (eta_mhc * peak_hbm * 1e6) + sink_ms
+            )
+            mhc_bwd = kernel_report.term(
+                "ffn_mhc_mapping", "bwd", 2.0 * cw, kind="gemm"
+            ) + kernel_report.term(
+                "ffn_mhc_mix", "bwd", mhc_bwd + 1.5 * cw_mem / (eta_mhc * peak_hbm * 1e6) + sink_ms
+            )
             fwd_time += mhc_fwd
             bwd_time += mhc_bwd
 
