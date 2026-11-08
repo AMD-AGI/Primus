@@ -5,7 +5,7 @@
 # the two named build contexts:
 #   primus   a `git archive` of this Primus checkout, with third_party/Megatron-LM
 #   dlrmv4   the DLRMv4 `recommendation/` tree
-# See README.md in this directory for what each layer fixes and how to reproduce the results.
+# See ../README.md for how to run the workloads.
 
 ARG BASE_IMAGE=amdprimus/amdprimus:tas-20261019-turbo-4c74631
 FROM ${BASE_IMAGE}

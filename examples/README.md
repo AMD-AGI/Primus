@@ -55,6 +55,7 @@ examples/
 │   │   └── kimi-k3/
 │   └── guides/            #   walkthroughs and packaged workflows
 │       ├── customer_package/
+│       ├── mi455x_package/
 │       ├── moe_package/
 │       ├── odc/
 │       ├── offline_tune/
