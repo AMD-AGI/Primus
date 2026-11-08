@@ -158,7 +158,7 @@ def build_attn_res_mixer_bwd(
     if inject and inject not in BWD_INJECTIONS:
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(BWD_INJECTIONS)}")
 
-    vec_path = use_vector_kernel(H, elem_dtype, inject)
+    vec_path = use_vector_kernel(H, elem_dtype, inject, arch)
     BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK
     EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
