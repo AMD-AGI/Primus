@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 #
-# MI455X (gfx1250) training image for the Kimi K3.1 Pro 4-layer proxy (Primus / Megatron) and
-# the MLPerf DLRMv4 HSTU ranker (generative_recommenders). Build with ./build.sh, which supplies
-# the two named build contexts:
+# MI455X (gfx1250) training image for the Kimi K3.1 Pro 4-layer proxy and Llama-2-70B LoRA SFT
+# (Primus / Megatron) and the MLPerf DLRMv4 HSTU ranker (generative_recommenders). Build with
+# ./build.sh, which supplies the two named build contexts:
 #   primus   a `git archive` of this Primus checkout, with third_party/Megatron-LM
 #   dlrmv4   the DLRMv4 `recommendation/` tree
 # See ../README.md for how to run the workloads.
@@ -105,7 +105,7 @@ LABEL org.amd.base-image="${BASE_IMAGE}" \
       org.amd.primus-turbo.commit="${TURBO_COMMIT}" \
       org.amd.triton.commit="${TRITON_COMMIT}" \
       org.amd.dlrmv4.commit="${DLRMV4_COMMIT}" \
-      org.amd.workloads="kimi_k3.1_pro_4L;dlrmv4_yambda_5b"
+      org.amd.workloads="kimi_k3.1_pro_4L;llama2_70b_lora_sft;dlrmv4_yambda_5b"
 
 WORKDIR /workspace/
 ENTRYPOINT []
