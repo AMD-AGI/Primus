@@ -12,6 +12,24 @@ from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
 from primus.core.utils.module_utils import log_rank_0
 
 
+def _stage_state_dict_to_device(state_dict: dict, device) -> dict:
+    """Copy the CPU tensors of an mmap-loaded state dict to ``device`` one at a time.
+
+    A host-to-device copy straight from ``torch.load(mmap=True)`` storage pins its private
+    file mapping, and the kernel turns every pinned page into anonymous memory: one full
+    copy of the checkpoint per rank (Llama-2-70B: ~138 GB per rank, 4 ranks exceed host RAM).
+    Each tensor is cloned to ordinary host memory first, so only one tensor is resident at
+    a time.
+    """
+    staged = {}
+    for key, value in state_dict.items():
+        if hasattr(value, "device") and value.device.type == "cpu" and value.numel() > 0:
+            staged[key] = value.clone().to(device)
+        else:
+            staged[key] = value
+    return staged
+
+
 def _resolve_legacy_ckpt_file(ckpt_dir: str, core_mpu) -> str:
     """Resolve the torch(legacy)-format weight file for the current rank.
 
@@ -412,7 +430,9 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                         model_sd = legacy_sd["model"]
                     else:
                         model_sd = legacy_sd
+                    model_sd = _stage_state_dict_to_device(model_sd, torch.cuda.current_device())
                     missing, unexpected = model.load_state_dict(model_sd, strict=False)
+                    del legacy_sd, model_sd
                 else:
                     # ------------------------------------------------------
                     # torch_dist format (Megatron-Bridge / dist_checkpointing).
