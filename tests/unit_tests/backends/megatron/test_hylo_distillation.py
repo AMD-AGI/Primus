@@ -212,6 +212,15 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "hylo_teacher_yarn_factor": 32.0}))
 
 
+def test_teacher_args_keep_the_checkpoint_and_fill_newer_megatron_fields():
+    run = Namespace(num_layers=16, fp4_param_gather=False, bf16=True, moe_deepep_num_sms=None)
+    saved = Namespace(num_layers=32, use_rope_scaling=True, moe_deepep_num_sms=20)
+    teacher = hylo_distillation.teacher_args_from_checkpoint(run, saved)
+    assert (teacher.num_layers, teacher.use_rope_scaling) == (32, True)
+    assert (teacher.fp4_param_gather, teacher.bf16, teacher.moe_deepep_num_sms) == (False, True, None)
+    assert saved.num_layers == 32 and not hasattr(saved, "fp4_param_gather")
+
+
 def test_validate_hylo_args_derives_the_trainer_warmup():
     args = Namespace(
         tensor_model_parallel_size=1,

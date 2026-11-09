@@ -15,6 +15,7 @@ from __future__ import annotations
 import functools
 import glob
 import math
+from argparse import Namespace
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -431,6 +432,16 @@ def set_teacher_yarn(config: Any, factor: float, original_max_position_embedding
     config.yarn_correction_range_round_to_int = True
 
 
+def teacher_args_from_checkpoint(args: Any, saved: Any) -> Namespace:
+    """The teacher checkpoint's saved args, with any field its Megatron predates taken from this run.
+
+    The teacher is built dense, so its saved ``moe_*`` fields are only the defaults of the Megatron that
+    wrote it; newer Megatron rejects some of them (deprecated knobs), so those come from this run too.
+    """
+    kept = {name: value for name, value in vars(saved).items() if not name.startswith("moe_")}
+    return Namespace(**{**vars(args), **kept})
+
+
 def _build_teacher(args, pre_process, post_process, config, pg_collection):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.gpt_layer_specs import (
@@ -443,6 +454,7 @@ def _build_teacher(args, pre_process, post_process, config, pg_collection):
     teacher_args = envelope.get("args")
     if teacher_args is None:
         raise ValueError("teacher checkpoint has no saved Megatron args")
+    teacher_args = teacher_args_from_checkpoint(args, teacher_args)
     teacher_config = core_transformer_config_from_args(teacher_args)
     requested_layers = getattr(args, "hylo_teacher_num_layers", None)
     if requested_layers is not None and int(requested_layers) != teacher_config.num_layers:

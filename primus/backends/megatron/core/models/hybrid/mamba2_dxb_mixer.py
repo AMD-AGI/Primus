@@ -84,6 +84,7 @@ class Mamba2DxbMixer(MegatronModule):
         layer_number: Optional[int] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: int = 0,
+        name: Optional[str] = None,  # passed by MambaLayer from Megatron-core 0.19 on, as to MambaMixer
     ):
         if mamba_chunk_scan_combined is None or RMSNormGated is None:
             raise ImportError("Mamba2DxbMixer needs mamba-ssm; install it with `pip install mamba-ssm`")

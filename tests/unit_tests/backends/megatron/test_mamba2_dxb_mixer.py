@@ -110,6 +110,7 @@ def test_mixer_matches_grouped_mamba2_recurrence(monkeypatch, groups, d_xb):
         d_model=16,
         d_xb=d_xb,
         pg_collection=SimpleNamespace(tp=single, cp=single),
+        name="decoder.layers.0.mixer",
     ).cuda()
     assert (mixer.d_inner, mixer.repeats) == (4 * groups, 2)
     hidden = torch.randn(7, 2, 16, device="cuda")
