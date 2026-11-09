@@ -169,13 +169,12 @@ def test_masked_fused_kl_without_fla_says_how_to_fall_back(monkeypatch):
 
 
 def _megatron_args(monkeypatch, **values):
+    # A stub, not the real module: off GPU, importing megatron.training can raise (mamba_ssm queries
+    # the device at import).
     args = Namespace(**values)
-    try:
-        import megatron.training as megatron_training
-    except ImportError:
-        megatron_training = ModuleType("megatron.training")
-        monkeypatch.setitem(sys.modules, "megatron.training", megatron_training)
-    monkeypatch.setattr(megatron_training, "get_args", lambda: args, raising=False)
+    megatron_training = ModuleType("megatron.training")
+    megatron_training.get_args = lambda: args
+    monkeypatch.setitem(sys.modules, "megatron.training", megatron_training)
     return args
 
 
@@ -422,8 +421,9 @@ def test_ild_step_scores_last_layer_after_final_norm_once_per_micro_batch(monkey
 def test_sft_ild_step_ignores_padding(monkeypatch):
     monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "ild"))
     monkeypatch.setattr(hylo_distillation, "_log_loss", lambda metrics: None)
-    # The third position is padding: its token value would raise the loss if it counted.
-    batch = {"input_ids": torch.tensor([[1, 2, 9]]), "loss_mask": torch.tensor([[0.0, 1.0, 0.0]])}
+    # A prompt token, the supervised EOS (the label at position 0), then padding, whose token value
+    # would raise the loss if it counted.
+    batch = {"input_ids": torch.tensor([[1, 2, 9]]), "loss_mask": torch.tensor([[1.0, 0.0, 0.0]])}
     _output, loss_func = create_sft_forward_step()(iter([batch]), _StudentHybrid())
     loss, _count, _report = loss_func(_output)
     width = torch.norm(torch.ones(4)) * torch.tensor([1.0, 2.0]).mean()

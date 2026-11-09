@@ -57,8 +57,9 @@ TEMPLATE = (
     "{{ content }}{% endfor %}{% if add_generation_prompt %}"
     "{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"
 )
-# Kept verbatim from alignment-handbook, including the adjacent literals in the last entry.
-HUMAN_EVAL_STRINGS_OK = ["return x + y", "return len(string)", "return n**2", "return " ".join(strings)"]
+# alignment-handbook's list. Its last entry is written `"return " ".join(strings)"`, which Python joins
+# into the one string below.
+HUMAN_EVAL_STRINGS_OK = ["return x + y", "return len(string)", "return n**2", "return .join(strings)"]
 
 
 def extract_docstring(prompt: str) -> str:

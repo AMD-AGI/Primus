@@ -40,7 +40,7 @@ def test_sequential_sampler_gives_each_rank_its_recorded_batch(tmp_path):
 def test_megatron_sampler_gives_each_rank_its_recorded_batch(tmp_path):
     try:
         from megatron.training.datasets.data_samplers import MegatronPretrainingSampler
-    except ImportError as e:
+    except (ImportError, RuntimeError) as e:  # RuntimeError: mamba_ssm queries the GPU at import
         pytest.skip(f"Megatron is not importable here: {e}")
     batches = _record(tmp_path)
     ds = HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
