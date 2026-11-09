@@ -3589,6 +3589,24 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
     return num_params * bytes_per_param / _BYTES_PER_GB
 
 
+# Comm/compute overlap is never perfect (per-bucket launch and sync, the
+# reduce-scatter's reduction compute, the param all-gather not fully tucking
+# under the next forward): this fraction of an overlapped collective stays exposed.
+OVERLAP_INEFFICIENCY = 0.20
+
+
+def exposed_grad_reduce_ms(reduce_ms: float, overlap_window_ms: Optional[float]) -> float:
+    """The part of the iteration's gradient reduce that compute does not hide.
+
+    ``overlap_window_ms`` is the fwd+bwd compute it can overlap, or ``None``
+    when it runs after the backward. Overlapped, the exposed part is the excess
+    over the window, but never less than the overlap inefficiency.
+    """
+    if overlap_window_ms is None:
+        return reduce_ms
+    return min(reduce_ms, max(OVERLAP_INEFFICIENCY * reduce_ms, reduce_ms - overlap_window_ms))
+
+
 def _run_multinode_projection(
     training_config,
     single_node_time_ms,
@@ -3704,8 +3722,11 @@ def _run_multinode_projection(
     # NOTE: Gradient allreduce happens ONCE per iteration (after the last
     # microbatch), not once per microbatch. We track the exposed (non-overlapped)
     # portion separately and add it as a per-iteration overhead.
-    grad_ar_per_iteration_ms = 0.0  # Non-overlapped allreduce time (added once)
-    param_ag_per_iteration_ms = 0.0  # Non-overlapped parameter all-gather (distributed optimizer)
+    # The collectives' full time; the calibration scales these, and their exposed part is taken after it.
+    grad_reduce_ms = 0.0
+    param_ag = 0.0
+    overlap_window = None  # None: the reduce runs after the backward, all of it exposed
+    overlap_param_gather = False
     if dp_target > 1:
         # Calculate gradient all-reduce for target
         _, target_breakdown, target_message_info, _ = calculate_collective_communication_time(
@@ -3749,29 +3770,13 @@ def _run_multinode_projection(
             # sync is a reduce-scatter (half the all-reduce volume); the matching
             # parameter all-gather overlaps the NEXT forward (overlap_param_gather).
             use_dist_opt = getattr(mp_config, "use_distributed_optimizer", False)
-            effective_ar = target_grad_ar * (0.5 if use_dist_opt else 1.0)
-            # Exposed grad-AR has two parts:
-            #   1. Bandwidth-bound excess that does not fit the compute hiding
-            #      window: max(0, effective_ar - overlap_window).
-            #   2. An overlap-inefficiency residual: even when the reduce fits the
-            #      window, comm/compute overlap is never perfect (per-bucket launch
-            #      & sync overhead, reduce-scatter reduction compute, and the param
-            #      all-gather not fully tucking under the next forward).
-            GRAD_AR_OVERLAP_INEFFICIENCY = 0.20  # 80% of the reduce is hidden
-            residual = GRAD_AR_OVERLAP_INEFFICIENCY * effective_ar
-            grad_ar_per_iteration_ms = min(
-                effective_ar,
-                max(residual, effective_ar - overlap_window),
-            )
+            grad_reduce_ms = target_grad_ar * (0.5 if use_dist_opt else 1.0)
         else:
             # Not overlapped: all-reduce runs sequentially after backward
-            grad_ar_per_iteration_ms = target_grad_ar
+            overlap_window = None
+            grad_reduce_ms = target_grad_ar
         param_ag = target_message_info.get("param_allgather_ms", 0.0)
-        if getattr(mp_config, "overlap_param_gather", False):
-            # Overlaps the next forward, with the same imperfect hiding as the gradient reduce.
-            param_ag_per_iteration_ms = 0.20 * param_ag
-        else:
-            param_ag_per_iteration_ms = param_ag
+        overlap_param_gather = bool(getattr(mp_config, "overlap_param_gather", False))
 
     # Per-microbatch projected time stays as compute only
     projected_time_ms = projected_compute_time_ms
@@ -3971,17 +3976,13 @@ def _run_multinode_projection(
             )
         optimizer_step_ms = _measured_opt_ms
 
-    grad_ar_per_iteration_ms = kernel_report.term(
-        "dp_grad_reduce", "step", grad_ar_per_iteration_ms, kind="comm", scope_name="iteration"
-    )
+    grad_reduce_ms = kernel_report.term("dp_grad_reduce", "step", grad_reduce_ms, kind="comm", scope_name="iteration")
     optimizer_step_ms = kernel_report.term(
         "optimizer", "step", optimizer_step_ms, kind="optimizer", scope_name="iteration"
     )
-    if param_ag_per_iteration_ms > 0:
-        param_ag_per_iteration_ms = kernel_report.term(
-            "dp_param_gather", "step", param_ag_per_iteration_ms, kind="comm", scope_name="iteration"
-        )
-    grad_ar_per_iteration_ms += param_ag_per_iteration_ms
+    param_ag = kernel_report.term("dp_param_gather", "step", param_ag, kind="comm", scope_name="iteration")
+    grad_ar_per_iteration_ms = exposed_grad_reduce_ms(grad_reduce_ms, overlap_window)
+    grad_ar_per_iteration_ms += OVERLAP_INEFFICIENCY * param_ag if overlap_param_gather else param_ag
     engine_step_ms = kernel_report.extras("iteration", "step")
 
     # Build full iteration time:
