@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from primus.core.launcher.parser import load_primus_config
-from primus.core.projection import kernel_report
+from primus.core.projection import kernel_report, param_counts
 from primus.core.projection.bench_harness import get_bench_runner, resolve_model_adapter
 from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
@@ -602,6 +602,13 @@ def calculate_collective_communication_time(
     stage_vocab_params = vocab_params * (2 if pp == 1 and untied else 1)
     non_expert_params_per_rank = non_expert_params // (tp * pp) + stage_vocab_params
     num_params_per_rank = params_per_gpu // (tp * pp) + stage_vocab_params
+    # Parameters on the most loaded stage, split by the data-parallel group that replicates them.
+    local = param_counts.local_params(training_config)
+    grad_bytes = param_counts.grad_bytes_per_param(training_config)
+    edp = param_counts.expert_dp_size(training_config, dp)
+    # Per-rank counts follow the DP-group split above.
+    non_expert_params_per_rank = local.dense
+    num_params_per_rank = local.total
 
     breakdown = {}
     message_info = {}
@@ -620,15 +627,12 @@ def calculate_collective_communication_time(
     # With FSDP2, gradient sync is handled by reduce-scatter, not all-reduce
     # With distributed_optimizer (ZeRO-1), we still need gradient all-reduce
     if dp > 1 and not use_fsdp:
-        # For MoE with EP > 1, expert gradient allreduce is across dp_replicas
-        # (1 GPU per node), which is bandwidth-limited by single inter-node link.
-        # Non-expert gradient allreduce is across full DP group.
-        dp_replicas = dp // max(ep, 1)  # data-parallel replicas (excluding EP)
+        # Dense gradients reduce over the full DP group, expert gradients over the expert
+        # data-parallel group only (none when expert parallelism fills the DP group).
+        dp_replicas = edp
 
-        if ep > 1 and num_moe_layers > 0 and dp_replicas > 1:
-            # Expert gradient allreduce: across dp_replicas GPUs (1 per node)
-            expert_params_per_gpu = (expert_total_params // ep) // (tp * pp)
-            expert_grad_size = expert_params_per_gpu * grad_bytes
+        if ep > 1 and num_moe_layers > 0:
+            expert_grad_size = local.expert * grad_bytes if dp_replicas > 1 else 0
             # Single-NIC inter-node ring. Because EP fills the node (EP ==
             # gpus_per_node), each expert lives on exactly ONE GPU per node, so a
             # given expert's gradient is replicated only ACROSS nodes (1 GPU per
@@ -649,14 +653,13 @@ def calculate_collective_communication_time(
             expert_ar_time_ms = 2 * expert_grad_size * ring_factor / (pod_bw * 1e9) * 1e3
 
             # Non-expert gradient allreduce: across full DP group
-            non_expert_per_rank = non_expert_params_per_rank
-            non_expert_grad_size = non_expert_per_rank * grad_bytes
+            non_expert_grad_size = local.dense * grad_bytes
             non_expert_ar_time = cm.allreduce(coll_args, non_expert_grad_size, dp, groups=["dp"])
             non_expert_ar_ms = non_expert_ar_time / 1000
 
             total_ar_ms = expert_ar_time_ms + non_expert_ar_ms
-            message_info["non_expert_ar_ms_per_param"] = non_expert_ar_ms / max(1, non_expert_per_rank)
-            message_info["expert_ar_ms_per_param"] = expert_ar_time_ms / max(1, expert_params_per_gpu)
+            message_info["non_expert_ar_ms_per_param"] = non_expert_ar_ms / max(1, local.dense)
+            message_info["expert_ar_ms_per_param"] = expert_ar_time_ms / max(1, local.expert)
             total_grad_size = expert_grad_size + non_expert_grad_size
 
             breakdown["gradient_allreduce"] = total_ar_ms
@@ -672,10 +675,8 @@ def calculate_collective_communication_time(
             overlap_grad_reduce_cfg = getattr(mp_config, "overlap_grad_reduce", True)
             message_info["moe_ar_no_overlap"] = not overlap_grad_reduce_cfg
         else:
-            # Expert-DP of 1 (EP spans the whole DP group): expert gradients
-            # have no replica to reduce with; only non-expert gradients sync.
-            moe_sharded = ep > 1 and num_moe_layers > 0
-            grad_size = (non_expert_params_per_rank if moe_sharded else num_params_per_rank) * grad_bytes
+            moe_sharded = False
+            grad_size = local.total * grad_bytes
             ar_time_dp = cm.allreduce(coll_args, grad_size, dp, groups=["dp"])
             breakdown["gradient_allreduce"] = ar_time_dp / 1000  # Convert to ms
             message_info["non_expert_ar_ms_per_param"] = ar_time_dp / 1000 / max(1, grad_size // grad_bytes)
@@ -696,6 +697,14 @@ def calculate_collective_communication_time(
     message_info["untied_embeddings"] = untied
     message_info["non_expert_params_per_rank"] = non_expert_params_per_rank
     message_info["expert_params_per_rank"] = num_params_per_rank - non_expert_params_per_rank
+    # 1b. The distributed optimizer's parameter all-gather (bf16 model weights), over the same
+    # groups the gradients reduce in. Kept out of ``breakdown``: the iteration adds its exposed part.
+    param_ag_ms = 0.0
+    if dp > 1 and not use_fsdp and getattr(mp_config, "use_distributed_optimizer", False):
+        param_ag_ms = cm.allgather(coll_args, local.dense * 2, dp, groups=["dp"]) / 1000
+        if edp > 1:
+            param_ag_ms += cm.allgather(coll_args, local.expert * 2, edp, groups=["dp"]) / 1000
+    message_info["param_allgather_ms"] = param_ag_ms
 
     # 2. MoE All-to-All (EP group)
     # With TP > 1 and sequence parallelism, each GPU holds S/TP tokens.
@@ -4230,6 +4239,7 @@ def _run_multinode_projection(
     # microbatch), not once per microbatch. We track the exposed (non-overlapped)
     # portion separately and add it as a per-iteration overhead.
     grad_ar_per_iteration_ms = 0.0  # Non-overlapped allreduce time (added once)
+    param_ag_per_iteration_ms = 0.0  # Non-overlapped parameter all-gather (distributed optimizer)
     if dp_target > 1:
         # Calculate gradient all-reduce for target
         _, target_breakdown, target_message_info, _ = calculate_collective_communication_time(
@@ -4257,6 +4267,12 @@ def _run_multinode_projection(
         else:
             # Not overlapped: all-reduce runs sequentially after backward
             grad_ar_per_iteration_ms = target_grad_ar
+        param_ag = target_message_info.get("param_allgather_ms", 0.0)
+        if getattr(mp_config, "overlap_param_gather", False):
+            # Overlaps the next forward, with the same imperfect hiding as the gradient reduce.
+            param_ag_per_iteration_ms = 0.20 * param_ag
+        else:
+            param_ag_per_iteration_ms = param_ag
 
     # Per-microbatch projected time stays as compute only
     projected_time_ms = projected_compute_time_ms
@@ -4503,6 +4519,11 @@ def _run_multinode_projection(
     optimizer_step_ms = kernel_report.term(
         "optimizer", "step", optimizer_step_ms, kind="optimizer", scope_name="iteration"
     )
+    if param_ag_per_iteration_ms > 0:
+        param_ag_per_iteration_ms = kernel_report.term(
+            "dp_param_gather", "step", param_ag_per_iteration_ms, kind="comm", scope_name="iteration"
+        )
+    grad_ar_per_iteration_ms += param_ag_per_iteration_ms
     engine_step_ms = kernel_report.extras("iteration", "step")
 
     # Build full iteration time:

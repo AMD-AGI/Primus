@@ -24,8 +24,10 @@ class ModelParallelConfig:
     virtual_pipeline_model_parallel_size: int = 1
     context_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1
+    expert_tensor_parallel_size: int = None  # None: the tensor-parallel size
     use_torch_fsdp2: bool = False
     use_distributed_optimizer: bool = False
+    accumulate_allreduce_grads_in_fp32: bool = False
     overlap_grad_reduce: bool = True
     overlap_param_gather: bool = False
     # Pipeline stage layer distribution
@@ -121,8 +123,9 @@ class ModelConfig:
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
     turbo_sync_free_moe_stage: int = 0  # 0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act
 
-    # Loss fusion – fuses cross-entropy with output layer avoiding full logits materialisation
+    # Fused vocab-parallel cross-entropy (the logits are still materialised by the output layer)
     cross_entropy_loss_fusion: bool = False
+    cross_entropy_fusion_impl: str = "native"  # "native" (Megatron's fused path) or "te"
 
     # ------------------------------------------------------------------
     # Sparse-embedding + HSTU (DLRM-v4 / TorchRec ranker) fields.
