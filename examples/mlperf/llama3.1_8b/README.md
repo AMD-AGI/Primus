@@ -91,3 +91,14 @@ bash run_and_time.sh
 
 - `log_interval: 99999999` suppresses regular Primus logs
 - `RUN_RUNTIME_TUNABLES` defaults to `0`; set `RUN_RUNTIME_TUNABLES=1` to run `runtime_tunables.sh` on the host before each trial (some steps require `sudo`).
+- `run_and_time.sh` sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to the file in `hipblaslt_tuning/` named after the image's hipBLASLt build (`HIPBLASLT_VERSION_TWEAK`), if there is one; hipBLASLt solution indices differ between builds. Set the variable yourself (empty for hipBLASLt's own choices) to override. The files tune the output layer's weight-gradient GEMM, accumulated in place by Apex, with output identical to hipBLASLt's choice. `main_grad` is FP32 unless `grad_reduce_in_bf16: true`, which makes it BF16:
+
+  | Image (hipBLASLt) | `main_grad`, MBS | hipBLASLt's choice | Tuned |
+  |---|---|---|---|
+  | `rocm/primus:v26.9` (`cb261897`) | FP32, 2 (this config) | 23202, 16.5 ms | 23309, 13.1 ms |
+  | | FP32, 4 | 23202, 32.6 ms | 23309, 27.0 ms |
+  | | BF16, 4 | 12094, 25.8 ms | 12115, 24.0 ms |
+  | `rocm/primus:v26.6` (`bbb68174`) | BF16, 4 | 12088, 25.6 ms | 12109, 24.3 ms |
+
+  On `v26.6` hipBLASLt's choice for FP32 `main_grad` is already the fastest. The files were made with `examples/megatron/guides/offline_tune/offline_tune_gemm_ext.py` from the GEMMs' `HIPBLASLT_LOG_MASK=32` lines; another image needs its own file.
+- `PRIMUS_TURBO_CROSS_ENTROPY=true` in `config_MI355X_1x8x1.sh` replaces TE's fused cross entropy with Primus-Turbo's, which writes the logits' gradient over the logits. Loss and gradient are bit-identical to TE's; on `rocm/primus:v26.9` forward plus backward takes 2.90 ms instead of 3.65 ms per micro-batch (MBS 2). The image's Primus-Turbo must have `primus_turbo.pytorch.ops.cross_entropy` (`v26.9` has it, `v26.6` does not).

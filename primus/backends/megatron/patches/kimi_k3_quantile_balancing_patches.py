@@ -10,8 +10,8 @@
 updated for a whole global batch::
 
     if config.moe_router_enable_expert_bias:
-        _update_router_expert_bias(model, config)     # finalize_model_grads.py
-    reset_model_temporary_tensors(config, model)
+        ...
+        _update_router_expert_bias(model, config, tp_dp_cp_group=tp_dp_cp_group)
 
 ``_update_router_expert_bias`` gathers ``local_tokens_per_expert`` and
 ``expert_bias`` from every router and hands them to ``get_updated_expert_bias``
@@ -76,7 +76,7 @@ def patch_quantile_balancing(ctx: PatchContext):
     original = finalize_model_grads._update_router_expert_bias
     state = {"step": 0, "warned": False, "routers": None}
 
-    def _quantile_update_router_expert_bias(model, config):
+    def _quantile_update_router_expert_bias(model, config, tp_dp_cp_group=None):
         # The set of QB routers is fixed for the run; discover it once and cache
         # (model structure does not change across optimizer steps).
         if state["routers"] is None:
@@ -97,11 +97,11 @@ def patch_quantile_balancing(ctx: PatchContext):
                     "submodules.router only when quantile_balancing_enabled(config)). "
                     "Falling back to the sign-based rule."
                 )
-            original(model, config)
+            original(model, config, tp_dp_cp_group=tp_dp_cp_group)
             return
 
         state["step"] += 1
-        update_router_expert_bias_quantile(model, config, step=state["step"])
+        update_router_expert_bias_quantile(model, config, group=tp_dp_cp_group, step=state["step"])
 
     finalize_model_grads._update_router_expert_bias = _quantile_update_router_expert_bias
     log_rank_0(

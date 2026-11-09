@@ -485,7 +485,10 @@ jobs:
           # gates (they self-skip off MI355X).
           TIER_ARGS=()
           [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] && TIER_ARGS=(--run-slow)
-          pytest --maxfail=1 -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
+          # The full run keeps going past a failure so one failure does not hide the rest.
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
             --cov=primus --cov-branch --cov-report=term-missing:skip-covered \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
@@ -585,7 +588,9 @@ jobs:
           # the Triton/LLVM toolchain is fixed for this kernel.
           TIER_ARGS=()
           [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
-          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_mamba_1B_hybrid \
@@ -617,7 +622,9 @@ jobs:
           # Re-enable once the primus_turbo/aiter fp8 attention backward is fixed.
           TIER_ARGS=()
           [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
-          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py "${TIER_ARGS[@]}" \
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_torchtitan_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_671b \
             --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_16b_fp8 \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
