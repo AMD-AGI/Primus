@@ -26,13 +26,13 @@ modules:
 
       # --- Training Config ---
       train_iters: ${PRIMUS_TRAIN_ITERS:200}
-      micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:2}                # grad_acc = global_batch_size / (micro_batch_size * num_gpus) = 32 / (2 * 8) = 2
+      micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:4}                # grad_acc = global_batch_size / (micro_batch_size * num_gpus) = 32 / (4 * 8) = 1
       global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:32}
       seq_length: 8192
       max_position_embeddings: 8192
       seed: ${SEED:1234}
-      lr: ${PRIMUS_LR:0.0008}          # 8e-4
-      min_lr: ${PRIMUS_MIN_LR:0.00008}     # 10% of lr
+      lr: ${PRIMUS_LR:0.00076}          # 7.6e-4
+      min_lr: ${PRIMUS_MIN_LR:0.000076}     # 10% of lr
       lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:64}
       lr_decay_iters: 1199936
       lr_decay_style: cosine
@@ -53,6 +53,7 @@ modules:
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
+      ddp_num_buckets: 32
       gradient_accumulation_fusion: true
       masked_softmax_fusion: true
       ddp_average_in_collective: true
@@ -93,29 +94,39 @@ modules:
       # --- FSDP Config ---
       use_torch_fsdp2: false
       use_distributed_optimizer: true # this is needed for fsdp2
+      # TE FusedAdam: 1.2-1.9 ms per step faster here than the Triton fused Adam that
+      # trainer_base.yaml defaults to.
+      use_triton_fused_adam: ${PRIMUS_TRITON_FUSED_ADAM:false}
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
       # Turbo's fused CE gives TE's loss and gradient bit for bit; writing the gradient over the
       # logits saves ~0.75 ms per micro-batch. Needs Primus-Turbo with ops.cross_entropy.
-      use_turbo_cross_entropy: ${PRIMUS_TURBO_CROSS_ENTROPY:false}
-      turbo_ce_overwrite_input: ${PRIMUS_TURBO_CROSS_ENTROPY:false}
+      use_turbo_cross_entropy: ${PRIMUS_TURBO_CROSS_ENTROPY:true}
+      turbo_ce_overwrite_input: ${PRIMUS_TURBO_CROSS_ENTROPY:true}
       # Alternative to Turbo CE: keep TE's cross entropy but build its gradient in backward.
+      # Set PRIMUS_TURBO_CROSS_ENTROPY=false with it; the two are exclusive.
       deferred_cross_entropy: ${PRIMUS_DEFERRED_CROSS_ENTROPY:false}
 
       # --- Mixed Precision Config ---
       fp4: e2m1
       fp4_recipe: mxfp4
-      accumulate_allreduce_grads_in_fp32: false
+      accumulate_allreduce_grads_in_fp32: ${PRIMUS_ACCUM_GRADS_FP32:true}
       grad_reduce_in_bf16: true
-      attention_softmax_in_fp32: false
-
+      attention_softmax_in_fp32: ${PRIMUS_ATTN_SOFTMAX_FP32:true}
 
       # --- Primus Turbo Config ---
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_gemm: false              # can't use together with delayed recipe
+      # FlyDSL attention, MXFP4 GEMMs and fused dense MLP, and Turbo RMSNorm. The
+      # config_MI355X_1x8x1.sh environment selects the FlyDSL backends and fusions.
+      enable_primus_turbo: ${ENABLE_PRIMUS_TURBO:true}
+      use_turbo_attention: ${PRIMUS_USE_TURBO_ATTENTION:true}
+      attention_backend: ${PRIMUS_ATTENTION_BACKEND:flash}
+      use_turbo_gemm: ${PRIMUS_USE_TURBO_GEMM:true}
+      turbo_gemm_backend: ${PRIMUS_TURBO_GEMM_BACKEND:flydsl}
+      use_turbo_fused_dense_mlp: ${PRIMUS_TURBO_FUSED_DENSE_MLP:true}
+      use_turbo_rms_norm: ${PRIMUS_USE_TURBO_RMS_NORM:true}
       use_turbo_grouped_gemm: false
       moe_use_fused_router_with_aux_score: false
-      enable_turbo_attention_float8 : false
+      enable_turbo_attention_float8: false
+      create_attention_mask_in_dataloader: false

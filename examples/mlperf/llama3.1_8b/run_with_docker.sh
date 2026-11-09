@@ -17,7 +17,7 @@
 #   export DATADIR=/data/mlperf_llama31_8b/data
 #   export MODELDIR=/data/mlperf_llama31_8b/model
 #   export LOGDIR=/data/mlperf_llama31_8b/results
-#   export CONT=rocm/primus:v26.5
+#   export CONT=rocm/primus:v26.9
 #   export DGXSYSTEM=MI355X_1x8x1
 #   export HF_TOKEN=<your_token>
 #   bash examples/mlperf/llama3.1_8b/run_with_docker.sh
@@ -38,7 +38,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
 # Defaults (override via env or INTERACTIVE prompts)
 : "${DGXSYSTEM:=MI355X_1x8x1}"
-: "${CONT:=rocm/primus:v26.5}"
+: "${CONT:=rocm/primus:v26.9}"
 : "${DATADIR:=${HOME}/data/mlperf_llama31_8b/data}"
 : "${MODELDIR:=$(dirname "${DATADIR}")/model}"
 : "${LOGDIR:=$(dirname "${DATADIR}")/results}"

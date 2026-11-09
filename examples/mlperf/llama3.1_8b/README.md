@@ -7,9 +7,23 @@ MLPerf-compliant LLama3.1 8B pretraining using Primus
 ### Configuration
 
 - **Model**: LLama3.1 8B (4096 hidden, 32 layers, 32 attention heads)
-- **Training**: 1.2M iterations, GBS=32, MBS=2, LR=8e-4
+- **Training**: 1.2M iterations, GBS=32, MBS=4, LR=7.6e-4
 - **Precision**: MXFP4
 - **Data**: C4 dataset (tokenized)
+- **Kernels**: Primus-Turbo FlyDSL attention, MXFP4 GEMMs and fused dense MLP, Turbo RMSNorm,
+  FlyDSL fused QKV RoPE, Turbo fused cross entropy and TE FusedAdam
+
+### Image
+
+Use `rocm/primus:v26.9` with a Primus-Turbo at or after `d04ffd9b`. The Primus-Turbo that
+`v26.9` ships (`de8fa6ca`) has every op this recipe uses but predates the gfx950 dense-GEMM race
+fixes of Primus-Turbo#570, so rebuild Primus-Turbo from `main` in the container. After changing
+Primus-Turbo, clear FlyDSL's compile cache (`FLYDSL_RUNTIME_CACHE_DIR`, `~/.flydsl/cache` by
+default): its key does not cover every kernel change, so stale binaries can be reused.
+
+On 8x MI355X with Primus-Turbo `main` (`0f76da56`) and seed 1234, this recipe reached eval loss
+3.29 at 196,608 samples, the same sample count as the MLPerf v6.0 submission
+(`rocm/primus:v26.6`, Primus-Turbo `728e15ff`), at 771-778 ms per step.
 
 
 ### Data
@@ -42,7 +56,7 @@ export MODELDIR=/data/mlperf_llama31_8b/model
 export LOGDIR=/data/mlperf_llama31_8b/results
 
 # Optional; these are the defaults.
-export CONT=rocm/primus:v26.5
+export CONT=rocm/primus:v26.9
 export DGXSYSTEM=MI355X_1x8x1
 export NEXP=1
 
@@ -68,7 +82,7 @@ bash examples/mlperf/llama3.1_8b/run_with_docker.sh
 ### Start Docker Image
 
 ```bash
-docker run -it     --device /dev/dri     --device /dev/kfd     --device /dev/infiniband     --network host --ipc host     --group-add video     --cap-add SYS_PTRACE     --security-opt seccomp=unconfined     --privileged     -v $HOME:$HOME   --shm-size 128G     --name primus_training_env rocm/primus:v26.5
+docker run -it     --device /dev/dri     --device /dev/kfd     --device /dev/infiniband     --network host --ipc host     --group-add video     --cap-add SYS_PTRACE     --security-opt seccomp=unconfined     --privileged     -v $HOME:$HOME   --shm-size 128G     --name primus_training_env rocm/primus:v26.9
 
 cd /workspace/Primus
 ```
@@ -95,10 +109,12 @@ bash run_and_time.sh
 
   | Image (hipBLASLt) | `main_grad`, MBS | hipBLASLt's choice | Tuned |
   |---|---|---|---|
-  | `rocm/primus:v26.9` (`cb261897`) | FP32, 2 (this config) | 23202, 16.5 ms | 23309, 13.1 ms |
+  | `rocm/primus:v26.9` (`cb261897`) | FP32, 2 | 23202, 16.5 ms | 23309, 13.1 ms |
   | | FP32, 4 | 23202, 32.6 ms | 23309, 27.0 ms |
-  | | BF16, 4 | 12094, 25.8 ms | 12115, 24.0 ms |
+  | | BF16, 4 (this config) | 12094, 25.8 ms | 12115, 24.0 ms |
   | `rocm/primus:v26.6` (`bbb68174`) | BF16, 4 | 12088, 25.6 ms | 12109, 24.3 ms |
 
   On `v26.6` hipBLASLt's choice for FP32 `main_grad` is already the fastest. The files were made with `examples/megatron/guides/offline_tune/offline_tune_gemm_ext.py` from the GEMMs' `HIPBLASLT_LOG_MASK=32` lines; another image needs its own file.
-- `PRIMUS_TURBO_CROSS_ENTROPY=true` in `config_MI355X_1x8x1.sh` replaces TE's fused cross entropy with Primus-Turbo's, which writes the logits' gradient over the logits. Loss and gradient are bit-identical to TE's; on `rocm/primus:v26.9` forward plus backward takes 2.90 ms instead of 3.65 ms per micro-batch (MBS 2). The image's Primus-Turbo must have `primus_turbo.pytorch.ops.cross_entropy` (`v26.9` has it, `v26.6` does not).
+- `PRIMUS_TURBO_CROSS_ENTROPY` (default `true` in `config_MI355X_1x8x1.sh`) replaces TE's fused cross entropy with Primus-Turbo's, which writes the logits' gradient over the logits. Loss and gradient are bit-identical to TE's; on `rocm/primus:v26.9` forward plus backward takes 2.90 ms instead of 3.65 ms per micro-batch (MBS 2). The image's Primus-Turbo must have `primus_turbo.pytorch.ops.cross_entropy` (`v26.9` has it, `v26.6` does not); set it to `false` for TE's.
+- `PRIMUS_DEFERRED_CROSS_ENTROPY=true`, with `PRIMUS_TURBO_CROSS_ENTROPY=false`, keeps TE's cross entropy but builds its gradient in backward with the double BF16 rounding of the TE in `rocm/primus:v26.6`. It also converged at 196,608 samples, about 1.8 ms per step slower than Turbo's.
+- `PRIMUS_TRITON_FUSED_ADAM` (default `false`) selects TE's FusedAdam over the Triton fused Adam that `trainer_base.yaml` defaults to; TE's is 1.2-1.9 ms per step faster here.
