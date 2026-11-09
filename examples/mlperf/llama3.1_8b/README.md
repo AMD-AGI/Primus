@@ -20,6 +20,10 @@ Use `rocm/primus:v26.9` with a Primus-Turbo at or after `d04ffd9b`. The Primus-T
 fixes of Primus-Turbo#570, so rebuild Primus-Turbo from `main` in the container. After changing
 Primus-Turbo, clear FlyDSL's compile cache (`FLYDSL_RUNTIME_CACHE_DIR`, `~/.flydsl/cache` by
 default): its key does not cover every kernel change, so stale binaries can be reused.
+The fused dense MLP needs `primus_turbo.pytorch.ops.mlp_fp4` and the fused QKV RoPE needs
+`primus_turbo.pytorch.ops.rope` (`v26.9` has both); set
+`PRIMUS_TURBO_FUSED_DENSE_MLP=false` and `PRIMUS_TURBO_FLYDSL_ROPE=0` for an older Primus-Turbo.
+RoPE calls outside the FlyDSL kernel's shapes go to TE's, with a warning on the first one.
 
 On 8x MI355X with Primus-Turbo `main` (`0f76da56`) and seed 1234, this recipe reached eval loss
 3.29 at 196,608 samples, the same sample count as the MLPerf v6.0 submission
@@ -117,4 +121,5 @@ bash run_and_time.sh
   On `v26.6` hipBLASLt's choice for FP32 `main_grad` is already the fastest. The files were made with `examples/megatron/guides/offline_tune/offline_tune_gemm_ext.py` from the GEMMs' `HIPBLASLT_LOG_MASK=32` lines; another image needs its own file.
 - `PRIMUS_TURBO_CROSS_ENTROPY` (default `true` in `config_MI355X_1x8x1.sh`) replaces TE's fused cross entropy with Primus-Turbo's, which writes the logits' gradient over the logits. Loss and gradient are bit-identical to TE's; on `rocm/primus:v26.9` forward plus backward takes 2.90 ms instead of 3.65 ms per micro-batch (MBS 2). The image's Primus-Turbo must have `primus_turbo.pytorch.ops.cross_entropy` (`v26.9` has it, `v26.6` does not); set it to `false` for TE's.
 - `PRIMUS_DEFERRED_CROSS_ENTROPY=true`, with `PRIMUS_TURBO_CROSS_ENTROPY=false`, keeps TE's cross entropy but builds its gradient in backward with the double BF16 rounding of the TE in `rocm/primus:v26.6`. It also converged at 196,608 samples, about 1.8 ms per step slower than Turbo's.
+- `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma` (the default in `config_MI355X_1x8x1.sh`) runs the distributed optimizer's parameter all-gather on the SDMA copy engines. It needs an open-file limit of 1048576 in the container (`run_with_docker.sh` passes `--ulimit=nofile=1048576:1048576`) and `NCCL_CTA_POLICY` unset. Set it to `nccl` for RCCL's kernel all-gather.
 - `PRIMUS_TRITON_FUSED_ADAM` (default `false`) selects TE's FusedAdam over the Triton fused Adam that `trainer_base.yaml` defaults to; TE's is 1.2-1.9 ms per step faster here.

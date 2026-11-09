@@ -221,6 +221,7 @@ if [[ "${DGXSYSTEM}" == MI* ]]; then
         --shm-size=128g \
         --ulimit=memlock=-1 \
         --ulimit=stack=67108864 \
+        --ulimit=nofile=1048576:1048576 \
         --name="${_cont_name}" "${_cont_mounts[@]}" \
         -e IMAGE_NAME="${CONT}" \
         "${CONT}" sleep infinity
@@ -230,6 +231,7 @@ else
         --gpus=all \
         --ulimit=memlock=-1 \
         --ulimit=stack=67108864 \
+        --ulimit=nofile=1048576:1048576 \
         --security-opt=seccomp=unconfined \
         --name="${_cont_name}" "${_cont_mounts[@]}" \
         -e IMAGE_NAME="${CONT}" \

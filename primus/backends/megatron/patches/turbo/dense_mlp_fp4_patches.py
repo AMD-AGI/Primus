@@ -162,14 +162,14 @@ def _wrap_prequant(x, prequant, config):
     from primus_turbo.pytorch.core.quantized_tensor import QuantizedTensor
 
     row, row_scale, col, col_scale = prequant
-    hidden = x.shape[-1]
-    rows = x.reshape(-1, hidden).shape[0]
 
-    def _wrap(data, scale, shape, axis, recipe):
+    def _wrap(data, scale, axis, recipe):
+        # Both operands describe the same [rows, hidden] activation; quantized_axis says
+        # which way each one is blocked.
         return QuantizedTensor(
             data.contiguous(),
             scale.contiguous(),
-            shape=shape,
+            shape=x.shape,
             orig_dtype=x.dtype,
             dest_dtype=float4_e2m1fn_x2,
             granularity=ScalingGranularity.MX_BLOCKWISE,
@@ -180,17 +180,16 @@ def _wrap_prequant(x, prequant, config):
         )
 
     return (
-        _wrap(row, row_scale, torch.Size((rows, hidden)), -1, ScalingRecipe()),
-        _wrap(col, col_scale, torch.Size((hidden, rows)), -2, ScalingRecipe(use_rht=True)),
+        _wrap(row, row_scale, -1, ScalingRecipe()),
+        _wrap(col, col_scale, -2, ScalingRecipe(use_rht=True)),
     )
 
 
 class _PrequantSTE(torch.autograd.Function):
-    """Keep the MLP dgrad connected to the BF16 norm output ``x``."""
+    """Keep the MLP dgrad connected to the BF16 norm output ``x`` ([rows, hidden])."""
 
     @staticmethod
     def forward(ctx, x, prequant, config):
-        ctx.input_shape = x.shape
         ctx.set_materialize_grads(False)
         row, col = _wrap_prequant(x, prequant, config)
         # The col-wise operand only feeds the weight gradient.
@@ -200,8 +199,7 @@ class _PrequantSTE(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_row, grad_col):
         del grad_col
-        grad_x = None if grad_row is None else grad_row.reshape(ctx.input_shape)
-        return grad_x, None, None
+        return grad_row, None, None
 
 
 def _forward_turbo_dense_mlp_fp4(mlp, hidden_states):

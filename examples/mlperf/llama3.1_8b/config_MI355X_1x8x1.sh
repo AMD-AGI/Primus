@@ -60,6 +60,11 @@ export TOKENIZERS_PARALLELISM=false
 export NCCL_CHECKS_DISABLE=1
 export TORCH_NCCL_HIGH_PRIORITY=1
 
+# Parameter all-gather on the SDMA copy engines. Needs a container nofile ulimit of
+# 1048576 (run_with_docker.sh sets it) and NCCL_CTA_POLICY unset.
+export MEGATRON_PARAM_GATHER_BACKEND="${MEGATRON_PARAM_GATHER_BACKEND:-rccl_sdma}"
+export MEGATRON_RCCL_SDMA_LOG="${MEGATRON_RCCL_SDMA_LOG:-1}"
+
 export AITER_LOG_TUNED_CONFIG=0
 export LOG_AITER_GEMMS=0
 export AITER_LOG_LEVEL=ERROR
