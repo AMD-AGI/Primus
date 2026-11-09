@@ -8,7 +8,7 @@
 WHY:
   With ``fsdp.average_in_collective: true`` Megatron-FSDP reduce-scatters with
   ``ReduceOp.AVG`` instead of first scaling the whole gradient buffer by
-  ``1/dp_size``, an elementwise pass that cost 12.7 ms per step on FLUX.1-schnell.
+  ``1/dp_size``, an elementwise pass over every gradient each step.
   In megatron-fsdp 0.5.0, ``MegatronFSDP._init_fsdp_param_and_grad_buffer``
   computes the expert gradient scaling factor from
   ``get_dp_group(is_expert_parallel=True).size()`` with no ``None`` check, so a

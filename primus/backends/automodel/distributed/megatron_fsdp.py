@@ -423,8 +423,7 @@ def drop_param_reshard_hooks(wrapped) -> None:
     ``release_module_parameters`` with no sharding-strategy guard, plus a hook that
     all-gathers the parameters again for the backward. Under ``optim`` and
     ``optim_grads`` the parameters were never sharded, so the pair moves the whole
-    model over the wire a second time per step for nothing: on FLUX.1-schnell
-    ZeRO-1 that was 47.5 GB of all-gather per step instead of 23.8 GB.
+    model over the wire a second time per step for nothing.
 
     Removing the two hook families is preferable to passing no unit modules: the
     unit list also puts the pre-forward unshard hook on the transformer blocks
