@@ -61,8 +61,8 @@ class _FakeGroupedLinear(torch.nn.Module):
         self.events = events
         self.register_forward_pre_hook(lambda module, _inputs: events.append(f"{module.name}.pre_hook"))
 
-    def prepare_weights(self, x):
-        self.events.append(f"{self.name}.prepare_weights")
+    def prepare_weights(self, x, turbo_op, weight_role):
+        self.events.append(f"{self.name}.prepare_weights({turbo_op}, {weight_role})")
         return x, f"{self.name}.weight", "pattern"
 
 
@@ -79,7 +79,7 @@ def test_fused_grouped_mlp_runs_linear_pre_hooks_before_preparing_weights():
     assert events == [
         "fc1.pre_hook",
         "fc2.pre_hook",
-        "fc1.prepare_weights",
-        "fc2.prepare_weights",
+        "fc1.prepare_weights(grouped_mlp, fc1)",
+        "fc2.prepare_weights(grouped_mlp, fc2)",
     ]
     assert out == (x, "fc1.weight", "fc2.weight", "pattern")
