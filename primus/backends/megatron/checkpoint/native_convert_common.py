@@ -420,7 +420,9 @@ def check_free_space(model, save_dir: str, log=print) -> None:
     write of a tensor's data as ``[enforce fail at inline_container.cc] unexpected pos
     <n> vs <m>`` (the ``OSError`` behind it is lost), after minutes of writing, and a
     retry fails the same way. The converted checkpoint of a large model is hundreds of
-    GiB (bf16), more than a node's local ``/tmp`` often has.
+    GiB (bf16), more than a node's local ``/tmp`` often has. The refusal names the
+    interrupted saves set aside in ``save_dir`` (``set_aside_interrupted_release``),
+    which take space there.
     """
     need = checkpoint_bytes(model)
     os.makedirs(save_dir, exist_ok=True)
@@ -429,8 +431,31 @@ def check_free_space(model, save_dir: str, log=print) -> None:
     if free < need:
         raise RuntimeError(
             f"not enough disk space for the converted checkpoint in {save_dir}: needs ~{_gib(need)}, "
-            f"{_gib(free)} free. Set native_ckpt_out (or DATA_PATH) to a volume with room."
+            f"{_gib(free)} free.{_set_aside_text(save_dir)} Set native_ckpt_out (or DATA_PATH) to a "
+            "volume with room."
         )
+
+
+def _set_aside_text(save_dir: str) -> str:
+    aside = sorted(n for n in os.listdir(save_dir) if n.startswith("release.incomplete-"))
+    if not aside:
+        return ""
+    size = sum(_dir_bytes(os.path.join(save_dir, n)) for n in aside)
+    return (
+        f" Interrupted saves set aside there use {_gib(size)} ({', '.join(aside)}); "
+        "deleting them frees that space."
+    )
+
+
+def _dir_bytes(path: str) -> int:
+    total = 0
+    for root, _, names in os.walk(path):
+        for name in names:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
 
 
 def read_hf_config(hf_dir: str) -> dict:

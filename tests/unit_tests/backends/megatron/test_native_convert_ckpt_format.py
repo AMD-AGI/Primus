@@ -234,6 +234,25 @@ def test_save_refused_before_writing_when_disk_too_small(tmp_path, fake_save_che
     assert not (tmp_path / "out" / "iter_0000001").exists()
 
 
+def test_space_refusal_names_the_interrupted_saves_set_aside(tmp_path, fake_save_checkpoint, monkeypatch):
+    """Each interrupted save is kept as ``release.incomplete-<time>``; a retry without room
+    is told how much of the space they hold."""
+    state, calls = fake_save_checkpoint
+    for stamp in ("1700000000", "1700000100"):
+        aside = tmp_path / "out" / f"release.incomplete-{stamp}"
+        aside.mkdir(parents=True)
+        with open(aside / "__0_0.distcp", "wb") as f:
+            f.truncate(3 * 2**29)  # 1.5 GiB, sparse
+    _free_space(monkeypatch, free=32)
+    with pytest.raises(RuntimeError, match="not enough disk space") as err:
+        _save(tmp_path, state, "torch_dist")
+    assert calls == []
+    assert (
+        "Interrupted saves set aside there use 3.0 GiB "
+        "(release.incomplete-1700000000, release.incomplete-1700000100); deleting them frees that space"
+    ) in str(err.value)
+
+
 @pytest.mark.parametrize("ckpt_format", ["torch_dist", "torch"])
 def test_failed_write_names_directory_and_free_space(
     tmp_path, fake_save_checkpoint, monkeypatch, ckpt_format
