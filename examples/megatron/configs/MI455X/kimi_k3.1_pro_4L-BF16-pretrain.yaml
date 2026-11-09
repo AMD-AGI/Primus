@@ -1,0 +1,169 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:kimi_k3.1_pro_4L-mi455-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# FlyDSL MLA, the hipBLASLt tuning table for this recipe's 62 GEMM shapes
+# (examples/megatron/models/kimi-k3.1-pro/hipblaslt_tuning/README.md), and
+# Triton's expert scheduling off, which fla's Triton kernels need on gfx1250
+# (on a Triton whose is_expert_scheduling_enabled() honours the variable).
+# These values replace any set in the shell; edit them here to change or drop them.
+# $PRIMUS_PATH is written without braces: the config loader would require
+# ${...} to be set when the file is only parsed; it is expanded at launch.
+env:
+  PRIMUS_TURBO_ATTN_BACKEND: flydsl
+  TRITON_HIP_USE_EXPERT_SCHEDULING: "0"
+  HIPBLASLT_TUNING_OVERRIDE_FILE: $PRIMUS_PATH/examples/megatron/models/kimi-k3.1-pro/hipblaslt_tuning/kimi_k3.1_pro_4L-gfx1250-hipblaslt_01f6f9c1-rocm_10.2.0a20261013.txt
+
+# Kimi K3.1 Pro official-width 4-layer (~94B) BF16 pretraining proxy for one node
+# of 4 x MI455X (gfx1250, 432 GiB each).
+#
+# Derived from MI355X/kimi_k3-BF16-8L-official.yaml. Differences:
+#   - depth 4 layers (1 dense + 3 MoE; KDA x 3 + NoPE MLA x 1) via the
+#     kimi_k3.1_pro_4L preset, EP 8 -> 4;
+#   - batch sized like the other one-node MI455X proxies (sequence 7168 -> 4096,
+#     global batch 128 -> 64, 8 micro-batches per rank);
+#   - recompute off (MI355X: full), manual_gc_interval 1 -> 50,
+#     gradient_accumulation_fusion on, moe_router_bwd_bf16 on;
+#   - Turbo FlyDSL MLA attention (create_attention_mask_in_dataloader: false),
+#     DeepEP on at 64 CUs, and a hipBLASLt tuning table (env block above).
+# At world 4 / EP 4 the expert-DP size is 1, so the memory recipe below
+# (distributed + precision-aware optimizer, bf16 grads/moments) is required.
+# Synthetic data (mock_data: true).
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # Official-width shape, depth compressed to 4 layers. num_layers and the
+    # attention / MoE interleave patterns come from the preset, NOT from CLI slicing.
+    model: ${PRIMUS_MODEL:kimi_k3.1_pro_4L}.yaml
+    overrides:
+      # ---------- log ----------
+      wandb_project: "Primus_Kimi_K3.1_Pro_4L_MI455X"
+      disable_wandb: true
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: ${PRIMUS_LOG_INTERVAL:1}
+
+      # ---------- token budget ----------
+      train_iters: ${TRAIN_ITERS:50}
+      micro_batch_size: ${MBS:2}
+      # GBS must be divisible by MBS * data_parallel_size. With TP=1/PP=1,
+      # DP = world_size = 4 on one node; 64 = 2 * 4 * 8 (grad-accum 8), so each
+      # rank runs 8 micro-batches per step.
+      global_batch_size: ${GBS:64}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      # ---------- hyper parameters ----------
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: ${LR_WARMUP_ITERS:5}
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+      layernorm_epsilon: 1.0e-5
+
+      # ---------- parallel ----------
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:4}
+
+      # ---------- 896-expert memory recipe (REQUIRED on one MI455X node) ----------
+      # At world 4 / EP 4 the expert-DP size is 1: each GPU holds the full
+      # optimizer state of its 224 experts per MoE layer. Distributed +
+      # precision-aware optimizer with bf16 grad/Adam moments halves the grad
+      # buffer and moments; fp32 master weights are kept. Estimated static
+      # memory ~277 GiB/GPU at 4 layers (vs ~416 GiB with fp32 grads/moments).
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: true
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # ---------- recompute off ----------
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 0
+
+      # ---------- data: MOCK (NullTokenizer, no external deps) ----------
+      create_attention_mask_in_dataloader: false
+      mock_data: true
+      tokenizer_type: NullTokenizer
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      split: null
+
+      # ---------- validation: off for a smoke ----------
+      eval_iters: 0
+      eval_interval: 100000
+
+      # ---------- Kimi K3 specific ----------
+      # fla chunk kernel + fla causal_conv1d, as on MI355X. fla is Triton; on
+      # gfx1250 Triton's expert scheduling must be off: run with
+      # TRITON_HIP_USE_EXPERT_SCHEDULING=0, on a Triton whose
+      # is_expert_scheduling_enabled() honours it. Fall back with
+      # PRIMUS_KDA_BACKEND=eager PRIMUS_ATTN_BACKEND=eager.
+      kda_backend: ${PRIMUS_KDA_BACKEND:fla}
+      # Unified KDA backend selector (supersedes kda_backend + K3P_KDA_CONV).
+      use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:fla}
+      moe_router_dtype: fp32
+      moe_router_bwd_bf16: true
+      optimizer: adam
+
+      # ---------- ckpt ----------
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # ---------- Turbo / fusion ----------
+      # grouped GEMM + RMSNorm + permute fusion are memory-neutral and on.
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:true}
+      use_turbo_grouped_gemm: true
+      use_turbo_rms_norm: true
+      moe_permute_fusion: true
+      # Attention uses the FlyDSL MLA backend (PRIMUS_TURBO_ATTN_BACKEND).
+      # DeepEP uses Primus-Turbo's FlyDSL flydsl_v2 backend for gfx1250
+      # (Primus-Turbo#602, in dev/mi455x_v4) and needs the dispatcher to flatten
+      # by the input width (latent MoE). Checked on 4 x MI455X: finite loss and no
+      # NaN in every 12-iteration run. The MI355X recipe keeps DeepEP off (its
+      # first backward went non-finite there). With the image's Primus-Turbo
+      # (no FlyDSL DeepEP), set use_turbo_deepep: false.
+      # Left OFF:
+      #   shared_expert_overlap  -- moe_layer.py asserts NOT-overlap on the live K3
+      #                             latent path; dies at forward.
+      #   sync-free              -- stage >= 2 force-enables a different DeepEP path.
+      use_turbo_attention: true
+      use_turbo_deepep: true
+      turbo_deepep_num_cu: 64
+      moe_shared_expert_overlap: false
+      moe_use_fused_router_with_aux_score: false
+      turbo_sync_free_moe_stage: 0
+
+      # ---------- host-side overhead / MoE stability ----------
+      manual_gc: true
+      manual_gc_interval: 50
+
+      # FP8 off (bf16 sweep; prior FP8 hybrid showed no gain over bf16). Re-enable
+      # per-run via CLI `--fp8 hybrid`.
+      fp8: null
+      enable_experimental: true
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
