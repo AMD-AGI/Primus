@@ -128,8 +128,23 @@ class TrialConfig:
         )
 
     def signature(self) -> str:
-        d = self.as_dict()
-        return ",".join(f"{k}={d[k]}" for k in sorted(d))
+        return config_signature(self.as_dict())
+
+
+def config_signature(config: dict) -> str:
+    """A trial's identity, with equivalent spellings folded together.
+
+    No recompute and ``"none"`` are the same run, and so are all VPPs at PP=1 and VPP=1 under
+    the default schedule; left apart they fill a seed budget with duplicates.
+    """
+    d = dict(config)
+    if d.get("recompute_granularity") in (None, "", "null"):
+        d["recompute_granularity"] = "none"
+    if d.get("recompute_granularity") == "none":
+        d["recompute_num_layers"] = 0
+    if int(d.get("pp") or 1) == 1 or (d.get("vpp") == 1 and d.get("pp_schedule", "auto") == "auto"):
+        d["vpp"] = None
+    return ",".join(f"{k}={d[k]}" for k in sorted(d))
 
 
 # ---------------------------------------------------------------------------
