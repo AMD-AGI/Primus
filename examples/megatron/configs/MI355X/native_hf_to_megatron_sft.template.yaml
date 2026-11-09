@@ -105,7 +105,7 @@ modules:
 
       finetune: true                     # load weights only (fresh optimizer/scheduler)
       ckpt_format: torch_dist            # the converter writes this format too; `torch` = legacy, TP1/PP1/EP1 only
-      auto_detect_ckpt_format: true
+      auto_detect_ckpt_format: true      # sft_trainer.yaml's default: Megatron loads the format the checkpoint has
       load: null
       save: null
 
