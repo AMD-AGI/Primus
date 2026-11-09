@@ -158,14 +158,11 @@ log_exported_vars "Persistent Cache Layout" \
     HIPBLASLT_TUNING_FILE HF_HUB_CACHE HF_DATASETS_CACHE
 
 site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])" 2>/dev/null || echo "")
-# PRIMUS_TURBO_PATH: a Primus-Turbo source checkout that must shadow the image's installed copy.
-_primus_turbo_root="${PRIMUS_TURBO_PATH:+${PRIMUS_TURBO_PATH}:}"
 if [[ -n "$site_packages" ]]; then
-    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${_primus_turbo_root}${site_packages}:${PYTHONPATH:-}"
+    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${site_packages}:${PYTHONPATH:-}"
 else
-    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${_primus_turbo_root}${PYTHONPATH:-}"
+    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${PYTHONPATH:-}"
 fi
-unset _primus_turbo_root
 
 log_exported_vars "Python Path and Data Paths" \
     PRIMUS_PATH PRIMUS_IMPORT_ROOT DATA_PATH HF_HOME PYTHONPATH
