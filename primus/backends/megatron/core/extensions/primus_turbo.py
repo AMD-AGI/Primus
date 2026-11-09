@@ -3,6 +3,8 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+from __future__ import annotations
+
 import gc
 import os
 from contextlib import contextmanager, nullcontext
@@ -19,11 +21,24 @@ from megatron.core.extensions.transformer_engine import (
     TEGroupedLinear,
     TELayerNormColumnParallelLinear,
     TELinear,
-    TEQuantizationParams,
-    TEQuantizationRecipe,
     TERowParallelLinear,
     condition_init_method,
 )
+
+try:
+    from megatron.core.extensions.transformer_engine import (
+        TEQuantizationParams,
+        TEQuantizationRecipe,
+    )
+except ImportError:
+
+    class TEQuantizationParams:  # Bridge Megatron-LM has no TE quantization config types
+        pass
+
+    class TEQuantizationRecipe:
+        pass
+
+
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -66,7 +81,6 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
-from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -221,12 +235,22 @@ def _bridge_activation_grad(
     return PrimusTurboQuantizedTensorPair(data=rowwise, data_t=colwise)
 
 
+try:
+    # Primus-Turbo since AMD-AGI/Primus-Turbo#605 caches each environment variable at its first
+    # read; set_env() writes os.environ and drops that cached value
+    from primus_turbo.common.envs import set_env as _set_turbo_env
+except ImportError:  # older Primus-Turbo reads os.environ at every dispatch
+
+    def _set_turbo_env(name: str, value: str) -> None:
+        os.environ[name] = value
+
+
 @lru_cache(maxsize=1)
 def _apply_turbo_gemm_backend_env() -> None:
     """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
     backend = getattr(get_args(), "turbo_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GEMM_BACKEND] = backend
+        _set_turbo_env("PRIMUS_TURBO_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
 
 
@@ -235,7 +259,7 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
     """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
     backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GROUPED_GEMM_BACKEND] = backend
+        _set_turbo_env("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 

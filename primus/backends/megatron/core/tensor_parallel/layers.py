@@ -54,7 +54,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
+        gtp_remat_size,
     ):
+        if gtp_remat_size > 1:
+            raise NotImplementedError("Primus linear grad split does not support GTP weight remat")
         ctx.save_for_backward(input, weight)
         ctx.use_bias = bias is not None
         ctx.gradient_accumulation_fusion = gradient_accumulation_fusion
@@ -250,10 +253,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
-            return sub_grad_input, grad_weight, grad_bias, None, None, None, None, None, None
+            return sub_grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None
 
         if ctx.allreduce_dgrad:
             if handle is not None:
                 handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None

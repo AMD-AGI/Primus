@@ -23,8 +23,9 @@ on:
 concurrency:
   # Scheduled runs get their own group: they share `github.ref` (refs/heads/main)
   # with pushes to main, and cancel-in-progress would otherwise let any merge
-  # kill a multi-hour weekend run.
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'weekly' || github.head_ref || github.event.merge_group.head_ref || github.ref }}
+  # kill a multi-hour weekend run. PRs key on their number, not head_ref: PRs
+  # from different forks often share a branch name (e.g. "main").
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'weekly' || github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.event.merge_group.head_ref || github.ref }}
   cancel-in-progress: true
 
 # Default to read-only. No job uses GITHUB_TOKEN for writes (Docker Hub push
@@ -118,6 +119,9 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: build-docker
     # runs-on: build-docker-crusoe
+    outputs:
+      image_id: ${{ steps.build.outputs.image_id }}
+      image_tag: ${{ steps.build.outputs.image_tag }}
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -152,7 +156,10 @@ jobs:
           else
             echo "IMAGE_TAG=others" >> $GITHUB_ENV
           fi
-      - name: Build and Push Docker Image
+      - name: Build and Push Docker Image (no push for fork PRs)
+        id: build
+        env:
+          PRIMUS_DOCKER_HUB_TOKEN: ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
         run: |
           # echo "> Login to ROCm Docker Hub"
           # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
@@ -187,11 +194,8 @@ jobs:
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
-
-          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          echo "image_id=$(docker image inspect -f '{{.Id}}' tasimage/primus:${{env.IMAGE_TAG}})" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${{ env.IMAGE_TAG }}" >> "$GITHUB_OUTPUT"
 
           # Primus v26.8 already carries the AINIC stack its release Dockerfile installs
           # (libionic-dev from the 1.117.5-a-77 bundle, UCX 1.18.0, OpenMPI 4.1.6) on the
@@ -200,7 +204,29 @@ jobs:
           # ships; its build stays below, commented out, for when it is needed again.
           echo "> Tag Docker Image as: ${{ env.IMAGE_TAG }}-ainic"
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+
+          # Fork and Dependabot PRs get no repository secrets. Their image is only
+          # built, so run-unittest-torch can use it only on this same host.
+          if [[ -z "${PRIMUS_DOCKER_HUB_TOKEN}" ]]; then
+            if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+              echo "::error::PRIMUS_DOCKER_HUB_TOKEN is empty on a ${{ github.event_name }} run; tasimage/primus:${{ env.IMAGE_TAG }} must be pushed."
+              exit 1
+            fi
+            echo "::notice::No Docker Hub token (fork or Dependabot PR): tasimage/primus:${{ env.IMAGE_TAG }} is built but not pushed."
+          else
+            # Log in under a per-run config dir, deleted on exit, so the token is
+            # never left in the runner user's shared docker config, which every
+            # later job (fork PR code included) can read. Not under /tmp: the
+            # docker snap has a private /tmp the CLI would not see. Dirs left by
+            # killed runs are swept once they are an hour old.
+            find "${HOME}" -maxdepth 1 -name 'docker-push-auth-*' -mmin +60 -exec rm -rf {} + || true
+            export DOCKER_CONFIG="${HOME}/docker-push-auth-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            mkdir -m 700 "${DOCKER_CONFIG}"
+            trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+            echo "${PRIMUS_DOCKER_HUB_TOKEN}" | docker login -u tasimage --password-stdin
+            docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+            docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          fi
           # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           # start_time=$(date +%s)
           # mkdir -p $CWS/.github/workflows/docker/ainic
@@ -279,10 +305,15 @@ jobs:
       # job env alone does not enter the UT container.
       NVTE_CK_IS_V3_ATOMIC_FP32: 1
       # All test steps run inside a sibling container launched from the image that
-      # build-docker built+pushed (docker.io/tasimage/primus:${IMAGE_TAG}). That
-      # image already bundles turbo / aiter / triton / rocSHMEM / uccl / origami,
-      # so their runtime installs are removed here.
-      UT_CONTAINER: primus_ut_torch
+      # build-docker built, by its image id. That image already bundles turbo /
+      # aiter / triton / rocSHMEM / uccl / origami, so their runtime installs are
+      # removed here.
+      # Fork PRs get a container of their own (reused across fork PRs), so what
+      # fork code leaves in the container filesystem (site-packages, ...) never
+      # reaches the runs that pass HF_TOKEN into theirs. That is all it
+      # separates: the container is privileged and shares the host network and
+      # /mnt/apps_proxy with every other run.
+      UT_CONTAINER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'primus_ut_torch_fork' || 'primus_ut_torch' }}
     needs: [build-docker]
     # PRs: ci:gpu label, not draft.
     if: >-
@@ -314,10 +345,10 @@ jobs:
             echo "Fixing ownership via running container ${UT_CONTAINER}."
             docker exec "${UT_CONTAINER}" bash -lc "$FIX" || true
           else
-            IMG="$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -m1 -E 'tasimage/primus|rocm/primus' || true)"
-            [ -n "$IMG" ] || IMG="${BASE_IMAGE}"
-            echo "Fixing ownership via throwaway container from image: $IMG"
-            docker run --rm -v /mnt/apps_proxy:/mnt/apps_proxy "$IMG" bash -lc "$FIX" || true
+            # BASE_IMAGE, not any local tasimage/primus tag: those include images
+            # built from fork PRs' Dockerfiles.
+            echo "Fixing ownership via throwaway container from image: ${BASE_IMAGE}"
+            docker run --rm -v /mnt/apps_proxy:/mnt/apps_proxy "${BASE_IMAGE}" bash -lc "$FIX" || true
           fi
           echo "root-owned-after=$(find "$CWS" -user 0 2>/dev/null | wc -l)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -345,36 +376,49 @@ jobs:
           else
             echo "CWS=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
           fi
-      - name: Resolve image tag
-        run: |
-          # build-docker sets IMAGE_TAG in its own job env only; re-derive it here
-          # with the identical logic so we can target the image it pushed.
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "IMAGE_TAG=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "schedule" ]]; then
-            echo "IMAGE_TAG=weekly" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "release" ]]; then
-            TAG_NAME="${{ github.ref }}"
-            TAG="${TAG_NAME#refs/tags/}"
-            echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
-          else
-            echo "IMAGE_TAG=others" >> $GITHUB_ENV
-          fi
       - name: Start (or reuse) unit-test container
+        env:
+          PRIMUS_DOCKER_HUB_TOKEN: ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
         run: |
           : > "$RUNNER_TEMP/runtime.tsv"  # reset the CI runtime log for this job
-          IMG="docker.io/tasimage/primus:${{ env.IMAGE_TAG }}"
-          echo "Target image: ${IMG}"
-          # Pull first, then compare image id (not tag name): IMAGE_TAG is
-          # constant ("latest") on main, so a tag-only check can't detect a
-          # same-tag repush and would keep reusing a stale container.
-          docker pull "${IMG}"
-          target_id="$(docker image inspect -f '{{.Id}}' "${IMG}" 2>/dev/null || true)"
+          # The exact image build-docker built, by id rather than tag, so a later
+          # build of the same tag (e.g. when only this job is re-run) or a
+          # retag cannot swap it.
+          IMG="${{ needs.build-docker.outputs.image_id }}"
+          TAG="docker.io/tasimage/primus:${{ needs.build-docker.outputs.image_tag }}"
+          echo "Target image: ${IMG} (${TAG})"
+          if [ -z "${IMG}" ]; then
+            echo "::error::build-docker did not output an image id."
+            exit 1
+          fi
+          # Already here when build-docker ran on this host. Otherwise pull the
+          # tag it pushed; fork and Dependabot PRs have neither a pushed image
+          # nor the token to pull one (tasimage/primus is private).
+          if ! docker image inspect "${IMG}" >/dev/null 2>&1; then
+            if [[ -z "${PRIMUS_DOCKER_HUB_TOKEN}" ]]; then
+              echo "::error::${IMG} is not on this host and this run has no Docker Hub token to pull ${TAG}."
+              exit 1
+            fi
+            (
+              # Same throwaway login as build-docker's push.
+              find "${HOME}" -maxdepth 1 -name 'docker-push-auth-*' -mmin +60 -exec rm -rf {} + || true
+              export DOCKER_CONFIG="${HOME}/docker-push-auth-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-ut"
+              mkdir -m 700 "${DOCKER_CONFIG}"
+              trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+              echo "${PRIMUS_DOCKER_HUB_TOKEN}" | docker login -u tasimage --password-stdin
+              docker pull "${TAG}"
+            )
+            if ! docker image inspect "${IMG}" >/dev/null 2>&1; then
+              echo "::error::${TAG} no longer points to ${IMG}; it was rebuilt after this run's build-docker."
+              exit 1
+            fi
+          fi
+          target_id="$(docker image inspect -f '{{.Id}}' "${IMG}")"
+          # Compare image ids: the tag is constant ("latest") on main, so only the
+          # id shows a rebuild that must not reuse a stale container.
           cur_id="$(docker inspect -f '{{.Image}}' "${UT_CONTAINER}" 2>/dev/null || true)"
           running="$(docker inspect -f '{{.State.Running}}' "${UT_CONTAINER}" 2>/dev/null || true)"
-          if [ "${running}" = "true" ] && [ -n "${target_id}" ] && [ "${cur_id}" = "${target_id}" ]; then
+          if [ "${running}" = "true" ] && [ "${cur_id}" = "${target_id}" ]; then
             echo "Reusing container ${UT_CONTAINER} (already on ${IMG}, id=${target_id})."
           else
             echo "Recreating container ${UT_CONTAINER} (running=${running}, cur_id=${cur_id}, target_id=${target_id})."
@@ -441,7 +485,10 @@ jobs:
           # gates (they self-skip off MI355X).
           TIER_ARGS=()
           [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] && TIER_ARGS=(--run-slow)
-          pytest --maxfail=1 -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
+          # The full run keeps going past a failure so one failure does not hide the rest.
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
             --cov=primus --cov-branch --cov-report=term-missing:skip-covered \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
@@ -541,7 +588,9 @@ jobs:
           # the Triton/LLVM toolchain is fixed for this kernel.
           TIER_ARGS=()
           [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
-          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
             --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_mamba_1B_hybrid \
@@ -573,7 +622,9 @@ jobs:
           # Re-enable once the primus_turbo/aiter fp8 attention backward is fixed.
           TIER_ARGS=()
           [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
-          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py "${TIER_ARGS[@]}" \
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_torchtitan_trainer.py "${TIER_ARGS[@]}" \
             --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_671b \
             --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_16b_fp8 \
             --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
