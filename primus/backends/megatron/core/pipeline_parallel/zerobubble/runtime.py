@@ -15,7 +15,6 @@ from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
 import torch
 from megatron.core import parallel_state
-from megatron.core.enums import ModelType
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_group,
@@ -32,7 +31,7 @@ from megatron.core.pipeline_parallel.schedules import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.timers import Timer
-from megatron.core.utils import get_model_config, get_model_type, get_model_xattn
+from megatron.core.utils import get_model_config, get_model_xattn
 from megatron.training import get_args, print_rank_0
 
 from primus.backends.megatron.core.pipeline_parallel.pp_visualizer import (
@@ -75,7 +74,6 @@ class TrainingIterationConfig:
     forward_step_func: Callable[..., Any]
     data_iterator: List[RollbackDataIteratorWrapper]
     model: List[torch.nn.Module]
-    model_type: Any
     # config of model
     config: Any
     num_microbatches: int
@@ -657,9 +655,7 @@ class TrainingIteration:
                 backward_step, "bwd", minibatch=scheduled_node.microbatch, chunk=scheduled_node.chunk
             )
 
-        input_tensor_grad = backward_step_(
-            input_tensor, output_tensor, output_tensor_grad, conf.model_type, conf.config
-        )
+        input_tensor_grad = backward_step_(input_tensor, output_tensor, output_tensor_grad, conf.config)
         assert isinstance(input_tensor_grad, list), "input_tensor_grad should be a list"
 
         if conf.run_timer:
@@ -1000,7 +996,10 @@ class SchedNodeRuntime:
         adjust_tensor_shapes_fn: Optional[Callable] = None,  # unused
         p2p_communicator: Optional[P2PCommunicator] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        force_all_reduce: Optional[bool] = False,
     ):
+        if force_all_reduce:
+            raise NotImplementedError("The zero-bubble schedule does not support save_wgrads_interval")
         if not isinstance(model, list):
             model = [model]
         assert len(model) > 0, "empty model list found"
@@ -1032,11 +1031,6 @@ class SchedNodeRuntime:
             )
 
         elif p2p_communicator is not None and pg_collection is not None:
-            model_type = get_model_type(model[0])
-            assert model_type != ModelType.encoder_and_decoder, (
-                "encoder PP stages not yet supported when passing custom process groups. "
-                "support coming soon!"
-            )
             assert hasattr(p2p_communicator, "config"), "p2p_communicator must have a config"
             assert hasattr(pg_collection, "tp"), "pg_collection must have a tp_group"
             assert hasattr(pg_collection, "cp"), "pg_collection must have a cp_group"
@@ -1097,7 +1091,6 @@ class SchedNodeRuntime:
         # Please refer the appendix C in https://arxiv.org/pdf/2205.05198.pdf
         assert config.num_microbatches_with_partial_activation_checkpoints is None
 
-        model_type = get_model_type(model[0])
         get_model_xattn(model[0])
 
         tensor_shape = [seq_length, micro_batch_size, config.hidden_size]
@@ -1143,7 +1136,6 @@ class SchedNodeRuntime:
             forward_step_func=forward_step_func,
             data_iterator=data_iterator,
             model=model,
-            model_type=model_type,
             config=config,
             num_microbatches=num_microbatches,
             forward_only=forward_only,

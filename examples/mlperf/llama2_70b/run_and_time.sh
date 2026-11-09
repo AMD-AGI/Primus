@@ -70,6 +70,25 @@ echo "Rank:    ${NODE_RANK}"
 echo "Master:  ${MASTER_ADDR}:${MASTER_PORT}"
 echo "============================================"
 
+# RCCL turns cuMem off when uname reports a kernel older than 6.8. Lux reports
+# RHEL 5.14 even though amdgpu supports cuMem, so the copy-engine collectives
+# would fall back to the compute units. This preload is process-local: the
+# host utsname is unchanged. run_with_docker.sh reaches training only through
+# this script, so the shim has to be built here.
+_fakeuname_src="${SCRIPT_DIR}/libfakeuname.c"
+_fakeuname_so="${LUX_FAKE_UNAME_SO:-/tmp/libfakeuname.so}"
+if [[ ! -f "${_fakeuname_src}" ]]; then
+    echo "[ERROR] libfakeuname source not found: ${_fakeuname_src}" >&2
+    exit 1
+fi
+gcc -shared -fPIC -O2 -o "${_fakeuname_so}" "${_fakeuname_src}" -ldl
+export LUX_FAKE_KERNEL="${LUX_FAKE_KERNEL:-6.8.0-lux}"
+case ":${LD_PRELOAD:-}:" in
+    *":${_fakeuname_so}:"*) ;;
+    *) export LD_PRELOAD="${_fakeuname_so}${LD_PRELOAD:+:${LD_PRELOAD}}" ;;
+esac
+echo "fake uname $(uname -r) (real kernel $(env -u LUX_FAKE_KERNEL -u LD_PRELOAD uname -r))"
+
 # Start timing
 start=$(date +%s)
 start_fmt=$(date +%Y-%m-%d\ %r)

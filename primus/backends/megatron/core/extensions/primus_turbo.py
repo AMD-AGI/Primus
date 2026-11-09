@@ -3,6 +3,8 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+from __future__ import annotations
+
 import gc
 import os
 from contextlib import contextmanager, nullcontext
@@ -19,11 +21,24 @@ from megatron.core.extensions.transformer_engine import (
     TEGroupedLinear,
     TELayerNormColumnParallelLinear,
     TELinear,
-    TEQuantizationParams,
-    TEQuantizationRecipe,
     TERowParallelLinear,
     condition_init_method,
 )
+
+try:
+    from megatron.core.extensions.transformer_engine import (
+        TEQuantizationParams,
+        TEQuantizationRecipe,
+    )
+except ImportError:
+
+    class TEQuantizationParams:  # Bridge Megatron-LM has no TE quantization config types
+        pass
+
+    class TEQuantizationRecipe:
+        pass
+
+
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.packed_seq_params import PackedSeqParams
