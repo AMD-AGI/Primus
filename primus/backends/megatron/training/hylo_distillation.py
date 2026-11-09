@@ -572,19 +572,27 @@ def _log_loss(metrics: dict[str, torch.Tensor]) -> None:
     log_rank_0(f"[HyLo] {parts}")
 
 
-def sft_real_tokens(loss_mask: torch.Tensor) -> torch.Tensor:
-    """Real-token mask, (sequence, batch), of an SFT micro-batch's ``loss_mask`` (batch, sequence).
+def sft_real_tokens(tokens: torch.Tensor, loss_mask: torch.Tensor, pad_id: int) -> torch.Tensor:
+    """Real-token mask, (sequence, batch), of an SFT micro-batch, from its (batch, sequence) tensors.
 
-    The SFT dataset pads each sample at its end and supervises it through its last real token (its
-    EOS). ``loss_mask`` is in label space, ``loss_mask[i]`` weighting the target at ``i + 1``, so a
-    position is real when it is at most one past the sample's last supervised label. Prompt tokens
-    count, as they do on packed data.
+    The SFT dataset pads each sample at its end with ``pad_id``, so its real tokens run through the
+    later of its last token that is not ``pad_id`` and its last supervised token: the pad token can
+    be the EOS the dataset appends to a supervised response. ``loss_mask`` is in label space,
+    ``loss_mask[i]`` weighting the target at ``i + 1``. Prompt and template tokens count, as
+    HyLo's ``attention_mask`` and the packed data do.
     """
-    supervised_inputs = F.pad(loss_mask[..., :-1], (1, 0))
-    supervised_from_here = torch.flip(
-        torch.cumsum(torch.flip(supervised_inputs, dims=[-1]), dim=-1), dims=[-1]
-    )
-    return (supervised_from_here > 0).transpose(0, 1)
+    supervised_inputs = F.pad(loss_mask[..., :-1], (1, 0)) > 0
+    real = ((tokens != pad_id) | supervised_inputs).to(torch.int32)
+    real_from_here = torch.flip(torch.cumsum(torch.flip(real, dims=[-1]), dim=-1), dims=[-1])
+    return (real_from_here > 0).transpose(0, 1)
+
+
+def _sft_pad_id() -> int:
+    from megatron.training import get_tokenizer
+
+    from primus.backends.megatron.sft.preprocessing import _resolve_pad_token_id
+
+    return _resolve_pad_token_id(get_tokenizer())
 
 
 def _ild_count(loss: torch.Tensor) -> torch.Tensor:
@@ -664,7 +672,7 @@ def create_sft_forward_step():
         def loss_func(_output):
             if _RUNTIME.stage == "ild":
                 loss, parts = enhanced_ild_loss(
-                    *_RUNTIME.ild_captures(), token_mask=sft_real_tokens(loss_mask)
+                    *_RUNTIME.ild_captures(), token_mask=sft_real_tokens(tokens, loss_mask, _sft_pad_id())
                 )
                 return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
             from megatron.training import get_args

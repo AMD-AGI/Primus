@@ -67,8 +67,8 @@ not vendored. Distillation is a Primus forward step behind
 Enhanced-ILD sums per-layer hidden L2 and token-mixer-output L2, with the last
 layer compared after each model's final norm. Each micro-batch's loss counts
 once. Each term is a mean over tokens: on the SFT path every sample is padded to
-`seq_length`, so the mean covers each sample's real tokens, the positions through
-its last supervised token; packed data has no padding and every position counts.
+`seq_length`, so the mean covers each sample's real tokens, every position but its
+padding; packed data has no padding and every position counts.
 During that stage each student mixer is forced to the matching teacher
 layer input. The teacher's mixer target is a copy of its self-attention output:
 in eval mode without grad, Megatron's bias-dropout-add adds the residual into

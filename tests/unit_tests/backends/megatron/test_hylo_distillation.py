@@ -87,22 +87,32 @@ def test_enhanced_ild_rejects_a_mask_of_another_shape():
         enhanced_ild_loss(sh, th, sm, tm, token_mask=torch.ones(2, 5))
 
 
-def test_sft_real_tokens_keep_the_prompt_and_drop_the_padding():
-    # Label-space masks: the last supervised target (the EOS) is the input one position later.
-    loss_mask = torch.tensor([[0.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]])
-    expected = torch.tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]], dtype=torch.bool).t()
-    assert torch.equal(sft_real_tokens(loss_mask), expected)
+def test_sft_real_tokens_keep_the_prompt_and_template_and_drop_the_padding():
+    # Pad id 0. Label-space masks: a supervised target is the input one position later.
+    tokens = torch.tensor([[5, 6, 7, 8, 0, 0], [5, 6, 7, 8, 9, 0], [5, 6, 0, 0, 0, 0]])
+    loss_mask = torch.tensor(
+        [[0.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0]]
+    )
+    # The second sample ends in unsupervised template text; the third in a supervised EOS that is
+    # the pad id.
+    expected = torch.tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 0], [1, 1, 1, 0, 0, 0]], dtype=torch.bool)
+    assert torch.equal(sft_real_tokens(tokens, loss_mask, pad_id=0), expected.t())
 
 
-def test_sft_real_tokens_are_the_tokenized_sample_without_its_padding():
-    from primus.backends.megatron.sft.formatters import AlpacaFormatter
+@pytest.mark.parametrize("formatter", ["alpaca", "openai"])
+@pytest.mark.parametrize("pad", [10001, 10000], ids=["pad", "pad-is-eos"])
+def test_sft_real_tokens_are_the_tokenized_sample_without_its_padding(formatter, pad):
+    from primus.backends.megatron.sft.formatters import create_formatter
     from primus.backends.megatron.sft.preprocessing import (
         normalize_sft_sample,
         tokenize_formatted_sft_sample,
     )
 
     class Tokenizer:
-        pad, eos = 10001, 10000
+        eos = 10000
+
+        def __init__(self, pad):
+            self.pad = pad
 
         def tokenize(self, text):
             return text.split()
@@ -110,12 +120,17 @@ def test_sft_real_tokens_are_the_tokenized_sample_without_its_padding():
         def convert_tokens_to_ids(self, tokens):
             return [hash(token) % 10000 for token in tokens]
 
-    sample = AlpacaFormatter().format_sample(
+    sample = create_formatter(formatter).format_sample(
         normalize_sft_sample({"instruction": "What is SFT?", "response": "SFT is supervised fine-tuning."})
     )
-    input_ids, _labels, loss_mask = tokenize_formatted_sft_sample(sample, Tokenizer(), max_seq_length=64)
-    real = sft_real_tokens(loss_mask.float().unsqueeze(0)).t()[0]
-    assert torch.equal(real, input_ids != Tokenizer.pad)
+    distinct_pad_ids, _labels, _mask = tokenize_formatted_sft_sample(
+        sample, Tokenizer(10001), max_seq_length=64
+    )
+    length = int((distinct_pad_ids != 10001).sum())
+    input_ids, _labels, loss_mask = tokenize_formatted_sft_sample(sample, Tokenizer(pad), max_seq_length=64)
+    real = sft_real_tokens(input_ids.unsqueeze(0), loss_mask.float().unsqueeze(0), pad_id=pad).t()[0]
+    assert 0 < length < 64
+    assert torch.equal(real, torch.arange(64) < length)
 
 
 def test_masked_chunked_kl_matches_dense_reference_and_has_grad():
@@ -403,6 +418,7 @@ class _StudentHybrid(nn.Module):
 def test_ild_step_scores_last_layer_after_final_norm_once_per_micro_batch(monkeypatch):
     monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "ild"))
     monkeypatch.setattr(hylo_distillation, "_log_loss", lambda metrics: None)
+    monkeypatch.setattr(hylo_distillation, "_sft_pad_id", lambda: 0)
     tokens = torch.tensor([[1, 2]])
     batch = {"input_ids": tokens, "loss_mask": torch.ones(1, 2)}
     _output, loss_func = create_sft_forward_step()(iter([batch]), _StudentHybrid())
@@ -421,6 +437,7 @@ def test_ild_step_scores_last_layer_after_final_norm_once_per_micro_batch(monkey
 def test_sft_ild_step_ignores_padding(monkeypatch):
     monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "ild"))
     monkeypatch.setattr(hylo_distillation, "_log_loss", lambda metrics: None)
+    monkeypatch.setattr(hylo_distillation, "_sft_pad_id", lambda: 9)
     # A prompt token, the supervised EOS (the label at position 0), then padding, whose token value
     # would raise the loss if it counted.
     batch = {"input_ids": torch.tensor([[1, 2, 9]]), "loss_mask": torch.tensor([[1.0, 0.0, 0.0]])}

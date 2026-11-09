@@ -97,7 +97,7 @@ Megatron does not divide it by the token count again. The logged `hylo ild`
 is the mean over data-parallel ranks, the value the reference logs.
 
 The SFT recipes pad every sample to `seq_length`, so their means cover only each
-sample's real tokens, the positions through its last supervised token. The
+sample's real tokens, every position but its padding. The
 packed recipes below have no padding, and every position counts. That holds for
 the stage-2 KL too, last position included: HyLo's `kd_trainer.py` averages
 FLA's `kl_div_kernel` over every position of every window, so the packed and
