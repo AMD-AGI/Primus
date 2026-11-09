@@ -101,7 +101,7 @@ Example config and usage:
 export HIDDEN_STATES_PATH=/data/runs/capture/hidden_states
 export OUTPUT_DIR=/data/runs/train
 export NPROC_PER_NODE=8
-export MAX_STEPS=20
+export MAX_STEPS=200
 ./runner/primus-cli direct -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
@@ -128,9 +128,9 @@ modules:
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
       specforge_overrides:
-        training.max_steps: ${MAX_STEPS:20}  # optimizer steps
+        training.max_steps: ${MAX_STEPS:200}  # optimizer steps
         training.num_epochs: 1           # epoch cap (max_steps usually wins first)
-        training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
+        training.save_interval: ${MAX_STEPS:200}  # checkpoint every N steps
         training.log_interval: 5         # log every N steps
         model.use_liger_kernel: false    # not shipped in this image
         data.hidden_states_path: ${HIDDEN_STATES_PATH}  # filtered capture output
@@ -149,7 +149,7 @@ export RUN_ROOT=/path/to/shared/run/$RUN_ID
 export OUTPUT_DIR=$RUN_ROOT/output
 export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
-export MAX_STEPS=20
+export MAX_STEPS=200
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
   -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
   --volume /shared:/shared \
@@ -222,9 +222,9 @@ modules:
         # peer_timeout_s: 1800           # wait for the other ranks
 
       specforge_overrides:
-        training.max_steps: ${MAX_STEPS:20}  # optimizer steps
+        training.max_steps: ${MAX_STEPS:200}  # optimizer steps
         training.num_epochs: 1           # epoch cap (max_steps usually wins first)
-        training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
+        training.save_interval: ${MAX_STEPS:200}  # checkpoint every N steps
         training.log_interval: 5         # log every N steps
         model.use_liger_kernel: false    # not shipped in this image
         data.train_data_path: ${TRAIN_DATA_PATH}  # ShareGPT-style JSONL
@@ -259,11 +259,15 @@ on every node. Point `OUTPUT_DIR` / `HIDDEN_STATES_PATH` at shared storage.
 Multi-GPU on one node is `NPROC_PER_NODE`. On Ethernet without IB, pass
 `NCCL_IB_DISABLE=1` and `NCCL_SOCKET_IFNAME=<iface>`.
 
-Online train is `slurm` only. `-N` must equal `CAPTURE_NNODES + TRAINER_NNODES`
-(default 1+1 so `-N 2`). Do not use `direct` or `container` on a single host.
-Do not wrap SpecForge `managed_local`; for one-node online, run the SpecForge
-CLI inside the image (AMD ROCm tutorial §4). `specforge export` and data-prep
-scripts stay on the SpecForge CLI.
+Online train defaults to separate capture and trainer nodes: `-N` must equal
+`CAPTURE_NNODES + TRAINER_NNODES` (default 1+1 so `-N 2`).
+Set `specforge_online.single_node: true` (recipe env
+`PRIMUS_SPECFORGE_SINGLE_NODE=true`) to share one host, with both role counts
+set to 1. This supports `slurm -N 1`, `container`, and `direct`.
+Set disjoint `server_gpus` / `trainer_gpus`, such as `0` / `1`, and request
+capture GPUs plus trainer GPUs. See the [single-node example](running.md#single-node-online-training).
+The flag defaults to false; separate-node behavior is unchanged.
+`specforge export` and data-prep scripts stay on the SpecForge CLI.
 
 Inside the docker image:
 
