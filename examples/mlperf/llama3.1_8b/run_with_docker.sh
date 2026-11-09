@@ -171,9 +171,15 @@ if [[ "${SUBMISSION_QUIET}" == "1" ]]; then
     )
 fi
 
+# Host values for the config's ${NAME:-default} switches; everything else stays isolated.
+_config_overrides=()
+while read -r _name; do
+    [[ -n "${!_name+set}" ]] && _config_overrides+=("${_name}=${!_name}")
+done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-' "${_config_file}" | sed -e 's/^\${//' -e 's/:-$//' | sort -u)
+
 # Export values from config_${DGXSYSTEM}.sh for docker exec.
 mapfile -t _config_env < <(
-    env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+    env -i HOME="${HOME}" PATH="${PATH}" "${_config_overrides[@]}" bash -c "
         set -a
         source '${_config_file}'
         set +a
