@@ -11,7 +11,12 @@ This is a custom recipe based on Megatron-Bridge's llama2.py recipe,
 but placed in Primus for easier customization and extension.
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
 import gc
+import math
 import os
 import sys
 import time
@@ -19,6 +24,7 @@ from collections import deque
 from datetime import timedelta
 from typing import Any, Callable, List, Optional, Union
 
+import _log_suppression  # noqa: F401, E402  # must precede noisy imports
 import torch
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.num_microbatches_calculator import (
@@ -43,82 +49,129 @@ from megatron.core.transformer.enums import AttnBackend
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
 from typing_extensions import TypedDict, Unpack
 
-from primus.backends.megatron_bridge.recipes.mlperf_llama2_70b import (  # noqa: F401, E402
-    _log_suppression,
-)
 from primus.core.utils.module_utils import log_rank_0 as _orig_log_rank_0
 from primus.core.utils.module_utils import log_rank_last as _orig_log_rank_last
 
 _log_suppression.reapply_quiet_logger_levels()
 
-_verbose_logging = os.environ.get("VERBOSE_TRAINING_LOG", "0") == "1"
-if _verbose_logging:
-    log_rank_0 = _orig_log_rank_0
-    log_rank_last = _orig_log_rank_last
-else:
-
-    def log_rank_0(*args, **kwargs):
-        pass
-
-    def log_rank_last(*args, **kwargs):
-        pass
-
+log_rank_0 = _orig_log_rank_0
+log_rank_last = _orig_log_rank_last
 
 from megatron.bridge.utils import common_utils
 
-# Megatron-Bridge training_log prints iteration / TFLOP/s / loss via print_rank_0
-# (plain stdout). Only silence Primus log_rank_0 helpers — not Megatron metrics.
-_megatron_print_rank_0 = common_utils.print_rank_0
-_megatron_print_rank_last = common_utils.print_rank_last
-_megatron_warn_rank_0 = common_utils.warn_rank_0
-common_utils.print_rank_0 = _megatron_print_rank_0
-common_utils.print_rank_last = _megatron_print_rank_last
-if _verbose_logging:
-    common_utils.warn_rank_0 = _megatron_warn_rank_0
-else:
-    common_utils.warn_rank_0 = log_rank_0
+common_utils.print_rank_0 = log_rank_0
+common_utils.print_rank_last = log_rank_last
+common_utils.warn_rank_0 = log_rank_0
+common_utils.warn_rank_last = log_rank_last
 
-
-def _truthy_env(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _log_training_gpu_mem(tag: str, memory_keys=None) -> None:
-    """Rank-0 CUDA memory snapshot when ``PRIMUS_LOG_GPU_MEM=1``."""
-    if not _truthy_env("PRIMUS_LOG_GPU_MEM", default=False):
-        return
-    try:
-        from megatron.bridge.training.utils.train_utils import report_memory
-
-        if not torch.cuda.is_available():
-            _orig_log_rank_0(f"[GPU mem] {tag} | CUDA not available")
-            return
-        torch.cuda.synchronize()
-        dev = torch.cuda.current_device()
-        alloc = torch.cuda.memory_allocated(dev) / (1024**3)
-        reserved = torch.cuda.memory_reserved(dev) / (1024**3)
-        peak_alloc = torch.cuda.max_memory_allocated(dev) / (1024**3)
-        peak_reserved = torch.cuda.max_memory_reserved(dev) / (1024**3)
-        _orig_log_rank_0(
-            f"[GPU mem] {tag} | "
-            f"allocated={alloc:.2f} GiB reserved={reserved:.2f} GiB "
-            f"max_alloc={peak_alloc:.2f} GiB max_reserved={peak_reserved:.2f} GiB"
-        )
-        mem = report_memory(memory_keys)
-        if mem:
-            detail = " | ".join(f"{k}={v}" for k, v in sorted(mem.items()))
-            _orig_log_rank_0(f"[GPU mem detail] {tag} | {detail}")
-    except Exception as exc:
-        _orig_log_rank_0(f"[GPU mem] {tag} | failed ({type(exc).__name__}: {exc})")
-
-
+import numpy as np
 from megatron.bridge import AutoBridge
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
+from megatron.bridge.data.datasets.sft import GPTSFTPackedDataset
 from megatron.bridge.data.finetuning import prepare_finetuning_batch
 from megatron.bridge.data.iterator_utils import make_data_iterator_list
+
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.resettable_data_iterator import (
+    ResettableDataIterator,
+)
+
+_orig_build_loss_mask = GPTSFTPackedDataset._build_loss_mask
+
+
+# The .npy stores loss_mask on the target tokens themselves (labels != -100), not
+# rolled onto the preceding position as NeMo's packer does, while labels[t] is
+# input_ids[t + 1]. Read the mask at t + 1 so each label is scored by its own mask,
+# as the reference's HF shifted-label loss does.
+def _build_loss_mask_label_aligned(self, processed_example):
+    if not self.answer_only_loss:
+        return _orig_build_loss_mask(self, processed_example)
+    seq_boundaries = processed_example["seq_boundaries"]
+    return np.concatenate(
+        [
+            processed_example["loss_mask"][seq_boundaries[i] + 1 : seq_boundaries[i + 1]]
+            for i in range(len(seq_boundaries) - 1)
+        ]
+    )
+
+
+GPTSFTPackedDataset._build_loss_mask = _build_loss_mask_label_aligned
+
+import megatron.bridge.data.samplers as _bridge_samplers
+
+from primus.core.patches import PatchContext, register_patch
+
+
+# Score every validation sample once.
+@register_patch(
+    "mlperf_llama2_70b.full_validation_pass",
+    backend="megatron_bridge",
+    phase="before_train",
+    priority=60,
+    description="Score every validation row exactly once per eval",
+)
+def _patch_full_validation_pass(ctx: PatchContext) -> None:
+    orig_build_loader = _bridge_samplers.build_pretraining_data_loader
+
+    def _build_loader(dataset, consumed_samples, dataloader_type, *args, **kwargs):
+        if kwargs.get("name") != "validation" or dataset is None:
+            return orig_build_loader(dataset, consumed_samples, dataloader_type, *args, **kwargs)
+        kwargs.pop("name")
+        kwargs.pop("eval_iters", None)
+        kwargs["drop_last"] = False
+        return orig_build_loader(dataset, 0, "batch", *args, **kwargs)
+
+    _bridge_samplers.build_pretraining_data_loader = _build_loader
+
+
+import functools
+
+import megatron.bridge.training.setup as _bridge_setup
+
+
+class _DeferredDataIterator:
+    def __init__(self, build, index):
+        self._build = build
+        self._index = index
+
+
+def _materialize_data_iterators(*iterators) -> None:
+    # Morph in place so every holder of the placeholder, including Bridge's pretrain(), sees the real iterator.
+    for it in iterators:
+        if isinstance(it, _DeferredDataIterator):
+            real = it._build()[it._index]
+            if real is not None:
+                it.__class__ = type(real)
+                it.__dict__ = real.__dict__
+
+
+# The clock must start before the dataset is touched, so the loaders are built after run_start.
+@register_patch(
+    "mlperf_llama2_70b.defer_data_iterators",
+    backend="megatron_bridge",
+    phase="before_train",
+    priority=60,
+    description="Build the train and validation iterators after run_start",
+)
+def _patch_defer_data_iterators(ctx: PatchContext) -> None:
+    orig_setup_data_iterators = _bridge_setup.setup_data_iterators
+
+    def _setup_data_iterators(cfg, train_state, model_length, train_valid_test_datasets_provider):
+        build = functools.cache(
+            lambda: orig_setup_data_iterators(
+                cfg=cfg,
+                train_state=train_state,
+                model_length=model_length,
+                train_valid_test_datasets_provider=train_valid_test_datasets_provider,
+            )
+        )
+        train_state.do_train = cfg.train.train_iters > 0
+        train_state.do_valid = cfg.train.eval_iters > 0
+        train_state.do_test = False
+        return _DeferredDataIterator(build, 0), _DeferredDataIterator(build, 1), None
+
+    _bridge_setup.setup_data_iterators = _setup_data_iterators
+
+
 from megatron.bridge.recipes.utils.finetune_utils import default_squad_config
 from megatron.bridge.recipes.utils.tokenizer_utils import (
     DEFAULT_NULL_TOKENIZER_VOCAB_SIZE,
@@ -150,9 +203,23 @@ from megatron.bridge.training.nvrx_straggler import safe_shutdown_nvrx_straggler
 from megatron.bridge.training.profiling import (
     handle_profiling_step,
     handle_profiling_stop,
-    initialize_pytorch_profiler,
     should_profile_rank,
 )
+
+from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.lora import LoRA
+
+_profiling_utils = os.path.join(
+    os.path.dirname(__file__), "..", "..", "..", "utilities", "metrics", "profiling"
+)
+if not os.path.isdir(_profiling_utils):
+    _profiling_utils = "/workspace/utilities/metrics/profiling"
+sys.path.insert(0, _profiling_utils)
+# utilities/ is mounted only by dev/run_with_docker_dev.sh; a non-profiled run
+# launched without it must still import this recipe.
+try:
+    from full_run_profiler_handler import FullRunProfilerHandler
+except ImportError:
+    FullRunProfilerHandler = None
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.tensor_inspect import (
     tensor_inspect_end_if_enabled,
@@ -165,11 +232,6 @@ from megatron.bridge.training.utils.train_utils import (
     calc_params_l2_norm,
     prepare_forward_step_func,
     training_log,
-)
-
-from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.lora import LoRA
-from primus.backends.megatron_bridge.patches.mlperf_llama2_70b.resettable_data_iterator import (
-    ResettableDataIterator,
 )
 
 # train_utils binds print_rank_* at import time; rebind so training_log always uses Primus loggers even if
@@ -246,7 +308,7 @@ def bf16_with_mxfp4_mixed() -> MixedPrecisionConfig:
     cfg.fp8_reduce_amax = False
     cfg.fp8_interval = 1
     cfg.fp8_margin = 0
-    cfg.fp8_dot_product_attention = False
+    cfg.fp8_dot_product_attention = _env_flag("FP8_DPA", "false")
     cfg.fp8_param_gather = False
     cfg.grad_reduce_in_fp32 = False
     return cfg
@@ -337,6 +399,881 @@ class Llama2CustomKwargs(TypedDict, total=False):
     recompute_num_layers: Optional[int]
     # TE attention backend ("flash", "fused", "unfused", "local", "auto"). None keeps Megatron's default.
     attention_backend: Optional[str]
+    enable_primus_turbo: bool
+    use_turbo_attention: bool
+    use_turbo_gemm: bool
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    return _as_bool(os.environ.get(name, default), default=_as_bool(default))
+
+
+#: Attributes ``primus_turbo.py`` reads off ``get_args()`` without a getattr
+#: default, so a missing one is an AttributeError rather than a fallback. The
+#: values here are the inert choices for a dense 1x8x1 LoRA run; anything the
+#: Primus config already carries is left alone.
+_TURBO_ARGS_FALLBACKS = (
+    ("offload", False),
+    ("offload_ops", ()),
+    ("deterministic_mode", False),
+    ("patch_primus_pipeline", False),
+    ("patch_zero_bubble", False),
+    ("enable_zero_bubble", False),
+    ("pp_algorithm", ""),
+    ("enable_turbo_attention_float8", False),
+    ("use_turbo_grouped_gemm", False),
+    ("moe_router_force_load_balancing", False),
+    ("moe_router_padding_for_quantization", False),
+    ("turbo_deepep_num_cu", 0),
+    ("turbo_deepep_use_comm_stream", False),
+    ("turbo_sync_free_moe_stage", 0),
+)
+
+
+def _turbo_log(message: str) -> None:
+    """Record which Turbo path was taken, under TURBO_DEBUG=1.
+
+    Not the Primus logger and not stderr: the recipe sets
+    ``stderr_sink_level: ERROR``, so anything below that is dropped and cannot
+    be used to confirm whether an install ran.
+    """
+    if os.getenv("TURBO_DEBUG") != "1":
+        return
+    try:
+        with open("/results/turbo_decide.log", "a") as fh:
+            fh.write(message + "\n")
+    except Exception:
+        pass
+
+
+def _run_forward_pre_hooks(module, args) -> None:
+    """Run ``module``'s forward-pre-hooks without calling its forward.
+
+    The distributed optimizer waits on and dispatches each submodule's parameter
+    all-gather from these hooks, so skipping linear_fc1/linear_fc2.forward must
+    not skip them.
+    """
+    for hook in module._forward_pre_hooks.values():
+        result = hook(module, args)
+        if result is not None:
+            args = result if isinstance(result, tuple) else (result,)
+    kwargs: dict = {}
+    for hook in getattr(module, "_forward_pre_hooks_with_kwargs", {}).values():
+        result = hook(module, args, kwargs)
+        if result is not None:
+            args, kwargs = result
+
+
+def _install_frozen_fused_mlp(state_mgr) -> None:
+    import turbo_fp4_frozen
+    from megatron.core.transformer.mlp import MLP
+    from primus_turbo.pytorch.ops.normalization import rmsnorm
+
+    orig_forward = MLP.forward
+    logged = set()
+
+    def forward(self, hidden_states, per_token_scale=None):
+        if per_token_scale is None and state_mgr.is_turbo_fp4_enabled():
+            fc1, fc2 = self.linear_fc1, self.linear_fc2
+            w1, w2 = fc1._parameters.get("weight"), fc2._parameters.get("weight")
+            quant = state_mgr.get_turbo_quant_config()
+            config = quant.data() if quant is not None and quant.mxfp4_scaling() else None
+            x2d = hidden_states.reshape(-1, hidden_states.shape[-1])
+            checks = {
+                "weights": w1 is not None and w2 is not None,
+                "no_bias": not any(
+                    isinstance(b, torch.Tensor) and b.numel() > 0
+                    for b in (getattr(fc1, "bias", None), getattr(fc2, "bias", None))
+                ),
+                "rmsnorm": self.config.normalization == "RMSNorm",
+                "norm_in_fc1": getattr(fc1, "layer_norm_weight", None) is not None,
+            }
+            if all(checks.values()):
+                checks["frozen_pairs_and_shapes"] = turbo_fp4_frozen.fused_mlp_eligible(x2d, w1, w2, config)
+            if all(checks.values()):
+                _run_forward_pre_hooks(fc1, (hidden_states,))
+                _run_forward_pre_hooks(fc2, (hidden_states,))
+                if getattr(fc1, "_skip_fused_norm", False):
+                    x = x2d
+                else:
+                    norm_weight = fc1.layer_norm_weight
+                    if fc1.zero_centered_gamma:
+                        norm_weight = norm_weight + 1
+                    x = rmsnorm(x2d, norm_weight, fc1.eps)
+                y = turbo_fp4_frozen.frozen_fused_mlp(x, w1, w2, config)
+                if "fused" not in logged:
+                    logged.add("fused")
+                    _turbo_log(f"[FusedDenseMLP] fused FlyDSL MLP taken, x={tuple(x.shape)}")
+                return y.view(*hidden_states.shape[:-1], y.shape[-1]), None
+            if "fallback" not in logged:
+                logged.add("fallback")
+                _turbo_log(
+                    f"[FusedDenseMLP] fallback to stock MLP under MXFP4: x={tuple(x2d.shape)} "
+                    f"dtype={x2d.dtype} config={config is not None} checks={checks} "
+                    f"fc1={type(fc1).__name__} w1={type(w1).__name__} "
+                    f"w1_pair={hasattr(w1, '_turbo_fp4_pair')} w1_rg={getattr(w1, 'requires_grad', None)} "
+                    f"preshuffle={getattr(config, 'use_preshuffle', None)}"
+                )
+        return orig_forward(self, hidden_states, per_token_scale)
+
+    MLP.forward = forward
+    _turbo_log("[FusedDenseMLP] MLP.forward routed through turbo_fp4_frozen.frozen_fused_mlp")
+
+
+def _install_fused_residual_norm() -> None:
+    if int(os.getenv("HEALING_ITER", "0") or 0) > 0 and not _env_flag("PRIMUS_TURBO_FP8_HEALING", "false"):
+        raise RuntimeError(
+            "PRIMUS_FUSED_RESIDUAL_NORM with healing needs PRIMUS_TURBO_FP8_HEALING=1: "
+            "TE's LayerNormLinear ignores _skip_fused_norm and would normalize twice"
+        )
+    from primus.backends.megatron.core.extensions import fused_residual_rmsnorm as frn
+
+    # LoRALinear keeps the fused-norm linear in to_wrap and does not forward its
+    # attributes, so the stock lookup misses the QKV gamma and the cross-layer carry
+    # is never consumed.
+    def _qkv_fused_ln_params(layer):
+        attn = getattr(layer, "self_attention", None)
+        qkv = getattr(attn, "linear_qkv", None) if attn is not None else None
+        qkv = getattr(qkv, "to_wrap", qkv)
+        ln_w = getattr(qkv, "layer_norm_weight", None) if qkv is not None else None
+        if ln_w is None:
+            return None
+        eps = getattr(qkv, "eps", None) or getattr(layer.config, "layernorm_epsilon", 1e-5)
+        return qkv, ln_w, eps
+
+    frn._qkv_fused_ln_params = _qkv_fused_ln_params
+
+    orig_can_fuse = frn._can_fuse
+    orig_run = frn._run_rmsnorm_residual
+    seen = {}
+
+    def _can_fuse(layer):
+        ok = orig_can_fuse(layer)
+        if "can_fuse" not in seen:
+            seen["can_fuse"] = ok
+            _turbo_log(
+                f"[FusedResidualNorm] first layer can_fuse={ok} "
+                f"hidden_dropout={getattr(layer, 'hidden_dropout', None)} "
+                f"qkv_params={_qkv_fused_ln_params(layer) is not None} "
+                f"v2_linked={getattr(layer, '_v2_next_layer', None) is not None}"
+            )
+        return ok
+
+    def _run_rmsnorm_residual(*args, **kwargs):
+        if "run" not in seen:
+            seen["run"] = True
+            _turbo_log(f"[FusedResidualNorm] rmsnorm_residual taken, x={tuple(args[0].shape)}")
+        return orig_run(*args, **kwargs)
+
+    frn._can_fuse = _can_fuse
+    frn._run_rmsnorm_residual = _run_rmsnorm_residual
+    if not frn.install():
+        raise RuntimeError("fused_residual_rmsnorm.install() failed; see [fused_residual_rmsnorm] log")
+    _turbo_log(
+        "[FusedResidualNorm] installed "
+        f"V1={_env_flag('PRIMUS_FUSED_RESIDUAL_NORM', 'false')} "
+        f"V2={_env_flag('PRIMUS_FUSED_RESIDUAL_NORM_V2', 'false')}"
+    )
+
+
+def _install_primus_args_bridge():
+    """Route Turbo's ``get_args()`` at the Primus config on the Bridge path.
+
+    ``primus_turbo.py`` imports ``get_args`` from ``megatron.training.global_vars``,
+    whose ``_GLOBAL_ARGS`` only ever gets set by Megatron-LM's own argparse
+    entrypoint. Megatron-Bridge never goes through it, so every Turbo module that
+    reads a config value -- ``PrimusTurboAttention.__init__`` among them -- dies on
+    ``AssertionError: args is not initialized``. Primus's *own* globals are
+    populated here, so fall back to those.
+
+    Returns the Primus args object.
+    """
+    from primus.backends.megatron.training.global_vars import get_primus_args
+
+    try:
+        primus_args = get_primus_args()
+    except Exception as exc:
+        raise RuntimeError("Primus args are not initialized; cannot wire Primus-Turbo.") from exc
+
+    for _name, _value in _TURBO_ARGS_FALLBACKS:
+        if not hasattr(primus_args, _name):
+            setattr(primus_args, _name, _value)
+
+    # Populate Megatron's own ``_GLOBAL_ARGS`` rather than only wrapping
+    # ``get_args``. Turbo modules do ``from megatron.training.global_vars import
+    # get_args`` at import time, so they hold a direct reference to the original
+    # function and never see a replaced module attribute; filling the global the
+    # original function reads fixes every consumer at once.
+    try:
+        import megatron.training.global_vars as megatron_global_vars
+
+        if getattr(megatron_global_vars, "_GLOBAL_ARGS", None) is None:
+            megatron_global_vars.set_args(primus_args)
+    except Exception:
+        pass
+
+    def _safe_get_args(orig):
+        def _inner(*args, **kwargs):
+            try:
+                return orig(*args, **kwargs)
+            except AssertionError:
+                return get_primus_args()
+
+        return _inner
+
+    from primus.backends.megatron.core.extensions import (
+        primus_turbo as primus_turbo_ext,
+    )
+
+    primus_turbo_ext.get_args = _safe_get_args(primus_turbo_ext.get_args)
+    primus_turbo_ext.use_split_wgrad_op = lambda: False
+
+    # Every Turbo linear picks its FP4 path with `if get_num_microbatches() == 1`,
+    # and this recipe is GBS 8 / MBS 1 / DP 8 -- exactly one microbatch. That
+    # branch is documented in-tree as "quantizes the bf16 weight internally and
+    # has no persistent cache": it hands the raw parameter to gemm_fp4, which
+    # re-quantizes it on every step and, with no transpose cache, dequantizes and
+    # re-quantizes again for the column direction. Both are pure HBM traffic on a
+    # weight that LoRA freezes. The >1 branch instead builds a
+    # QuantizedTensorPair once via create_quantized_weight and reuses it.
+    #
+    # The count is never read for anything else -- all ten uses in that module are
+    # this same ==1 test -- so reporting 2 selects the cached path everywhere.
+    if _env_flag("PRIMUS_TURBO_FP4_WEIGHT_CACHE", "false"):
+        _orig_num_mb = primus_turbo_ext.get_num_microbatches
+
+        def _num_microbatches_at_least_two():
+            try:
+                return max(2, int(_orig_num_mb()))
+            except Exception:
+                return 2
+
+        primus_turbo_ext.get_num_microbatches = _num_microbatches_at_least_two
+        _turbo_log("[TurboWeightCache] forced the cached QuantizedTensorPair path")
+
+        # The cached path still rebuilds its buffers on the first microbatch of
+        # every step, which re-quantizes the weight. For a LoRA-frozen base
+        # weight that is both wasted and impossible: the parameter is a TE
+        # MXFP4Tensor, and re-quantizing it lands in TE's dequantize stub
+        # ("MXFP4 dequantization from packed FP4 not yet implemented"). When
+        # pre_quantize_mxfp4 has already built the pair from the high-precision
+        # weight it hangs it on the parameter, so reuse that instead.
+        _orig_make_buffers = getattr(primus_turbo_ext, "_maybe_create_quantized_weight_buffers", None)
+
+        if _orig_make_buffers is not None:
+
+            _fp8_healing = _env_flag("PRIMUS_TURBO_FP8_HEALING", "false")
+
+            def _reuse_prequantized_weight_buffers(weight, *args, **kwargs):
+                pair = getattr(weight, "_turbo_fp4_pair", None)
+                if pair is not None:
+                    return pair
+                # After healing the parameter is the FP8 stash (TE Float8Tensor,
+                # per-tensor E4M3, scale 1); serve it to the frozen FP8 GEMM as-is.
+                if _fp8_healing:
+                    import turbo_fp8_frozen
+
+                    w8 = turbo_fp8_frozen.frozen_fp8_weight(weight)
+                    if w8 is not None:
+                        return w8, None
+                return _orig_make_buffers(weight, *args, **kwargs)
+
+            primus_turbo_ext._maybe_create_quantized_weight_buffers = _reuse_prequantized_weight_buffers
+
+        # The cached path then bridges the quantized weight's gradient back onto
+        # the parameter's main_grad, and asserts main_grad exists. Under LoRA the
+        # base weights are frozen, so DDP never allocates one and there is no
+        # base wgrad to bridge -- the adapters carry the gradient. Skip the
+        # bridge for those and hand the GEMM the pair directly.
+        _orig_bridge = getattr(primus_turbo_ext, "_bridge_weight_grad", None)
+
+        if _orig_bridge is not None:
+
+            def _bridge_weight_grad_if_trainable(x, weight, weight_buffer, fuse_wgrad_accum=False):
+                if not hasattr(weight, "main_grad"):
+                    return x, weight_buffer
+                return _orig_bridge(x, weight, weight_buffer, fuse_wgrad_accum=fuse_wgrad_accum)
+
+            primus_turbo_ext._bridge_weight_grad = _bridge_weight_grad_if_trainable
+
+        # Skipping the bridge is not enough on its own. forward_internal asks
+        # _fuse_wgrad_accum_pattern separately, and with a pattern the gemm runs
+        # a beta=1 epilogue that accumulates into main_grad *on the quantized
+        # buffer* -- a target only the bridge installs. Skip one without the
+        # other and the gemm accumulates into an unset target, which is how the
+        # first working run produced a rising loss and then NaN.
+        _orig_fuse_pattern = getattr(primus_turbo_ext, "_fuse_wgrad_accum_pattern", None)
+
+        if _orig_fuse_pattern is not None:
+
+            def _fuse_wgrad_accum_pattern_if_trainable(config, weight):
+                if not hasattr(weight, "main_grad"):
+                    return None
+                return _orig_fuse_pattern(config, weight)
+
+            primus_turbo_ext._fuse_wgrad_accum_pattern = _fuse_wgrad_accum_pattern_if_trainable
+
+    return primus_args
+
+
+def _install_turbo_attention(*, attention_float8: bool) -> None:
+    """Swap TE fused attention for Turbo's flash-attention on the Bridge path.
+
+    Only reachable with ``use_turbo_gemm=False``: ``_install_flydsl_fp4_gemms``
+    pins ``use_turbo_attention`` off and asserts the spec provider hands back
+    TE attention, so the two are mutually exclusive by construction.
+    """
+    primus_args = _install_primus_args_bridge()
+    primus_args.enable_primus_turbo = True
+    primus_args.use_turbo_attention = True
+    primus_args.enable_turbo_attention_float8 = attention_float8
+    if hasattr(primus_args, "use_turbo_gemm"):
+        primus_args.use_turbo_gemm = False
+
+    # PrimusTurboAttention.forward always passes ``sink=`` (sink attention,
+    # upstream PR 208), but only the BF16 ``flash_attn_func`` in this
+    # primus-turbo pin grew that parameter -- the FP8 entry point raises
+    # TypeError. Llama-2 has no sink parameters, so the argument is always None
+    # and dropping it is a no-op; refuse rather than silently ignore a real one.
+    if attention_float8:
+        import inspect as _insp
+
+        import primus_turbo.pytorch as _turbo_pt
+
+        _fp8_attn = _turbo_pt.ops.flash_attn_fp8_func
+        try:
+            _params = _insp.signature(_fp8_attn).parameters
+            _takes_sink = "sink" in _params or any(
+                p.kind == _insp.Parameter.VAR_KEYWORD for p in _params.values()
+            )
+        except (TypeError, ValueError):
+            _takes_sink = False
+        if not _takes_sink:
+
+            def _fp8_attn_without_sink(*args, sink=None, **kwargs):
+                if sink is not None:
+                    raise ValueError(
+                        "FP8 attention in this primus-turbo build has no sink "
+                        "support; disable use_sink_attention."
+                    )
+                return _fp8_attn(*args, **kwargs)
+
+            _turbo_pt.ops.flash_attn_fp8_func = _fp8_attn_without_sink
+
+    import megatron.core.extensions.transformer_engine as te_spec_mod
+    from megatron.core.extensions.transformer_engine import TELinear
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboAttention,
+    )
+    from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+        PrimusTurboSpecProvider,
+    )
+
+    te_spec_mod.TESpecProvider = PrimusTurboSpecProvider
+    for _mod_path, _attr in (
+        ("megatron.core.extensions.transformer_engine_spec_provider", "TESpecProvider"),
+        ("megatron.core.models.gpt.gpt_layer_specs", "TESpecProvider"),
+    ):
+        try:
+            import importlib
+
+            setattr(importlib.import_module(_mod_path), _attr, PrimusTurboSpecProvider)
+        except Exception:
+            pass
+
+    provider = PrimusTurboSpecProvider()
+    attn_cls = provider.core_attention()
+    linear_cls = provider.linear()
+    if attn_cls is not PrimusTurboAttention:
+        raise RuntimeError(
+            "Turbo attention requested, but spec provider.core_attention() is "
+            f"{attn_cls.__module__}.{attn_cls.__name__}"
+        )
+    if linear_cls is not TELinear:
+        raise RuntimeError(
+            "Turbo attention runs with TE linear layers, but spec "
+            f"provider.linear() is {linear_cls.__module__}.{linear_cls.__name__}"
+        )
+
+    import turbo_attention_thd
+
+    turbo_attention_thd.install()
+
+    _turbo_log(
+        "[TurboAttention] PrimusTurboAttention selected; "
+        f"linear={linear_cls.__name__}; fp8={attention_float8}; "
+        f"backend={os.getenv('PRIMUS_TURBO_ATTN_BACKEND', '<unset>')}"
+    )
+
+
+def _install_flydsl_fp4_gemms(
+    *,
+    enable_primus_turbo: bool,
+    use_turbo_gemm: bool,
+    use_turbo_attention: bool,
+) -> None:
+    """Wire Primus-Turbo FlyDSL MXFP4 GEMMs on Bridge, optionally with Turbo attention.
+
+    Megatron-Bridge does not reliably apply the Megatron ``before_train`` Turbo
+    patches, so this recipe:
+      * sets Primus args (``use_turbo_gemm``)
+      * replaces ``TESpecProvider`` with ``PrimusTurboSpecProvider``
+      * nests ``primus_turbo_fp4_autocast`` around Megatron ``get_fp4_context``
+      * falls back to TE Linear.forward after MXFP4 healing (FP8 DelayedScaling)
+      * with ``use_turbo_attention``, takes ``PrimusTurboAttention`` (FlyDSL flash
+        attention) with THD support from ``turbo_attention_thd``; else TE attention
+    """
+    if not enable_primus_turbo or not use_turbo_gemm:
+        return
+
+    try:
+        import primus_turbo  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "use_turbo_gemm=True requires primus_turbo in the image. "
+            "Rebuild llama2_sft/primus with Primus-Turbo installed."
+        ) from exc
+
+    os.environ.setdefault("PRIMUS_TURBO_GEMM_BACKEND", "flydsl")
+    os.environ.setdefault("PRIMUS_TURBO_AUTO_TUNE", "1")
+
+    primus_args = _install_primus_args_bridge()
+
+    primus_args.enable_primus_turbo = True
+    primus_args.use_turbo_attention = bool(use_turbo_attention)
+    if use_turbo_attention:
+        primus_args.enable_turbo_attention_float8 = False
+
+    # Gradient stochastic rounding. Primus resolves this off the model config
+    # and falls back to get_args(), which _install_primus_args_bridge populates,
+    # so setting it here is enough to reach fp4_utils' quant config.
+    #
+    # Worth having because the FlyDSL path diverges at the recipe's 6e-4 while
+    # training cleanly at 2e-4: round-to-nearest on MXFP4 gradients accumulates
+    # a bias every step, and SR is the standard remedy for exactly that. The
+    # coarse 32x32 weight scales make this regime more bias-prone than TE's
+    # 1x32, which is consistent with TE being stable at the same LR.
+    if "MXFP4_GRADIENT_SR" in os.environ:
+        primus_args.mxfp4_gradient_stochastic_rounding = _env_flag("MXFP4_GRADIENT_SR", "false")
+        _turbo_log(
+            "[TurboGradSR] mxfp4_gradient_stochastic_rounding="
+            f"{primus_args.mxfp4_gradient_stochastic_rounding}"
+        )
+
+    if hasattr(primus_args, "use_turbo_gemm"):
+        primus_args.use_turbo_gemm = True
+    elif hasattr(primus_args, "use_turbo_parallel_linear"):
+        primus_args.use_turbo_parallel_linear = True
+
+    import inspect as _inspect
+
+    from megatron.core.extensions.transformer_engine import (
+        TEColumnParallelLinear,
+        TEDotProductAttention,
+        TELayerNormColumnParallelLinear,
+        TELinear,
+        TERowParallelLinear,
+    )
+
+    # The Megatron pin calls the TE 2.7+ graph-capture setter, while the TE
+    # pin in this image stores the same device flag directly on its
+    # quantization state. Backfill the setter so local full-iteration graphs
+    # can capture MXFP4 weight-cache update decisions.
+    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboColumnParallelLinear,
+        PrimusTurboLayerNormColumnParallelLinear,
+        PrimusTurboLinear,
+        PrimusTurboLowPrecisionGlobalStateManager,
+        PrimusTurboQuantConfig,
+        PrimusTurboRowParallelLinear,
+        primus_turbo_fp4_autocast,
+    )
+    from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+        PrimusTurboSpecProvider,
+    )
+
+    if not hasattr(FP8GlobalStateManager, "set_skip_fp8_weight_update_tensor"):
+
+        @classmethod
+        def _set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
+            state = cls.quantization_state
+            if state.skip_fp8_weight_update_tensor is None:
+                state.skip_fp8_weight_update_tensor = torch.empty(1, dtype=torch.float32, device="cuda")
+            state.skip_fp8_weight_update_tensor.fill_(skip)
+
+        FP8GlobalStateManager.set_skip_fp8_weight_update_tensor = _set_skip_fp8_weight_update_tensor
+
+    def _drop_unsupported_init_kwargs(cls):
+        orig = cls.__init__
+        params = _inspect.signature(orig).parameters
+        if any(p.kind == _inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return
+
+        def _init(self, *args, **kwargs):
+            allowed = {k: v for k, v in kwargs.items() if k in params}
+            return orig(self, *args, **allowed)
+
+        cls.__init__ = _init
+
+    for _te_cls in (
+        TELinear,
+        TEColumnParallelLinear,
+        TERowParallelLinear,
+        TELayerNormColumnParallelLinear,
+    ):
+        _drop_unsupported_init_kwargs(_te_cls)
+
+    import megatron.core.extensions.transformer_engine as te_spec_mod
+
+    te_spec_mod.TESpecProvider = PrimusTurboSpecProvider
+    try:
+        import megatron.core.extensions.transformer_engine_spec_provider as te_spec_provider_mod
+
+        te_spec_provider_mod.TESpecProvider = PrimusTurboSpecProvider
+    except Exception:
+        pass
+    try:
+        from megatron.core.models.gpt import gpt_layer_specs
+
+        gpt_layer_specs.TESpecProvider = PrimusTurboSpecProvider
+    except Exception:
+        pass
+
+    provider = PrimusTurboSpecProvider()
+    linear_cls = provider.linear()
+    attn_cls = provider.core_attention()
+    norm_cls = provider.layer_norm()
+    if linear_cls is not PrimusTurboLinear:
+        raise RuntimeError(
+            "FlyDSL FP4 GEMMs requested, but spec provider.linear() is "
+            f"{linear_cls.__module__}.{linear_cls.__name__}"
+        )
+    if use_turbo_attention:
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboAttention,
+        )
+
+        if attn_cls is not PrimusTurboAttention:
+            raise RuntimeError(
+                "Turbo attention requested, but spec provider.core_attention() is "
+                f"{attn_cls.__module__}.{attn_cls.__name__}"
+            )
+        import turbo_attention_thd
+
+        turbo_attention_thd.install()
+    elif attn_cls is not TEDotProductAttention:
+        raise RuntimeError(
+            "TE fused attention required, but spec provider.core_attention() is "
+            f"{attn_cls.__module__}.{attn_cls.__name__}"
+        )
+
+    def _te_fallback_forward(cls):
+        orig = cls.forward
+
+        def forward(self, *args, **kwargs):
+            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled() or (
+                PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            ):
+                return orig(self, *args, **kwargs)
+            return super(cls, self).forward(*args, **kwargs)
+
+        cls.forward = forward
+
+    for turbo_cls in (
+        PrimusTurboLinear,
+        PrimusTurboRowParallelLinear,
+        PrimusTurboColumnParallelLinear,
+        PrimusTurboLayerNormColumnParallelLinear,
+    ):
+        # The Turbo forward reads self.te_quant_params, which a newer mcore sets
+        # from TE quantization params this image's TE does not have -- the
+        # container's own [compat] step stubs those types out, and
+        # _drop_unsupported_init_kwargs strips the kwarg, so nothing ever assigns
+        # it. None is the correct value, not merely a safe one:
+        # _get_fp8_autocast_for_quant_params returns nullcontext() for None, and
+        # quantization here comes from the Turbo MXFP4 autocast, not from TE.
+        if not hasattr(turbo_cls, "te_quant_params"):
+            turbo_cls.te_quant_params = None
+        _te_fallback_forward(turbo_cls)
+
+    # LoRA sets return_layernorm_output on every TELayerNormColumnParallelLinear and
+    # feeds the adapter the norm output it gets back. The Turbo forward_internal
+    # ignores the flag and returns (out, None), so Bridge falls back to the raw
+    # residual stream as the adapter input. LoRA B starts at zero, so step 1 is
+    # exact and every step after it is wrong (loss 4.1 -> 9.3 at step 2).
+    # Normalize here and run the stock forward on its pre-normalized
+    # _skip_fused_norm path, so the norm is still computed once.
+    from primus_turbo.pytorch.ops.normalization import rmsnorm as _turbo_rmsnorm
+
+    _orig_ln_forward_internal = PrimusTurboLayerNormColumnParallelLinear.forward_internal
+
+    def _ln_forward_internal(self, x, is_first_microbatch=False):
+        if not getattr(self, "return_layernorm_output", False):
+            return _orig_ln_forward_internal(self, x, is_first_microbatch)
+        if getattr(self, "_skip_fused_norm", False):
+            out, bias = _orig_ln_forward_internal(self, x, is_first_microbatch)
+            return (out, x), bias
+        if self.config.normalization != "RMSNorm":
+            raise RuntimeError(
+                "return_layernorm_output on PrimusTurboLayerNormColumnParallelLinear "
+                f"is only handled for RMSNorm, not {self.config.normalization}"
+            )
+        norm_weight = self.layer_norm_weight
+        if self.zero_centered_gamma:
+            norm_weight = norm_weight + 1
+        ln_out = _turbo_rmsnorm(x, norm_weight, self.eps)
+        prev_skip = self.__dict__.get("_skip_fused_norm", None)
+        self._skip_fused_norm = True
+        try:
+            out, bias = _orig_ln_forward_internal(self, ln_out, is_first_microbatch)
+        finally:
+            if prev_skip is None:
+                del self._skip_fused_norm
+            else:
+                self._skip_fused_norm = prev_skip
+        return (out, ln_out), bias
+
+    PrimusTurboLayerNormColumnParallelLinear.forward_internal = _ln_forward_internal
+    _turbo_log("[TurboLNLinear] return_layernorm_output honored for LoRA adapters")
+
+    from contextlib import contextmanager
+
+    import megatron.core.fp4_utils as fp4_utils
+
+    orig_fp4_context = fp4_utils.get_fp4_context
+
+    _fp4_ctx_logged = []
+
+    @contextmanager
+    def _turbo_fp4_context(config, layer_no: int = -1, is_init: bool = False):
+        inner = orig_fp4_context(config, layer_no, is_init)
+        recipe = str(getattr(config, "fp4_recipe", "")).lower()
+        use_mxfp4 = bool(getattr(config, "fp4", None)) and "mxfp4" in recipe
+        if not _fp4_ctx_logged:
+            _fp4_ctx_logged.append(True)
+            _turbo_log(
+                f"[TurboFP4Ctx] fp4={getattr(config, 'fp4', None)!r} "
+                f"fp4_recipe={getattr(config, 'fp4_recipe', None)!r} "
+                f"use_mxfp4={use_mxfp4} is_init={is_init}"
+            )
+        if is_init or not use_mxfp4:
+            with inner:
+                yield
+            return
+        from primus_turbo.pytorch.core.low_precision import (
+            Format,
+            ScaleDtype,
+            ScalingGranularity,
+            ScalingStrategy,
+        )
+
+        quant = PrimusTurboQuantConfig(
+            format=Format.E2M1_X2,
+            granularity=ScalingGranularity.MX_BLOCKWISE,
+            strategy=ScalingStrategy.DYNAMIC,
+            scale_dtype=ScaleDtype.E8M0,
+            block_size=32,
+        )
+        with inner:
+            with primus_turbo_fp4_autocast(
+                enabled=True,
+                enabled_turbo=True,
+                turbo_quant_config=quant,
+            ):
+                yield
+
+    # Installing on fp4_utils alone is not enough, and that was the whole
+    # problem: transformer_block.py does `from megatron.core.fp4_utils import
+    # get_fp4_context` at import time, so it holds a direct reference and never
+    # sees a replaced module attribute -- while being the module that actually
+    # calls it. The Turbo MXFP4 autocast was therefore never established, every
+    # PrimusTurbo linear fell back to TE through _te_fallback_forward, and the
+    # GEMM backend knobs had nothing to select between. Primus ships both the
+    # ROCm implementation and the consumer list, but registers them through its
+    # own patch registry, which Megatron-Bridge never runs.
+    # Healing swaps the weights to FP8 and repoints fp4_utils.get_fp4_recipe at the
+    # healing recipe, but neither Turbo context looks at either: they keep entering
+    # the Turbo MXFP4 autocast, now over FP8 weights with no Turbo pair. After healing,
+    # hand back to Megatron's own context, which builds TE's autocast from the patched
+    # recipe -- the same post-healing path the TE recipe takes.
+    # PRIMUS_TURBO_FP8_HEALING=1 keeps the post-healing phase on the Turbo linears
+    # instead: a Turbo FP8 autocast (tensorwise, HYBRID like the healing recipe, TE
+    # FP8 off) whose GEMMs turbo_fp8_frozen serves from the FP8 stash on FlyDSL.
+    _fp8_healing_ctx = _env_flag("PRIMUS_TURBO_FP8_HEALING", "false")
+    if _fp8_healing_ctx:
+        from primus_turbo.pytorch.core.low_precision import Format as _Fmt
+        from primus_turbo.pytorch.core.low_precision import ScalingGranularity as _Gran
+
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            primus_turbo_fp8_autocast,
+        )
+
+        _fp8_quant = PrimusTurboQuantConfig(format=_Fmt.HYBRID, granularity=_Gran.TENSORWISE)
+
+        @contextmanager
+        def _turbo_fp8_healing_context():
+            with primus_turbo_fp8_autocast(enabled=False, enabled_turbo=True, turbo_quant_config=_fp8_quant):
+                yield
+
+    def _healing_aware(ctx_fn):
+        def _ctx(config, layer_no: int = -1, is_init: bool = False):
+            if not is_init and not getattr(fp4_utils, "_mxfp4_phase", True):
+                if _fp8_healing_ctx:
+                    return _turbo_fp8_healing_context()
+                return orig_fp4_context(config, layer_no, is_init)
+            return ctx_fn(config, layer_no, is_init)
+
+        return _ctx
+
+    if _env_flag("PRIMUS_TURBO_FP4_AUTOCAST", "false"):
+        fp4_ctx = _turbo_fp4_context
+        try:
+            from primus.backends.megatron.core.fp4_utils import (
+                get_fp4_context as _primus_fp4_ctx,
+            )
+
+            fp4_ctx = _primus_fp4_ctx
+        except Exception:
+            pass
+        _fp4_ctx_name = "primus" if fp4_ctx is not _turbo_fp4_context else "local"
+        fp4_ctx = _healing_aware(fp4_ctx)
+
+        import importlib as _importlib
+
+        _fp4_consumers = [fp4_utils]
+        for _mod_name in (
+            "megatron.core.transformer.transformer_block",
+            "megatron.core.ssm.mamba_block",
+            "megatron.core.transformer.multi_token_prediction",
+        ):
+            try:
+                _fp4_consumers.append(_importlib.import_module(_mod_name))
+            except Exception:
+                continue
+        for _mod in _fp4_consumers:
+            if getattr(_mod, "get_fp4_context", None) is not None:
+                _mod.get_fp4_context = fp4_ctx
+        _turbo_log(
+            f"[TurboFP4Ctx] installed {_fp4_ctx_name} get_fp4_context (healing-aware) "
+            f"into {[m.__name__ for m in _fp4_consumers]}"
+        )
+    else:
+        fp4_utils.get_fp4_context = _healing_aware(_turbo_fp4_context)
+
+    try:
+        from primus_turbo.pytorch.core.backend import BackendType, GlobalBackendManager
+
+        flydsl = getattr(BackendType, "FLYDSL", None) or getattr(BackendType, "flydsl", None)
+        if flydsl is not None:
+            GlobalBackendManager.set_gemm_backend(flydsl)
+    except Exception:
+        pass
+
+    # LoRA freezes every base weight, so stock gemm_fp4's activation column
+    # half, grad_out column half and wgrad GEMM are discarded work (960 GEMMs a
+    # step for 640 used). This routes frozen 1x32 weight pairs to a forward +
+    # dgrad-only FlyDSL path; quantize and GEMM both run FlyDSL kernels.
+    if _env_flag("PRIMUS_TURBO_FP4_FROZEN_WEIGHT", "false"):
+        import turbo_fp4_frozen
+
+        turbo_fp4_frozen.install()
+        _turbo_log("[FrozenFP4] gemm_fp4 routed through turbo_fp4_frozen")
+
+    # qkv and proj LoRA adapters folded into the frozen MXFP4 base GEMM's forward
+    # epilogue and dgrad accumulate.
+    if _env_flag("PRIMUS_TURBO_LORA_FP4_FUSED", "false"):
+        if not _env_flag("PRIMUS_TURBO_FP4_FROZEN_WEIGHT", "false"):
+            raise RuntimeError("PRIMUS_TURBO_LORA_FP4_FUSED=1 needs PRIMUS_TURBO_FP4_FROZEN_WEIGHT=1")
+        import turbo_lora_fp4
+
+        turbo_lora_fp4.install()
+        _turbo_log("[LoRAFP4] LoRALinear qkv/proj routed through lora_frozen_linear")
+
+    if _env_flag("PRIMUS_TURBO_FP8_HEALING", "false"):
+        if not _env_flag("PRIMUS_TURBO_FP4_WEIGHT_CACHE", "false"):
+            raise RuntimeError("PRIMUS_TURBO_FP8_HEALING=1 needs PRIMUS_TURBO_FP4_WEIGHT_CACHE=1")
+        import turbo_fp8_frozen
+
+        turbo_fp8_frozen.install()
+        _turbo_log("[FrozenFP8] gemm_fp8 routed through turbo_fp8_frozen")
+
+    # fc1 -> SwiGLU -> fc2 as two FlyDSL GEMMs with the SwiGLU (and its MXFP4
+    # quantize) fused into the fc1 forward and fc2 dgrad epilogues, replacing TE's
+    # gated_act / dgated_act. MLP weights
+    # carry no LoRA adapters, so the frozen forward + dgrad path covers them.
+    # Only taken inside the Turbo MXFP4 autocast; after healing the stock path runs.
+    if _env_flag("PRIMUS_TURBO_FUSED_DENSE_MLP", "false"):
+        if not _env_flag("PRIMUS_TURBO_FP4_FROZEN_WEIGHT", "false"):
+            raise RuntimeError("PRIMUS_TURBO_FUSED_DENSE_MLP=1 needs PRIMUS_TURBO_FP4_FROZEN_WEIGHT=1")
+        _install_frozen_fused_mlp(PrimusTurboLowPrecisionGlobalStateManager)
+
+    # Residual add + RMSNorm in one Triton kernel, as in gpt-oss and the 8B. The
+    # Primus patch is registered for the megatron backend only, so it never runs
+    # under megatron_bridge unless installed here, before the model is built.
+    if _env_flag("PRIMUS_FUSED_RESIDUAL_NORM", "false") or _env_flag(
+        "PRIMUS_FUSED_RESIDUAL_NORM_V2", "false"
+    ):
+        _install_fused_residual_norm()
+
+    _orig_log_rank_0(
+        "[TurboGEMM] PrimusTurboSpecProvider selected PrimusTurboLinear; "
+        f"attention={attn_cls.__name__}; "
+        f"norm={norm_cls.__name__}; "
+        f"PRIMUS_TURBO_GEMM_BACKEND={os.getenv('PRIMUS_TURBO_GEMM_BACKEND', '<unset>')}"
+    )
+
+
+def _install_te_graph_compat() -> bool:
+    """Give mcore's CUDA-graph code the TE setter our pinned TE never shipped.
+
+    ``megatron.core.transformer.cuda_graphs`` calls
+    ``FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(bool)`` at three
+    points around capture and replay. Our pinned TE has no such method -- it
+    keeps the flag as ``quantization_state.skip_fp8_weight_update_tensor``, an
+    ``Optional[Tensor]`` in which ``None`` means "do not skip" -- so enabling
+    MCORE_CUDA_GRAPH dies with AttributeError during capture.
+
+    TE does this exact job itself in ``graph.py`` when capturing its own graphs,
+    so this mirrors that code rather than inventing semantics: a lazily
+    allocated float32 tensor of shape (1,) on cuda, filled in place. float32
+    rather than bool is TE's choice, and the consumers in ``linear.py``,
+    ``layernorm_linear.py`` and ``layernorm_mlp.py`` read whatever TE allocated,
+    so the dtype has to match theirs rather than look more correct than theirs.
+
+    Filling in place is the entire point. Capture records the tensor by
+    reference, which is why mcore hands the graph a tensor instead of a Python
+    bool, so this must allocate at most once and never rebind the attribute
+    afterwards -- a rebind would leave the captured graph reading a tensor
+    nobody writes to again.
+
+    Returns whether the method was added. False means TE already provides it, in
+    which case TE's own implementation is left alone.
+    """
+    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+    if hasattr(FP8GlobalStateManager, "set_skip_fp8_weight_update_tensor"):
+        return False
+
+    @classmethod
+    def set_skip_fp8_weight_update_tensor(cls, value: bool) -> None:
+        qstate = cls.quantization_state
+        if qstate.skip_fp8_weight_update_tensor is None:
+            qstate.skip_fp8_weight_update_tensor = torch.empty(1, dtype=torch.float32, device="cuda")
+        qstate.skip_fp8_weight_update_tensor.fill_(value)
+
+    FP8GlobalStateManager.set_skip_fp8_weight_update_tensor = set_skip_fp8_weight_update_tensor
+    return True
 
 
 def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
@@ -370,10 +1307,7 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
         global _sft_logger
         try:
             from primus_mllog import MLPerfSFTLogger
-        except ImportError as exc:
-            raise ImportError("PRIMUS_MLLOG IS NOT FOUND") from exc
 
-        try:
             kw = combined_kwargs
             gbs = kw.get("global_batch_size", 8)
             mbs = kw.get("micro_batch_size", 1)
@@ -421,6 +1355,9 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
                 ),
             )
             _sft_logger.log_init_params(init_cfg)
+        except ImportError:
+            _orig_log_rank_0("primus_mllog is required when ENABLE_MLLOG=1")
+            raise
         except Exception as exc:
             _orig_log_rank_0(f"MLPerf logging init failed ({type(exc).__name__}: {exc}) — disabled")
             _sft_logger = None
@@ -441,7 +1378,10 @@ def llama2_70b_lora_mxfp4_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> C
         "recompute_granularity": None,
         "recompute_method": None,
         "recompute_num_layers": None,
-        "attention_backend": "fused",
+        "attention_backend": os.environ.get("PRIMUS_ATTENTION_BACKEND", "fused"),
+        "enable_primus_turbo": _env_flag("ENABLE_PRIMUS_TURBO", "true"),
+        "use_turbo_attention": _env_flag("PRIMUS_USE_TURBO_ATTENTION", "false"),
+        "use_turbo_gemm": _env_flag("PRIMUS_USE_TURBO_GEMM", "true"),
     }
     combined_kwargs: Llama2CustomKwargs = {**mxfp4_defaults, **user_kwargs}
     return llama2_70b_lora_config(**combined_kwargs)
@@ -491,6 +1431,9 @@ def _llama2_lora(
     recompute_method: Optional[str] = None,
     recompute_num_layers: Optional[int] = None,
     attention_backend: Optional[str] = None,
+    enable_primus_turbo: bool = True,
+    use_turbo_attention: bool = False,
+    use_turbo_gemm: bool = True,
 ) -> ConfigContainer:
     """
     Create a custom pre-training configuration for Llama2 models.
@@ -573,20 +1516,25 @@ def _llama2_lora(
     model_cfg.params_dtype = torch.bfloat16
     model_cfg.autocast_dtype = torch.bfloat16
     model_cfg.pipeline_dtype = torch.bfloat16
-    # Fusions / CE: TE parallel cross-entropy; grad-acc fusion (not used with Megatron FSDP).
-    model_cfg.cross_entropy_loss_fusion = False
-    model_cfg.cross_entropy_fusion_impl = "native"
-    model_cfg.gradient_accumulation_fusion = False
+    # Keep the switches environment-controlled so the MI355X recipe can A/B
+    # Megatron's TE fused cross entropy and full-iteration graph capture.
+    model_cfg.cross_entropy_loss_fusion = _env_flag("CROSS_ENTROPY_LOSS_FUSION", "false")
+    model_cfg.cross_entropy_fusion_impl = os.getenv("CROSS_ENTROPY_LOSS_FUSION_IMPL", "native")
+    model_cfg.gradient_accumulation_fusion = _env_flag("GRADIENT_ACCUMULATION_FUSION", "false")
     model_cfg.bias_dropout_fusion = True
-    model_cfg.fused_single_qkv_rope = False
+    model_cfg.fused_residual_rmsnorm = _env_flag("FUSED_RESIDUAL_RMSNORM", "false")
+    model_cfg.fused_single_qkv_rope = _env_flag("FUSED_SINGLE_QKV_ROPE", "true")
     model_cfg.apply_rope_fusion = True
-    model_cfg.use_transformer_engine_op_fuser = False
+    if model_cfg.fused_single_qkv_rope and _env_flag("PRIMUS_TURBO_FLYDSL_ROPE", "false"):
+        import turbo_rope
+
+        turbo_rope.install()
+        _turbo_log("[FlyDSLRoPE] TE fused QKV RoPE replaced by Turbo fused_qkv_rope")
+    model_cfg.use_transformer_engine_op_fuser = _env_flag("USE_TE_OPS", "false")
     # Activation offload hint for TP paths (distinct from cpu_offloading / cpu_offloading_num_layers).
     model_cfg.cpu_offloading_activations = True
 
-    # MXFP4 weights (fp4/e2m1); fp8=None during MXFP4 phase. FP8_* env vars in
-    # config_MI355X_1x8x1.sh configure healing (step 340) and TE delayed scaling,
-    # not Megatron model_cfg.fp8 (which stays None until healing).
+    # MXFP4 configuration
     model_cfg.fp8 = None
     model_cfg.fp4 = "e2m1"
     model_cfg.fp4_recipe = "mxfp4"
@@ -596,10 +1544,29 @@ def _llama2_lora(
     # Used when cuda_graph_impl is not "none" (harmless when graphs are disabled).
     model_cfg.cuda_graph_retain_backward_graph = True
     model_cfg.cuda_graph_use_single_mempool = True
+    if _env_flag("MCORE_CUDA_GRAPH", "false"):
+        from megatron.core.transformer.enums import CudaGraphScope
+
+        model_cfg.cuda_graph_impl = os.getenv("CUDA_GRAPH_IMPL", "local").strip() or "local"
+        model_cfg.cuda_graph_scope = [CudaGraphScope.full_iteration]
+        model_cfg.cuda_graph_warmup_steps = int(os.getenv("CUDA_GRAPH_WARMUP_STEPS", "1"))
+        model_cfg.use_te_rng_tracker = True
+        # Only patch TE when graphs are actually on, so the no-flag baseline is
+        # left byte-identical.
+        shimmed = _install_te_graph_compat()
+        # Announced on stderr, not log_rank_0: the configs pin PRIMUS_LOG_LEVEL=ERROR
+        # and _log_suppression filters fd 1, which is why earlier graph runs could
+        # not be confirmed from their logs either way.
+        print(
+            f"MCORE_CUDA_GRAPH enabled: impl={model_cfg.cuda_graph_impl} "
+            f"scope={model_cfg.cuda_graph_scope} "
+            f"warmup={model_cfg.cuda_graph_warmup_steps} te_graph_shim={shimmed}",
+            file=sys.stderr,
+            flush=True,
+        )
+    model_cfg.fp8 = None
     model_cfg.fp8_recipe = "delayed"
     model_cfg.fp8_amax_history_len = 4
-    model_cfg.fp8_amax_compute_algo = "most_recent"
-    model_cfg.fp8_dot_product_attention = False
     model_cfg.disable_parameter_transpose_cache = False
     model_cfg.fine_grained_activation_offloading = False
     model_cfg.use_transformer_engine_full_layer_spec = (
@@ -627,6 +1594,30 @@ def _llama2_lora(
                 f"Unknown attention_backend {attention_backend!r}; expected one of "
                 f"{[b.name for b in AttnBackend]}."
             ) from e
+    # TE reads these two TransformerConfig fields into its fp8_dpa / fp8_mha recipe flags
+    # (transformer_engine.py:1900), which is the only supported way to ask for
+    # the FP8 fused-attention backend; the NVTE_* env vars alone do not reach it.
+    model_cfg.fp8_dot_product_attention = _env_flag("FP8_DOT_PRODUCT_ATTENTION", "false")
+    model_cfg.fp8_multi_head_attention = _env_flag("FP8_MULTI_HEAD_ATTENTION", "false")
+
+    _turbo_on = _as_bool(enable_primus_turbo, True)
+    _turbo_gemm = _as_bool(use_turbo_gemm, True)
+    _turbo_attn = _as_bool(use_turbo_attention, False)
+    _turbo_log(
+        f"[TurboDecide] turbo={_turbo_on} gemm={_turbo_gemm} attn={_turbo_attn} "
+        f"env_attn={os.getenv('PRIMUS_USE_TURBO_ATTENTION', '<unset>')} "
+        f"env_gemm={os.getenv('PRIMUS_USE_TURBO_GEMM', '<unset>')}"
+    )
+    if _turbo_on and _turbo_attn and not _turbo_gemm:
+        _install_turbo_attention(
+            attention_float8=_env_flag("PRIMUS_TURBO_ATTENTION_FP8", "false"),
+        )
+    else:
+        _install_flydsl_fp4_gemms(
+            enable_primus_turbo=_turbo_on,
+            use_turbo_gemm=_turbo_gemm,
+            use_turbo_attention=_turbo_attn,
+        )
     # Disable attention QK clipping / max-logit scans in the optimizer path (extra GPU work per step).
     if hasattr(model_cfg, "qk_clip"):
         model_cfg.qk_clip = False
@@ -704,6 +1695,9 @@ def _llama2_lora(
             do_test=False,
             do_validation=True,
             dataset_kwargs={"return_cu_seqlen": False},
+            # GPTSFTPackedDataset only shuffles (per epoch, seeded) when this is set; without it
+            # train.npy is read in file order, which is all CRS reports followed by all GAO reports.
+            max_train_samples=int(math.ceil(global_batch_size * train_iters * 1.005)),
         )
     else:
         raise ValueError(f"Unknown dataset_type: {dataset_type!r}. Expected 'squad' or 'mlperf_dataset'.")
@@ -752,10 +1746,10 @@ def _llama2_lora(
         dataset=dataset_cfg,
         logger=LoggerConfig(
             log_interval=10,
-            tensorboard_dir=None,
+            tensorboard_dir=os.getenv("TORCHPROF_OUTPUT_DIR"),
             # Per-step / log-interval overhead toggles (keep off for throughput).
             log_params_norm=False,
-            log_throughput=True,
+            log_throughput=False,
             log_energy=False,
             log_progress=False,
             timing_log_level=0,
@@ -791,6 +1785,11 @@ def _llama2_lora(
             load_main_params_from_ckpt=False,
             load_optim=False,
             load_rng=False,
+            # PrimusTurboAttention's sharded_state_dict requests a
+            # core_attention._extra_state entry that the converted Llama-2-70b
+            # checkpoint does not carry. DIST_CKPT_STRICTNESS selects how that
+            # missing key is treated. The recipe default is assume_ok_unexpected.
+            dist_ckpt_strictness=os.getenv("DIST_CKPT_STRICTNESS", "assume_ok_unexpected"),
         ),
         rng=RNGConfig(seed=seed, te_rng_tracker=True),
         rerun_state_machine=RerunStateMachineConfig(
@@ -802,11 +1801,18 @@ def _llama2_lora(
         mixed_precision=precision_config,
         peft=peft_config,
         profiling=ProfilingConfig(
-            use_pytorch_profiler=False,
-            profile_step_start=140,
-            profile_step_end=144,
-            profile_ranks=list(range(8)),  # 1 node × 8 GPUs
-            record_shapes=False,
+            use_pytorch_profiler=os.getenv("PRIMUS_PROFILE", "").lower() in ("1", "true", "yes", "on"),
+            profile_step_start=int(os.getenv("PRIMUS_PROFILE_STEP_START", "140")),
+            profile_step_end=int(os.getenv("PRIMUS_PROFILE_STEP_END", "144")),
+            profile_ranks=[
+                int(rank)
+                for rank in os.getenv("PRIMUS_PROFILE_RANKS", "0,1,2,3,4,5,6,7").split(",")
+                if rank.strip()
+            ],
+            # Off by default: shapes roughly double trace size and add launch
+            # overhead. Needed to attribute GEMM time to individual shapes and
+            # check them against the AITER tuning table.
+            record_shapes=_env_flag("PRIMUS_PROFILE_RECORD_SHAPES", "false"),
             nvtx_ranges=False,
         ),
     )
@@ -1178,6 +2184,37 @@ class _SyntheticSFTDataIterator:
         return {"tokens": tokens, "labels": labels, "loss_mask": loss_mask, "position_ids": position_ids}
 
 
+def _warmup_frozen_fp8_gemms(model, global_state) -> None:
+    """Compile the post-healing FlyDSL FP8 GEMMs before RUN_START, for every frozen base
+    linear shape of the first decoder layer."""
+    import turbo_fp8_frozen
+
+    chunks = model if isinstance(model, (list, tuple)) else [model]
+    layer0 = _mxh_extract_layers(chunks[0])[0]
+    shapes = []
+    for name, mod in layer0.named_modules():
+        w = getattr(mod, "_parameters", {}).get("weight")
+        if w is not None and w.ndim == 2 and not w.requires_grad:
+            # PRIMUS_TURBO_FP4_DROP_TE_WEIGHT empties the TE storage that w.shape derives from.
+            shape = (getattr(mod, "out_features", None), getattr(mod, "in_features", None))
+            if None in shape:
+                shape = tuple(w.shape)
+            if tuple(w.shape) != shape:
+                _turbo_log(
+                    f"[FP8Warmup] {name}: {type(w).__name__} reports {tuple(w.shape)}, module says {shape}"
+                )
+            shapes.append(shape)
+    cfg = global_state.cfg
+    turbo_fp8_frozen.warmup(shapes, cfg.model.seq_length * cfg.train.micro_batch_size)
+
+
+def _mxh_extract_layers(chunk):
+    m = chunk
+    while not hasattr(m, "decoder") and hasattr(m, "module"):
+        m = m.module
+    return m.decoder.layers
+
+
 def run_synthetic_warmup(
     forward_step_func: ForwardStepCallable,
     model: list[MegatronModule],
@@ -1198,6 +2235,9 @@ def run_synthetic_warmup(
     """
     warmup_train_steps = int(os.getenv("SYNTH_WARMUP_STEPS", "5"))
     warmup_valid_steps = int(os.getenv("SYNTH_WARMUP_VALID_STEPS", "5"))
+
+    if _env_flag("PRIMUS_TURBO_FP8_HEALING", "false") and int(os.getenv("HEALING_ITER", "0") or 0) > 0:
+        _warmup_frozen_fp8_gemms(model, global_state)
 
     if warmup_train_steps <= 0 and warmup_valid_steps <= 0:
         return
@@ -1234,10 +2274,9 @@ def run_synthetic_warmup(
         saved = []
         for group in inner.param_groups:
             state = {}
-            for key in ("betas", "weight_decay", "bias_correction", "step"):
+            for key in ("betas", "weight_decay", "bias_correction"):
                 if key in group:
-                    val = group[key]
-                    state[key] = val.clone() if isinstance(val, torch.Tensor) else val
+                    state[key] = group[key]
             saved.append(state)
             if "betas" in group:
                 group["betas"] = [1.0, 1.0]
@@ -1299,12 +2338,14 @@ def run_synthetic_warmup(
     del saved_params
 
     # --- Restore optimizer state ---
+    # TE FusedAdam keeps the bias-correction step in group["step"] and recreates it
+    # as 1 on the next update when absent, so the first real step is step 1 for any
+    # SYNTH_WARMUP_STEPS.
     for inner, saved in zip(inner_opts, saved_opt_states):
         for group, state in zip(inner.param_groups, saved):
-            # Adam creates and increments group["step"] during warmup.
-            group.pop("step", None)
             for key, val in state.items():
                 group[key] = val
+            group.pop("step", None)
 
     if hasattr(optimizer, "reload_model_params"):
         optimizer.reload_model_params()
@@ -1386,10 +2427,114 @@ def run_synthetic_warmup(
     global_state.train_state.consumed_train_samples = 0
 
     # --- Clear CUDA cache (single clear after warmup, before RUN_START) ---
+    # WARMUP_KEEP_CACHE=1 keeps the warm-up's pool: releasing it here makes the
+    # first measured steps map it back inside the clock.
     torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    if not _env_flag("WARMUP_KEEP_CACHE", "false"):
+        torch.cuda.empty_cache()
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
+
+
+def _drop_turbo_fp4_pairs(model) -> None:
+    """Free the Turbo MXFP4 weight pairs before healing installs the FP8 weights.
+
+    Healing releases the TE MXFP4 weight by unlinking the parameter, but the pair
+    pre_quantize_mxfp4 built for the FlyDSL GEMM lives on the module buffers and on
+    the parameter, outside healing's view. Left in place it is ~70 GiB resident next
+    to the ~64 GiB FP8 weights, and the first post-healing step OOMs at 262 of 288
+    GiB. After healing the Turbo linears take TE's forward and never read the pair.
+    """
+    chunks = model if isinstance(model, (list, tuple)) else [model]
+    n_dropped = 0
+    for chunk in chunks:
+        for m in chunk.modules():
+            dropped = False
+            for attr in ("quantized_weight_buffer", "quantized_weight_t_buffer"):
+                if getattr(m, attr, None) is not None:
+                    setattr(m, attr, None)
+                    dropped = True
+            w = m._parameters.get("weight") if hasattr(m, "_parameters") else None
+            if w is not None and hasattr(w, "_turbo_fp4_pair"):
+                del w._turbo_fp4_pair
+                dropped = True
+            n_dropped += dropped
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    _turbo_log(f"[TurboWeights] dropped {n_dropped} Turbo MXFP4 weight pairs before healing")
+
+
+_STASH_PREFETCH: dict = {"stream": None}
+
+
+def _prefetch_fp8_stash(stash, budget_bytes: Optional[int] = None) -> int:
+    """Copy the FP8 healing stash tensors still on the host to the GPU, up to ``budget_bytes``.
+
+    The caching allocator keeps a pool per stream, so the destinations are allocated
+    on the current stream and only the copy runs on the side stream. Allocating on the
+    copy stream, as healing's own restore does, maps new memory instead of reusing the
+    ~220 GiB cached on the compute stream, and near the HBM limit the allocator then
+    frees its whole cache. Healing's ``.to(dev, non_blocking=True)`` hands back a tensor
+    already on the device unchanged. Synchronize the stream before healing.
+    """
+    dev = torch.cuda.current_device()
+    stream = _STASH_PREFETCH["stream"] or torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    copied = 0
+    with torch.no_grad():
+        for weight in (w for layer in stash for w in layer):
+            data = getattr(weight, "_data", None)
+            if data is None or data.is_cuda:
+                continue
+            nbytes = data.numel() * data.element_size()
+            if budget_bytes is not None and copied + nbytes > budget_bytes:
+                break
+            dst = torch.empty(data.shape, dtype=data.dtype, device=dev)
+            with torch.cuda.stream(stream):
+                dst.copy_(data, non_blocking=True)
+            weight._data = dst
+            copied += nbytes
+    _STASH_PREFETCH["stream"] = stream
+    _turbo_log(f"[HealPrefetch] copying {copied / 2**30:.1f} GiB of the FP8 stash")
+    return copied
+
+
+def _install_healing_timers(mxh) -> None:
+    """HEALING_TIMING=1: log wall time and GPU memory around each healing phase."""
+    import time as _time
+
+    def _mem():
+        return (
+            f"alloc={torch.cuda.memory_allocated() / 2**30:.1f}G "
+            f"reserved={torch.cuda.memory_reserved() / 2**30:.1f}G"
+        )
+
+    def _timed(name, fn):
+        def _inner(*args, **kwargs):
+            torch.cuda.synchronize()
+            t0 = _time.perf_counter()
+            out = fn(*args, **kwargs)
+            torch.cuda.synchronize()
+            _turbo_log(f"[HealTiming] {name}: {_time.perf_counter() - t0:.3f}s {_mem()}")
+            return out
+
+        return _inner
+
+    for name in ("_reset_full_iteration_cuda_graphs", "_set_quantized_params_cpu", "_reset_fp8_state"):
+        setattr(mxh, name, _timed(name, getattr(mxh, name)))
+    _orig_empty_cache = torch.cuda.empty_cache
+    torch.cuda.empty_cache = _timed("empty_cache", _orig_empty_cache)
+    globals()["_drop_turbo_fp4_pairs"] = _timed("_drop_turbo_fp4_pairs", _drop_turbo_fp4_pairs)
+    _orig_apply = mxh.apply_healing_after_step
+
+    def _apply(*args, **kwargs):
+        _turbo_log(f"[HealTiming] before healing: {_mem()}")
+        try:
+            return _timed("apply_healing_after_step", _orig_apply)(*args, **kwargs)
+        finally:
+            torch.cuda.empty_cache = _orig_empty_cache
+
+    mxh.apply_healing_after_step = _apply
 
 
 def megatron_bridge_train_override(
@@ -1522,20 +2667,50 @@ def megatron_bridge_train_override(
     eval_iterations = 0
 
     prof = None
+    full_run_handler = None
     nsys_nvtx_context = None  # NVTX context for nsys profiling
     prof_config = config.profiling
+    if torch.distributed.get_rank() == 0:
+        _dbg_msg = (
+            f"[PROFILER DEBUG] PRIMUS_PROFILE={os.getenv('PRIMUS_PROFILE','<unset>')}, "
+            f"use_pytorch_profiler={prof_config.use_pytorch_profiler if prof_config else 'no_config'}, "
+            f"should_profile={should_profile_rank(prof_config, 0) if prof_config else False}"
+        )
+        print(_dbg_msg, flush=True)
+        try:
+            with open("/results/profiler_debug.txt", "w") as _f:
+                _f.write(_dbg_msg + "\n")
+        except FileNotFoundError:
+            pass
     if prof_config and should_profile_rank(prof_config, torch.distributed.get_rank()):
         if prof_config.use_pytorch_profiler:
             trace_dir = config.logger.tensorboard_dir or os.path.join(os.getcwd(), "torch_profiler_traces")
-            prof = initialize_pytorch_profiler(prof_config, trace_dir)
-            prof.start()
+            window_size = int(os.getenv("PRIMUS_PROFILE_WINDOW_SIZE", "4"))
+            total_steps = config.train.train_iters
+            if FullRunProfilerHandler is None:
+                raise ImportError(
+                    "PyTorch profiling requested but full_run_profiler_handler is not "
+                    f"importable; mount utilities/ at /workspace/utilities (looked in {_profiling_utils})"
+                )
+            full_run_handler = FullRunProfilerHandler(
+                trace_dir,
+                total_steps,
+                window_size,
+                record_shapes=prof_config.record_shapes,
+            )
+            print(
+                f"[FullRunProfiler] Enabled (repeat=1 per window): "
+                f"window_size={window_size}, total_steps={total_steps}, "
+                f"midpoint_window={full_run_handler.midpoint_window}",
+                flush=True,
+            )
 
     # Initialize RPD profiler if enabled
     rpd = None
     rpd_status = None
     profiler_type = os.getenv("PROFILER", "")
-    rpd_warmup_steps = int(os.getenv("RPD_WARMUP_STEPS", "0"))
-    rpd_active_steps = int(os.getenv("RPD_ACTIVE_STEPS", "100"))
+    rpd_warmup_steps = max(0, int(os.getenv("RPD_WARMUP_STEPS", "0")))
+    rpd_active_steps = int(os.getenv("RPD_ACTIVE_STEPS", "999999"))
     if profiler_type == "rpd":
         try:
             from rpdTracerControl import rpdTracerControl
@@ -1616,7 +2791,6 @@ def megatron_bridge_train_override(
         global_state,
         pg_collection,
     )
-    _log_training_gpu_mem("after synthetic warmup", config.logger.memory_keys)
 
     sft_logger = _get_sft_logger()
 
@@ -1624,10 +2798,17 @@ def megatron_bridge_train_override(
     if sft_logger is not None:
         sft_logger.log_init_stop_run_start()
 
+    _materialize_data_iterators(train_data_iterator, valid_data_iterator)
+
     # Wall-clock for the training loop only (first through last train step; warmup eval disabled).
     training_wall_start = time.perf_counter()
     # Skip the first N interval evals (e.g. 48, 96, 144 when eval_interval=48); run from step 4*interval (192).
     eval_skip_first_n = 3
+
+    # LIMIT_VAL_BATCHES=0 disables all evaluation (matches NeMo profiling behavior).
+    limit_val_batches = float(os.getenv("LIMIT_VAL_BATCHES", "0"))
+    if limit_val_batches == 0:
+        log_rank_0("LIMIT_VAL_BATCHES=0: evaluation disabled for this run")
 
     # One-shot MXFP4 healing env banner (no-op unless HEALING_ITER > 0 and
     # MXFP4_HEALING_PHASE_LOG is on). Safe to call even when the healing
@@ -1666,14 +2847,17 @@ def megatron_bridge_train_override(
             rpd_status = "finished"
 
         # Handle profiling for this step
-        nvtx_ctx = handle_profiling_step(
-            prof_config,
-            global_state.train_state.step,
-            torch.distributed.get_rank(),
-            prof,
-        )
-        if nvtx_ctx is not None:
-            nsys_nvtx_context = nvtx_ctx
+        if full_run_handler is not None:
+            full_run_handler.pre_step(global_state.train_state.step)
+        else:
+            nvtx_ctx = handle_profiling_step(
+                prof_config,
+                global_state.train_state.step,
+                torch.distributed.get_rank(),
+                prof,
+            )
+            if nvtx_ctx is not None:
+                nsys_nvtx_context = nvtx_ctx
 
         # Update the timeout for all process groups after initialization
         # We update the timeout after the first successful iteration,
@@ -1729,6 +2913,10 @@ def megatron_bridge_train_override(
         timer.stop()
         timers("interval-time").stop()
 
+        # Advance profiler after the training step completes
+        if full_run_handler is not None:
+            full_run_handler.post_step(global_state.train_state.step)
+
         # Advance NVIDIA DLFw Inspect step if enabled
         tensor_inspect_step_if_enabled(config.tensor_inspect)
 
@@ -1765,7 +2953,7 @@ def megatron_bridge_train_override(
         global_state.train_state.step += 1
 
         # MXFP4 healing: when train_state.step + 1 == HEALING_ITER, restore FP8
-        # weights from the CPU stash (see ``mxfp4_healing``) and
+        # weights from the CPU stash (see ``mlperf_llama2_70b.mxfp4_healing``) and
         # switch ``megatron.core.fp4_utils`` out of the MXFP4 phase. No-op when
         # HEALING_ITER == 0 (default) so BF16/MXFP8 submission runs are
         # unaffected.
@@ -1775,7 +2963,40 @@ def megatron_bridge_train_override(
             )
 
             if _mxh.healing_iter() > 0:
-                _mxh.apply_healing_after_step(model, model_config, global_state.train_state.step)
+                _real_empty_cache = torch.cuda.empty_cache
+                _prefetch_gb = float(os.getenv("HEALING_PREFETCH_GB", "0") or 0)
+                if (
+                    _prefetch_gb > 0
+                    and global_state.train_state.step + 1
+                    == _mxh.healing_iter() - int(os.getenv("HEALING_PREFETCH_STEPS", "4"))
+                    and not _mxh.is_fp8_healing_phase()
+                    and _mxh._FP8_CPU_PARAMS
+                ):
+                    _prefetch_fp8_stash(_mxh._FP8_CPU_PARAMS, int(_prefetch_gb * 2**30))
+                if (
+                    global_state.train_state.step + 1 == _mxh.healing_iter()
+                    and not _mxh.is_fp8_healing_phase()
+                    and _mxh._FP8_CPU_PARAMS
+                ):
+                    # HEALING_KEEP_CACHE=1: healing's empty_cache calls unmap ~200 GiB
+                    # (~1.6 s) that the first FP8 step then maps back (~2 s). Keeping
+                    # the cache only works with the stash copied into it first: the
+                    # restore allocates on its own stream, which cannot reuse the
+                    # compute stream's cache, overflows HBM and makes the allocator
+                    # free everything anyway.
+                    if _env_flag("HEALING_KEEP_CACHE", "false"):
+                        torch.cuda.empty_cache = lambda: None
+                    if _env_flag("HEALING_TIMING", "false"):
+                        _install_healing_timers(_mxh)
+                    _drop_turbo_fp4_pairs(model)
+                    if _env_flag("HEALING_KEEP_CACHE", "false"):
+                        _prefetch_fp8_stash(_mxh._FP8_CPU_PARAMS)
+                    if _STASH_PREFETCH["stream"] is not None:
+                        _STASH_PREFETCH["stream"].synchronize()
+                try:
+                    _mxh.apply_healing_after_step(model, model_config, global_state.train_state.step)
+                finally:
+                    torch.cuda.empty_cache = _real_empty_cache
             _mxh.log_training_step_phase(global_state.train_state.step)
         except Exception as _heal_err:  # noqa: BLE001
             _orig_log_rank_0(
@@ -1847,14 +3068,14 @@ def megatron_bridge_train_override(
             log_max_attention_logit,
             nemo_elapsed_time_per_iter_sec=nemo_elapsed_time_per_iter_sec,
         )
-        if config.logger.log_interval and global_state.train_state.step % config.logger.log_interval == 0:
-            _log_training_gpu_mem(
-                f"step {global_state.train_state.step}",
-                config.logger.memory_keys,
-            )
         if nemo_elapsed_time_per_iter_sec is not None:
             nemo_style_iter_seconds_accum = 0.0
             nemo_style_iter_count = 0
+
+        if os.environ.get("LORA_FP4_PARITY") == "1":
+            import turbo_lora_fp4
+
+            turbo_lora_fp4.log_step(global_state.train_state.step, loss_dict, grad_norm)
 
         # MLPerf logging: per-step train loss
         if sft_logger is not None and not skipped_iter and loss_dict:
@@ -1866,7 +3087,8 @@ def megatron_bridge_train_override(
             )
 
         if (
-            global_state.train_state.do_valid
+            limit_val_batches > 0
+            and global_state.train_state.do_valid
             and train_config.eval_interval
             and global_state.train_state.step % train_config.eval_interval == 0
             and global_state.train_state.step > eval_skip_first_n * train_config.eval_interval
@@ -1909,6 +3131,12 @@ def megatron_bridge_train_override(
                 )
                 if target_hit:
                     should_exit = True
+                    if rpd and rpd_status == "running":
+                        log_rank_0(
+                            f"Stopping RPD profiling at convergence (step {global_state.train_state.step})"
+                        )
+                        rpd.stop()
+                        rpd_status = "finished"
             if should_exit:
                 exit_code = 0
             eval_duration += timers("eval-time").elapsed()
@@ -1968,6 +3196,19 @@ def megatron_bridge_train_override(
         sft_logger.log_run_stop(global_state.train_state.consumed_train_samples)
 
     _delete_cuda_graphs(cuda_graph_helper)
+
+    # Write profiler summary if active
+    if full_run_handler is not None:
+        full_run_handler.finalize()
+        full_run_handler.write_summary()
+        try:
+            with open("/results/profiler_debug.txt", "a") as _f:
+                _f.write(
+                    f"[FullRunProfiler] Collected {len(full_run_handler.kernel_stats)} unique kernels "
+                    f"across {full_run_handler.current_window} windows\n"
+                )
+        except FileNotFoundError:
+            pass
 
     # Stop RPD profiler if still running
     if rpd and rpd_status == "running":

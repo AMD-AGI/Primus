@@ -29,7 +29,7 @@ modules:
         local_batch_size: 6
         seq_len: 8192
         mock_data: true
-        steps: 50
+        steps: 20
         gc_freq: 100
 
       profiling:
