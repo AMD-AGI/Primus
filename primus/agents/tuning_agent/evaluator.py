@@ -672,26 +672,19 @@ class Evaluator:
 
         # memory cap enforcement
         #
-        # Caveat for `recompute_granularity in {"selective", "none", None}`:
         # Primus's analytic memory model only models ``full`` recompute
-        # (see core/projection/module_profilers/language_model.py:504). For
-        # ``selective`` and ``none`` it stores **all** per-layer activations,
-        # which over-counts vs. real Megatron runs (selective saves ~50%
-        # because attention activations are recomputed). To avoid falsely
-        # pre-rejecting these in *benchmark* mode (where the actual GPU run
-        # is the ground truth and will OOM if it can't fit), we apply a
-        # heuristic correction:
-        #   - "selective": multiply projection by 0.55  (saves attention)
-        #   - "none"/None: leave as-is, trust the projection
-        # When in benchmark mode, even a still-over-cap result is treated
-        # as ADVISORY: log it but proceed to benchmark, because real OOM is
-        # the only authoritative answer. In simulate / memory-only modes
-        # the projection remains authoritative.
+        # (see core/projection/module_profilers/language_model.py:504): for
+        # ``selective`` it stores every per-layer activation, an upper bound.
+        # Benchmark mode measures memory instead (``_evaluate_benchmark``);
+        # here nothing does, so the projection is authoritative. With flash
+        # attention, selective recompute's default (core attention) saves
+        # little, and a discounted guess would rank configs that run out of
+        # memory first.
         cap = self.cfg.optimization.hbm_capacity_gb * (1 - self.cfg.optimization.memory_safety_margin)
         adjusted_mem = result.memory_per_gpu_gb
-        if cfg.recompute_granularity == "selective" and adjusted_mem is not None:
-            adjusted_mem = adjusted_mem * 0.55
         result.memory_per_gpu_gb_adjusted = adjusted_mem
+        if cfg.recompute_granularity == "selective":
+            result.memory_warning = "selective recompute: memory is the model's no-recompute upper bound"
 
         # Strict memory enforcement: any trial whose projected per-GPU
         # memory exceeds the safety-margined HBM cap is rejected up-front,
