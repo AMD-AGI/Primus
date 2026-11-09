@@ -49,6 +49,12 @@ def log_success(msg: str):
         print(f"[OK] {msg}")
 
 
+def log_warning(msg: str):
+    """Log warning message (only on rank 0)."""
+    if _is_rank_0():
+        print(f"[WARNING] {msg}")
+
+
 def _first_config_value(obj, *names: str) -> str | None:
     """Return the first non-empty attribute value found on an object."""
     if obj is None:
@@ -423,6 +429,23 @@ def _emit_native_checkpoint_args(megatron_path: Path):
     print(f"extra.finetune=true")
 
 
+def _warn_unused_earlier_conversion(earlier: Path, megatron_path: Path, ckpt_format: str, suffixed: bool):
+    """Point out a conversion in ``earlier``, the default output directory of earlier
+    versions (``<name>_native``, without the format), which a conversion into
+    ``megatron_path`` leaves unused."""
+    from primus.backends.megatron.checkpoint import native_convert_common as common
+
+    if not (earlier / common.TRACKER_FILENAME).exists():
+        return
+    note = (
+        f"{earlier} holds a conversion, at the default output directory of earlier versions (which "
+        f"did not name the format); this run converts into {megatron_path}."
+    )
+    if not suffixed and common.saved_ckpt_format(str(earlier)) == ckpt_format:
+        note += f" To reuse it instead (it is a {ckpt_format} checkpoint), set native_ckpt_out: {earlier}."
+    log_warning(f"{note} Delete {earlier} when nothing uses it, to free its space.")
+
+
 def _resolve_native_ckpt_format(requested: str | None, experiment: dict) -> str:
     """Pick the format the native converter writes, or exit with the reason.
 
@@ -559,7 +582,8 @@ def _native_main(
     load to any TP / PP / EP; see ``_resolve_native_ckpt_format``. The format is
     part of the default output path and is checked against an existing
     checkpoint before it is reused, so a checkpoint of one format is never
-    handed to a run that needs the other.
+    handed to a run that needs the other. A new conversion points out one left
+    at the default output path of earlier versions (``<name>_native``).
 
     The family's registration (``native_registry``) adds its options, and its
     ``prepare`` step (``config_file`` and ``argv``, the hook's command line, are
@@ -583,6 +607,7 @@ def _native_main(
 
     # Output path. torch_dist: <out>/release/ (metadata.json, .metadata, *.distcp);
     # torch: <out>/iter_0000001/mp_rank_00/model_optim_rng.pt.
+    earlier = None
     if native_opts.get("out"):
         megatron_path = Path(native_opts["out"])
     else:
@@ -590,6 +615,7 @@ def _native_main(
         megatron_path = data_path / "megatron_checkpoints" / f"{Path(hf_path).name}_native_{ckpt_format}"
         if plan.path_suffix:
             megatron_path = megatron_path.with_name(megatron_path.name + plan.path_suffix)
+        earlier = megatron_path.parent / f"{Path(hf_path).name}_native"
 
     log_info(f"HF Model: {hf_path}  (native family: {family}, format: {ckpt_format})")
     log_info(f"Megatron Path: {megatron_path}")
@@ -616,6 +642,8 @@ def _native_main(
     done_file = Path(f"{megatron_path}.done")
 
     if node_rank == 0:
+        if earlier is not None:
+            _warn_unused_earlier_conversion(earlier, megatron_path, ckpt_format, bool(plan.path_suffix))
         log_info("Converting HF checkpoint to Megatron format (native, bridge-free)...")
         megatron_path.parent.mkdir(parents=True, exist_ok=True)
         lock_file.touch()

@@ -473,6 +473,25 @@ def test_default_output_path_includes_format(
     assert common.saved_ckpt_format(str(expected)) == ckpt_format
 
 
+@pytest.mark.parametrize("ckpt_format", ["torch_dist", "torch"])
+def test_conversion_points_out_one_at_the_earlier_default_path(
+    tmp_path, monkeypatch, capsys, hf_llama, fake_convert, ckpt_format
+):
+    """Earlier versions converted into ``<name>_native`` (legacy torch); a conversion into
+    the new default path says that one is left unused, and how a torch run reuses it."""
+    monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
+    earlier = tmp_path / "data" / "megatron_checkpoints" / "tiny-llama_native"
+    _write_torch(earlier / "iter_0000001")
+    (earlier / common.TRACKER_FILENAME).write_text("1")
+
+    hook._native_main(str(hf_llama), {"out": None, "ckpt_format": None}, _experiment(ckpt_format=ckpt_format))
+
+    out = capsys.readouterr().out
+    assert f"[WARNING] {earlier} holds a conversion" in out
+    assert (f"set native_ckpt_out: {earlier}." in out) == (ckpt_format == "torch")
+    assert [c["ckpt_format"] for c in fake_convert] == [ckpt_format]
+
+
 def test_existing_checkpoint_of_same_format_is_reused(tmp_path, monkeypatch, capsys, hf_llama, fake_convert):
     monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
     hook._native_main(str(hf_llama), {"out": None, "ckpt_format": None}, _experiment(tp=2))
