@@ -115,6 +115,12 @@ moe_router_force_load_balancing_type: "even"
 # metrics or logging computed from the logits, or hooks that inspect them.
 # Leave it on for plain pretraining / SFT, where the logits only feed this loss.
 te_ce_overwrite_input: true
+# Defer TE fused cross entropy's gradient to the backward pass: the forward only
+# computes the loss and per-token softmax statistics, and the backward writes the
+# gradient over the logits with TE's BF16 rounding. TP=1 contiguous BF16 logits
+# only (other cases keep TE). Same logits caveat as te_ce_overwrite_input;
+# cannot be combined with use_turbo_cross_entropy.
+deferred_cross_entropy: false
 
 # ===== MXFP4 Weight De-oscillation =====
 # Snap weight elements whose MXFP4-quantized value oscillates while the fp32
