@@ -8,10 +8,15 @@ recompute. Attention and the expert grouped GEMMs run on Primus-Turbo's FlyDSL k
 of `DOCKER_IMAGE` from the host and re-runs itself inside it; with `PRIMUS_LAUNCHER=direct` it runs inside
 the current container.
 
-The default image, `amdprimus/amdprimus:tas-20261019`, is `amdprimus/amdprimus:tas-20261015` (ROCm
-10.2.0a20261011, PyTorch 2.14.0, FlyDSL 0.3.4.1, aiter 0.1.24.post1) with hipBLASLt built from
-ROCm/rocm-libraries `develop` e1e7fdcab and Primus-Turbo `main` 21588d59 (#567: FlyDSL MLA attention and
-the tuned gfx1250 BF16 grouped GEMM).
+The default image, `amdprimus/amdprimus:tas-20261109`
+(`sha256:5e287acb708c936ae3a29771c92ceeb2f17c03d686e9a6cb254a0d974a5346cb`), is
+`amdprimus/amdprimus:tas-20261019` with its Primus-Turbo replaced by Primus-Turbo `dev/mi455x_v4` 126a485b
+(Primus-Turbo PR #632: FlyDSL MLA attention, the tuned gfx1250 BF16 grouped GEMM, and MegaMoE, whose expert
+wgrads accumulate into `main_grad`), built for gfx942, gfx950 and gfx1250. `amdprimus/amdprimus:tas-20261019`,
+the default before it, is `amdprimus/amdprimus:tas-20261015` (ROCm 10.2.0a20261011, PyTorch 2.14.0, FlyDSL
+0.3.4.1, aiter 0.1.24.post1) with hipBLASLt built from ROCm/rocm-libraries `develop` e1e7fdcab and
+Primus-Turbo `main` 21588d59 (Primus-Turbo PR #567: FlyDSL MLA attention and the tuned gfx1250 BF16 grouped
+GEMM). Both images have the same hipBLASLt.
 
 ## Run
 
@@ -21,7 +26,7 @@ bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
 
 # Inside a container
 docker run -d --name dsv3 --privileged --network host --ipc host --device /dev/kfd --device /dev/dri \
-    --group-add video -v "$PWD:$PWD" -w "$PWD" amdprimus/amdprimus:tas-20261019 sleep infinity
+    --group-add video -v "$PWD:$PWD" -w "$PWD" amdprimus/amdprimus:tas-20261109 sleep infinity
 docker exec -it dsv3 bash
 PRIMUS_LAUNCHER=direct bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
 ```
@@ -59,9 +64,9 @@ GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_NUM_EXPERTS=32 GBS=16 \
 
 **MegaMoE.** `USE_TURBO_MEGA_MOE=True` runs each MoE layer as Primus-Turbo's fused MegaMoE layer instead
 of the token dispatcher and the grouped GEMM, at EP 2 to 8 (so not in the 1-GPU variant). It needs a
-Primus-Turbo with the gfx1250 MegaMoE kernels (on `main` since b4ad3bcb, e.g. a `TURBO_DIR` checkout); the
-image's predates them. The default, `auto`, turns MegaMoE on when the Primus-Turbo in use has them, and
-`False` keeps it off. With MegaMoE, the yaml's `gradient_accumulation_fusion: true` covers the expert
+Primus-Turbo with the gfx1250 MegaMoE kernels (on `main` since b4ad3bcb), which the default image has;
+tas-20261019's predates them. The default, `auto`, turns MegaMoE on when the Primus-Turbo in use has them,
+and `False` keeps it off. With MegaMoE, the yaml's `gradient_accumulation_fusion: true` covers the expert
 weights too: their wgrads accumulate straight into `main_grad`.
 
 **Another Primus-Turbo checkout.** Build it in place for the image once (gfx1250 only, OpenMPI off the
@@ -69,7 +74,7 @@ paths so rocSHMEM is not linked), then pass it as `TURBO_DIR`; the launcher puts
 
 ```bash
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /path/to/Primus-Turbo:/path/to/Primus-Turbo \
-    -w /path/to/Primus-Turbo amdprimus/amdprimus:tas-20261019 bash -c \
+    -w /path/to/Primus-Turbo amdprimus/amdprimus:tas-20261109 bash -c \
     'PATH=$(tr : "\n" <<< "$PATH" | grep -v openmpi | paste -sd:) GPU_ARCHS=gfx1250 python3 setup.py build_ext --inplace'
 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh
 ```
@@ -155,6 +160,19 @@ they differed by up to 0.002 from iteration 5 on, and the table shows the first 
 | --- | --- |
 | 1 | 5.292, 5.326, 5.587, 7.069, 12.977, 14.047, 13.663, 14.999, 13.477, 14.189 |
 | 4 | 3.810, 3.777, 3.815, 5.138, 8.843, 10.093, 7.850, 7.170, 6.819, 6.650 |
+
+**On tas-20261109.** The launcher's defaults on 4 GPUs with the default image (Primus-Turbo 126a485b, no
+`TURBO_DIR`), on another MI455X node than the tables above, inside a container (`PRIMUS_LAUNCHER=direct`),
+one run at a time, 2 runs; ms/iter is the average over iterations 3–10:
+
+| Variant | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- |
+| Launcher defaults (MegaMoE) | 899.6 (900.8, 898.4) | 72,800 | 1572 | 151.96–152.82 GiB | 5.56301–5.56302 |
+
+- On the same node and tree, Primus-Turbo `dev/mi455x_v4` 24e989fd through `TURBO_DIR` on tas-20261019 ran
+  899.1 ms/iter, so the image's Primus-Turbo needs no checkout and runs at its speed.
+- `USE_TURBO_MEGA_MOE=False USE_TURBO_DEEPEP=True` with `--turbo_deepep_num_cu 64` (Primus-Turbo's FlyDSL
+  DeepEP instead of MegaMoE): 894.3 ms/iter, 153.13 GiB, lm loss 5.56281.
 
 ## Known issues
 

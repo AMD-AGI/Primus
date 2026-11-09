@@ -12,7 +12,8 @@ picks slower kernels for these shapes.
 On another hipBLASLt build, the file's `Git Version` line does not match, and hipBLASLt uses each row
 only while its kernel name still names a kernel of that build; the other shapes fall back to the
 default. All 29 kernels of this file are in the hipBLASLt of `amdprimus/amdprimus:tas-20261019`
-(rocm-libraries `e1e7fdcab9`, ROCm 10.2.0a20261011), where the file was measured. Tune again, and give
+(rocm-libraries `e1e7fdcab9`, ROCm 10.2.0a20261011), where the file was measured, and of
+`amdprimus/amdprimus:tas-20261109`, which has the same hipBLASLt. Tune again, and give
 the new file the new build in its name, when the hipBLASLt build or the GEMM shapes change.
 
 To remake it (`examples/megatron/guides/offline_tune/README.md`):

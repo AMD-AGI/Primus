@@ -139,11 +139,12 @@ modules:
       moe_permute_fusion: true
       # Attention uses the FlyDSL MLA backend (PRIMUS_TURBO_ATTN_BACKEND).
       # DeepEP uses Primus-Turbo's FlyDSL flydsl_v2 backend for gfx1250
-      # (Primus-Turbo#602, in dev/mi455x_v4) and needs the dispatcher to flatten
-      # by the input width (latent MoE). Checked on 4 x MI455X: finite loss and no
-      # NaN in every 12-iteration run. The MI355X recipe keeps DeepEP off (its
-      # first backward went non-finite there). With the image's Primus-Turbo
-      # (no FlyDSL DeepEP), set use_turbo_deepep: false.
+      # (Primus-Turbo#602, in amdprimus/amdprimus:tas-20261109's Primus-Turbo)
+      # and needs the dispatcher to flatten by the input width (latent MoE).
+      # Checked on 4 x MI455X: finite loss and no NaN in every 12-iteration run.
+      # The MI355X recipe keeps DeepEP off (its first backward went non-finite
+      # there). With a Primus-Turbo without FlyDSL DeepEP (e.g. that of
+      # tas-20261019), set use_turbo_deepep: false.
       # Left OFF:
       #   shared_expert_overlap  -- moe_layer.py asserts NOT-overlap on the live K3
       #                             latent path; dies at forward.

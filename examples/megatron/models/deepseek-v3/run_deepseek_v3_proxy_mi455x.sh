@@ -27,7 +27,7 @@ cd "$(dirname "${SCRIPT}")/../../../.."
 
 # container: re-run this script in a new container of DOCKER_IMAGE; direct: run in this container
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
-export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261019}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261109}
 export EXP=${EXP:-examples/megatron/configs/MI455X/deepseek_v3-BF16-pretrain.yaml}
 # Primus-Turbo checkout built in place for DOCKER_IMAGE (see README.md); empty: the image's primus_turbo
 export TURBO_DIR=${TURBO_DIR:-}
@@ -150,7 +150,7 @@ if [[ "${PATCH_TRITON_EXPERT_SCHEDULING}" == 1 ]]; then
     fi
 fi
 
-# The image's primus_turbo predates the gfx1250 MegaMoE kernels; TURBO_DIR, when set, is the one in use
+# tas-20261019's primus_turbo predates the gfx1250 MegaMoE kernels; TURBO_DIR, when set, is the one in use
 if [[ "${USE_TURBO_MEGA_MOE}" == auto ]]; then
     TURBO_PKG=$(PYTHONPATH="${TURBO_DIR:+${TURBO_DIR}:}${PYTHONPATH:-}" python3 -c \
         'import importlib.util; print(importlib.util.find_spec("primus_turbo").submodule_search_locations[0])')
