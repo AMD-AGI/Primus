@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Same runtime and Flux flags as mlperf-training-dev/flux1/primus/config_common.sh.
-# Dataset and log paths stay overridable because this launcher mounts data at /data
-# and results at /output. Source this before primus-cli.
+# Dataset and log paths stay overridable because this launcher mounts data at /dataset
+# and results at /results. Source this before primus-cli.
 
 export TQDM_DISABLE=True
 export PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF:-}
@@ -11,17 +11,17 @@ export HF_DATASETS_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export DIFFUSERS_OFFLINE=1
 
-export DATASET_PATH=${DATASET_PATH:-/data/cc12m_preprocessed}
-export EVAL_DATASET_PATH=${EVAL_DATASET_PATH:-/data/coco_preprocessed}
-export EMPTY_ENCODINGS_PATH=${EMPTY_ENCODINGS_PATH:-/data/empty_encodings}
-export MLLOG_OUTPUT_FILE=${MLLOG_OUTPUT_FILE:-/output/flux_mlperf/mlperf_compliance.log}
-export MLLOG_CONFIG_FILENAME=${MLLOG_CONFIG_FILENAME:-config_MI355X_1x8x32.sh}
+export DATASET_PATH=${DATASET_PATH:-/dataset/cc12m_preprocessed}
+export EVAL_DATASET_PATH=${EVAL_DATASET_PATH:-/dataset/coco_preprocessed}
+export EMPTY_ENCODINGS_PATH=${EMPTY_ENCODINGS_PATH:-/dataset/empty_encodings}
+export MLLOG_OUTPUT_FILE=${MLLOG_OUTPUT_FILE:-/results/mlperf_logging.out}
+export MLLOG_CONFIG_FILENAME=${MLLOG_CONFIG_FILENAME:-config_${DGXSYSTEM}.sh}
 export MLLOG_SUBMISSION_ORG=AMD
 export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR='mxfp4'
 export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN='bfloat16'
 export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM='mxfp4'
-export OUTPUT_DIR=${OUTPUT_DIR:-/output/flux_mlperf}
-export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-/output/primus_workspace}
+export OUTPUT_DIR=${OUTPUT_DIR:-/results/full_logs/flux_mlperf}
+export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-/results/primus_workspace}
 
 export GPU_FORCE_BLIT_COPY_SIZE=${GPU_FORCE_BLIT_COPY_SIZE:-512}
 # 4 hardware queues and 2 connections let the reduce-scatter stream leave the
@@ -217,3 +217,4 @@ export NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-none}
 
 export PRIMUS_PATH=${PRIMUS_PATH:-/workspace/Primus}
 export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH:-}"
+export EXP=${EXP:-/workspace/code/flux.1_schnell_t2i-pretrain.yaml}
