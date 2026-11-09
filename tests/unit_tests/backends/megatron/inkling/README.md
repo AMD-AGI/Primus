@@ -26,7 +26,7 @@ Monday Oct 19, 2026, on one MI355X GPU (`HIP_VISIBLE_DEVICES=0`), spur job
 | torch | `2.14.0+rocm10.1.0` |
 | Container transformers | 5.10.0 (has no Inkling) |
 | Reference transformers | 5.19.0.dev0 at commit `263c5eb913849847dcff1885b7b5e387c483f844` |
-| Emerging-Optimizers | commit `93d9eb3a6c899b50de73992826451fba3ab6adfb` |
+| Emerging-Optimizers | commit `93d9eb3a6c899b50de73992826451fba3ab6adfb` (Megatron-core 0.19 needs `1f29ffd2`, as in step 2) |
 | Primus | branch `feat/inkling-megatron`, `main` merged at `8e7a2406` |
 
 ### pytest
@@ -171,7 +171,8 @@ NFS checkout.
 All three go to the container's `/tmp`, so `/home` (NFS) stays untouched. The
 container's transformers stays at 5.10; the pinned build is only added through
 `PYTHONPATH`. The image doesn't ship Emerging-Optimizers, which Megatron's Muon
-needs; the commit is the one the Muon install hook pins.
+needs; the commit is the one the Muon install hook pins (v0.3.1: Megatron-core 0.19
+imports `Lion`, which older commits lack, and the Muon tests then skip).
 
 ```bash
 export PYTHONDONTWRITEBYTECODE=1
@@ -184,7 +185,7 @@ PYTHONPATH=/tmp/inkling_ref/site python -c \
 # -> 5.19.0.dev0
 
 pip install --no-deps --no-cache-dir -q --target /tmp/eo \
-    https://github.com/NVIDIA-NeMo/Emerging-Optimizers/archive/93d9eb3a6c899b50de73992826451fba3ab6adfb.zip
+    https://github.com/NVIDIA-NeMo/Emerging-Optimizers/archive/1f29ffd2acbf047f3dd3efdd8e9469d9305a8f77.zip
 
 # Ranged download of the layer 0-5, embedding and unembedding tensors from
 # thinkingmachines/Inkling-Small: 122 tensors, 56.6 GB, about 3.5 min.

@@ -84,5 +84,4 @@ modules:
       use_turbo_deepep: false
       use_turbo_rms_norm: false
       moe_grouped_gemm: true
-      moe_token_dispatcher_type: alltoall
       moe_permute_fusion: false
