@@ -544,6 +544,7 @@ def _run_sdma_hook(extra_env, kernel_release="6.8.0"):
     hook = Path(__file__).resolve().parents[3] / "runner/helpers/hooks/06_enable_sdma_all_gather.sh"
     env = os.environ.copy()
     for name in (
+        "SDMA_ALL_GATHER",
         "FSDP_ALL_GATHER_BACKEND",
         "MEGATRON_PARAM_GATHER_BACKEND",
         "MEGATRON_GRAD_REDUCE_BACKEND",
@@ -581,6 +582,7 @@ def _run_sdma_hook(extra_env, kernel_release="6.8.0"):
     "backend",
     [
         {"FSDP_ALL_GATHER_BACKEND": "rccl_sdma"},
+        {"SDMA_ALL_GATHER": "1"},
         {"MEGATRON_PARAM_GATHER_BACKEND": "rccl_sdma"},
     ],
 )
@@ -656,6 +658,20 @@ def test_fsdp_hook_keeps_global_cumem_and_cta_policy():
     assert result.returncode == 0
     assert "env.NCCL_CUMEM_ENABLE=1" in result.stdout
     assert "env.NCCL_CTA_POLICY=2" in result.stdout
+
+
+def test_neutral_sdma_trigger_keeps_fsdp_runtime_prerequisites():
+    result = _run_sdma_hook({"SDMA_ALL_GATHER": "1"})
+    assert result.returncode == 0
+    assert "env.SDMA_ALL_GATHER=1" in result.stdout
+    assert "env.NCCL_CTA_POLICY=2" in result.stdout
+    assert "env.LD_PRELOAD=/tmp/libhip_attr_drain.so" in result.stdout
+
+
+def test_neutral_sdma_trigger_rejects_megatron_global_policy_conflict():
+    result = _run_sdma_hook({"SDMA_ALL_GATHER": "1", "MEGATRON_PARAM_GATHER_BACKEND": "rccl_sdma"})
+    assert result.returncode == 2
+    assert "cannot be enabled together" in result.stderr
 
 
 def test_hook_rejects_combined_fsdp_and_megatron_backends():

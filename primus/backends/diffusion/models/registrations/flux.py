@@ -32,6 +32,9 @@ from primus.backends.diffusion.models.flux.train_pipeline import (
 from primus.backends.diffusion.utils.log import logger
 from primus.backends.diffusion.utils.train_utils import count_parameters
 
+# Saved lazily so non-FP8 builds do not require TorchAO.
+_ORIGINAL_FLOAT8_ADDMM = None
+
 _FLUX_PRESET_ALIASES = {
     "flux-schnell": "flux-schnell",
     "flux.1-schnell": "flux-schnell",
@@ -51,6 +54,78 @@ _FP8_DOUBLE_MLP_SUFFIXES = {
     "txt_mlp.0",
     "txt_mlp.2",
 }
+_FLUX_QKV_SUFFIXES = {
+    "img_attn.qkv",
+    "txt_attn.qkv",
+}
+_FP8_SELECTIVE_GEMM_SHAPES = {
+    (3072, 15360, 16384),
+    (8192, 3072, 3072),
+    (8192, 3072, 12288),
+    (8192, 9216, 3072),
+    (8192, 12288, 3072),
+    (16384, 3072, 15360),
+    (16384, 15360, 3072),
+    (16384, 21504, 3072),
+}
+
+
+@torch.library.custom_op("primus::flux_flydsl_scaled_mm", mutates_args=())
+def _flux_flydsl_scaled_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    a_scale: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    from primus_turbo.flydsl.gemm.gemm_fp8_kernel import (
+        gemm_fp8_tensorwise_flydsl_kernel,
+    )
+
+    return gemm_fp8_tensorwise_flydsl_kernel(
+        a,
+        a_scale,
+        b.t(),
+        b_scale,
+        trans_a=False,
+        trans_b=True,
+        out_dtype=torch.bfloat16,
+    )
+
+
+@_flux_flydsl_scaled_mm.register_fake
+def _(a, b, a_scale, b_scale):
+    return torch.empty((a.shape[0], b.shape[1]), device=a.device, dtype=torch.bfloat16)
+
+
+@torch.library.custom_op("primus::flux_flydsl_natural_wgrad", mutates_args=())
+def _flux_flydsl_natural_wgrad(
+    grad_output: torch.Tensor,
+    input: torch.Tensor,
+    grad_scale: torch.Tensor,
+    input_scale: torch.Tensor,
+) -> torch.Tensor:
+    from primus_turbo.flydsl.gemm.gemm_fp8_kernel import (
+        gemm_fp8_tensorwise_flydsl_kernel,
+    )
+
+    return gemm_fp8_tensorwise_flydsl_kernel(
+        grad_output,
+        grad_scale,
+        input,
+        input_scale,
+        trans_a=True,
+        trans_b=False,
+        out_dtype=torch.bfloat16,
+    )
+
+
+@_flux_flydsl_natural_wgrad.register_fake
+def _(grad_output, input, grad_scale, input_scale):
+    return torch.empty(
+        (grad_output.shape[1], input.shape[1]),
+        device=input.device,
+        dtype=torch.bfloat16,
+    )
 
 
 def _strip_known_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -165,6 +240,96 @@ def _build_flux_dit(params) -> Flux:
     return dit
 
 
+def _flux_block_kind(module: torch.nn.Module, fqn: str) -> str | None:
+    """Classify a FLUX block Linear as ``"qkv"`` or ``"full"``, else None.
+
+    The selection is deliberately identical to the FP8 recipe's, so an MXFP4 run
+    quantizes exactly the same 228 modules and leaves the embeddings,
+    modulation/adaLN projections and final layer in BF16.
+    """
+    if type(module) is not torch.nn.Linear:
+        return None
+    parts = fqn.split(".", 2)
+    if len(parts) != 3:
+        return None
+    if parts[0] == "double_blocks":
+        if parts[2] in _FLUX_QKV_SUFFIXES:
+            return "qkv"
+        if parts[2] in _FP8_DOUBLE_ATTN_PROJ_SUFFIXES:
+            return "full"
+        if parts[2] in _FP8_DOUBLE_MLP_SUFFIXES:
+            return "full"
+    if parts[0] == "single_blocks" and parts[2] in {"linear1", "linear2"}:
+        return "full"
+    return None
+
+
+def _apply_flux_mxfp4(dit, config):
+    """Quantize block Linears, with optional BF16 QKV Wgrad and first/last blocks.
+
+    Sensitivity can occur at either end (arXiv:2603.08747). MLP_ONLY selects
+    double-block MLPs; single-block attention/MLP Linears cannot be separated.
+    All precision opt-outs default off.
+    """
+    from dataclasses import replace
+
+    from primus.backends.diffusion.models.quantization.mxfp4_linear import (
+        convert_to_mxfp4_training,
+    )
+
+    qkv_wgrad_bf16 = os.getenv("FLUX_FP4_QKV_WGRAD_BF16", "0") == "1"
+    bf16_last = int(os.getenv("FLUX_FP4_BF16_LAST_BLOCKS", "0"))
+    bf16_first = int(os.getenv("FLUX_FP4_BF16_FIRST_BLOCKS", "0"))
+    mlp_only = os.getenv("FLUX_FP4_BF16_MLP_ONLY", "0") == "1"
+    n_double, n_single = len(dit.double_blocks), len(dit.single_blocks)
+    if min(bf16_last, bf16_first) < 0 or bf16_last + bf16_first > n_double + n_single:
+        raise ValueError(f"FLUX_FP4_BF16_FIRST_BLOCKS={bf16_first} + LAST_BLOCKS={bf16_last} is out of range")
+
+    # Held-back blocks as (kind, index), walking inwards from each end of the
+    # network. Network order is the double blocks then the single blocks, so
+    # "first" starts at double_blocks.0 and "last" ends at the final single block.
+    order = [("double_blocks", i) for i in range(n_double)]
+    order += [("single_blocks", i) for i in range(n_single)]
+    held_back = set(order[:bf16_first]) | set(order[len(order) - bf16_last :])
+
+    def held(fqn: str) -> bool:
+        kind, index, suffix = fqn.split(".", 2)
+        if (kind, int(index)) not in held_back:
+            return False
+        # Double blocks name their MLP separately, so MLP_ONLY can act there.
+        return not (mlp_only and kind == "double_blocks" and suffix not in _FP8_DOUBLE_MLP_SUFFIXES)
+
+    # Enumerated before conversion, since _flux_block_kind keys off nn.Linear and the
+    # swapped modules are no longer one. This replaces the arithmetic the count check
+    # used to do, which does not survive a per-module selection.
+    block_linears = [fqn for fqn, m in dit.named_modules() if _flux_block_kind(m, fqn) is not None]
+    expected_total = n_double * 8 + n_single * 2
+    if len(block_linears) != expected_total:
+        raise RuntimeError(f"FLUX has {len(block_linears)} block Linear modules; expected {expected_total}")
+    expected = sum(1 for fqn in block_linears if not held(fqn))
+
+    def filter_fn(module: torch.nn.Module, fqn: str) -> bool:
+        return _flux_block_kind(module, fqn) is not None and not held(fqn)
+
+    def config_for(fqn: str):
+        parts = fqn.split(".", 2)
+        if qkv_wgrad_bf16 and parts[0] == "double_blocks" and parts[2] in _FLUX_QKV_SUFFIXES:
+            return replace(config, wgrad="bf16")
+        return None
+
+    converted = convert_to_mxfp4_training(dit, filter_fn, config, config_for)
+
+    if len(converted) != expected:
+        raise RuntimeError(f"FLUX MXFP4 converted {len(converted)} Linear modules; expected {expected}")
+    logger.info(
+        f"Enabled MXFP4 for {len(converted)} of {expected_total} FLUX block Linear modules "
+        f"({config.describe()}); wgrad={'BF16' if qkv_wgrad_bf16 else 'MXFP4'} for QKV modules; "
+        f"held back {expected_total - len(converted)} modules across {len(held_back)} blocks "
+        f"(first={bf16_first} last={bf16_last} mlp_only={int(mlp_only)})"
+    )
+    return dit
+
+
 def build_flux_model(model_config: dict[str, Any]):
     """
     Build a FLUX model from the selected model preset.
@@ -176,6 +341,15 @@ def build_flux_model(model_config: dict[str, Any]):
     float8_recipe = str(cfg_dict.get("float8_recipe") or "").strip().lower()
     if float8_recipe not in {"", "tensorwise"}:
         raise ValueError(f"Unsupported FLUX float8_recipe={float8_recipe!r}; expected null or 'tensorwise'")
+    fp8_gemm_backend = str(cfg_dict.get("float8_gemm_backend") or "").strip().lower()
+    if fp8_gemm_backend not in {"", "selective_triton", "selective_flydsl", "full_flydsl"}:
+        raise ValueError(
+            "Unsupported FLUX float8_gemm_backend="
+            f"{fp8_gemm_backend!r}; expected null, 'selective_triton', "
+            "'selective_flydsl', or 'full_flydsl'"
+        )
+    if fp8_gemm_backend and not float8_recipe:
+        raise ValueError("FLUX float8_gemm_backend requires float8_recipe='tensorwise'")
     preset_name = str(model_config.get("model_preset") or cfg_dict.get("model_preset") or "flux.1-schnell")
     preset = _FLUX_PRESET_ALIASES.get(preset_name.lower(), preset_name)
 
@@ -204,6 +378,20 @@ def build_flux_model(model_config: dict[str, Any]):
                 f"missing={load_result.missing_keys[:8]} unexpected={load_result.unexpected_keys[:8]}"
             )
 
+    # MXFP4 replaces the FP8 GEMMs on the same modules, so the two recipes are
+    # mutually exclusive and FLUX_FP4_PASSES wins when both are configured.
+    # Do not import the broad MXFP4/Turbo integration for native/FP8-only runs.
+    fp4_passes = os.getenv("FLUX_FP4_PASSES", "").strip().lower()
+    if fp4_passes not in {"", "0", "off", "none"}:
+        from primus.backends.diffusion.models.quantization.mxfp4_linear import (
+            config_from_env as _mxfp4_config_from_env,
+        )
+
+        mxfp4_config = _mxfp4_config_from_env()
+        if mxfp4_config is not None:
+            dit = _apply_flux_mxfp4(dit, mxfp4_config)
+            float8_recipe = ""
+
     if float8_recipe:
         try:
             from torchao.float8 import (
@@ -215,36 +403,80 @@ def build_flux_model(model_config: dict[str, Any]):
         except ImportError as exc:
             raise ImportError("TorchAO is required for FLUX tensor-wise FP8 training") from exc
 
+        import torchao.float8.float8_ops as float8_ops
+
+        global _ORIGINAL_FLOAT8_ADDMM
+        if _ORIGINAL_FLOAT8_ADDMM is None:
+            _ORIGINAL_FLOAT8_ADDMM = float8_ops.addmm_float8_unwrapped
+        float8_ops.addmm_float8_unwrapped = _ORIGINAL_FLOAT8_ADDMM
+
+        if fp8_gemm_backend:
+            os.environ["PRIMUS_FLUX_FP8_GEMM_BACKEND"] = fp8_gemm_backend
+        else:
+            os.environ.pop("PRIMUS_FLUX_FP8_GEMM_BACKEND", None)
+
+        if fp8_gemm_backend == "selective_triton":
+            from torch._inductor.kernel import mm
+
+            if not getattr(mm, "_PRIMUS_FLUX_SELECTIVE_TRITON", False):
+                raise RuntimeError("selective_triton requires the FLUX FP8 Inductor image patch")
+            logger.info(f"Using Triton FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
+
+        if fp8_gemm_backend in {"selective_flydsl", "full_flydsl"}:
+            original_addmm = _ORIGINAL_FLOAT8_ADDMM
+
+            def selective_flydsl_addmm(
+                a_data,
+                a_scale,
+                b_data,
+                b_scale,
+                output_dtype,
+                output_scale=None,
+                bias=None,
+                use_fast_accum=False,
+            ):
+                shape = (a_data.shape[0], b_data.shape[1], a_data.shape[1])
+                if (
+                    (fp8_gemm_backend == "full_flydsl" or shape in _FP8_SELECTIVE_GEMM_SHAPES)
+                    and output_dtype == torch.bfloat16
+                    and output_scale is None
+                    and bias is None
+                ):
+                    return _flux_flydsl_scaled_mm(
+                        a_data,
+                        b_data,
+                        a_scale.reciprocal(),
+                        b_scale.reciprocal(),
+                    )
+                return original_addmm(
+                    a_data,
+                    a_scale,
+                    b_data,
+                    b_scale,
+                    output_dtype,
+                    output_scale,
+                    bias,
+                    use_fast_accum,
+                )
+
+            float8_ops.addmm_float8_unwrapped = selective_flydsl_addmm
+            if fp8_gemm_backend == "full_flydsl":
+                logger.info("Using FlyDSL for all FLUX FP8 scaled GEMMs")
+            else:
+                logger.info(f"Using FlyDSL FP8 GEMM for shapes {sorted(_FP8_SELECTIVE_GEMM_SHAPES)}")
+
+        fp8_all_gather = os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1"
         full_wgrad_fqns: list[str] = []
         high_precision_wgrad_fqns: list[str] = []
 
-        def module_kind(module: torch.nn.Module, fqn: str) -> str | None:
-            if type(module) is not torch.nn.Linear:
-                return None
-            parts = fqn.split(".", 2)
-            if len(parts) != 3:
-                return None
-            if parts[0] == "double_blocks":
-                if parts[2] == "img_attn.qkv":
-                    return "qkv"
-                if parts[2] == "txt_attn.qkv":
-                    return "qkv"
-                if parts[2] in _FP8_DOUBLE_ATTN_PROJ_SUFFIXES:
-                    return "full"
-                if parts[2] in _FP8_DOUBLE_MLP_SUFFIXES:
-                    return "full"
-            if parts[0] == "single_blocks" and parts[2] in {"linear1", "linear2"}:
-                return "full"
-            return None
-
         def full_wgrad_filter(module: torch.nn.Module, fqn: str) -> bool:
-            selected = module_kind(module, fqn) == "full"
+            selected = _flux_block_kind(module, fqn) == "full"
             if selected:
                 full_wgrad_fqns.append(fqn)
             return selected
 
         def high_precision_wgrad_filter(module: torch.nn.Module, fqn: str) -> bool:
-            selected = module_kind(module, fqn) == "qkv"
+            selected = _flux_block_kind(module, fqn) == "qkv"
             if selected:
                 high_precision_wgrad_fqns.append(fqn)
             return selected
@@ -254,7 +486,7 @@ def build_flux_model(model_config: dict[str, Any]):
             module_filter_fn=full_wgrad_filter,
             config=Float8LinearConfig(
                 pad_inner_dim=False,
-                enable_fsdp_float8_all_gather=False,
+                enable_fsdp_float8_all_gather=fp8_all_gather,
             ),
         )
         dit = convert_to_float8_training(
@@ -264,7 +496,7 @@ def build_flux_model(model_config: dict[str, Any]):
                 cast_config_input_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
                 cast_config_grad_output_for_grad_weight=CastConfig(scaling_type=ScalingType.DISABLED),
                 pad_inner_dim=False,
-                enable_fsdp_float8_all_gather=False,
+                enable_fsdp_float8_all_gather=fp8_all_gather,
             ),
         )
         expected_full_count = len(dit.double_blocks) * 6 + len(dit.single_blocks) * 2

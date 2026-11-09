@@ -35,6 +35,16 @@ from primus.backends.diffusion.distributed import (
 )
 from primus.backends.diffusion.utils.log import logger
 
+
+def _pin_symm_mem_pools() -> None:
+    import ctypes
+
+    from torch.distributed import _symmetric_memory as symm_mem
+
+    for pool in list(getattr(symm_mem, "_symm_mem_pools", {}).values()):
+        ctypes.pythonapi.Py_IncRef(ctypes.py_object(pool))
+
+
 from .base import BaseWanTrainer
 
 
@@ -120,6 +130,53 @@ class FSDP2Trainer(BaseWanTrainer):
         """Hook for casting the wrapped root before the world-size short-circuit."""
         del wrap_root, mp_dtype
 
+    def _sdma_all_gather_enabled(self) -> bool:
+        return (
+            os.getenv("FSDP_ALL_GATHER_BACKEND", "") == "rccl_sdma"
+            and os.getenv("FLUX_SDMA_ATTACH", "1") == "1"
+        )
+
+    def _maybe_attach_sdma_all_gather(self, module, module_name: str) -> None:
+        if not self._sdma_all_gather_enabled():
+            return
+        # FSDP_SDMA_MODULES: comma-separated module-path prefixes (e.g. "single_blocks") that take the
+        # copy-engine gather; the rest keep the kernel gather. Empty means every module.
+        prefixes = [p.strip() for p in os.getenv("FSDP_SDMA_MODULES", "").split(",") if p.strip()]
+        if prefixes and not any(module_name == p or module_name.startswith(p + ".") for p in prefixes):
+            return
+
+        from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
+            SymmMemAllGather,
+        )
+
+        try:
+            state = module._get_fsdp_state()
+        except Exception:
+            return
+
+        # set_custom_all_gather rejects modules whose parameters span more than one group.
+        groups = getattr(state, "_fsdp_param_groups", None) or []
+        if len(groups) != 1:
+            if self.rank == 0:
+                logger.warning(
+                    f"FSDP2/SDMA: skipping {type(module).__name__}: "
+                    f"expected one parameter group, found {len(groups)}"
+                )
+            return
+
+        process_group = groups[0]._all_gather_process_group
+        try:
+            module.set_custom_all_gather(SymmMemAllGather(process_group, "NCCL"))
+        except (AttributeError, ValueError, AssertionError) as error:
+            if self.rank == 0:
+                logger.warning(f"FSDP2/SDMA: failed to attach to {type(module).__name__}: {error}")
+            return
+        self._sdma_attached = getattr(self, "_sdma_attached", 0) + 1
+        if self._sdma_attached == 1:
+            import atexit
+
+            atexit.register(_pin_symm_mem_pools)
+
     def _apply_fsdp2(self):
         """Apply torch.distributed._composable.fsdp.fully_shard to the model."""
         mp_dtype = self._resolve_dtype()
@@ -128,6 +185,67 @@ class FSDP2Trainer(BaseWanTrainer):
         if reduce_dtype_name not in {"fp32", "bf16"}:
             raise ValueError(f"Unsupported FSDP2_REDUCE_DTYPE={reduce_dtype_name!r}")
         reduce_dtype = torch.float32 if reduce_dtype_name == "fp32" else torch.bfloat16
+
+        fp8_all_reduce = os.getenv("FSDP2_HSDP_FP8_ALL_REDUCE", "").lower()
+        if fp8_all_reduce:
+            fp8_dtypes = {
+                "e4m3": torch.float8_e4m3fn,
+                "e5m2": torch.float8_e5m2,
+            }
+            if fp8_all_reduce not in fp8_dtypes:
+                raise ValueError(
+                    f"Unsupported FSDP2_HSDP_FP8_ALL_REDUCE={fp8_all_reduce!r}; " "expected e4m3 or e5m2"
+                )
+            block_size = int(os.getenv("FSDP2_HSDP_FP8_BLOCK_SIZE", "0"))
+            if block_size < 0:
+                raise ValueError("FSDP2_HSDP_FP8_BLOCK_SIZE must be non-negative")
+            from types import SimpleNamespace
+
+            from torch.distributed.fsdp._fully_shard import _fsdp_collectives
+
+            if not hasattr(_fsdp_collectives, "_primus_original_dist"):
+                original_dist = _fsdp_collectives.dist
+                fp8_dtype = fp8_dtypes[fp8_all_reduce]
+                fp8_limit = torch.finfo(fp8_dtype).max
+
+                def fp8_gradient_all_reduce(tensor, op=dist.ReduceOp.SUM, group=None, async_op=False):
+                    if tensor.dtype != torch.bfloat16 or tensor.numel() < 1 << 20:
+                        return original_dist.all_reduce(tensor, op=op, group=group, async_op=async_op)
+                    if async_op or op not in (dist.ReduceOp.SUM, dist.ReduceOp.AVG):
+                        raise ValueError("FP8 HSDP gradient AllReduce only supports synchronous SUM or AVG")
+                    world_size = group.size()
+                    flat = tensor.flatten()
+                    if block_size:
+                        padding = (-flat.numel()) % block_size
+                        scaled_input = torch.nn.functional.pad(flat, (0, padding)) if padding else flat
+                        blocks = scaled_input.view(-1, block_size)
+                        absmax = blocks.abs().amax(dim=1).float()
+                    else:
+                        blocks = flat
+                        absmax = flat.abs().amax().float()
+                    original_dist.all_reduce(absmax, op=dist.ReduceOp.MAX, group=group)
+                    scale = (fp8_limit / world_size) / absmax.clamp_min(torch.finfo(torch.float32).eps)
+                    if block_size:
+                        # E8M0-style power-of-two scales make scaling exact.
+                        scale = torch.exp2(torch.floor(torch.log2(scale)).clamp(-126, 127))[:, None]
+                    quantized = (
+                        (blocks * scale).clamp(-fp8_limit / world_size, fp8_limit / world_size).to(fp8_dtype)
+                    )
+                    original_dist.all_reduce(quantized, op=dist.ReduceOp.SUM, group=group)
+                    reduced = (quantized.to(tensor.dtype) / scale).flatten()[: tensor.numel()]
+                    tensor.copy_(reduced.view_as(tensor))
+                    if op == dist.ReduceOp.AVG:
+                        tensor.div_(world_size)
+
+                fp8_dist = SimpleNamespace(**vars(original_dist))
+                fp8_dist.all_reduce = fp8_gradient_all_reduce
+                _fsdp_collectives._primus_original_dist = original_dist
+                _fsdp_collectives.dist = fp8_dist
+            if self.rank == 0:
+                scaling = f"block-{block_size}" if block_size else "tensor-wise"
+                logger.info(f"FSDP2: HSDP gradient AllReduce uses FP8 {fp8_all_reduce}, {scaling}")
+        if os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1" and self.rank == 0:
+            logger.info("FSDP2: FP8 AllGather uses native one-byte transport")
 
         # Keep FP32 parameter/optimizer storage while allowing an explicit
         # reduction-dtype experiment around the FP32-qualified default.
@@ -165,13 +283,19 @@ class FSDP2Trainer(BaseWanTrainer):
             )
         self._prepare_fsdp2_root(wrap_root, mp_dtype)
 
+        compile_transformer_blocks = bool(self.args.get("compile_transformer_blocks", False))
+        compile_strategy = str(self.args.get("compile_strategy", "per_block")).strip().lower()
+        if compile_transformer_blocks:
+            self._compile_transformer_blocks(wrap_root)
+        if bool(self.args.get("compile_output_head", False)) and not (
+            compile_transformer_blocks and compile_strategy == "full_dit"
+        ):
+            self._compile_output_head(wrap_root)
+
         if self.world_size == 1:
             if self.rank == 0:
                 logger.info("FSDP2: world_size=1; skipping composable FSDP wrapping.")
             return
-
-        if bool(self.args.get("compile_transformer_blocks", False)):
-            self._compile_transformer_blocks(wrap_root)
 
         reshard_after_forward = bool(self.args.get("fsdp2_reshard_after_forward", True))
         no_reshard_paths = {
@@ -182,6 +306,8 @@ class FSDP2Trainer(BaseWanTrainer):
 
         module_paths_spec = str(self.args.get("fsdp_module_paths_to_wrap", "") or "")
         module_paths = [item.strip() for item in module_paths_spec.split(",") if item.strip()]
+        if compile_transformer_blocks and compile_strategy == "full_dit":
+            module_paths = [path for path in module_paths if path != "final_layer"]
         wrapped_paths = 0
         for module_path in module_paths:
             module = self._get_module_by_path(wrap_root, module_path, option_name="fsdp_module_paths_to_wrap")
@@ -191,6 +317,7 @@ class FSDP2Trainer(BaseWanTrainer):
                 reshard_after_forward=False if module_path in no_reshard_paths else reshard_after_forward,
                 mp_policy=mp_policy,
             )
+            self._maybe_attach_sdma_all_gather(module, module_path)
             wrapped_paths += 1
         if self.rank == 0 and wrapped_paths:
             logger.info(
@@ -216,11 +343,21 @@ class FSDP2Trainer(BaseWanTrainer):
 
             wrapped_count = 0
             seen = set()
-            for _, module in wrap_root.named_modules():
+            # FSDP hooks are Dynamo-disabled, so compiled stacks must remain
+            # root-managed to keep those hooks outside the full graph.
+            root_managed_stacks = {
+                "single_stack": {"single_blocks"},
+                "double_stack": {"double_blocks"},
+                "stack": {"double_blocks", "single_blocks"},
+                "full_dit": {"double_blocks", "single_blocks"},
+            }.get(compile_strategy, set())
+            for module_name, module in wrap_root.named_modules():
                 if id(module) in seen:
                     continue
                 seen.add(id(module))
                 if module is wrap_root:
+                    continue
+                if compile_transformer_blocks and module_name.split(".", 1)[0] in root_managed_stacks:
                     continue
                 checkpointed_module = getattr(module, "_checkpoint_wrapped_module", None)
                 target_module = checkpointed_module if checkpointed_module is not None else module
@@ -233,6 +370,7 @@ class FSDP2Trainer(BaseWanTrainer):
                         reshard_after_forward=reshard_after_forward,
                         mp_policy=mp_policy,
                     )
+                    self._maybe_attach_sdma_all_gather(module, module_name)
                     if checkpointed_module is not None:
                         seen.add(id(checkpointed_module))
                     wrapped_count += 1
@@ -246,26 +384,103 @@ class FSDP2Trainer(BaseWanTrainer):
             reshard_after_forward=reshard_after_forward,
             mp_policy=mp_policy,
         )
+        self._maybe_attach_sdma_all_gather(wrap_root, "")
+        if self.rank == 0 and self._sdma_all_gather_enabled():
+            logger.info(
+                f"FSDP2/SDMA: SymmMemAllGather attached to {getattr(self, '_sdma_attached', 0)} modules"
+            )
         if self.rank == 0:
             logger.info(
                 f"FSDP2: applied fully_shard to '{wrap_target or '<model>'}' "
                 f"with mp={mp_dtype}, reduce={reduce_dtype}"
             )
 
+        if int(os.getenv("FLUX_FSDP_FWD_PREFETCH", "0") or 0) > 0:
+            from torch.distributed.fsdp import FSDPModule
+
+            fwd_order = [wrap_root] + [
+                getattr(wrap_root, name, None)
+                for name in ("img_in", "time_in", "guidance_in", "vector_in", "txt_in")
+            ]
+            for attr in ("double_blocks", "single_blocks"):
+                fwd_order.extend(getattr(wrap_root, attr, None) or [])
+            fwd_order.append(getattr(wrap_root, "final_layer", None))
+            fwd_order = [m for m in fwd_order if isinstance(m, FSDPModule)]
+            import os as _os
+
+            _depth = max(1, int(_os.environ.get("FLUX_FSDP_FWD_PREFETCH", "1") or 1))
+            for _i, cur in enumerate(fwd_order[:-1]):
+                cur.set_modules_to_forward_prefetch(fwd_order[_i + 1 : _i + 1 + _depth])
+            if self.rank == 0:
+                logger.info(
+                    f"FSDP2: explicit forward prefetch chained across {len(fwd_order)} modules, depth={_depth}"
+                )
+
     def _compile_transformer_blocks(self, root: torch.nn.Module) -> None:
-        compiled = 0
+        strategy = str(self.args.get("compile_strategy", "per_block")).strip().lower()
+        stack_regions = {
+            "single_stack": ("_run_single_blocks",),
+            "double_stack": ("_run_double_blocks",),
+            "stack": ("_run_double_blocks", "_run_single_blocks"),
+            "full_dit": ("_run_dit",),
+        }
+        if strategy != "per_block" and strategy not in stack_regions:
+            valid = ["per_block", *stack_regions]
+            raise ValueError(f"Unsupported compile_strategy={strategy!r}; expected one of {valid}")
+
+        backend = str(self.args.get("compile_backend", "inductor")).strip() or "inductor"
+        fullgraph = bool(self.args.get("compile_fullgraph", True))
+        dynamic = bool(self.args.get("compile_dynamic", False))
         compile_mode = os.getenv("TORCH_COMPILE_MODE", "").strip() or None
-        for attr in ("double_blocks", "single_blocks"):
-            blocks = getattr(root, attr, None)
-            if blocks is None:
-                continue
-            for block in blocks:
-                block.compile(fullgraph=True, mode=compile_mode)
-                compiled += 1
+        compile_kwargs = {
+            "backend": backend,
+            "fullgraph": fullgraph,
+            "dynamic": dynamic,
+            "mode": compile_mode,
+        }
+
+        compiled_regions = []
+        if strategy == "per_block":
+            for attr in ("double_blocks", "single_blocks"):
+                blocks = getattr(root, attr, None)
+                if blocks is None:
+                    continue
+                for index, block in enumerate(blocks):
+                    block.compile(**compile_kwargs)
+                    compiled_regions.append(f"{attr}[{index}]")
+        else:
+            for name in stack_regions[strategy]:
+                region = getattr(root, name, None)
+                if region is None:
+                    raise ValueError(f"compile_strategy={strategy!r} requires model method {name}")
+                setattr(root, name, torch.compile(region, **compile_kwargs))
+                compiled_regions.append(name)
+
         if self.rank == 0:
             logger.info(
-                f"FSDP2: compiled {compiled} FLUX transformer blocks "
-                f"with torch.compile mode={compile_mode or 'default'}"
+                f"FSDP2: compiled FLUX regions {compiled_regions} with strategy={strategy}, "
+                f"backend={backend}, fullgraph={fullgraph}, dynamic={dynamic}, "
+                f"mode={compile_mode or 'default'}"
+            )
+
+    def _compile_output_head(self, root: torch.nn.Module) -> None:
+        final_layer = getattr(root, "final_layer", None)
+        if final_layer is None:
+            raise ValueError("compile_output_head requires a FLUX model with final_layer")
+        backend = str(self.args.get("compile_backend", "inductor")).strip() or "inductor"
+        fullgraph = bool(self.args.get("compile_fullgraph", True))
+        dynamic = bool(self.args.get("compile_dynamic", False))
+        compile_mode = os.getenv("TORCH_COMPILE_MODE", "").strip() or None
+        final_layer.compile(
+            backend=backend,
+            fullgraph=fullgraph,
+            dynamic=dynamic,
+            mode=compile_mode,
+        )
+        if self.rank == 0:
+            logger.info(
+                f"FSDP2: compiled FLUX output head with backend={backend}, "
+                f"fullgraph={fullgraph}, dynamic={dynamic}, mode={compile_mode or 'default'}"
             )
 
     @staticmethod

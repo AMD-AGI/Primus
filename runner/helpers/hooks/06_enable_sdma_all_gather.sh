@@ -39,11 +39,16 @@
 
 set -euo pipefail
 
+sdma_trigger="${SDMA_ALL_GATHER:-0}"
 fsdp_backend="${FSDP_ALL_GATHER_BACKEND:-}"
+fsdp_sdma=false
+if [[ "${fsdp_backend}" == "rccl_sdma" || "${sdma_trigger}" == "1" ]]; then
+    fsdp_sdma=true
+fi
 megatron_backend="${MEGATRON_PARAM_GATHER_BACKEND:-}"
 megatron_grad_backend="${MEGATRON_GRAD_REDUCE_BACKEND:-}"
 
-if [[ "${fsdp_backend}" != "rccl_sdma" && "${megatron_backend}" != "rccl_sdma" && \
+if [[ "${fsdp_sdma}" != "true" && "${megatron_backend}" != "rccl_sdma" && \
       "${megatron_grad_backend}" != "rccl_sdma" ]]; then
     exit 0
 fi
@@ -55,7 +60,7 @@ if [[ "${megatron_grad_backend}" == "rccl_sdma" && "${megatron_backend}" != "rcc
     exit 2
 fi
 
-if [[ "${fsdp_backend}" == "rccl_sdma" && "${megatron_backend}" == "rccl_sdma" ]]; then
+if [[ "${fsdp_sdma}" == "true" && "${megatron_backend}" == "rccl_sdma" ]]; then
     echo "[ERROR] FSDP and Megatron RCCL-SDMA cannot be enabled together: " \
          "the FSDP path requires global NCCL_CTA_POLICY=2, while the Megatron " \
          "path requires zero CTA only on its dedicated parameter-AllGather group." >&2
@@ -87,9 +92,14 @@ fi
 
 # 2) Make the active selector visible to torchrun children. primus-cli direct
 #    does not otherwise inherit arbitrary host environment variables.
-if [[ "${fsdp_backend}" == "rccl_sdma" ]]; then
+if [[ "${fsdp_sdma}" == "true" ]]; then
     echo "env.NCCL_CTA_POLICY=2"
-    echo "env.FSDP_ALL_GATHER_BACKEND=rccl_sdma"
+    if [[ "${sdma_trigger}" == "1" ]]; then
+        echo "env.SDMA_ALL_GATHER=1"
+    fi
+    if [[ "${fsdp_backend}" == "rccl_sdma" ]]; then
+        echo "env.FSDP_ALL_GATHER_BACKEND=rccl_sdma"
+    fi
     if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
         echo "env.PRIMUS_TURBO_GROUPED_GEMM_BACKEND=${PRIMUS_TURBO_GROUPED_GEMM_BACKEND}"
     fi
@@ -122,7 +132,7 @@ if [[ "${megatron_grad_backend}" == "rccl_sdma" ]]; then
 fi
 # The native Primus RCCL build used by Megatron has the cuMem probe fix and
 # does not need the legacy attribute-drain interposer.
-if [[ "${fsdp_backend}" != "rccl_sdma" ]]; then
+if [[ "${fsdp_sdma}" != "true" ]]; then
     exit 0
 fi
 

@@ -65,5 +65,10 @@ modules:
         attention_backend: ${ATTENTION_BACKEND:flash_attn_aiter}
         gradient_checkpointing: ${GRADIENT_CHECKPOINTING:false}
         compile_transformer_blocks: ${COMPILE_TRANSFORMER_BLOCKS:true}
+        compile_strategy: ${COMPILE_STRATEGY:per_block}
+        compile_backend: ${COMPILE_BACKEND:inductor}
+        compile_fullgraph: ${COMPILE_FULLGRAPH:true}
+        compile_dynamic: ${COMPILE_DYNAMIC:false}
+        compile_output_head: ${COMPILE_OUTPUT_HEAD:false}
         fsdp2_reshard_after_forward: ${FSDP2_RESHARD_AFTER_FORWARD:true}
         report_to: none

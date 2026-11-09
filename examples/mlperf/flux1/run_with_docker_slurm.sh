@@ -3,49 +3,61 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
-: "${SLURM_JOB_ID:?Run this script inside a Slurm allocation}"
-: "${SLURM_NNODES:?Missing SLURM_NNODES from the allocation}"
-: "${SLURM_JOB_NODELIST:?Missing SLURM_JOB_NODELIST from the allocation}"
-: "${DATA_ROOT:?Set DATA_ROOT to the directory containing the MLPerf datasets}"
-: "${OUTPUT_ROOT:?Set OUTPUT_ROOT to the output directory}"
+: "${SLURM_JOB_ID:?Run inside a Slurm/Spur allocation}"
+: "${SLURM_NNODES:?Missing SLURM_NNODES}"
+: "${DATA_ROOT:?Set DATA_ROOT}"
+: "${OUTPUT_ROOT:?Set OUTPUT_ROOT}"
 
-command -v srun >/dev/null || { echo "srun is required" >&2; exit 1; }
-
-export NNODES=${NNODES:-$SLURM_NNODES}
+export FLUX_CONFIG=${FLUX_CONFIG:-config_1n_gbs256_a6w4.sh}
+[[ -f "$SCRIPT_DIR/$FLUX_CONFIG" ]] || { echo "Unknown FLUX_CONFIG: $FLUX_CONFIG" >&2; exit 2; }
+# The profile is selected and checked at runtime.
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/$FLUX_CONFIG"
+[[ "$NNODES" == "$SLURM_NNODES" ]] || {
+    echo "$FLUX_CONFIG requires $NNODES nodes; allocation has $SLURM_NNODES" >&2
+    exit 2
+}
 if [[ -z "${MASTER_ADDR:-}" ]]; then
-  if [[ "$NNODES" == "1" ]]; then
-    MASTER_ADDR=${SLURMD_NODENAME:-$SLURM_JOB_NODELIST}
-  elif hostnames=$(scontrol show hostnames "$SLURM_JOB_NODELIST" 2>/dev/null); then
-    MASTER_ADDR=${hostnames%%$'\n'*}
-  elif [[ -n "${SPUR_PEER_NODES:-}" ]]; then
-    MASTER_ADDR=${SPUR_PEER_NODES%%,*}
-    MASTER_ADDR=${MASTER_ADDR%%:*}
-  else
-    echo "Set MASTER_ADDR: this scheduler cannot expand SLURM_JOB_NODELIST" >&2
-    exit 1
-  fi
+    if [[ "$NNODES" == "1" ]]; then
+        MASTER_ADDR=${SLURMD_NODENAME:-$SLURM_JOB_NODELIST}
+    elif command -v scontrol >/dev/null && \
+         hostnames=$(scontrol show hostnames "$SLURM_JOB_NODELIST") && [[ -n "$hostnames" ]]; then
+        MASTER_ADDR=${hostnames%%$'\n'*}
+    else
+        MASTER_ADDR=${SPUR_PEER_NODES:?Set MASTER_ADDR}
+        MASTER_ADDR=${MASTER_ADDR%%,*}
+        MASTER_ADDR=${MASTER_ADDR%%:*}
+    fi
 fi
-export MASTER_ADDR
-export MASTER_PORT=${MASTER_PORT:-29500}
+export MASTER_ADDR MASTER_PORT=${MASTER_PORT:-29500}
 
 srun_args=(--nodes="$NNODES" --ntasks="$NNODES" --ntasks-per-node=1)
-if command -v spur >/dev/null; then
-  srun_args+=(--jobid="$SLURM_JOB_ID" --overlap)
-fi
+command -v spur >/dev/null && srun_args+=(--jobid="$SLURM_JOB_ID" --overlap)
 
-forward_vars=(
-  DATA_ROOT OUTPUT_ROOT DOCKER_IMAGE CONFIG PRIMUS_WORKSPACE GPUS_PER_NODE
-  DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR
-  FLUX_FLOAT8_RECIPE ATTENTION_BACKEND LOCAL_BATCH_SIZE MAX_STEPS
-  GRADIENT_CHECKPOINTING_RATIO COMPILE_TRANSFORMER_BLOCKS
-  FSDP2_RESHARD_AFTER_FORWARD FSDP2_REDUCE_DTYPE
-  SAVE_STEPS SAVE_STRATEGY CHECKPOINT_KEEP_LATEST RESUME_FROM_CHECKPOINT
-  MLPERF_ENABLE MLPERF_CLEAR_CACHES MLLOG_OUTPUT_FILE TARGET_ACCURACY
-  VAL_CHECK_INTERVAL SEED
+# Forward the selected recipe's exported surface without duplicating it here.
+mapfile -t forward_vars < <(
+    # Expand $1 in the child shell, not the launcher.
+    # shellcheck disable=SC2016
+    env -i PATH="$PATH" FLUX_CLUSTER="${FLUX_CLUSTER:-}" \
+        bash -c 'source "$1"; compgen -e' bash "$SCRIPT_DIR/$FLUX_CONFIG" |
+        grep -Ev '^(PATH|PWD|SHLVL|_)$'
 )
-env_args=(NNODES="$NNODES" MASTER_ADDR="$MASTER_ADDR" MASTER_PORT="$MASTER_PORT")
+# Preserve bounded recipe variables created only by the current overrides.
+mapfile -t current_flux_env < <(compgen -e | grep '^FLUX_' || true)
+forward_vars+=("${current_flux_env[@]}")
+forward_vars+=(
+    FLUX_CONFIG LAUNCH_MODE DOCKER_IMAGE CONFIG PRIMUS_WORKSPACE DATASET_PATH
+    EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR MLLOG_OUTPUT_FILE EVAL_BATCH_SIZE
+    PROFILE_OUTPUT_DIR TORCHINDUCTOR_CACHE_DIR TORCHINDUCTOR_CACHE_SEED
+    TORCHINDUCTOR_CACHE_EXPORT FSDP2_HSDP_FP8_ALL_REDUCE FSDP2_HSDP_FP8_BLOCK_SIZE
+)
+env_args=(DATA_ROOT="$DATA_ROOT" OUTPUT_ROOT="$OUTPUT_ROOT" NNODES="$NNODES" MASTER_ADDR="$MASTER_ADDR" MASTER_PORT="$MASTER_PORT")
+declare -A seen_env=()
 for name in "${forward_vars[@]}"; do
-  [[ -v "$name" ]] && env_args+=("$name=${!name}")
+    if [[ -v "$name" && -z "${seen_env[$name]:-}" ]]; then
+        env_args+=("$name=${!name}")
+        seen_env[$name]=1
+    fi
 done
 
-srun "${srun_args[@]}" env "${env_args[@]}" bash "$SCRIPT_DIR/run_with_docker.sh"
+exec srun "${srun_args[@]}" env "${env_args[@]}" bash "$SCRIPT_DIR/run_with_docker.sh"
