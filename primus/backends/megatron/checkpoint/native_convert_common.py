@@ -29,6 +29,7 @@ Bridge-free guarantee: this module (and its callers) import ONLY
 a hard guard asserts it never leaked into ``sys.modules``.
 """
 
+import errno
 import json
 import os
 import shutil
@@ -296,7 +297,8 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     (conversion hook) fails loudly instead of writing a silently-wrong ckpt, and
     before writing anything if ``save_dir`` has less free space than the checkpoint
     needs (``check_free_space``). A write that fails anyway is re-raised as a
-    ``RuntimeError`` that names the directory and its free space.
+    ``RuntimeError`` that names the directory, and its free space when the write
+    ran out of it.
     """
     missing, unexpected = model.load_state_dict(sd, strict=False)
     missing_non_extra = [k for k in missing if "_extra_state" not in k]
@@ -345,13 +347,43 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:
-        raise RuntimeError(
-            f"writing the {ckpt_format} checkpoint to {save_dir} failed ({e!r}); "
-            f"{_gib(shutil.disk_usage(save_dir).free)} free there now. A write that fails part-way "
-            "(most often a full disk) is reported by torch as '[enforce fail at inline_container.cc] "
-            "unexpected pos <n> vs <m>'. Set native_ckpt_out (or DATA_PATH) to a volume with room."
-        ) from e
+        message = f"writing the {ckpt_format} checkpoint to {save_dir} failed ({e!r})"
+        if _ran_out_of_space(e):
+            message += (
+                f"; most likely the disk filled up ({_free_space_text(save_dir)}). "
+                "Set native_ckpt_out (or DATA_PATH) to a volume with room."
+            )
+        raise RuntimeError(message) from e
     log(f"DONE. Converted {ckpt_format} checkpoint at: {save_dir}")
+
+
+# How a write that runs out of space is reported: torch.save loses the OSError and raises
+# "[enforce fail at inline_container.cc] unexpected pos <n> vs <m>" (see check_free_space);
+# newer torch and other writers raise the OSError.
+_OUT_OF_SPACE_TEXT = ("unexpected pos", "No space left on device", "Disk quota exceeded")
+
+
+def _ran_out_of_space(exc: BaseException) -> bool:
+    """Whether ``exc``, or an exception it was raised from, is a write that ran out of space.
+
+    A DCP ``CheckpointException`` includes the errors of its ranks in its text.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
+            return True
+        if any(text in str(exc) for text in _OUT_OF_SPACE_TEXT):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def _free_space_text(path: str) -> str:
+    try:
+        return f"{_gib(shutil.disk_usage(path).free)} free there now"
+    except OSError as e:
+        return f"its free space could not be read: {e}"
 
 
 # Per-tensor overhead of the files a save writes: each tensor is its own small zip
