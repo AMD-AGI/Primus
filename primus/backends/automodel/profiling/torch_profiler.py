@@ -63,6 +63,8 @@ from primus.backends.automodel import options
 logger = logging.getLogger(__name__)
 
 _INSTALLED_FLAG = "_primus_profile_installed"
+# Set on the wrapper itself; source rewrites of the loop refuse a wrapped one.
+LOOP_WRAPPED_FLAG = "_primus_profile_wrapped"
 _SECTION = "primus_profiler"
 
 # The experiment directory of the latest install() call, i.e. of the current trainer.
@@ -213,7 +215,7 @@ def install(exp_root: Optional[str] = None) -> bool:
                 )
             target_optimizer.step = orig_opt_step
 
-    patched_loop._primus_profile_wrapped = True
+    setattr(patched_loop, LOOP_WRAPPED_FLAG, True)
     TrainDiffusionRecipe.run_train_validation_loop = patched_loop
     setattr(TrainDiffusionRecipe, _INSTALLED_FLAG, True)
     logger.info("[PrimusDiffusionProfile] installed torch.profiler train-loop wrapper.")
