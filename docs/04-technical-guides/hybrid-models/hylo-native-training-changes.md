@@ -14,10 +14,12 @@ not vendored. Distillation is a Primus forward step behind
 
 | File | Why it is here |
 | --- | --- |
-| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD (over real tokens only on the padded SFT path), and masked chunked `KL(teacher \|\| student)`. Optional Hugging Face YaRN for the teacher. |
+| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD (over real tokens only on the padded SFT path), and masked `KL(teacher \|\| student)`, either through FLA's fused `kl_div_kernel` on bf16 logits (`hylo_kl_impl: fused`) or the chunked PyTorch loop. Optional Hugging Face YaRN for the teacher. Derives `lr_warmup_iters` from `hylo_warmup_ratio`. |
+| `primus/backends/megatron/training/hylo_utils.py` | `unset()` for null-like recipe values, and the hybrid pretrain entry point: `pretrain_mamba` before Megatron-core 0.19, `pretrain_hybrid` from it, whose `get_batch` returns its fields in `BATCH_KEYS` order. |
+| `primus/backends/megatron/training/hylo_order_dataset.py`, `primus/backends/megatron/patches/hylo_order_data_patches.py` | Replay of a HyLo run's recorded batches in its order (`hylo_order_data_dir`): the dataset, an all-ones loss mask, and the provider patch with its batch-layout checks. |
 | `primus/backends/megatron/megatron_sft_trainer.py` | Enables that forward step for both training stages. |
 | `primus/backends/megatron/megatron_pretrain_trainer.py` | Same hook, used by the zero-learning-rate constructor. |
-| `primus/backends/megatron/argument_builder.py` | Keeps the `hylo_*` recipe fields (including `hylo_teacher_yarn_*` and `hylo_mla_kv_heads`), `hybrid_linear_type`, `mamba_expand`, and `mamba_d_xb` through Megatron argument merge, so they reach the saved checkpoint args the upcycler reads. |
+| `primus/backends/megatron/argument_builder.py` | Keeps the `hylo_*` recipe fields (including `hylo_teacher_yarn_*`, `hylo_mla_kv_heads`, `hylo_kl_impl`, `hylo_warmup_ratio`, and `hylo_order_data_dir`), `hybrid_linear_type`, `mamba_expand`, and `mamba_d_xb` through Megatron argument merge, so they reach the saved checkpoint args the upcycler reads. |
 | `primus/backends/megatron/checkpoint/hybrid_upcycle.py` | From-teacher MLA, GDN, and Mamba-2 init, plus stage-1 checkpoint assembly. The recurrent mixer's input norm also accepts the TE-fused `linear_qkv.layer_norm_weight` of a converted Llama. |
 | `primus/backends/megatron/checkpoint/native_loader_llama.py` | Preserves Llama-3 `rope_scaling` when converting the teachers. |
 | `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py` | `hylo_gdn_hybrid_stack_spec`: RMSNorm, with MLA LoRA latent norms off. `hylo_m2_hybrid_stack_spec`: the same with the grouped Mamba-2 mixer. `hylo_grouped_mla_hybrid_stack_spec`: the same with 8 MLA key/value heads. |
@@ -31,9 +33,10 @@ not vendored. Distillation is a Primus forward step behind
 | `examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml` | All-GDN Enhanced-ILD. |
 | `examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml` | All-MLA Enhanced-ILD, from Zebra-Llama `zebra_MLA_ILD.yaml`. |
 | `examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild.yaml` | All-Mamba-2 Enhanced-ILD, from Zebra-Llama `zebra_M2_ILD.yaml`. |
-| `examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild-packed.yaml`, `hylo_mla_1B-enhanced-ild-packed.yaml` | The same students on the reference's packed 2048-token data and schedule, 6934 steps of 96 windows: the recipes that reproduce the reference stage-1 checkpoints. |
+| `examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild-packed.yaml`, `hylo_mla_1B-enhanced-ild-packed.yaml`, `hylo_gdn_1B-enhanced-ild-packed.yaml` | The same students on the reference's packed 2048-token data and schedule, 6934 steps of 96 windows: the recipes that reproduce the reference stage-1 checkpoints. |
 | `examples/megatron/configs/MI300X/hylo_m2_1B-ild-eval.yaml`, `hylo_mla_1B-ild-eval.yaml` | Enhanced-ILD of fixed weights (learning rate 0) on the packed test split. |
-| `examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml` | 8K pure-KL stage 2. |
+| `examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml` | 8K pure-KL stage 2 on padded samples. |
+| `examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft-packed.yaml` | 8K pure-KL stage 2 on the reference's packed 8192-token windows, 32 a step. |
 | `tools/hybrid/prepare_hylo_assets.py` | Downloads and converts the gated Llama teachers and exports the public SFT set. |
 | `tools/hybrid/assemble_hylo_ild.py` | Copies trained GDN and MLA blocks into the target layout. |
 | `tools/hybrid/run_hylo_1b_4mla12gdn.sh` | Constructor, upcycle, both ILD stages, assembly, then stage 2. |
@@ -42,8 +45,10 @@ not vendored. Distillation is a Primus forward step behind
 | `primus/backends/megatron/checkpoint/mamba2_reference_draw.py`, `tools/hybrid/scan_mamba2_reference_draw.py`, `tools/hybrid/write_mamba2_reference_init.py` | Find the compute-unit count that rebuilds a reference all-Mamba-2 student's random init, then write that init into an upcycled checkpoint. |
 | `primus/backends/megatron/checkpoint/hylo_reference_compare.py`, `tools/hybrid/compare_hylo_ild_to_reference.py`, `tools/hybrid/convert_hylo_reference_to_megatron.py` | Compare a student with its reference tensor by tensor; write the reference as a Megatron checkpoint for evaluation. |
 | `tools/hybrid/run_hylo_ild_eval.sh`, `tools/hybrid/summarize_hylo_ild_eval.py`, `tools/hybrid/summarize_hylo_ild_loss.py` | Test-split Enhanced-ILD of a checkpoint, and summaries of evaluation and training logs. |
-| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks; the ILD step's final-norm pair and per-micro-batch count; the real-token mask on the SFT path; the teacher attention capture under an in-place residual add; teacher YaRN against Hugging Face (GPU). |
-| `tests/unit_tests/backends/megatron/test_hylo_packed_recipes.py` | The packed recipes keep the SFT recipes' model, teacher, and optimizer on the reference's schedule. |
+| `tools/hybrid/hylo_train_dump.py` | Runs HyLo's `train_distill.py` unchanged and records its student init and every rank's training batches for replay. |
+| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks; the ILD step's final-norm pair and per-micro-batch count; the real-token mask on the SFT path; the teacher attention capture under an in-place residual add; teacher YaRN against Hugging Face (GPU); the fused KL against the chunked loop (GPU) and the KL dispatch. |
+| `tests/unit_tests/backends/megatron/test_hylo_packed_recipes.py` | The four packed recipes keep the SFT recipes' model, teacher, and optimizer on the reference's schedule; the warmup derivation. |
+| `tests/unit_tests/backends/megatron/test_hylo_order_dataset.py`, `test_hylo_order_data_patches.py`, `test_hylo_utils.py` | Replay through Megatron's sampler, its mask and layout checks, the provider patch on both entry points, and the batch unpacking on both Megatron versions. |
 | `tests/unit_tests/backends/megatron/test_philox_uniform.py` | Philox4x32-10 known answers, the kernel's element order and offsets, and the model against the local GPU's `uniform_` (GPU). |
 | `tests/unit_tests/backends/megatron/test_mamba2_reference_draw.py` | The scan recovers a planted compute-unit count; the writer replaces only the random tensors. |
 | `tests/unit_tests/backends/megatron/test_hylo_reference_compare.py` | Name mapping, the reference-to-Megatron round trip, comparison statistics, and MLA sign alignment. |
@@ -69,8 +74,17 @@ layer input. The teacher's mixer target is a copy of its self-attention output:
 in eval mode without grad, Megatron's bias-dropout-add adds the residual into
 that tensor in place, which would turn the target into the post-attention
 residual stream. Stage 2
-uses pure KL with `hylo_kl_weight: 1.0` and `hylo_ce_weight: 0.0`. The KL is
-chunked at 4096 tokens and masked.
+uses pure KL with `hylo_kl_weight: 1.0` and `hylo_ce_weight: 0.0`, summed over the
+loss mask and divided by its count. `hylo_kl_impl: fused` runs FLA's
+`kl_div_kernel`, as HyLo does, on Float16Module's bf16 logits; it computes the
+gradient in the forward pass, and the mask is applied to the loss and to that
+gradient without a host sync. `chunked` is the PyTorch reference, 4096 tokens at
+a time. On packed data and in replay every position counts, the last one
+included, as in HyLo.
+
+The GDN and 4MLA12GDN recipes also set `use_fla_short_conv`,
+`use_fla_fused_gated_norm`, and `grad_reduce_in_bf16`, the kernels and gradient
+precision HyLo trains with.
 
 The teacher is a frozen Megatron GPT built from the converted checkpoint. Each
 data-parallel rank owns its own copy. Tensor and pipeline parallelism must be 1.
@@ -88,7 +102,7 @@ These values follow `configs/llama3.2_1B/`:
 | --- | --- | --- |
 | Context | 2048 in the packed recipes, as the reference; the SFT recipes use 4096 | 8192 |
 | Learning rate | 2e-4 | 6e-5 |
-| Warmup | 0.01 | 0.01 |
+| Warmup | 0.01 (`hylo_warmup_ratio` in the packed recipes) | 0.01 |
 | Schedule | cosine | cosine |
 | Micro-batch | 12 | 4 |
 | Teacher | Llama-3.2-1B-Instruct | Llama-3.1-8B-Instruct |

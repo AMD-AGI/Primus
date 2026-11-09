@@ -473,8 +473,8 @@ The script writes:
 | Output | Contents |
 | --- | --- |
 | `$HYLO_OUTPUT_ROOT/gdn-upcycled` | all-GDN initialization |
-| `$HYLO_OUTPUT_ROOT/mla-upcycled` | all-MLA initialization |
-| `$HYLO_OUTPUT_ROOT/4mla12gdn-upcycled` | target-layout initialization |
+| `$HYLO_OUTPUT_ROOT/mla-kv8-upcycled` | all-MLA initialization (8 key/value heads) |
+| `$HYLO_OUTPUT_ROOT/4mla12gdn-kv8-upcycled` | target-layout initialization (8 key/value heads) |
 | `$HYLO_OUTPUT_ROOT/amd/root/gdn-ild/checkpoints` | stage-1 all-GDN student |
 | `$HYLO_OUTPUT_ROOT/amd/root/mla-ild/checkpoints` | stage-1 all-MLA student |
 | `$HYLO_OUTPUT_ROOT/stage2-init` | assembled MLA blocks 1, 5, 10, and 14 |

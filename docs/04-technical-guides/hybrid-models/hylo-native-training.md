@@ -76,6 +76,14 @@ tools/hybrid/run_hylo_1b_4mla12gdn.sh
 The stage recipes are under `examples/megatron/configs/MI300X/`. Set
 `HYLO_ILD_TRAIN_ITERS=1` and `HYLO_SFT_TRAIN_ITERS=1` for a smoke run.
 
+The script skips the constructor and upcycle steps for any init that already
+holds `latest_checkpointed_iteration.txt`. All-MLA and 4MLA12GDN inits written
+before the stage-2 recipes moved to 8 key/value heads have per-head MLA weights,
+which the grouped recipes cannot load. The default paths now end in
+`-kv8-upcycled`, so the script rebuilds them; if you point
+`HYLO_MLA_UPCYCLED_CKPT` or `HYLO_STAGE2_BASE_CKPT` at an older init, delete it
+first.
+
 ## Enhanced-ILD loss
 
 The loss follows the reference `kd_trainer.py`. For each of the 16 blocks it
@@ -90,7 +98,10 @@ is the mean over data-parallel ranks, the value the reference logs.
 
 The SFT recipes pad every sample to `seq_length`, so their means cover only each
 sample's real tokens, the positions through its last supervised token. The
-packed recipes below have no padding, and every position counts.
+packed recipes below have no padding, and every position counts. That holds for
+the stage-2 KL too, last position included: HyLo's `kd_trainer.py` averages
+FLA's `kl_div_kernel` over every position of every window, so the packed and
+replay paths use an all-ones loss mask.
 
 ## All-MLA Enhanced-ILD
 
@@ -118,10 +129,12 @@ Build the init checkpoint with `hylo_mla_1B-constructor.yaml`, upcycle it with
 `--hybrid-pattern '*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-'`, then train with
 `HYLO_MLA_UPCYCLED_CKPT` set.
 
-The released 4MLA12GDN model also keeps 8 key/value heads, but
-`hylo_4MLA12GDN_1B-8K-sft.yaml` and `hylo_1B-constructor.yaml` still use
-Megatron's per-head MLA. Assembly rejects the grouped all-MLA weights for that
-target until stage 2 moves to the grouped spec.
+The released 4MLA12GDN model also keeps 8 key/value heads. The stage-2 recipes
+use `hylo_grouped_mla_hybrid_stack_spec` with `hylo_mla_kv_heads: 8`, and
+`run_hylo_1b_4mla12gdn.sh` builds both the all-MLA and the 4MLA12GDN
+constructors from `hylo_mla_1B-constructor.yaml`, so assembly copies the
+grouped all-MLA weights into the target as they are. `hylo_1B-constructor.yaml`
+builds only the all-GDN constructor.
 
 ## All-Mamba-2 Enhanced-ILD
 
@@ -178,9 +191,10 @@ The recipes above train on the public SFT set at 4K. The Zebra-Llama stage-1
 checkpoints were trained differently: TRL packed a 20% selection of
 `JunxiongWang/sftdatasetv3` into 2048-token windows, with attention across
 conversations and no padding, for one epoch of 6934 steps of 96 windows.
-`hylo_m2_1B-enhanced-ild-packed.yaml` and `hylo_mla_1B-enhanced-ild-packed.yaml`
-keep the model, teacher, and optimizer of the recipes above and train on that
-data and schedule through the pretrain data path. With them the trained students
+`hylo_m2_1B-enhanced-ild-packed.yaml`, `hylo_mla_1B-enhanced-ild-packed.yaml`, and
+`hylo_gdn_1B-enhanced-ild-packed.yaml` keep the model, teacher, and optimizer of
+the recipes above and train on that data and schedule through the pretrain data
+path. With them the trained students
 match the reference checkpoints; the numbers are in
 [hylo-native-training-changes.md](hylo-native-training-changes.md#what-was-run).
 
@@ -231,7 +245,14 @@ match the reference checkpoints; the numbers are in
    HYLO_MLA_UPCYCLED_CKPT=/path/to/all-mla-upcycled HYLO_MLA_ILD_OUTPUT=/path/to/mla-ild \
      ./primus-cli direct -- train pretrain \
      --config examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild-packed.yaml
+   HYLO_GDN_UPCYCLED_CKPT=/path/to/all-gdn-upcycled HYLO_GDN_ILD_OUTPUT=/path/to/gdn-ild \
+     ./primus-cli direct -- train pretrain \
+     --config examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild-packed.yaml
    ```
+
+   `hylo_warmup_ratio: 0.01` sets the warmup the way the Trainer's `warmup_ratio` does,
+   `ceil(0.01 * train_iters)` steps (70 of 6934), so `HYLO_ILD_TRAIN_ITERS` can change
+   without touching it.
 
 4. Compare with the reference:
 
@@ -266,17 +287,33 @@ match the reference checkpoints; the numbers are in
 
 ### Train in lockstep with a HyLo run
 
-The packed recipes follow the reference's schedule: `lr_warmup_iters` is the Trainer's
-`warmup_ratio` 0.01 rounded up, 70 of 6934 steps (`HYLO_ILD_WARMUP_ITERS`, `ceil(0.01 * steps)`
-for other lengths). Megatron's packing still orders and cuts the windows differently from TRL's
-`ConstantLengthDataset`. To train on exactly the batches a HyLo `train_distill.py` run used, record
-them, along with its init, while it trains: each rank's per-step `input_ids` as int32
-`(steps, micro_batch, seq_len)` in `batches_rank<r>.bin`, with `meta.json` holding `micro_batch`,
-`seq_len`, `world_size`, and `steps`. Point `HYLO_ORDER_DATA_DIR` at that directory and
-`HyLoOrderDataset` replays the batches. The patch switches the sampler to `dataloader_type:
-single`, so every rank receives, at every step, the batch the HyLo rank with its index used. It
-requires the HyLo run's micro-batch, sequence length, and data-parallel size. Convert the recorded
-init with `convert_hylo_reference_to_megatron.py` and load it as the upcycled checkpoint.
+The packed recipes follow the reference's schedule, but Megatron's packing orders and cuts the
+windows differently from TRL's `ConstantLengthDataset`. To train on exactly the batches a HyLo
+`train_distill.py` run used, record them, along with its init, while it trains.
+`tools/hybrid/hylo_train_dump.py` runs `train_distill.py` unchanged and writes each rank's
+per-step `input_ids` as int32 `(steps, micro_batch, seq_len)` to `batches_rank<r>.bin`,
+`meta.json` with `micro_batch`, `seq_len`, `world_size`, and `steps`, and the student's init to
+`init/model.safetensors`. Launch it from the HyLo checkout in place of `train_distill.py`:
+
+```bash
+cd /path/to/AMD-Hybrid-Models/HyLo
+HYLO_DUMP_DIR=/data/dump/gdn accelerate launch --config_file configs/fsdp_GDN.yaml \
+  /path/to/Primus/tools/hybrid/hylo_train_dump.py <HyLo recipe.yaml>
+```
+
+The numbers below were recorded against AMD-Hybrid-Models `feat/HyLo` at `84871cc`, with a local
+change that adds the `teacher_rope_from_student` option and fixes padded-batch Enhanced-ILD; the
+packed runs do not depend on it.
+
+Point `HYLO_ORDER_DATA_DIR` at the dump and `HyLoOrderDataset` replays the batches. The patch
+switches the sampler to `dataloader_type: single`, so every rank receives, at every step, the
+batch the HyLo rank with its index used. The run must use the HyLo run's micro-batch, sequence
+length, and data-parallel size, CP=1, and `global_batch_size` equal to micro-batch times
+data-parallel size: one recorded micro-batch per rank per step. Startup fails if `meta.json` and
+the rank files disagree on the step count or record fewer steps than `train_iters`. Replay builds
+no validation or test set, so in-training evaluation is off; score checkpoints afterwards with
+`run_hylo_ild_eval.sh`. Convert the recorded init with `convert_hylo_reference_to_megatron.py` and
+load it as the upcycled checkpoint.
 
 The teacher keeps Llama-3's rope scaling. HyLo's `train_distill.py` gives the teacher the
 student's YaRN by default (`teacher_rope_from_student`); to match that, set
@@ -285,7 +322,50 @@ student's YaRN by default (`teacher_rope_from_student`); to match that, set
 
 For 1000 steps from the same init on the same batches, Primus and HyLo give the same per-step
 loss to within 0.3% over the first 25 steps. They drift apart only as bf16 runs do, ending within
-0.3%. The final students score within 0.12% of each other on the test split.
+0.3%. The final students score within 0.12% of each other on the test split. The all-GDN
+student, with the FLA kernels below, ends within 0.14% of HyLo over the last 250 steps and scores
+37.056 against HyLo's 37.126 on the test split.
+
+## Stage 2 on packed 8K windows
+
+`hylo_4MLA12GDN_1B-8K-sft-packed.yaml` trains the assembled 4MLA12GDN student the way HyLo's
+`zebra_4MLA12GDN_8bT_SFT_8k_combined.yaml` does: the whole templated, decontaminated
+`sftdatasetv3` (`data_ratio: 1.0`) packed into 8192-token windows, 32 windows a step, pure KL over
+every position. The stage-1 packed data is a 20% selection and cannot be reused. Build the 8K
+data with the full selection; `--seq-length` and `--batch` only change the counts in
+`<out>-stats.json`, whose `trl_steps` is the length of one epoch:
+
+```bash
+python tools/hybrid/prepare_hylo_packed_data.py --split train --ratio 1.0 \
+  --seq-length 8192 --batch 32 \
+  --tokenizer /path/to/Llama-3.2-1B-Instruct --out data/hylo/packed-8k/train
+```
+
+The recipe runs 1000 steps by default, the length of the lockstep runs; set
+`HYLO_SFT_TRAIN_ITERS` to `trl_steps` for a full epoch. `hylo_warmup_ratio: 0.01` follows it
+(10 steps of 1000). Replay works as in stage 1.
+
+From the same init on the same batches, Primus and HyLo log the same first-step KL, 1.693. Over
+the last 250 of 1000 steps their losses differ by 0.21% on average, the final students score a
+held-out KL of 0.3388 and 0.3390, and every weight group keeps a cosine of at least 0.998 to
+HyLo's.
+
+## Speed
+
+HyLo runs the stage-2 KL as one FLA Triton kernel on bf16 logits and the GDN layers with FLA's
+short convolution and fused gated norm, and FSDP reduces its gradients in bf16. The GDN and
+4MLA12GDN recipes, packed and padded, do the same:
+
+| Setting | Effect |
+| --- | --- |
+| `hylo_kl_impl: fused` | FLA's `kl_div_kernel`, which takes Float16Module's bf16 logits and upcasts them in-kernel; `chunked` is the PyTorch reference loop |
+| `use_fla_short_conv`, `use_fla_fused_gated_norm` | the FLA GDN kernels HyLo's `fla.layers.GatedDeltaNet` uses |
+| `grad_reduce_in_bf16` | bf16 gradient all-reduce, as HyLo's FSDP mixed precision |
+
+`fused` raises if FLA's kernel cannot be imported on GPU; set `hylo_kl_impl: chunked` there. Rank
+0 logs the KL implementation once. On eight MI300X GPUs, a stage-2 step takes 1011 ms against
+HyLo's 1052 ms (1196 ms before these settings), and an all-GDN Enhanced-ILD step 417 ms (466 ms
+before).
 
 File-by-file notes for this change are in
 [hylo-native-training-changes.md](hylo-native-training-changes.md).
