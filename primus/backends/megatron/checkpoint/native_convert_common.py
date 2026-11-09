@@ -499,14 +499,20 @@ def set_aside_interrupted_release(save_dir: str, log=print) -> None:
     Megatron writes the tracker file after the checkpoint, so a ``release/``
     without one is what an interrupted save leaves: it is moved to
     ``release.incomplete-<unix time>`` and the conversion runs again. A
-    ``release/`` with a tracker file beside it is refused.
+    ``release/`` with a tracker file beside it is refused, whatever the file
+    holds (``release``, an iteration, or nothing Megatron can read): only a
+    missing tracker shows an interrupted save.
     """
     release_dir = os.path.join(save_dir, "release")
     if not os.path.exists(release_dir):
         return
-    if tracked_ckpt_dir(save_dir) is not None:
+    tracker = os.path.join(save_dir, TRACKER_FILENAME)
+    if os.path.exists(tracker):
+        with open(tracker, errors="replace") as f:
+            holds = f.read().strip()[:40]
         raise RuntimeError(
-            f"{save_dir} already has a 'release' directory; remove it or convert into an empty directory."
+            f"{save_dir} already has a 'release' directory, and a tracker file holding {holds!r}; "
+            "remove both or convert into an empty directory."
         )
     aside = f"{release_dir}.incomplete-{int(time.time())}"
     os.rename(release_dir, aside)

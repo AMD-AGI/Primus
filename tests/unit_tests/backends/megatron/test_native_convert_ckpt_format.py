@@ -143,13 +143,19 @@ def test_legacy_torch_save_keeps_per_rank_layout(tmp_path, fake_save_checkpoint)
     assert common.saved_ckpt_format(str(out)) == "torch"
 
 
-def test_torch_dist_save_refuses_a_finished_release_dir(tmp_path, fake_save_checkpoint):
+@pytest.mark.parametrize("tracker", ["release", "1", "", "garbage"])
+def test_torch_dist_save_refuses_a_release_dir_beside_any_tracker(tmp_path, fake_save_checkpoint, tracker):
+    """Only a missing tracker file shows an interrupted save: a ``release/`` beside one
+    stays where it is, whatever the tracker holds."""
     state, calls = fake_save_checkpoint
     _write_torch_dist(tmp_path / "out" / "release")
-    (tmp_path / "out" / common.TRACKER_FILENAME).write_text("release")
-    with pytest.raises(RuntimeError, match="already has a 'release' directory"):
+    (tmp_path / "out" / common.TRACKER_FILENAME).write_text(tracker)
+    with pytest.raises(RuntimeError, match="already has a 'release' directory") as err:
         _save(tmp_path, state, "torch_dist")
+    assert f"tracker file holding {tracker!r}" in str(err.value)
     assert calls == []
+    assert (tmp_path / "out" / "release" / "metadata.json").is_file()
+    assert not list((tmp_path / "out").glob("release.incomplete-*"))
 
 
 def test_torch_dist_save_sets_aside_an_interrupted_release_dir(tmp_path, fake_save_checkpoint):
