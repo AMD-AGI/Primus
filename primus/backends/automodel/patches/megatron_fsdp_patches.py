@@ -11,19 +11,23 @@ megatron_fsdp``, which the diffusion recipe otherwise drops, and
 without expert parallelism. The one Primus setting is
 ``primus_mfsdp.no_param_reshard``.
 
-A run that asks for Megatron-FSDP and cannot have it stops in the condition:
-the patch runner logs a failing patch body and carries on, and here that would
-train on FSDP2 under a config that says otherwise.
+A run that asks for Megatron-FSDP and cannot have it stops: in the condition
+when megatron-fsdp is missing, and with ``SystemExit`` when a patch fails to
+install. The patch runner logs any other exception from a patch body and
+carries on, and here that would train on FSDP2, or with an unsharded
+optimizer, under a config that says otherwise.
 """
 
 import importlib.util
 
 from primus.backends.automodel import options
+from primus.backends.automodel.patches._conditions import (
+    as_automodel_reads_it,
+    checkpoint_enabled,
+)
 from primus.core.patches import PatchContext, get_param, register_patch
 
 options.declare("primus_mfsdp", "no_param_reshard")
-
-_TRUE = {"1", "true", "yes", "on"}
 
 
 def _megatron_fsdp_requested(ctx: PatchContext) -> bool:
@@ -37,16 +41,24 @@ def _megatron_fsdp_requested(ctx: PatchContext) -> bool:
             "fsdp.backend: megatron_fsdp, which shards it already."
         )
     if importlib.util.find_spec("megatron_fsdp") is None:
-        raise ImportError(
-            "fsdp.backend: megatron_fsdp needs the megatron-fsdp package, which AutoModel pins "
-            "(pip install megatron-fsdp==0.5.0)."
-        )
+        raise ImportError(megatron_fsdp.MISSING_PACKAGE)
     return True
 
 
 def _average_in_collective_requested(ctx: PatchContext) -> bool:
-    value = get_param(ctx, "fsdp.average_in_collective", False)
-    return str(value).strip().lower() in _TRUE and _megatron_fsdp_requested(ctx)
+    # Read as AutoModel hands it on: whatever reaches megatron-fsdp as on needs the repair.
+    value = as_automodel_reads_it(get_param(ctx, "fsdp.average_in_collective", False))
+    return bool(value) and _megatron_fsdp_requested(ctx)
+
+
+def _install_or_exit(install, what: str) -> None:
+    from primus.backends.automodel.distributed.megatron_fsdp import LOG_PREFIX
+
+    # SystemExit is a BaseException, which the patch runner does not catch.
+    try:
+        install()
+    except Exception as exc:
+        raise SystemExit(f"{LOG_PREFIX} {what} failed to install: {exc}") from exc
 
 
 @register_patch(
@@ -60,11 +72,11 @@ def _average_in_collective_requested(ctx: PatchContext) -> bool:
 def apply(ctx: PatchContext) -> None:
     from primus.backends.automodel.distributed import megatron_fsdp
 
-    megatron_fsdp.install()
-    if str(get_param(ctx, "checkpoint.enabled", True)).strip().lower() in _TRUE:
+    _install_or_exit(megatron_fsdp.install, "Megatron-FSDP for the diffusion recipe")
+    if checkpoint_enabled(ctx):
         megatron_fsdp.logger.warning(
-            "[PrimusMegatronFSDP] checkpoint saving is untested with fsdp.backend: megatron_fsdp "
-            "on the diffusion path."
+            "%s checkpoint saving is untested with fsdp.backend: megatron_fsdp on the diffusion path.",
+            megatron_fsdp.LOG_PREFIX,
         )
 
 
@@ -79,4 +91,4 @@ def apply(ctx: PatchContext) -> None:
 def apply_average_in_collective(ctx: PatchContext) -> None:
     from primus.backends.automodel.distributed import mfsdp_average_in_collective
 
-    mfsdp_average_in_collective.install()
+    _install_or_exit(mfsdp_average_in_collective.install, "the average_in_collective repair")

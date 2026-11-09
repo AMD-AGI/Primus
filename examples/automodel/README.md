@@ -70,11 +70,17 @@ place.
 
 Training behaviour is set in the YAML: batch sizes, `fsdp.activation_checkpointing`
 (`true` or `selective`), `fsdp.reshard_after_forward`, `fsdp.enable_compile`, and
-so on. The Primus repairs that make those keys take effect are always on. One of
-them routes `fsdp.backend: megatron_fsdp` to Megatron-FSDP, with
-`fsdp.zero_dp_strategy` (1, 2 or 3) and the other `MegatronFSDPConfig` fields; it
-needs `model.torch_dtype` and `model.compute_dtype` both `bfloat16`, and supports
-neither context parallelism nor LoRA.
+so on. The Primus repairs that make those keys take effect are always on.
+
+`fsdp.backend: megatron_fsdp` trains the diffusion transformer on Megatron-FSDP
+instead of FSDP2, with `fsdp.zero_dp_strategy` (1, 2 or 3) and the other
+`MegatronFSDPConfig` fields. It needs the `megatron-fsdp` package AutoModel pins
+(0.5.0), and `model.torch_dtype` and `model.compute_dtype` both `bfloat16`. Context
+parallelism, LoRA, `fsdp.cpu_offload` and Dion-family optimizers are refused.
+FSDP2-only keys such as `fsdp.reshard_after_forward` are dropped with a log line.
+Unlike FSDP2, activation checkpointing stays off unless
+`fsdp.activation_checkpointing` turns it on; it and checkpoint saving are
+untested on this path.
 
 Primus features that AutoModel has no setting for are configured in top-level
 `primus_*` sections of the module config, either in the experiment's

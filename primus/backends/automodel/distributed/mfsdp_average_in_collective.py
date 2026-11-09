@@ -26,9 +26,11 @@ from __future__ import annotations
 import inspect
 import logging
 
+from primus.backends.automodel._source_patch import patch_method_source
+from primus.backends.automodel.distributed.megatron_fsdp import LOG_PREFIX
+
 logger = logging.getLogger(__name__)
 
-_LOG_PREFIX = "[PrimusMegatronFSDP]"
 _PATCH_FLAG = "_primus_average_in_collective_without_expert_dp"
 _METHOD = "_init_fsdp_param_and_grad_buffer"
 
@@ -54,13 +56,11 @@ def patch_class(mfsdp_cls) -> bool:
     if getattr(mfsdp_cls, _PATCH_FLAG, False):
         return True
 
-    from primus.backends.automodel._source_patch import patch_method_source
-
     if ANCHOR not in inspect.getsource(mfsdp_cls.__dict__[_METHOD]):
         logger.warning(
             "%s %s.%s no longer matches the megatron-fsdp 0.5.0 source; assuming a missing expert "
             "group is handled upstream. Not patching.",
-            _LOG_PREFIX,
+            LOG_PREFIX,
             mfsdp_cls.__name__,
             _METHOD,
         )
@@ -71,6 +71,6 @@ def patch_class(mfsdp_cls) -> bool:
     logger.info(
         "%s average_in_collective falls back to the data-parallel group when there is no "
         "expert-parallel group.",
-        _LOG_PREFIX,
+        LOG_PREFIX,
     )
     return True
