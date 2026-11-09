@@ -307,6 +307,9 @@ def assemble_ild_state_dict(
     Global tensors remain from ``hybrid_base_state`` (the upcycled Llama
     backbone). Each mixer/MLP pair is copied wholesale from the corresponding
     stage-1 checkpoint, matching ``HybridModelWrapper.init_distillation``.
+    Layouts are compared on parameters only: a recipe with
+    ``use_fla_fused_gated_norm`` replaces the GDN ``out_norm`` TE norm by one
+    without ``_extra_state``, so a layer takes its source's extra states.
     """
     num_sublayers = count_decoder_layers(hybrid_base_state)
     if num_sublayers % 2:
@@ -327,20 +330,29 @@ def assemble_ild_state_dict(
             prefix = f"decoder.layers.{layer_index}."
             target_keys = {key for key in assembled if key.startswith(prefix)}
             source_keys = {key for key in source if key.startswith(prefix)}
-            if target_keys != source_keys:
-                missing = sorted(target_keys - source_keys)
-                extra = sorted(source_keys - target_keys)
+            target_params = {key for key in target_keys if not _is_extra_state(key)}
+            source_params = {key for key in source_keys if not _is_extra_state(key)}
+            if target_params != source_params:
+                missing = sorted(target_params - source_params)
+                extra = sorted(source_params - target_params)
                 raise ValueError(
                     f"ILD layer {layer_index} layout mismatch; " f"missing={missing[:5]}, extra={extra[:5]}"
                 )
-            for key in target_keys:
-                if tuple(assembled[key].shape) != tuple(source[key].shape):
+            for key in target_keys - source_keys:
+                del assembled[key]
+            for key in source_keys:
+                if key in target_params and tuple(assembled[key].shape) != tuple(source[key].shape):
                     raise ValueError(
                         f"ILD tensor {key}: target {tuple(assembled[key].shape)} "
                         f"!= source {tuple(source[key].shape)}"
                     )
-                assembled[key] = source[key].detach().to(device="cpu").clone()
+                value = source[key]
+                assembled[key] = value.detach().to(device="cpu").clone() if torch.is_tensor(value) else value
     return assembled
+
+
+def _is_extra_state(key: str) -> bool:
+    return key.endswith("._extra_state")
 
 
 def build_upcycle_checkpoint(hybrid_checkpoint: dict, upcycled_state: Mapping[str, torch.Tensor]) -> dict:

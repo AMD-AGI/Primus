@@ -433,3 +433,24 @@ def test_assemble_ild_rejects_count_and_shape_mismatches():
     bad_shape["decoder.layers.2.mixer.in_proj.weight"] = torch.zeros(1, 1)
     with pytest.raises(ValueError, match="ILD tensor"):
         assemble_ild_state_dict(base, bad_shape, mla, pattern)
+
+
+def test_assemble_ild_takes_extra_states_from_the_source_layer():
+    pattern = "*-M-"
+    base = _hybrid_state(pattern)
+    base["decoder.layers.2.mixer.out_norm._extra_state"] = torch.zeros(3, dtype=torch.uint8)
+    base["decoder.layers.2.mixer.in_proj._extra_state"] = torch.zeros(3, dtype=torch.uint8)
+    gdn = {key: value.clone() for key, value in base.items() if not key.endswith("out_norm._extra_state")}
+    gdn["decoder.layers.2.mixer.in_proj._extra_state"] = torch.ones(5, dtype=torch.uint8)
+    mla = {key: value.clone() for key, value in base.items()}
+    assembled = assemble_ild_state_dict(base, gdn, mla, pattern)
+    assert "decoder.layers.2.mixer.out_norm._extra_state" not in assembled
+    assert torch.equal(
+        assembled["decoder.layers.2.mixer.in_proj._extra_state"], torch.ones(5, dtype=torch.uint8)
+    )
+
+    missing_weight = {
+        key: value for key, value in gdn.items() if key != "decoder.layers.2.mixer.in_proj.weight"
+    }
+    with pytest.raises(ValueError, match="layout mismatch"):
+        assemble_ild_state_dict(base, missing_weight, mla, pattern)
