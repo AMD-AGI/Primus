@@ -1,0 +1,21 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Inkling (large) 20-layer proxy for four-node experiments: every per-tensor
+# width is the released value; only the depth shrinks to the first 20 layers
+# (2 dense + 18 MoE). Layers 5, 11 and 17 are global (8 KV heads), the rest
+# slide (16 KV heads).
+#
+# ~269 B parameters: 18 MoE layers x 256 experts x 56.6 M = 261 B routed,
+# plus embed + head (1.2 B each), attention, shared experts and the two dense
+# layers. At PP=4 x EP=8 that is ~8.2 B routed parameters per GPU, about what
+# the single-node 6L proxy holds at EP=8.
+###############################################################################
+extends:
+  - inkling_large.yaml
+
+num_layers: 20
+moe_layer_freq: "([0]*2+[1]*18)"
