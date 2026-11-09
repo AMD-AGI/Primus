@@ -454,7 +454,8 @@ def _dir_bytes(path: str) -> int:
             try:
                 total += os.path.getsize(os.path.join(root, name))
             except OSError:
-                pass
+                # removed or unreadable while walking; the total only goes in a message
+                continue
     return total
 
 
