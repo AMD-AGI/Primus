@@ -129,7 +129,9 @@ def student_layout(state: Dict[str, torch.Tensor], kind: str, args=None) -> Layo
         value_dim = state[a + "mixer.out_proj.weight"].shape[1]
         key_dim = (conv_dim - value_dim) // 2
         if 2 * key_dim + 2 * value_dim + 2 * nheads != in_rows:
-            raise ValueError(f"GDN in_proj has {in_rows} rows; key {key_dim}, value {value_dim}, heads {nheads}")
+            raise ValueError(
+                f"GDN in_proj has {in_rows} rows; key {key_dim}, value {value_dim}, heads {nheads}"
+            )
         widths = (key_dim, key_dim, value_dim, value_dim, nheads, nheads)
         edges = [sum(widths[:j]) for j in range(len(widths) + 1)]
         layout.gdn_in = dict(zip("qkvgba", zip(edges[:-1], edges[1:])))

@@ -88,9 +88,34 @@ def test_enhanced_ild_rejects_a_mask_of_another_shape():
 
 
 def test_sft_real_tokens_keep_the_prompt_and_drop_the_padding():
-    loss_mask = torch.tensor([[0.0, 1.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 0.0]])
-    expected = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 0]], dtype=torch.bool).t()
+    # Label-space masks: the last supervised target (the EOS) is the input one position later.
+    loss_mask = torch.tensor([[0.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 1.0, 1.0, 0.0]])
+    expected = torch.tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]], dtype=torch.bool).t()
     assert torch.equal(sft_real_tokens(loss_mask), expected)
+
+
+def test_sft_real_tokens_are_the_tokenized_sample_without_its_padding():
+    from primus.backends.megatron.sft.formatters import AlpacaFormatter
+    from primus.backends.megatron.sft.preprocessing import (
+        normalize_sft_sample,
+        tokenize_formatted_sft_sample,
+    )
+
+    class Tokenizer:
+        pad, eos = 10001, 10000
+
+        def tokenize(self, text):
+            return text.split()
+
+        def convert_tokens_to_ids(self, tokens):
+            return [hash(token) % 10000 for token in tokens]
+
+    sample = AlpacaFormatter().format_sample(
+        normalize_sft_sample({"instruction": "What is SFT?", "response": "SFT is supervised fine-tuning."})
+    )
+    input_ids, _labels, loss_mask = tokenize_formatted_sft_sample(sample, Tokenizer(), max_seq_length=64)
+    real = sft_real_tokens(loss_mask.float().unsqueeze(0)).t()[0]
+    assert torch.equal(real, input_ids != Tokenizer.pad)
 
 
 def test_masked_chunked_kl_matches_dense_reference_and_has_grad():

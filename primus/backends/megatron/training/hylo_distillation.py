@@ -575,11 +575,15 @@ def _log_loss(metrics: dict[str, torch.Tensor]) -> None:
 def sft_real_tokens(loss_mask: torch.Tensor) -> torch.Tensor:
     """Real-token mask, (sequence, batch), of an SFT micro-batch's ``loss_mask`` (batch, sequence).
 
-    The SFT dataset pads each sample at its end and supervises it through its last real token, so
-    a position is real when it is at or before the sample's last supervised position. Prompt
-    tokens count, as they do on packed data.
+    The SFT dataset pads each sample at its end and supervises it through its last real token (its
+    EOS). ``loss_mask`` is in label space, ``loss_mask[i]`` weighting the target at ``i + 1``, so a
+    position is real when it is at most one past the sample's last supervised label. Prompt tokens
+    count, as they do on packed data.
     """
-    supervised_from_here = torch.flip(torch.cumsum(torch.flip(loss_mask, dims=[-1]), dim=-1), dims=[-1])
+    supervised_inputs = F.pad(loss_mask[..., :-1], (1, 0))
+    supervised_from_here = torch.flip(
+        torch.cumsum(torch.flip(supervised_inputs, dims=[-1]), dim=-1), dims=[-1]
+    )
     return (supervised_from_here > 0).transpose(0, 1)
 
 
