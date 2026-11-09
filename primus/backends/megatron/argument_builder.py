@@ -34,6 +34,8 @@ _PRIMUS_MEGATRON_DEFAULTS = {
     "hylo_mla_ild_checkpoint": None,
     "hylo_kl_weight": 1.0,
     "hylo_ce_weight": 0.0,
+    # Hugging Face Trainer's warmup_ratio: lr_warmup_iters = ceil(train_iters * ratio) (validate_hylo_args).
+    "hylo_warmup_ratio": None,
     # "fused": FLA's single-pass Triton KL (HyLo's fused_kl); "chunked": the PyTorch reference loop.
     "hylo_kl_impl": "fused",
     "hylo_kl_chunk_size": 4096,

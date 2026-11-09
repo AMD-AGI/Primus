@@ -17,6 +17,7 @@ modules:
       hylo_distill_stage: ild
       hylo_teacher_checkpoint: ${HYLO_LLAMA32_1B_MEGATRON_CKPT:./data/checkpoints/llama32-1b-megatron}
       hylo_teacher_num_layers: 16
+      hylo_teacher_use_rope_scaling: true
       hylo_kl_weight: 1.0
       hylo_ce_weight: 0.0
 

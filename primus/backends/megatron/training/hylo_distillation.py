@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import glob
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -21,7 +22,7 @@ from typing import Any, Callable, Iterable, Optional
 import torch
 import torch.nn.functional as F
 
-from primus.backends.megatron.training.hylo_order_dataset import unset
+from primus.backends.megatron.training.hylo_utils import hybrid_batch_getter, unset
 
 _KL_CHUNK = 4096
 _RUNTIME: Optional["HyLoRuntime"] = None
@@ -154,15 +155,15 @@ class _FusedMaskedKL(torch.autograd.Function):
             num_warps=warps,
         )
         if mask is not None:
-            grad.mul_(mask.unsqueeze(-1).to(grad.dtype))
             loss = loss * mask
-        ctx.save_for_backward(grad)
+        ctx.save_for_backward(grad, mask)
         return loss.sum()
 
     @staticmethod
     def backward(ctx, grad_output):
-        (grad,) = ctx.saved_tensors
-        return grad.mul_(grad_output), None, None
+        grad, mask = ctx.saved_tensors
+        scale = grad_output if mask is None else mask.unsqueeze(-1) * grad_output
+        return grad.mul_(scale), None, None
 
 
 def masked_fused_kl(
@@ -170,9 +171,14 @@ def masked_fused_kl(
     teacher_logits: torch.Tensor,
     loss_mask: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``masked_chunked_kl`` through FLA's fused KL kernel; falls back to it without FLA or off GPU."""
-    if not student_logits.is_cuda or _fla_kl_kernel() is None:
+    """``masked_chunked_kl`` through FLA's fused KL kernel; off GPU, the chunked loop itself."""
+    if not student_logits.is_cuda:
         return masked_chunked_kl(student_logits, teacher_logits, loss_mask)
+    if _fla_kl_kernel() is None:
+        raise RuntimeError(
+            "hylo_kl_impl: fused needs flash-linear-attention's fla.modules.fused_kl_div.kl_div_kernel, "
+            "which failed to import; install FLA or set hylo_kl_impl: chunked"
+        )
     student = student_logits.reshape(-1, student_logits.shape[-1])
     teacher = teacher_logits.reshape(-1, teacher_logits.shape[-1])
     if student.shape != teacher.shape:
@@ -182,9 +188,18 @@ def masked_fused_kl(
     else:
         mask = loss_mask.reshape(-1).to(device=student.device, dtype=torch.float32)
         count = mask.sum().detach().to(torch.int)
-        if bool((mask == 1).all()):
-            mask = None
     return _FusedMaskedKL.apply(student, teacher, mask), count
+
+
+_KL_IMPLS = ("fused", "chunked")
+
+
+@functools.lru_cache(maxsize=None)
+def _log_kl_impl(impl: str, dtype: torch.dtype) -> None:
+    from primus.core.utils.module_utils import log_rank_0
+
+    how = "FLA's fused kl_div_kernel" if impl == "fused" else "the chunked PyTorch loop"
+    log_rank_0(f"[HyLo] KL(teacher || student) with {how}, on {dtype} logits")
 
 
 def teacher_kl(
@@ -195,16 +210,17 @@ def teacher_kl(
 
     args = get_args()
     impl = getattr(args, "hylo_kl_impl", "fused")
+    if impl not in _KL_IMPLS:
+        raise ValueError(f"hylo_kl_impl must be 'fused' or 'chunked', got {impl!r}")
+    _log_kl_impl(impl if student_logits.is_cuda else "chunked", student_logits.dtype)
     if impl == "fused":
         return masked_fused_kl(student_logits, teacher_logits, loss_mask)
-    if impl == "chunked":
-        return masked_chunked_kl(
-            student_logits,
-            teacher_logits,
-            loss_mask,
-            chunk_size=int(getattr(args, "hylo_kl_chunk_size", _KL_CHUNK)),
-        )
-    raise ValueError(f"hylo_kl_impl must be 'fused' or 'chunked', got {impl!r}")
+    return masked_chunked_kl(
+        student_logits,
+        teacher_logits,
+        loss_mask,
+        chunk_size=int(getattr(args, "hylo_kl_chunk_size", _KL_CHUNK)),
+    )
 
 
 def _logits_kwargs() -> dict:
@@ -519,6 +535,22 @@ def validate_hylo_args(args: Any) -> None:
         raise ValueError("hylo_teacher_yarn_factor needs hylo_teacher_yarn_original_max_position_embeddings")
     if stage == "sft" and float(getattr(args, "hylo_ce_weight", 0.0)) != 0.0:
         raise ValueError("the native 4MLA12GDN recipe requires hylo_ce_weight=0")
+    _derive_warmup(args)
+
+
+def _derive_warmup(args: Any) -> None:
+    """Sets ``lr_warmup_iters`` from ``hylo_warmup_ratio`` the way the Hugging Face Trainer does,
+    ``ceil(train_iters * ratio)``, below Megatron's ``lr_warmup_steps < lr_decay_steps`` bound."""
+    ratio = getattr(args, "hylo_warmup_ratio", None)
+    if unset(ratio):
+        return
+    if not unset(getattr(args, "lr_warmup_fraction", None)):
+        raise ValueError("set hylo_warmup_ratio or lr_warmup_fraction, not both")
+    if unset(getattr(args, "train_iters", None)):
+        raise ValueError("hylo_warmup_ratio needs train_iters")
+    train_iters = int(args.train_iters)
+    decay_iters = int(getattr(args, "lr_decay_iters", None) or train_iters)
+    args.lr_warmup_iters = max(0, min(math.ceil(train_iters * float(ratio)), decay_iters - 1))
 
 
 def _log_loss(metrics: dict[str, torch.Tensor]) -> None:
@@ -556,13 +588,14 @@ def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, to
 
 def create_pretrain_forward_step():
     from megatron.training import get_args
-    from pretrain_mamba import get_batch
+
+    get_batch = hybrid_batch_getter()
 
     def forward_step(data_iterator, model, return_schedule_plan=False):
         if return_schedule_plan:
             raise NotImplementedError("HyLo distillation does not support schedule plans")
         assert _RUNTIME is not None
-        tokens, labels, loss_mask, attention_mask, position_ids, *_ = get_batch(data_iterator)
+        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator)
         _RUNTIME.install_student_hooks(model)
         _RUNTIME.clear()
         logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()

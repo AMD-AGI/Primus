@@ -20,6 +20,7 @@ modules:
       hylo_distill_stage: sft
       hylo_teacher_checkpoint: ${HYLO_LLAMA31_8B_MEGATRON_CKPT:./data/checkpoints/llama31-8b-megatron}
       hylo_teacher_num_layers: 32
+      hylo_teacher_use_rope_scaling: true
       hylo_kl_weight: 1.0
       hylo_ce_weight: 0.0
       # Used by hylo_kl_impl: chunked, the PyTorch reference.

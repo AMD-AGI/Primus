@@ -33,10 +33,32 @@ def test_sequential_sampler_gives_each_rank_its_recorded_batch(tmp_path):
     for step in range(STEPS):
         global_batch = list(range(step * MBS * DP, (step + 1) * MBS * DP))
         for rank in range(DP):
-            served = np.stack(
-                [ds[i]["tokens"].numpy() for i in global_batch[rank * MBS : (rank + 1) * MBS]]
-            )
+            served = np.stack([ds[i]["tokens"].numpy() for i in global_batch[rank * MBS : (rank + 1) * MBS]])
             np.testing.assert_array_equal(served, batches[rank, step])
+
+
+def test_megatron_sampler_gives_each_rank_its_recorded_batch(tmp_path):
+    try:
+        from megatron.training.datasets.data_samplers import MegatronPretrainingSampler
+    except ImportError as e:
+        pytest.skip(f"Megatron is not importable here: {e}")
+    batches = _record(tmp_path)
+    ds = HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
+    for rank in range(DP):
+        sampler = MegatronPretrainingSampler(len(ds), 0, MBS, rank, DP)
+        served = [np.stack([ds[i]["tokens"].numpy() for i in indices]) for indices in sampler]
+        np.testing.assert_array_equal(np.stack(served), batches[rank])
+
+
+def test_every_position_is_supervised_and_padding_none(tmp_path):
+    batches = _record(tmp_path)
+    ds = HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
+    sample = ds[1]
+    assert sample["loss_mask"].tolist() == [1.0] * SEQ
+    assert sample["labels"].tolist() == batches[0, 0, 1, 1:].tolist() + [0]
+    padding = ds[None]
+    assert padding["loss_mask"].tolist() == [0.0] * SEQ
+    assert padding["tokens"].shape == (SEQ,)
 
 
 def test_rejects_a_mismatched_layout(tmp_path):
@@ -45,6 +67,22 @@ def test_rejects_a_mismatched_layout(tmp_path):
         HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS + 1, data_parallel_size=DP)
     with pytest.raises(ValueError, match="data-parallel"):
         HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP * 2)
+
+
+def test_rejects_a_step_count_the_rank_files_do_not_hold(tmp_path):
+    _record(tmp_path)
+    (tmp_path / "meta.json").write_text(
+        json.dumps({"micro_batch": MBS, "seq_len": SEQ, "world_size": DP, "steps": STEPS - 1})
+    )
+    with pytest.raises(ValueError, match="steps"):
+        HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
+
+
+def test_rejects_rank_files_of_different_lengths(tmp_path):
+    batches = _record(tmp_path)
+    batches[1, :-1].tofile(tmp_path / "batches_rank1.bin")
+    with pytest.raises(ValueError, match="steps"):
+        HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
 
 
 @pytest.mark.parametrize("value", [None, "", "null", "None", " NULL "])

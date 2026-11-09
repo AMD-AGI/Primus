@@ -209,15 +209,26 @@ MLA_ARGS = Namespace(qk_pos_emb_head_dim=ROPE, qk_head_dim=2, iteration=0)
 def test_gdn_in_proj_and_conv_split_into_the_fla_projections():
     state = _hybrid_student(["gdn", "gdn"])
     layout = cmp.student_layout(state, "gdn")
-    assert layout.gdn_in == {"q": (0, 6), "k": (6, 12), "v": (12, 24), "g": (24, 36), "b": (36, 39), "a": (39, 42)}
+    assert layout.gdn_in == {
+        "q": (0, 6),
+        "k": (6, 12),
+        "v": (12, 24),
+        "g": (24, 36),
+        "b": (36, 39),
+        "a": (39, 42),
+    }
     assert layout.gdn_conv == {"q": (0, 6), "k": (6, 12), "v": (12, 24)}
     named, left = cmp.to_reference_names(state, layout)
     assert left == []
     w = state["decoder.layers.2.mixer.in_proj.weight"]
     assert torch.equal(named["model.layers.1.gdn.g_proj.weight"], w[24:36])
     assert torch.equal(named["model.layers.1.gdn.a_proj.weight"], w[39:])
-    assert torch.equal(named["model.layers.1.gdn.v_conv1d.weight"], state["decoder.layers.2.mixer.conv1d.weight"][12:])
-    assert torch.equal(named["model.layers.0.gdn.o_norm.weight"], state["decoder.layers.0.mixer.out_norm.weight"])
+    assert torch.equal(
+        named["model.layers.1.gdn.v_conv1d.weight"], state["decoder.layers.2.mixer.conv1d.weight"][12:]
+    )
+    assert torch.equal(
+        named["model.layers.0.gdn.o_norm.weight"], state["decoder.layers.0.mixer.out_norm.weight"]
+    )
     assert torch.equal(named["lm_head.weight"], state["embedding.word_embeddings.weight"])
 
 

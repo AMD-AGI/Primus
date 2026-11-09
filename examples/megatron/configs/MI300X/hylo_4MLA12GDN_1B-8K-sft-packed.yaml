@@ -36,7 +36,7 @@ modules:
       tokenizer_model: ${HYLO_TOKENIZER_MODEL:meta-llama/Llama-3.2-1B-Instruct}
       mock_data: false
       train_data_path: ${HYLO_PACKED_TRAIN_DATA:./data/hylo/packed-8k/train}
-      # A reference run's recorded batches (hylo_train_dump.py), served in its order.
+      # A reference run's recorded batches (tools/hybrid/hylo_train_dump.py), served in its order.
       hylo_order_data_dir: ${HYLO_ORDER_DATA_DIR:null}
       valid_data_path: null
       test_data_path: null
@@ -54,8 +54,9 @@ modules:
       lr: 6.0e-5
       min_lr: 0.0
       lr_decay_style: cosine
-      # The Trainer's warmup_ratio 0.01 is ceil(0.01 * steps) steps: 10 of 1000.
-      lr_warmup_iters: ${HYLO_SFT_WARMUP_ITERS:10}
+      # The Trainer's warmup_ratio: validate_hylo_args sets lr_warmup_iters to ceil(0.01 * train_iters),
+      # 10 of 1000, for any train_iters.
+      hylo_warmup_ratio: 0.01
       lr_warmup_fraction: null
 
       # Hugging Face Trainer values used by the reference.

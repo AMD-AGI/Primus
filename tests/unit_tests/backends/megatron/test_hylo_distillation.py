@@ -4,9 +4,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import sys
 from argparse import Namespace
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -134,6 +135,60 @@ def test_masked_fused_kl_matches_the_chunked_reference(masked, dtype):
     assert count.item() == expected_count.item()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="off GPU the fused KL is the chunked loop")
+def test_masked_fused_kl_without_fla_says_how_to_fall_back(monkeypatch):
+    monkeypatch.setattr(hylo_distillation, "_fla_kl_kernel", lambda: None)
+    logits = torch.zeros(1, 2, 8, device="cuda")
+    with pytest.raises(RuntimeError, match="hylo_kl_impl: chunked"):
+        hylo_distillation.masked_fused_kl(logits, logits)
+
+
+def _megatron_args(monkeypatch, **values):
+    args = Namespace(**values)
+    try:
+        import megatron.training as megatron_training
+    except ImportError:
+        megatron_training = ModuleType("megatron.training")
+        monkeypatch.setitem(sys.modules, "megatron.training", megatron_training)
+    monkeypatch.setattr(megatron_training, "get_args", lambda: args, raising=False)
+    return args
+
+
+def _kl_inputs():
+    generator = torch.Generator().manual_seed(5)
+    student = torch.randn(2, 3, 11, generator=generator)
+    teacher = torch.randn(2, 3, 11, generator=generator)
+    return student, teacher, torch.tensor([[1.0, 0.0, 1.0], [1.0, 1.0, 0.0]])
+
+
+def test_teacher_kl_fused_is_the_chunked_loop_off_gpu(monkeypatch):
+    _megatron_args(monkeypatch, hylo_kl_impl="fused")
+    student, teacher, mask = _kl_inputs()
+    loss, count = hylo_distillation.teacher_kl(student, teacher, mask)
+    expected, expected_count = masked_chunked_kl(student, teacher, mask)
+    torch.testing.assert_close(loss, expected)
+    assert count.item() == expected_count.item() == 4
+
+
+def test_teacher_kl_chunked_uses_the_configured_chunk(monkeypatch):
+    _megatron_args(monkeypatch, hylo_kl_impl="chunked", hylo_kl_chunk_size=2)
+    seen = []
+
+    def chunked(student, teacher, mask, chunk_size):
+        seen.append(chunk_size)
+        return masked_chunked_kl(student, teacher, mask, chunk_size=chunk_size)
+
+    monkeypatch.setattr(hylo_distillation, "masked_chunked_kl", chunked)
+    hylo_distillation.teacher_kl(*_kl_inputs())
+    assert seen == [2]
+
+
+def test_teacher_kl_rejects_an_unknown_impl(monkeypatch):
+    _megatron_args(monkeypatch, hylo_kl_impl="triton")
+    with pytest.raises(ValueError, match="hylo_kl_impl"):
+        hylo_distillation.teacher_kl(*_kl_inputs())
+
+
 def test_validate_hylo_args_rejects_unsupported_parallelism():
     base = dict(
         tensor_model_parallel_size=1,
@@ -155,6 +210,23 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "hylo_teacher_checkpoint": None}))
     with pytest.raises(ValueError, match="original_max_position_embeddings"):
         validate_hylo_args(Namespace(**{**base, "hylo_teacher_yarn_factor": 32.0}))
+
+
+def test_validate_hylo_args_derives_the_trainer_warmup():
+    args = Namespace(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        hylo_distill_stage="sft",
+        hylo_teacher_checkpoint="/tmp/teacher",
+        hylo_ce_weight=0.0,
+        hylo_warmup_ratio=0.01,
+        lr_warmup_fraction=None,
+        lr_warmup_iters=0,
+        train_iters=1000,
+        lr_decay_iters=None,
+    )
+    validate_hylo_args(args)
+    assert args.lr_warmup_iters == 10
 
 
 def test_enhanced_ild_rejects_mismatched_captures():
