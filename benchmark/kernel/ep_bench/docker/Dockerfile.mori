@@ -1,0 +1,58 @@
+# CONTEXT {'gpu_vendor': 'AMD', 'guest_os': 'UBUNTU'}
+###############################################################################
+#
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#
+###############################################################################
+#
+# Slim image for the Primus MoRI EP microbenchmarks.
+#
+# Based on the upstream vLLM ROCm image (which already provides ROCm, PyTorch,
+# and vLLM and MoRI) and inspired by ROCm/MAD's docker/large_ep_benchmark.ubuntu.amd.Dockerfile,
+#
+# Build (from this directory):
+#   docker build \
+#       -f Dockerfile.mori \
+#       --build-arg GPU_ARCH=gfx942 \
+#       -t primus-mori-ep:latest .
+#
+# Use with the Slurm launcher:
+#   DOCKER_IMAGE=primus-mori-ep:latest sbatch -N 1 -p <partition> \
+#       ../run_slurm.sh
+#
+###############################################################################
+
+# Latest stable upstream vLLM ROCm image.
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.21.0
+FROM ${BASE_IMAGE}
+
+#
+## The upstream vllm-openai-rocm image sets ENTRYPOINT to launch the vLLM API
+## server; clear it so the container can be driven by our bench scripts.
+ENTRYPOINT []
+CMD ["/bin/bash"]
+#
+WORKDIR /app
+RUN sed -i 's/http/https/g' /etc/apt/sources.list
+
+RUN apt update && \
+   apt install -y \
+    autoconf pkg-config \
+    libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+    libibverbs-dev ibverbs-utils libtool libboost-all-dev \
+    libgrpc++-dev protobuf-compiler-grpc protobuf-compiler libprotobuf-dev \
+    libaio-dev liburing-dev pybind11-dev ninja-build libgflags-dev \
+    rdma-core infiniband-diags perftest openssh-server \
+    psmisc vim cmake-curses-gui
+
+WORKDIR /app
+
+# not installing mori since its already installed in vllm container.
+RUN pip install tqdm prettytable
+RUN git clone --recursive $(grep '^MORI_REPO:' versions.txt | cut -d' ' -f2) && \
+    cd mori && \
+    git checkout $(grep '^MORI_BRANCH:' /app/versions.txt | cut -d' ' -f2) 
+
+RUN cd /app/mori && git log | head
