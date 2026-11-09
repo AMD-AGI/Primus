@@ -11,7 +11,7 @@ limitations, see [Native HyLo 1B training](hylo-native-training.md).
 - `meta-llama/Llama-3.1-8B-Instruct`, also converted to TP=PP=1, is the
   stage-2 teacher.
 - `JunxiongWang/sftdatasetv3` is the public training set.
-- `rocm/primus:v26.8` is the validated runtime image.
+- `rocm/primus:v26.9` is the validated runtime image.
 
 Run `tools/hybrid/prepare_hylo_assets.py` once to prepare those inputs. Pass the
 Hugging Face token through `HF_TOKEN`; the script does not write it to disk.
@@ -68,7 +68,7 @@ export HYLO_LLAMA32_1B_MEGATRON_CKPT=/path/to/llama32-1b
 export HYLO_LLAMA31_8B_MEGATRON_CKPT=/path/to/llama31-8b
 export HYLO_SFT_DATASET=JunxiongWang/sftdatasetv3
 export HYLO_OUTPUT_ROOT=/path/to/hylo-output
-export PRIMUS_IMAGE=rocm/primus:v26.8
+export PRIMUS_IMAGE=rocm/primus:v26.9
 
 tools/hybrid/run_hylo_1b_4mla12gdn.sh
 ```
@@ -101,14 +101,13 @@ export HYLO_GLOBAL_BATCH_SIZE=1
 ```
 
 The full script still runs both Enhanced-ILD branches, assembles the target
-checkpoint, and then runs pure KL. A one-GPU check in `rocm/primus:v26.8`
-completed both 4K ILD steps, assembled them, and finished one 8K pure-KL step
-from that checkpoint. It ran before the fix to the teacher's attention capture,
-so its ILD mixer terms include the residual stream.
+checkpoint, and then runs pure KL. A one-GPU check in `rocm/primus:v26.9` on
+MI355X completed both 4K ILD steps, assembled them, and finished one 8K pure-KL
+step from that checkpoint. Tensor counts leave out `_extra_state`.
 
 | Step | Result |
 | --- | --- |
-| all-GDN Enhanced-ILD, 4K | 360.000000 (hidden 168.000000, mixer 192.000000); iteration 1, 243 tensors, all finite |
-| all-MLA Enhanced-ILD, 4K | 169.000000 (hidden 66.000000, mixer 103.000000); iteration 1, 275 tensors, all finite |
-| assemble | every mixer/MLP pair matches its ILD source; 251 tensors, all finite |
-| pure KL from the assembly, 8K | summed masked KL 72.599213; iteration 1, reload finite |
+| all-GDN Enhanced-ILD, 4K | 137.000000 (hidden 91.500000, mixer 45.500000); iteration 1, 162 tensors, all finite |
+| all-MLA Enhanced-ILD, 4K | 134.000000 (hidden 89.000000, mixer 44.500000); iteration 1, 146 tensors, all finite |
+| assemble | every mixer/MLP pair matches its ILD source |
+| pure KL from the assembly, 8K | summed masked KL 43.979050; iteration 1, 158 tensors, all finite |

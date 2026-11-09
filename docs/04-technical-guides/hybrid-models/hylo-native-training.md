@@ -13,7 +13,7 @@ reference TRL trainer:
    `KL(teacher || student)` (`KL=1`, `CE=0`) and YaRN factor 4.
 
 The runtime currently supports TP=1 and PP=1. It is intended for eight-way data
-parallel training on MI300X with `rocm/primus:v26.8`.
+parallel training on MI300X with `rocm/primus:v26.9`.
 
 ## Prepare public assets
 
@@ -26,7 +26,7 @@ docker run --rm --entrypoint bash \
   --device /dev/kfd --device /dev/dri --group-add video \
   -e HF_TOKEN \
   -v "$PWD:/workspace/src" -w /workspace/src \
-  rocm/primus:v26.8 -lc \
+  rocm/primus:v26.9 -lc \
   'python tools/hybrid/prepare_hylo_assets.py --root /workspace/src/data/hylo'
 ```
 
@@ -326,6 +326,14 @@ loss to within 0.3% over the first 25 steps. They drift apart only as bf16 runs 
 student, with the FLA kernels below, ends within 0.14% of HyLo over the last 250 steps and scores
 37.056 against HyLo's 37.126 on the test split.
 
+On Megatron-core 0.19 in `rocm/primus:v26.9` the replays end within 0.14% (all-GDN), 0.42% to
+0.59% (three all-MLA runs), and 0.30% and 0.75% (two all-Mamba-2 runs) of HyLo over the last 250
+steps. The two all-Mamba-2 runs, with the same inputs, are themselves 0.45% apart there, so bf16
+nondeterminism sets that spread. On the test split they score all-GDN 37.061, all-MLA 34.263 and
+34.217, and all-Mamba-2 48.847 and 48.640, against HyLo's 37.126, 34.186, and 48.657. The same
+all-MLA replay in `rocm/primus:v26.8` scores 34.189, so the small all-MLA shift comes with the
+newer image's kernels.
+
 ## Stage 2 on packed 8K windows
 
 `hylo_4MLA12GDN_1B-8K-sft-packed.yaml` trains the assembled 4MLA12GDN student the way HyLo's
@@ -348,7 +356,8 @@ The recipe runs 1000 steps by default, the length of the lockstep runs; set
 From the same init on the same batches, Primus and HyLo log the same first-step KL, 1.693. Over
 the last 250 of 1000 steps their losses differ by 0.21% on average, the final students score a
 held-out KL of 0.3388 and 0.3390, and every weight group keeps a cosine of at least 0.998 to
-HyLo's.
+HyLo's. On Megatron-core 0.19 the same replay gives a first-step KL of 1.693 and a held-out KL of
+0.3384 against HyLo's 0.3390.
 
 ## Speed
 
@@ -363,9 +372,9 @@ short convolution and fused gated norm, and FSDP reduces its gradients in bf16. 
 | `grad_reduce_in_bf16` | bf16 gradient all-reduce, as HyLo's FSDP mixed precision |
 
 `fused` raises if FLA's kernel cannot be imported on GPU; set `hylo_kl_impl: chunked` there. Rank
-0 logs the KL implementation once. On eight MI300X GPUs, a stage-2 step takes 1011 ms against
-HyLo's 1052 ms (1196 ms before these settings), and an all-GDN Enhanced-ILD step 417 ms (466 ms
-before).
+0 logs the KL implementation once. On eight MI355X GPUs in `rocm/primus:v26.9` (Megatron-core
+0.19), a stage-2 step takes 970 ms against HyLo's 1052 ms, and an all-GDN Enhanced-ILD step 394 ms.
+On the earlier Megatron pin they took 1011 and 417 ms, and 1196 and 466 ms before these settings.
 
 File-by-file notes for this change are in
 [hylo-native-training-changes.md](hylo-native-training-changes.md).

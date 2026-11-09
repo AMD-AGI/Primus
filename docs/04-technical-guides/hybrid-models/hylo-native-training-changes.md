@@ -14,16 +14,17 @@ not vendored. Distillation is a Primus forward step behind
 
 | File | Why it is here |
 | --- | --- |
-| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD (over real tokens only on the padded SFT path), and masked `KL(teacher \|\| student)`, either through FLA's fused `kl_div_kernel` on bf16 logits (`hylo_kl_impl: fused`) or the chunked PyTorch loop. Optional Hugging Face YaRN for the teacher. Derives `lr_warmup_iters` from `hylo_warmup_ratio`. |
+| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD (over real tokens only on the padded SFT path), and masked `KL(teacher \|\| student)`, either through FLA's fused `kl_div_kernel` on bf16 logits (`hylo_kl_impl: fused`) or the chunked PyTorch loop. Optional Hugging Face YaRN for the teacher. The teacher is built from its checkpoint's saved args, with fields that Megatron predates (and the dense teacher's `moe_*` defaults) from the run. Derives `lr_warmup_iters` from `hylo_warmup_ratio`. |
 | `primus/backends/megatron/training/hylo_utils.py` | `unset()` for null-like recipe values, and the hybrid pretrain entry point: `pretrain_mamba` before Megatron-core 0.19, `pretrain_hybrid` from it, whose `get_batch` returns its fields in `BATCH_KEYS` order. |
 | `primus/backends/megatron/training/hylo_order_dataset.py`, `primus/backends/megatron/patches/hylo_order_data_patches.py` | Replay of a HyLo run's recorded batches in its order (`hylo_order_data_dir`): the dataset, an all-ones loss mask, and the provider patch with its batch-layout checks. |
 | `primus/backends/megatron/megatron_sft_trainer.py` | Enables that forward step for both training stages. |
 | `primus/backends/megatron/megatron_pretrain_trainer.py` | Same hook, used by the zero-learning-rate constructor. |
 | `primus/backends/megatron/argument_builder.py` | Keeps the `hylo_*` recipe fields (including `hylo_teacher_yarn_*`, `hylo_mla_kv_heads`, `hylo_kl_impl`, `hylo_warmup_ratio`, and `hylo_order_data_dir`), `hybrid_linear_type`, `mamba_expand`, and `mamba_d_xb` through Megatron argument merge, so they reach the saved checkpoint args the upcycler reads. |
-| `primus/backends/megatron/checkpoint/hybrid_upcycle.py` | From-teacher MLA, GDN, and Mamba-2 init, plus stage-1 checkpoint assembly. The recurrent mixer's input norm also accepts the TE-fused `linear_qkv.layer_norm_weight` of a converted Llama. |
+| `primus/backends/megatron/checkpoint/hybrid_upcycle.py` | From-teacher MLA, GDN, and Mamba-2 init, plus stage-1 checkpoint assembly. The recurrent mixer's input norm also accepts the TE-fused `linear_qkv.layer_norm_weight` of a converted Llama. Assembly compares layouts on parameters and takes each layer's `_extra_state` from its ILD checkpoint, since `use_fla_fused_gated_norm` replaces the GDN `out_norm` TE norm with one that has none. |
+| `primus/backends/megatron/patches/checkpoint_patches.py` | The finetune `load_checkpoint` wrapper forwards every argument, including the process groups Megatron-core 0.19 passes by keyword. |
 | `primus/backends/megatron/checkpoint/native_loader_llama.py` | Preserves Llama-3 `rope_scaling` when converting the teachers. |
 | `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py` | `hylo_gdn_hybrid_stack_spec`: RMSNorm, with MLA LoRA latent norms off. `hylo_m2_hybrid_stack_spec`: the same with the grouped Mamba-2 mixer. `hylo_grouped_mla_hybrid_stack_spec`: the same with 8 MLA key/value heads. |
-| `primus/backends/megatron/core/models/hybrid/mamba2_dxb_mixer.py` | MambaInLlama's Mamba-2 with x and B on the key/value groups (`d_xb`). |
+| `primus/backends/megatron/core/models/hybrid/mamba2_dxb_mixer.py` | MambaInLlama's Mamba-2 with x and B on the key/value groups (`d_xb`). Accepts the `name` Megatron-core 0.19's `MambaLayer` passes. |
 | `primus/backends/megatron/core/models/hybrid/grouped_kv_mla.py` | MLA `linear_kv_up_proj` with one block per key/value head, repeated for its query heads. |
 | `primus/configs/models/megatron/hylo_gdn_1B_hybrid.yaml` | 1B 4MLA12GDN widths. MLA blocks are 1, 5, 10, and 14. MLA YaRN uses `mscale: 1.0` and `mscale_all_dim: 0.0`, as HyLo's `rope_scaling` sets neither: the softmax scale stays `1/sqrt(q_head_dim)` and cos and sin are scaled by `0.1 ln(factor) + 1`. |
 | `primus/configs/models/megatron/hylo_m2_1B_hybrid.yaml` | 1B all-Mamba-2 widths. |
@@ -39,7 +40,7 @@ not vendored. Distillation is a Primus forward step behind
 | `examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft-packed.yaml` | 8K pure-KL stage 2 on the reference's packed 8192-token windows, 32 a step. |
 | `tools/hybrid/prepare_hylo_assets.py` | Downloads and converts the gated Llama teachers and exports the public SFT set. |
 | `tools/hybrid/assemble_hylo_ild.py` | Copies trained GDN and MLA blocks into the target layout. |
-| `tools/hybrid/run_hylo_1b_4mla12gdn.sh` | Constructor, upcycle, both ILD stages, assembly, then stage 2. |
+| `tools/hybrid/run_hylo_1b_4mla12gdn.sh` | Constructor, upcycle, both ILD stages, assembly, then stage 2, in `rocm/primus:v26.9` by default. |
 | `tools/hybrid/prepare_hylo_packed_data.py` | The reference's training and test text as Megatron datasets: the 20% selection, the recipe's Llama-3 template, HumanEval decontamination, and TRL's tokenization. |
 | `primus/backends/megatron/checkpoint/philox_uniform.py` | NumPy model of PyTorch's GPU `uniform_` stream: Philox4x32-10 draws, ordered by the GPU's compute-unit count. |
 | `primus/backends/megatron/checkpoint/mamba2_reference_draw.py`, `tools/hybrid/scan_mamba2_reference_draw.py`, `tools/hybrid/write_mamba2_reference_init.py` | Find the compute-unit count that rebuilds a reference all-Mamba-2 student's random init, then write that init into an upcycled checkpoint. |
@@ -55,7 +56,8 @@ not vendored. Distillation is a Primus forward step behind
 | `tests/unit_tests/tools/test_prepare_hylo_packed_data.py` | Selection, decontamination, and TRL's sequence count. |
 | `tests/unit_tests/tools/test_hylo_ild_eval.py` | Evaluation and training-loss summaries, and the evaluation configs. |
 | `tests/unit_tests/backends/megatron/test_grouped_kv_mla.py` | Grouped MLA key/value heads against Llama's `repeat_kv`. |
-| `tests/unit_tests/backends/megatron/test_hybrid_upcycle.py` | Upcycle and assembly rules. |
+| `tests/unit_tests/backends/megatron/test_hybrid_upcycle.py` | Upcycle and assembly rules, including extra states that differ from the base. |
+| `tests/unit_tests/backends/megatron/test_load_checkpoint_patch.py` | The `load_checkpoint` wrapper forwards keywords and treats a missing `model` key as a fresh start. |
 | `tests/unit_tests/backends/megatron/test_hybrid_upcycle_hylo_reference.py` | Exact match against HyLo `re_init_q`, `re_init_kv`, and `_copy_llama_attn_to_gdn`. |
 | `tests/unit_tests/backends/megatron/test_native_loader_llama_rope.py` | Llama-3 rope-scaling conversion. |
 | `tests/unit_tests/backends/megatron/test_mamba2_dxb_mixer.py` | Grouped Mamba-2 head mapping, and the mixer against a token-by-token recurrence (GPU). |
@@ -127,20 +129,21 @@ On `rocm/primus:v26.8`:
 - One all-GDN constructor step, its upcycle, one Enhanced-ILD step, and one
   pure-KL stage-2 step completed on one GPU at sequence length 128.
 
-One-step smokes at the recipe context lengths also completed in
-`rocm/primus:v26.8`:
+After the merge of Megatron-core 0.19, `run_hylo_1b_4mla12gdn.sh` ran one step
+of each stage at the recipe context lengths on one MI355X GPU in
+`rocm/primus:v26.9` (tensor counts leave out `_extra_state`):
 
 | Step | Context | Loss | Checkpoint reload |
 | --- | --- | --- | --- |
-| all-GDN Enhanced-ILD | 4096 | total 360.000000, hidden 168.000000, mixer 192.000000 | iteration 1, 243 tensors, all finite |
-| all-MLA Enhanced-ILD | 4096 | total 169.000000, hidden 66.000000, mixer 103.000000 | iteration 1, 275 tensors, all finite |
-| assembled 4MLA12GDN pure KL | 8192 | summed masked KL 72.599213 | iteration 1, 251 tensors, all finite |
+| all-GDN Enhanced-ILD | 4096 | total 137.000000, hidden 91.500000, mixer 45.500000 | iteration 1, 162 tensors, all finite |
+| all-MLA Enhanced-ILD | 4096 | total 134.000000, hidden 89.000000, mixer 44.500000 | iteration 1, 146 tensors, all finite |
+| assembled 4MLA12GDN pure KL | 8192 | summed masked KL 43.979050 | iteration 1, 158 tensors, all finite |
 
 Each step used micro-batch 1, global batch 1, and one optimizer step. Assembly
-checked that every mixer/MLP pair came from the matching ILD checkpoint.
-`run_hylo_1b_4mla12gdn.sh` was not executed as a full 1000-iteration job.
-These smokes predate the fix to the teacher's attention capture, so their
-mixer terms include the residual stream.
+checked that every mixer/MLP pair came from the matching ILD checkpoint. A rerun
+gave the same ILD losses. `run_hylo_1b_4mla12gdn.sh` was not executed as a full
+1000-iteration job. The earlier `rocm/primus:v26.8` smokes (360.0, 169.0, and
+72.599213) predate the fix to the teacher's attention capture.
 
 In October 2026 the packed all-MLA and all-Mamba-2 recipes ran the reference's
 full schedule, 6934 steps of 96 sequences of 2048 tokens, on the reference's

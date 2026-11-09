@@ -445,7 +445,7 @@ The checkpoint `args` must carry the HyLo widths (`q_lora_rank`, `kv_lora_rank`,
 
 ## Native HyLo training
 
-Primus trains the public 1B 4MLA12GDN model natively. Tensor, pipeline, and context parallelism must stay at 1. Data parallelism can use all eight GPUs on one MI300X node. The runtime image is `rocm/primus:v26.8`.
+Primus trains the public 1B 4MLA12GDN model natively. Tensor, pipeline, and context parallelism must stay at 1. Data parallelism can use all eight GPUs on one MI300X node. The runtime image is `rocm/primus:v26.9`.
 
 Stage 1 is Enhanced-ILD at 4K. It trains an all-GDN student and an all-MLA student from `meta-llama/Llama-3.2-1B-Instruct`. The public HyLo configs use 2K for this stage; these recipes start at 4K. Stage 2 is pure `KL(teacher || student)` at 8K against `meta-llama/Llama-3.1-8B-Instruct`, with KL weight 1 and CE weight 0. The released stage-2 mixture also used four AMD-preprocessed datasets that are not public, so `JunxiongWang/sftdatasetv3` reproduces the code path without reproducing the released weights.
 
@@ -459,14 +459,14 @@ export HYLO_LLAMA32_1B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama32-1b"
 export HYLO_LLAMA31_8B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama31-8b"
 export HYLO_SFT_DATASET=JunxiongWang/sftdatasetv3
 export HYLO_OUTPUT_ROOT="$PWD/output/hylo-native"
-export PRIMUS_IMAGE=rocm/primus:v26.8
+export PRIMUS_IMAGE=rocm/primus:v26.9
 
 tools/hybrid/run_hylo_1b_4mla12gdn.sh
 ```
 
 `HYLO_ILD_SEQ_LENGTH` overrides the 4K stage, and `HYLO_SFT_SEQ_LENGTH` overrides the 8K stage. A one-step check uses `HYLO_ILD_TRAIN_ITERS=1`, `HYLO_SFT_TRAIN_ITERS=1`, micro-batch 1, and global batch 1.
 
-On one MI300X GPU in `rocm/primus:v26.8`, that check logged all-GDN Enhanced-ILD 360.000000 and all-MLA Enhanced-ILD 169.000000 at 4K. Assembly kept each mixer/MLP pair from the matching ILD checkpoint. The following 8K step, started from that assembly, logged summed masked KL 72.599213. Each saved iteration 1 reloaded with every tensor finite.
+On one MI355X GPU in `rocm/primus:v26.9`, that check logged all-GDN Enhanced-ILD 137.000000 and all-MLA Enhanced-ILD 134.000000 at 4K. Assembly kept each mixer/MLP pair from the matching ILD checkpoint. The following 8K step, started from that assembly, logged summed masked KL 43.979050. Each saved iteration 1 reloaded with every tensor finite.
 
 The script writes:
 

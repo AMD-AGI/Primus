@@ -13,7 +13,7 @@ set -euo pipefail
 #   HYLO_ILD_TRAIN_ITERS, HYLO_SFT_TRAIN_ITERS, PRIMUS_IMAGE.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-IMAGE="${PRIMUS_IMAGE:-rocm/primus:v26.8}"
+IMAGE="${PRIMUS_IMAGE:-rocm/primus:v26.9}"
 OUT="${HYLO_OUTPUT_ROOT:-${ROOT}/output/hylo-native}"
 mkdir -p "${OUT}"
 
