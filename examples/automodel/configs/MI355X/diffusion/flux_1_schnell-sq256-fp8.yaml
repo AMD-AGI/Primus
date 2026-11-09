@@ -48,8 +48,8 @@ modules:
 
     overrides:
       # The model preset's float32 storage with bfloat16 compute stays: FSDP2 casts
-      # the parameters as it gathers them, so AdamW keeps fp32 master weights for
-      # about 8 GB more memory and well under 1% of throughput.
+      # the parameters as it gathers them, so AdamW keeps fp32 master weights at a
+      # small cost in memory and throughput.
       step_scheduler:
         max_steps: 25
         local_batch_size: 64
