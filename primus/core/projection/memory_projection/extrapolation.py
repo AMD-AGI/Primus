@@ -179,7 +179,7 @@ def static_breakdown_for_profiler(profiler, *, rank: int = 0) -> StaticBreakdown
     The profiler's ``get_num_bytes_per_param`` already encodes the convention::
 
         bytes_per_param = 4 (bf16 params + bf16 grads)
-                        + 10 / dp_size (fp32 main params + fp32 mom1 + fp32 mom2)
+                        + 12 / dp_size (fp32 main params + fp32 mom1 + fp32 mom2)
 
     We re-decompose that here so the report can show params/grads/optimizer
     individually.  ``estimated_num_params(rank=rank)`` gives the number of
@@ -190,7 +190,7 @@ def static_breakdown_for_profiler(profiler, *, rank: int = 0) -> StaticBreakdown
     return StaticBreakdown(
         params_bytes=n_params * 2,  # bf16 params held on this rank
         grads_bytes=n_params * 2,  # bf16 grads (Megatron grad buffer is fp32; see below)
-        optimizer_bytes=int(n_params * 10 / dp_size),
+        optimizer_bytes=int(n_params * 12 / dp_size),
     )
 
 
