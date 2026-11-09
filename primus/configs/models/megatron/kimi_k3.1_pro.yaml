@@ -8,9 +8,8 @@
 #
 # ~2.8 T total params, ~104 B active, vocab 163840 -- K3's shapes.
 # Source: https://www.kimi.ai/blog/kimi-k3-1-pro (2026-10-23): "Kimi K3.1 Pro
-# is a post-trained version of Kimi K3". The weights and config.json are
-# announced for 2026-11-04 and were not public when this preset was written,
-# so it extends kimi_k3.yaml without overrides.
+# is a post-trained version of Kimi K3". Until moonshotai publishes the K3.1 Pro
+# config.json, this preset extends kimi_k3.yaml without overrides.
 #
 # Once moonshotai publishes the K3.1 Pro config.json, diff its text_config
 # against moonshotai/Kimi-K3's and override only the keys that change here.
