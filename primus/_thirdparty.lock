@@ -22,7 +22,7 @@
       "name": "Emerging-Optimizers",
       "path": "third_party/Emerging-Optimizers",
       "url": "https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git",
-      "commit": "93d9eb3a6c899b50de73992826451fba3ab6adfb"
+      "commit": "1f29ffd2acbf047f3dd3efdd8e9469d9305a8f77"
     },
     {
       "name": "Megatron-Bridge",
