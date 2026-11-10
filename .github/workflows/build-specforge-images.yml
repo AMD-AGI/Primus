@@ -45,11 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - variant: mi30x
-            base_image: lmsysorg/sglang:v0.5.14-rocm700-mi30x@sha256:381a9ece716e75bdeb7a08d7734fb8ba62f2abcda310f0087575e62a6083f092
-          - variant: mi35x
-            base_image: lmsysorg/sglang:v0.5.14-rocm700-mi35x@sha256:f1d38fd8076e69fdd103858149f9953a936cf9b322b2aa2cc97b08474d9a3623
+        variant: [mi30x, mi35x]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -58,38 +54,31 @@ jobs:
         id: build
         env:
           VARIANT: ${{ matrix.variant }}
-          BASE_IMAGE: ${{ matrix.base_image }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          DOCKER_BUILDKIT: "1"
         shell: bash
         run: |
           set -euo pipefail
-          # Stream the allowlisted context to the daemon; no host-specific mounts
-          # or paths are needed. BuildKit is required for Dockerfile heredocs.
-          tag="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${VARIANT}"
+          helper=examples/specforge/docker/build.py
+          version_tag="$(python3 "$helper" "$VARIANT" --field version_tag)"
+          base_image="$(python3 "$helper" "$VARIANT" --field base_image)"
+          # Keep per-run tags for traceability, but lead with the software versions.
+          tag="${version_tag}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           alias=""
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            alias="pr-${PR_NUMBER}-${VARIANT}"
-          elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
-            alias="latest-${VARIANT}"
-          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            alias="${GITHUB_REF_NAME}-${VARIANT}"
+            alias="pr-${PR_NUMBER}-${version_tag}"
+            tag="pr-${PR_NUMBER}-${tag}"
+          elif [[ "$GITHUB_REF" == "refs/heads/main" || "$GITHUB_REF" == refs/tags/* ]]; then
+            alias="$version_tag"
           fi
-          tar -C "$GITHUB_WORKSPACE" -cf - \
-            pyproject.toml LICENSE README.md primus_cli.py primus runner examples/specforge \
-            | docker build --network=host \
-                -f examples/specforge/docker/Dockerfile \
-                --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
-                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-                --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-                -t "${IMAGE_REPOSITORY}:${tag}" -
+          python3 "$helper" "$VARIANT" --build --tag "${IMAGE_REPOSITORY}:${tag}" --revision "$GITHUB_SHA"
           image_id="$(docker image inspect -f '{{.Id}}' "${IMAGE_REPOSITORY}:${tag}")"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "alias=$alias" >> "$GITHUB_OUTPUT"
           mkdir -p image-metadata
           printf 'variant=%s\nbase_image=%s\nrevision=%s\nimage=%s:%s\nimage_id=%s\n' \
-            "$VARIANT" "$BASE_IMAGE" "$GITHUB_SHA" "$IMAGE_REPOSITORY" "$tag" "$image_id" \
+            "$VARIANT" "$base_image" "$GITHUB_SHA" "$IMAGE_REPOSITORY" "$tag" "$image_id" \
             > "image-metadata/${VARIANT}.txt"
+          python3 "$helper" "$VARIANT" > "image-metadata/${VARIANT}.json"
       - name: Publish image
         # Never expose registry credentials to fork or Dependabot PRs.
         if: >-

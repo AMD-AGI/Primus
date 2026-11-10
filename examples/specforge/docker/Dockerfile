@@ -4,29 +4,30 @@
 #
 # Build, ownership, and docker run: docs/04-technical-guides/specforge/runtime-image.md
 # Build from the Primus repository root:
-#   docker build -f examples/specforge/docker/Dockerfile \
-#     -t primus-specforge:v0.5.14-rocm700-mi35x .
+#   uv run --no-project python examples/specforge/docker/build.py mi35x --build
 
-# Digest is the pin. A floating tag here would silently pick up a new push of
-# v0.5.14-rocm700-mi35x. Override with --build-arg for MI300X (mi30x tag).
-ARG BASE_IMAGE=lmsysorg/sglang:v0.5.14-rocm700-mi35x@sha256:f1d38fd8076e69fdd103858149f9953a936cf9b322b2aa2cc97b08474d9a3623
+# Required pins are supplied by build.py from images.json for local and CI builds.
+ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG SPECFORGE_REF=ec0988d527c828a24b8a5d639857f676e6e7f575
+ARG SPECFORGE_REF
+ARG SPECFORGE_VERSION
+ARG SGLANG_VERSION
 
 LABEL org.opencontainers.image.title="Primus SpecForge ROCm runtime"
-LABEL org.opencontainers.image.description="SGLang v0.5.14 ROCm base with SpecForge capture patch and Primus SpecForge backend"
+LABEL org.opencontainers.image.description="SGLang ROCm base with SpecForge capture patch and Primus SpecForge backend"
 
 # The SGLang base image already ships git.
 RUN command -v git >/dev/null
 
 WORKDIR /workspace
 RUN git clone https://github.com/sgl-project/SpecForge.git SpecForge \
-    && git -C SpecForge checkout --detach "${SPECFORGE_REF}"
+    && git -C SpecForge checkout --detach "${SPECFORGE_REF}" \
+    && test "$(cat SpecForge/version.txt | tr -d '[:space:]')" = "${SPECFORGE_VERSION}"
 
 WORKDIR /sgl-workspace/sglang
-RUN git apply --check /workspace/SpecForge/patches/sglang/v0.5.14/spec-capture.patch \
-    && git apply /workspace/SpecForge/patches/sglang/v0.5.14/spec-capture.patch \
+RUN git apply --check "/workspace/SpecForge/patches/sglang/v${SGLANG_VERSION}/spec-capture.patch" \
+    && git apply "/workspace/SpecForge/patches/sglang/v${SGLANG_VERSION}/spec-capture.patch" \
     && python -m py_compile python/sglang/srt/server_args.py \
        python/sglang/srt/spec_capture_sink.py
 

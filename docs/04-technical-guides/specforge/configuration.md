@@ -151,7 +151,7 @@ export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
 export MAX_STEPS=20
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
@@ -275,7 +275,7 @@ Inside the docker image:
 From the host:
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+./runner/primus-cli container --image primus-specforge:local-mi35x \
   --shm-size 64g --volume /data:/data --env KEY=VALUE \
   -- train pretrain --config <experiment.yaml> \
   [dotted.overrides...]

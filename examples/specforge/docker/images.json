@@ -1,0 +1,11 @@
+{
+  "sglang_repository": "lmsysorg/sglang",
+  "sglang_version": "0.5.14",
+  "rocm_tag": "rocm700",
+  "specforge_version": "0.2.0",
+  "specforge_ref": "ec0988d527c828a24b8a5d639857f676e6e7f575",
+  "variants": {
+    "mi30x": "sha256:381a9ece716e75bdeb7a08d7734fb8ba62f2abcda310f0087575e62a6083f092",
+    "mi35x": "sha256:f1d38fd8076e69fdd103858149f9953a936cf9b322b2aa2cc97b08474d9a3623"
+  }
+}

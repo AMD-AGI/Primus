@@ -33,7 +33,7 @@ Inside the image:
 From the host, capture or offline train:
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+./runner/primus-cli container --image primus-specforge:local-mi35x \
   --shm-size 64g --volume /data:/data \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
@@ -43,7 +43,7 @@ Multi-node capture or offline train (shared output path; `-N` is the node count)
 
 ```bash
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline-capture.yaml
@@ -168,7 +168,7 @@ export MAX_STEPS=20
 cd /opt/primus
 ./runner/primus-cli slurm srun -N 2 \
   --gres=gpu:1 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
@@ -275,7 +275,7 @@ export SERVER_COUNT=8
 export SERVER_TP=1
 # SERVER_GPUS / TRAINER_GPUS default 0 → 0..7 when the counts above are 8.
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml \
