@@ -1,4 +1,4 @@
-# SpecForge ROCm runtime: SGLang ROCm stack + SpecForge's spec-capture.patch
+# SpecForge ROCm runtime: SGLang ROCm stack + SpecForge capture plugin
 # + SpecForge (editable, --no-deps) + this Primus checkout (editable, --no-deps).
 # Do not install Primus's full dependency tree or run primus-cli deps sync.
 #
@@ -6,16 +6,15 @@
 # Build from the Primus repository root:
 #   uv run --no-project python examples/specforge/docker/build.py mi35x --build
 
-# Required pins are supplied by build.py from images.json for local and CI builds.
+# Required plugin-capable base pin is supplied by build.py from images.json.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG SPECFORGE_REF
 ARG SPECFORGE_VERSION
-ARG SGLANG_VERSION
 
 LABEL org.opencontainers.image.title="Primus SpecForge ROCm runtime"
-LABEL org.opencontainers.image.description="SGLang ROCm base with SpecForge capture patch and Primus SpecForge backend"
+LABEL org.opencontainers.image.description="SGLang ROCm base with SpecForge capture plugin and Primus SpecForge backend"
 
 # The SGLang base image already ships git.
 RUN command -v git >/dev/null
@@ -25,14 +24,11 @@ RUN git clone https://github.com/sgl-project/SpecForge.git SpecForge \
     && git -C SpecForge checkout --detach "${SPECFORGE_REF}" \
     && test "$(cat SpecForge/version.txt | tr -d '[:space:]')" = "${SPECFORGE_VERSION}"
 
-WORKDIR /sgl-workspace/sglang
-RUN git apply --check "/workspace/SpecForge/patches/sglang/v${SGLANG_VERSION}/spec-capture.patch" \
-    && git apply "/workspace/SpecForge/patches/sglang/v${SGLANG_VERSION}/spec-capture.patch" \
-    && python -m py_compile python/sglang/srt/server_args.py \
-       python/sglang/srt/spec_capture_sink.py
-
 WORKDIR /workspace/SpecForge
-RUN python -m pip install -e . --no-deps
+# Keep the base image's ROCm stack. The tested image's Python is older than
+# SpecForge declares; do not resolve SpecForge's training dependency pins here.
+RUN python -m pip install -e . --no-deps --ignore-requires-python \
+    && python -m pip install -e plugins/sglang-spec-capture --no-deps
 
 # This checkout, not the published primus wheel (that wheel has no SpecForge backend).
 WORKDIR /opt/primus
@@ -42,11 +38,16 @@ COPY runner /opt/primus/runner
 COPY examples/specforge /opt/primus/examples/specforge
 # hatchling is the build backend for an editable Primus install. It is not the
 # Primus runtime dependency tree (do not run primus-cli deps sync).
-RUN python -m pip install "hatchling>=1.21" \
+# Normalize Windows runner scripts (outside docker/*.sh in .gitattributes).
+# primus-cli resolves its packaged launcher under primus/runner in editable installs.
+RUN find /opt/primus/runner -type f -print0 | xargs -0 sed -i 's/\r$//' \
+    && ln -sfn /opt/primus/runner /opt/primus/primus/runner \
+    && python -m pip install "hatchling>=1.21" \
     && python -m pip install -e /opt/primus --no-deps
 
 COPY examples/specforge/docker/install-light-deps.sh examples/specforge/docker/smoke-check.sh /tmp/
-RUN bash /tmp/install-light-deps.sh
+RUN sed -i 's/\r$//' /tmp/install-light-deps.sh /tmp/smoke-check.sh \
+    && bash /tmp/install-light-deps.sh
 
 # install-light-deps.sh uses --no-deps. SummaryWriter imports tensorboard's own
 # dependency tree, so a no-deps install leaves --report-to tensorboard broken.
@@ -104,8 +105,7 @@ Path("/tmp/base-constraints.txt").unlink(missing_ok=True)
 Path("/tmp/base-versions.json").unlink(missing_ok=True)
 PY
 
-# The editable package exposes primus/, but the standalone primus_cli module
-# also lives at the checkout root. Keep it importable by console scripts.
+# Keep the standalone source-tree CLI module importable by console scripts.
 ENV PYTHONPATH=/opt/primus
 RUN bash /tmp/smoke-check.sh
 

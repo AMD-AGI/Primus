@@ -23,7 +23,7 @@ def image_config(variant):
         and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
     )
     digest = pins["variants"][variant]
-    base_tag = f"v{pins['sglang_version']}-{pins['rocm_tag']}-{variant}"
+    base_tag = f"v{pins['sglang_version']}-{pins['rocm_tag']}-{variant}-{pins['sglang_tag_suffix']}"
     return {
         "base_image": f"{pins['sglang_repository']}:{base_tag}@{digest}",
         "specforge_ref": pins["specforge_ref"],
@@ -54,7 +54,7 @@ def main():
         args.revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     )
     command = ["docker", "build", "--network=host", "-f", "examples/specforge/docker/Dockerfile"]
-    for field in ("base_image", "specforge_ref", "specforge_version", "sglang_version"):
+    for field in ("base_image", "specforge_ref", "specforge_version"):
         command.extend(["--build-arg", f"{field.upper()}={config[field]}"])
     command.extend(
         [

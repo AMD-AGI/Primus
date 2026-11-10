@@ -123,7 +123,7 @@ modules:
     overrides:
       specforge_mode: train              # train | capture
       specforge_train_mode: offline      # online | offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}  # SpecForge Hydra YAML
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-amd.yaml}  # SpecForge Hydra YAML
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
@@ -188,7 +188,7 @@ modules:
     overrides:
       specforge_mode: train              # train | capture
       specforge_train_mode: online       # online | offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}  # SpecForge Hydra YAML
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-amd.yaml}  # SpecForge Hydra YAML
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
