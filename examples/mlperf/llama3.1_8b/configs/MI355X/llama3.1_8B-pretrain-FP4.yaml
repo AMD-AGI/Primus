@@ -112,7 +112,6 @@ modules:
       # --- Mixed Precision Config ---
       fp4: e2m1
       fp4_recipe: mxfp4
-      accumulate_allreduce_grads_in_fp32: ${PRIMUS_ACCUM_GRADS_FP32:true}
       grad_reduce_in_bf16: true
       attention_softmax_in_fp32: ${PRIMUS_ATTN_SOFTMAX_FP32:true}
 
