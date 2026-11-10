@@ -41,7 +41,9 @@ start_fmt=$(date +%Y-%m-%d\ %r)
 echo "STARTING TIMING RUN AT $start_fmt"
 
 set +e
-"${PRIMUS_PATH}/primus-cli" direct -- \
+# The patch skips itself unless PRIMUS_RCCL_REF is set.
+"${PRIMUS_PATH}/primus-cli" direct \
+    --patch "${PRIMUS_PATH}/runner/helpers/patches/12_rebuild_rccl.sh" -- \
     train pretrain \
     --config "${EXP}" \
     2>&1 | tee "${TRAIN_LOG_FILE}"
