@@ -2,7 +2,6 @@
   "sglang_repository": "lmsysorg/sglang-rocm",
   "sglang_version": "0.5.23",
   "rocm_tag": "rocm720",
-  "specforge_version": "0.2.0",
   "specforge_ref": "af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5",
   "variants": {
     "mi30x": "sha256:803b561efe9ddf26894176c1fa96825623f6cc2d5cfdd3b786781de0e0740603",

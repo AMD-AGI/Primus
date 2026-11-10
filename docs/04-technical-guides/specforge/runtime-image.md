@@ -41,7 +41,7 @@ uv run --no-project python examples/specforge/docker/build.py mi30x --build
 
 [`images.json`](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/docker/images.json)
 is the single source of truth for SGLang's version, ROCm tag, architecture-specific
-base digests, and SpecForge's version and commit pin. Primus's version comes from
+base digests, and SpecForge's commit pin. Primus's version comes from
 its existing `primus/__init__.py`; it is not duplicated in the manifest.
 
 The helper supplies the Dockerfile build arguments in both CI and local builds.
@@ -53,10 +53,10 @@ To inspect the resolved pins and default local tag without building:
 uv run --no-project python examples/specforge/docker/build.py mi35x
 ```
 
-The default tag combines Primus, SGLang, and SpecForge versions, the first 12
-characters of the SpecForge commit, and the architecture variant:
-`v<primus>-sglang<sglang>-specforge<specforge>-g<commit>-mi35x`.
-The commit suffix distinguishes SpecForge snapshots that share a package version.
+The default tag combines Primus and SGLang versions, the first 12 characters of
+SpecForge's commit, and the architecture variant:
+`v<primus>-sglang<sglang>-specforge-<commit>-mi35x`.
+SpecForge is identified by its source commit, not a package release version.
 For the convenient local name used in this guide's run examples:
 
 ```bash
@@ -64,8 +64,7 @@ uv run --no-project python examples/specforge/docker/build.py mi35x --build \
   --tag primus-specforge:local-mi35x
 ```
 
-The Dockerfile installs the SpecForge SGLang capture plugin and
-checks that the SpecForge package version matches the manifest. It installs both
+The Dockerfile installs the SpecForge SGLang capture plugin. It installs both
 source trees with `--no-deps` (SpecForge also uses `--ignore-requires-python`), preserves the base ROCm stack, installs the constrained
 tensorboard dependencies, and runs the existing GPU-free smoke checks.
 Changing pins still requires rebuilding and validating the resulting runtime.
@@ -140,14 +139,13 @@ requires a Linux Docker runner with BuildKit enabled. No GPU is needed to build.
 Relevant non-draft PRs and pushes to `main`, version-tag pushes, and manual
 dispatches trigger the workflow. Draft PRs wait until marked ready for review.
 The `ci:gpu` label does not gate image builds, matching the existing Primus image
-workflow. This workflow only runs the Dockerfile's existing GPU-free checks;
-it does not launch training or add a GPU test.
+workflow. The build runs the Dockerfile's existing GPU-free checks.
 
 Main and version-tag builds publish the version-bearing tag described above.
 PR builds publish `pr-<number>-<version-bearing-tag>` so they cannot overwrite
-main/release aliases. Every build also publishes a unique tag ending in
-`-run-<run-id>-<attempt>`; these are GitHub Actions identifiers, not software
-versions. Manual branch runs outside `main` publish only that unique tag.
+main/release tags. Manual branch runs outside `main` prepend
+`sha-<Primus-commit-prefix>-` to avoid overwriting main/release tags.
+No CI run IDs or attempt numbers are included in image tags.
 There is no architecture-neutral `latest` tag. Tags can move on rebuild;
 use a registry digest to identify exact image contents.
 

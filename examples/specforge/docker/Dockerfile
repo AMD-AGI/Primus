@@ -11,7 +11,6 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG SPECFORGE_REF
-ARG SPECFORGE_VERSION
 
 LABEL org.opencontainers.image.title="Primus SpecForge ROCm runtime"
 LABEL org.opencontainers.image.description="SGLang ROCm base with SpecForge capture plugin and Primus SpecForge backend"
@@ -21,8 +20,7 @@ RUN command -v git >/dev/null
 
 WORKDIR /workspace
 RUN git clone https://github.com/sgl-project/SpecForge.git SpecForge \
-    && git -C SpecForge checkout --detach "${SPECFORGE_REF}" \
-    && test "$(cat SpecForge/version.txt | tr -d '[:space:]')" = "${SPECFORGE_VERSION}"
+    && git -C SpecForge checkout --detach "${SPECFORGE_REF}"
 
 WORKDIR /workspace/SpecForge
 # Keep the base image's ROCm stack. The tested image's Python is older than

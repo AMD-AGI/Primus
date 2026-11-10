@@ -61,19 +61,16 @@ jobs:
           helper=examples/specforge/docker/build.py
           version_tag="$(python3 "$helper" "$VARIANT" --field version_tag)"
           base_image="$(python3 "$helper" "$VARIANT" --field base_image)"
-          # Keep per-run tags for traceability, but lead with the software versions.
-          tag="${version_tag}-run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          alias=""
+          tag="$version_tag"
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            alias="pr-${PR_NUMBER}-${version_tag}"
-            tag="pr-${PR_NUMBER}-${tag}"
-          elif [[ "$GITHUB_REF" == "refs/heads/main" || "$GITHUB_REF" == refs/tags/* ]]; then
-            alias="$version_tag"
+            tag="pr-${PR_NUMBER}-${version_tag}"
+          elif [[ "$GITHUB_REF" != "refs/heads/main" && "$GITHUB_REF" != refs/tags/* ]]; then
+            # Manual feature-branch builds must not overwrite main/release tags.
+            tag="sha-${GITHUB_SHA:0:12}-${version_tag}"
           fi
           python3 "$helper" "$VARIANT" --build --tag "${IMAGE_REPOSITORY}:${tag}" --revision "$GITHUB_SHA"
           image_id="$(docker image inspect -f '{{.Id}}' "${IMAGE_REPOSITORY}:${tag}")"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "alias=$alias" >> "$GITHUB_OUTPUT"
           mkdir -p image-metadata
           printf 'variant=%s\nbase_image=%s\nrevision=%s\nimage=%s:%s\nimage_id=%s\n' \
             "$VARIANT" "$base_image" "$GITHUB_SHA" "$IMAGE_REPOSITORY" "$tag" "$image_id" \
@@ -88,7 +85,6 @@ jobs:
         env:
           PRIMUS_DOCKER_HUB_TOKEN: ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           IMAGE_TAG: ${{ steps.build.outputs.tag }}
-          IMAGE_ALIAS: ${{ steps.build.outputs.alias }}
           VARIANT: ${{ matrix.variant }}
         shell: bash
         run: |
@@ -105,12 +101,6 @@ jobs:
           docker push "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
           digest_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE_REPOSITORY}:${IMAGE_TAG}")"
           printf 'published_image=%s\n' "$digest_ref" >> "image-metadata/${VARIANT}.txt"
-          # Publish convenience aliases only after the unique run tag succeeds.
-          if [[ -n "$IMAGE_ALIAS" ]]; then
-            docker tag "${IMAGE_REPOSITORY}:${IMAGE_TAG}" "${IMAGE_REPOSITORY}:${IMAGE_ALIAS}"
-            docker push "${IMAGE_REPOSITORY}:${IMAGE_ALIAS}"
-            printf 'alias=%s:%s\n' "$IMAGE_REPOSITORY" "$IMAGE_ALIAS" >> "image-metadata/${VARIANT}.txt"
-          fi
           printf '### SpecForge %s\n\nPublished `%s`\n' "$VARIANT" "$digest_ref" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload image metadata
         if: always()

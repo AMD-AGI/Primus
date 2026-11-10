@@ -27,11 +27,9 @@ def image_config(variant):
     return {
         "base_image": f"{pins['sglang_repository']}:{base_tag}@{digest}",
         "specforge_ref": pins["specforge_ref"],
-        "specforge_version": pins["specforge_version"],
         "sglang_version": pins["sglang_version"],
         "version_tag": (
-            f"v{version}-sglang{pins['sglang_version']}-specforge{pins['specforge_version']}"
-            f"-g{pins['specforge_ref'][:12]}-{variant}"
+            f"v{version}-sglang{pins['sglang_version']}-specforge-" f"{pins['specforge_ref'][:12]}-{variant}"
         ),
     }
 
@@ -54,7 +52,7 @@ def main():
         args.revision or subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     )
     command = ["docker", "build", "--network=host", "-f", "examples/specforge/docker/Dockerfile"]
-    for field in ("base_image", "specforge_ref", "specforge_version"):
+    for field in ("base_image", "specforge_ref"):
         command.extend(["--build-arg", f"{field.upper()}={config[field]}"])
     command.extend(
         [
