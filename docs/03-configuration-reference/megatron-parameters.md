@@ -597,6 +597,7 @@ models:
 | `moe_router_force_load_balancing` | `false` | *Primus:* force load-balanced routing. |
 | `use_deprecated_20241209_moe_layer` | `false` | *Primus:* legacy MoE layer implementation. |
 | `moe_router_force_load_balancing_type` | `even` | *Primus:* Control the force load balancing type for the MoE router. Choices: even, uniform. |
+| `moe_router_triton_gemm` | `false` | *Primus:* run an FP32 router's gating GEMM and its backward on Triton kernels, as accurate as Megatron's FP32 GEMMs (BF16 input and weight, no bias, 16-256 experts, hidden a multiple of 256; other calls keep Megatron's path). Not together with `moe_router_bwd_bf16`. |
 
 
 ### 10.7 Logit softcapping (Primus / Grok-style)
