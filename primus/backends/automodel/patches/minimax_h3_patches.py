@@ -4,11 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Register the MiniMax-H3 adapter and its transformer-only training pipeline.
+"""Register the MiniMax-H3 adapter, its transformer-only training pipeline and its sidecar.
 
-Both have to be in place before the recipe builds the model: the pipeline class
-before ``DiffusionPipeline.from_pretrained`` resolves ``model_index.json``, and the
-adapter before the recipe resolves ``adapter_type``. Neither condition imports the
+All three have to be in place before the recipe builds the model: the pipeline class
+before ``DiffusionPipeline.from_pretrained`` resolves ``model_index.json``, the
+adapter before the recipe resolves ``adapter_type``, and the sidecar before the model
+is parallelized. Neither condition imports the
 module it would install; discovery runs before anything has decided a run needs
 torch or diffusers, so a condition that reached for the implementation would make
 an unrelated diffusion job fail at startup on an import it never needed.
@@ -63,3 +64,17 @@ def apply_adapter(ctx: PatchContext) -> None:
     from primus.backends.automodel.models.minimax_h3 import adapter
 
     adapter.install()
+
+
+@register_patch(
+    "automodel.models.minimax_h3.parallelize",
+    backend="automodel",
+    phase="before_train",
+    description="Compute MiniMax-H3's keep-in-FP32 modules in FP32 under FSDP2",
+    condition=_minimax_h3_configured,
+    priority=50,
+)
+def apply_parallelize(ctx: PatchContext) -> None:
+    from primus.backends.automodel.models.minimax_h3 import parallelize
+
+    parallelize.install()
