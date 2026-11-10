@@ -1,8 +1,8 @@
 # Primus EXP — FLUX.1-schnell T2I pretrain at 256x256 with Primus-Turbo FP8
 # linears, AutoModel backend, 8x MI355X.
 #
-# The fastest FLUX.1-schnell recipe measured on this backend: mbs 64 / gbs 512,
-# activation checkpointing off, per-block torch.compile on FSDP2, and
+# The recipe: mbs 64 / gbs 512, activation checkpointing off, per-block
+# torch.compile on FSDP2, and
 #   - FP8: compile-friendly tensorwise linears, delayed scaling, casts Inductor
 #     fuses into their producers, one cast per shared input, and FlyDSL as the
 #     default FP8 GEMM backend (quantization/_fp8_traceable.py);
