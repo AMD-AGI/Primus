@@ -26,10 +26,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from primus.backends.megatron.training.hylo_utils import (  # noqa: F401  (re-exported)
-    unset,
-)
-
 
 class HyLoOrderDataset(Dataset):
     def __init__(self, dump_dir: str, seq_length: int, micro_batch_size: int, data_parallel_size: int):

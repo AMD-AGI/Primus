@@ -9,7 +9,7 @@ import json
 import numpy as np
 import pytest
 
-from primus.backends.megatron.training.hylo_order_dataset import HyLoOrderDataset, unset
+from primus.backends.megatron.training.hylo_order_dataset import HyLoOrderDataset
 
 STEPS, MBS, SEQ, DP = 5, 3, 4, 2
 
@@ -83,13 +83,3 @@ def test_rejects_rank_files_of_different_lengths(tmp_path):
     batches[1, :-1].tofile(tmp_path / "batches_rank1.bin")
     with pytest.raises(ValueError, match="steps"):
         HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
-
-
-@pytest.mark.parametrize("value", [None, "", "null", "None", " NULL "])
-def test_unset_values(value):
-    assert unset(value)
-
-
-@pytest.mark.parametrize("value", [32.0, "32", "/data/run"])
-def test_set_values(value):
-    assert not unset(value)

@@ -12,9 +12,20 @@ import pytest
 from primus.backends.megatron.training.hylo_utils import (
     hybrid_batch_getter,
     hybrid_pretrain_module,
+    unset,
 )
 
 LEGACY = ("tokens", "labels", "loss_mask", "attention_mask", "position_ids")
+
+
+@pytest.mark.parametrize("value", [None, "", "null", "None", " NULL "])
+def test_unset_values(value):
+    assert unset(value)
+
+
+@pytest.mark.parametrize("value", [32.0, "32", "/data/run"])
+def test_set_values(value):
+    assert not unset(value)
 
 
 def _module(name, **attrs):

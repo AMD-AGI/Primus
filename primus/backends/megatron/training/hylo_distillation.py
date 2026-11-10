@@ -235,7 +235,7 @@ def _logits_kwargs() -> dict:
     args = get_args()
     fused = getattr(args, "hylo_kl_impl", "fused") == "fused"
     half = getattr(args, "fp16", False) or getattr(args, "bf16", False)
-    if fused and half and torch.cuda.is_available() and _fla_kl_kernel() is not None:
+    if fused and half and torch.cuda.is_available():
         return {"fp32_output": False}
     return {}
 
