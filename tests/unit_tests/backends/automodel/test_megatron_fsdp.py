@@ -14,7 +14,9 @@ WHY THIS TEST EXISTS:
   is DDP with extra steps. Let split dtypes through and the forward runs in fp32
   at half the speed. Remove the wrong backward hook and every gradient is zero.
   Reduce ZeRO-1's gradients after every micro-batch and the accumulated ones are
-  wrong; turn overlap_param_gather off below ZeRO-3 and the weights go stale.
+  wrong; turn overlap_param_gather off below ZeRO-3 and the weights go stale; let
+  the root pre-backward hook run late and the layers outside the blocks get
+  wrong gradients.
   None of those raises, so the tests pin each one:
 
     - key translation, the fp32 defaults, the dtype guard and the refusals (CP,
@@ -26,14 +28,15 @@ WHY THIS TEST EXISTS:
       Megatron-FSDP;
     - the hook removal, against a stand-in that registers hooks the way the
       library does, including the root gradient-reduction hook that must stay;
+    - that the root pre-backward hook runs before the first gradient;
     - one gradient reduction per optimizer step under ZeRO-1;
     - the average_in_collective rewrite, against a stub of the library method
       and against the installed one's source.
 
   The contract tests run against the pinned AutoModel and megatron-fsdp when they
   are importable, with no GPU and no process group. Where megatron-fsdp and two
-  GPUs are there, a two-rank run checks the hook removal and the gradient
-  accumulation against an unsharded fp32 reference.
+  GPUs are there, a two-rank run checks the root-level gradients, the hook
+  removal and the gradient accumulation against an unsharded fp32 reference.
 """
 
 import contextlib
@@ -856,6 +859,61 @@ def test_an_all_fp32_model_is_reported(monkeypatch, caplog):
     assert "this run computes in fp32" in caplog.text
 
 
+class TestRootPreBackward:
+    """Megatron-FSDP's root pre-backward hook must run before the first gradient is processed."""
+
+    def _wrapped(self, order, output=lambda y: y, handler=True):
+        def root_handler(module, *unused, skip_backward_hook=False):
+            order.append("root")
+
+        class Wrapped(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.module = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 2))
+                if handler:
+                    self.pre_backward = functools.partial(root_handler, module=None, skip_backward_hook=True)
+
+            def forward(self, x):
+                # As MegatronFSDP.forward does: the root module's own hooks never run.
+                return output(self.module.forward(x))
+
+        wrapped = Wrapped()
+        for parameter in wrapped.module.parameters():
+            parameter.register_post_accumulate_grad_hook(lambda p: order.append("gradient"))
+        return wrapped
+
+    @pytest.mark.parametrize(
+        "output,loss",
+        [
+            (lambda y: y, lambda out: out.sum()),
+            (lambda y: (y,), lambda out: out[0].sum()),
+            (lambda y: {"sample": y}, lambda out: out["sample"].sum()),
+        ],
+    )
+    def test_the_root_handler_runs_before_any_gradient(self, output, loss):
+        order = []
+        wrapped = self._wrapped(order, output)
+        mod.run_root_pre_backward_first(wrapped)
+
+        loss(wrapped(torch.ones(1, 2))).backward()
+
+        assert order[0] == "root" and order.count("root") == 1 and order.count("gradient") == 4
+
+    def test_a_forward_without_grad_is_not_hooked(self):
+        order = []
+        wrapped = self._wrapped(order)
+        mod.run_root_pre_backward_first(wrapped)
+
+        with torch.no_grad():
+            wrapped(torch.ones(1, 2))
+
+        assert order == []
+
+    def test_a_wrapper_without_the_handler_stops_the_run(self):
+        with pytest.raises(RuntimeError, match="root pre-backward handler"):
+            mod.run_root_pre_backward_first(self._wrapped([], handler=False))
+
+
 def _with_buffers(wrapped, compute, main):
     group = SimpleNamespace(
         model_weight_buffer=SimpleNamespace(dtype=compute),
@@ -1136,6 +1194,19 @@ def test_the_sync_layout_matches_the_installed_megatron_fsdp():
     assert "group.main_weight_buffer = DataParallelBuffer(" in buffers
 
 
+def test_the_root_hook_layout_matches_the_installed_megatron_fsdp():
+    """run_root_pre_backward_first exists for these; fails when megatron-fsdp changes them."""
+    module = pytest.importorskip("megatron_fsdp.megatron_fsdp")
+
+    def source(name):
+        return inspect.getsource(module.MegatronFSDP.__dict__[name])
+
+    assert "self.module.forward(" in source("forward"), "the root module's own hooks never run"
+    hooks = source("_register_fsdp_hooks")
+    assert "self._root_pre_backward_hook_handle = create_custom_backward_hook(" in hooks
+    assert "if self._root_pre_backward_hook_issued:" in hooks, "the late copy must find it already ran"
+
+
 # --------------------------------------------------------------------------- #
 # Real megatron-fsdp on two GPUs                                              #
 # --------------------------------------------------------------------------- #
@@ -1165,9 +1236,26 @@ def _real_mfsdp_worker(rank, port, out_dir):
             def forward(self, x):
                 return torch.tanh(self.linear(x))
 
+        class Net(torch.nn.Module):
+            """Root-level layers around the blocks; as in Ideogram-4, the module registered
+            last is not the one producing the output."""
+
+            def __init__(self):
+                super().__init__()
+                self.in_proj = torch.nn.Linear(width, width)
+                self.blocks = torch.nn.ModuleList(Block() for _ in range(depth))
+                self.out_proj = torch.nn.Linear(width, width)
+                self.modulation = torch.nn.Linear(width, width)
+
+            def forward(self, x):
+                x = self.in_proj(x)
+                for block in self.blocks:
+                    x = block(x)
+                return self.out_proj(x * (1 + self.modulation(x)))
+
         def net():
             torch.manual_seed(0)
-            return torch.nn.Sequential(*(Block() for _ in range(depth))).cuda()
+            return Net().cuda()
 
         def data(step, data_rank, micro):
             generator = torch.Generator().manual_seed(1000 * step + 10 * data_rank + micro)
@@ -1201,6 +1289,7 @@ def _real_mfsdp_worker(rank, port, out_dir):
                 mixed_precision_policy=MixedPrecisionPolicy(main_params_dtype=None, main_grads_dtype=None),
             )
             model._replace_param_with_distributed_if_needed()
+            mod.run_root_pre_backward_first(model)
             if drop_hooks:
                 mod.drop_param_reshard_hooks(model)
             optimizer = fully_shard_optimizer(model, torch.optim.SGD(model.parameters(), lr=lr))
@@ -1244,8 +1333,9 @@ def _free_port():
 @pytest.mark.skipif(importlib.util.find_spec("megatron_fsdp") is None, reason="needs megatron-fsdp")
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 2, reason="needs two GPUs")
 def test_two_ranks_train_like_an_unsharded_model(tmp_path):
-    """fp32 throughout, so every case agrees with the reference to rounding; without patch E,
-    ZeRO-1 with two micro-batches does not."""
+    """fp32 throughout, so every case agrees with the reference to rounding; without
+    run_root_pre_backward_first none does, and without patch E ZeRO-1 with two micro-batches
+    does not."""
     import torch.multiprocessing as mp
 
     mp.spawn(_real_mfsdp_worker, args=(_free_port(), str(tmp_path)), nprocs=2, join=True)

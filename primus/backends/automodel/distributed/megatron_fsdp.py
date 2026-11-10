@@ -26,7 +26,9 @@ WHAT (NO diffusers / AutoModel fork), installed only when ``fsdp.backend`` asks:
      carry several.
   B. ``compile_parallelized_model``: per-layer ``torch.compile`` of the wrapped
      transformer when ``fsdp.enable_compile`` is set. After wrapping, a run that
-     asked for activation checkpointing and got none stops.
+     asked for activation checkpointing and got none stops, and Megatron-FSDP's
+     root pre-backward hook is made to run before any gradient
+     (``run_root_pre_backward_first``).
   C. ``OptimizerConfig.build``, in every config class that defines one, including
      classes defined later: shard the optimizer of a Megatron-FSDP model through
      AutoModel's ``fully_shard_optimizer``. A config that sets
@@ -59,6 +61,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import logging
+from collections.abc import Mapping
 from dataclasses import fields
 from typing import Any, Dict
 
@@ -282,6 +285,57 @@ def check_activation_checkpointing(wrapped, mesh_context) -> None:
     )
 
 
+def _output_tensors(output) -> list:
+    import torch
+
+    if torch.is_tensor(output):
+        return [output]
+    if isinstance(output, Mapping):
+        output = list(output.values())
+    if isinstance(output, (list, tuple)):
+        return [tensor for item in output for tensor in _output_tensors(item)]
+    return []
+
+
+def run_root_pre_backward_first(wrapped) -> None:
+    """Run Megatron-FSDP's root pre-backward hook before any gradient is processed.
+
+    That hook marks every parameter as awaiting its gradient and queues the
+    callback that finishes the reduction. ``MegatronFSDP.forward`` calls the
+    wrapped module's ``forward`` directly, so the copy megatron-fsdp 0.5.0 puts on
+    the root module never fires; the copy that does sits on whichever module
+    ``named_modules()`` yields last. When that module is not the one producing the
+    output (Ideogram-4's ``final_layer.adaln_modulation``), the gradients that
+    arrive before it are processed again after the backward, and the bucket
+    holding them is reduced a second and third time in place: every parameter
+    outside the transformer blocks gets a wrong gradient, at every ZeRO stage.
+    Hooked onto the wrapper's output, the handler runs first; the late copy then
+    finds it already ran and returns.
+    """
+    import torch
+
+    handler = getattr(getattr(wrapped, "pre_backward", None), "func", None)
+    if handler is None:
+        raise RuntimeError(
+            f"{LOG_PREFIX} cannot find Megatron-FSDP's root pre-backward handler, without which "
+            "parameters outside the transformer blocks can get wrong gradients; re-check "
+            "run_root_pre_backward_first against the installed megatron-fsdp."
+        )
+    forward = wrapped.forward
+
+    @functools.wraps(forward)
+    def _forward(*args, **kwargs):
+        output = forward(*args, **kwargs)
+        tensors = [tensor for tensor in _output_tensors(output) if tensor.requires_grad]
+        if tensors and torch.is_grad_enabled():
+            torch.autograd.graph.register_multi_grad_hook(
+                tensors, lambda grads: handler(wrapped.module), mode="any"
+            )
+        return output
+
+    wrapped.forward = _forward
+
+
 def _buffer_dtypes(wrapped, buffer: str) -> list:
     groups = getattr(getattr(wrapped, "param_and_grad_buffer", None), "parameter_groups", None) or ()
     return sorted({str(buf.dtype) for buf in (getattr(g, buffer, None) for g in groups) if buf is not None})
@@ -290,6 +344,7 @@ def _buffer_dtypes(wrapped, buffer: str) -> list:
 def _after_wrap(wrapped) -> None:
     if not is_megatron_fsdp_model(wrapped):
         return
+    run_root_pre_backward_first(wrapped)
     if no_param_reshard_enabled():
         drop_param_reshard_hooks(wrapped)
     # The module's parameters are the optimizer's, fp32 whenever the main weights are;
