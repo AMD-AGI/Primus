@@ -306,8 +306,9 @@ class InklingSelfAttention(Attention):
 
         kv_channels_local = self.num_query_groups_per_partition * self.hidden_size_per_attention_head
         k = cfg.short_conv_kernel_size
-        self.k_sconv = InklingShortConv(cfg, kv_channels_local, k, tensor_parallel=True)
-        self.v_sconv = InklingShortConv(cfg, kv_channels_local, k, tensor_parallel=True)
+        tp_group = self.pg_collection.tp
+        self.k_sconv = InklingShortConv(cfg, kv_channels_local, k, tensor_parallel=True, tp_group=tp_group)
+        self.v_sconv = InklingShortConv(cfg, kv_channels_local, k, tensor_parallel=True, tp_group=tp_group)
 
         self.rel_proj = torch.nn.Parameter(torch.empty(cfg.d_rel, self.rel_extent, dtype=cfg.params_dtype))
         setattr(self.rel_proj, "sequence_parallel", cfg.sequence_parallel)

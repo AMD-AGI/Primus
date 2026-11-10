@@ -96,14 +96,25 @@ def _muon_args(**overrides):
     return SimpleNamespace(**{**values, **overrides})
 
 
+@pytest.fixture
+def turbo_installed(monkeypatch):
+    monkeypatch.setattr(rocm_arg_validation, "_primus_turbo_installed", lambda: True)
+
+
 @pytest.mark.parametrize("optimizer", ["muon", "dist_muon", "adaptive_muon"])
-def test_turbo_grouped_gemm_rejects_muon(optimizer):
+def test_turbo_grouped_gemm_rejects_muon(turbo_installed, optimizer):
     with pytest.raises(ValueError, match="use_turbo_grouped_gemm=false.$"):
         validate_turbo_grouped_gemm_with_muon(_muon_args(optimizer=optimizer))
 
 
+@pytest.mark.parametrize("freq", [1, 2, [0, 1, 0, 0], "([0]*1+[1]*3)", "2"])
+def test_turbo_grouped_gemm_with_muon_rejects_any_moe_layer(turbo_installed, freq):
+    with pytest.raises(ValueError, match="use_turbo_grouped_gemm=false.$"):
+        validate_turbo_grouped_gemm_with_muon(_muon_args(moe_layer_freq=freq))
+
+
 @pytest.mark.parametrize("stage", [2, 3])
-def test_turbo_grouped_gemm_with_muon_advises_sync_free_stage(stage):
+def test_turbo_grouped_gemm_with_muon_advises_sync_free_stage(turbo_installed, stage):
     with pytest.raises(ValueError, match="turbo_sync_free_moe_stage below 2"):
         validate_turbo_grouped_gemm_with_muon(_muon_args(turbo_sync_free_moe_stage=stage))
 
@@ -116,10 +127,18 @@ def test_turbo_grouped_gemm_with_muon_advises_sync_free_stage(stage):
         {"enable_primus_turbo": False},
         {"num_experts": None},
         {"moe_grouped_gemm": False},
+        {"moe_layer_freq": [0, 0, 0, 0]},
+        {"moe_layer_freq": "([0]*4)"},
     ],
 )
-def test_turbo_grouped_gemm_with_muon_allows_other_configs(overrides):
+def test_turbo_grouped_gemm_with_muon_allows_other_configs(turbo_installed, overrides):
     validate_turbo_grouped_gemm_with_muon(_muon_args(**overrides))
+
+
+def test_turbo_grouped_gemm_with_muon_allows_missing_turbo(monkeypatch):
+    """Without primus_turbo the experts fall back to TE, which Muon trains."""
+    monkeypatch.setattr(rocm_arg_validation, "_primus_turbo_installed", lambda: False)
+    validate_turbo_grouped_gemm_with_muon(_muon_args())
 
 
 def _fp8_permute_args(**overrides):
