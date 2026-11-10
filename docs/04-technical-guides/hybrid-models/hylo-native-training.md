@@ -301,9 +301,10 @@ HYLO_DUMP_DIR=/data/dump/gdn accelerate launch --config_file configs/fsdp_GDN.ya
   /path/to/Primus/tools/hybrid/hylo_train_dump.py <HyLo recipe.yaml>
 ```
 
-The numbers below were recorded against AMD-Hybrid-Models `feat/HyLo` at `84871cc`, with a local
-change that adds the `teacher_rope_from_student` option and fixes padded-batch Enhanced-ILD; the
-packed runs do not depend on it.
+The numbers below were recorded against AMD-Hybrid-Models `feat/HyLo` at `84871cc` with
+`tools/hybrid/hylo_primus_parity.patch` applied (`git am`). The patch adds the
+`teacher_rope_from_student` option, which the recordings set to false so the teacher keeps its own
+RoPE scaling as in Primus, and fixes padded-batch Enhanced-ILD.
 
 Point `HYLO_ORDER_DATA_DIR` at the dump and `HyLoOrderDataset` replays the batches. The patch
 switches the sampler to `dataloader_type: single`, so every rank receives, at every step, the

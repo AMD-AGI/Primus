@@ -20,8 +20,9 @@ HyLo's directory (``HYLO_DIR``, default the current directory), in place of ``tr
     HYLO_DUMP_DIR=/data/dump/s2 accelerate launch --config_file configs/fsdp_GDN.yaml \\
         /path/to/Primus/tools/hybrid/hylo_train_dump.py <HyLo recipe.yaml>
 
-Used against AMD-Hybrid-Models ``feat/HyLo`` at 84871cc plus 024ace6 (teacher RoPE option and
-padded-batch Enhanced-ILD; packed stage-1 runs are the same without it).
+Used against AMD-Hybrid-Models ``feat/HyLo`` at 84871cc with ``hylo_primus_parity.patch`` applied
+(``git am``), which adds ``teacher_rope_from_student`` (the recordings set it to false) and
+padded-batch Enhanced-ILD.
 """
 import json
 import os

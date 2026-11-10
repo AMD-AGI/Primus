@@ -1,0 +1,78 @@
+From 024ace642fa79d3428e43d096c58d92146635004 Mon Sep 17 00:00:00 2001
+From: vanbhati <vanbhati@amd.com>
+Date: Mon, 26 Oct 2026 00:30:40 +0000
+Subject: [PATCH] HyLo stage 1: match Primus's Enhanced-ILD
+
+- teacher_rope_from_student (default true, the current behavior): false keeps the teacher's own
+  rope scaling, as Zebra-Llama and Primus do.
+- Enhanced-ILD means run over real tokens when a batch is padded (packing: false); packed
+  batches are unchanged.
+---
+ HyLo/train_configs.py              |  5 +++++
+ HyLo/train_hybrid/train_distill.py |  6 +++++-
+ HyLo/trainer/kd_trainer.py         | 15 +++++++++++++--
+ 3 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/HyLo/train_configs.py b/HyLo/train_configs.py
+index 1643a8d..8456490 100644
+--- a/HyLo/train_configs.py
++++ b/HyLo/train_configs.py
+@@ -134,6 +134,11 @@ class SFTDistillConfig(SFTConfig):
+         default=2048,
+         metadata={"help": "Define the original max positional embeddings"},
+     )
++    teacher_rope_from_student: bool = field(
++        default=True,
++        metadata={"help": "Give the teacher the student's YaRN rope scaling (factor, original_max_position_embeddings). "
++                          "False keeps the teacher's own rope scaling from its config, as Zebra-Llama does."},
++    )
+     fused_linear_cross_entropy: bool = field(
+         default=False,
+         metadata={"help": "Whether to use fused linear lm_head + cross entropy (Liger kernel)."},
+diff --git a/HyLo/train_hybrid/train_distill.py b/HyLo/train_hybrid/train_distill.py
+index bfc7b76..aa128e7 100644
+--- a/HyLo/train_hybrid/train_distill.py
++++ b/HyLo/train_hybrid/train_distill.py
+@@ -603,7 +603,11 @@ def main():
+     # `factor * original_max_position_embeddings`. For long-context KD the teacher
+     # must see the same positions, otherwise its hidden states and logits are
+     # computed under a different positional regime than the student is distilled to.
+-    if getattr(training_args, "use_rope", True) and getattr(training_args, "factor", 1.0):
++    if (
++        training_args.teacher_rope_from_student
++        and getattr(training_args, "use_rope", True)
++        and getattr(training_args, "factor", 1.0)
++    ):
+         teacher_model_kwargs["rope_scaling"] = {
+             "rope_type": "yarn",
+             "factor": training_args.factor,
+diff --git a/HyLo/trainer/kd_trainer.py b/HyLo/trainer/kd_trainer.py
+index 461a9de..79949e8 100755
+--- a/HyLo/trainer/kd_trainer.py
++++ b/HyLo/trainer/kd_trainer.py
+@@ -200,10 +200,21 @@ class KDTrainer(SFTTrainer):
+             student_all_states = outputs_student["hidden_states"]
+             student_all_attn_out = outputs_student["attentions"]
+
++            # Means over real tokens: unpacked batches are padded to their longest sample.
++            token_mask = inputs.get("attention_mask")
++            if token_mask is not None and bool(token_mask.all()):
++                token_mask = None
++
++            def token_mean(distance):
++                if token_mask is None:
++                    return distance.mean()
++                weights = token_mask.to(torch.float32)
++                return ((distance.float() * weights).sum() / weights.sum().clamp_min(1.0)).to(distance.dtype)
++
+             loss = 0
+             for layer_idx in range(1, len(teacher_all_states)):
+-                loss_value = torch.norm(student_all_states[layer_idx] - teacher_all_states[layer_idx], p=2, dim=(-1,)).mean() \
+-                         + 1.0 * torch.norm(teacher_all_attn_out[layer_idx-1] - student_all_attn_out[layer_idx-1], p=2, dim=(-1,)).mean()
++                loss_value = token_mean(torch.norm(student_all_states[layer_idx] - teacher_all_states[layer_idx], p=2, dim=(-1,))) \
++                         + 1.0 * token_mean(torch.norm(teacher_all_attn_out[layer_idx-1] - student_all_attn_out[layer_idx-1], p=2, dim=(-1,)))
+                 loss += loss_value
+
+         else:
+--
+2.43.0
