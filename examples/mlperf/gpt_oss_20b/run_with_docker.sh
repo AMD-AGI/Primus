@@ -16,14 +16,16 @@
 #   export DATADIR=/data/gpt_oss_20b/data
 #   export MODELDIR=/data/gpt_oss_20b/model
 #   export LOGDIR=/data/gpt_oss_20b/results
-#   export CONT=rocm/primus:v26.5
+#   export CONT=rocm/primus:v26.9
 #   export DGXSYSTEM=MI355X_1x8x1
 #   export HF_TOKEN=<your_token>
 #   bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 #
-# MXFP4 recipe:
-#   export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-MXFP4-deosc-mlperf-pretrain.yaml
-#   export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR=mxfp4
+# FP8 recipe (MXFP4 is the default):
+#   export EXP=/workspace/Primus/examples/mlperf/gpt_oss_20b/configs/MI355/gpt_oss_20B-FP8-turbo-attn-mlperf-pretrain.yaml
+#
+# Keep the image's RCCL instead of rebuilding it for CE ReduceScatter (see README.md):
+#   PRIMUS_REBUILD_RCCL=0 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
 #
 # Interactive (prompts for HF_TOKEN, image, NEXP, paths):
 #   INTERACTIVE=1 bash examples/mlperf/gpt_oss_20b/run_with_docker.sh
@@ -41,7 +43,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
 # Defaults (override via env or INTERACTIVE prompts)
 : "${DGXSYSTEM:=MI355X_1x8x1}"
-: "${CONT:=rocm/primus:v26.5}"
+: "${CONT:=rocm/primus:v26.9}"
 : "${DATADIR:=${HOME}/data/gpt_oss_20b/data}"
 : "${MODELDIR:=$(dirname "${DATADIR}")/model}"
 : "${LOGDIR:=$(dirname "${DATADIR}")/results}"
@@ -56,6 +58,9 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
 : "${RUN_RUNTIME_TUNABLES:=0}"
+# The RCCL in rocm/primus:v26.9 has no CE ReduceScatter; config_${DGXSYSTEM}.sh
+# rebuilds it at launch when this is 1.
+: "${PRIMUS_REBUILD_RCCL:=1}"
 
 # Map DGXSYSTEM (e.g. MI355X_1x8x1) -> PRIMUS_GPU_MODEL for primus-env when rocm-smi is unavailable in Docker.
 if [[ -z "${PRIMUS_GPU_MODEL:-}" && "${DGXSYSTEM}" =~ ^(MI[0-9]+[A-Z]*) ]]; then
@@ -205,9 +210,17 @@ if [[ "${SUBMISSION_QUIET}" == "1" ]]; then
     )
 fi
 
-# Export values from config_${DGXSYSTEM}.sh for docker exec.
+# Export values from config_${DGXSYSTEM}.sh for docker exec. The config derives
+# recipe-specific settings from these host selectors, so they are visible to it.
+_config_selectors=()
+for _selector_env in EXP MEGATRON_GRAD_REDUCE_BACKEND PRIMUS_USE_PRECISION_AWARE_OPTIMIZER \
+    PRIMUS_REBUILD_RCCL PRIMUS_RCCL_REF PRIMUS_RCCL_GPU_ARCHS; do
+    if [[ -n "${!_selector_env:-}" ]]; then
+        _config_selectors+=("${_selector_env}=${!_selector_env}")
+    fi
+done
 mapfile -t _config_env < <(
-    env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+    env -i HOME="${HOME}" PATH="${PATH}" "${_config_selectors[@]}" bash -c "
         set -a
         source '${_config_file}'
         set +a
