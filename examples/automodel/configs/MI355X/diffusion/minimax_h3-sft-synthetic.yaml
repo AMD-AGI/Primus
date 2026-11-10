@@ -14,7 +14,13 @@
 #       --config examples/automodel/configs/MI355X/diffusion/minimax_h3-sft-synthetic.yaml
 #
 # Measured on 8x MI355X, rocm/primus:v26.8, the full 50-block proxy at this clip
-# (5.2 s at 768x1344, about 38K rows): 0.05 samples/s/GPU, 159 GB peak per GPU.
+# (5.2 s at 768x1344, about 38K rows): 17.0 s per step, 0.06 samples/s/GPU; 86 GiB
+# allocated per GPU in training. The device peak is higher (159 GB), because loading
+# puts the whole FP32 model (124 GiB) on each GPU before sharding, and the allocator
+# keeps that memory reserved.
+#
+# Attention: the trainer preset turns on Primus-Turbo's non-deterministic flash
+# attention; `env:` below makes its dq accumulation FP32 (see the preset).
 #
 # ON ONE GPU, use BF16 weights: model.torch_dtype=bfloat16 step_scheduler.global_batch_size=1
 # AutoModel skips FSDP2 on a single rank, and with it the cast of FP32 master weights to
@@ -24,6 +30,10 @@ work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:minimax_h3-sft-synthetic}
 workspace: ${PRIMUS_WORKSPACE:./output}
+
+env:
+  # FP32 dq atomics for Primus-Turbo's attention backward (Primus defaults to 0, BF16).
+  PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: "1"
 
 modules:
   pre_trainer:

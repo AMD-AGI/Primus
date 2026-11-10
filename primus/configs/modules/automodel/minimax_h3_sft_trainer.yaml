@@ -73,6 +73,16 @@ flow_matching:
   use_loss_weighting: false
   log_interval: 100
   summary_log_interval: 10
+# Attention is about 60% of the step at full size. This routes diffusers' `flash`
+# backend to Primus-Turbo's flash_attn_func (AITER's gfx950 kernels) with a
+# non-deterministic backward: 20.4 -> 17.0 s per step on 8x MI355X at full size.
+# Run it with FP32 dq atomics (PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=1, set by the
+# example experiments' `env:`): Primus's MI355X default of 0 accumulates dq in BF16,
+# which is faster (15.5 s) but gives dq a 1.5e-2 relative error against SDPA,
+# against 1.5e-4 with FP32 atomics. Same choice as Primus's own diffusion-backend
+# Wan (AITER, non-deterministic, FP32 atomics).
+primus_turbo:
+  nondeterministic_attention: true
 fsdp:
   tp_size: 1
   cp_size: 1
