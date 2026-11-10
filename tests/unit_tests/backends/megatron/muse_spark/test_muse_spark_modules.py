@@ -25,7 +25,7 @@ from primus.backends.megatron.core.transformer.muse_spark.norms import (  # noqa
     casts_to_half,
 )
 from primus.backends.megatron.patches.args import (  # noqa: E402
-    muse_spark_recompute_cp_patches as rc,
+    muse_spark_arg_compat_patches as rc,
 )
 
 
@@ -160,30 +160,9 @@ def _ctx(**args):
     return SimpleNamespace(extra={"backend_args": SimpleNamespace(**args)})
 
 
-def test_selective_recompute_drops_leftovers_and_warns(monkeypatch):
-    msgs = []
-    monkeypatch.setattr(rc, "warning_rank_0", msgs.append)
-    ctx = _ctx(recompute_granularity="selective", recompute_method="uniform", recompute_num_layers=1)
-    rc.patch_muse_spark_selective_recompute(ctx)
-    a = ctx.extra["backend_args"]
-    assert a.recompute_method is None and a.recompute_num_layers is None
-    assert (
-        len(msgs) == 1
-        and "'recompute_method': 'uniform'" in msgs[0]
-        and "'recompute_num_layers': 1" in msgs[0]
-    )
-
-
-def test_full_recompute_untouched(monkeypatch):
-    monkeypatch.setattr(rc, "warning_rank_0", lambda m: pytest.fail(m))
-    ctx = _ctx(recompute_granularity="full", recompute_method="uniform", recompute_num_layers=1)
-    rc.patch_muse_spark_selective_recompute(ctx)
-    assert ctx.extra["backend_args"].recompute_method == "uniform"
-
-
 def test_missing_backend_args_raises():
     with pytest.raises(RuntimeError, match="backend_args"):
-        rc.patch_muse_spark_selective_recompute(SimpleNamespace(extra={}))
+        rc.patch_muse_spark_cp_comm(SimpleNamespace(extra={}))
 
 
 @pytest.mark.parametrize(
@@ -244,11 +223,6 @@ def test_cp_comm_patch_only_with_window_and_cp(monkeypatch):
         )
 
 
-def test_fused_linear_ce_is_allowed():
-    # the chunked linear+CE calls model._scale_logits (soft-cap), so nothing rejects it
-    assert not hasattr(rc, "patch_muse_spark_no_fused_linear_ce")
-
-
 def test_merged_args_reads_backend_args_first_then_params():
     from primus.backends.megatron.core.models.muse_spark.model_types import (
         merged_args_of,
@@ -262,6 +236,38 @@ def test_merged_args_reads_backend_args_first_then_params():
     assert getattr(m, "missing", "dflt") == "dflt"
     m.use_turbo_deepep = False  # written where the key lives
     assert params.use_turbo_deepep is False and not hasattr(ctx.extra["backend_args"], "use_turbo_deepep")
+
+
+def test_merged_args_refuses_a_context_without_backend_args():
+    from primus.backends.megatron.core.models.muse_spark.model_types import (
+        MergedArgs,
+        merged_args_of,
+    )
+
+    ctx = _ctx(expert_model_parallel_size=1)
+    ctx.extra.pop("backend_args")
+    ctx.extra["module_config"] = SimpleNamespace(params=SimpleNamespace(use_turbo_deepep=True))
+    with pytest.raises(RuntimeError, match="no backend_args"):
+        merged_args_of(ctx)  # a write would reach params only
+    with pytest.raises(ValueError, match="at least one"):
+        MergedArgs(None, None)  # a write would go nowhere
+    only = SimpleNamespace(a=1)
+    m = MergedArgs(only, None)
+    m.b = 2
+    assert only.b == 2 and m.a == 1
+
+
+def test_merged_args_does_not_let_a_none_default_hide_a_configured_value():
+    import numpy as np
+
+    from primus.backends.megatron.core.models.muse_spark.model_types import (
+        MergedArgs,
+        bool_flag,
+    )
+
+    m = MergedArgs(SimpleNamespace(k=None, n=None), SimpleNamespace(k=True))
+    assert m.k is True and m.n is None
+    assert bool_flag(np.bool_(True), "k") is True and bool_flag(np.bool_(False), "k") is False
 
 
 def test_deepep_condition_sees_the_backend_args_ep_override(monkeypatch):
@@ -281,6 +287,30 @@ def test_deepep_condition_sees_the_backend_args_ep_override(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "dispatcher, want", [("flex", "alltoall"), ("alltoall", "alltoall"), ("allgather", "allgather")]
+)
+def test_deepep_off_moves_a_flex_dispatcher_to_alltoall(monkeypatch, dispatcher, want):
+    # flex needs DeepEP: when DeepEP goes off the dispatcher must not stay flex
+    logs = []
+    monkeypatch.setattr(rc, "warning_rank_0", logs.append)
+    params = SimpleNamespace(
+        use_turbo_deepep=True,
+        enable_primus_turbo=True,
+        expert_model_parallel_size=1,
+        expert_tensor_parallel_size=1,
+        tensor_model_parallel_size=1,
+        moe_token_dispatcher_type=dispatcher,
+        moe_enable_deepep=dispatcher == "flex",
+    )
+    ctx = _ctx(expert_model_parallel_size=1, expert_tensor_parallel_size=1, tensor_model_parallel_size=1)
+    ctx.extra["module_config"] = SimpleNamespace(params=params)
+    rc.patch_muse_spark_deepep_group_size(ctx)
+    assert params.use_turbo_deepep is False and params.moe_token_dispatcher_type == want
+    assert params.moe_enable_deepep is False
+    assert f"moe_token_dispatcher_type: {want}" in logs[0]
+
+
+@pytest.mark.parametrize(
     "params, backend, found",
     [
         (dict(turbo_sync_free_moe_stage=1), {}, ["turbo_sync_free_moe_stage=1"]),
@@ -291,6 +321,17 @@ def test_deepep_condition_sees_the_backend_args_ep_override(monkeypatch):
             ["moe_use_fused_router_with_aux_score=True"],
         ),
         ({}, dict(turbo_sync_free_moe_stage=2), ["turbo_sync_free_moe_stage=2"]),
+        # split across namespaces: only the merged view sees both flags
+        (
+            dict(moe_use_fused_router_with_aux_score=True),
+            dict(enable_primus_turbo=True),
+            ["moe_use_fused_router_with_aux_score=True"],
+        ),
+        (
+            dict(enable_primus_turbo=True),
+            dict(moe_use_fused_router_with_aux_score=True),
+            ["moe_use_fused_router_with_aux_score=True"],
+        ),
     ],
 )
 def test_fused_router_is_rejected(params, backend, found):
@@ -331,7 +372,12 @@ def test_backend_args_helper_is_public_in_model_types():
 
 
 def test_island_opt_in_attribute():
-    # Primus's FSDP2 wrapper shards fp32 params as their own group only when opted in
+    # the Muse Spark FSDP2 patch shards fp32 params as their own group only when opted in
+    from primus.backends.megatron.core.models.muse_spark.fsdp2_islands import (
+        ISLAND_ATTR,
+    )
+
+    assert ISLAND_ATTR == "fsdp2_dtype_island"
     assert MuseSparkTopKRouter.fsdp2_dtype_island is True
     assert MuseSparkGatedResidual.fsdp2_dtype_island is True
 
@@ -466,7 +512,7 @@ def test_deepep_dispatcher_constructor_does_not_size_from_hidden_size():
     assert "hidden_size" not in used
 
 
-def test_deepep_is_turned_off_only_at_tp_ep_1():
+def test_deepep_is_turned_off_only_at_tp_ep_1(monkeypatch):
     from types import SimpleNamespace
 
     def a(tp, ep, deepep=True, turbo=True, etp=1):
@@ -478,20 +524,22 @@ def test_deepep_is_turned_off_only_at_tp_ep_1():
             enable_primus_turbo=turbo,
         )
 
-    assert _deepep_off(a(1, 1))
+    # local_gpus=8: an EP 8 group fits one node whatever LOCAL_WORLD_SIZE / GPUS_PER_NODE say
+    assert _deepep_off(a(1, 1), 8)
     # the dispatcher's TP is the expert TP (Muse Spark: 1), so TP 2 with EP 1 is still 1
-    assert _deepep_off(a(2, 1))
-    assert _deepep_on(a(1, 8)) and _deepep_on(a(2, 1, etp=None))
-    assert _deepep_on(a(1, 1, deepep=False)) and _deepep_on(a(1, 1, turbo=False))
+    assert _deepep_off(a(2, 1), 8)
+    assert _deepep_on(a(1, 8), 8) and _deepep_on(a(2, 1, etp=None), 8)
+    assert _deepep_on(a(1, 1, deepep=False), 8) and _deepep_on(a(1, 1, turbo=False), 8)
 
 
 def test_deepep_is_turned_off_when_the_expert_group_spans_nodes(monkeypatch):
-    from primus.backends.megatron.patches.args.muse_spark_recompute_cp_patches import (
+    from primus.backends.megatron.patches.args.muse_spark_arg_compat_patches import (
         deepep_disable_reason,
     )
 
-    def a(ep, etp=1):
+    def a(ep, etp=1, internode=False):
         return SimpleNamespace(
+            muse_spark_turbo_deepep_internode=internode,
             tensor_model_parallel_size=1,
             expert_model_parallel_size=ep,
             expert_tensor_parallel_size=etp,
@@ -499,25 +547,37 @@ def test_deepep_is_turned_off_when_the_expert_group_spans_nodes(monkeypatch):
             enable_primus_turbo=True,
         )
 
-    monkeypatch.delenv("PRIMUS_TURBO_DEEPEP_INTERNODE", raising=False)
     assert _deepep_on(a(8), local_gpus=8)
     assert "num_rdma_ranks" in deepep_disable_reason(a(64), local_gpus=8)
-    assert "PRIMUS_TURBO_DEEPEP_INTERNODE=1" in deepep_disable_reason(a(64), local_gpus=8)
+    assert "muse_spark_turbo_deepep_internode: true" in deepep_disable_reason(a(64), local_gpus=8)
     # a Primus-Turbo build with rocSHMEM: internode dispatch, keep DeepEP across nodes
-    monkeypatch.setenv("PRIMUS_TURBO_DEEPEP_INTERNODE", "1")
-    assert _deepep_on(a(64), local_gpus=8)
-    assert _deepep_off(a(1), local_gpus=8)  # the group-1 rule still holds
-    monkeypatch.delenv("PRIMUS_TURBO_DEEPEP_INTERNODE")
+    assert _deepep_on(a(64, internode=True), local_gpus=8)
+    assert _deepep_off(a(1, internode=True), local_gpus=8)  # the group-1 rule still holds
     assert _deepep_off(a(8, etp=2), local_gpus=8)
+    # a group that does not divide the node: consecutive ranks straddle a node boundary
+    # (EP 3: ranks 6-8; EP 6: ranks 6-11), though the group is no larger than a node
+    for ep in (3, 6, 5, 7):
+        assert "spans nodes" in deepep_disable_reason(a(ep), local_gpus=8)
+        assert _deepep_on(a(ep, internode=True), local_gpus=8)
+    for ep in (2, 4, 8):
+        assert _deepep_on(a(ep), local_gpus=8)
     monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
     monkeypatch.setenv("GPUS_PER_NODE", "4")
     assert _deepep_off(a(8)) and _deepep_on(a(4))
+    # one process on an 8-GPU node (--nproc_per_node=1): the node still has 8 GPUs
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "1")
+    assert _deepep_on(a(8))
+    # a malformed GPUS_PER_NODE raises; it does not fall back to the process count (1)
+    monkeypatch.setenv("GPUS_PER_NODE", "8x")
+    with pytest.raises(ValueError, match="GPUS_PER_NODE='8x'"):
+        deepep_disable_reason(a(8))
 
 
 def test_turbo_grouped_gemm_is_turned_off_only_with_megatron_fsdp():
     from types import SimpleNamespace
 
-    from primus.backends.megatron.patches.args.muse_spark_recompute_cp_patches import (
+    from primus.backends.megatron.patches.args.muse_spark_arg_compat_patches import (
         turbo_grouped_gemm_needs_disabling as f,
     )
 
@@ -544,8 +604,8 @@ def test_qk_norm_is_the_weightless_rms_norm():
 
 
 def test_rms_helper_equals_torch_rms_norm():
-    # the eager fp32 helper (all Muse Spark norms and the embedding norm) is the same
-    # function as F.rms_norm: a later kernel swap only needs the GPU parity check
+    # the eager fp32 helper (Primus's shared eager_rms_norm) is the same function as
+    # F.rms_norm: a later kernel swap only needs the GPU parity check
     from primus.backends.megatron.core.transformer.muse_spark.norms import _rms
 
     torch.manual_seed(0)
@@ -556,18 +616,22 @@ def test_rms_helper_equals_torch_rms_norm():
 
 def test_final_logit_softcapping_must_be_null_zero_or_positive():
     from primus.backends.megatron.patches.args.muse_spark_layer_patterns_patches import (
-        check_softcap,
+        normalize_softcap,
     )
 
     for ok in (None, 0, 20.0, "20"):
-        check_softcap(ok)
+        normalize_softcap(ok)
+    # the normalized float is returned (the patch writes it back to the args)
+    assert normalize_softcap(None) is None
+    assert normalize_softcap("20") == 20.0 and isinstance(normalize_softcap("20"), float)
+    assert normalize_softcap("0") == 0.0
     for bad in (-1.0, float("nan"), float("inf"), "abc", True):
         with pytest.raises(ValueError, match="final_logit_softcapping"):
-            check_softcap(bad)
+            normalize_softcap(bad)
 
 
 def _deepep_off(args, local_gpus=None):
-    from primus.backends.megatron.patches.args.muse_spark_recompute_cp_patches import (
+    from primus.backends.megatron.patches.args.muse_spark_arg_compat_patches import (
         deepep_disable_reason,
     )
 
@@ -604,3 +668,263 @@ def test_stacked_expert_factory_names_the_unsupported_optimizer_format():
     assert torch.equal(factory.merge_fn({f"expert{i}": weights[i] for i in range(2)}), weights)
     with pytest.raises(NotImplementedError, match="fully_sharded_model_space.*dp_reshardable"):
         factory.build_fn("opt.mlp.weight", weights, (0, 0, 0), slice(0, 4))
+
+
+def test_softcap_patch_writes_back_the_float_cap():
+    from primus.backends.megatron.patches.args.muse_spark_layer_patterns_patches import (
+        patch_muse_spark_layer_patterns,
+    )
+    from primus.core.patches import PatchContext
+
+    args = SimpleNamespace(num_layers=4, moe_layer_freq=1, final_logit_softcapping="20")
+    ctx = PatchContext(
+        backend="megatron",
+        phase="build_args",
+        extra={"module_config": SimpleNamespace(params=SimpleNamespace()), "backend_args": args},
+    )
+    patch_muse_spark_layer_patterns(ctx)
+    assert args.final_logit_softcapping == 20.0 and isinstance(args.final_logit_softcapping, float)
+
+
+def test_router_subclasses_primus_topk_router_with_the_layout_base_first():
+    # R-10: the base is PrimusTopKRouter whatever the import order (no topk_router_patches here)
+    from primus.backends.megatron.core.transformer.muse_spark import moe
+
+    pytest.importorskip("triton")  # PrimusTopKRouter needs Triton; with it, it must import
+    assert moe.PrimusTopKRouter is not None
+    assert issubclass(MuseSparkTopKRouter, moe.PrimusTopKRouter)
+    assert MuseSparkTopKRouter.__mro__[1] is moe._FSDP2LayoutBase
+
+
+def test_router_uses_upstream_routing_without_primus_args(monkeypatch):
+    # Megatron-only args (converter / parity harness): PrimusTopKRouter.routing would read
+    # Primus-only keys from get_args(); the upstream TopKRouter.routing runs instead.
+    from megatron.training import global_vars
+
+    from primus.backends.megatron.core.transformer.muse_spark import moe
+
+    pytest.importorskip("triton")  # PrimusTopKRouter needs Triton; with it, it must import
+    assert moe.PrimusTopKRouter is not None
+    upstream = [c for c in MuseSparkTopKRouter.__mro__ if c.__name__ == "TopKRouter"][-1]
+    calls = []
+    monkeypatch.setattr(upstream, "routing", lambda self, logits, **kw: calls.append("up") or "up")
+    monkeypatch.setattr(
+        moe.PrimusTopKRouter, "routing", lambda self, logits, **kw: calls.append("primus") or "primus"
+    )
+    # no global args yet: upstream routing, and the answer is not cached
+    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", None, raising=False)
+    r = _bare_router(torch.ones(2, 3))
+    assert r.routing(torch.zeros(1, 2)) == "up"
+    assert "_use_primus_routing" not in r.__dict__
+    # Primus args: Primus routing, decided once and cached on the router
+    full = SimpleNamespace(**{k: None for k in moe._PRIMUS_ROUTER_ARGS})
+    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", full, raising=False)
+    assert r.routing(torch.zeros(1, 2)) == "primus"
+    assert r.__dict__["_use_primus_routing"] is True
+    monkeypatch.setattr(moe, "_primus_router_args_present", lambda: pytest.fail("not cached"))
+    assert r.routing(torch.zeros(1, 2)) == "primus"
+    # Megatron-only args (converter / parity harness): upstream routing, cached
+    monkeypatch.undo()
+    monkeypatch.setattr(upstream, "routing", lambda self, logits, **kw: calls.append("up") or "up")
+    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", SimpleNamespace(), raising=False)
+    r2 = _bare_router(torch.ones(2, 3))
+    assert r2.routing(torch.zeros(1, 2)) == "up"
+    assert r2.__dict__["_use_primus_routing"] is False
+    assert calls == ["up", "primus", "primus", "up"]
+
+
+@pytest.mark.parametrize("router_dtype, held", [("fp64", torch.float32), (None, torch.bfloat16)])
+def test_router_gating_does_not_move_the_parameter(router_dtype, held):
+    # R-11: a weight in another dtype than the GEMM's is copied for the GEMM, never
+    # reassigned in forward (fp64 gating of the fp32 weight; fp32 gating of a bf16-held one)
+    r = _bare_router(torch.ones(2, 3))
+    with torch.no_grad():
+        r.weight.data = r.weight.data.to(held)
+    r.output_multiplier = 2.0
+    r.bias = None
+    r.config = SimpleNamespace(moe_router_dtype=router_dtype)
+    param = r.weight
+    before = param.data_ptr()
+    out = r.gating(torch.ones(4, 3, dtype=torch.bfloat16))
+    want = torch.float64 if router_dtype == "fp64" else torch.float32
+    assert out.dtype == want  # the GEMM ran on a copy in this dtype
+    assert r.weight is param and param.data_ptr() == before and param.dtype == held
+    assert torch.equal(out, torch.full((4, 2), 6.0, dtype=want))
+
+
+def test_moe_preprocess_keeps_the_cudagraph_decorator():
+    # R-13: upstream MoELayer.preprocess is wrapped by maybe_skip_or_early_return_by_cudagraph.
+    # Behaviour: in a CUDA-graph replay (TE graphs, a store with hidden_states / probs and no
+    # routing_map) the wrapper returns the stored tensors and never runs the body.
+    from primus.backends.megatron.core.transformer.muse_spark.moe import (
+        MuseSparkMoELayer,
+    )
+
+    pre = MuseSparkMoELayer.preprocess
+    assert callable(getattr(pre, "__wrapped__", None))  # functools.wraps of the decorator
+
+    class _Store:
+        hidden_states, probs, routing_map = "stored-h", "stored-p", None
+
+        def is_empty(self):
+            return False
+
+    layer = SimpleNamespace(
+        config=SimpleNamespace(cuda_graph_impl="transformer_engine"),
+        cudagraph_tensor_store=_Store(),
+        training=False,
+    )
+    assert pre(layer, None, None, None) == ("stored-h", "stored-p")  # the body would fail on None
+
+
+def test_the_pinned_megatron_passes_pg_collection_to_a_moe_subclass():
+    # MuseSparkTransformerLayer overrides nothing: the pinned Megatron-core builds every mlp
+    # (MuseSparkMoELayer included) with pg_collection / is_mtp_layer / name
+    import inspect
+
+    from megatron.core.transformer.transformer_layer import TransformerLayer
+
+    from primus.backends.megatron.core.models.muse_spark import (
+        muse_spark_layer_specs as specs,
+    )
+
+    assert "name" in inspect.signature(TransformerLayer.__init__).parameters
+    assert specs.MuseSparkTransformerLayer.__init__ is TransformerLayer.__init__
+
+
+# ---------------------------------------------------------------- MuseSparkMoELayer
+def _moe_cfg(**kw):
+    base = dict(
+        moe_latent_size=8,
+        layernorm_epsilon=1e-5,
+        post_norm_eps=1e-8,
+        hidden_size=16,
+        sequence_parallel=False,
+        cuda_graph_impl="none",
+        muse_spark_fused_centered_norm=False,
+        muse_spark_fused_post_expert_norm=False,
+    )
+    return SimpleNamespace(**{**base, **kw})
+
+
+def _build_moe_layer(monkeypatch, experts, dispatcher, cfg=None):
+    """MuseSparkMoELayer.__init__ over a stubbed MoELayer.__init__ (no parallel state / TE):
+    the stub sets the experts and the dispatcher the subclass inspects."""
+    from megatron.core.transformer.moe.moe_layer import MoELayer
+
+    from primus.backends.megatron.core.transformer.muse_spark import moe
+
+    def fake_init(self, config, submodules=None, layer_number=None, *a, **k):
+        torch.nn.Module.__init__(self)
+        self.config = config
+        self.experts = experts
+        self.token_dispatcher = dispatcher
+        self.shared_expert_overlap = False
+
+    monkeypatch.setattr(MoELayer, "__init__", fake_init)
+    if not getattr(moe._turbo_deepep_dispatcher_cls, "_test_stub", False):
+        # hermetic: no Primus-Turbo import (it queries the GPU at import time)
+        stub = lambda: None  # noqa: E731
+        stub._test_stub = True
+        monkeypatch.setattr(moe, "_turbo_deepep_dispatcher_cls", stub)
+    return moe.MuseSparkMoELayer(cfg or _moe_cfg())
+
+
+def _muse_experts():
+    from primus.backends.megatron.core.transformer.muse_spark import moe
+
+    e = moe.MuseSparkSequentialMLP.__new__(moe.MuseSparkSequentialMLP)
+    torch.nn.Module.__init__(e)
+    e._init_post_expert_norm()
+    return e
+
+
+def test_the_moe_layer_wires_its_post_expert_norm_into_the_experts(monkeypatch):
+    experts = _muse_experts()
+    layer = _build_moe_layer(monkeypatch, experts, SimpleNamespace(config="orig"))
+    assert experts._muse_post_expert_norm is layer.post_expert_norm
+    assert layer.pre_expert_norm.weight.shape == (8,) and layer.post_expert_norm.eps == 1e-8
+    assert layer.token_dispatcher.config == "orig"  # not a DeepEP dispatcher: untouched
+
+
+def test_the_moe_layer_refuses_experts_that_are_not_muse_spark(monkeypatch):
+    with pytest.raises(TypeError, match="needs Muse Spark experts"):
+        _build_moe_layer(monkeypatch, torch.nn.Identity(), SimpleNamespace(config="orig"))
+
+
+def test_the_moe_layer_gives_the_deepep_dispatcher_the_latent_width(monkeypatch):
+    from primus.backends.megatron.core.transformer.muse_spark import moe
+
+    class _DeepEP:
+        def __init__(self):
+            self.config = None
+
+    stub = lambda: _DeepEP  # noqa: E731
+    stub._test_stub = True
+    monkeypatch.setattr(moe, "_turbo_deepep_dispatcher_cls", stub)
+    cfg = _moe_cfg()
+    dispatcher = _DeepEP()
+    dispatcher.config = cfg
+    _build_moe_layer(monkeypatch, _muse_experts(), dispatcher, cfg)
+    assert isinstance(dispatcher.config, moe._LatentWidthConfig)
+    assert dispatcher.config.hidden_size == 8 and dispatcher.config.layernorm_epsilon == 1e-5
+
+
+def test_the_moe_preprocess_norms_the_latent_before_the_dispatch(monkeypatch):
+    # preprocess: fc1_latent_proj -> pre_expert_norm -> dispatch_preprocess (HF order)
+    from primus.backends.megatron.core.transformer.muse_spark.centered_norm import (
+        centered_rms_norm_reference,
+    )
+
+    seen = {}
+
+    class _Dispatcher:
+        config = None
+
+        def dispatch_preprocess(self, h, routing_map, probs):
+            seen["h"] = h
+            return h, probs
+
+    layer = _build_moe_layer(monkeypatch, _muse_experts(), _Dispatcher())
+    torch.manual_seed(0)
+    with torch.no_grad():
+        layer.pre_expert_norm.weight.normal_(0, 0.1)
+    proj = torch.nn.Linear(16, 8, bias=False)
+    layer.fc1_latent_proj = lambda x: (proj(x), None)
+    x = torch.randn(5, 16)
+    probs = torch.rand(5, 2)
+    h, p = layer.preprocess(x, probs, torch.ones(5, 2, dtype=torch.bool))
+    want = centered_rms_norm_reference(proj(x), layer.pre_expert_norm.weight, 1e-5)
+    torch.testing.assert_close(seen["h"], want)
+    torch.testing.assert_close(h, want)
+    assert p is probs
+
+
+def test_a_malformed_module_yaml_gives_none(tmp_path, monkeypatch):
+    # yaml.YAMLError is not a ValueError: the docstring's "None when unreadable" holds for it
+    from primus.backends.megatron.patches.args import (
+        muse_spark_layer_patterns_patches as lp,
+    )
+
+    bad = tmp_path / "trainer_base.yaml"
+    bad.write_text("make_vocab_size_divisible_by: [128\n")
+    monkeypatch.setattr(lp, "_TRAINER_BASE_YAML", bad)
+    lp.module_vocab_divisible_by.cache_clear()
+    try:
+        assert lp.module_vocab_divisible_by() is None
+    finally:
+        lp.module_vocab_divisible_by.cache_clear()
+
+
+def test_the_ignored_vocab_multiple_reads_the_module_default_from_its_yaml():
+    import yaml
+
+    from primus.backends.megatron.patches.args import (
+        muse_spark_layer_patterns_patches as lp,
+    )
+
+    default = yaml.safe_load(lp._TRAINER_BASE_YAML.read_text())["make_vocab_size_divisible_by"]
+    assert lp.module_vocab_divisible_by() == default
+    assert lp.ignored_vocab_multiple(SimpleNamespace(make_vocab_size_divisible_by=default)) is None
+    assert lp.ignored_vocab_multiple(SimpleNamespace(make_vocab_size_divisible_by=64)) is None
+    assert lp.ignored_vocab_multiple(SimpleNamespace(make_vocab_size_divisible_by=256)) == 256

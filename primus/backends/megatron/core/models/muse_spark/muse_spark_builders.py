@@ -34,7 +34,10 @@ def muse_spark_builder(
     print_rank_0("[Primus:MuseSpark] building MuseSparkModel...")
     if config is None:
         config = core_transformer_config_from_args(args, config_class=MuseSparkTransformerConfig)
-    assert not args.use_legacy_models, "Muse Spark requires use_legacy_models=False (Mcore-only)."
+    # Megatron-LM core_v0.19 dropped the legacy models (and the arg): absent means Mcore
+    assert not getattr(
+        args, "use_legacy_models", False
+    ), "Muse Spark requires use_legacy_models=False (Mcore-only)."
 
     if args.spec is not None:
         decoder_spec = import_module(args.spec)

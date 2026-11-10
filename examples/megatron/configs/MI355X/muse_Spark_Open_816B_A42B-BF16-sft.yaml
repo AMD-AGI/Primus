@@ -3,22 +3,38 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-sft}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# Muse-Spark-Open-816B-A42B (text decoder) BF16 SFT from the released Hugging Face weights,
-# on ONE node of MI355X (8 GPUs). Launch with the post-train entrypoint, which converts the
-# checkpoint first (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py):
+# Muse-Spark-Open-816B-A42B (text decoder) BF16 SFT from the released Hugging Face weights
+# on MI355X. The model default is the full 62-layer preset; the parallel defaults below
+# (one node, 8 GPUs, EP 8, PP 1) fit only a 4-layer cut: on one node, run it with
+# --num_layers 4 (or PRIMUS_MODEL=muse_Spark_Open_816B_A42B_proxy). Launch with the
+# post-train entrypoint, which converts the checkpoint first
+# (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py):
 #   ./runner/primus-cli direct -- train posttrain --config <this file>
-# with tokenizer_model set to the HF snapshot on the command line (--tokenizer_model <dir>);
-# the preset's tokenizer_model is the Hub id. The convert hook reads the HF path from it.
+# The convert hook reads the HF source from hf_path, else tokenizer_model (below,
+# MUSE_SPARK_HF_PATH).
+# It must be a LOCAL HF directory: the convert hook does not download a Hub id (a Hub id
+# falls back to Megatron-Bridge, which has no Muse Spark model).
 #
-# Model: by default the 4-layer proxy (muse_spark_816B_A42B_proxy: the released layers
-# 0-3, all 256 experts, ~58B params), which converts and trains on this one node as is.
-# The full 62-layer 816B model does not fit on one node (~14.7 TB of model states) and is
-# above the single-process converter's limit (native_ckpt_max_params, 60B): for it use
-# PRIMUS_MODEL=muse_Spark_Open_816B_A42B on many nodes (see the pretrain file's layouts)
-# with an already converted checkpoint as pretrained_checkpoint (the hook then skips the
-# conversion).
+# Model: the full preset (muse_Spark_Open_816B_A42B, 62 layers), kept as the default
+# because multi-node fine-tunes of the released model run this file at full depth. A
+# shallower fine-tune (--num_layers 4, or PRIMUS_MODEL=muse_Spark_Open_816B_A42B_proxy)
+# against the released 62-layer checkpoint makes the hook convert only its first 4
+# layers (the converter's depth cut), into <hf dir name>_native_torch_dist_layers4; a
+# depth above the checkpoint's is refused. The 4-layer cut (~56B params, all 256 experts)
+# trains on one node with this file's parallel defaults (EP 8, PP 1, GBS 8).
+# Set MUSE_SPARK_HF_PATH to the HF directory. The checkpoint is saved to
+# $DATA_PATH/megatron_checkpoints/<hf dir name>_native_torch_dist (plus the cut suffix).
+# The full 62-layer model does not fit on one node (~14.8 TB of model states): train it on
+# many nodes WITH a multi-node layout (PRIMUS_TP / PRIMUS_PP / PRIMUS_EP, e.g. TP 8 PP 5
+# EP 16 on 20 nodes; PP 5 splits 62 layers unevenly: set decoder_first_pipeline_num_layers
+# 14, the other stages 12 each; an even split needs PP in 1, 2, 31 or 62) and, best, an
+# already converted checkpoint as pretrained_checkpoint (the hook then skips the
+# conversion); the memory check stops a layout that cannot fit before the model build.
+# In a multi-node job the other nodes wait for node 0's conversion while its heartbeat
+# moves (docs section 11.6); converting first and setting pretrained_checkpoint skips it.
+# See docs/03-configuration-reference/megatron-parameters.md, section 11.6.
 #
-# Conversion: muse_spark is a native (bridge-free) family by default. The native converter
+# Conversion: the native converter
 # (primus/backends/megatron/checkpoint/native_loader_muse_spark.py) builds the model at
 # TP=PP=EP=1 and saves a torch_dist checkpoint, which Megatron reshards on load, so this
 # file trains at EP 8 (32 experts per GPU).
@@ -28,7 +44,7 @@ modules:
   post_trainer:
     framework: megatron
     config: sft_trainer.yaml
-    model: ${PRIMUS_MODEL:muse_spark_816B_A42B_proxy}.yaml
+    model: ${PRIMUS_MODEL:muse_Spark_Open_816B_A42B}.yaml
     overrides:
       stage: sft
       stderr_sink_level: DEBUG
@@ -70,13 +86,20 @@ modules:
       eval_iters: 0
 
       # checkpoint: the converted torch_dist checkpoint, weights only. With no
-      # pretrained_checkpoint (the default) the post-train hook converts the HF weights
-      # first; that works for the default proxy model only. For the full model
-      # (PRIMUS_MODEL=muse_Spark_Open_816B_A42B, above native_ckpt_max_params) the hook
-      # stops up front. Either raise native_ckpt_max_params to 816000000000 on a host
-      # with ~3.3 TB RAM (the hook then converts), or convert once and set it, e.g.
-      #   pretrained_checkpoint: /path/to/muse_spark_816B_torch_dist
+      # pretrained_checkpoint (the default) the post-train hook converts MUSE_SPARK_HF_PATH first
+      # (see "# Model:" above). To use a checkpoint converted elsewhere, set it, e.g.
+      #   pretrained_checkpoint: /path/to/muse_spark_torch_dist
       # (or --pretrained_checkpoint <dir> on the command line).
+      # The converter copies the weights in one layer at a time and checks the host's
+      # available memory first: the full model (822B params) needs ~1.5 TiB (1.64 TB) of
+      # host RAM in bf16, plus a 5 % margin.
+      # the HF source of the convert hook (it reads tokenizer_model when there is no hf_path):
+      # REQUIRED: set MUSE_SPARK_HF_PATH to your local HF checkpoint directory (the released
+      # checkpoint; with --num_layers 4 or the _proxy preset the hook converts its first 4
+      # layers; a 4-layer HF cut works too). The default below
+      # is a placeholder that does not exist: without the variable the hook finds no Muse
+      # Spark config.json there and the run stops at the conversion / tokenizer load.
+      tokenizer_model: ${MUSE_SPARK_HF_PATH:/path/to/Muse-Spark-Open-816B-A42B}
       finetune: true
       ckpt_format: torch_dist
       auto_detect_ckpt_format: true
@@ -86,11 +109,19 @@ modules:
       disable_last_saving: true
       no_save_optim: true
 
-      # MoE path as the pretrain file: Turbo grouped GEMM experts, alltoall dispatcher
+      # MoE path as the full-size pretrain file (muse_Spark_Open_816B_A42B-BF16-pretrain.yaml),
+      # not the proxy one: Turbo grouped GEMM experts, alltoall dispatcher by default.
+      # DeepEP is opt-in (PRIMUS_USE_TURBO_DEEPEP=true, 32 CUs as the proxy file) and only
+      # helps while the expert group fits in one node (EP 8 here); at a larger EP the
+      # Primus image's Turbo build (no rocSHMEM) turns it back off with a warning. Every
+      # Muse Spark example (pretrain, proxy, SFT) keeps DeepEP off by default.
       enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:true}
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
-      use_turbo_deepep: false
+      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}
+      turbo_deepep_num_cu: 32
+      turbo_deepep_use_comm_stream: false
       moe_token_dispatcher_type: alltoall
       moe_permute_fusion: true
-      cross_entropy_loss_fusion: false
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te

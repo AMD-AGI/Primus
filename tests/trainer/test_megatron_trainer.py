@@ -686,21 +686,19 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    # Muse Spark (muse_spark): new cases, so all three are in the weekly burn-in tier
-    # (tests/README.md: a new case moves to the per-PR tier by deleting the marker once a
-    # weekend run is green). Until then no per-PR trainer case trains Muse Spark: per-PR
-    # coverage is the CPU unit tests named below. test_muse_Spark_Open_816B_A42B is the
-    # case to promote first: on
-    # one 8-GPU node, the full example cut to 4 layers (the released 816B per-layer dims)
-    # with 16 experts top-4, EP 8 (alltoall dispatch + Turbo grouped GEMM, the example's
-    # default; DeepEP is not exercised) and seq 1024. The toy-size preset and the
-    # 256-expert proxy stay weekly. The CPU coverage of the model code, patches and
-    # converter is in tests/unit_tests/backends/megatron/muse_spark/. Every case checks that the Muse Spark model code
-    # ran; run_script already requires "Training completed." and a finite loss / grad norm on
-    # every logged iteration.
+    # Muse Spark (muse_spark): one case per preset (the full preset cut to 4 layers on the
+    # command line, and the proxy preset). Each checks that the Muse Spark model code was built
+    # (the markers below). The layout is pinned on the command line, so a change of the
+    # example's parallel defaults does not change what a case runs. CPU coverage of the model
+    # code, patches and converter: tests/unit_tests/backends/megatron/muse_spark/.
     _MUSE_SPARK_MARKERS = (
         "Loaded Muse-Spark model_provider",
         "[Patch:megatron.args.muse_spark_layer_patterns]",
+        # logged by the built MuseSparkModel: the decoder layer, attention, gated residual,
+        # MoE layer, router and experts are the Muse Spark classes (not stock GPT layers)
+        "layer=MuseSparkTransformerLayer attention=MuseSparkSelfAttention "
+        "residual=MuseSparkGatedResidual mlp=MuseSparkMoELayer router=MuseSparkTopKRouter "
+        "experts=MuseSpark",
     )
 
     _MUSE_SPARK_TRAIN_ITERS = 3  # with --log_interval 1: one loss line each
@@ -720,8 +718,16 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--global_batch_size",
                 "8",
+                "--tensor_model_parallel_size",
+                "1",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--num_virtual_stages_per_pipeline_rank",
+                "null",
                 "--expert_model_parallel_size",
                 str(ep),
+                "--recompute_granularity",
+                "null",
                 *(extra or []),
             ],
         )
@@ -733,6 +739,10 @@ class TestMegatronTrainer(PrimusUT):
             len(losses) == self._MUSE_SPARK_TRAIN_ITERS
         ), f"[{tag}] expected one 'lm loss' per iteration: {losses}"
         assert all(math.isfinite(v) and 0.0 < v < 30.0 for v in losses), f"[{tag}] bad lm loss {losses}"
+        norms = [float(v) for v in re.findall(r"grad norm: (\S+?)(?=\s|\||$)", out)]
+        assert len(norms) == self._MUSE_SPARK_TRAIN_ITERS and all(
+            math.isfinite(v) and v > 0.0 for v in norms
+        ), f"[{tag}] bad grad norm (non-finite, or 0: no gradient flows) {norms}"
 
     @pytest.mark.weekly
     def test_muse_Spark_Open_816B_A42B(self):
@@ -759,16 +769,9 @@ class TestMegatronTrainer(PrimusUT):
         )
 
     @pytest.mark.weekly
-    def test_muse_spark_toy_bf16(self):
-        # Toy-size preset muse_spark_toy.yaml (hidden 1024, 16 experts).
-        self._muse_spark(
-            f"muse_spark_toy_{GPU_PLATFORM.lower()}_bf16",
-            f"examples/megatron/configs/{GPU_PLATFORM}/muse_spark_toy-BF16-pretrain.yaml",
-        )
-
-    @pytest.mark.weekly
     def test_muse_spark_816B_A42B_proxy_bf16(self):
-        # The proxy with all 256 released experts, EP 8 (32 per rank).
+        # The proxy preset (4 released layers, all 256 experts), EP 8 (32 per rank): the
+        # SFT example's model; the case above uses 16 experts.
         self._muse_spark(
             f"muse_spark_proxy_{GPU_PLATFORM.lower()}_bf16",
             f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml",

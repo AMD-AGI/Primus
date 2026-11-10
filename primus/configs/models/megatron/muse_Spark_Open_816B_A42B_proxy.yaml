@@ -1,6 +1,7 @@
 ###############################################################################
 # Muse-Spark-Open-816B-A42B cut to its first 4 layers (proxy /
-# smoke tests). Layer i is the released layer i, so the HF checkpoint loads unchanged;
+# smoke tests). Layer i is the released layer i: a fine-tune converts the released HF
+# checkpoint's first 4 layers (the posttrain hook passes the depth to the converter);
 # the per-layer window / NoPE patterns are cut to num_layers by the config.
 ###############################################################################
 

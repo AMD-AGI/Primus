@@ -6,7 +6,7 @@
 # latent sigmoid MoE, soft-capped untied head.
 # Generic: no sizes and no tokenizer model / path (only tokenizer_type). Not a model preset itself (it lives in a
 # subdirectory, like diffusion/flux_base.yaml); the size presets extend it:
-# muse_Spark_Open_816B_A42B.yaml (released sizes) and muse_spark_toy.yaml (small model).
+# muse_Spark_Open_816B_A42B.yaml (released sizes) and muse_Spark_Open_816B_A42B_proxy.yaml (4 layers).
 # Model code: primus/backends/megatron/core/models/muse_spark/.
 ###############################################################################
 
@@ -17,7 +17,7 @@ model_type: muse_spark
 
 tokenizer_type: HuggingFaceTokenizer
 normalization: RMSNorm
-layernorm_epsilon: 1.0e-05  # every Muse Spark norm (Megatron's --norm-epsilon dest)
+layernorm_epsilon: 1.0e-05  # pre norms, QK-norm, pre_expert_norm; post norms and post_expert_norm use post_norm_eps
 swiglu: true
 add_bias_linear: false
 add_qkv_bias: false
@@ -37,7 +37,7 @@ window_size: [2048, 0]             # HF sliding_window (keys incl. the query); t
 # per-layer window_attn_skip_freq / no_rope_freq (1 = sliding window / 1 = NoPE) depend on
 # num_layers, so the size presets set them (a list of num_layers entries)
 
-# context parallel: TE's p2p CP has no sliding-window backend (a p2p entry is rejected)
+# context parallel: TE's p2p CP has no sliding-window backend (p2p is rewritten to all_gather with a warning; a2a+p2p is an error)
 cp_comm_type: all_gather
 
 # ---- residual / norms ----
@@ -52,7 +52,7 @@ hidden_dropout: 0.0                # HF has no dropout; the embedding norm runs 
 attention_dropout: 0.0
 
 # ---- head ----
-output_logit_multiplier: 0.17677669529663687
+output_logit_multiplier: 0.17677669529663687  # 1/sqrt(32): HF output_multiplier on the LM-head logits (the router uses moe_router_output_multiplier)
 final_logit_softcapping: 20.0
 
 # ---- MoE (latent, sigmoid, selection bias) ----
@@ -67,16 +67,23 @@ moe_router_enable_expert_bias: true
 # sets a rate (e.g. 1.0e-3, the DeepSeek-V3 value) in its experiment config.
 moe_router_bias_update_rate: 0.0
 moe_router_topk_scaling_factor: 1.0
-moe_router_output_multiplier: 0.17677669529663687
+moe_router_output_multiplier: 0.17677669529663687  # 1/sqrt(32): HF output_multiplier on the router logits
 moe_router_load_balancing_type: none
 moe_aux_loss_coeff: 0.0
 moe_router_dtype: fp32
 moe_token_dispatcher_type: alltoall
 moe_grouped_gemm: true
 moe_use_legacy_grouped_gemm: false
-moe_permute_fusion: false          # Megatron default here; the 816B / proxy experiment configs set true
+moe_permute_fusion: false          # Megatron default here; the full-model / proxy experiment configs set true
 moe_shared_expert_overlap: false
 moe_shared_expert_intermediate_size: null
+# per-expert post_expert_norm + routing prob (and the post-MoE norm) as one Triton kernel
+# per pass (GPU); false: eager
+muse_spark_fused_post_expert_norm: true
+# the weightless attention post_norm / o_norm / Q-K norms with the same kernel; false: eager
+muse_spark_fused_attn_norm: true
+# the centered (1 + w) pre-norms and the MoE pre_expert_norm as one Triton kernel; false: eager
+muse_spark_fused_centered_norm: true
 
 mtp_num_layers: null
 expert_model_parallel_size: 1
@@ -84,4 +91,6 @@ expert_tensor_parallel_size: 1     # post_expert_norm needs the full expert outp
 
 # ---- runtime checks / ROCm (Primus-only args, read by the Muse Spark before_train patches) ----
 muse_spark_skip_memory_check: false  # true skips the fail-fast weights + grads + optimizer memory check
-te_gemm_workspace_mb: 512          # ROCm: lower bound (MiB) per TE hipBLASLt GEMM workspace (split-K)
+# Turbo DeepEP across nodes needs a Primus-Turbo build with rocSHMEM; false turns DeepEP off
+# (alltoall dispatcher) when the expert group spans nodes
+muse_spark_turbo_deepep_internode: false

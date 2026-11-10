@@ -6,7 +6,8 @@
 
 """Muse Spark layer specs (TE backend).
 
-Each decoder layer is Megatron's ``TransformerLayer`` with:
+Each decoder layer is :class:`MuseSparkTransformerLayer` (Megatron's ``TransformerLayer``)
+with:
 
 * ``input_layernorm`` / ``pre_mlp_layernorm``: centered RMSNorm (``1 + w``);
   ``linear_qkv`` is a plain column-parallel linear (no fused TE norm, whose
@@ -23,6 +24,7 @@ Only this pipeline stage's layers are built (``get_num_layers_to_build``); the
 per-layer choices use the global ``layer_number``, so PP and VPP come from ``TransformerBlock``.
 """
 
+import functools
 from typing import Optional
 
 from megatron.core.extensions import (
@@ -56,7 +58,18 @@ from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkRMSNorm,
 )
 
-__all__ = ["get_muse_spark_layer_spec", "get_muse_spark_decoder_block_spec"]
+__all__ = [
+    "MuseSparkTransformerLayer",
+    "get_muse_spark_layer_spec",
+    "get_muse_spark_decoder_block_spec",
+]
+
+
+class MuseSparkTransformerLayer(TransformerLayer):
+    """Megatron's ``TransformerLayer`` for the Muse Spark decoder (its own class, so the
+    built-module log line names the Muse Spark layer). The pinned Megatron-core builds every
+    mlp, a ``MoELayer`` subclass included, with ``pg_collection`` / ``is_mtp_layer``, so
+    nothing is overridden."""
 
 
 def _spec_provider():
@@ -65,11 +78,26 @@ def _spec_provider():
     return _te_spec_provider.TESpecProvider()
 
 
+def _expert_module_and_submodules(backend, grouped_gemm: bool):
+    """``(module, submodules)`` of the provider's experts on every Megatron version.
+
+    Older Megatron returns the tuple; Megatron-core 0.19+ returns an ``ExpertsBuilder``: a
+    ``functools.partial`` (Megatron's TESpecProvider) or Primus's ``build`` closure, whose
+    ``(module, submodules)`` the Primus provider also exposes directly."""
+    inner = getattr(backend, "_grouped_mlp_module_and_submodules", None)
+    if inner is not None:
+        return inner(grouped_gemm)
+    experts = backend.grouped_mlp_modules(grouped_gemm)
+    if isinstance(experts, functools.partial):
+        return experts.func, experts.keywords.get("submodules")
+    return experts
+
+
 def get_muse_spark_moe_spec(backend=None, grouped_gemm: bool = True) -> ModuleSpec:
     """Latent MoE spec. The provider picks the experts (Turbo grouped GEMM, TE grouped
     GEMM or sequential); each gets its Muse Spark subclass with ``post_expert_norm``."""
     backend = backend or _spec_provider()
-    base_cls, expert_submodule = backend.grouped_mlp_modules(grouped_gemm)
+    base_cls, expert_submodule = _expert_module_and_submodules(backend, grouped_gemm)
     if expert_submodule is not None:
         expert_submodule.activation_func = backend.activation_func()
     expert_cls = muse_spark_expert_cls(base_cls)
@@ -77,6 +105,8 @@ def get_muse_spark_moe_spec(backend=None, grouped_gemm: bool = True) -> ModuleSp
         module=MuseSparkMoELayer,
         submodules=MoESubmodules(
             router=MuseSparkTopKRouter,
+            # a ModuleSpec is callable as the 0.19+ ExpertsBuilder too:
+            # spec(num_local_experts, config, pg_collection=..., name=...)
             experts=ModuleSpec(module=expert_cls, submodules=expert_submodule),
             shared_experts=None,
         ),
@@ -87,7 +117,7 @@ def get_muse_spark_moe_spec(backend=None, grouped_gemm: bool = True) -> ModuleSp
 def get_muse_spark_layer_spec(config) -> ModuleSpec:
     backend = _spec_provider()
     return ModuleSpec(
-        module=TransformerLayer,
+        module=MuseSparkTransformerLayer,
         submodules=TransformerLayerSubmodules(
             input_layernorm=MuseSparkCenteredRMSNorm,
             self_attention=ModuleSpec(

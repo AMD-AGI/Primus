@@ -6,14 +6,10 @@
 
 """Muse Spark per-layer 0/1 patterns (``window_attn_skip_freq`` / ``no_rope_freq``).
 
-One parser for the config and the ``build_args`` patch. It reads an int, a list,
-or a Python-list expression string such as ``"([1,0,1,1]*15+[1,0])"`` without
-``eval``: only int literals (with unary minus), flat int list / tuple literals,
-``list * int``, ``int * list`` and ``list + list`` are accepted. A list may hold at
-most ``MAX_PATTERN_LEN`` entries (checked before a repetition is built), a string at
-most ``MAX_SOURCE_LEN`` characters, and every malformed input (including unary minus
-on a list and deeply nested expressions) raises ValueError. An int means "every N-th layer" (Megatron's
-meaning) and must be >= 1.
+One parser for the config and the ``build_args`` patch: ``parse_layer_pattern``
+(``muse_spark/layer_freq.py``, shared with the FLOPs patches). It reads an int, a list, or a
+Python-list expression string such as ``"([1,0,1,1]*15+[1,0])"`` without ``eval``. An
+int means "every N-th layer" (Megatron's meaning) and must be >= 1.
 
 A longer list is cut to ``num_layers`` on purpose: a depth-reduced build (proxy,
 trainer test) keeps the first layers of the released model, so it keeps the first
@@ -25,22 +21,27 @@ must be in ``[1, num_layers]`` (a larger N skips no layer). Every error names th
 argument. Pure Python (no torch / Megatron).
 """
 
-import ast
+import math
 import re
 
-# re-exported: the one implementation lives in the shared light helper
-from primus.backends.megatron.core.attention_pairs import causal_visible_pairs
+# re-exported: the one eval-free pattern parser lives in the shared light helper
+from primus.backends.megatron.core.models.muse_spark.layer_freq import (
+    parse_layer_pattern,
+)
+from primus.backends.megatron.core.models.muse_spark.number_utils import (
+    parse_positive_int,
+    require_positive_int,
+)
 
 __all__ = [
     "MODEL_TYPE",
-    "MODEL_TYPES",
     "parse_layer_pattern",
     "normalize_layer_pattern",
     "check_all_moe_layers",
     "parse_window_size",
     "hf_sliding_window",
-    "causal_visible_pairs",
     "MAKE_VOCAB_SIZE_DIVISIBLE_BY",
+    "HF_OUTPUT_MULTIPLIER",
     "vocab_size_with_padding",
 ]
 
@@ -48,11 +49,26 @@ __all__ = [
 # compare against it; ``muse_spark_text`` is only the HF text_config's model_type, which the
 # checkpoint hook maps to this family).
 MODEL_TYPE = "muse_spark"
-MODEL_TYPES = (MODEL_TYPE,)
 
-# The presets' make_vocab_size_divisible_by (202048 = 64 * 3157), used when the args set none
-# (the converter's own default; Megatron's argument default is 128).
+# Muse Spark pads the vocab to a multiple of 64 (202048 = 64 * 3157) at every TP;
+# args.make_vocab_size_divisible_by is not read (Megatron's default is 128).
 MAKE_VOCAB_SIZE_DIVISIBLE_BY = 64
+
+# HF ``output_multiplier`` (1/sqrt(32)): HF applies the one value to the router logits and to
+# the lm-head logits. The config field defaults and the converter's defaults both use it.
+HF_OUTPUT_MULTIPLIER = 1 / math.sqrt(32)
+
+
+def _vocab_padding_int(value, name, default=None):
+    """For :func:`vocab_size_with_padding` only (its name is in the error): ``value`` as an
+    int >= 1, parsed by the shared config-number parser
+    (:func:`number_utils.require_positive_int` / ``parse_positive_int``); with a ``default``, None or a
+    blank string is that default. A bool, a non-integral number (e.g. 202047.9), None
+    (without a default), text or a value < 1 raises ValueError naming ``name``."""
+    error = f"vocab_size_with_padding: {name}={value!r} must be an integer >= 1"
+    if default is not None:
+        return parse_positive_int(value, default, error)
+    return require_positive_int(value, error)
 
 
 def vocab_size_with_padding(vocab_size, divisible_by=MAKE_VOCAB_SIZE_DIVISIBLE_BY, tp=1):
@@ -63,99 +79,20 @@ def vocab_size_with_padding(vocab_size, divisible_by=MAKE_VOCAB_SIZE_DIVISIBLE_B
     (``divisible_by * TP``), TP is not a factor: the rows depend only on the model config,
     so one checkpoint loads at every TP. The vocab-parallel layers need the rows to divide
     by TP; that is checked here (202048 rows divide by every TP that 128 heads / 16 query
-    groups allow) and an error names the fix.
+    groups allow) and the error asks for a TP that divides the rows.
     """
-    multiple = int(divisible_by)
-    if multiple < 1:
-        raise ValueError(f"make_vocab_size_divisible_by={divisible_by!r} must be >= 1")
-    rows = -(-int(vocab_size) // multiple) * multiple
-    tp = int(tp or 1)
+    multiple = _vocab_padding_int(divisible_by, "divisible_by")
+    vocab = _vocab_padding_int(vocab_size, "vocab_size")
+    tp = _vocab_padding_int(tp, "tensor_model_parallel_size", default=1)
+    rows = -(-vocab // multiple) * multiple
     if rows % tp:
+        # the multiple is the model's fixed constant (args.make_vocab_size_divisible_by is
+        # not read), so the only knob the user has is the TP size
         raise ValueError(
-            f"padded vocab {rows} (vocab_size {vocab_size} rounded up to make_vocab_size_divisible_by="
-            f"{multiple}) does not divide by tensor_model_parallel_size={tp}: set "
-            f"make_vocab_size_divisible_by to a multiple of {tp}"
+            f"padded vocab {rows} (vocab_size {vocab_size} rounded up to a multiple of {multiple}) "
+            f"does not divide by tensor_model_parallel_size={tp}: choose a TP that divides {rows}"
         )
     return rows
-
-
-# Upper bound on a pattern list (far above any real depth); stops e.g. "[1]*1000000000".
-MAX_PATTERN_LEN = 4096
-# Upper bound on a pattern string (a 4096-entry literal list is ~12k characters).
-MAX_SOURCE_LEN = 4 * MAX_PATTERN_LEN
-_SHOWN_PATTERN_CHARS = 80  # how much of a bad pattern string an error shows
-
-
-def _repeat(lst, n):
-    # n itself is bounded too: an empty list times a huge n would pass the length check
-    if n < 0 or n > MAX_PATTERN_LEN or len(lst) * n > MAX_PATTERN_LEN:
-        raise ValueError(f"layer-pattern repetition {len(lst)}*{n} is outside [0, {MAX_PATTERN_LEN}]")
-    return lst * n
-
-
-def _eval_node(node):
-    if isinstance(node, ast.Expression):
-        return _eval_node(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
-        return node.value
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-        operand = _eval_node(node.operand)
-        if not isinstance(operand, int):
-            raise ValueError("unary minus applies to an int only")
-        return -operand
-    if isinstance(node, (ast.List, ast.Tuple)):
-        out = [_eval_node(e) for e in node.elts]
-        if any(isinstance(v, list) for v in out):
-            raise ValueError("nested lists are not a layer pattern")
-        if len(out) > MAX_PATTERN_LEN:
-            raise ValueError(f"layer pattern longer than {MAX_PATTERN_LEN}")
-        return out
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Mult, ast.Add)):
-        left, right = _eval_node(node.left), _eval_node(node.right)
-        if isinstance(node.op, ast.Add) and isinstance(left, list) and isinstance(right, list):
-            if len(left) + len(right) > MAX_PATTERN_LEN:
-                raise ValueError(f"layer pattern longer than {MAX_PATTERN_LEN}")
-            return left + right
-        if isinstance(node.op, ast.Mult) and isinstance(left, list) and isinstance(right, int):
-            return _repeat(left, right)
-        if isinstance(node.op, ast.Mult) and isinstance(left, int) and isinstance(right, list):
-            return _repeat(right, left)
-    raise ValueError(f"unsupported layer-pattern expression: {ast.dump(node)}")
-
-
-def parse_layer_pattern(value):
-    """``value`` as an int, a flat list of ints, or None (strings are parsed safely).
-
-    Raises ValueError for anything else (bools, nested lists, bad syntax, too long).
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError(f"layer pattern must be an int or a list, got {value!r}")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        src = value.strip()
-        if len(src) > MAX_SOURCE_LEN:
-            raise ValueError(f"layer-pattern string longer than {MAX_SOURCE_LEN} characters")
-        try:
-            return _eval_node(ast.parse(src, mode="eval"))
-        except SyntaxError as e:
-            raise ValueError(
-                f"cannot parse layer pattern {value[:_SHOWN_PATTERN_CHARS]!r}: {e.msg}"
-            ) from None
-        except (MemoryError, RecursionError) as e:  # deeply nested input
-            raise ValueError(f"layer pattern {value[:_SHOWN_PATTERN_CHARS]!r} is nested too deeply") from e
-    if isinstance(value, (list, tuple)):
-        if len(value) > MAX_PATTERN_LEN:
-            raise ValueError(f"layer pattern longer than {MAX_PATTERN_LEN}")
-        out = []
-        for v in value:
-            if isinstance(v, bool) or not isinstance(v, int):
-                raise ValueError(f"layer-pattern entries must be ints, got {v!r}")
-            out.append(v)
-        return out
-    raise ValueError(f"layer pattern must be an int, a list or a string, got {type(value).__name__}")
 
 
 def normalize_layer_pattern(value, num_layers, name="layer pattern", warn=None):

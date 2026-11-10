@@ -8,8 +8,9 @@
 model with the single-node example defaults) instead of an out-of-memory error later.
 
 Pure Python: an approximate estimate of the model states on the most loaded GPU:
-weights (bf16), main grads (fp32 unless ``main_grads_dtype`` is 16-bit or
-``accumulate_allreduce_grads_in_fp32`` is False) and optimizer
+weights (``params_dtype``: bf16 / fp16 2 bytes, fp32 4), main grads (as Megatron keeps
+them: fp32 unless ``main_grads_dtype`` is 16-bit, bf16 with ``grad_reduce_in_bf16`` or
+fp16 without fp32 accumulation) and optimizer
 states (master params + Adam moments or one SGD momentum, dtypes from the
 precision-aware optimizer args, divided over data parallel ranks with the distributed
 optimizer, minus the CPU-offloaded fraction). Activations, the TE workspace, RCCL
@@ -24,7 +25,15 @@ import copy
 import math
 import os
 
+from primus.backends.megatron.core.models.muse_spark.model_types import bool_flag
+from primus.backends.megatron.core.models.muse_spark.number_utils import (
+    parse_positive_int,
+)
+
 __all__ = [
+    "DEFAULT_GPUS_PER_NODE",
+    "GPUS_PER_NODE_ENV",
+    "gpus_per_node",
     "DEFAULT_BUDGET",
     "DEFAULT_MAX_NODES",
     "DEFAULT_VOCAB_SIZE",
@@ -37,7 +46,38 @@ __all__ = [
     "suggest_layout",
     "vocab_size_of",
     "expert_ffn_size",
+    "required_state_bytes_or_raise",
+    "skip_requested",
 ]
+
+# GPUs per node of the MI300X / MI355X nodes (8 OAM GPUs): gpus_per_node()'s default.
+DEFAULT_GPUS_PER_NODE = 8
+# Where gpus_per_node() looks, in order: the Primus launcher's GPU count, then torchrun's
+# per-node process count (a run without the launcher). GPUS_PER_NODE comes first: with
+# fewer processes than GPUs (--nproc_per_node=1 debug runs, a single-process conversion)
+# LOCAL_WORLD_SIZE is the process count, not the node size.
+GPUS_PER_NODE_ENV = ("GPUS_PER_NODE", "LOCAL_WORLD_SIZE")
+
+
+def gpus_per_node(default: int = DEFAULT_GPUS_PER_NODE) -> int:
+    """GPUs per node: the first of ``$GPUS_PER_NODE``, ``$LOCAL_WORLD_SIZE`` that is set
+    (not blank), parsed by ``number_utils.parse_positive_int``; ``default`` when neither
+    is set.
+
+    A set value that is not a positive int (``"abc"``, ``"8x"``, ``"0"``) raises
+    ``ValueError`` naming the variable: it does not fall through to the next variable
+    (a malformed ``GPUS_PER_NODE`` under ``--nproc_per_node=1`` would otherwise give the
+    process count, 1, and a wrong node-span decision).
+
+    Unlike ``BasePlatform.get_gpus_per_node`` this needs no platform object (it is read
+    in arg patches, before the platform is set up)."""
+    for name in GPUS_PER_NODE_ENV:
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip():
+            return parse_positive_int(
+                raw, default, f"{name}={raw!r} must be a positive integer (GPUs per node)"
+            )
+    return default
 
 
 # HF ``vocab_size`` of the released model: used only when the args carry no vocabulary.
@@ -51,34 +91,9 @@ RAISE_FRACTION = 0.95
 DEFAULT_BUDGET = 0.65
 # suggest_layout gives up above this node count.
 DEFAULT_MAX_NODES = 128
-# GPUs per node of the MI300X / MI355X nodes these presets target (8 OAM GPUs).
-DEFAULT_GPUS_PER_NODE = 8
-# Where gpus_per_node() looks, in order: torchrun's per-node process count, then the
-# Primus launcher's GPUS_PER_NODE.
-GPUS_PER_NODE_ENV = ("LOCAL_WORLD_SIZE", "GPUS_PER_NODE")
 # suggest_layout's search space: EP a power of two up to 256, PP up to 8 (TP is 1 or a node).
 EP_CANDIDATES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
 PP_CANDIDATES = (1, 2, 4, 8)
-
-
-def gpus_per_node(default=DEFAULT_GPUS_PER_NODE, warn=None) -> int:
-    """GPUs per node: the first of ``$LOCAL_WORLD_SIZE``, ``$GPUS_PER_NODE`` that is a
-    positive int, else ``default``. The one reader for the Muse Spark patches (the DeepEP
-    node-span check and the memory-check layout hint). A set but malformed value is
-    skipped; ``warn`` (if given) is called with a message naming it."""
-    for name in GPUS_PER_NODE_ENV:
-        raw = os.environ.get(name, "").strip()
-        if not raw:
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value > 0:
-            return value
-        if warn is not None:
-            warn(f"ignoring {name}={raw!r} (not a positive int)")
-    return int(default)
 
 
 _HALF = {"bf16", "fp16", "bfloat16", "float16", "half"}
@@ -107,6 +122,17 @@ def expert_ffn_size(a) -> int:
     return int(v or 0)
 
 
+def expert_mlp_matrices(a) -> int:
+    """Weight matrices per expert MLP: 3 (gate, up, down) for a gated (SwiGLU) MLP, 2 (up,
+    down) otherwise. Read from ``swiglu`` (Megatron args) or ``gated_linear_unit``
+    (TransformerConfig); with neither set it is the Muse Spark expert, SwiGLU
+    (``muse_spark_base.yaml``: ``swiglu: true``)."""
+    gated = getattr(a, "swiglu", None)
+    if gated is None:
+        gated = getattr(a, "gated_linear_unit", None)
+    return 2 if gated is False else 3
+
+
 def param_parts(a, vocab_size=None):
     """Parameter counts by placement from Megatron args ``a`` (linear weights only).
 
@@ -117,18 +143,22 @@ def param_parts(a, vocab_size=None):
     projection each) and ``mtp_expert`` (their experts).
 
     The latent projections are counted only when ``moe_latent_size`` is set, the output
-    gate only with ``attention_output_gate``.
+    gate only with ``attention_output_gate``. An expert has :func:`expert_mlp_matrices`
+    weight matrices (3 for SwiGLU).
     """
     h = int(a.hidden_size)
     kv = int(a.kv_channels or h // a.num_attention_heads)
     q = int(a.num_attention_heads) * kv
-    g = int(a.num_query_groups or a.num_attention_heads) * kv
+    # Like core_transformer_config_from_args: without GQA, K/V have one group per head
+    # (Megatron's num_query_groups default is ignored then). Unset (None) keeps GQA's count.
+    groups = a.num_query_groups if getattr(a, "group_query_attention", None) is not False else None
+    g = int(groups or a.num_attention_heads) * kv
     gate = q if getattr(a, "attention_output_gate", False) else 0
     attn = h * (q + gate + 2 * g) + q * h
     latent_size = getattr(a, "moe_latent_size", None)
     n_exp = int(a.num_experts or 0)
     layer_dense = attn + (2 * h * int(latent_size) if latent_size and n_exp else 0) + n_exp * h
-    layer_expert = n_exp * 3 * int(latent_size or h) * expert_ffn_size(a)
+    layer_expert = n_exp * expert_mlp_matrices(a) * int(latent_size or h) * expert_ffn_size(a)
     vocab = vocab_size_of(a, vocab_size)
     untied = getattr(a, "untie_embeddings_and_output_weights", False)  # Megatron default: tied
     n_mtp = int(getattr(a, "mtp_num_layers", None) or 0)
@@ -218,23 +248,59 @@ def _dtype_bytes(v):
     return 2 if name in _HALF else 4
 
 
+def _weight_and_grad_bytes(a):
+    """(weight, main grad) bytes per parameter, as Megatron's ``validate_args`` and DDP set them.
+
+    Weight: ``params_dtype`` when set; else 2 under ``--bf16`` / ``--fp16`` or when neither
+    flag is present (the Muse Spark default, bf16); 4 when neither flag is true and at
+    least one is explicitly False (fp32 params). Main grad: a 16-bit ``main_grads_dtype`` is 2 bytes; fp32 params keep
+    fp32 grads; ``--bf16`` keeps fp32 grads unless ``grad_reduce_in_bf16`` (``validate_args``
+    turns ``accumulate_allreduce_grads_in_fp32`` on for bf16, so its argparse default False
+    is not read here); ``--fp16`` keeps fp32 grads only with
+    ``accumulate_allreduce_grads_in_fp32``; with no precision flag the main grad is fp32
+    unless ``accumulate_allreduce_grads_in_fp32`` is explicitly False.
+    """
+    bf16, fp16 = getattr(a, "bf16", None), getattr(a, "fp16", None)
+    params_dtype = getattr(a, "params_dtype", None)
+    if params_dtype is not None:
+        weight = _dtype_bytes(params_dtype)
+    elif bf16 or fp16 or (bf16 is None and fp16 is None):
+        weight = 2  # 16-bit params; no precision args = the Muse Spark default, bf16
+    else:
+        weight = 4  # neither flag true, at least one explicitly False: fp32 params
+    if _dtype_bytes(getattr(a, "main_grads_dtype", None)) < 4:
+        return weight, 2
+    if weight == 4:
+        return weight, 4
+    if fp16 and not bf16:
+        return weight, 4 if getattr(a, "accumulate_allreduce_grads_in_fp32", False) else 2
+    if bf16:
+        return weight, 2 if getattr(a, "grad_reduce_in_bf16", False) else 4
+    # 16-bit params with no flag to say which: the fp32-accumulation flag, if any
+    return weight, 2 if getattr(a, "accumulate_allreduce_grads_in_fp32", None) is False else 4
+
+
 def _bytes_per_param(a):
     """(weight + main grad, optimizer states on the GPU) bytes per parameter from the args.
 
-    Defaults (Adam, fp32 master / moments / main grads, no offload): (2 + 4, 12).
+    Defaults (bf16, Adam, fp32 master / moments / main grads, no offload): (2 + 4, 12).
+    fp32 params keep no separate master copy: (4 + 4, 8).
     """
-    grad = _dtype_bytes(getattr(a, "main_grads_dtype", None))
-    if getattr(a, "accumulate_allreduce_grads_in_fp32", None) is False and grad == 4:
-        grad = 2  # grads kept in the bf16 param dtype
+    weight, grad = _weight_and_grad_bytes(a)
     pa = bool(getattr(a, "use_precision_aware_optimizer", False))
-    master = _dtype_bytes(getattr(a, "main_params_dtype", None)) if pa else 4
-    m1 = _dtype_bytes(getattr(a, "exp_avg_dtype", None)) if pa else 4
-    m2 = _dtype_bytes(getattr(a, "exp_avg_sq_dtype", None)) if pa else 4
+
+    def state_bytes(key):  # fp32 (unset) unless the precision-aware optimizer sets a dtype
+        return _dtype_bytes(getattr(a, key, None) if pa else None)
+
+    # fp32 params are their own main copy (FP32Optimizer, or the distributed optimizer's
+    # fp32 shard groups): no separate master weights
+    master = 0 if weight == 4 else state_bytes("main_params_dtype")
+    m1, m2 = state_bytes("exp_avg_dtype"), state_bytes("exp_avg_sq_dtype")
     opt = master + (m1 if getattr(a, "optimizer", "adam") == "sgd" else m1 + m2)
     if getattr(a, "optimizer_cpu_offload", False):
         frac = getattr(a, "optimizer_offload_fraction", None)
         opt *= 1.0 - float(1.0 if frac is None else frac)
-    return 2 + grad, float(opt)
+    return weight + grad, float(opt)
 
 
 def state_bytes_per_gpu(a, world_size, vocab_size=None, parts=None, per_param=None, stage_params=None):
@@ -253,8 +319,8 @@ def state_bytes_per_gpu(a, world_size, vocab_size=None, parts=None, per_param=No
     pp = int(getattr(a, "pipeline_model_parallel_size", 1) or 1)
     ep = int(getattr(a, "expert_model_parallel_size", 1) or 1)
     etp = int(getattr(a, "expert_tensor_parallel_size", 1) or 1)
-    if parts is None:
-        parts = param_parts(a, vocab_size)
+    if stage_params is None:
+        stage_params = _stage_params(a, parts if parts is not None else param_parts(a, vocab_size))
     # Megatron shards dense optimizer state / FSDP over the data-parallel group *with*
     # context parallel (get_data_parallel_group(with_context_parallel=True)): DP x CP.
     dp = max(1, world_size // (tp * pp))
@@ -264,10 +330,7 @@ def state_bytes_per_gpu(a, world_size, vocab_size=None, parts=None, per_param=No
     wg, opt = per_param if per_param is not None else _bytes_per_param(a)  # FSDP shards weights + grads too
     per_dense = (wg / dp if fsdp else wg) + (opt / dp if dist_opt else opt)
     per_expert = (wg / edp if fsdp else wg) + (opt / edp if dist_opt else opt)
-    return max(
-        dense / tp * per_dense + expert / (ep * etp) * per_expert
-        for dense, expert in (stage_params if stage_params is not None else _stage_params(a, parts))
-    )
+    return max(dense / tp * per_dense + expert / (ep * etp) * per_expert for dense, expert in stage_params)
 
 
 def suggest_layout(
@@ -319,11 +382,67 @@ def suggest_layout(
                     if per_stage % ep:
                         continue
                     b.expert_model_parallel_size = ep
-                    need = state_bytes_per_gpu(
-                        b, world, parts=parts, per_param=per_param, stage_params=stage_p[pp]
-                    )
-                    if need <= limit and (best is None or (tp, need) < (best[1]["tp"], best[0])):
-                        best = (need, dict(nodes=nodes, world=world, tp=tp, pp=pp, ep=ep))
+                    need = state_bytes_per_gpu(b, world, per_param=per_param, stage_params=stage_p[pp])
+                    if need <= limit and (best is None or (tp, need) < best[:2]):
+                        best = (tp, need, dict(nodes=nodes, world=world, tp=tp, pp=pp, ep=ep))
         if best:
-            return {**best[1], "bytes": best[0]}
+            return {**best[2], "bytes": best[1]}
     return None
+
+
+# ---- the fail-fast check (the before_train patch and the conversion hook call it) ----
+GiB = 2**30  # bytes per GiB, for messages
+SKIP_ARG = "muse_spark_skip_memory_check"  # config / args key (muse_spark_base.yaml: false)
+
+
+# Alternative to more GPUs: run the cut example config, or cut the model on the CLI.
+CUT_MODEL_HINT = (
+    "cut the model (muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml, or --num_layers / --num_experts)"
+)
+
+
+def _layout_hint(args, total_bytes, n_gpus_per_node):
+    """A layout for these GPUs, from :func:`suggest_layout` (states within ``DEFAULT_BUDGET``
+    of a GPU)."""
+    hint = suggest_layout(args, total_bytes, n_gpus_per_node=n_gpus_per_node)
+    if hint is None:
+        return (
+            f"No layout up to {DEFAULT_MAX_NODES} nodes keeps the model states under "
+            f"{DEFAULT_BUDGET:.0%} of a GPU: {CUT_MODEL_HINT}"
+        )
+    return (
+        f"Use more GPUs, e.g. >= {hint['nodes']} node(s) of {n_gpus_per_node} such GPUs: PRIMUS_TP={hint['tp']} "
+        f"PRIMUS_PP={hint['pp']} PRIMUS_EP={hint['ep']} (~{hint['bytes'] / GiB:.0f} GiB of states per GPU; "
+        f"GBS a multiple of DP; recompute helps the activations), or {CUT_MODEL_HINT}"
+    )
+
+
+def skip_requested(args) -> bool:
+    """``args.muse_spark_skip_memory_check`` as a bool (:func:`model_types.bool_flag`); an
+    unrecognised value (e.g. a typo) raises ValueError."""
+    value = getattr(
+        args, "muse_spark_skip_memory_check", False
+    )  # SKIP_ARG; a literal for the config-schema scan
+    return bool_flag(value, SKIP_ARG)
+
+
+def required_state_bytes_or_raise(args, world_size, total_bytes, n_gpus_per_node=DEFAULT_GPUS_PER_NODE):
+    """The estimated weights + grads + optimizer states per GPU (bytes); raise ValueError when
+    they exceed ``RAISE_FRACTION`` of ``total_bytes``. The rest is a fixed headroom for the
+    TE GEMM workspaces, RCCL buffers and activations, which are not estimated, so only
+    layouts that cannot fit raise.
+
+    Uses ``args.padded_vocab_size`` (the allocated embedding / head rows). The layout in
+    the error is computed for this GPU's memory (MI300X and MI355X differ).
+    """
+    need = state_bytes_per_gpu(args, world_size)
+    if need > RAISE_FRACTION * total_bytes:
+        raise ValueError(
+            f"Muse Spark: weights + grads + optimizer states need ~{need / GiB:.0f} GiB per GPU "
+            f"(num_layers={args.num_layers}, num_experts={args.num_experts}, "
+            f"TP={args.tensor_model_parallel_size}, PP={args.pipeline_model_parallel_size}, "
+            f"EP={args.expert_model_parallel_size}, world={world_size}) but a GPU has "
+            f"{total_bytes / GiB:.0f} GiB (limit {RAISE_FRACTION:.0%} of it). {_layout_hint(args, total_bytes, n_gpus_per_node)}. "
+            f"{SKIP_ARG}: true skips this check."
+        )
+    return need

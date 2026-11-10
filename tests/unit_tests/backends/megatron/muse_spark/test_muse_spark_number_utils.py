@@ -4,15 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""primus.core.utils.number_utils.parse_positive_int (standard library only)."""
+"""primus.backends.megatron.core.models.muse_spark.number_utils.parse_positive_int (standard library only)."""
 
 import importlib.util
+from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 
 import pytest
 
-_PATH = Path(__file__).resolve().parents[4] / "primus/core/utils/number_utils.py"
+_PATH = (
+    Path(__file__).resolve().parents[5] / "primus/backends/megatron/core/models/muse_spark/number_utils.py"
+)
 _spec = importlib.util.spec_from_file_location("_number_utils", _PATH)
 number_utils = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(number_utils)
@@ -43,7 +46,8 @@ def parse(value):
     ],
 )
 def test_accepted(value, expected):
-    assert parse(value) == expected
+    got = parse(value)
+    assert got == expected and type(got) is int
 
 
 @pytest.mark.parametrize(
@@ -54,7 +58,9 @@ def test_accepted(value, expected):
         0,
         -1,
         "0",
+        "-0",
         "-5",
+        "-1e3",
         512.5,
         float("nan"),
         float("inf"),
@@ -97,6 +103,7 @@ def test_numpy_scalars():
     np = pytest.importorskip("numpy")
     assert parse(np.int64(512)) == 512
     assert parse(np.float32(512.0)) == 512
+    assert type(parse(np.float32(512.0))) is int and type(parse(np.int64(512))) is int
     with pytest.raises(ValueError):
         parse(np.bool_(True))
 
@@ -139,3 +146,62 @@ def test_decimal_is_parsed_like_its_string():
 def test_a_bad_default_is_not_returned(default):
     with pytest.raises(ValueError, match="default"):
         number_utils.parse_positive_int(None, default, "ERR")
+    # also when a value is set: the default is checked on every call
+    with pytest.raises(ValueError, match="default"):
+        number_utils.parse_positive_int("7", default, "ERR")
+
+
+@pytest.mark.parametrize("value", ["0" * 70 + "512", "0_" * 35 + "512"])
+def test_a_long_text_is_rejected_by_the_length_limit_alone(value):
+    # valid and in range apart from its length: only _MAX_TEXT_LEN rejects it
+    assert len(value) > number_utils._MAX_TEXT_LEN
+    assert number_utils._NUMBER.fullmatch(value)
+    with pytest.raises(ValueError, match="bad value"):
+        parse(value)
+
+
+@pytest.mark.parametrize("value", [" " * 1000 + "512", " " * 100 + "5", "\u00a0512", "512\u3000"])
+def test_whitespace_counts_toward_the_limit_and_must_be_ascii(value):
+    # the length limit applies to the raw value, and only ASCII spaces are stripped
+    with pytest.raises(ValueError, match="bad value"):
+        number_utils.parse_int(value, "bad value")
+    assert number_utils.parse_int(" \t512\n", "bad value") == 512
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (0, 0),
+        (-5, -5),
+        ("-1e3", -1000),
+        ("-0", 0),
+        ("0.0", 0),
+        (-512.0, -512),
+        ("+7", 7),
+        (Fraction(-4, 1), -4),
+        # a zero is 0 whatever its exponent (Decimal("0e30").adjusted() is 30)
+        ("0e30", 0),
+        ("0E+19", 0),
+        ("-0e400", 0),
+        ("0.000e999999", 0),
+        (Decimal("0E+20"), 0),
+    ],
+)
+def test_parse_int_takes_any_sign(value, expected):
+    got = number_utils.parse_int(value, "bad value")
+    assert got == expected and type(got) is int
+
+
+@pytest.mark.parametrize(
+    "value", [None, "", True, "-+5", "--1", "-0.5", -0.5, Fraction(-3, 2), "-1e400", -(2**63), "nan"]
+)
+def test_parse_int_rejects(value):
+    with pytest.raises(ValueError, match="bad value"):
+        number_utils.parse_int(value, "bad value")
+
+
+@pytest.mark.parametrize("value", ["\u00a0", " \u00a0 ", "\u2003"])
+def test_non_ascii_whitespace_is_not_blank(value):
+    # a non-ASCII space (e.g. NBSP) is an error, not the default
+    with pytest.raises(ValueError, match="^bad value$"):
+        parse(value)

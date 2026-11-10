@@ -6,7 +6,8 @@
 
 """Converter entry point named after the HF ``text_config.model_type`` (``muse_spark_text``).
 
-The posttrain conversion hook imports this module for the Muse Spark family. The
+The posttrain conversion hook imports this module for the Muse Spark family (registered
+in ``native_families/muse_spark.py``). The
 implementation is in ``native_loader_muse_spark``; this module only names the API.
 """
 
@@ -19,7 +20,12 @@ from primus.backends.megatron.checkpoint.native_loader_muse_spark import (
     check_convert_size,
     convert,
     derive_megatron_fields,
+    hook_before_convert,
+    hook_dtype_from_config,
+    hook_prepare,
+    hook_wait,
     vocab_size_with_padding,
+    wait_for_hook_conversion,
 )
 
 __all__ = [
@@ -31,5 +37,10 @@ __all__ = [
     "check_convert_size",
     "convert",
     "derive_megatron_fields",
+    "hook_before_convert",
+    "hook_dtype_from_config",
+    "hook_prepare",
+    "hook_wait",
     "vocab_size_with_padding",
+    "wait_for_hook_conversion",
 ]

@@ -1,20 +1,21 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B_proxy-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:muse_Spark_Open_816B_A42B_proxy-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# Muse-Spark-Open-816B-A42B proxy (the first 4 layers of the
-# released model, same weights layout) BF16 pretraining on MI355X: ONE node, 8 GPUs
-# (EP 8 over the 256 experts; set PRIMUS_EP to change it).
+# Muse-Spark-Open-816B-A42B proxy (4 layers with the released model's per-layer sizes)
+# BF16 pretraining on MI355X from random weights (load: null; the HF -> Megatron converter
+# is not used): ONE node, 8 GPUs (EP 8 over the 256 experts; set PRIMUS_EP to change it).
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
-#   HF -> Megatron weights: primus/backends/megatron/checkpoint/native_loader_muse_spark.py.
+#   To start from the released weights, use the SFT example (muse_Spark_Open_816B_A42B-BF16-sft.yaml),
+#   whose posttrain hook converts them.
 
 modules:
   pre_trainer:
     framework: megatron
     config: pre_trainer.yaml
 
-    model: ${PRIMUS_MODEL:muse_spark_816B_A42B_proxy}.yaml
+    model: ${PRIMUS_MODEL:muse_Spark_Open_816B_A42B_proxy}.yaml
     overrides:
       # log
       wandb_project: "Primus_Muse_Spark"
@@ -83,15 +84,18 @@ modules:
 
       # Primus-Turbo, as the deepseek_v3 / qwen3_235B siblings: grouped GEMM experts
       # (MuseSparkTurboGroupedMLP keeps the per-expert post_expert_norm) and the DeepEP
-      # dispatcher (it moves the latent-width tokens; fp32 router probs come from the base
-      # config). Turbo attention stays off: Muse Spark uses TE attention with a sliding
-      # window. Turbo RMSNorm is not used (the Muse Spark norms are eager fp32).
+      # dispatcher, opt-in as in the full pretrain and SFT recipes
+      # (PRIMUS_USE_TURBO_DEEPEP=true; it moves the latent-width tokens; fp32 router probs
+      # come from the base config). Turbo attention stays off: Muse Spark uses TE attention
+      # with a sliding window. Turbo RMSNorm is not used (the Muse Spark norms are their own fp32 modules).
       # DeepEP needs expert TP x EP > 1: at EP == 1 it is turned off (alltoall) with a
-      # warning. With use_megatron_fsdp the Turbo grouped GEMM falls back to TE's (warning). PRIMUS_ENABLE_TURBO=false gives the plain TE grouped GEMM + alltoall path.
+      # warning.
+      # With use_megatron_fsdp the Turbo grouped GEMM falls back to TE's (warning).
+      # PRIMUS_ENABLE_TURBO=false gives the plain TE grouped GEMM + alltoall path.
       enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:true}
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
-      use_turbo_deepep: true
+      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}
       # DeepEP CUs: <= 32 is required when EP >= 16 (internode dispatch / combine)
       turbo_deepep_num_cu: 32
       turbo_deepep_use_comm_stream: false
@@ -102,7 +106,7 @@ modules:
       # expert_bias: it drops Muse Spark's e_score_correction_bias from the top-k choice and
       # routes unlike HF, so the megatron.args.muse_spark_no_fused_router patch rejects them.
 
-      # Megatron's fused vocab-parallel CE stays off (plain CE on the soft-capped logits).
-      # Primus's chunked linear+CE (enable_fused_linear_ce: true / FUSED_LINEAR_CE=1) is
-      # allowed: it applies the soft-cap per chunk through MuseSparkModel._scale_logits.
-      cross_entropy_loss_fusion: false
+      # Fused CE (TE): GPTModel applies _scale_logits (the soft-cap) before the loss,
+      # so the fused loss sees the capped logits.
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te

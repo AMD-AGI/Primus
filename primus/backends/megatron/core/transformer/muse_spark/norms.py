@@ -22,6 +22,20 @@ The module signatures follow Megatron's norm builders
 import torch
 from torch import nn
 
+from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
+from primus.backends.megatron.core.transformer.muse_spark.centered_norm import (
+    centered_rms_norm,
+    weighted_rms_norm,
+)
+from primus.backends.megatron.core.transformer.muse_spark.post_expert_norm import (
+    fused_rms_norm_available,
+    post_expert_norm_probs,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
+    eager_rms_norm,
+    fused_rms_norm,
+)
+
 _HALF = (torch.bfloat16, torch.float16)
 
 
@@ -63,14 +77,29 @@ def _norm_size(config, hidden_size) -> int:
 
 
 def _rms(x: torch.Tensor, eps: float) -> torch.Tensor:
-    return x * torch.pow(x.pow(2).mean(-1, keepdim=True) + eps, -0.5)
+    """The fp32 weightless RMSNorm of ``x``, rounded once to ``x.dtype``: Primus's shared
+    eager RMSNorm (``eager_rms_norm``, the reference of the fused kernel ``fused_rms_norm``)."""
+    return eager_rms_norm(x, None, eps=eps, mid_cast=False, out_dtype=x.dtype)
+
+
+def weightless_rms(x: torch.Tensor, eps: float, fused: bool = True) -> torch.Tensor:
+    """``rms_norm(x.float()).type_as(x)`` over the last dim, no weight.
+
+    ``fused``: Primus's shared RMSNorm (``fused_rms_norm``: one Triton forward and one
+    backward kernel on GPU, ``PRIMUS_RMSNORM_TRITON``; the eager reference elsewhere).
+    Otherwise the eager reference (``eager_rms_norm``): the same fp32 math."""
+    if fused:
+        return fused_rms_norm(x, None, eps=eps, mid_cast=False, out_dtype=x.dtype)
+    return _rms(x, eps)
 
 
 class MuseSparkRMSNorm(nn.RMSNorm):
     """RMSNorm in fp32; ``with_scale=False`` gives the weightless norm.
 
-    Built on ``torch.nn.RMSNorm`` (the norm behind Megatron's ``WrappedTorchNorm``);
-    the forward keeps the HF fp32 math.
+    Built on ``torch.nn.RMSNorm`` (the norm behind Megatron's ``WrappedTorchNorm``); the
+    forward is Primus's shared RMSNorm (``fused_rms_norm``) with the HF fp32 math: normalize
+    and scale in fp32, round once to the input dtype. The weightless norm runs the eager fp32
+    reference instead when ``muse_spark_fused_attn_norm`` is false.
     """
 
     def __init__(
@@ -79,56 +108,77 @@ class MuseSparkRMSNorm(nn.RMSNorm):
         super().__init__(_norm_size(config, hidden_size), eps=float(eps), elementwise_affine=with_scale)
         if with_scale and getattr(config, "sequence_parallel", False):
             setattr(self.weight, "sequence_parallel", True)
+        # the weightless norms (attention post_norm, Q / K norm) run fused on GPU
+        self.fused = config_flag(config, "muse_spark_fused_attn_norm", True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = _rms(x.float(), self.eps)
-        if self.weight is not None:  # elementwise_affine (with_scale)
-            out = out * self.weight.float()
-        return out.type_as(x)
+        if self.weight is None:
+            return weightless_rms(x, self.eps, self.fused)
+        # with_scale: fp32 norm * fp32 weight, rounded once to x.dtype (deterministic in
+        # deterministic mode, see weighted_rms_norm)
+        return weighted_rms_norm(x, self.weight.float(), self.eps)
 
 
-class MuseSparkCenteredRMSNorm(nn.RMSNorm):
-    """``norm(x) * (1 + w)`` in fp32 (w init 0)."""
+class _ZeroInitRMSNorm(nn.RMSNorm):
+    """The shared part of the Muse Spark ``(1 + w)`` norms: a zero-initialised weight of the
+    config's width, marked sequence-parallel when the config is, and ``self.fused`` from the
+    subclass's ``FUSED_FLAG`` (default on). A subclass sets ``FUSED_FLAG``, its default eps
+    and ``forward``."""
+
+    FUSED_FLAG: str = None
 
     def __init__(self, config=None, hidden_size: int = None, eps: float = 1e-5, **_kw):
         # nn.RMSNorm.__init__ calls reset_parameters (below), which zeroes the weight.
         super().__init__(_norm_size(config, hidden_size), eps=float(eps), elementwise_affine=True)
         if getattr(config, "sequence_parallel", False):
             setattr(self.weight, "sequence_parallel", True)
+        # the fused kernel on GPU; the flag set to false runs the eager formula
+        self.fused = config_flag(config, self.FUSED_FLAG, True)
 
     def reset_parameters(self) -> None:
-        if getattr(self, "weight", None) is not None:
-            torch.nn.init.zeros_(self.weight)
+        # elementwise_affine=True: nn.RMSNorm sets self.weight before it calls this
+        torch.nn.init.zeros_(self.weight)
+
+
+class MuseSparkCenteredRMSNorm(_ZeroInitRMSNorm):
+    """``norm(x) * (1 + w)`` in fp32 (w init 0), rounded once to the input dtype.
+
+    It runs Primus's shared fused RMSNorm with the weight ``1 + w`` (``centered_norm.py``):
+    Triton forward and backward on GPU, the eager formula elsewhere
+    (``muse_spark_fused_centered_norm: false``).
+    """
+
+    FUSED_FLAG = "muse_spark_fused_centered_norm"
+
+    def __init__(self, config=None, hidden_size: int = None, eps: float = 1e-5, **kw):
+        super().__init__(config, hidden_size, eps, **kw)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Cast before adding 1: ``1 + w`` in bf16 would round the small learned w.
-        out = _rms(x.float(), self.eps) * (1.0 + self.weight.float())
-        return out.type_as(x)
+        return centered_rms_norm(x, self.weight, self.eps, self.fused)
 
 
-class MuseSparkInputScaledRMSNorm(nn.RMSNorm):
-    """``norm(round(x * (1 + w)))``: scale first, round to the input dtype, then normalize."""
+class MuseSparkInputScaledRMSNorm(_ZeroInitRMSNorm):
+    """``norm(round(x * (1 + w)))``: scale first, round to the input dtype, then normalize.
 
-    def __init__(
-        self, config=None, hidden_size: int = None, eps: float = 1e-8, sequence_parallel=None, **_kw
-    ):
-        # nn.RMSNorm.__init__ calls reset_parameters (below), which zeroes the weight.
-        super().__init__(_norm_size(config, hidden_size), eps=float(eps), elementwise_affine=True)
-        sp = (
-            sequence_parallel
-            if sequence_parallel is not None
-            else getattr(config, "sequence_parallel", False)
-        )
-        if sp:
-            setattr(self.weight, "sequence_parallel", True)
+    On GPU this runs as the fused post-expert-norm Triton kernel without routing probs
+    (``probs=None``: the norm alone), one forward and one backward kernel instead of about six
+    eager ones with fp32 copies of the activation. ``config.muse_spark_fused_post_expert_norm =
+    False`` keeps the eager formula; CPU and widths above ``MAX_FUSED_HIDDEN`` always use it.
+    """
 
-    def reset_parameters(self) -> None:
-        if getattr(self, "weight", None) is not None:
-            torch.nn.init.zeros_(self.weight)
+    FUSED_FLAG = "muse_spark_fused_post_expert_norm"
+
+    def __init__(self, config=None, hidden_size: int = None, eps: float = 1e-8, **kw):
+        super().__init__(config, hidden_size, eps, **kw)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.fused and x.dim() >= 1:
+            rows = x.reshape(-1, x.shape[-1])
+            if fused_rms_norm_available(rows):
+                # probs=None: the norm alone (no ones tensor, no prob load, no dp in backward)
+                return post_expert_norm_probs(rows, self.weight, None, self.eps).view(x.shape)
         out = (x.float() * (1.0 + self.weight.float())).type_as(x)
-        return _rms(out.float(), self.eps).type_as(x)
+        return _rms(out, self.eps)  # out is in x.dtype; _rms normalizes in fp32 and rounds back
 
 
 def residual_gate_coeffs(gate: torch.Tensor, temperature: float, eps: float = 1e-3):
@@ -146,7 +196,7 @@ class MuseSparkGatedResidual(nn.Module):
     RMSNorm (after the MoE), both with ``post_norm_eps``. ``gate`` is kept fp32.
     """
 
-    # FSDP2: the fp32 ``gate`` is sharded as its own fp32 group (Primus's FSDP2 wrapper).
+    # FSDP2: the fp32 ``gate`` is sharded as its own fp32 group (muse_spark/fsdp2_islands.py).
     fsdp2_dtype_island = True
 
     def __init__(self, config, kind: str = "attn"):

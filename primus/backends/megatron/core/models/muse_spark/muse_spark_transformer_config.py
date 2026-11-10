@@ -38,11 +38,14 @@ from typing import Optional
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
+    HF_OUTPUT_MULTIPLIER,
     check_all_moe_layers,
     hf_sliding_window,
     normalize_layer_pattern,
     parse_window_size,
 )
+from primus.backends.megatron.core.models.muse_spark.model_types import bool_flag
+from primus.backends.megatron.core.models.muse_spark.number_utils import parse_softcap
 
 __all__ = ["MuseSparkTransformerConfig"]
 
@@ -56,6 +59,21 @@ class MuseSparkTransformerConfig(TransformerConfig):
     post_norm_eps: float = 1e-8
     # residual gate: beta = sigmoid(g / T), alpha = sqrt(clamp(sigmoid(-g / T) * (1 + beta), 1e-3)).
     residual_gate_temperature: float = 0.3
+    muse_spark_fused_post_expert_norm: bool = True
+    """Run the per-expert ``post_expert_norm`` and the routing-prob multiply, and the
+    input-scaled post-MoE norm, as one Triton kernel per pass
+    (``transformer/muse_spark/post_expert_norm.py``; same roundings as the eager path).
+    False runs the eager norm modules and the multiply. Parsed strictly (``bool_flag``)."""
+    muse_spark_fused_attn_norm: bool = True
+    """Run the weightless attention norms (the post-attention ``post_norm``, the per-head
+    ``o_norm`` and the Q / K norms) with the same Triton kernel (zero weight, unit probs).
+    False runs the eager fp32 formula. Independent of ``muse_spark_fused_post_expert_norm``.
+    Parsed strictly (``bool_flag``)."""
+    muse_spark_fused_centered_norm: bool = True
+    """Run the centered ``(1 + w)`` RMSNorms (the input / pre-MLP norms and the MoE
+    ``pre_expert_norm``) as one Triton forward and one backward kernel
+    (``transformer/muse_spark/centered_norm.py``). False runs the eager fp32 formula.
+    Parsed strictly (``bool_flag``)."""
     residual_gate_init_value: float = -0.9
     """Initial value of every residual gate ``g`` for a run from random weights (a checkpoint
     load overwrites it). HF initialises ``g ~ N(0, 0.02)`` (beta = 0.5, alpha = 0.87): the
@@ -68,11 +86,10 @@ class MuseSparkTransformerConfig(TransformerConfig):
     # queries are multiplied by this after the weightless QK-norm (HF ``qk_scale_factor``).
     qk_scale_factor: float = 5.4730064863875
     # router logits are computed in fp32 and multiplied by this before the sigmoid.
-    # HF ``output_multiplier`` = 0.1767... = 1/sqrt(32); HF applies the one value to the
-    # router logits and to the lm-head logits.
-    moe_router_output_multiplier: float = 0.17677669529663687
-    # the lm-head logits: T * tanh(logits * mult / T) (HF ``output_multiplier``, 1/sqrt(32)).
-    output_logit_multiplier: float = 0.17677669529663687
+    moe_router_output_multiplier: float = HF_OUTPUT_MULTIPLIER
+    # lm-head logits: cap * tanh(logits * output_logit_multiplier / cap), with
+    # cap = final_logit_softcapping (HF ``output_multiplier`` and ``final_logit_softcapping``).
+    output_logit_multiplier: float = HF_OUTPUT_MULTIPLIER
     final_logit_softcapping: Optional[float] = 20.0
     # weightless RMSNorm after the embedding lookup (eps = layernorm_epsilon).
     embedding_norm: bool = True
@@ -87,13 +104,6 @@ class MuseSparkTransformerConfig(TransformerConfig):
     to False to pass a TE window directly.
     """
 
-    muse_audio_config: Optional[dict] = None
-    """The waveform audio encoder settings (``audio_encoder.audio_config_from_hf``); None
-    builds no audio tower (text-only training). The native converter sets it from the HF
-    ``audio_config``, so a converted checkpoint carries the tower."""
-    audio_token_id: int = 200038
-    """HF ``audio_token_id``: the placeholder positions that the audio features replace."""
-
     derived_softmax_scale: Optional[float] = None
     """The ``softmax_scale`` that ``__post_init__`` derived (``qk_scale_factor /
     sqrt(kv_channels)``); internal. When ``softmax_scale`` still equals it, the scale is
@@ -101,6 +111,18 @@ class MuseSparkTransformerConfig(TransformerConfig):
     the new scale and never a stale one."""
 
     def __post_init__(self):
+        # Muse Spark booleans may come from env-driven yaml as strings: strict parse
+        # ("false" is False, a typo raises) before any module reads them.
+        for name in (
+            "muse_spark_fused_post_expert_norm",
+            "muse_spark_fused_attn_norm",
+            "muse_spark_fused_centered_norm",
+            "embedding_norm",
+            "window_size_is_hf_sliding_window",
+        ):
+            # unset (None / blank) takes the field's own default, not False
+            default = self.__dataclass_fields__[name].default
+            setattr(self, name, bool_flag(getattr(self, name), name, default))
         # Yaml / CLI may give the per-layer patterns as Python-list strings, or the
         # full pattern for a depth-reduced proxy: parse (no eval) and cut to num_layers.
         for name in ("window_attn_skip_freq", "no_rope_freq"):
@@ -126,8 +148,12 @@ class MuseSparkTransformerConfig(TransformerConfig):
                 "set qk_scale_factor instead (leave softmax_scale unset)"
             )
         self.derived_softmax_scale = self.softmax_scale
-        if self.residual_gate_temperature <= 0:
-            raise ValueError(f"residual_gate_temperature must be > 0, got {self.residual_gate_temperature}")
+        # an inf / NaN / negative / bool cap would make every logit NaN or flip its sign
+        self.final_logit_softcapping = parse_softcap(self.final_logit_softcapping)
+        t = self.residual_gate_temperature
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not (math.isfinite(t) and t > 0):
+            # NaN makes every gate NaN; inf freezes every gate at 0.5
+            raise ValueError(f"residual_gate_temperature must be a finite number > 0, got {t!r}")
         if self.num_moe_experts and self.moe_latent_size is None:
             raise ValueError("Muse Spark MoE needs moe_latent_size (HF moe_hidden_size)")
         if (self.expert_tensor_parallel_size or 1) > 1:
@@ -143,3 +169,9 @@ class MuseSparkTransformerConfig(TransformerConfig):
         if self.mtp_num_layers:
             raise ValueError("Muse Spark has no MTP layers; the MTP loss would skip the logit soft-cap")
         check_all_moe_layers(self.moe_layer_freq, self.num_layers)
+        if self.moe_shared_expert_intermediate_size:
+            # the layer spec builds no shared expert (HF num_shared_experts=0): refuse, not drop
+            raise ValueError(
+                "Muse Spark has no shared expert (HF num_shared_experts=0); "
+                f"moe_shared_expert_intermediate_size must be unset, got {self.moe_shared_expert_intermediate_size}"
+            )

@@ -40,7 +40,8 @@ def get_model_provider(model_type="gpt"):
 
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
-            'kimi_k3', 'glm5_next', 'muse_spark', or 'zaya1'. Defaults to 'gpt'.
+            'kimi_k3', 'glm5_next', 'zaya1' or 'inkling'. Defaults to 'gpt'.
+            Also accepted: 'muse_spark' (the Muse Spark text decoder).
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -60,6 +61,16 @@ def get_model_provider(model_type="gpt"):
             kimi_k3_module.kimi_k3_builder,
         )
 
+    # Primus-owned: Inkling (Thinking Machines) text backbone
+    if model_type == "inkling":
+        inkling_module = importlib.import_module(
+            "primus.backends.megatron.core.models.inkling.inkling_builders"
+        )
+        log_rank_0(
+            f"[Primus][MegatronCompat] Loaded Inkling model_provider + builder from {inkling_module.__name__}"
+        )
+        return partial(inkling_module.model_provider, inkling_module.inkling_builder)
+
     # Primus-owned: GLM-5.3 (KDA + DSA hybrid with mHC)
     if model_type == "glm5_next":
         glm5_next_module = importlib.import_module(
@@ -74,9 +85,8 @@ def get_model_provider(model_type="gpt"):
             glm5_next_module.glm5_next_builder,
         )
 
-    # Primus-owned: Muse Spark text decoder (gated residuals, latent MoE). A string literal,
-    # like the other families, so no other model imports the Muse Spark package (and the
-    # config schema check sees the branch); a test keeps it equal to layer_patterns.MODEL_TYPE.
+    # Primus-owned: Muse Spark text decoder (gated residuals, latent MoE). The package is
+    # imported only inside this branch; a test keeps the literal equal to layer_patterns.MODEL_TYPE.
     if model_type == "muse_spark":
         muse_spark_module = importlib.import_module(
             "primus.backends.megatron.core.models.muse_spark.muse_spark_builders"

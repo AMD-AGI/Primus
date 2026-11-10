@@ -7,15 +7,52 @@
 """Muse Spark under torch FSDP2 (``use_torch_fsdp2``).
 
 Muse Spark keeps the router weight and the residual gates fp32 in a bf16 model.
-Primus's FSDP2 wrapper shards them as their own fp32 groups; this patch lets
-Megatron's fp16 optimizer take their gradients (FSDP2 sets ``.grad``, not ``main_grad``).
+``megatron.muse_spark.fsdp2_dtype_islands`` shards them as their own fp32 groups
+(``muse_spark/fsdp2_islands.py``, through the ``fully_shard`` Primus's FSDP2 wrapper calls);
+``megatron.muse_spark.fsdp2_fp32_param_grads`` lets Megatron's fp16 optimizer take their
+gradients (FSDP2 sets ``.grad``, not ``main_grad``). Both run for Muse Spark with
+``use_torch_fsdp2`` only.
 """
 
 from primus.backends.megatron.core.models.muse_spark.model_types import (
+    bool_flag,
     is_muse_spark_model_type,
 )
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+
+def _is_muse_spark_fsdp2(ctx: PatchContext) -> bool:
+    # bool_flag: an env-substituted "false" / "0" is off (bool("false") would be True)
+    return is_muse_spark_model_type(ctx) and bool_flag(
+        getattr(get_args(ctx), "use_torch_fsdp2", False), "use_torch_fsdp2"
+    )
+
+
+@register_patch(
+    "megatron.muse_spark.fsdp2_dtype_islands",
+    backend="megatron",
+    phase="before_train",
+    description="FSDP2: shard Muse Spark's fp32 router / residual gates as their own fp32 groups.",
+    condition=_is_muse_spark_fsdp2,
+)
+def patch_muse_spark_fsdp2_dtype_islands(ctx: PatchContext):
+    """Wrap the ``fully_shard`` of Primus's FSDP2 wrapper module (a module global it
+    calls per wrapped submodule and on the root) with ``with_dtype_islands``."""
+    del ctx
+    from primus.backends.megatron.core.distributed import (
+        torch_fully_sharded_data_parallel as fsdp_mod,
+    )
+    from primus.backends.megatron.core.models.muse_spark.fsdp2_islands import (
+        with_dtype_islands,
+    )
+
+    if getattr(fsdp_mod.fully_shard, "_primus_dtype_islands", False):
+        return
+    fsdp_mod.fully_shard = with_dtype_islands(fsdp_mod.fully_shard)
+    log_rank_0(
+        "[Patch:megatron.muse_spark.fsdp2_dtype_islands] FSDP2 shards the fp32 islands as their own groups"
+    )
 
 
 @register_patch(
@@ -26,7 +63,7 @@ from primus.core.utils.module_utils import log_rank_0
         "FSDP2: fp32 params kept inside a bf16 model (no main_grad) hand their sharded .grad "
         "to Float16OptimizerWithFloat16Params."
     ),
-    condition=lambda ctx: is_muse_spark_model_type(ctx) and getattr(get_args(ctx), "use_torch_fsdp2", False),
+    condition=_is_muse_spark_fsdp2,
 )
 def patch_muse_spark_fsdp2_fp32_param_grads(ctx: PatchContext):
     """``Float16OptimizerWithFloat16Params`` reads ``main_grad`` from its fp32 params.

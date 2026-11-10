@@ -30,28 +30,30 @@ layers when the last layer is MoE); dense layers have no router.
 Norms / gates are elementwise and not counted (as upstream).
 """
 
+from primus.backends.megatron.core.models.muse_spark.layer_freq import moe_layer_pattern
 from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
-    causal_visible_pairs,
     hf_sliding_window,
     normalize_layer_pattern,
     parse_window_size,
 )
 from primus.backends.megatron.core.models.muse_spark.model_types import (
+    bool_flag,
     is_muse_spark_model_type,
 )
-from primus.backends.megatron.patches.kimi_k3_flops_patches import moe_layer_pattern
+
+# DeepSeek-V4's causal pair count (swa_window keys per query, <= 0 or >= S: full causal):
+# the same formula, reused rather than copied
+from primus.backends.megatron.patches.deepseek_v4_flops_patches import (
+    _local_visible_pairs as causal_visible_pairs_of,
+)
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _TAG = "[Patch:megatron.muse_spark.flops_reporting]"
 
 
-def causal_mean_keys(seq_length: int, window) -> float:
-    """Mean keys per query of causal attention limited to ``window`` keys (None: full).
-
-    The visible-pair count (:func:`causal_visible_pairs`) divided by the sequence length."""
-    s = int(seq_length)
-    return causal_visible_pairs(s, window) / s
+# 2 FLOPs per multiply-add x 3 (forward, plus the two backward GEMMs): Megatron's factor
+FWD_BWD_FLOPS_PER_MAC = 6.0
 
 
 def sliding_window_keys(args):
@@ -62,7 +64,10 @@ def sliding_window_keys(args):
     ws = getattr(args, "window_size", None)
     if isinstance(ws, int) and not isinstance(ws, bool):
         ws = (ws, 0)
-    if getattr(args, "window_size_is_hf_sliding_window", True):
+    # strict boolean as the config parses it ("false" / "0" from env-driven yaml are False)
+    if bool_flag(
+        getattr(args, "window_size_is_hf_sliding_window", None), "window_size_is_hf_sliding_window", True
+    ):
         return hf_sliding_window(ws)
     ws = parse_window_size(ws)
     return None if ws is None or ws[0] == -1 else ws[0] + 1
@@ -106,9 +111,12 @@ def num_moe_layers(args) -> int:
     if not int(getattr(args, "num_experts", None) or 0):
         return 0
     n_layers = int(args.num_layers)
-    # unset is upstream's default 1 (every layer); the int / list rules and the length check
-    # are the shared moe_layer_pattern (kimi_k3_flops_patches), not a second copy
-    freq = getattr(args, "moe_layer_freq", None) or 1
+    # unset (None) is upstream's default 1 (every layer); an int <= 0 is a ValueError (no
+    # layout Megatron builds); a string is parsed by normalize_layer_pattern (an empty one is an error). The
+    # int / list rules and the length check are the shared moe_layer_pattern (muse_spark/layer_freq.py).
+    freq = getattr(args, "moe_layer_freq", None)
+    if freq is None:
+        freq = 1
     if isinstance(freq, str):  # yaml / CLI pattern string, e.g. "([1]*3+[0])"
         freq = normalize_layer_pattern(freq, n_layers, "moe_layer_freq")
     pattern = [int(bool(v)) for v in moe_layer_pattern(freq, n_layers)]
@@ -116,40 +124,78 @@ def num_moe_layers(args) -> int:
     return sum(pattern) + (pattern[-1] * mtp if pattern else 0)
 
 
-def muse_spark_flops_delta_per_sample(args) -> float:
-    """The per-sample correction that :func:`muse_spark_flops_delta` scales by the batch and
-    adds to Megatron's count (not the model's total FLOPs): the sliding-window attention
-    adjustment plus the router term. It depends only on the run's fixed args (seq_length,
-    window, layer pattern, experts), so the wrapper computes it once."""
-    s = int(args.seq_length)
-    q = int(args.kv_channels) * int(args.num_attention_heads)
-    w = sliding_window_keys(args)
-    attn = 0.0
-    if w is not None and w < s:
-        n_sliding = num_sliding_layers(args)
-        # upstream per layer per token: 6 * q * 2 * (S/2); scale its S/2 by the key ratio
-        ratio = causal_mean_keys(s, w) / causal_mean_keys(s, None)
-        attn = 6.0 * q * 2.0 * (s / 2.0) * (ratio - 1.0) * n_sliding
-    router = 6.0 * int(args.hidden_size) * int(args.num_experts or 0) * num_moe_layers(args)
-    return s * (attn + router)
+class MuseSparkFlopsTerms:
+    """The fixed parts of the Muse Spark FLOPs correction for a run (read once from ``args``):
+    the attention width ``q``, the sliding window (keys), the number of sliding layers and the
+    router FLOPs per token."""
+
+    def __init__(self, args):
+        self.seq_length = int(args.seq_length)
+        self.q = int(args.kv_channels) * int(args.num_attention_heads)
+        self.window = sliding_window_keys(args)
+        self.n_sliding = num_sliding_layers(args) if self.window is not None else 0
+        self.router_per_token = (
+            FWD_BWD_FLOPS_PER_MAC * int(args.hidden_size) * int(args.num_experts or 0) * num_moe_layers(args)
+        )
+
+    def sliding_attention_delta(self, seqlen_squared_sum: float, doc_length: float) -> float:
+        """The sliding-window correction for attention that upstream charges as
+        ``FWD_BWD_FLOPS_PER_MAC * q * seqlen_squared_sum`` per layer (full causal), for
+        documents of length ``doc_length``: 0 when they fit in the window."""
+        w, L = self.window, int(round(doc_length))
+        if self.n_sliding == 0 or L <= w:  # n_sliding is 0 when there is no window
+            return 0.0
+        ratio = causal_visible_pairs_of(w, L) / causal_visible_pairs_of(0, L)  # = mean_keys ratio
+        return FWD_BWD_FLOPS_PER_MAC * self.q * seqlen_squared_sum * (ratio - 1.0) * self.n_sliding
 
 
-def muse_spark_flops_delta(args, batch_size, per_sample=None) -> float:
+def muse_spark_flops_delta_per_sample(args, terms=None) -> float:
+    """The per-sample correction for a padded (BSHD) batch of ``args.seq_length`` tokens per
+    sample: the sliding-window attention adjustment plus the router term (``terms``: the
+    run's :class:`MuseSparkFlopsTerms`, built from ``args`` when not given)."""
+    t = terms or MuseSparkFlopsTerms(args)
+    s = t.seq_length
+    return t.sliding_attention_delta(s * s, s) + t.router_per_token * s
+
+
+def muse_spark_flops_delta(
+    args,
+    batch_size,
+    per_sample=None,
+    seqlen_squared_sum_in_batch=None,
+    total_real_tokens_in_batch=None,
+    terms=None,
+) -> float:
     """FLOPs to add to Megatron's count: a sliding-window correction (negative: upstream
     counts full causal attention on the sliding layers) plus the router GEMM that
-    upstream omits (positive). The sign of the sum depends on which term is larger;
-    with no window (or a window >= seq_length) it is the router term alone.
-    ``per_sample``: a cached :func:`muse_spark_flops_delta_per_sample` value for ``args``."""
-    if per_sample is None:
-        per_sample = muse_spark_flops_delta_per_sample(args)
-    return batch_size * per_sample
+    upstream omits (positive).
+
+    BSHD (no packed stats): ``batch_size`` samples of ``seq_length`` tokens (``per_sample``: a
+    cached :func:`muse_spark_flops_delta_per_sample`). Packed / THD batches (Megatron-core 0.19
+    passes ``seqlen_squared_sum_in_batch = sum L_i^2`` and ``total_real_tokens_in_batch = sum L_i``):
+    the router term is per real token, and the window correction is taken at the
+    length-weighted mean document length ``sum L_i^2 / sum L_i`` (exact for equal-length
+    documents and for BSHD; 0 when the documents fit in the window, where upstream's count is
+    already right). Only the two sums reach the FLOPs count, so per-document lengths are not
+    available here."""
+    if seqlen_squared_sum_in_batch is None and total_real_tokens_in_batch is None:
+        if per_sample is None:
+            per_sample = muse_spark_flops_delta_per_sample(args, terms)
+        return batch_size * per_sample
+    t = terms or MuseSparkFlopsTerms(args)
+    s = t.seq_length
+    tokens = float(total_real_tokens_in_batch if total_real_tokens_in_batch is not None else batch_size * s)
+    sq = float(seqlen_squared_sum_in_batch if seqlen_squared_sum_in_batch is not None else batch_size * s * s)
+    doc_length = sq / tokens if tokens > 0 else 0.0
+    return t.sliding_attention_delta(sq, doc_length) + t.router_per_token * tokens
 
 
 def make_muse_spark_num_floating_point_operations(original_fn):
     """Wrap ``original_fn`` so every call adds :func:`muse_spark_flops_delta`.
 
-    The per-sample delta depends only on the run's fixed args, so it is computed on the
-    first call for an ``args`` object and reused (``batch_size`` is the only per-call input).
+    The fixed terms depend only on the run's args, so they are computed on the first call for
+    an ``args`` object and reused; ``batch_size`` and Megatron-core 0.19's packed-batch sums
+    (``seqlen_squared_sum_in_batch`` / ``total_real_tokens_in_batch``) are the per-call inputs.
 
     No ``args.model_type`` check per call: Megatron's ``get_model`` replaces
     ``args.model_type`` with the ``ModelType`` enum before ``train()`` counts FLOPs,
@@ -159,13 +205,24 @@ def make_muse_spark_num_floating_point_operations(original_fn):
     ``deepseek_v4_flops_patches``. Install this wrapper only for Muse Spark runs.
     """
 
-    cache = {}  # id(args) -> (args, per-sample delta): the fixed args are read once per run
+    cached_args, cached_per_sample, cached_terms = None, None, None  # the fixed args, read once per run
 
-    def wrapped(args, batch_size):
-        hit = cache.get(id(args))
-        if hit is None or hit[0] is not args:
-            hit = cache[id(args)] = (args, muse_spark_flops_delta_per_sample(args))
-        return original_fn(args, batch_size) + muse_spark_flops_delta(args, batch_size, hit[1])
+    def wrapped(
+        args, batch_size, seqlen_squared_sum_in_batch=None, total_real_tokens_in_batch=None, **kwargs
+    ):
+        nonlocal cached_args, cached_per_sample, cached_terms
+        if cached_args is not args:
+            cached_terms = MuseSparkFlopsTerms(args)
+            cached_args, cached_per_sample = args, muse_spark_flops_delta_per_sample(args, cached_terms)
+        packed = {}
+        if seqlen_squared_sum_in_batch is not None:
+            packed["seqlen_squared_sum_in_batch"] = seqlen_squared_sum_in_batch
+        if total_real_tokens_in_batch is not None:
+            packed["total_real_tokens_in_batch"] = total_real_tokens_in_batch
+        base = original_fn(args, batch_size, **packed, **kwargs)
+        return base + muse_spark_flops_delta(
+            args, batch_size, per_sample=cached_per_sample, terms=cached_terms, **packed
+        )
 
     wrapped.__wrapped__ = original_fn
     wrapped._muse_spark_flops_patched = True

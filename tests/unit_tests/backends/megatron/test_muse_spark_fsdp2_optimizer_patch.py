@@ -89,9 +89,11 @@ def test_grads_reach_the_optimizer(mesh, patched):
 
 def test_plain_param_without_main_grad_still_fails(mesh, patched):
     plain = torch.nn.Parameter(torch.zeros(4))  # not FSDP2: the patch must not hide it
-    opt = SimpleNamespace(float16_groups=[], fp32_from_float16_groups=[], fp32_from_fp32_groups=[[plain]])
+    groups = [[plain]]
+    opt = SimpleNamespace(float16_groups=[], fp32_from_float16_groups=[], fp32_from_fp32_groups=groups)
     with pytest.raises(AttributeError, match="main_grad"):
         patched(opt)
+    assert opt.fp32_from_fp32_groups is groups  # restored on the error path too (finally)
 
 
 def test_patch_is_idempotent(patched):
@@ -107,14 +109,22 @@ def test_patch_is_idempotent(patched):
         ("muse_spark_text", True, False),  # the HF text_config model_type is not a Primus one
         ("muse_spark", False, False),
         ("muse_spark", None, False),  # flag absent
+        ("muse_spark", "false", False),  # env-substituted strings: bool("false") would be True
+        ("muse_spark", "0", False),
+        ("muse_spark", "true", True),
         ("gpt", True, False),
     ],
 )
-def test_registered_condition_needs_muse_spark_and_fsdp2(model_type, fsdp2, expected):
+@pytest.mark.parametrize(
+    "name", ["megatron.muse_spark.fsdp2_fp32_param_grads", "megatron.muse_spark.fsdp2_dtype_islands"]
+)
+def test_registered_condition_needs_muse_spark_and_fsdp2(name, model_type, fsdp2, expected):
+    # both FSDP2 patches share one condition (muse_spark_fsdp2_patches._is_muse_spark_fsdp2)
+    from primus.backends.megatron.patches import muse_spark_fsdp2_patches  # noqa: F401
     from primus.core.patches import PatchContext
     from primus.core.patches.patch_registry import PatchRegistry
 
-    registered = PatchRegistry.get("megatron.muse_spark.fsdp2_fp32_param_grads")
+    registered = PatchRegistry.get(name)
     assert registered is not None and registered.phase == "before_train"
     params = SimpleNamespace(model_type=model_type)
     if fsdp2 is not None:

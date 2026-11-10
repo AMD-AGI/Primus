@@ -24,7 +24,8 @@ Megatron's ``MoELayer`` with ``moe_latent_size`` already has
   ``PrimusGroupedMLP`` variant (see :func:`muse_spark_expert_cls`): experts that apply ``post_expert_norm``
   to each expert output and then the routing prob (the backend applies the prob
   inside the activation, before ``linear_fc2``; the norm makes that order wrong
-  here). Expert TP is not supported: ``post_expert_norm`` needs full expert output
+  here). With ``muse_spark_fused_post_expert_norm`` (default on) the norm and the prob run as
+  one Triton kernel per pass (:mod:`.post_expert_norm`), with the same roundings. Expert TP is not supported: ``post_expert_norm`` needs full expert output
   rows, so ``MuseSparkTransformerConfig`` requires ``expert_tensor_parallel_size == 1``.
 """
 
@@ -39,14 +40,52 @@ from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.moe_utils import (
     maybe_skip_or_early_return_by_cudagraph,
 )
-from megatron.core.transformer.moe.router import TopKRouter
 
+from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
 from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkCenteredRMSNorm,
     MuseSparkInputScaledRMSNorm,
     apply_keeping_fp32,
 )
+from primus.backends.megatron.core.transformer.muse_spark.post_expert_norm import (
+    post_expert_norm_probs,
+)
 from primus.core.utils.module_utils import log_rank_0
+
+try:
+    # Subclass Primus's router explicitly: ``topk_router_patches`` rebinds
+    # ``megatron.core.transformer.moe.router.TopKRouter`` only in training (build_args), so
+    # an import-time ``TopKRouter`` binding would depend on the import order.
+    from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
+except ImportError:  # pragma: no cover - no Triton (CPU-only install)
+    PrimusTopKRouter = None
+    from megatron.core.transformer.moe.router import TopKRouter as _RouterBase
+else:
+    _RouterBase = PrimusTopKRouter
+
+# The args PrimusTopKRouter.routing reads. Megatron-only arg sets (the converter's
+# build_margs, the logprob-parity harness, unit tests) lack them; there the upstream
+# TopKRouter.routing runs.
+_PRIMUS_ROUTER_ARGS = (
+    "router_logit_softcapping",
+    "enable_primus_turbo",
+    "moe_use_fused_router_with_aux_score",
+    "moe_router_force_load_balancing",
+)
+
+
+def _primus_router_args_present():
+    """True / False once the global args exist (they do not change after that), None while
+    they are unset (the caller must not cache that answer)."""
+    try:
+        from megatron.training import global_vars
+    except ImportError:  # pragma: no cover
+        return False
+    args = getattr(global_vars, "_GLOBAL_ARGS", None)
+    if args is None:
+        return None
+    return all(hasattr(args, k) for k in _PRIMUS_ROUTER_ARGS)
+
 
 __all__ = [
     "MuseSparkTopKRouter",
@@ -61,18 +100,19 @@ __all__ = [
 class _FSDP2LayoutBase(MegatronModule):
     """Empty leading base: lets FSDP2's ``fully_shard`` swap the router's class.
 
-    Megatron's ``Router(ABC, MegatronModule)`` lists ``ABC`` first, so CPython rejects
+    Megatron's ``Router(ABC, MegatronModule)`` (a base of ``PrimusTopKRouter``) lists
+    ``ABC`` first, so CPython rejects
     ``module.__class__ = FSDP<Router>`` ("object layout differs"). With this base first,
     the class's layout base is ``nn.Module`` like FSDPModule's. The MRO is unchanged otherwise.
     """
 
 
-class MuseSparkTopKRouter(_FSDP2LayoutBase, TopKRouter):
+class MuseSparkTopKRouter(_FSDP2LayoutBase, _RouterBase):
     """Sigmoid top-k router; logits = linear * ``moe_router_output_multiplier``, computed in
     fp32 (fp64 when ``moe_router_dtype == 'fp64'``; bf16 / unset run fp32, like HF).
 
     The router weight is stored fp32 through Float16Module (HF keeps ``mlp.gate.weight`` fp32).
-    Under FSDP2 the fp32 weight is its own parameter group (dtype islands in Primus's wrapper).
+    Under FSDP2 the fp32 weight is its own parameter group (muse_spark/fsdp2_islands.py).
     """
 
     fsdp2_dtype_island = True
@@ -89,6 +129,21 @@ class MuseSparkTopKRouter(_FSDP2LayoutBase, TopKRouter):
         # exists yet. ``.to(device)`` / ``.cuda()`` / fp32 casts do not clone.
         return apply_keeping_fp32(self, "weight", fn, super()._apply, *args, **kwargs)
 
+    def routing(self, logits: torch.Tensor, **kwargs):
+        # PrimusTopKRouter.routing under Primus's args (training); upstream routing when the
+        # global args are Megatron-only or unset (converter / parity harness / unit tests).
+        # Decided once per router after the global args exist (cached on the instance);
+        # while they are unset the answer is not cached.
+        use_primus = self.__dict__.get("_use_primus_routing")
+        if use_primus is None:
+            use_primus = _primus_router_args_present()
+            if use_primus is not None:
+                self.__dict__["_use_primus_routing"] = use_primus
+        if PrimusTopKRouter is not None and not use_primus:
+            # skip PrimusTopKRouter in the MRO: the upstream TopKRouter.routing
+            return super(PrimusTopKRouter, self).routing(logits, **kwargs)
+        return super().routing(logits, **kwargs)
+
     def _router_dtype(self):
         # HF computes the router logits in fp32; fp64 is honoured, bf16 / None fall back to fp32.
         return torch.float64 if getattr(self.config, "moe_router_dtype", None) == "fp64" else torch.float32
@@ -97,12 +152,33 @@ class MuseSparkTopKRouter(_FSDP2LayoutBase, TopKRouter):
         # HF: F.linear(x.float(), W.float()) * output_multiplier. Plain torch GEMM
         # (TE's general_gemm finds no algorithm on ROCm for bf16 input x fp32 weight).
         dtype = self._router_dtype()
-        weight = self.weight
-        if weight.device != input.device:  # use_cpu_initialization before the model moves
-            weight = weight.to(device=input.device)
+        # one .to (a no-op when device and dtype match); a temporary copy under
+        # use_cpu_initialization before the caller moves the model (the parameter is kept)
+        weight = self.weight.to(device=input.device, dtype=dtype)
         bias = None if self.bias is None else self.bias.to(device=input.device, dtype=dtype)
-        logits = torch.nn.functional.linear(input.to(dtype), weight.to(dtype), bias)
+        logits = torch.nn.functional.linear(input.to(dtype), weight, bias)
         return logits * self.output_multiplier
+
+
+def _run_forward_pre_hooks(module, x):
+    """Run ``module``'s forward pre-hooks as ``nn.Module.__call__`` would, without forward.
+
+    The hooks' results are dropped (the kernel takes ``x`` and the weight as they are).
+    ``register_forward_pre_hook(..., with_kwargs=True)`` hooks (e.g. accelerate / harness
+    hooks) are called with the kwargs dict, as torch does: their ids are listed in
+    ``_forward_pre_hooks_with_kwargs``. The shared ``dense_mlp_fp4_patches`` helper calls
+    every hook without kwargs, so it is not reused here."""
+    args, kwargs = (x,), {}
+    with_kwargs = getattr(module, "_forward_pre_hooks_with_kwargs", {})
+    for hook_id, hook in module._forward_pre_hooks.items():
+        if hook_id in with_kwargs:
+            result = hook(module, args, kwargs)
+            if result is not None:
+                args, kwargs = result
+        else:
+            result = hook(module, args)
+            if result is not None:
+                args = result if isinstance(result, tuple) else (result,)
 
 
 class _PostExpertNormMixin:
@@ -121,6 +197,14 @@ class _PostExpertNormMixin:
         if output_bias is not None:
             raise RuntimeError("Muse Spark experts have no bias (add_bias_linear must be False)")
         norm = self._muse_post_expert_norm
+        if norm is not None and config_flag(self.config, "muse_spark_fused_post_expert_norm", True):
+            # The kernel reads norm.weight without norm.forward, so run the norm's
+            # forward-pre-hooks first: with overlap_param_gather the DDP hook waits there
+            # for the weight's all-gather (as PrimusGroupedMLP does for fc1 / fc2).
+            _run_forward_pre_hooks(norm, output)
+            # one Triton kernel per pass, same roundings as below (eager on CPU)
+            output = post_expert_norm_probs(output, norm.weight, permuted_probs, norm.eps)
+            return output, output_bias
         if norm is not None:
             output = norm(output)
         # HF rounding order (MuseSparkTextExperts): the norm output is rounded to the model
@@ -252,18 +336,20 @@ def _sync_stacked_expert_weights(module, state_dict, prefix, *args, **kwargs):
         if linear is None or not hasattr(linear, "weights"):
             continue
         p = f"{prefix}{name}."
+        stacked_key = f"{p}weights"
         per = [f"{p}weight{i}" for i in range(linear.num_gemms)]
         # the weight{i} views exist only after the first forward / state_dict()
         views = all(f"weight{i}" in linear._parameters for i in range(linear.num_gemms))
-        if f"{p}weights" in state_dict:
-            stacked = state_dict[f"{p}weights"]
-            for i, k in enumerate(per):
-                if views:
+        if stacked_key in state_dict:
+            stacked = state_dict[stacked_key]
+            if views:
+                for i, k in enumerate(per):
                     state_dict.setdefault(k, stacked[i])
-                else:
+            else:
+                for k in per:
                     state_dict.pop(k, None)
         elif all(k in state_dict for k in per):
-            state_dict[f"{p}weights"] = torch.stack([state_dict[k] for k in per])
+            state_dict[stacked_key] = torch.stack([state_dict[k] for k in per])
             if not views:
                 for k in per:
                     state_dict.pop(k)
@@ -306,7 +392,8 @@ class _LatentWidthConfig:
 
     def __getattr__(self, name):
         # Only reached when normal lookup fails. ``_base`` itself must not recurse: it is
-        # unset on an instance made without __init__ (copy / pickle build it that way).
+        # unset only on an instance made with ``object.__new__`` (no __init__); copy and
+        # pickle go through __reduce__ below, which calls __init__.
         if name == "_base":
             raise AttributeError(name)
         return getattr(self._base, name)
@@ -334,12 +421,13 @@ def latent_dispatch_config(config):
 
 
 def _turbo_deepep_dispatcher_cls():
-    """``PrimusTurboDeepEPTokenDispatcher``, or None when Primus-Turbo is not importable."""
+    """``PrimusTurboDeepEPTokenDispatcher``, or None when Primus-Turbo is not importable
+    (not installed, or its import queries a GPU and finds none: RuntimeError)."""
     try:
         from primus.backends.megatron.core.extensions.primus_turbo import (
             PrimusTurboDeepEPTokenDispatcher,
         )
-    except ImportError:
+    except (ImportError, RuntimeError):
         return None
     return PrimusTurboDeepEPTokenDispatcher
 

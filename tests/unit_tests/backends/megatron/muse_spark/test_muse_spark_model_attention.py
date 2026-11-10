@@ -46,10 +46,53 @@ def test_softcap_logits_matches_the_formula():
     assert got.abs().max() > CAP - 1e-6  # and saturates at it
 
 
-@pytest.mark.parametrize("cap", [None, 0, 0.0])
+def test_softcap_logits_keeps_the_input_and_its_gradient():
+    # the in-place div_ / tanh_ work on the x * m temporary: the input is unchanged and
+    # the gradient is the out-of-place formula's
+    x = torch.randn(4, 7, dtype=torch.float64) * 300
+    x0 = x.clone()
+    a, b = x.clone().requires_grad_(), x.clone().requires_grad_()
+    g = torch.randn(4, 7, dtype=torch.float64)
+    msm.softcap_logits(a, MULT, CAP).backward(g)
+    (CAP * torch.tanh(b * MULT / CAP)).backward(g)
+    torch.testing.assert_close(a.grad, b.grad, rtol=0, atol=0)
+    assert torch.equal(a.detach(), x0)
+
+
+@pytest.mark.parametrize("cap", [None, 0, 0.0, "0", "0.0"])
 def test_softcap_logits_without_a_cap_only_scales(cap):
     x = torch.randn(3, 5, dtype=torch.float64)
     torch.testing.assert_close(msm.softcap_logits(x, MULT, cap), x * MULT, rtol=0, atol=0)
+
+
+def test_softcap_logits_accepts_a_numeric_string_cap():
+    # a quoted yaml value ("20") caps like the float, no TypeError in forward
+    x = torch.linspace(-500.0, 500.0, 11, dtype=torch.float64)
+    torch.testing.assert_close(msm.softcap_logits(x, MULT, "20"), msm.softcap_logits(x, MULT, CAP))
+    assert msm.softcap_value("20") == 20.0 and msm.softcap_value("0") is None
+    assert msm.softcap_value(None) is None
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("nan"), -5.0, "-20", True, "abc", 10**400])
+def test_softcap_value_rejects_a_bad_cap(bad):
+    # inf gives NaN logits, a negative cap flips every logit's sign, a bool is no cap value
+    with pytest.raises(ValueError, match="final_logit_softcapping"):
+        msm.softcap_value(bad)
+    with pytest.raises(ValueError, match="final_logit_softcapping"):
+        msm.softcap_logits(torch.ones(2), MULT, bad)
+
+
+def test_softcap_value_rejects_a_numpy_bool_and_normalizes_negative_zero():
+    np = pytest.importorskip("numpy")
+    with pytest.raises(ValueError, match="final_logit_softcapping"):
+        msm.softcap_value(np.True_)
+    from primus.backends.megatron.core.models.muse_spark.number_utils import (
+        parse_softcap,
+    )
+
+    v = parse_softcap("-0")
+    assert v == 0.0 and math.copysign(1.0, v) == 1.0
+    assert msm.softcap_value("-0") is None
 
 
 def _model(mup=False, cap=CAP, mult=MULT):
@@ -181,6 +224,7 @@ def _attn(hn, eps):
     a = object.__new__(MuseSparkSelfAttention)
     a.hidden_size_per_attention_head = hn
     a.o_norm_eps = eps
+    a.o_norm_fused = True  # the CPU tensors here take the eager path anyway
     return a
 
 
@@ -204,12 +248,22 @@ def test_output_gate_is_per_head_rms_then_sigmoid_gate(dtype):
 
 def test_output_gate_uses_o_norm_eps_and_head_size():
     hn = 4
-    x = torch.full((1, 1, 2 * hn), 1e-3, dtype=torch.float64)
+    # two heads at very different scales, and no constant run inside head 0: a wrong head
+    # size (a split inside a head, or the whole row) changes the RMS of the result
+    head0 = 1e-3 * torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float64)
+    head1 = torch.full((hn,), 5.0, dtype=torch.float64)
+    x = torch.cat([head0, head1]).view(1, 1, 2 * hn)
     gate = torch.zeros_like(x)  # sigmoid(0) = 1/2
     for eps in (1e-6, 1.0):
-        got = _attn(hn, eps)._apply_output_gate(x, gate)
-        expected = 0.5 * 1e-3 / math.sqrt(1e-6 + eps)
-        torch.testing.assert_close(got, torch.full_like(x, expected))
+        got = _attn(hn, eps)._apply_output_gate(x, gate).view(2 * hn)
+        want0 = 0.5 * head0 / math.sqrt(float((head0**2).mean()) + eps)
+        want1 = 0.5 * head1 / math.sqrt(25.0 + eps)
+        torch.testing.assert_close(got[:hn], want0)  # head 0 alone
+        torch.testing.assert_close(got[hn:], want1)  # head 1 alone
+    # with a small eps, another head size (a split inside a head, or the whole row) differs
+    got = _attn(hn, 1e-6)._apply_output_gate(x, gate)
+    for wrong in (hn // 2, 2 * hn):
+        assert not torch.allclose(_attn(wrong, 1e-6)._apply_output_gate(x, gate), got)
 
 
 def test_output_gate_calls_megatron_gate_with_the_normed_input(monkeypatch):

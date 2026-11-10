@@ -15,10 +15,6 @@
 * The untied output logits become
   ``final_logit_softcapping * tanh(logits * output_logit_multiplier / final_logit_softcapping)``
   (only the multiplier when ``final_logit_softcapping`` is 0 / unset).
-* With ``config.muse_audio_config`` set, the first stage has the waveform audio encoder
-  (``audio_tower``). ``forward(..., input_values=, input_values_mask=)`` embeds the tokens
-  with the audio placeholder ids set to 0, then writes the encoder features (after the
-  embedding norm) into the placeholder rows, as HF ``MuseSparkModel.forward`` does.
 
 The decoder layers come from the layer spec (see ``muse_spark_layer_specs``);
 the final norm is the plain weighted RMSNorm set in the block spec.
@@ -30,21 +26,36 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
 )
 from megatron.core.models.gpt.gpt_model import GPTModel
 
-from primus.backends.megatron.core.models.muse_spark.audio_encoder import (
-    MuseSparkAudioEncoder,
-    merge_padded_audio,
-    padded_audio_features,
-)
-from primus.backends.megatron.core.transformer.muse_spark.norms import _rms
+from primus.backends.megatron.core.models.muse_spark.number_utils import parse_softcap
+from primus.backends.megatron.core.transformer.muse_spark.norms import weightless_rms
+from primus.core.utils.module_utils import log_rank_0
 
-__all__ = ["MuseSparkModel", "MuseSparkNormedEmbedding", "softcap_logits"]
+__all__ = ["MuseSparkModel", "MuseSparkNormedEmbedding", "softcap_logits", "softcap_value"]
+
+
+def softcap_value(cap):
+    """``final_logit_softcapping`` as a float, or None for no cap (None, 0 or ``"0"``).
+
+    Yaml / CLI may give the cap as a numeric string (``"20"``): convert it before the truth
+    test, so ``"0"`` disables the cap and ``"20"`` caps at 20.0 (not a TypeError in forward).
+    An inf, NaN, negative or bool cap raises ValueError (``parse_softcap``).
+    """
+    return parse_softcap(cap) or None
+
+
+def _apply_softcap(logits: torch.Tensor, multiplier: float, cap) -> torch.Tensor:
+    """The soft-cap with an already parsed ``cap`` (a float > 0, or None for no cap)."""
+    # HF's order (x * m, then / cap): pre-dividing m / cap rounds differently.
+    # div_ / tanh_ run in place on the x * m copy to avoid extra logit-sized buffers.
+    logits = logits * multiplier
+    if cap is not None:
+        logits = logits.div_(cap).tanh_() * cap
+    return logits
 
 
 def softcap_logits(logits: torch.Tensor, multiplier: float, cap) -> torch.Tensor:
-    logits = logits * multiplier
-    if cap:
-        logits = torch.tanh(logits / cap) * cap
-    return logits
+    """``cap * tanh(logits * multiplier / cap)``; ``cap`` is parsed (:func:`softcap_value`)."""
+    return _apply_softcap(logits, multiplier, softcap_value(cap))
 
 
 class MuseSparkNormedEmbedding(LanguageModelEmbedding):
@@ -56,7 +67,27 @@ class MuseSparkNormedEmbedding(LanguageModelEmbedding):
 
     def forward(self, *args, **kwargs):
         out = super().forward(*args, **kwargs)
-        return _rms(out.float(), self.muse_embed_norm_eps).type_as(out)
+        return weightless_rms(out, self.muse_embed_norm_eps)
+
+
+def built_module_summary(model) -> str:
+    """The classes of the built Muse Spark pieces (the first local decoder layer), e.g.
+    ``embedding=MuseSparkNormedEmbedding layer=MuseSparkTransformerLayer attention=...``. The trainer test
+    checks this line, so a spec that falls back to Megatron's stock layers is caught."""
+    parts = {"embedding": type(getattr(model, "embedding", None)).__name__}
+    layers = getattr(getattr(model, "decoder", None), "layers", None) or []
+    if layers:
+        layer = layers[0]
+        mlp = getattr(layer, "mlp", None)
+        parts.update(
+            layer=type(layer).__name__,
+            attention=type(getattr(layer, "self_attention", None)).__name__,
+            residual=type(getattr(layer, "mlp_bda", None)).__name__,
+            mlp=type(mlp).__name__,
+            router=type(getattr(mlp, "router", None)).__name__,
+            experts=type(getattr(mlp, "experts", None)).__name__,
+        )
+    return " ".join(f"{k}={v}" for k, v in parts.items())
 
 
 class MuseSparkModel(GPTModel):
@@ -73,48 +104,19 @@ class MuseSparkModel(GPTModel):
                 )
             self.embedding.__class__ = MuseSparkNormedEmbedding
             self.embedding.muse_embed_norm_eps = float(config.layernorm_epsilon)
-        if self.pre_process and getattr(config, "muse_audio_config", None):
-            self.audio_tower = MuseSparkAudioEncoder(config.muse_audio_config)
-
-    def forward(
-        self,
-        input_ids,
-        position_ids,
-        attention_mask,
-        decoder_input=None,
-        *args,
-        input_values=None,
-        input_values_mask=None,
-        **kwargs,
-    ):
-        """GPTModel.forward; with ``input_values`` (``[B, samples]`` waveform) the audio
-        features replace the embeddings at the ``audio_token_id`` positions."""
-        if input_values is not None and self.pre_process:
-            if getattr(self, "audio_tower", None) is None:
-                raise ValueError("Muse Spark: input_values given, but the model has no audio_tower")
-            if decoder_input is not None:
-                raise ValueError("Muse Spark: give input_values or decoder_input, not both")
-            if self.config.sequence_parallel or self.config.context_parallel_size > 1:
-                raise NotImplementedError("Muse Spark audio input with sequence / context parallelism")
-            audio_mask = input_ids == self.config.audio_token_id
-            embeddings = self.embedding(
-                input_ids=input_ids.masked_fill(audio_mask, 0), position_ids=position_ids
-            )
-            # padded features + an on-device gather: no data-dependent shape, no host sync
-            feats, n_tok = padded_audio_features(
-                self.audio_tower, input_values, input_values_mask, float(self.config.layernorm_epsilon)
-            )
-            decoder_input = merge_padded_audio(embeddings, audio_mask, feats, n_tok)
-        return super().forward(input_ids, position_ids, attention_mask, decoder_input, *args, **kwargs)
+        log_rank_0(f"[Primus:MuseSpark] built modules: {built_module_summary(self)}")
 
     def _scale_logits(self, logits: torch.Tensor) -> torch.Tensor:
         # Every loss path calls this: the plain output layer, the fused vocab-parallel cross
         # entropy, and Primus's chunked linear+CE (``enable_fused_linear_ce``), whose
         # _ChunkedLinearCE forward and backward call ``model._scale_logits`` per chunk.
         # So every path gets the capped logits; MTP is rejected by MuseSparkTransformerConfig.
+        # The multiplier and the cap are parsed once per config value (the config already
+        # validated the cap) and reused: this runs per chunk, forward and backward.
         logits = super()._scale_logits(logits)
-        return softcap_logits(
-            logits,
-            float(self.config.output_logit_multiplier),
-            self.config.final_logit_softcapping,
-        )
+        key = (self.config.output_logit_multiplier, self.config.final_logit_softcapping)
+        cached = self.__dict__.get("_muse_logit_scale")
+        if cached is None or cached[0] != key:
+            cached = (key, float(key[0]), softcap_value(key[1]))
+            self.__dict__["_muse_logit_scale"] = cached
+        return _apply_softcap(logits, cached[1], cached[2])

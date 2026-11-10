@@ -9,7 +9,8 @@
 Muse Spark keeps the router weight, ``e_score_correction_bias`` and the residual gates
 fp32 in a bf16 model. ``Float16OptimizerWithFloat16Params.sharded_state_dict`` numbers
 the optimizer params from ``float16_groups`` only, but torch numbers the optimizer
-state over *all* params of every group (fp16 main copies and fp32 params, interleaved).
+state over *all* params of every group (the fp32 main copies of the bf16 params and the
+fp32 params, interleaved).
 With an fp32 param in a group the ids shift and the save fails ("Optimizer shape ...
 does not match model shape ..." or ``KeyError``). This patch maps ids in the
 optimizer's real order; a model with no fp32 params takes the upstream path unchanged.
@@ -51,7 +52,12 @@ def optimizer_order_model_params(optimizer):
 
 
 def fp16_optimizer_sharded_state_dict(self, model_sharded_state_dict, is_loading=False, metadata=None):
-    """``Float16OptimizerWithFloat16Params.sharded_state_dict`` with ids in optimizer order."""
+    """``Float16OptimizerWithFloat16Params.sharded_state_dict`` with ids in optimizer order.
+
+    The same steps as upstream's method (``test_the_copy_calls_every_helper_upstream_calls``
+    fails when upstream gains one): init on load, the id map, the GTP_remat backfill, the
+    fp32 main copies, the common step. Only the id order differs. ``metadata`` is accepted
+    for the signature; upstream's method does not read it either."""
     from megatron.core.dist_checkpointing.optimizer import (
         get_param_id_to_sharded_param_map,
         make_sharded_optimizer_tensor,
@@ -63,6 +69,13 @@ def fp16_optimizer_sharded_state_dict(self, model_sharded_state_dict, is_loading
     state_dict = self.state_dict()
     params, fp16_positions = optimizer_order_model_params(self)
     id_to_sharded_param_map = get_param_id_to_sharded_param_map(model_sharded_state_dict, params)
+    # upstream's GTP_remat backfill (distributed Muon): it indexes params by their position
+    # in chain(groups), so it gets this function's optimizer-order list as one group
+    from megatron.core.optimizer import optimizer as opt_module
+
+    backfill = getattr(opt_module, "_backfill_gtp_sharded_param_map", None)
+    if backfill is not None:  # absent in older Megatron
+        backfill(id_to_sharded_param_map, [params], model_sharded_state_dict)
 
     groups = state_dict["optimizer"]["param_groups"]
     assert len(state_dict["fp32_from_fp16_params"]) == len(groups) == len(fp16_positions)
@@ -133,16 +146,20 @@ def own_param_groups(optimizer):
     groups, start = [], 0
     for group in optimizer.optimizer.param_groups:
         packed = {k: v for k, v in group.items() if k != "params"}
-        packed["params"] = list(range(start, start + len(group["params"])))
-        start += len(group["params"])
+        n = len(group["params"])
+        packed["params"] = list(range(start, start + n))
+        start += n
         groups.append(packed)
     return groups
 
 
-def _complete_optimizer_state(part, optimizer, step):
-    """``part`` (one optimizer's loaded tensors) with ``optimizer``'s own param groups and
-    the step the checkpoint (saved in another layout) shares."""
+def _complete_optimizer_state(part, optimizer, step, grad_scaler=None):
+    """``part`` (one optimizer's loaded tensors) with ``optimizer``'s own param groups, the
+    step the checkpoint (saved in another layout) shares and its ``grad_scaler`` state (the
+    fp16 dynamic loss scale; None: none saved)."""
     part = dict(part)
+    if grad_scaler is not None and part.get("grad_scaler") is None:
+        part["grad_scaler"] = grad_scaler
     inner = dict(part.get("optimizer") or {})
     inner["param_groups"] = own_param_groups(optimizer)
     state = dict(inner.get("state") or {})
@@ -164,15 +181,20 @@ def relayout_chained_optimizer_state(chained, state_dict):
     if n > 1 and named and ints == list(range(n)):
         # saved by one optimizer: its common part sits at the top level
         step = _common_step(state_dict)
+        scaler = state_dict.get("grad_scaler")
         return [
-            _complete_optimizer_state(state_dict[i], opt, step)
+            _complete_optimizer_state(state_dict[i], opt, step, scaler)
             for i, opt in enumerate(chained.chained_optimizers)
         ]
     if n == 1 and ints and "param_groups" not in (state_dict.get("optimizer") or {}):
         # saved by a chain: the common parts sit under 0, 1, ...
         step = next((s for s in (_common_step(state_dict[i]) for i in ints) if s is not None), None)
-        part = {k: v for k, v in state_dict.items() if not isinstance(k, int)}
-        return [_complete_optimizer_state(part, chained.chained_optimizers[0], step)]
+        scalers = (
+            state_dict[i].get("grad_scaler") if isinstance(state_dict[i], dict) else None for i in ints
+        )
+        scaler = next((s for s in scalers if s is not None), None)
+        part = {k: state_dict[k] for k in named}
+        return [_complete_optimizer_state(part, chained.chained_optimizers[0], step, scaler)]
     return None
 
 

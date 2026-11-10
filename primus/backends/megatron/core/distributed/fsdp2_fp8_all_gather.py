@@ -38,8 +38,6 @@ from torch.distributed._tensor import DTensor
 from torch.distributed._tensor.placement_types import Partial, Replicate
 from torch.library import triton_op, wrap_triton
 
-from primus.backends.megatron.core.distributed.fsdp2_dtype_islands import ISLAND_ATTR
-
 _ops_to_preserve_subclass = {
     torch.ops.aten.empty_like.default,
     torch.ops.aten.new_zeros.default,
@@ -540,9 +538,6 @@ def _wrap_fp8_weights_for_all_gather(
     wrapped_count = 0
     for child in module.modules():
         if not (hasattr(child, "_fp8_config") and hasattr(child, "weight")):
-            continue
-        if getattr(child, ISLAND_ATTR, False):
-            # opted-in dtype islands (e.g. an fp32 router) keep their own dtype: no FP8 all-gather
             continue
         w = child.weight
         if w is not None and w.dtype in (torch.bfloat16, torch.float32) and w.requires_grad:

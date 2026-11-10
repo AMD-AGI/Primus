@@ -15,6 +15,7 @@ from primus.backends.megatron.core.models.muse_spark.memory_check import (
     DEFAULT_MAX_NODES,
     RAISE_FRACTION,
     WARN_FRACTION,
+    _bytes_per_param,
     _stage_params,
     param_parts,
     param_split,
@@ -50,6 +51,17 @@ def test_full_model_count_is_816b():
     assert 800e9 < sum(param_split(_a())) < 840e9
 
 
+def test_the_expert_matrix_count_follows_the_gated_mlp_flag():
+    # SwiGLU experts have gate, up and down matrices; a non-gated MLP has up and down
+    from primus.backends.megatron.core.models.muse_spark.memory_check import param_parts
+
+    swiglu = param_parts(_a(swiglu=True))["layer_expert"]
+    assert swiglu == param_parts(_a())["layer_expert"] == 256 * 3 * 4096 * 4096
+    assert param_parts(_a(swiglu=False))["layer_expert"] == swiglu * 2 // 3
+    assert param_parts(_a(gated_linear_unit=False))["layer_expert"] == swiglu * 2 // 3
+    assert param_parts(_a(gated_linear_unit=True))["layer_expert"] == swiglu
+
+
 def test_single_node_defaults_cannot_fit_and_documented_layout_can():
     assert state_bytes_per_gpu(_a(), 8) > 1000 * GIB  # example defaults: TP1 PP1 EP8 on one node
     multi = state_bytes_per_gpu(_a(expert_model_parallel_size=64, pipeline_model_parallel_size=2), 128)
@@ -57,15 +69,17 @@ def test_single_node_defaults_cannot_fit_and_documented_layout_can():
 
 
 def test_gate_sized_runs_pass():
-    # 4 layers, 16 experts, 1 GPU: measured 134 GB max allocated on MI355X (round 2 proxy log)
+    # 4 layers, 16 experts, 1 GPU: ~134 GB max allocated measured on MI355X
     one = state_bytes_per_gpu(_a(num_layers=4, num_experts=16, expert_model_parallel_size=1), 1)
     assert 100 * GIB < one < 150 * GIB
 
 
-def test_fsdp_shards_weights_and_grads():
+@pytest.mark.parametrize("fsdp_flag", ["use_torch_fsdp2", "use_megatron_fsdp"])
+def test_fsdp_shards_weights_and_grads(fsdp_flag):
+    # both FSDP flavours shard weights and grads; either term dropped would over-report
     base = dict(num_layers=4, num_experts=16, expert_model_parallel_size=1, use_distributed_optimizer=False)
     plain = state_bytes_per_gpu(_a(**base), 2)
-    fsdp = state_bytes_per_gpu(_a(**base, use_torch_fsdp2=True), 2)
+    fsdp = state_bytes_per_gpu(_a(**base, **{fsdp_flag: True}), 2)
     assert fsdp < plain / 1.9
 
 
@@ -88,12 +102,20 @@ def test_required_state_bytes_or_raise_raises_with_the_layout_hint():
     )
 
 
-def test_context_parallel_does_not_raise_the_estimate():
-    # the distributed optimizer / FSDP shard dense states over DP x CP (with_context_parallel=True)
+def test_the_distributed_optimizer_shards_states_over_world_over_tp_pp():
+    # the distributed optimizer shards optimizer states over world / (TP x PP) ranks: the
+    # data-parallel group *with* context parallel, so CP ranks share the states too
     base = dict(expert_model_parallel_size=64, pipeline_model_parallel_size=2)
-    cp1 = state_bytes_per_gpu(_a(**base), 128)
-    cp8 = state_bytes_per_gpu(_a(**base, context_parallel_size=8), 128)
-    assert cp8 == cp1
+    dist = [state_bytes_per_gpu(_a(**base), w) for w in (128, 256)]
+    assert dist[1] < dist[0]
+    plain = [state_bytes_per_gpu(_a(**base, use_distributed_optimizer=False), w) for w in (128, 256)]
+    assert plain[1] == plain[0] > dist[0]  # no sharding: the world size does not matter
+    # exact for a dense-only model: TP 1, PP 1, 12 B of Adam states per param split over DP
+    dense = _a(num_experts=0, tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
+    n = sum(param_split(dense))
+    wg, opt = 2 + 4, 12
+    for world in (1, 8, 64):
+        assert abs(state_bytes_per_gpu(dense, world) - n * (wg + opt / world)) < 1e-6 * n
 
 
 def test_uses_the_padded_vocab_from_args():
@@ -116,7 +138,16 @@ def test_missing_expert_ffn_size_does_not_pass_vacuously():
 def test_suggested_layouts_fit_with_room_for_activations():
     for total in (288 * 10**9, 192 * 10**9):
         hint = suggest_layout(_a(), total)
-        assert hint and hint["bytes"] <= DEFAULT_BUDGET * total
+        assert hint is not None
+        # recomputed for the returned layout, not the function's own bound
+        laid_out = _a(
+            tensor_model_parallel_size=hint["tp"],
+            pipeline_model_parallel_size=hint["pp"],
+            expert_model_parallel_size=hint["ep"],
+            expert_tensor_parallel_size=1,
+        )
+        assert hint["bytes"] == state_bytes_per_gpu(laid_out, hint["world"])
+        assert hint["bytes"] <= DEFAULT_BUDGET * total
 
 
 def test_no_phantom_latent_projections():
@@ -164,12 +195,30 @@ def test_optimizer_args_change_the_bytes():
 
 def test_counts_param_keeps_the_result():
     a = _a(expert_model_parallel_size=64, pipeline_model_parallel_size=2)
-    assert state_bytes_per_gpu(a, 128, parts=param_parts(a)) == state_bytes_per_gpu(a, 128)
+    base = state_bytes_per_gpu(a, 128)
+    assert state_bytes_per_gpu(a, 128, parts=param_parts(a)) == base
+    # each precomputed argument is used, not recomputed: doubled counts double the bytes
+    parts = param_parts(a)
+    assert state_bytes_per_gpu(a, 128, parts={k: 2 * v for k, v in parts.items()}) == pytest.approx(2 * base)
+    wg, opt = _bytes_per_param(a)
+    assert state_bytes_per_gpu(a, 128, per_param=(2 * wg, 2 * opt)) == pytest.approx(2 * base)
+    stages = [(2 * d, 2 * e) for d, e in _stage_params(a, parts)]
+    assert state_bytes_per_gpu(a, 128, stage_params=stages) == pytest.approx(2 * base)
 
 
 def test_suggested_tp_follows_gpus_per_node():
-    hint = suggest_layout(_a(), 192 * 10**9, n_gpus_per_node=4)
-    assert hint and hint["tp"] in (1, 4) and hint["world"] == hint["nodes"] * 4
+    small = _a(num_layers=8, num_experts=16)
+    # 96 GB GPUs, 4 per node: no TP 1 layout fits one node, TP 4 does
+    tight = suggest_layout(small, 96 * 10**9, n_gpus_per_node=4)
+    assert {k: tight[k] for k in ("nodes", "world", "tp", "pp", "ep")} == dict(
+        nodes=1, world=4, tp=4, pp=1, ep=4
+    )
+    # 192 GB GPUs: TP 4 also fits one node, but TP 1 is preferred
+    roomy = suggest_layout(small, 192 * 10**9, n_gpus_per_node=4)
+    assert {k: roomy[k] for k in ("nodes", "tp", "pp", "ep")} == dict(nodes=1, tp=1, pp=2, ep=2)
+    tp4 = _a(num_layers=8, num_experts=16, tensor_model_parallel_size=4, expert_model_parallel_size=4)
+    assert state_bytes_per_gpu(tp4, 4) <= DEFAULT_BUDGET * 192 * 10**9
+    # 1 GPU per node: TP can only be 1
     one = suggest_layout(_a(num_layers=4, num_experts=16), 288 * 10**9, n_gpus_per_node=1)
     assert one and one["tp"] == 1
 
@@ -225,26 +274,23 @@ def test_patch_skip_arg_does_nothing(monkeypatch, value):
     assert calls == {"props": 0, "logs": []}
 
 
-@pytest.mark.parametrize(
-    "value, warned",
-    [
-        (False, False),
-        (None, False),
-        ("0", False),
-        ("off", False),
-        ("no", False),
-        ("", False),
-        ("maybe", True),
-        ("2", True),
-    ],
-)
-def test_patch_skip_arg_false_or_unknown_runs_the_check(monkeypatch, value, warned):
+@pytest.mark.parametrize("value", [False, None, "0", "off", "no", ""])
+def test_patch_skip_arg_false_runs_the_check(monkeypatch, value):
     args = _a()
     setattr(args, "muse_spark_skip_memory_check", value)
     mod, calls = _patch_env(monkeypatch, total=1, args=args)
     with pytest.raises(ValueError, match="muse_spark_skip_memory_check: true skips this check"):
         mod.patch_muse_spark_memory_check(None)
-    assert any("is not a boolean" in m for m in calls["logs"]) == warned
+
+
+@pytest.mark.parametrize("value", ["maybe", "2", "ture"])
+def test_patch_skip_arg_typo_stops_the_run(monkeypatch, value):
+    args = _a()
+    setattr(args, "muse_spark_skip_memory_check", value)
+    mod, calls = _patch_env(monkeypatch, total=1, args=args)
+    with pytest.raises(ValueError, match="muse_spark_skip_memory_check=.* is not a boolean"):
+        mod.patch_muse_spark_memory_check(None)
+    assert calls["props"] == 0  # refused before any check
 
 
 def test_the_error_gives_the_cut_advice_once():
@@ -310,12 +356,17 @@ def test_patch_uses_gpus_per_node_for_the_hint(monkeypatch):
 
 
 @pytest.mark.parametrize("raw", ["abc", "0", "-2", "4.5"])
-def test_patch_falls_back_to_the_device_count_for_a_bad_gpus_per_node(monkeypatch, raw):
-    mod, calls = _patch_env(monkeypatch, total=288 * 10**9, args=_a(world_size=8), gpus=2)
+def test_patch_raises_for_a_bad_gpus_per_node(monkeypatch, raw):
+    mod, _ = _patch_env(monkeypatch, total=288 * 10**9, args=_a(world_size=8), gpus=2)
     monkeypatch.setenv("GPUS_PER_NODE", raw)
+    with pytest.raises(ValueError, match="GPUS_PER_NODE="):
+        mod.patch_muse_spark_memory_check(None)
+
+
+def test_patch_uses_the_device_count_without_the_env(monkeypatch):
+    mod, _ = _patch_env(monkeypatch, total=288 * 10**9, args=_a(world_size=8), gpus=2)
     with pytest.raises(ValueError, match="node\\(s\\) of 2 such GPUs"):
         mod.patch_muse_spark_memory_check(None)
-    assert any("ignoring GPUS_PER_NODE" in m for m in calls["logs"])
 
 
 def test_embedding_and_output_layer_are_not_spread_over_stages():
@@ -428,13 +479,19 @@ def test_required_state_bytes_or_raise_leaves_room_for_workspaces_and_buffers():
         )  # states at 97% of the GPU: raise, not a warning
 
 
-@pytest.mark.parametrize("first, last, pp", [(3, 3, 2), (40, 30, 4), (30, 30, 2), (31, None, 1)])
+@pytest.mark.parametrize("first, last", [(31, None), (31, 31), (3, 3)])
+def test_stage_layers_at_pp1_ignores_the_split_options(first, last):
+    a = _a(
+        num_layers=62,
+        pipeline_model_parallel_size=1,
+        decoder_first_pipeline_num_layers=first,
+        decoder_last_pipeline_num_layers=last,
+    )
+    assert stage_layers(a) == [62]
+
+
+@pytest.mark.parametrize("first, last, pp", [(3, 3, 2), (40, 30, 4), (30, 30, 2)])
 def test_stage_layers_rejects_a_split_that_does_not_cover_num_layers(first, last, pp):
-    if pp == 1:  # PP 1 ignores the split options
-        assert stage_layers(
-            _a(num_layers=62, pipeline_model_parallel_size=1, decoder_first_pipeline_num_layers=first)
-        ) == [62]
-        return
     with pytest.raises(ValueError, match="do not split num_layers=62"):
         stage_layers(
             _a(
@@ -479,23 +536,31 @@ def test_suggested_layout_ignores_the_users_uneven_split():
 def test_gpus_per_node_is_one_shared_reader(monkeypatch):
     """The DeepEP node-span check and the memory-check hint read GPUs per node the same way."""
     from primus.backends.megatron.core.models.muse_spark import memory_check as mc
+    from primus.backends.megatron.patches import muse_spark_memory_check_patches as mp
     from primus.backends.megatron.patches.args import (
-        muse_spark_recompute_cp_patches as rc,
+        muse_spark_arg_compat_patches as rc,
     )
 
-    assert rc.gpus_per_node is mc.gpus_per_node
+    assert rc.gpus_per_node is mc.gpus_per_node is mp.gpus_per_node
     monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
     monkeypatch.delenv("GPUS_PER_NODE", raising=False)
-    assert mc.gpus_per_node() == mc.DEFAULT_GPUS_PER_NODE
+    assert mc.gpus_per_node() == 8
     assert mc.gpus_per_node(3) == 3
-    monkeypatch.setenv("GPUS_PER_NODE", "4")
-    assert mc.gpus_per_node() == 4
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "2")
-    assert mc.gpus_per_node() == 2  # torchrun's per-node count first
-    warns = []
-    monkeypatch.setenv("LOCAL_WORLD_SIZE", "x")
-    assert mc.gpus_per_node(warn=warns.append) == 4
-    assert warns == ["ignoring LOCAL_WORLD_SIZE='x' (not a positive int)"]
+    assert mc.gpus_per_node() == 2  # no launcher: torchrun's per-node count
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "1")
+    assert mc.gpus_per_node() == 8  # the GPU count wins over a smaller process count
+    # a set but malformed value raises; it does not fall through to LOCAL_WORLD_SIZE
+    for bad in ("x", "8x", "0", "-1"):
+        monkeypatch.setenv("GPUS_PER_NODE", bad)
+        with pytest.raises(ValueError, match="GPUS_PER_NODE="):
+            mc.gpus_per_node()
+    monkeypatch.setenv("GPUS_PER_NODE", " ")  # blank: unset
+    assert mc.gpus_per_node() == 1
+    monkeypatch.setenv("GPUS_PER_NODE", "1_6")
+    assert mc.gpus_per_node() == 16  # the shared parser (number_utils.parse_positive_int)
+    assert mc.DEFAULT_GPUS_PER_NODE == 8
 
 
 @pytest.mark.parametrize(
@@ -522,3 +587,93 @@ def test_fp8_moments_are_one_byte_each():
         exp_avg_sq_dtype="fp8",
     )
     assert _bytes_per_param(a)[1] == 2 + 1 + 1
+
+
+@pytest.mark.parametrize(
+    "kw, expected",
+    [
+        ({}, 2 + 4),  # no precision args: the Muse Spark bf16 default
+        ({"bf16": True, "fp16": False}, 2 + 4),
+        # argparse default before validate_args: bf16 still keeps fp32 grads
+        ({"bf16": True, "fp16": False, "accumulate_allreduce_grads_in_fp32": False}, 2 + 4),
+        ({"bf16": True, "fp16": False, "grad_reduce_in_bf16": True}, 2 + 2),
+        ({"bf16": False, "fp16": False}, 4 + 4),  # fp32 params
+        ({"params_dtype": "torch.float32", "bf16": True}, 4 + 4),
+        ({"bf16": False, "fp16": True}, 2 + 2),
+        ({"bf16": False, "fp16": True, "accumulate_allreduce_grads_in_fp32": True}, 2 + 4),
+        ({"bf16": True, "main_grads_dtype": "bf16"}, 2 + 2),
+    ],
+)
+def test_weight_and_grad_bytes_follow_the_precision_args(kw, expected):
+    # weight and grad bytes follow the dtypes, including accumulate_allreduce_grads_in_fp32
+    from primus.backends.megatron.core.models.muse_spark.memory_check import (
+        _bytes_per_param,
+    )
+
+    assert _bytes_per_param(SimpleNamespace(**kw))[0] == expected
+
+
+def test_fp32_params_keep_no_master_copy():
+    # Megatron keeps no separate main copy of fp32 params: 4 + 4 + 8 = 16 bytes per param,
+    # less than bf16's 2 + 4 + 12 = 18
+    from primus.backends.megatron.core.models.muse_spark.memory_check import (
+        _bytes_per_param,
+    )
+
+    assert _bytes_per_param(SimpleNamespace(bf16=False, fp16=False)) == (8, 8.0)
+    assert _bytes_per_param(SimpleNamespace(bf16=True)) == (6, 12.0)
+    n = 1
+    bf16 = state_bytes_per_gpu(_a(bf16=True, fp16=False), n)
+    fp32 = state_bytes_per_gpu(_a(bf16=False, fp16=False), n)
+    assert fp32 < bf16
+
+
+@pytest.mark.parametrize(
+    "model_type, expected", [("muse_spark", True), ("deepseek_v4", False), ("gpt", False)]
+)
+def test_the_memory_check_is_registered_before_train_for_muse_spark_only(model_type, expected):
+    from primus.backends.megatron.patches import (  # noqa: F401 - registers the patch
+        muse_spark_memory_check_patches,
+    )
+    from primus.core.patches import PatchContext, PatchRegistry
+
+    patch = PatchRegistry.get("megatron.muse_spark.memory_check")
+    # before_train: padded_vocab_size and world_size are set by then
+    assert patch is not None and patch.phase == "before_train"
+    ctx = PatchContext(
+        backend="megatron",
+        phase="before_train",
+        extra={"module_config": SimpleNamespace(params=SimpleNamespace(model_type=model_type))},
+    )
+    assert bool(patch.condition(ctx)) is expected
+
+
+def test_expert_tensor_parallel_splits_the_experts_and_their_optimizer_group():
+    # ep=2, etp=2, pp=1, world=8, distributed optimizer: experts / (ep*etp), expert DP = 8 / 4
+    a = _a(
+        num_layers=2,
+        num_experts=16,
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=2,
+        expert_tensor_parallel_size=2,
+        pipeline_model_parallel_size=1,
+    )
+    ((dense, expert),) = _stage_params(a, param_parts(a))
+    wg, opt = _bytes_per_param(a)
+    edp, dp = 8 // (2 * 2), 8
+    want = dense * (wg + opt / dp) + expert / (2 * 2) * (wg + opt / edp)
+    assert state_bytes_per_gpu(a, 8) == pytest.approx(want)
+    # etp=1 would hold twice the expert weights and a twice larger expert DP group
+    b = _a(**{**vars(a), "expert_tensor_parallel_size": 1})
+    assert state_bytes_per_gpu(b, 8) == pytest.approx(dense * (wg + opt / dp) + expert / 2 * (wg + opt / 4))
+
+
+def test_kv_groups_follow_the_gqa_flag():
+    # Without GQA Megatron ignores num_query_groups: K/V have one group per attention head.
+    from primus.backends.megatron.core.models.muse_spark.memory_check import param_parts
+
+    off = param_parts(_a(group_query_attention=False, num_query_groups=1))["layer_dense"]
+    mha = param_parts(_a(group_query_attention=True, num_query_groups=128))["layer_dense"]
+    assert off == mha
+    gqa = param_parts(_a(group_query_attention=True))["layer_dense"]
+    assert gqa == param_parts(_a())["layer_dense"] < off

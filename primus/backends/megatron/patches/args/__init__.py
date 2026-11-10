@@ -24,9 +24,6 @@ from . import (  # noqa: F401
     logging_level_patches,
     mock_data_patches,
     moe_layer_freq_patches,
-    muse_spark_layer_patterns_patches,
-    muse_spark_recompute_cp_patches,
-    muse_spark_save_dir_patches,
     sequence_parallel_tp1_patches,
     tensorboard_path_patches,
     validate_args_patches,
@@ -44,8 +41,5 @@ __all__ = [
     "sequence_parallel_tp1_patches",
     "iterations_to_skip_default_patches",
     "moe_layer_freq_patches",
-    "muse_spark_layer_patterns_patches",
-    "muse_spark_recompute_cp_patches",
-    "muse_spark_save_dir_patches",
     "validate_args_patches",
 ]
