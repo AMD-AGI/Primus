@@ -13,27 +13,37 @@ WHY THIS TEST EXISTS:
   FSDP2 under a config that says Megatron-FSDP. Forget the optimizer and ZeRO-1
   is DDP with extra steps. Let split dtypes through and the forward runs in fp32
   at half the speed. Remove the wrong backward hook and every gradient is zero.
+  Reduce ZeRO-1's gradients after every micro-batch and the accumulated ones are
+  wrong; turn overlap_param_gather off below ZeRO-3 and the weights go stale.
   None of those raises, so the tests pin each one:
 
-    - key translation, the dtype guard and the refusals (CP, LoRA, CPU offload,
-      ZeRO-1 on the DDP path, a missing megatron-fsdp, an optimizer it cannot
-      shard);
+    - key translation, the fp32 defaults, the dtype guard and the refusals (CP,
+      LoRA, CPU offload, overlap_param_gather off, ZeRO-1 on the DDP path, a
+      missing megatron-fsdp, an optimizer it cannot shard, activation
+      checkpointing that nothing applied);
     - that a patch that fails to install stops the run instead of being logged;
     - that each patched AutoModel seam falls through for anything that is not
       Megatron-FSDP;
     - the hook removal, against a stand-in that registers hooks the way the
       library does, including the root gradient-reduction hook that must stay;
+    - one gradient reduction per optimizer step under ZeRO-1;
     - the average_in_collective rewrite, against a stub of the library method
       and against the installed one's source.
 
   The contract tests run against the pinned AutoModel and megatron-fsdp when they
-  are importable. No GPU and no process group needed.
+  are importable, with no GPU and no process group. Where megatron-fsdp and two
+  GPUs are there, a two-rank run checks the hook removal and the gradient
+  accumulation against an unsharded fp32 reference.
 """
 
+import contextlib
 import functools
 import importlib.util
 import inspect
+import json
 import logging
+import os
+import socket
 import sys
 import textwrap
 from types import ModuleType, SimpleNamespace
@@ -180,6 +190,7 @@ class TestApply:
             "_install_mesh_context_patch",
             "_install_parallelize_patches",
             "_install_optimizer_patch",
+            "_install_sync_context_patch",
         ):
             monkeypatch.setattr(mod, name, functools.partial(installed.append, name))
 
@@ -189,6 +200,7 @@ class TestApply:
             "_install_mesh_context_patch",
             "_install_parallelize_patches",
             "_install_optimizer_patch",
+            "_install_sync_context_patch",
         ]
 
     def test_a_broken_megatron_fsdp_stops_the_run(self, upstream):
@@ -265,6 +277,7 @@ class TestStrategySection:
         assert section["strategy"] == "megatron_fsdp"
         assert section["zero_dp_strategy"] == 1 and section["average_in_collective"] is True
         assert section["grad_reduce_in_fp32"] is False, "reduce_dtype bfloat16 means a bf16 reduction"
+        assert section["preserve_fp32_weights"] is True
         assert enable_compile is True and "enable_compile" not in section
         assert dropped == [
             "defer_fsdp_grad_sync",
@@ -284,6 +297,7 @@ class TestStrategySection:
         assert isinstance(parsed["strategy_config"], MegatronFSDPConfig)
         assert parsed["strategy_config"].zero_dp_strategy == 1
         assert parsed["strategy_config"].average_in_collective is True
+        assert parsed["strategy_config"].preserve_fp32_weights is True
         assert parsed["activation_checkpointing"] is False
 
     @pytest.mark.parametrize(
@@ -305,6 +319,21 @@ class TestStrategySection:
 
         assert section["grad_reduce_in_fp32"] is False
 
+    def test_the_main_weights_are_fp32_unless_set(self):
+        """As on FSDP2, where the presets' fp32 storage gives AdamW fp32 master weights."""
+        assert mod.strategy_section({})[0]["preserve_fp32_weights"] is True
+        assert mod.strategy_section({"preserve_fp32_weights": False})[0]["preserve_fp32_weights"] is False
+
+    @pytest.mark.parametrize("zero_dp_strategy", [3, "optim_grads_params", None])
+    def test_overlap_param_gather_off_is_kept_at_zero3(self, zero_dp_strategy):
+        """At ZeRO-3 every forward gathers the shards again, so nothing goes stale."""
+        fsdp = {"overlap_param_gather": False}
+        if zero_dp_strategy is not None:
+            fsdp["zero_dp_strategy"] = zero_dp_strategy
+        section, _, _ = mod.strategy_section(fsdp)
+
+        assert section["overlap_param_gather"] is False
+
     def test_context_parallelism_is_refused(self):
         with pytest.raises(ValueError, match="cp_size > 1 is not supported"):
             mod.strategy_section({"cp_size": 2})
@@ -315,6 +344,17 @@ class TestStrategySection:
 
         section, _, dropped = mod.strategy_section({"cpu_offload": False})
         assert "cpu_offload" not in section and "cpu_offload" not in dropped
+
+
+class TestStaleWeights:
+    """Runs without AutoModel: the refusal comes before the section is filtered."""
+
+    @pytest.mark.parametrize("zero_dp_strategy", [1, 2, "optim", "optim_grads"])
+    def test_overlap_param_gather_off_is_refused_below_zero3(self, zero_dp_strategy):
+        """Below ZeRO-3 only finish_grad_sync's re-gather refreshes the other ranks' shards, and it
+        runs only with overlap_param_gather on."""
+        with pytest.raises(ValueError, match="overlap_param_gather: false is not supported"):
+            mod.strategy_section({"zero_dp_strategy": zero_dp_strategy, "overlap_param_gather": False})
 
 
 class TestDtypes:
@@ -493,6 +533,45 @@ class TestParallelizePatches:
 
         assert seen == [wrapped]
 
+    def test_activation_checkpointing_is_checked_after_wrapping(self, fake_pipeline, monkeypatch):
+        module, _ = fake_pipeline
+        checked = []
+        monkeypatch.setattr(mod, "check_activation_checkpointing", lambda *args: checked.append(args))
+        monkeypatch.setattr(mod, "_after_wrap", lambda wrapped: None)
+        mod._install_parallelize_patches()
+        fsdp2, mfsdp = self._contexts()
+
+        module.parallelize_model("a", fsdp2)
+        wrapped = module.parallelize_model("b", mfsdp)
+
+        assert checked == [(wrapped, mfsdp)]
+
+
+class TestActivationCheckpointingCheck:
+    """AutoModel skips its own checkpointing on Megatron-FSDP; only blocks Primus wrapped count."""
+
+    def _model(self, checkpointed):
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            checkpoint_wrapper,
+        )
+
+        block = torch.nn.Linear(2, 2)
+        return torch.nn.ModuleList([checkpoint_wrapper(block) if checkpointed else block])
+
+    def test_checkpointing_that_was_applied_passes(self):
+        mod.check_activation_checkpointing(self._model(True), SimpleNamespace(activation_checkpointing=True))
+
+    def test_checkpointing_that_nothing_applied_stops_the_run(self):
+        with pytest.raises(ValueError, match="nothing in ModuleList was checkpointed"):
+            mod.check_activation_checkpointing(
+                self._model(False), SimpleNamespace(activation_checkpointing=True)
+            )
+
+    def test_a_run_without_checkpointing_is_not_checked(self):
+        mod.check_activation_checkpointing(
+            self._model(False), SimpleNamespace(activation_checkpointing=False)
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Patch C: the optimizer                                                      #
@@ -604,6 +683,7 @@ def test_the_seams_this_patches_still_exist():
         "mesh_context",
     ]
     assert list(inspect.signature(fully_shard_optimizer).parameters)[:2] == ["model", "optimizer"]
+    assert list(inspect.signature(train_mod.get_sync_ctx).parameters)[:2] == ["model", "is_optim_step"]
     assert callable(_apply_per_layer_compile)
     assert OptimizerConfig.supports_megatron_fsdp_sharding is True
     assert MuonConfig.supports_megatron_fsdp_sharding is False
@@ -776,6 +856,130 @@ def test_an_all_fp32_model_is_reported(monkeypatch, caplog):
     assert "this run computes in fp32" in caplog.text
 
 
+def _with_buffers(wrapped, compute, main):
+    group = SimpleNamespace(
+        model_weight_buffer=SimpleNamespace(dtype=compute),
+        main_weight_buffer=None if main is None else SimpleNamespace(dtype=main),
+    )
+    wrapped.param_and_grad_buffer = SimpleNamespace(parameter_groups=[group])
+    return wrapped
+
+
+def test_fp32_main_weights_over_bf16_compute_are_not_reported(monkeypatch, caplog):
+    """With fp32 main weights every module parameter is fp32; the forward still runs in bf16."""
+    monkeypatch.setattr(mod, "is_megatron_fsdp_model", lambda model: True)
+    wrapped = _with_buffers(FakeMegatronFSDP(), torch.bfloat16, torch.float32)
+
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        mod._after_wrap(wrapped)
+
+    assert "compute dtype=['torch.bfloat16'], main weight dtype=['torch.float32']" in caplog.text
+    assert "computes in fp32" not in caplog.text
+
+
+def test_an_fp32_model_weight_buffer_is_reported(monkeypatch, caplog):
+    monkeypatch.setattr(mod, "is_megatron_fsdp_model", lambda model: True)
+    wrapped = _with_buffers(FakeMegatronFSDP(), torch.float32, None)
+
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        mod._after_wrap(wrapped)
+
+    assert "main weight dtype=['torch.float32']" in caplog.text
+    assert "this run computes in fp32" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Patch E: one gradient reduction per optimizer step                          #
+# --------------------------------------------------------------------------- #
+def _sync_model(upstream, strategy):
+    """A model the patches take for Megatron-FSDP, with the library's two sync switches."""
+
+    class Model(upstream.MegatronFSDP):
+        def __init__(self):
+            self.data_parallel_sharding_strategy = strategy
+            self.model_auto_sync = True
+
+        @contextlib.contextmanager
+        def no_sync(self):
+            self.is_last_microbatch = False
+            try:
+                yield
+            finally:
+                self.is_last_microbatch = True
+
+    return Model()
+
+
+def _optimizer_step(model, micro_batches):
+    """(auto-sync, last-micro-batch) as each backward of one optimizer step sees them."""
+    seen = []
+    for index in range(micro_batches):
+        with mod.sync_context(model, index == micro_batches - 1):
+            seen.append((model.model_auto_sync, getattr(model, "is_last_microbatch", True)))
+    return seen
+
+
+class TestSyncContext:
+    @pytest.mark.parametrize("strategy", ["optim", "no_shard"])
+    def test_a_replicated_gradient_buffer_is_reduced_once_per_step(self, upstream, strategy):
+        model = _sync_model(upstream, strategy)
+
+        assert _optimizer_step(model, 3) == [(False, False), (False, False), (True, True)]
+        assert _optimizer_step(model, 1) == [(True, True)]
+
+    @pytest.mark.parametrize("strategy", ["optim_grads", "optim_grads_params"])
+    def test_sharded_gradients_are_left_to_automodel(self, upstream, strategy):
+        model = _sync_model(upstream, strategy)
+
+        assert mod.sync_context(model, False) is None
+        assert model.model_auto_sync is True
+
+    def test_any_other_model_is_left_to_automodel(self, upstream):
+        assert mod.sync_context(torch.nn.Linear(2, 2), False) is None
+
+
+@pytest.fixture
+def fake_sync_ctx(monkeypatch):
+    """The real recipe module with its sync context swapped for a recorder, restored afterwards."""
+    import nemo_automodel.recipes.diffusion.train as module
+
+    calls = []
+
+    def get_sync_ctx(model, is_optim_step, defer_fsdp_grad_sync):
+        calls.append((model, is_optim_step, defer_fsdp_grad_sync))
+        return "automodel's context"
+
+    monkeypatch.setattr(module, "get_sync_ctx", get_sync_ctx)
+    return module, calls
+
+
+@requires_automodel
+class TestSyncContextPatch:
+    def test_another_model_gets_automodels_context(self, fake_sync_ctx):
+        module, calls = fake_sync_ctx
+        mod._install_sync_context_patch()
+
+        assert module.get_sync_ctx("model", False, defer_fsdp_grad_sync=True) == "automodel's context"
+        assert calls == [("model", False, True)]
+
+    def test_a_megatron_fsdp_model_gets_its_own(self, fake_sync_ctx, monkeypatch):
+        module, calls = fake_sync_ctx
+        monkeypatch.setattr(mod, "sync_context", lambda model, is_optim_step: f"mfsdp {is_optim_step}")
+        mod._install_sync_context_patch()
+
+        assert module.get_sync_ctx("model", False, defer_fsdp_grad_sync=True) == "mfsdp False"
+        assert calls == []
+
+    def test_the_patch_is_installed_once(self, fake_sync_ctx):
+        module, _ = fake_sync_ctx
+        mod._install_sync_context_patch()
+        patched = module.get_sync_ctx
+
+        mod._install_sync_context_patch()
+
+        assert module.get_sync_ctx is patched
+
+
 # --------------------------------------------------------------------------- #
 # average_in_collective without an expert-parallel group                      #
 # --------------------------------------------------------------------------- #
@@ -907,3 +1111,145 @@ def test_the_hook_layout_matches_the_installed_megatron_fsdp():
     assert 'self.forward_hooks[f"release module {name} parameters"]' in source
     assert "module.register_forward_hook(_post_forward" in source, "the release handles are what is removed"
     assert 'self.backward_pre_hooks[f"all-gather {module._get_name()} parameters"]' in source
+
+
+def test_the_sync_layout_matches_the_installed_megatron_fsdp():
+    """Patch E, the overlap_param_gather refusal and the dtype report rely on these; fails when
+    megatron-fsdp changes them."""
+    module = pytest.importorskip("megatron_fsdp.megatron_fsdp")
+    buffers = inspect.getsource(pytest.importorskip("megatron_fsdp.param_and_grad_buffer"))
+
+    def source(name):
+        return inspect.getsource(module.MegatronFSDP.__dict__[name])
+
+    assert "self.model_auto_sync = sync_model" in source("set_model_auto_sync")
+    assert "self.is_last_microbatch = False" in source("no_sync")
+    hooks = source("_register_fsdp_hooks")
+    assert hooks.count("or self.model_auto_sync:") == 2, "both gradient reductions follow auto-sync"
+    assert "if self.model_auto_sync:" in hooks and "self.finish_grad_sync()" in hooks
+    finish = source("finish_grad_sync")
+    assert (
+        "if self.ddp_config.overlap_param_gather:" in finish and "self.synchronize_param_gather()" in finish
+    )
+    assert "self.all_gather_pipeline.reset(" in source("synchronize_param_gather")
+    assert "group.model_weight_buffer = DataParallelBuffer(" in buffers
+    assert "group.main_weight_buffer = DataParallelBuffer(" in buffers
+
+
+# --------------------------------------------------------------------------- #
+# Real megatron-fsdp on two GPUs                                              #
+# --------------------------------------------------------------------------- #
+def _real_mfsdp_worker(rank, port, out_dir):
+    """One rank: train a toy model on Megatron-FSDP, and record how far its losses are from
+    plain SGD on an unsharded copy that sees every rank's batches."""
+    import torch.distributed as dist
+    from megatron_fsdp import fully_shard_model
+    from megatron_fsdp.mixed_precision import MixedPrecisionPolicy
+    from nemo_automodel.components.distributed.megatron_fsdp import (
+        fully_shard_optimizer,
+    )
+    from torch.distributed.device_mesh import init_device_mesh
+
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=2)
+    try:
+        width, depth, batch, steps, lr = 32, 3, 4, 4, 0.5
+
+        class Block(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(width, width, bias=False)
+
+            def forward(self, x):
+                return torch.tanh(self.linear(x))
+
+        def net():
+            torch.manual_seed(0)
+            return torch.nn.Sequential(*(Block() for _ in range(depth))).cuda()
+
+        def data(step, data_rank, micro):
+            generator = torch.Generator().manual_seed(1000 * step + 10 * data_rank + micro)
+            return torch.randn(batch, width, generator=generator).cuda()
+
+        def loss_of(model, x):
+            return model(x).square().mean()
+
+        def reference(micro_batches):
+            model = net()
+            optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+            losses = []
+            for step in range(steps):
+                optimizer.zero_grad(set_to_none=True)
+                per_rank = [
+                    [loss_of(model, data(step, r, m)) for m in range(micro_batches)] for r in range(2)
+                ]
+                losses.append([loss.item() for loss in per_rank[rank]])
+                torch.stack([loss for row in per_rank for loss in row]).mean().backward()
+                optimizer.step()
+            return losses
+
+        def sharded(zero_dp_strategy, micro_batches, drop_hooks=False):
+            model = fully_shard_model(
+                net(),
+                device_mesh=init_device_mesh("cuda", (2, 1), mesh_dim_names=("dp", "tp")),
+                dp_shard_dim="dp",
+                tp_dim="tp",
+                fsdp_unit_modules=[Block],
+                zero_dp_strategy=zero_dp_strategy,
+                mixed_precision_policy=MixedPrecisionPolicy(main_params_dtype=None, main_grads_dtype=None),
+            )
+            model._replace_param_with_distributed_if_needed()
+            if drop_hooks:
+                mod.drop_param_reshard_hooks(model)
+            optimizer = fully_shard_optimizer(model, torch.optim.SGD(model.parameters(), lr=lr))
+            losses = []
+            for step in range(steps):
+                optimizer.zero_grad(set_to_none=True)
+                row = []
+                for micro in range(micro_batches):
+                    # As the recipe drives it: one context per micro-batch, no other sync call.
+                    with mod.sync_context(model, micro == micro_batches - 1) or contextlib.nullcontext():
+                        loss = loss_of(model, data(step, rank, micro))
+                        row.append(loss.item())
+                        (loss / micro_batches).backward()
+                losses.append(row)
+                optimizer.step()
+            return losses
+
+        def error(got, want):
+            return max(
+                abs(g - w) / abs(w) for got_row, want_row in zip(got, want) for g, w in zip(got_row, want_row)
+            )
+
+        result = {
+            "zero1, two micro-batches": error(sharded(1, 2), reference(2)),
+            "zero2, two micro-batches": error(sharded(2, 2), reference(2)),
+            "zero1, no_param_reshard": error(sharded(1, 1, drop_hooks=True), reference(1)),
+        }
+        with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
+            json.dump(result, handle)
+    finally:
+        dist.destroy_process_group()
+
+
+def _free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@requires_automodel
+@pytest.mark.skipif(importlib.util.find_spec("megatron_fsdp") is None, reason="needs megatron-fsdp")
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 2, reason="needs two GPUs")
+def test_two_ranks_train_like_an_unsharded_model(tmp_path):
+    """fp32 throughout, so every case agrees with the reference to rounding; without patch E,
+    ZeRO-1 with two micro-batches does not."""
+    import torch.multiprocessing as mp
+
+    mp.spawn(_real_mfsdp_worker, args=(_free_port(), str(tmp_path)), nprocs=2, join=True)
+
+    for rank in range(2):
+        result = json.loads((tmp_path / f"rank{rank}.json").read_text())
+        assert all(error < 1e-5 for error in result.values()), f"rank {rank}: {result}"
