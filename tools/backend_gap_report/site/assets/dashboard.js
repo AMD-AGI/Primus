@@ -8,6 +8,9 @@ const SECTIONS_DATA_URL = "./sections.json";
 // Unified weekly + monthly index. The `weekly` namespace below renders all
 // periodic engineering reports regardless of cadence; cadence is a data field.
 const REPORTS_DATA_URL = "./reports-data/index.json";
+// Dependency releases and CI health, collected at deploy time by
+// collect_live_status.py. Optional.
+const LIVE_DATA_URL = "./live-data/index.json";
 
 const CADENCE_LABELS = { weekly: "Weekly", monthly: "Monthly" };
 
@@ -19,6 +22,15 @@ function cadenceLabel(cadence) {
   return "Report";
 }
 
+// `statusKey`: report field with the target's pin facts; `dependency`: its
+// row name in the dependency matrix.
+const DRIFT_TARGETS = [
+  { key: "megatron", label: "Megatron-LM", statusKey: "megatron_status", dependency: "Megatron-LM", color: "var(--accent)" },
+  { key: "torchtitan", label: "TorchTitan", statusKey: "torchtitan_status", dependency: "torchtitan", color: "var(--warning)" },
+  { key: "primus_turbo", label: "Primus-Turbo", statusKey: "primus_turbo_status", dependency: "Primus-Turbo" },
+];
+const STALE_DEEP_DIVE_DAYS = 60;
+
 const state = {
   backendGap: {
     reports: [],
@@ -28,43 +40,95 @@ const state = {
     reports: [],
     filteredReports: [],
   },
+  monthly: [], // newest first
+  selected: null, // report shown in the snapshot
+  prs: { area: "all", category: "all", search: "", expanded: false },
+  live: null,
 };
+
+const PR_PAGE_SIZE = 12;
+const AREA_LIMIT = 8;
+const REPO_URL = "https://github.com/AMD-AGI/Primus";
 
 const el = (id) => document.getElementById(id);
 
 const elements = {
-  heroChips: el("hero-chips"),
   heroNav: el("hero-nav"),
   heroNavLinks: el("hero-nav-links"),
+
+  trend: {
+    panel: el("trend-panel"),
+    prs: el("trend-prs"),
+    prsLegend: el("trend-prs-legend"),
+    ttm: el("trend-ttm"),
+    ttmLegend: el("trend-ttm-legend"),
+    gap: el("trend-gap"),
+    gapLegend: el("trend-gap-legend"),
+  },
+
+  selection: {
+    note: el("selection-note"),
+    text: el("selection-note-text"),
+    reset: el("selection-reset"),
+  },
+
+  areas: {
+    card: el("areas-card"),
+    list: el("weekly-featured-areas"),
+  },
+
+  prs: {
+    panel: el("prs-panel"),
+    count: el("pr-count"),
+    areaFilter: el("pr-area-filter"),
+    categoryFilter: el("pr-category-filter"),
+    search: el("pr-search"),
+    rows: el("pr-rows"),
+    more: el("pr-more"),
+  },
+
+  deps: {
+    section: el("deps-section"),
+    summary: el("deps-summary"),
+    asOf: el("deps-as-of"),
+    rows: el("deps-rows"),
+  },
+
+  ci: {
+    section: el("ci-section"),
+    asOf: el("ci-as-of"),
+    statRow: el("ci-stat-row"),
+    strip: el("ci-strip"),
+    stripCaption: el("ci-strip-caption"),
+    coveragePanel: el("ci-coverage-panel"),
+    coverageCaption: el("ci-coverage-caption"),
+    coverageList: el("ci-coverage-list"),
+  },
 
   weekly: {
     statRow: el("weekly-stat-row"),
     featured: el("weekly-featured"),
+    featuredEyebrow: el("weekly-featured-eyebrow"),
     featuredTitle: el("weekly-featured-title"),
     featuredCadence: el("weekly-featured-cadence"),
     featuredWindow: el("weekly-featured-window"),
-    featuredPrs: el("weekly-featured-prs"),
     featuredCategories: el("weekly-featured-categories"),
-    featuredRecommendations: el("weekly-featured-recommendations"),
     featuredFindings: el("weekly-featured-findings"),
     filterRow: el("weekly-filter-row"),
     cadenceFilter: el("weekly-cadence-filter"),
-    recommendationFilter: el("weekly-recommendation-filter"),
     searchFilter: el("weekly-search-filter"),
     resultCount: el("weekly-result-count"),
     loadingState: el("weekly-loading-state"),
     errorState: el("weekly-error-state"),
     emptyState: el("weekly-empty-state"),
     list: el("weekly-list"),
+    rows: el("weekly-rows"),
   },
 
   backendGap: {
-    statRow: el("gap-stat-row"),
     filterRow: el("gap-filter-row"),
-    totalReports: null,
     backendFilter: el("backend-filter"),
     searchFilter: el("search-filter"),
-    resultCount: el("gap-result-count"),
     loadingState: el("loading-state"),
     errorState: el("error-state"),
     emptyState: el("empty-state"),
@@ -81,18 +145,131 @@ function formatNumber(value) {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
-function formatDate(value) {
-  if (!value) return "-";
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toISOString().slice(0, 10);
+function dateTimeFormatter(timeZone, withTime) {
+  const options = { day: "2-digit", month: "short", year: "numeric" };
+  if (withTime) Object.assign(options, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  try {
+    return new Intl.DateTimeFormat("en-GB", { ...options, timeZone: timeZone || "UTC" });
+  } catch (_) {
+    return new Intl.DateTimeFormat("en-GB", { ...options, timeZone: "UTC" });
+  }
 }
 
-function formatDateTime(value) {
-  if (!value) return "-";
+function zoneLabel(date, timeZone) {
+  try {
+    const part = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "shortOffset" })
+      .formatToParts(date)
+      .find((p) => p.type === "timeZoneName");
+    return part ? part.value : timeZone;
+  } catch (_) {
+    return timeZone || "UTC";
+  }
+}
+
+// Renders a report window in the report's own timezone, e.g.
+// "01 Oct 2026, 17:02 → 01 Nov 2026, 17:02 GMT+8".
+function formatWindow(tw, { withTime = true } = {}) {
+  if (!tw || !tw.start || !tw.end) return "-";
+  const start = new Date(tw.start);
+  const end = new Date(tw.end);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return `${tw.start} → ${tw.end}`;
+  const fmt = dateTimeFormatter(tw.timezone, withTime);
+  const suffix = withTime ? ` ${zoneLabel(end, tw.timezone || "UTC")}` : "";
+  return `${fmt.format(start)} → ${fmt.format(end)}${suffix}`;
+}
+
+function daysSince(value) {
   const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  return d.toUTCString().replace("GMT", "UTC");
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+}
+
+function windowDays(tw) {
+  if (!tw || !tw.start || !tw.end) return null;
+  const ms = new Date(tw.end) - new Date(tw.start);
+  return Number.isNaN(ms) ? null : Math.round(ms / 86400000);
+}
+
+function statusOf(report, target) {
+  return (report && report[target.statusKey]) || {};
+}
+
+// One source per view so tiles, matrix and backend cards agree: live data for
+// the latest report, else the report's own snapshot.
+function standingStatusOf(report, target) {
+  const status = statusOf(report, target);
+  const deps = report === latestReport() && state.live && state.live.dependencies;
+  const dep = deps && deps.find((d) => d.name === target.dependency);
+  if (!dep) return status;
+  return {
+    ...status,
+    pin_version: dep.pin_release || `commit ${dep.pin_commit}`,
+    pin_date: dep.pin_date,
+    latest_release: dep.latest_release ? { version: dep.latest_release.tag, date: dep.latest_release.date } : null,
+    releases_behind: dep.releases_behind,
+    commits_to_latest_release: dep.commits_to_latest_release,
+    commits_past_latest_release: null,
+  };
+}
+
+// Raw commit gaps are always large, so colour follows the recommendation.
+function recommendationTone(value) {
+  const lowered = typeof value === "string" ? value.toLowerCase() : "";
+  if (lowered.includes("urgent")) return "danger";
+  if (lowered.includes("plan")) return "warning";
+  if (lowered.includes("monitor")) return "success";
+  return null;
+}
+
+function plural(count, word) {
+  return `${formatNumber(count)} ${word}${count === 1 ? "" : "s"}`;
+}
+
+function daysBetween(from, to) {
+  const ms = new Date(to) - new Date(from);
+  return Number.isNaN(ms) ? null : Math.round(ms / 86400000);
+}
+
+// "October 2026" for a ~monthly window. The report id is the run month, one
+// month after the work it covers.
+function coveredPeriodLabel(tw) {
+  if (!tw || !tw.start || !tw.end) return null;
+  const end = new Date(new Date(tw.end).getTime() - 86400000);
+  const start = new Date(tw.start);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+  const fmt = (d, opts) => new Intl.DateTimeFormat("en-GB", { timeZone: tw.timezone || "UTC", ...opts }).format(d);
+  const startMonth = fmt(start, { month: "long", year: "numeric" });
+  const endMonth = fmt(end, { month: "long", year: "numeric" });
+  if (startMonth === endMonth) return startMonth;
+  return `${fmt(start, { month: "short" })} – ${fmt(end, { month: "short", year: "numeric" })}`;
+}
+
+// Pin vs newest stable upstream release, in words; reports without release
+// fields fall back to the pin version.
+function releaseStanding(status) {
+  const latest = status.latest_release;
+  const behind = status.releases_behind;
+  const pin = status.pin_version || (status.pin_commit ? String(status.pin_commit).slice(0, 8) : "-");
+  if (!latest || typeof behind !== "number") {
+    return { headline: pin, lines: [status.upstream_version ? `upstream main ${status.upstream_version}` : null] };
+  }
+  if (behind === 0) {
+    const past = status.commits_past_latest_release;
+    return {
+      headline: "On latest release",
+      lines: [`${latest.version}${past ? ` + ${plural(past, "commit")}` : ""} (released ${latest.date})`],
+      behind,
+    };
+  }
+  const catchUp = status.commits_to_latest_release;
+  return {
+    headline: `${plural(behind, "release")} behind`,
+    lines: [
+      `${pin} → latest ${latest.version} (${latest.date})`,
+      typeof catchUp === "number" ? `${plural(catchUp, "upstream commit")} to catch up` : null,
+    ],
+    behind,
+  };
 }
 
 function recommendationClass(value) {
@@ -112,7 +289,8 @@ function createPill(text, className) {
   return span;
 }
 
-function statTile(label, value, sub) {
+// `sub` may be a string or a list of lines; `recommendation` adds a pill.
+function statTile(label, value, sub, recommendation) {
   const tile = document.createElement("div");
   tile.className = "stat-tile";
 
@@ -126,94 +304,735 @@ function statTile(label, value, sub) {
 
   tile.append(labelEl, valueEl);
 
-  if (sub) {
+  (Array.isArray(sub) ? sub : [sub]).filter(Boolean).forEach((line) => {
     const subEl = document.createElement("span");
     subEl.className = "stat-tile__sub";
-    subEl.textContent = sub;
+    subEl.textContent = line;
     tile.append(subEl);
+  });
+
+  if (recommendation) {
+    const pill = createPill(recommendation, recommendationClass(recommendation));
+    pill.classList.add("stat-tile__pill");
+    tile.append(pill);
   }
   return tile;
 }
 
-function heroChip(label, value) {
-  const chip = document.createElement("span");
-  chip.className = "hero-chip";
-  const labelEl = document.createElement("span");
-  labelEl.textContent = label;
-  const valueEl = document.createElement("strong");
-  valueEl.textContent = value;
-  chip.append(labelEl, valueEl);
-  return chip;
+// ---------- Latest snapshot ----------
+
+function linkTile(tile, target) {
+  tile.classList.add("stat-tile--link");
+  tile.title = "Jump to the details";
+  tile.addEventListener("click", () => target.scrollIntoView({ behavior: "smooth", block: "start" }));
+  return tile;
 }
 
-function recommendationCounts(summary) {
-  const counts = summary && summary.recommendation_counts ? summary.recommendation_counts : {};
+// One overview tile per section below, each linking to it. Reports without a
+// dependency matrix fall back to one tile per drift target.
+function renderSnapshotStatRow(latest) {
+  const row = elements.weekly.statRow;
+  row.innerHTML = "";
+  if (!latest) return;
+
+  const days = windowDays(latest.time_window);
+  row.append(
+    statTile(
+      latest === latestReport() ? "Latest report covers" : "Report covers",
+      coveredPeriodLabel(latest.time_window) || latest.report_id,
+      `report ${latest.report_id}${days !== null ? ` · ${days}-day window` : ""}`
+    ),
+    statTile(
+      "Merged PRs",
+      formatNumber(latest.merged_pr_count),
+      typeof latest.contributor_count === "number"
+        ? `by ${plural(latest.contributor_count, "contributor")}`
+        : "in that window"
+    )
+  );
+
+  const source = dependencySource(latest);
+  if (source) {
+    const d = summarizeDependencies(source.deps, source.asOf);
+    row.append(
+      linkTile(
+        statTile(
+          "Dependencies",
+          d.behind.length ? `${d.behind.length} behind latest` : "all on latest",
+          [
+            `of ${d.total} pinned: ${d.onLatest} on latest · ${d.noReleases} without releases`,
+            d.behind.length ? `worst ${d.behind[0].dep.name} (${d.behind[0].standing.text})` : null,
+          ]
+        ),
+        elements.deps.section
+      )
+    );
+  }
+  const ci = latest === latestReport() && state.live && state.live.ci;
+  if (ci) {
+    const main = ci.latest_main;
+    const tile = statTile("CI on main", main ? `latest ${CI_LABELS[main.conclusion] || main.conclusion}` : "-", [
+      ci.summary && ci.summary.pass_rate !== null ? `${ci.summary.pass_rate}% pass rate · ${ci.window_days} d` : null,
+      ci.latest_weekly ? `weekly full run ${CI_LABELS[ci.latest_weekly.conclusion] || ci.latest_weekly.conclusion}` : null,
+    ]);
+    if (main) tile.classList.add(`stat-tile--${main.conclusion}`);
+    row.append(linkTile(tile, elements.ci.section));
+  }
+  if (source) return;
+
+  DRIFT_TARGETS.forEach((target) => {
+    const status = standingStatusOf(latest, target);
+    if (!status.latest_release && !status.pin_version && !status.pin_commit) return;
+    const standing = releaseStanding(status);
+    const bumped = status.pin_changed_in_window
+      ? `pin bumped this window${status.previous_pin_version ? ` (was ${status.previous_pin_version})` : ""}`
+      : null;
+    row.append(statTile(target.label, standing.headline, [...standing.lines, bumped]));
+  });
+}
+
+// ---------- Monthly trend ----------
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs, text) {
+  const node = document.createElementNS(SVG_NS, tag);
+  Object.entries(attrs || {}).forEach(([k, v]) => node.setAttribute(k, v));
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function niceCeil(value) {
+  if (value <= 0) return 1;
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  const step = [1, 2, 2.5, 5, 10].find((s) => s * magnitude >= value);
+  return step * magnitude;
+}
+
+// Dependency-free chart: optional bars plus lines on one axis. A series is
+// {label, color, value(report), format(v)}. Windows shorter than
+// SHORT_WINDOW_DAYS are faded as too short to compare.
+const SHORT_WINDOW_DAYS = 14;
+
+function renderTrendChart(container, reports, { bars, lines = [] }) {
+  const width = 420;
+  const height = 180;
+  const pad = { top: 20, right: 10, bottom: 28, left: 44 };
+  const innerW = width - pad.left - pad.right;
+  const innerH = height - pad.top - pad.bottom;
+  const series = [...(bars ? [bars] : []), ...lines];
+  const values = series.flatMap((s) => reports.map((r) => s.value(r)).filter((v) => typeof v === "number"));
+  container.innerHTML = "";
+  if (!values.length) {
+    container.textContent = "Not recorded for these reports.";
+    container.className = "trend-chart__empty";
+    return;
+  }
+  container.className = "";
+  const max = niceCeil(Math.max(...values));
+  const slot = innerW / reports.length;
+  const xAt = (i) => pad.left + slot * i + slot / 2;
+  const yAt = (v) => pad.top + innerH - (v / max) * innerH;
+  const isShort = (r) => {
+    const days = windowDays(r.time_window);
+    return days !== null && days < SHORT_WINDOW_DAYS;
+  };
+  const tip = (s, r, v) => `${r.report_id} · ${s.label}: ${s.format(v)}\n${formatWindow(r.time_window, { withTime: false })}`;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, class: "trend-chart__svg", role: "img" });
+
+  [0, 0.5, 1].forEach((f) => {
+    const y = yAt(max * f);
+    svg.append(svgEl("line", { x1: pad.left, x2: width - pad.right, y1: y, y2: y, class: "trend-chart__grid" }));
+    svg.append(svgEl("text", { x: pad.left - 6, y: y + 4, class: "trend-chart__axis", "text-anchor": "end" }, formatNumber(max * f)));
+  });
+
+  reports.forEach((r, i) => {
+    const cls = `trend-chart__axis${state.selected === r ? " is-selected" : ""}`;
+    svg.append(svgEl("text", { x: xAt(i), y: height - 6, class: cls, "text-anchor": "middle" }, r.report_id));
+  });
+
+  if (bars) {
+    const barW = Math.min(34, slot * 0.6);
+    reports.forEach((r, i) => {
+      const v = bars.value(r);
+      if (typeof v !== "number") return;
+      const cls = ["trend-chart__bar", isShort(r) && "is-faded", state.selected === r && "is-selected"].filter(Boolean).join(" ");
+      const rect = svgEl("rect", { x: xAt(i) - barW / 2, y: yAt(v), width: barW, height: pad.top + innerH - yAt(v), rx: 4, class: cls });
+      rect.addEventListener("click", () => selectReport(r, { scroll: true }));
+      rect.append(svgEl("title", {}, tip(bars, r, v)));
+      svg.append(rect);
+      svg.append(svgEl("text", { x: xAt(i), y: yAt(v) - 5, class: "trend-chart__value", "text-anchor": "middle" }, bars.format(v)));
+    });
+  }
+
+  lines.forEach((line) => {
+    const points = reports.map((r, i) => ({ r, i, v: line.value(r) })).filter((p) => typeof p.v === "number");
+    if (!points.length) return;
+    svg.append(
+      svgEl("polyline", {
+        points: points.map((p) => `${xAt(p.i)},${yAt(p.v)}`).join(" "),
+        class: `trend-chart__line${line.dashed ? " trend-chart__line--dashed" : ""}`,
+        style: `stroke:${line.color}`,
+      })
+    );
+    points.forEach((p) => {
+      const bumped = line.bumped && line.bumped(p.r);
+      if (bumped) {
+        svg.append(svgEl("circle", { cx: xAt(p.i), cy: yAt(p.v), r: 8, class: "trend-chart__bump", style: `stroke:${line.color}` }));
+      }
+      const dot = svgEl("circle", {
+        cx: xAt(p.i),
+        cy: yAt(p.v),
+        r: 4,
+        class: `trend-chart__dot${isShort(p.r) ? " is-faded" : ""}`,
+        style: `fill:${line.color}`,
+      });
+      dot.addEventListener("click", () => selectReport(p.r, { scroll: true }));
+      dot.append(svgEl("title", {}, tip(line, p.r, p.v) + (bumped ? "\npin bumped in this window" : "")));
+      svg.append(dot);
+    });
+  });
+
+  container.append(svg);
+}
+
+function renderLegend(list, series) {
+  list.innerHTML = "";
+  series.forEach((s) => {
+    const li = document.createElement("li");
+    const swatch = document.createElement("span");
+    swatch.className = `trend-legend__swatch${s.dashed ? " trend-legend__swatch--dashed" : ""}`;
+    swatch.style.background = s.color;
+    li.append(swatch, document.createTextNode(s.label));
+    list.append(li);
+  });
+}
+
+function percentile(sorted, q) {
+  return sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))] : undefined;
+}
+
+// Sorted open→merge days, or null for reports without per-PR timestamps.
+function mergeDays(report) {
+  const prs = (report.merged_prs || []).filter((pr) => pr.created_at && pr.merged_at);
+  if (!prs.length) return null;
+  return prs.map((pr) => (new Date(pr.merged_at) - new Date(pr.created_at)) / 86400000).sort((a, b) => a - b);
+}
+
+function renderTrend(monthlyNewestFirst) {
+  const panel = elements.trend.panel;
+  if (!panel) return;
+  const reports = [...monthlyNewestFirst].reverse();
+  if (reports.length < 2) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  const days1 = (v) => `${v.toFixed(1)} d`;
+  const perWeek = {
+    label: "PRs per week",
+    color: "var(--accent)",
+    format: (v) => v.toFixed(1),
+    value: (r) => {
+      const days = windowDays(r.time_window);
+      return days ? (r.merged_pr_count / days) * 7 : undefined;
+    },
+  };
+  const contributors = {
+    label: "Contributors",
+    color: "var(--success)",
+    format: (v) => formatNumber(v),
+    value: (r) =>
+      typeof r.contributor_count === "number"
+        ? r.contributor_count
+        : r.merged_prs
+          ? new Set(r.merged_prs.map((pr) => pr.author)).size
+          : undefined,
+  };
+  renderTrendChart(elements.trend.prs, reports, { bars: perWeek, lines: [contributors] });
+  renderLegend(elements.trend.prsLegend, [perWeek, contributors]);
+
+  const ttm = [
+    { label: "Median", color: "var(--accent)", format: days1, value: (r) => percentile(mergeDays(r) || [], 0.5) },
+    { label: "90th percentile", color: "var(--warning)", dashed: true, format: days1, value: (r) => percentile(mergeDays(r) || [], 0.9) },
+  ];
+  renderTrendChart(elements.trend.ttm, reports, { lines: ttm });
+  renderLegend(elements.trend.ttmLegend, ttm);
+
+  // Pin age at the end of each window.
+  const pinAge = DRIFT_TARGETS.filter((t) => t.color).map((t) => ({
+    label: t.label,
+    color: t.color,
+    format: (v) => `${formatNumber(v)} days old`,
+    value: (r) => {
+      const pinDate = statusOf(r, t).pin_date;
+      return pinDate && r.time_window ? daysBetween(pinDate, r.time_window.end) : undefined;
+    },
+    bumped: (r) => statusOf(r, t).pin_changed_in_window === true,
+  }));
+  renderTrendChart(elements.trend.gap, reports, { lines: pinAge });
+  renderLegend(elements.trend.gapLegend, pinAge);
+}
+
+// ---------- Where the work landed ----------
+
+function barRow(label, count, max, onClick) {
+  const li = document.createElement("li");
+  li.className = "bar-list__row";
+  const name = document.createElement(onClick ? "button" : "span");
+  name.className = "bar-list__label";
+  name.textContent = label;
+  if (onClick) {
+    name.type = "button";
+    name.addEventListener("click", onClick);
+  }
+  const track = document.createElement("span");
+  track.className = "bar-list__track";
+  const fill = document.createElement("span");
+  fill.className = "bar-list__fill";
+  fill.style.width = `${Math.max(2, (count / max) * 100)}%`;
+  track.append(fill);
+  const value = document.createElement("span");
+  value.className = "bar-list__value";
+  value.textContent = formatNumber(count);
+  li.append(name, track, value);
+  return li;
+}
+
+function renderWorkAreas(report) {
+  const prs = Array.isArray(report && report.merged_prs) ? report.merged_prs : [];
+  elements.areas.card.hidden = !prs.length;
+  elements.areas.list.innerHTML = "";
+  if (!prs.length) return;
+
+  const counts = new Map();
+  prs.forEach((pr) => (pr.areas || []).forEach((a) => counts.set(a, (counts.get(a) || 0) + 1)));
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const top = sorted.slice(0, AREA_LIMIT);
+  const restAreas = new Set(sorted.slice(AREA_LIMIT).map(([a]) => a));
+  const max = top.length ? top[0][1] : 1;
+
+  top.forEach(([area, count]) => {
+    elements.areas.list.append(
+      barRow(area, count, max, () => {
+        setPrFilter({ area });
+        elements.prs.panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      })
+    );
+  });
+  if (restAreas.size) {
+    // A text line, not a bar: summed small areas would out-draw single ones.
+    const restPrs = prs.filter((pr) => (pr.areas || []).some((a) => restAreas.has(a))).length;
+    const li = document.createElement("li");
+    li.className = "bar-list__more";
+    li.textContent = `+ ${restAreas.size} smaller areas (${[...restAreas].slice(0, 4).join(", ")}${restAreas.size > 4 ? ", …" : ""}) touched by ${plural(restPrs, "PR")}`;
+    elements.areas.list.append(li);
+  }
+}
+
+// ---------- Merged PR table ----------
+
+function fillSelect(select, allLabel, values) {
+  select.innerHTML = "";
+  [["all", allLabel], ...values.map((v) => [v, v])].forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  });
+}
+
+function formatShanghai(value, withTime) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value || "-";
+  const opts = { timeZone: "Asia/Shanghai", month: "short", day: "2-digit" };
+  if (withTime) Object.assign(opts, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return new Intl.DateTimeFormat("en-GB", opts).format(d);
+}
+
+function renderPrTable(report) {
+  const prs = Array.isArray(report && report.merged_prs) ? report.merged_prs : [];
+  elements.prs.panel.hidden = !prs.length;
+  if (!prs.length) return;
+
+  const byCount = (values) => {
+    const counts = new Map();
+    values.forEach((v) => counts.set(v, (counts.get(v) || 0) + 1));
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([v]) => v);
+  };
+  fillSelect(elements.prs.areaFilter, "All areas", byCount(prs.flatMap((pr) => pr.areas || [])));
+  fillSelect(elements.prs.categoryFilter, "All categories", byCount(prs.map((pr) => pr.category || "Other")));
+  state.prs = { area: "all", category: "all", search: "", expanded: false };
+  elements.prs.search.value = "";
+  applyPrFilters();
+}
+
+function setPrFilter(patch) {
+  Object.assign(state.prs, patch, { expanded: false });
+  elements.prs.areaFilter.value = state.prs.area;
+  elements.prs.categoryFilter.value = state.prs.category;
+  applyPrFilters();
+}
+
+function applyPrFilters() {
+  const report = state.selected;
+  const prs = (report && report.merged_prs) || [];
+  const { area, category, search, expanded } = state.prs;
+  const needle = search.trim().toLowerCase();
+  const matches = prs
+    .filter((pr) => area === "all" || (pr.areas || []).includes(area))
+    .filter((pr) => category === "all" || (pr.category || "Other") === category)
+    .filter((pr) => !needle || `#${pr.number} ${pr.title} ${pr.author}`.toLowerCase().includes(needle))
+    .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
+  const shown = expanded ? matches : matches.slice(0, PR_PAGE_SIZE);
+
+  elements.prs.rows.innerHTML = "";
+  shown.forEach((pr) => {
+    const tr = document.createElement("tr");
+    const link = document.createElement("a");
+    link.href = `${REPO_URL}/pull/${pr.number}`;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = `#${pr.number}`;
+    const areas = pr.areas || [];
+    const areaText = areas.length > 2 ? `${areas.slice(0, 2).join(", ")} +${areas.length - 2}` : areas.join(", ");
+    const cells = [
+      ["", link],
+      ["", formatShanghai(pr.merged_at, true)],
+      ["", pr.category || "Other"],
+      ["data-table__wrap", areaText],
+      ["data-table__title", pr.title],
+      ["num", `+${formatNumber(pr.additions || 0)} / −${formatNumber(pr.deletions || 0)}`],
+    ];
+    cells.forEach(([className, value]) => {
+      const td = document.createElement("td");
+      if (className) td.className = className;
+      td.append(value);
+      tr.append(td);
+    });
+    tr.children[3].title = areas.join(", ");
+    elements.prs.rows.append(tr);
+  });
+
+  const filtered = matches.length !== prs.length;
+  elements.prs.count.textContent =
+    `${filtered ? `${formatNumber(matches.length)} of ` : ""}${plural(prs.length, "PR")} merged to main` +
+    (shown.length < matches.length ? ` · showing ${shown.length}` : "");
+  elements.prs.more.hidden = shown.length >= matches.length;
+  elements.prs.more.textContent = `Show all ${formatNumber(matches.length)}`;
+}
+
+function attachPrFilters() {
+  elements.prs.areaFilter.addEventListener("change", (e) => setPrFilter({ area: e.target.value }));
+  elements.prs.categoryFilter.addEventListener("change", (e) => setPrFilter({ category: e.target.value }));
+  elements.prs.search.addEventListener("input", (e) => {
+    state.prs.search = e.target.value;
+    applyPrFilters();
+  });
+  elements.prs.more.addEventListener("click", () => {
+    state.prs.expanded = true;
+    applyPrFilters();
+  });
+}
+
+// ---------- Pinned dependency matrix ----------
+
+function standingOf(dep) {
+  if (!dep.latest_release) return { text: "No GitHub releases", className: "pill--neutral", rank: -1 };
+  const behind = dep.releases_behind;
+  if (typeof behind !== "number") return { text: "Unknown", className: "pill--neutral", rank: -1 };
+  if (behind === 0) return { text: "On latest release", className: "pill--monitor", rank: 0 };
+  return { text: `${plural(behind, "release")} behind`, className: behind === 1 ? "pill--plan" : "pill--urgent", rank: behind };
+}
+
+function ageCell(days) {
+  const wrap = document.createElement("div");
+  wrap.className = "age-cell";
+  if (days === null) {
+    wrap.textContent = "-";
+    return wrap;
+  }
+  const track = document.createElement("span");
+  track.className = "age-cell__track";
+  const fill = document.createElement("span");
+  fill.className = `age-cell__fill age-cell__fill--${days > 180 ? "old" : days > 90 ? "aging" : "fresh"}`;
+  fill.style.width = `${Math.min(100, (days / 365) * 100)}%`;
+  track.append(fill);
+  const label = document.createElement("span");
+  label.textContent = `${formatNumber(days)} d`;
+  wrap.append(track, label);
+  return wrap;
+}
+
+function cellWithSub(main, sub, mono) {
+  const wrap = document.createElement("div");
+  const top = document.createElement(mono ? "code" : "span");
+  top.textContent = main;
+  wrap.append(top);
+  if (sub) {
+    const s = document.createElement("div");
+    s.className = "data-table__sub";
+    if (sub instanceof Node) s.append(sub);
+    else s.textContent = sub;
+    wrap.append(s);
+  }
+  return wrap;
+}
+
+// Latest report: live data; older reports: their stored snapshot.
+function dependencySource(report) {
+  const live = state.live && Array.isArray(state.live.dependencies) ? state.live : null;
+  if (report === latestReport() && live) {
+    return {
+      deps: live.dependencies,
+      asOf: live.generated_at,
+      label: `Live · checked ${formatShanghai(live.generated_at, true)} GMT+8 (refreshed weekly and whenever a pin moves)`,
+    };
+  }
+  if (Array.isArray(report && report.dependencies)) {
+    return {
+      deps: report.dependencies,
+      asOf: report.time_window && report.time_window.end,
+      label: `Snapshot at the end of the ${report.report_id} report window`,
+    };
+  }
+  return null;
+}
+
+// Shared by the overview tile and the matrix heading so they always agree.
+function summarizeDependencies(deps, asOf) {
+  const rows = deps
+    .map((dep) => ({ dep, standing: standingOf(dep), age: dep.pin_date && asOf ? daysBetween(dep.pin_date, asOf) : null }))
+    .sort((a, b) => b.standing.rank - a.standing.rank || (b.age || 0) - (a.age || 0));
   return {
-    urgent: counts["urgent sync"] || 0,
-    plan: counts["plan sync"] || 0,
-    monitor: counts.monitor || 0,
+    rows,
+    total: rows.length,
+    onLatest: rows.filter((r) => r.standing.rank === 0).length,
+    behind: rows.filter((r) => r.standing.rank > 0),
+    noReleases: rows.filter((r) => !r.dep.latest_release).length,
+    oldest: [...rows].sort((a, b) => (b.age || 0) - (a.age || 0))[0],
   };
 }
 
-// ---------- Weekly Reports ----------
+function renderDependencies(report) {
+  const source = dependencySource(report);
+  elements.deps.section.hidden = !source;
+  if (!source) return;
+  elements.deps.asOf.textContent = source.label;
+  const { rows, total, onLatest, behind, noReleases, oldest } = summarizeDependencies(source.deps, source.asOf);
+  elements.deps.summary.textContent =
+    `${onLatest} of ${total} are on their latest stable release, ${behind.length} are behind` +
+    (behind.length ? ` (worst: ${behind[0].dep.name}, ${behind[0].standing.text.toLowerCase()})` : "") +
+    `, and ${noReleases} publish no GitHub releases.` +
+    (oldest && oldest.age !== null ? ` Oldest pin: ${oldest.dep.name}, ${formatNumber(oldest.age)} days.` : "");
 
-function renderHeroChips(reportsPayload, gapPayload) {
-  elements.heroChips.innerHTML = "";
-  const summary = reportsPayload && reportsPayload.summary ? reportsPayload.summary : {};
-  const gapSummary = gapPayload && gapPayload.summary ? gapPayload.summary : {};
-  const recCounts = recommendationCounts(summary);
+  elements.deps.rows.innerHTML = "";
+  rows.forEach(({ dep, standing, age }) => {
+    const tr = document.createElement("tr");
 
-  if (summary.latest_report_id) {
-    const cadence = summary.latest_cadence ? ` (${cadenceLabel(summary.latest_cadence)})` : "";
-    elements.heroChips.append(heroChip("Latest report", `${summary.latest_report_id}${cadence}`));
-  }
-  if (summary.latest_merged_pr_count !== undefined) {
-    elements.heroChips.append(
-      heroChip("Merged PRs in latest report", formatNumber(summary.latest_merged_pr_count))
-    );
-  }
-  if (summary.total_reports !== undefined) {
-    elements.heroChips.append(heroChip("Reports tracked", formatNumber(summary.total_reports)));
-  }
-  if (recCounts.urgent) {
-    elements.heroChips.append(heroChip("Urgent sync", formatNumber(recCounts.urgent)));
-  }
-  if (recCounts.plan) {
-    elements.heroChips.append(heroChip("Plan sync", formatNumber(recCounts.plan)));
-  }
-  if (gapSummary.total_reports !== undefined) {
-    elements.heroChips.append(heroChip("Backend reports", formatNumber(gapSummary.total_reports)));
-  }
+    const upstream = document.createElement("a");
+    upstream.href = `https://github.com/${dep.upstream}`;
+    upstream.target = "_blank";
+    upstream.rel = "noopener noreferrer";
+    upstream.textContent = dep.upstream;
+    const nameCell = cellWithSub(dep.name, upstream);
+
+    const pinCell = cellWithSub(dep.pin_release || `commit ${dep.pin_commit}`, dep.pin_date ? `committed ${dep.pin_date}` : null, true);
+
+    const latest = dep.latest_release;
+    const latestCell = latest
+      ? cellWithSub(
+          latest.tag,
+          [latest.date, typeof dep.commits_to_latest_release === "number" && dep.commits_to_latest_release > 0
+            ? `+${formatNumber(dep.commits_to_latest_release)} commits`
+            : null]
+            .filter(Boolean)
+            .join(" · "),
+          true
+        )
+      : cellWithSub("—", null);
+
+    const standingCell = document.createElement("div");
+    standingCell.append(createPill(standing.text, standing.className));
+
+    let bumpCell;
+    if (dep.last_bump) {
+      const link = document.createElement(dep.last_bump.pr ? "a" : "span");
+      if (dep.last_bump.pr) {
+        link.href = `${REPO_URL}/pull/${dep.last_bump.pr}`;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
+      link.textContent = dep.last_bump.pr ? `#${dep.last_bump.pr}` : "";
+      link.title = dep.last_bump.title;
+      const sub = document.createElement("span");
+      sub.append(link);
+      if (typeof dep.bumps_last_12_months === "number") {
+        sub.append(document.createTextNode(` · ${dep.bumps_last_12_months}× in 12 mo`));
+      }
+      bumpCell = cellWithSub(dep.last_bump.date, sub);
+    } else {
+      bumpCell = cellWithSub("—", dep.bumps_last_12_months === 0 ? "not in the last 12 months" : null);
+    }
+
+    [nameCell, pinCell, ageCell(age), latestCell, standingCell, bumpCell].forEach((content) => {
+      const td = document.createElement("td");
+      td.append(content);
+      tr.append(td);
+    });
+    elements.deps.rows.append(tr);
+  });
 }
 
-function renderWeeklyStatRow(payload) {
-  elements.weekly.statRow.innerHTML = "";
-  const summary = payload && payload.summary ? payload.summary : {};
-  const recCounts = recommendationCounts(summary);
-  const latestSub = [
-    summary.latest_cadence ? cadenceLabel(summary.latest_cadence) : null,
-    formatDate(summary.latest_generated_at),
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  elements.weekly.statRow.append(
-    statTile("Total reports", formatNumber(summary.total_reports || 0))
+// ---------- CI health (live) ----------
+
+const CI_LABELS = { success: "passed", failure: "failed", cancelled: "cancelled" };
+
+function ciRunLine(run) {
+  if (!run) return null;
+  return `${formatShanghai(run.created_at, true)} · ${run.duration_min} min · ${run.head_sha}`;
+}
+
+function ciTile(label, run) {
+  if (!run) return statTile(label, "-", "no run in the window");
+  const tile = statTile(label, CI_LABELS[run.conclusion] || run.conclusion, [
+    ciRunLine(run),
+    ...(run.failed_steps || []).slice(0, 2).map((step) => `✗ ${step}`),
+  ]);
+  tile.classList.add("stat-tile--link", `stat-tile--${run.conclusion}`);
+  tile.addEventListener("click", () => window.open(run.url, "_blank", "noopener"));
+  tile.title = "Open this run in GitHub Actions";
+  return tile;
+}
+
+function coverageTone(pct) {
+  if (pct >= 50) return "fresh";
+  if (pct >= 25) return "aging";
+  return "old";
+}
+
+function renderCoverage(coverage) {
+  const panel = elements.ci.coveragePanel;
+  panel.hidden = !coverage || !Array.isArray(coverage.rows);
+  if (panel.hidden) return;
+
+  elements.ci.coverageCaption.textContent =
+    `${coverage.combined.toFixed(1)}% overall (unit ${coverage.unit.toFixed(1)}%) over ` +
+    `${formatNumber(coverage.statements)} statements · from the ${coverage.event === "schedule" ? "weekly full" : "latest"} run of ` +
+    `${formatShanghai(coverage.created_at)}`;
+
+  // Each backend, plus core as one row.
+  const rows = coverage.rows.filter(
+    (r) => (r.detail && r.module.startsWith("backends/")) || (!r.detail && r.module === "core")
   );
-  elements.weekly.statRow.append(
-    statTile("Latest report", summary.latest_report_id || "-", latestSub)
+  rows.sort((a, b) => b.statements - a.statements);
+  const list = elements.ci.coverageList;
+  list.innerHTML = "";
+  rows.forEach((row) => {
+    const li = document.createElement("li");
+    li.className = "bar-list__row";
+    const name = document.createElement("span");
+    name.className = "bar-list__label";
+    name.textContent = row.module.replace(/^backends\//, "");
+    name.title = `${row.module} · ${formatNumber(row.statements)} statements`;
+    const track = document.createElement("span");
+    track.className = "bar-list__track";
+    const tone = coverageTone(row.combined);
+    const unit = document.createElement("span");
+    unit.className = `bar-list__fill bar-list__fill--base bar-list__fill--${tone}`;
+    unit.style.width = `${row.unit}%`;
+    const combined = document.createElement("span");
+    combined.className = `bar-list__fill bar-list__fill--${tone}`;
+    combined.style.width = `${row.combined}%`;
+    track.append(combined, unit);
+    const value = document.createElement("span");
+    value.className = "bar-list__value";
+    value.textContent = `${row.combined.toFixed(0)}%`;
+    const size = document.createElement("span");
+    size.className = "bar-list__meta";
+    size.textContent = `${formatNumber(row.statements)} stmts`;
+    li.append(name, track, value, size);
+    list.append(li);
+  });
+}
+
+function renderCi(live) {
+  const ci = live && live.ci;
+  elements.ci.section.hidden = !ci;
+  if (!ci) return;
+  elements.ci.asOf.textContent = `Live · checked ${formatShanghai(live.generated_at, true)} GMT+8 · last ${ci.window_days} days of ${ci.workflow} on ${ci.branch}`;
+
+  const s = ci.summary || {};
+  const counts = s.by_conclusion || {};
+  const row = elements.ci.statRow;
+  row.innerHTML = "";
+  row.append(
+    ciTile("Latest main run", ci.latest_main),
+    ciTile("Weekly full run", ci.latest_weekly),
+    statTile(
+      "Pass rate",
+      s.pass_rate === null || s.pass_rate === undefined ? "-" : `${s.pass_rate}%`,
+      [`${counts.success || 0} passed · ${counts.failure || 0} failed`, `${counts.cancelled || 0} cancelled (not counted)`]
+    ),
+    statTile(
+      "Run time",
+      s.median_success_min ? `${s.median_success_min} min` : "-",
+      s.p90_success_min ? ["median of passing runs", `p90 ${s.p90_success_min} min`] : null
+    )
   );
-  elements.weekly.statRow.append(
-    statTile("Merged PRs (latest)", formatNumber(summary.latest_merged_pr_count || 0))
-  );
-  elements.weekly.statRow.append(
-    statTile("Urgent sync", formatNumber(recCounts.urgent))
-  );
-  elements.weekly.statRow.append(
-    statTile("Plan sync", formatNumber(recCounts.plan))
-  );
-  elements.weekly.statRow.append(
-    statTile("Monitor", formatNumber(recCounts.monitor))
-  );
+  if (ci.coverage) {
+    row.append(
+      statTile("Coverage", `${ci.coverage.combined.toFixed(1)}%`, [`unit + E2E`, `unit only ${ci.coverage.unit.toFixed(1)}%`])
+    );
+  }
+
+  const runs = [...(ci.runs || [])].reverse();
+  elements.ci.stripCaption.textContent = `${plural(runs.length, "run")} over ${ci.window_days} days, oldest left · click a cell to open it`;
+  elements.ci.strip.innerHTML = "";
+  runs.forEach((run) => {
+    const cell = document.createElement("a");
+    cell.className = `ci-cell ci-cell--${run.conclusion}${run.event === "schedule" ? " ci-cell--weekly" : ""}`;
+    cell.href = run.url;
+    cell.target = "_blank";
+    cell.rel = "noopener noreferrer";
+    cell.title = `${CI_LABELS[run.conclusion] || run.conclusion}${run.event === "schedule" ? " (weekly full run)" : ""}\n${ciRunLine(run)}\n${run.title}`;
+    elements.ci.strip.append(cell);
+  });
+
+  renderCoverage(ci.coverage);
+}
+
+// ---------- Report selection (trend / archive → snapshot) ----------
+
+function latestReport() {
+  return state.monthly[0] || state.weekly.reports[0] || null;
+}
+
+function selectReport(report, { scroll = false } = {}) {
+  if (!report) return;
+  state.selected = report;
+  const isLatest = report === latestReport();
+
+  renderSnapshotStatRow(report);
+  renderWeeklyFeatured(report);
+  renderWorkAreas(report);
+  renderPrTable(report);
+  renderDependencies(report);
+  renderTrend(state.monthly);
+  if (state.weekly.filteredReports.length) renderWeeklyList(state.weekly.filteredReports);
+
+  elements.weekly.featuredEyebrow.textContent = isLatest ? "Latest report" : "Selected report";
+  elements.selection.note.hidden = isLatest;
+  if (!isLatest) {
+    elements.selection.text.textContent =
+      `Showing ${report.report_id} (${coveredPeriodLabel(report.time_window) || report.report_id}), not the latest report. ` +
+      "Sections the report did not record are hidden.";
+  }
+  if (scroll) {
+    document.querySelector(".section--lead").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 function renderWeeklyFeatured(report) {
@@ -234,14 +1053,7 @@ function renderWeeklyFeatured(report) {
     }
   }
 
-  const tw = report.time_window || {};
-  const windowLabel =
-    tw.start && tw.end
-      ? `${formatDateTime(tw.start)} → ${formatDateTime(tw.end)} (${tw.timezone || "UTC"})`
-      : "-";
-  elements.weekly.featuredWindow.textContent = `${report.report_id} · ${windowLabel}`;
-
-  elements.weekly.featuredPrs.textContent = formatNumber(report.merged_pr_count);
+  elements.weekly.featuredWindow.textContent = `Window: ${formatWindow(report.time_window)}`;
 
   elements.weekly.featuredCategories.innerHTML = "";
   const categories = report.category_breakdown || {};
@@ -256,23 +1068,6 @@ function renderWeeklyFeatured(report) {
       elements.weekly.featuredCategories.append(li);
     });
 
-  elements.weekly.featuredRecommendations.innerHTML = "";
-  const targetLabels = {
-    megatron: "Megatron-LM",
-    torchtitan: "torchtitan",
-    primus_turbo: "Primus-Turbo",
-  };
-  const recommendations = report.recommendations || {};
-  Object.entries(recommendations).forEach(([key, rec]) => {
-    const row = document.createElement("li");
-    row.className = "recommendation-list__row";
-    const label = document.createElement("span");
-    label.className = "label";
-    label.textContent = targetLabels[key] || key;
-    row.append(label, createPill(rec || "-", recommendationClass(rec)));
-    elements.weekly.featuredRecommendations.append(row);
-  });
-
   elements.weekly.featuredFindings.innerHTML = "";
   (report.key_findings || []).slice(0, 6).forEach((finding) => {
     const li = document.createElement("li");
@@ -282,100 +1077,70 @@ function renderWeeklyFeatured(report) {
 
 }
 
-function buildWeeklyCard(report) {
-  const card = document.createElement("article");
-  card.className = "weekly-card";
+function buildArchiveRow(report) {
+  const tr = document.createElement("tr");
+  if (report === state.selected) tr.className = "is-selected";
 
-  const header = document.createElement("div");
-  header.className = "weekly-card__header";
-
-  const idGroup = document.createElement("div");
-  idGroup.className = "weekly-card__id-group";
-
-  const idEl = document.createElement("h3");
-  idEl.className = "weekly-card__id";
-  idEl.textContent = report.report_id;
-  idGroup.append(idEl);
-
+  const id = document.createElement("div");
+  id.className = "archive-id";
+  const name = document.createElement("strong");
+  name.textContent = report.report_id;
+  id.append(name);
   if (report.cadence) {
-    const cadenceTag = document.createElement("span");
-    cadenceTag.className = "cadence-tag cadence-tag--sm";
-    cadenceTag.dataset.cadence = report.cadence;
-    cadenceTag.textContent = cadenceLabel(report.cadence);
-    idGroup.append(cadenceTag);
+    const tag = document.createElement("span");
+    tag.className = "cadence-tag cadence-tag--sm";
+    tag.dataset.cadence = report.cadence;
+    tag.textContent = cadenceLabel(report.cadence);
+    id.append(tag);
   }
 
-  const tw = report.time_window || {};
-  const windowEl = document.createElement("span");
-  windowEl.className = "weekly-card__window";
-  if (tw.start && tw.end) {
-    windowEl.textContent = `${formatDateTime(tw.start)} → ${formatDateTime(tw.end)}`;
-  } else {
-    windowEl.textContent = report.generated_at ? formatDate(report.generated_at) : "";
-  }
+  const days = windowDays(report.time_window);
+  const period =
+    report.cadence === "monthly"
+      ? cellWithSub(coveredPeriodLabel(report.time_window) || "-", `${formatWindow(report.time_window, { withTime: false })} · ${days} d`)
+      : cellWithSub(formatWindow(report.time_window, { withTime: false }), null);
 
-  header.append(idGroup, windowEl);
+  const moved = DRIFT_TARGETS.filter((t) => statusOf(report, t).pin_changed_in_window === true).map((t) => t.label);
+  const recorded = DRIFT_TARGETS.some((t) => typeof statusOf(report, t).pin_changed_in_window === "boolean");
+  const pins = document.createElement("span");
+  pins.textContent = moved.length ? moved.join(", ") : recorded ? "none" : "not recorded";
+  if (!moved.length) pins.className = "muted";
 
-  const meta = document.createElement("div");
-  meta.className = "weekly-card__meta";
-  const merged = document.createElement("span");
-  merged.innerHTML = `Merged PRs <strong>${formatNumber(report.merged_pr_count)}</strong>`;
-  meta.append(merged);
-
-  const categoryParts = Object.entries(report.category_breakdown || {})
-    .filter(([, count]) => count > 0)
-    .map(([label, count]) => `${label} ${count}`);
-  if (categoryParts.length) {
-    const categories = document.createElement("span");
-    categories.textContent = categoryParts.join(" · ");
-    meta.append(categories);
-  }
-
-  const pills = document.createElement("div");
-  pills.className = "weekly-card__pills";
-  const targetLabels = {
-    megatron: "Megatron-LM",
-    torchtitan: "torchtitan",
-    primus_turbo: "Primus-Turbo",
-  };
-  Object.entries(report.recommendations || {}).forEach(([key, value]) => {
-    const text = `${targetLabels[key] || key}: ${value}`;
-    pills.append(createPill(text, recommendationClass(value)));
-  });
-
-  const findingsList = document.createElement("ul");
-  findingsList.className = "findings-list";
-  (report.key_findings || []).slice(0, 3).forEach((finding) => {
-    const li = document.createElement("li");
-    li.textContent = finding;
-    findingsList.append(li);
-  });
-
-  const footer = document.createElement("div");
-  footer.className = "weekly-card__footer";
-  const generated = document.createElement("span");
-  generated.className = "weekly-card__window";
-  generated.textContent = report.generated_at
-    ? `Generated ${formatDate(report.generated_at)}`
-    : "";
-  footer.append(generated);
-
+  const actions = document.createElement("div");
+  actions.className = "archive-actions";
+  const show = document.createElement("button");
+  show.type = "button";
+  show.className = "button button--small";
+  show.textContent = "Show";
+  show.addEventListener("click", () => selectReport(report, { scroll: true }));
+  actions.append(show);
   if (report.report_github_url) {
     const link = document.createElement("a");
-    link.className = "button";
+    link.className = "button button--small button--ghost";
     link.target = "_blank";
     link.rel = "noopener noreferrer";
     link.href = report.report_github_url;
-    link.textContent = "Open Markdown report";
-    footer.append(link);
+    link.textContent = "Markdown";
+    actions.append(link);
   }
 
-  card.append(header, meta, pills, findingsList, footer);
-  return card;
+  [
+    ["", id],
+    ["", period],
+    ["num", formatNumber(report.merged_pr_count)],
+    ["data-table__pins", pins],
+    ["", actions],
+  ].forEach(([className, content]) => {
+    const td = document.createElement("td");
+    if (className) td.className = className;
+    td.append(content);
+    tr.append(td);
+  });
+  return tr;
 }
 
 function renderWeeklyList(reports) {
-  elements.weekly.list.innerHTML = "";
+  elements.weekly.rows.innerHTML = "";
   if (elements.weekly.filterRow) {
     elements.weekly.filterRow.hidden = state.weekly.reports.length <= 1;
   }
@@ -402,22 +1167,16 @@ function renderWeeklyList(reports) {
   elements.weekly.emptyState.hidden = true;
   elements.weekly.list.hidden = false;
   reports.forEach((report) => {
-    elements.weekly.list.append(buildWeeklyCard(report));
+    elements.weekly.rows.append(buildArchiveRow(report));
   });
 }
 
 function applyWeeklyFilters() {
   const cadence = elements.weekly.cadenceFilter ? elements.weekly.cadenceFilter.value : "all";
-  const rec = elements.weekly.recommendationFilter.value;
   const search = elements.weekly.searchFilter.value.trim().toLowerCase();
 
   state.weekly.filteredReports = state.weekly.reports.filter((report) => {
     const cadenceMatch = cadence === "all" || report.cadence === cadence;
-
-    const recs = Object.values(report.recommendations || {}).map((v) =>
-      (v || "").toLowerCase()
-    );
-    const recMatch = rec === "all" || recs.includes(rec.toLowerCase());
 
     const haystackParts = [
       report.report_id,
@@ -429,7 +1188,7 @@ function applyWeeklyFilters() {
     ];
     const haystack = haystackParts.join(" ").toLowerCase();
     const searchMatch = !search || haystack.includes(search);
-    return cadenceMatch && recMatch && searchMatch;
+    return cadenceMatch && searchMatch;
   });
 
   renderWeeklyList(state.weekly.filteredReports);
@@ -439,7 +1198,6 @@ function attachWeeklyFilters() {
   if (elements.weekly.cadenceFilter) {
     elements.weekly.cadenceFilter.addEventListener("change", applyWeeklyFilters);
   }
-  elements.weekly.recommendationFilter.addEventListener("change", applyWeeklyFilters);
   elements.weekly.searchFilter.addEventListener("input", applyWeeklyFilters);
 }
 
@@ -471,12 +1229,6 @@ function compactFact(label, value, tone) {
 
   item.append(labelEl, valueEl);
   return item;
-}
-
-function driftTone(commitGap) {
-  if (commitGap >= 500) return "danger";
-  if (commitGap >= 100) return "warning";
-  return "success";
 }
 
 function buildBackendFocusItems(report) {
@@ -535,21 +1287,14 @@ function listSection(title, items) {
   return section;
 }
 
-function renderBackendGapStats(payload) {
-  elements.backendGap.statRow.innerHTML = "";
-  const summary = (payload && payload.summary) || {};
-  elements.backendGap.statRow.append(
-    statTile("Total reports", formatNumber(summary.total_reports || 0))
-  );
-  elements.backendGap.statRow.append(
-    statTile("Verified reports", formatNumber(summary.verified_reports || 0))
-  );
-  elements.backendGap.statRow.append(
-    statTile("Tracked backends", formatNumber(summary.total_backends || 0))
-  );
-  elements.backendGap.statRow.append(
-    statTile("Latest report", summary.latest_report_date || "-")
-  );
+// Deep dives are regenerated rarely; prefer the newer monthly status so the
+// card headline never lags upstream.
+function liveDriftFor(report) {
+  const target = DRIFT_TARGETS.find((t) => report.backend && t.key === report.backend.key);
+  const latest = state.monthly[0];
+  if (!target || !latest) return null;
+  if (new Date(latest.generated_at) <= new Date(report.generated_at)) return null;
+  return { status: standingStatusOf(latest, target), reportId: latest.report_id };
 }
 
 function buildBackendDeepDiveCard(report) {
@@ -558,8 +1303,10 @@ function buildBackendDeepDiveCard(report) {
 
   const backendLabel = report.backend && report.backend.label ? report.backend.label : "Backend";
   const stats = report.stats || {};
-  const integration = report.integration || {};
   const summary = report.dashboard_summary || {};
+  const live = liveDriftFor(report);
+  const ageDays = daysSince(report.generated_at);
+  const isStale = ageDays !== null && ageDays > STALE_DEEP_DIVE_DAYS;
 
   const header = document.createElement("header");
   header.className = "backend-card__header";
@@ -580,24 +1327,50 @@ function buildBackendDeepDiveCard(report) {
 
   titleGroup.append(eyebrow, title, scope);
 
+  const liveStatus = live ? live.status : {};
+  const recommendation = liveStatus.recommendation || summary.recommendation;
+  const tone = recommendationTone(recommendation);
+  // Releases behind; without release fields, the commit gap to upstream main.
+  const behind = liveStatus.releases_behind;
+  const hasReleases = typeof behind === "number" && liveStatus.latest_release;
   const gapBadge = document.createElement("div");
-  gapBadge.className = `commit-gap-badge commit-gap-badge--${driftTone(stats.commit_gap || 0)}`;
+  gapBadge.className = `commit-gap-badge${tone ? ` commit-gap-badge--${tone}` : ""}`;
   const gapValue = document.createElement("strong");
-  gapValue.textContent = formatNumber(stats.commit_gap);
   const gapLabel = document.createElement("span");
-  gapLabel.textContent = "commits behind";
+  if (hasReleases) {
+    gapValue.textContent = behind === 0 ? "✓" : formatNumber(behind);
+    gapLabel.textContent = behind === 0 ? "on latest release" : `release${behind === 1 ? "" : "s"} behind`;
+  } else {
+    gapValue.textContent = formatNumber(stats.commit_gap);
+    gapLabel.textContent = "commits behind main";
+  }
   gapBadge.append(gapValue, gapLabel);
 
   header.append(titleGroup, gapBadge);
 
   const facts = document.createElement("div");
   facts.className = "backend-card__facts";
+  const pinDate = liveStatus.pin_date || (report.local && report.local.commit_date);
+  const pinAge = daysSince(pinDate);
+  const latestRelease = liveStatus.latest_release;
   facts.append(
-    compactFact("Primus baseline", report.local && report.local.version),
-    compactFact("Upstream version", report.upstream && report.upstream.version),
-    compactFact("Recommendation", summary.recommendation || report.status),
-    compactFact("Integration files", formatNumber(integration.backend_files))
+    compactFact("Primus pin", liveStatus.pin_version || (report.local && report.local.version)),
+    latestRelease
+      ? compactFact("Latest release", `${latestRelease.version} (${latestRelease.date})`)
+      : compactFact("Upstream main", liveStatus.upstream_version || (report.upstream && report.upstream.version)),
+    compactFact("Pin age", pinAge !== null ? `${formatNumber(pinAge)} days (${pinDate})` : "-"),
+    compactFact("Recommendation", recommendation || report.status, tone)
   );
+
+  let staleNotice = null;
+  if (live && isStale) {
+    staleNotice = document.createElement("p");
+    staleNotice.className = "backend-card__stale";
+    staleNotice.textContent =
+      `The analysis below is from ${report.generated_at} (${ageDays} days ago) and compares the pin with ` +
+      `upstream main as it was then; the status above is from the ${live.reportId} monthly report. ` +
+      `The analysis refreshes on the next pin change or once it is older than ${STALE_DEEP_DIVE_DAYS} days.`;
+  }
 
   const focus = document.createElement("section");
   focus.className = "backend-card__focus";
@@ -625,8 +1398,9 @@ function buildBackendDeepDiveCard(report) {
   const footer = document.createElement("footer");
   footer.className = "backend-card__footer";
   const meta = document.createElement("span");
-  meta.className = "backend-card__meta";
-  meta.textContent = `Updated ${report.generated_at || "-"} · ${report.status || "unknown"}`;
+  meta.className = `backend-card__meta${isStale ? " backend-card__meta--stale" : ""}`;
+  const age = ageDays !== null ? ` (${ageDays} days ago)` : "";
+  meta.textContent = `Deep dive updated ${report.generated_at || "-"}${age} · ${report.status || "unknown"}`;
   footer.append(meta);
 
   const artifactBar = document.createElement("div");
@@ -638,9 +1412,17 @@ function buildBackendDeepDiveCard(report) {
     });
   footer.append(artifactBar);
 
-  card.append(header, facts, focus);
+  card.append(header, facts);
+  if (staleNotice) card.append(staleNotice);
+  card.append(focus);
   if (insights.children.length) {
-    card.append(insights);
+    // PDF excerpts, collapsed so the card leads with "What matters".
+    const more = document.createElement("details");
+    more.className = "backend-card__more";
+    const moreSummary = document.createElement("summary");
+    moreSummary.textContent = "Upstream capabilities, dependency shift, integration risk";
+    more.append(moreSummary, insights);
+    card.append(more);
   }
   card.append(footer);
   return card;
@@ -654,9 +1436,6 @@ function renderBackendGapReports(reports) {
     // deep-dive cards; surface them only once the set grows.
     elements.backendGap.filterRow.hidden = state.backendGap.reports.length <= 3;
   }
-  elements.backendGap.resultCount.textContent = `${reports.length} report${
-    reports.length === 1 ? "" : "s"
-  }`;
 
   if (!reports.length) {
     list.hidden = true;
@@ -786,6 +1565,8 @@ async function renderSectionNav(payload) {
 async function loadDashboard() {
   attachWeeklyFilters();
   attachBackendGapFilters();
+  attachPrFilters();
+  elements.selection.reset.addEventListener("click", () => selectReport(latestReport()));
 
   const sectionsResult = await fetchJsonOptional(SECTIONS_DATA_URL);
   if (sectionsResult.ok) {
@@ -794,16 +1575,16 @@ async function loadDashboard() {
 
   const reportsResult = await fetchJsonOptional(REPORTS_DATA_URL);
   const gapResult = await fetchJsonOptional(BACKEND_GAP_DATA_URL);
-
-  // Hero chips (best effort — show whatever loaded)
-  renderHeroChips(reportsResult.payload, gapResult.payload);
+  const liveResult = await fetchJsonOptional(LIVE_DATA_URL);
+  state.live = liveResult.ok ? liveResult.payload : null;
+  renderCi(state.live);
 
   // --- Engineering reports section (weekly + monthly) ---
   elements.weekly.loadingState.hidden = true;
   if (reportsResult.ok && reportsResult.payload) {
     state.weekly.reports = reportsResult.payload.reports || [];
-    renderWeeklyStatRow(reportsResult.payload);
-    renderWeeklyFeatured(state.weekly.reports[0]);
+    state.monthly = state.weekly.reports.filter((report) => report.cadence === "monthly");
+    selectReport(latestReport());
     applyWeeklyFilters();
   } else {
     elements.weekly.errorState.hidden = false;
@@ -817,14 +1598,12 @@ async function loadDashboard() {
   elements.backendGap.loadingState.hidden = true;
   if (gapResult.ok && gapResult.payload) {
     state.backendGap.reports = gapResult.payload.reports || [];
-    renderBackendGapStats(gapResult.payload);
     populateBackendFilter(gapResult.payload.backends || []);
     applyBackendGapFilters();
   } else {
     elements.backendGap.errorState.hidden = false;
     elements.backendGap.errorState.textContent = `Unable to load backend gap data. ${gapResult.error || ""}`.trim();
     elements.backendGap.reportList.hidden = true;
-    elements.backendGap.resultCount.textContent = "0 reports";
   }
 }
 

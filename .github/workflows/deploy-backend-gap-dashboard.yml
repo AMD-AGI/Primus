@@ -14,14 +14,22 @@ on:
   # this after a data push, so report updates publish without a timed schedule.
   repository_dispatch:
     types: [dashboard-data-updated]
+  # Weekly refresh of the live panels (upstream releases and CI runs trigger
+  # nothing here); Monday 01:00 UTC also picks up Saturday's full CI run.
+  schedule:
+    - cron: "0 1 * * 1"
   # Tooling/shell/workflow changes and mounted section sources (declared in
   # pages-sections.json) on main. Add a new section's source path here too.
+  # _thirdparty.lock refreshes the dependency matrix when a submodule pin
+  # moves; the Turbo pin in the busy ci.yaml is left to the weekly refresh.
   push:
     branches:
       - main
     paths:
       - "tools/backend_gap_report/**"
       - "tools/pip_index/**"
+      - "tools/ci/coverage_summary.py"
+      - "primus/_thirdparty.lock"
       - "examples/megatron/models/deepseek-v4/projection/site/**"
       - ".github/workflows/deploy-backend-gap-dashboard.yml"
 
@@ -29,6 +37,8 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  # CI runs, jobs and coverage artifacts for the CI health panel.
+  actions: read
 
 concurrency:
   group: backend-gap-dashboard-pages
@@ -43,6 +53,10 @@ jobs:
     steps:
       - name: Check out repository (tooling + site shell from main)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Commit history for when each pin last moved; no old file contents.
+          fetch-depth: 0
+          filter: blob:none
 
       - name: Check out dashboard data branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -85,6 +99,16 @@ jobs:
             --package primus \
             --requires-python ">=3.10" \
             --output-dir "${{ runner.temp }}/backend-gap-site/simple"
+
+      # Best effort: the dashboard hides a panel whose data is missing, so a
+      # GitHub API hiccup never blocks publishing the reports.
+      - name: Collect live dependency and CI status
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 tools/backend_gap_report/collect_live_status.py --repo "${{ github.repository }}" \
+            live --output "${{ runner.temp }}/backend-gap-site/live-data/index.json"
 
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
