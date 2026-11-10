@@ -126,7 +126,10 @@ def make_param_and_grad_buffer_init(original):
         bound = signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
         ddp_config = bound.arguments["ddp_config"]
-        params = bound.arguments["params"]
+        if "params_with_names" in bound.arguments:  # Megatron-LM >= 0.19
+            params = [param for param, _ in bound.arguments["params_with_names"]]
+        else:
+            params = bound.arguments["params"]
         original_group = bound.arguments["data_parallel_group"]
         nccl_ub = bound.arguments["nccl_ub"]
 

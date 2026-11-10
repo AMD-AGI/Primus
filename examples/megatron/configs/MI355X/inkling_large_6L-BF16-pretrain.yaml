@@ -5,9 +5,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Inkling (Large) 6-layer proxy (released widths, 2 dense + 4 MoE layers,
 # layers 0-4 sliding with 16 KV groups, layer 5 global with 8) on one MI355X
-# node: EP=8 x DP=8, AdamW, random init, mock data. Turbo is off so every
-# kernel is one the reference tests cover. Same recipe as
-# inkling_small_12L-BF16-pretrain.yaml except the model.
+# node: EP=8 x DP=8, AdamW, random init, mock data. Turbo kernels are on;
+# PRIMUS_TURBO=false runs only the kernels the reference tests cover. Same
+# recipe as inkling_small_12L-BF16-pretrain.yaml except the model and Turbo.
 
 modules:
   pre_trainer:
@@ -79,12 +79,20 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # turbo off: TE grouped GEMM + alltoall dispatcher
-      enable_primus_turbo: false
+      # Turbo grouped GEMM, RMSNorm, DeepEP dispatcher and GEMM (attention,
+      # MLPs, shared experts). Inkling keeps its own attention core.
+      # DeepEP needs fp32 router probs (set by inkling_base.yaml) and switches the
+      # dispatcher to flex.
+      # Muon does not orthogonalize Turbo's stacked expert weights: run
+      # muon / dist_muon with PRIMUS_TURBO=false.
+      enable_primus_turbo: ${PRIMUS_TURBO:true}
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
-      use_turbo_deepep: false
-      use_turbo_rms_norm: false
+      use_turbo_grouped_gemm: ${PRIMUS_TURBO:true}
+      use_turbo_deepep: ${PRIMUS_TURBO:true}
+      # 64 CUs: 0.8% faster than the default 32 at EP 8 (16 is slower; 160 is about
+      # the same as 64 and uses 2 GB more per GPU)
+      turbo_deepep_num_cu: 64
+      use_turbo_rms_norm: ${PRIMUS_TURBO:true}
+      use_turbo_gemm: ${PRIMUS_TURBO:true}
       moe_grouped_gemm: true
-      moe_token_dispatcher_type: alltoall
       moe_permute_fusion: false
