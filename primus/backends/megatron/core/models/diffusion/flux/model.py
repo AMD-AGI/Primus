@@ -58,6 +58,7 @@ from primus.backends.megatron.core.models.diffusion.flux.layer_spec import (
 from primus.backends.megatron.core.models.diffusion.flux.layers import EmbedND
 from primus.backends.megatron.core.transformer.diffusion_transformer_block import (
     DiffusionTransformerBlock,
+    uses_per_layer_quantization_context,
 )
 
 _QK_RMSNORM_PARAM_ATTRS = (
@@ -654,13 +655,20 @@ class Flux(DiffusionModule):
         context manager is needed. This avoids mutable global state that would cause
         torch.compile graph breaks.
 
+        With sensitive layers (``first_last_layers_bf16``), a context around the
+        whole transformer would keep those layers quantized, so this returns
+        nullcontext and ``DiffusionTransformerBlock`` enters one context per layer.
+
         Returns:
             Context manager for the active quantization mode (or nullcontext if
-            quantization is disabled or using local spec).
+            quantization is disabled, using local spec, or entered per layer).
         """
         from contextlib import nullcontext
 
         if self.config.transformer_impl == "local":
+            return nullcontext()
+
+        if uses_per_layer_quantization_context(self.config):
             return nullcontext()
 
         if getattr(self.config, "fp8", None):

@@ -24,6 +24,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+from primus.backends.specforge.capture_plugin import (
+    capture_server_env,
+    require_capture_plugin,
+)
 from primus.backends.specforge.online_launch import (
     build_online_overrides,
     build_role_argv,
@@ -204,13 +208,19 @@ def _start_local_sglang(
     settings: dict[str, Any], head_ip: str, local_ip: str, log_root: Path, capture_rank: int
 ) -> list[subprocess.Popen]:
     servers: list[subprocess.Popen] = []
-    for index in range(int(settings["server_count"])):
-        gpus = server_gpu_group(settings["server_gpus"], index, int(settings["server_tp"]))
-        server_env = _merge_env(mooncake_env(head_ip, settings, local_ip), gpus)
-        log_path = log_root / f"sglang-server-{capture_rank}-{index}.log"
-        proc = _popen(sglang_server_argv(index, settings), server_env, log_path)
-        servers.append(proc)
-        _wait_sglang(local_ip, index, settings, proc, log_path)
+    try:
+        for index in range(int(settings["server_count"])):
+            gpus = server_gpu_group(settings["server_gpus"], index, int(settings["server_tp"]))
+            server_env = capture_server_env(_merge_env(mooncake_env(head_ip, settings, local_ip), gpus))
+            log_path = log_root / f"sglang-server-{capture_rank}-{index}.log"
+            proc = _popen(sglang_server_argv(index, settings), server_env, log_path)
+            servers.append(proc)
+            _wait_sglang(local_ip, index, settings, proc, log_path)
+            require_capture_plugin(f"http://{local_ip}:{int(settings['server_port']) + index}", log_path)
+    except BaseException:
+        for proc in reversed(servers):
+            _kill_group(proc)
+        raise
     write_lines(sglang_url_path(str(log_root), capture_rank), server_urls(local_ip, settings))
     log_rank_0(f"SGLang capture server(s) healthy on rank {capture_rank}")
     return servers
