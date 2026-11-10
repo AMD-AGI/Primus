@@ -274,6 +274,76 @@ def test_trainer_setup_and_init_keep_paths_of_the_launch_directory(tmp_path, mon
         os.chdir(launch)
 
 
+@pytest.mark.parametrize("node_rank", ["0", "3"])
+def test_trainer_warm_waits_for_its_node_run_start_marker(tmp_path, monkeypatch, node_rank):
+    """The in-run warm keys on a per-node RUN_START marker (written by the trainer's
+    local rank 0 of each node), not on the MLPerf log: only global rank 0 writes that
+    log, so nodes 1+ never saw run_start in it. Node 0 still starts a fresh log; a
+    shared log must not be deleted by another node."""
+    from primus.backends.recommendation.dlrm_v4 import trainer as T
+
+    src, data = _fake_trainer_tree(tmp_path)
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+    real_exists = os.path.exists
+    monkeypatch.setattr(T.os.path, "exists", lambda p: p == "/opt/rocm/bin/hipcc" or real_exists(p))
+    for name in ("DLRM_DATA_PATH", "SEED", "MLPERF_LOG_PATH", "PYTHONPATH", "DLRM_RUN_START_MARKER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NODE_RANK", node_rank)
+    params = {
+        "trainer_src": str(src),
+        "data_path": str(data),
+        "output_dir": "rel_out",
+        "private_site": str(tmp_path / "missing_site"),
+        "mlperf_logging": True,
+        "warm_cache_after_run_start": True,
+    }
+    saved = list(sys.path)
+    try:
+        t = T.DlrmV4Trainer(backend_args=params)
+        t.setup()
+        marker = launch / "rel_out" / f"run_start.node{node_rank}"
+        assert t.run_start_marker == str(marker)
+        assert os.environ["DLRM_RUN_START_MARKER"] == str(marker)
+        # A log with run_start in it (stale on node 0, node 0's live log elsewhere) must
+        # not start the warm; node 0 removes it, other nodes keep it; this node's stale
+        # marker is removed.
+        log = Path(os.environ["MLPERF_LOG_PATH"])
+        log.write_text(':::MLLOG {"key": "run_start"}\n')
+        marker.write_text("stale\n")
+        warmed = []
+        monkeypatch.setattr(t, "_pagecache", lambda mode: warmed.append(mode))
+
+        class _TR:
+            @staticmethod
+            def launch(*args):
+                assert not marker.exists()  # the stale marker was removed before launch
+                assert log.exists() == (node_rank != "0")
+                marker.write_text("1.0\n")  # what each node's local rank 0 does at RUN_START
+                t._warm_thread.join(timeout=10)
+
+        monkeypatch.setitem(sys.modules, "generative_recommenders.dlrm_v4.train.train_ranker", _TR)
+        import importlib
+
+        try:  # the package may already be the real one: patch its attribute too
+            monkeypatch.setattr(
+                importlib.import_module("generative_recommenders.dlrm_v4.train"),
+                "train_ranker",
+                _TR,
+                raising=False,
+            )
+        except ImportError:
+            pass
+        monkeypatch.setattr(T.run_config, "run_summary", lambda path: {})
+        t.train()
+        assert warmed == ["warm"]
+        t.cleanup()
+    finally:
+        sys.path[:] = saved
+        os.chdir(launch)
+
+
 def test_trainer_refuses_missing_data(tmp_path, monkeypatch):
     from primus.backends.recommendation.dlrm_v4 import trainer as T
 

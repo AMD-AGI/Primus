@@ -67,6 +67,7 @@ class DlrmV4Trainer(BaseTrainer):
         self._launch_cwd: Optional[str] = None
         self.gin_path: str = ""
         self.mlperf_log: str = ""
+        self.run_start_marker: str = ""
         self._warm_stop = threading.Event()
         self._warm_thread: Optional[threading.Thread] = None
 
@@ -113,6 +114,13 @@ class DlrmV4Trainer(BaseTrainer):
         self.mlperf_log = os.environ.get("MLPERF_LOG_PATH", "")
         if self.mlperf_log:
             Path(self.mlperf_log).parent.mkdir(parents=True, exist_ok=True)
+        # Per-node RUN_START marker for the in-run warm: the trainer's local rank 0
+        # of each node writes it right after RUN_START. Only global rank 0 writes the
+        # MLPerf log, so with one log per node, nodes 1+ never saw run_start and never
+        # warmed; and a shared log must not be deleted by another node.
+        out.mkdir(parents=True, exist_ok=True)
+        self.run_start_marker = str(out / f"run_start.node{os.environ.get('NODE_RANK', '0')}")
+        os.environ["DLRM_RUN_START_MARKER"] = self.run_start_marker
 
         missing = run_config.missing_data(os.environ.get("DLRM_DATA_PATH"), self._p("history_length"))
         if missing:
@@ -172,9 +180,18 @@ class DlrmV4Trainer(BaseTrainer):
     def train(self):
         from generative_recommenders.dlrm_v4.train import train_ranker
 
-        if self._p("warm_cache_after_run_start", False) and self.mlperf_log:
-            # A log left over from an earlier run must not trigger the warm early.
-            if os.path.exists(self.mlperf_log):
+        if self._p("warm_cache_after_run_start", False) and self.run_start_marker:
+            # A marker left over from an earlier run must not trigger the warm early.
+            if os.path.exists(self.run_start_marker):
+                os.remove(self.run_start_marker)
+            # Node 0 starts a fresh MLPerf log, as before; global rank 0 writes it, so
+            # another node must leave it alone (on a shared path it would unlink the
+            # log node 0 is writing).
+            if (
+                self.mlperf_log
+                and os.environ.get("NODE_RANK", "0") == "0"
+                and os.path.exists(self.mlperf_log)
+            ):
                 os.remove(self.mlperf_log)
             self._warm_thread = threading.Thread(target=self._warm_after_run_start, daemon=True)
             self._warm_thread.start()
@@ -213,7 +230,7 @@ class DlrmV4Trainer(BaseTrainer):
 
     def _warm_after_run_start(self) -> None:
         while not self._warm_stop.is_set():
-            if run_config.mlperf_run_started(self.mlperf_log):
+            if os.path.exists(self.run_start_marker):
                 break
             time.sleep(0.5)
         else:
