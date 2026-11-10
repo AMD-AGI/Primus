@@ -4,23 +4,31 @@ exp_name: ${PRIMUS_EXP_NAME:inkling_large-FP8-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Inkling (Large), full 66 layers (2 dense + 64 MoE, 947 B total / 41 B
-# active) on 16 MI355X nodes with Primus-Turbo kernels and FP8 tensorwise
-# GEMMs: the Turbo and FP8 settings of inkling_large_6L-FP8-pretrain.yaml at
-# full depth. Needs Primus-Turbo 0.6 or later (rocm/primus:v26.9).
+# active) on 16 MI355X nodes in FP8 tensorwise, with Primus-Turbo's DeepEP and
+# RMSNorm and Transformer Engine's GEMMs: the Turbo and FP8 settings of
+# inkling_large_6L-FP8-pretrain.yaml at full depth, with use_turbo_grouped_gemm
+# and use_turbo_gemm off. Needs Primus-Turbo 0.6 or later (rocm/primus:v26.9).
 #
 # PP=16 across nodes (one stage per node) x EP=8 inside each node, so the
 # expert all-to-all (DeepEP) never leaves a node and dense weights are
 # data-parallel 8 ways. Each GPU holds 1/8 of the experts of its stage's MoE
 # layers. Stage split 3/3/3/3/3, 4/4/4/4/4, 5/5/5/5, 6, 5 (+ LM head): under
 # 1F1B stage r holds 16 - r microbatches, so the early stages get fewer layers.
-# The fullest stage, stage 10, peaked at 285 of 288 GiB per GPU; if a stage
+# The fullest stage, stage 14, peaked at 280 of 288 GiB per GPU; if a stage
 # runs out of memory, use recompute_granularity: selective with
 # recompute_modules: [layernorm, moe_act].
 #
-# The first step builds and autotunes Turbo's FP8 GEMMs with FlyDSL at each
-# stage in turn: on 16 nodes it took 2 h 10 min, and stage 0 waited 2 h 3 min
-# for its first gradient, hence distributed_timeout_minutes: 300. Allow about
-# 3 hours for the 50 steps.
+# On 16 nodes the first step took 11 minutes and the median step 48.50 s, so
+# the 50 steps take under an hour.
+#
+# For long training runs, switch to Turbo's FP8 GEMMs, whose expert GEMMs are
+# FlyDSL kernels: set use_turbo_grouped_gemm and use_turbo_gemm to
+# ${PRIMUS_TURBO:true} and distributed_timeout_minutes to 300. On 16 nodes the
+# median step drops to 43.49 s, but the first step, which builds and autotunes
+# the FlyDSL kernels at each stage in turn, took 2 h 10 min, and stage 0
+# waited 2 h 3 min for its first gradient. Allow about 3 hours for 50 steps;
+# the faster steps make up for the first one after about 1,420 steps. The
+# fullest stage, stage 10, peaked at 285 of 288 GiB.
 #
 # Environment: TORCHINDUCTOR_COMPILE_THREADS=1 on every node, so each rank
 # runs its Inductor compiles in its own process. With a compile-worker pool, a
@@ -73,9 +81,8 @@ modules:
       # Deferring the LM-head wgrad buffers every microbatch's [seq, vocab]
       # output gradient on the last stage.
       defer_embedding_wgrad_compute: false
-      # The first step builds and autotunes Turbo's FP8 GEMMs (FlyDSL) at one
-      # stage after another, and stage 0 waits for its first gradient meanwhile.
-      distributed_timeout_minutes: 300
+      # 300 with Turbo's FP8 GEMMs: see the header.
+      distributed_timeout_minutes: 120
 
       # data. NullTokenizer puts eod at id vocab_size: 200057 + eod = the
       # 200058 real Inkling tokens (padded to 200064).
@@ -106,20 +113,20 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # Turbo grouped GEMM, RMSNorm, DeepEP dispatcher and GEMM (attention,
-      # MLPs, shared experts). Inkling keeps its own attention core, and the
-      # LM head stays Megatron's. DeepEP stays inside a node at EP=8; it needs
-      # fp32 router probs and switches the dispatcher to flex.
-      # PRIMUS_TURBO=false uses TE + alltoall.
+      # Turbo RMSNorm and DeepEP dispatcher; the expert and dense GEMMs are
+      # TE's (the header says how to switch to Turbo's). Inkling keeps its own
+      # attention core, and the LM head stays Megatron's. DeepEP stays inside a
+      # node at EP=8; it needs fp32 router probs and switches the dispatcher to
+      # flex. PRIMUS_TURBO=false turns Turbo off entirely (TE + alltoall).
       enable_primus_turbo: ${PRIMUS_TURBO:true}
       use_turbo_attention: false
-      use_turbo_grouped_gemm: ${PRIMUS_TURBO:true}
+      use_turbo_grouped_gemm: false
       use_turbo_deepep: ${PRIMUS_TURBO:true}
       # 64 CUs: 0.8% faster than the default 32 at EP 8 (16 is slower; 160 is about
       # the same as 64 and uses 2 GB more per GPU)
       turbo_deepep_num_cu: 64
       use_turbo_rms_norm: ${PRIMUS_TURBO:true}
-      use_turbo_gemm: ${PRIMUS_TURBO:true}
+      use_turbo_gemm: false
       moe_router_dtype: fp32
       moe_grouped_gemm: true
       moe_permute_fusion: false

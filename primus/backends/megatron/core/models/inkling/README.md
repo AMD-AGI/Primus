@@ -44,7 +44,7 @@ a Megatron GPT layer:
 | `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L`, `inkling_large_6L` and `inkling_large_20L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
 | `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml`, `inkling_large_6L-FP8-pretrain.yaml` | Single-node recipes (EP 8, AdamW, mock data) |
 | `examples/megatron/configs/MI355X/inkling_large_20L-BF16-pretrain.yaml` | Four-node recipe (PP 4 × EP 8) for the 20-layer Large proxy; not yet run on this code |
-| `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_small-FP8-pretrain.yaml`, `inkling_large-BF16-pretrain.yaml`, `inkling_large-FP8-pretrain.yaml` | Multi-node recipes run on MI355X nodes: the full Small model (PP 4 × EP 8) on 4 nodes, in BF16 with Turbo off and in FP8 tensorwise with Turbo, and the full 66-layer Large model (PP 16 × EP 8) on 16 nodes with Turbo, in BF16 and FP8 tensorwise |
+| `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_small-FP8-pretrain.yaml`, `inkling_large-BF16-pretrain.yaml`, `inkling_large-FP8-pretrain.yaml` | Multi-node recipes run on MI355X nodes: the full Small model (PP 4 × EP 8) on 4 nodes, in BF16 with Turbo off and in FP8 tensorwise with Turbo, and the full 66-layer Large model (PP 16 × EP 8) on 16 nodes with Turbo, in BF16 and in FP8 tensorwise with Turbo's GEMMs off |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
 
