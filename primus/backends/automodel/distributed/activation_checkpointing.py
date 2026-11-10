@@ -30,11 +30,20 @@ WHY THERE IS A STRIDE:
   and so on, counted across all the block lists; 0 or 1 is plain full AC. It
   applies to full AC only: selective AC decides per operation inside every
   block, so a per-block stride would compose two granularities.
+
+WHY SELECTIVE AC IS TOLD ABOUT PRIMUS-TURBO'S ATTENTION:
+  AutoModel's selective policy keeps the outputs of the ops it lists (PyTorch's
+  own attention ops, matmuls, collectives) and recomputes every other op. The
+  attention overrides run Primus-Turbo's attention, a custom op it does not
+  list, so without this the whole attention forward -- the costliest op in a
+  long-sequence block -- would run again in the backward. Turbo's attention
+  forward ops are added to the list; keeping their output costs one activation
+  per kernel call (under ring context parallelism, one per ring step).
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +58,43 @@ MODE_OFF = "off"
 MODE_FULL = "full"
 MODE_SELECTIVE = "selective"
 MODE_NO_BLOCKS = "no-blocks"
+
+# Primus-Turbo's attention forward ops, as ``torch.ops`` paths. They exist once
+# Turbo is imported, which the attention overrides do when they install.
+TURBO_ATTENTION_FORWARD_OPS = (
+    "primus_turbo.attention_aiter_forward_impl.default",
+    "primus_turbo.attention_triton_forward_impl.default",
+)
+
+
+def _resolve_op(dotted_path: str) -> Any:
+    import torch
+
+    obj = torch.ops
+    try:
+        for part in dotted_path.split("."):
+            obj = getattr(obj, part)
+    except (AttributeError, RuntimeError):
+        return None
+    return obj
+
+
+def save_attention_under_selective_ac(
+    helpers: Any, names: Sequence[str] = TURBO_ATTENTION_FORWARD_OPS
+) -> List[str]:
+    """Add the registered ops among ``names`` to AutoModel's selective-AC save set.
+
+    AutoModel's policy reads the set at call time, so this applies to blocks
+    wrapped before or after it. Returns the names that are registered (empty
+    when none is, or when ``helpers`` has no save set).
+    """
+    save_ops = getattr(helpers, "_SELECTIVE_AC_MUST_SAVE_OPS", None)
+    if save_ops is None:
+        return []
+    found = {name: op for name in names if (op := _resolve_op(name)) is not None}
+    if found:
+        helpers._SELECTIVE_AC_MUST_SAVE_OPS = frozenset(save_ops) | frozenset(found.values())
+    return sorted(found)
 
 
 def upstream_helpers():
@@ -144,10 +190,12 @@ def apply(
         helpers.apply_selective_checkpointing_to_layers(
             model, layers, False, enable_compile=bool(enable_compile)
         )
+        saved = save_attention_under_selective_ac(helpers)
         logger.info(
-            "%s wrapped %d blocks with SELECTIVE (partial) activation checkpointing",
+            "%s wrapped %d blocks with SELECTIVE (partial) activation checkpointing; attention outputs kept: %s",
             log_prefix,
             len(layers),
+            ", ".join(saved) if saved else "no Primus-Turbo attention op registered",
         )
         return MODE_SELECTIVE, len(layers)
 
