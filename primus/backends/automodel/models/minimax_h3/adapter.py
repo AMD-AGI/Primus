@@ -99,15 +99,26 @@ def _build_adapter_class():
             video_flow_shift: float = 12.0,
             audio_flow_shift: float = 3.0,
             audio_sigma: str = "derived",
+            audio_loss_log_interval: int = 10,
         ):
             if audio_sigma not in _AUDIO_SIGMA_MODES:
                 raise ValueError(f"audio_sigma must be one of {_AUDIO_SIGMA_MODES}, got {audio_sigma!r}")
             if video_flow_shift <= 0 or audio_flow_shift <= 0:
                 raise ValueError("flow shifts must be positive")
+            if int(audio_loss_log_interval) < 0:
+                raise ValueError(f"audio_loss_log_interval must be >= 0, got {audio_loss_log_interval}")
             self.audio_loss_weight = audio_loss_weight
             self.video_flow_shift = video_flow_shift
             self.audio_flow_shift = audio_flow_shift
             self.audio_sigma = audio_sigma
+            # AutoModel's recipe calls the pipeline with collect_metrics=False, so the
+            # auxiliary losses it returns are never reported; the logged loss is video plus
+            # weighted audio. The adapter logs the unweighted audio loss itself, averaged on
+            # the device over this many micro-steps and across data-parallel ranks, so a
+            # broken audio path shows up on its own. One host sync per interval; 0 turns it off.
+            self.audio_loss_log_interval = int(audio_loss_log_interval)
+            self._audio_loss_sum = None
+            self._audio_loss_count = 0
 
         def _audio_sigma(self, sigma_video: torch.Tensor) -> torch.Tensor:
             if self.audio_sigma == "same":
@@ -195,7 +206,30 @@ def _build_adapter_class():
 
         def auxiliary_losses(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor] | None:
             audio_loss = nn.functional.mse_loss(inputs["_audio_pred"].float(), inputs["_audio_target"])
+            if self.audio_loss_log_interval:
+                self._record_audio_loss(audio_loss.detach())
             return {"audio_loss": self.audio_loss_weight * audio_loss}
+
+        def _record_audio_loss(self, value: torch.Tensor) -> None:
+            self._audio_loss_sum = value if self._audio_loss_sum is None else self._audio_loss_sum + value
+            self._audio_loss_count += 1
+            if self._audio_loss_count < self.audio_loss_log_interval:
+                return
+            mean = self._audio_loss_sum / self._audio_loss_count
+            import torch.distributed as dist
+
+            distributed = dist.is_available() and dist.is_initialized()
+            if distributed:
+                # Every rank runs the same number of micro-steps, so they reach this together.
+                dist.all_reduce(mean, op=dist.ReduceOp.AVG)
+            if not distributed or dist.get_rank() == 0:
+                logger.info(
+                    "[PrimusMiniMaxH3] audio_loss=%.6f (unweighted, mean of the last %d micro-steps%s)",
+                    mean.item(),
+                    self._audio_loss_count,
+                    " across ranks" if distributed else "",
+                )
+            self._audio_loss_sum, self._audio_loss_count = None, 0
 
     return MiniMaxH3Adapter
 

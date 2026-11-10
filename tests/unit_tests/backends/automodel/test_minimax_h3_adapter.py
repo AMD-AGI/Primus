@@ -356,6 +356,66 @@ class TestForward:
         assert torch.allclose(prediction, eps - x0, atol=1e-6)
 
 
+class TestAudioLossLogging:
+    """The recipe never reports auxiliary losses, so the adapter logs the audio loss itself."""
+
+    @pytest.fixture(autouse=True)
+    def _needs_diffusers(self, reference):
+        pass
+
+    def _micro_step(self, adapter, ctx, x0, audio_rows):
+        inputs = adapter.prepare_inputs(ctx)
+        adapter.forward(lambda **kw: (L.patchify_video(x0, (1, 2, 2)), audio_rows), inputs)
+        return adapter.auxiliary_losses(inputs)["audio_loss"]
+
+    def _messages(self, caplog):
+        return [r.getMessage() for r in caplog.records if "audio_loss=" in r.getMessage()]
+
+    def test_it_logs_the_unweighted_mean_every_interval(self, fake_automodel, caplog):
+        ctx, x0, _ = make_context()
+        adapter = new_adapter(fake_automodel, audio_loss_weight=3.0, audio_loss_log_interval=2)
+        zeros = torch.zeros(1, 2 * AUDIO_LEN, 32)
+        with caplog.at_level("INFO", logger=adapter_mod.logger.name):
+            first = self._micro_step(adapter, ctx, x0, zeros)
+            assert self._messages(caplog) == []  # not yet at the interval
+            self._micro_step(adapter, ctx, x0, zeros)
+        (message,) = self._messages(caplog)
+        # Unweighted: the returned (weighted) loss is 3x what is logged, for a fixed audio noise seed.
+        logged = float(message.split("audio_loss=")[1].split()[0])
+        assert logged > 0
+        assert first.item() == pytest.approx(3 * logged, rel=0.5)  # same distribution, fresh noise
+
+    def test_the_window_restarts_after_each_log(self, fake_automodel, caplog):
+        ctx, x0, _ = make_context()
+        adapter = new_adapter(fake_automodel, audio_loss_log_interval=1)
+        zeros = torch.zeros(1, 2 * AUDIO_LEN, 32)
+        with caplog.at_level("INFO", logger=adapter_mod.logger.name):
+            for _ in range(3):
+                self._micro_step(adapter, ctx, x0, zeros)
+        assert len(self._messages(caplog)) == 3
+
+    def test_zero_turns_it_off(self, fake_automodel, caplog):
+        ctx, x0, _ = make_context()
+        adapter = new_adapter(fake_automodel, audio_loss_log_interval=0)
+        with caplog.at_level("INFO", logger=adapter_mod.logger.name):
+            for _ in range(12):
+                self._micro_step(adapter, ctx, x0, torch.zeros(1, 2 * AUDIO_LEN, 32))
+        assert self._messages(caplog) == []
+
+    def test_a_negative_interval_is_refused(self, fake_automodel):
+        with pytest.raises(ValueError, match="audio_loss_log_interval"):
+            new_adapter(fake_automodel, audio_loss_log_interval=-1)
+
+    def test_logging_does_not_change_the_returned_loss(self, fake_automodel):
+        ctx, x0, _ = make_context()
+        values = []
+        for interval in (0, 1):
+            adapter = new_adapter(fake_automodel, audio_loss_log_interval=interval)
+            torch.manual_seed(5)
+            values.append(self._micro_step(adapter, ctx, x0, torch.zeros(1, 2 * AUDIO_LEN, 32)).item())
+        assert values[0] == values[1]
+
+
 class TestWithTheRealTransformer:
     @pytest.fixture(autouse=True)
     def _needs_diffusers(self, reference):
@@ -503,3 +563,50 @@ class TestInstall:
         with caplog.at_level("WARNING"):
             adapter_mod.install()
         assert any("could not import the diffusion recipe" in r.getMessage() for r in caplog.records)
+
+
+class TestAudioLossLogging:
+    """AutoModel never reports auxiliary losses, so the adapter logs the audio loss itself."""
+
+    @staticmethod
+    def _inputs(error):
+        target = torch.zeros(1, 2, 32, 4)
+        return {"_audio_pred": torch.full_like(target, error), "_audio_target": target}
+
+    def test_it_logs_the_unweighted_mean_once_per_interval(self, fake_automodel, caplog):
+        adapter = new_adapter(fake_automodel, audio_loss_weight=0.5, audio_loss_log_interval=3)
+        with caplog.at_level("INFO", logger=adapter_mod.logger.name):
+            for error in (1.0, 2.0):
+                adapter.auxiliary_losses(self._inputs(error))
+            assert "audio_loss=" not in caplog.text
+            out = adapter.auxiliary_losses(self._inputs(3.0))
+        # MSE of a constant error e is e**2: mean of 1, 4 and 9, unweighted.
+        assert "audio_loss=4.666667" in caplog.text
+        assert "last 3 micro-steps" in caplog.text
+        # The returned loss is still the weighted one.
+        assert out["audio_loss"].item() == pytest.approx(0.5 * 9.0)
+
+    def test_the_window_restarts_after_each_log(self, fake_automodel, caplog):
+        adapter = new_adapter(fake_automodel, audio_loss_log_interval=2)
+        with caplog.at_level("INFO", logger=adapter_mod.logger.name):
+            for error in (1.0, 1.0, 3.0, 3.0):
+                adapter.auxiliary_losses(self._inputs(error))
+        assert [r.getMessage().split()[1] for r in caplog.records] == ["audio_loss=1.000000", "audio_loss=9.000000"]
+
+    def test_zero_turns_it_off(self, fake_automodel, caplog):
+        adapter = new_adapter(fake_automodel, audio_loss_log_interval=0)
+        with caplog.at_level("INFO", logger=adapter_mod.logger.name):
+            for _ in range(20):
+                adapter.auxiliary_losses(self._inputs(1.0))
+        assert "audio_loss=" not in caplog.text
+
+    def test_a_negative_interval_is_refused(self, fake_automodel):
+        with pytest.raises(ValueError, match="audio_loss_log_interval"):
+            new_adapter(fake_automodel, audio_loss_log_interval=-1)
+
+    def test_it_does_not_keep_the_graph(self, fake_automodel):
+        adapter = new_adapter(fake_automodel, audio_loss_log_interval=5)
+        inputs = self._inputs(1.0)
+        inputs["_audio_pred"].requires_grad_(True)
+        adapter.auxiliary_losses(inputs)
+        assert not adapter._audio_loss_sum.requires_grad
