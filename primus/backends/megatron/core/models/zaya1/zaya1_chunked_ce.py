@@ -56,7 +56,13 @@ def chunked_ce_chunk_tokens() -> int:
 
 def chunked_ce_compile_enabled() -> bool:
     """``ZAYA_CHUNKED_CE_COMPILE`` (default 1): fuse each chunk's CE math with torch.compile."""
-    return os.environ.get("ZAYA_CHUNKED_CE_COMPILE", "1").strip().lower() not in ("0", "false", "off", "no", "")
+    return os.environ.get("ZAYA_CHUNKED_CE_COMPILE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+        "",
+    )
 
 
 def _chunk_logits(x_c: Tensor, weight: Tensor, logit_scale: Optional[float]) -> Tensor:
@@ -99,7 +105,9 @@ _FUSED = {}
 def _fused_kernels():
     """(fwd_stats, bwd_dlogits) compiled once per process; eager fallback inside."""
     if "fns" not in _FUSED:
-        from primus.backends.megatron.core.models.zaya1.zaya1_modules import _maybe_compile
+        from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
+            _maybe_compile,
+        )
 
         _FUSED["fns"] = (_maybe_compile(_ce_fwd_stats, True), _maybe_compile(_ce_bwd_dlogits, True))
     return _FUSED["fns"]
@@ -191,7 +199,7 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
             p.mul_(g.unsqueeze(1))
             if logit_scale is not None:
                 # d(scaled logits)/d(raw logits); stock autograd does this in bf16.
-                d = (p.to(x.dtype) * logit_scale)
+                d = p.to(x.dtype) * logit_scale
             else:
                 d = p.to(x.dtype)
             del p

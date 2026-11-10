@@ -113,7 +113,9 @@ def test_chunked_ce_out_of_range_labels_match_stock(tp_group, compile_flag, monk
     labels[1, 3] = vocab + 5
     mask = torch.ones(b, s)
     ref = _run(lambda x, w, y: _stock(x, w, y, tp_group), hidden0, weight0, labels, mask)
-    out = _run(lambda x, w, y: chunked_linear_cross_entropy(x, w, y, chunk_tokens=5), hidden0, weight0, labels, mask)
+    out = _run(
+        lambda x, w, y: chunked_linear_cross_entropy(x, w, y, chunk_tokens=5), hidden0, weight0, labels, mask
+    )
     torch.testing.assert_close(out[0], ref[0], rtol=1e-5, atol=1e-5)
     assert _rel(out[1], ref[1]) < 1e-2
     assert _rel(out[2], ref[2]) < 1e-2

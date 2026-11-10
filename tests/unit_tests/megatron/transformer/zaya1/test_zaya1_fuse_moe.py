@@ -83,7 +83,11 @@ def _run(module, flag, monkeypatch, *inputs):
     inputs = [x.detach().clone().requires_grad_(x.is_floating_point()) for x in inputs]
     out = module(*inputs)
     outs = out if isinstance(out, tuple) else (out,)
-    loss = sum((o.float() * torch.linspace(0.5, 1.5, o.numel()).view_as(o)).sum() for o in outs if o.is_floating_point())
+    loss = sum(
+        (o.float() * torch.linspace(0.5, 1.5, o.numel()).view_as(o)).sum()
+        for o in outs
+        if o.is_floating_point()
+    )
     loss.backward()
     params = module.named_parameters() if hasattr(module, "named_parameters") else []
     grads = {n: p.grad.detach().clone() for n, p in params if p.grad is not None}
