@@ -45,7 +45,11 @@ from typing import Any, Dict, List, Tuple
 
 import torch
 from nemo_automodel.components.datasets.diffusion.loader import DiffusionDataloaderBuild
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import Dataset, DistributedSampler
+# AutoModel checkpoints a dataloader's position only if it is a StatefulDataLoader
+# (``base_recipe.is_dataloader``), and its step scheduler skips nothing on resume. A
+# plain DataLoader would replay the interrupted epoch from its start after a resume.
+from torchdata.stateful_dataloader import StatefulDataLoader
 
 from primus.backends.automodel.models.minimax_h3 import layout as layout_lib
 
@@ -201,7 +205,7 @@ class SyntheticMiniMaxH3DataloaderConfig:
                 shuffle=self.shuffle,
                 drop_last=self.drop_last,
             )
-        dataloader = DataLoader(
+        dataloader = StatefulDataLoader(
             dataset,
             batch_size=batch_size,
             # Sampler and shuffle are mutually exclusive in DataLoader.

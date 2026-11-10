@@ -147,6 +147,38 @@ class TestDataloader:
         assert sorted(seen[0] + seen[1]) == [0, 1, 2, 3]
         assert not set(seen[0]) & set(seen[1])
 
+    def test_it_is_a_dataloader_automodel_checkpoints(self, synthetic):
+        """AutoModel saves a dataloader's position only for a StatefulDataLoader
+        (``base_recipe.is_dataloader``: that type, with state_dict and load_state_dict)."""
+        from torchdata.stateful_dataloader import StatefulDataLoader
+
+        build = self._config(synthetic).build(dp_rank=0, dp_world_size=1, batch_size=1)
+        assert isinstance(build.dataloader, StatefulDataLoader)
+        assert callable(build.dataloader.state_dict) and callable(build.dataloader.load_state_dict)
+
+    @pytest.mark.parametrize("world", [1, 2])
+    def test_a_resume_mid_epoch_continues_where_it_stopped(self, synthetic, world):
+        """Without a saved position, a resumed run would replay the interrupted epoch from its start."""
+        cfg = self._config(synthetic, num_samples=8, shuffle=True)
+
+        def key(batch):
+            return batch["video_latents"].float().sum().item()
+
+        build = cfg.build(dp_rank=0, dp_world_size=world, batch_size=1)
+        if build.sampler is not None:
+            build.sampler.set_epoch(3)
+        it = iter(build.dataloader)
+        next(it)
+        state = build.dataloader.state_dict()
+        rest = [key(b) for b in it]
+        assert rest  # something is left to resume into
+
+        resumed = cfg.build(dp_rank=0, dp_world_size=world, batch_size=1)
+        if resumed.sampler is not None:
+            resumed.sampler.set_epoch(3)
+        resumed.dataloader.load_state_dict(state)
+        assert [key(b) for b in resumed.dataloader] == rest
+
     def test_too_few_samples_for_the_ranks_is_refused(self, synthetic):
         cfg = self._config(synthetic, num_samples=1)
         with pytest.raises(ValueError, match="no batch"):
