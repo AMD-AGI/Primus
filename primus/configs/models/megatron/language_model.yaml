@@ -115,6 +115,9 @@ moe_router_bwd_bf16: false
 # Join the router input gradient with the expert input gradient in one kernel
 # (fused residual/RMSNorm layers only; requires moe_router_bwd_bf16).
 moe_router_grad_merge: false
+# Triton forward/backward GEMMs for an FP32 router with BF16 input/weight; the backward keeps FP32
+# accuracy. Not installed together with moe_router_bwd_bf16.
+moe_router_triton_gemm: false
 moe_router_score_function: softmax # softmax, sigmoid
 moe_router_topk: 2
 moe_router_pre_softmax: false
