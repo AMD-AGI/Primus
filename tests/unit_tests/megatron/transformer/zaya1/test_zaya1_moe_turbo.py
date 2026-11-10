@@ -14,10 +14,9 @@ the grouped path against the per-expert split path.
 
 import pytest
 import torch
+from test_zaya1_math import _cfg  # noqa: E402  (pytest puts this dir on sys.path)
 
 from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
-
-from test_zaya1_math import _cfg  # noqa: E402  (pytest puts this dir on sys.path)
 
 
 def _reference_grouped_gemm(a, b, group_lens, group_offs):
@@ -216,10 +215,30 @@ def test_deferred_router_flushes_on_next_forward_without_backward(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
 def test_turbo_gpu_matches_split_without_host_sync(monkeypatch):
     pytest.importorskip("primus_turbo.pytorch.ops")
-    split = _build_moe("split", monkeypatch, hidden_size=256, moe_ffn_hidden_size=128, ffn_hidden_size=128,
-                       num_moe_experts=16).cuda().bfloat16()
-    turbo = _build_moe("turbo", monkeypatch, hidden_size=256, moe_ffn_hidden_size=128, ffn_hidden_size=128,
-                       num_moe_experts=16).cuda().bfloat16()
+    split = (
+        _build_moe(
+            "split",
+            monkeypatch,
+            hidden_size=256,
+            moe_ffn_hidden_size=128,
+            ffn_hidden_size=128,
+            num_moe_experts=16,
+        )
+        .cuda()
+        .bfloat16()
+    )
+    turbo = (
+        _build_moe(
+            "turbo",
+            monkeypatch,
+            hidden_size=256,
+            moe_ffn_hidden_size=128,
+            ffn_hidden_size=128,
+            num_moe_experts=16,
+        )
+        .cuda()
+        .bfloat16()
+    )
     for moe in (split, turbo):
         moe.eval()
         _skew_routes(moe, empty=(3,))

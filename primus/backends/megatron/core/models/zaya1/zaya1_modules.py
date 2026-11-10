@@ -35,6 +35,7 @@ try:
 except Exception:  # pragma: no cover - depends on the image
     _flash_attn_func = None
 
+
 # ZAYA_FUSE_NORM=1 (default): run each stage's fp32 elementwise chain
 # (ResidualScaling affine, residual merge, RMSNorm) as one torch.compile'd
 # region instead of ~12 eager kernels over [tokens, hidden] fp32 tensors, fwd
@@ -278,9 +279,19 @@ def merge_residual(residual: Optional[torch.Tensor], hidden_states: torch.Tensor
 
 
 def _cca_qk_post(
-    query_conv, key_conv, query_pre, key_base, temp, position_ids,
-    num_q_heads: int, num_k_heads: int, gqa_groups: int, head_dim: int,
-    clamp_temp: bool, rotary_dim: int, rope_base: float,
+    query_conv,
+    key_conv,
+    query_pre,
+    key_base,
+    temp,
+    position_ids,
+    num_q_heads: int,
+    num_k_heads: int,
+    gqa_groups: int,
+    head_dim: int,
+    clamp_temp: bool,
+    rotary_dim: int,
+    rope_base: float,
 ):
     """CCA._grouped_means + _qk_norm_and_temp + _rope as one function of tensors.
 
@@ -524,9 +535,19 @@ class CCA(nn.Module):
         dtype = hidden_states.dtype
         if FUSE_CCA:
             query, key = _fused_cca_qk(
-                query_conv, key_conv, query_pre, key_base, self.temp, position_ids,
-                self.num_q_heads, self.num_k_heads, self.gqa_groups, self.head_dim,
-                self.clamp_temp, self.rotary_dim, self.rope_base,
+                query_conv,
+                key_conv,
+                query_pre,
+                key_base,
+                self.temp,
+                position_ids,
+                self.num_q_heads,
+                self.num_k_heads,
+                self.gqa_groups,
+                self.head_dim,
+                self.clamp_temp,
+                self.rotary_dim,
+                self.rope_base,
             )
         else:
             query, key = self._grouped_means(query_conv, key_conv, query_pre, key_base)
@@ -801,8 +822,11 @@ class ZayaRouter(nn.Module):
         seq, batch, _ = hidden_states.shape
         if self.use_eda and prev_router is not None:
             routed, logits = _fused_eda_norm(
-                routed, prev_router.reshape(seq * batch, self.width), self.router_states_scale,
-                self.rmsnorm_eda.weight, self.rmsnorm_eda.eps,
+                routed,
+                prev_router.reshape(seq * batch, self.width),
+                self.router_states_scale,
+                self.rmsnorm_eda.weight,
+                self.rmsnorm_eda.eps,
             )
         else:
             logits = self.rmsnorm_eda(routed)
@@ -919,8 +943,7 @@ class ZayaMoE(nn.Module):
         intermediate = int(getattr(config, "moe_ffn_hidden_size", None) or config.ffn_hidden_size)
         self.router = ZayaRouter(config)
         experts = [
-            SwiGLUExpert(int(config.hidden_size), intermediate, config)
-            for _ in range(self.num_real_experts)
+            SwiGLUExpert(int(config.hidden_size), intermediate, config) for _ in range(self.num_real_experts)
         ]
         self.use_turbo_gemm = MOE_GEMM == "turbo" and not _fp8_requested(config)
         if self.use_turbo_gemm:
@@ -947,7 +970,9 @@ class ZayaMoE(nn.Module):
                 state_dict[_expert_key(prefix, expert_id, fc)] = stacked[expert_id]
         return state_dict
 
-    def _stack_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def _stack_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
         for fc in ("fc1", "fc2"):
             keys = [_expert_key(prefix, i, fc) for i in range(self.num_real_experts)]
             if all(k in state_dict for k in keys):
@@ -1097,13 +1122,22 @@ class ZayaStage(nn.Module):
         if FUSE_NORM and rs is not None and (residual is None or rs.has_residual):
             if residual is None:
                 residual, normed = _fused_smn_first(
-                    hidden_states, rs.hidden_states_bias, rs.hidden_states_scale,
-                    self.input_norm.weight, self.input_norm.eps,
+                    hidden_states,
+                    rs.hidden_states_bias,
+                    rs.hidden_states_scale,
+                    self.input_norm.weight,
+                    self.input_norm.eps,
                 )
             else:
                 residual, normed = _fused_smn_res(
-                    hidden_states, residual, rs.hidden_states_bias, rs.hidden_states_scale,
-                    rs.residual_bias, rs.residual_scale, self.input_norm.weight, self.input_norm.eps,
+                    hidden_states,
+                    residual,
+                    rs.hidden_states_bias,
+                    rs.hidden_states_scale,
+                    rs.residual_bias,
+                    rs.residual_scale,
+                    self.input_norm.weight,
+                    self.input_norm.eps,
                 )
         else:
             if rs is not None:
@@ -1157,8 +1191,11 @@ class ZayaStack(nn.Module):
         # had no grad path to the stack input) land before any topk reads the
         # bias. A no-op when nothing is pending; no host sync either way.
         self.flush_router_bias_updates()
-        if self.training and torch.is_grad_enabled() and hidden_states.requires_grad and any(
-            r.defer_bias_update for r in self._routers()
+        if (
+            self.training
+            and torch.is_grad_enabled()
+            and hidden_states.requires_grad
+            and any(r.defer_bias_update for r in self._routers())
         ):
             # Fires once the stack input's gradient is known, i.e. after every
             # stage's backward: one all-reduce for all routers, applied before
@@ -1184,8 +1221,14 @@ class ZayaStack(nn.Module):
             rs = self.res_scale
             if FUSE_NORM and rs is not None and residual is not None:
                 _, normed = _fused_smn_res(
-                    hidden_states, residual, rs.hidden_states_bias, rs.hidden_states_scale,
-                    rs.residual_bias, rs.residual_scale, self.final_norm.weight, self.final_norm.eps,
+                    hidden_states,
+                    residual,
+                    rs.hidden_states_bias,
+                    rs.hidden_states_scale,
+                    rs.residual_bias,
+                    rs.residual_scale,
+                    self.final_norm.weight,
+                    self.final_norm.eps,
                 )
                 return normed
             if rs is not None:
