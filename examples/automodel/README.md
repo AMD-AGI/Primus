@@ -33,10 +33,13 @@ before the first launch (model weights, a dataset, or a cache).
 
 Primus pins AutoModel to the commit in `primus/_thirdparty.lock`, which is also the
 `third_party/Automodel` submodule pointer. That commit requires
-`transformers==5.15.1` and, through its `diffusion` extra, `diffusers>=0.39.0`.
-The prepare hook also holds diffusers below 0.41: 0.41.0 imports a torchao API
-that the image's torchao 0.15 lacks, so no diffusers model would load. These
-examples are verified with diffusers 0.39.0 and 0.40.0.
+`transformers==5.18.0`, `torchao>=0.16.0` and, through its `diffusion` extra,
+`diffusers>=0.39.0`. The prepare hook raises the diffusers floor to 0.42.1: the
+FLUX 3 and Qwen-Image-2.1 recipes import classes first released in 0.42.0, and
+0.42.1 is its security release. So the first launch in an image that ships an
+older diffusers upgrades it, and installs torchao 0.18.0 from PyPI in place of
+the image's ROCm build (its Python API is what diffusers uses; its compiled
+extensions do not load on ROCm). These examples are verified with diffusers 0.42.1.
 Published Primus images may ship no AutoModel or an older one, so
 initialise the submodule before the first launch:
 
