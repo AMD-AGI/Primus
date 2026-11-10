@@ -3,8 +3,9 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""MiniMax-H3's parallelization sidecar: whole-block checkpointing, and FP32 compute
-for its keep-in-FP32 modules under FSDP2.
+"""MiniMax-H3's parallelization sidecar: whole-block checkpointing, FP32 compute for its
+keep-in-FP32 modules under FSDP2, and releasing the load's cached memory after sharding
+(``release_cached_memory``).
 
 WHOLE-BLOCK CHECKPOINTING:
   AutoModel's default checkpointing reports every transformer block as selected, but
@@ -125,8 +126,43 @@ def build(base: type) -> type:
     checkpointed = sidecar.block_checkpointing(
         MiniMaxH3Parallelizer, block_attrs=_BLOCK_ATTRS, log_prefix=_LOG_PREFIX
     )
-    checkpointed.__name__ = checkpointed.__qualname__ = "MiniMaxH3Parallelizer"
-    return checkpointed
+
+    class MiniMaxH3ReleasingParallelizer(checkpointed):
+        def parallelize(self, model, mesh_context, /):
+            result = super().parallelize(model, mesh_context)
+            release_cached_memory()
+            return result
+
+    MiniMaxH3ReleasingParallelizer.__name__ = MiniMaxH3ReleasingParallelizer.__qualname__ = "MiniMaxH3Parallelizer"
+    return MiniMaxH3ReleasingParallelizer
+
+
+def release_cached_memory() -> float:
+    """Return the allocator's cached blocks to the device, once, after sharding. Returns GiB released.
+
+    AutoModel moves the whole model onto every GPU before sharding it (124 GiB for the
+    33B model in FP32), and after sharding the caching allocator keeps that memory
+    reserved. Training then allocates on top of the pool, fragmenting it: measured on
+    8x MI355X at full size, 5.2 s clip, the device peak was 159 GB against 86 GiB
+    allocated. Releasing the pool here brought it to 118 GiB, with step time
+    unchanged (20.39 s both). One call, at setup; nothing in the training loop.
+    """
+    import torch
+
+    if not (torch.cuda.is_available() and torch.cuda.is_initialized()):
+        return 0.0
+    before = torch.cuda.memory_reserved()
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    released = (before - torch.cuda.memory_reserved()) / 2**30
+    logger.info(
+        "%s released %.1f GiB of cached memory after sharding (%.1f GiB allocated, %.1f GiB reserved).",
+        _LOG_PREFIX,
+        released,
+        torch.cuda.memory_allocated() / 2**30,
+        torch.cuda.memory_reserved() / 2**30,
+    )
+    return released
 
 
 def install() -> bool:

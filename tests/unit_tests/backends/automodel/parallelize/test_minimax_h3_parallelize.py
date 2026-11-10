@@ -302,3 +302,94 @@ class TestPatch:
         assert patch.condition(ctx("minimax_h3")) is True
         assert patch.condition(ctx("wan")) is False
         assert patch.condition(None) is True
+
+
+class TestReleaseCachedMemory:
+    """The load's cached memory is released once, after sharding, and only on a GPU."""
+
+    @pytest.fixture
+    def fake_cuda(self, monkeypatch):
+        state = {"reserved": 124 * 2**30, "calls": []}
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda *a: state["reserved"])
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *a: 15 * 2**30)
+        monkeypatch.setattr(torch.cuda, "synchronize", lambda *a: state["calls"].append("synchronize"))
+
+        def empty_cache():
+            state["calls"].append("empty_cache")
+            state["reserved"] = 16 * 2**30
+
+        monkeypatch.setattr(torch.cuda, "empty_cache", empty_cache)
+        return state
+
+    def test_it_empties_the_cache_and_reports_what_it_released(self, fake_cuda, caplog):
+        with caplog.at_level("INFO"):
+            assert h3.release_cached_memory() == pytest.approx(108.0)
+        assert fake_cuda["calls"] == ["synchronize", "empty_cache"]
+        assert "released 108.0 GiB" in caplog.text
+
+    def test_without_an_initialized_gpu_it_does_nothing(self, monkeypatch):
+        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+        monkeypatch.setattr(torch.cuda, "empty_cache", lambda: pytest.fail("emptied without a GPU"))
+        assert h3.release_cached_memory() == 0.0
+
+    def test_parallelize_releases_after_the_sidecar_chain_returns(self, monkeypatch):
+        order = []
+
+        class Base:
+            def parallelize(self, model, mesh_context, /):
+                order.append("sharded")
+                return model
+
+        monkeypatch.setattr(h3, "release_cached_memory", lambda: order.append("released") or 0.0)
+        no_ac = types.SimpleNamespace(activation_checkpointing=False, strategy_config=types.SimpleNamespace())
+        model = object()
+        assert h3.build(Base)().parallelize(model, no_ac) is model
+        assert order == ["sharded", "released"]
+
+    def test_the_class_keeps_its_name(self):
+        assert h3.build(type("Base", (), {})).__name__ == "MiniMaxH3Parallelizer"
+
+
+class TestReleasingCachedMemory:
+    """After sharding, the sidecar returns the load's cached memory to the device, once."""
+
+    def test_it_runs_once_after_the_base_has_sharded(self, monkeypatch):
+        order = []
+
+        class Base:
+            def parallelize(self, model, mesh_context, /):
+                order.append("sharded")
+                return model
+
+        monkeypatch.setattr(h3, "release_cached_memory", lambda: order.append("released") or 0.0)
+        context = types.SimpleNamespace(
+            activation_checkpointing=False, strategy_config=types.SimpleNamespace(activation_checkpointing=False)
+        )
+        sidecar = h3.build(Base)()
+        model = object()
+        assert sidecar.parallelize(model, context) is model
+        assert order == ["sharded", "released"]
+
+    def test_it_keeps_the_sidecar_name(self):
+        class Base:
+            pass
+
+        assert h3.build(Base).__name__ == "MiniMaxH3Parallelizer"
+
+    def test_it_does_nothing_without_a_gpu(self, monkeypatch):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        assert h3.release_cached_memory() == 0.0
+
+    def test_it_empties_the_cache_and_reports_what_it_released(self, monkeypatch):
+        reserved = iter([130 * 2**30, 16 * 2**30, 16 * 2**30])
+        calls = []
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda *a: next(reserved))
+        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *a: 15 * 2**30)
+        monkeypatch.setattr(torch.cuda, "synchronize", lambda *a: calls.append("sync"))
+        monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
+        assert h3.release_cached_memory() == pytest.approx(114.0)
+        assert calls == ["sync", "empty"]
