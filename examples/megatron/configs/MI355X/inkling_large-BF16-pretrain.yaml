@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:inkling_large-BF16-turbo-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:inkling_large-BF16-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Inkling (Large), full 66 layers (2 dense + 64 MoE, 947 B total / 41 B
