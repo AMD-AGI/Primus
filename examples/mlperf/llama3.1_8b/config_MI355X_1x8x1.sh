@@ -51,7 +51,7 @@ export PRIMUS_TURBO_FLYDSL_ROPE_BWD="${PRIMUS_TURBO_FLYDSL_ROPE_BWD:-1}"
 
 export HSA_NO_SCRATCH_RECLAIM=1
 export HSA_ENABLE_SDMA=1
-export GPU_MAX_HW_QUEUES=2
+export GPU_MAX_HW_QUEUES="${GPU_MAX_HW_QUEUES:-4}"
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 export CHECK_FOR_NAN_IN_GRAD=0
@@ -61,7 +61,8 @@ export NCCL_CHECKS_DISABLE=1
 export TORCH_NCCL_HIGH_PRIORITY=1
 
 # Parameter all-gather on the SDMA copy engines. Needs a container nofile ulimit of
-# 1048576 (run_with_docker.sh sets it) and NCCL_CTA_POLICY unset.
+# 1048576 (run_with_docker.sh sets it) and NCCL_CTA_POLICY unset. It is 24 ms per step
+# slower with GPU_MAX_HW_QUEUES=2, which runner/helpers/envs/base_env.sh defaults to.
 export MEGATRON_PARAM_GATHER_BACKEND="${MEGATRON_PARAM_GATHER_BACKEND:-rccl_sdma}"
 export MEGATRON_RCCL_SDMA_LOG="${MEGATRON_RCCL_SDMA_LOG:-1}"
 
