@@ -4,6 +4,21 @@ set -euo pipefail
 
 python -c "from sglang.srt.server_args import ServerArgs; assert hasattr(ServerArgs, 'enable_spec_capture')"
 python -c "import specforge"
+python - <<'PY'
+import tempfile
+from pathlib import Path
+
+from torch.utils.tensorboard import SummaryWriter
+
+with tempfile.TemporaryDirectory() as tmp:
+    writer = SummaryWriter(log_dir=tmp)
+    writer.add_scalar("smoke/ok", 1.0, 0)
+    writer.flush()
+    writer.close()
+    events = list(Path(tmp).rglob("events.out.tfevents.*"))
+    if not events:
+        raise SystemExit("SummaryWriter did not write an event file")
+PY
 
 primus-cli --help >/dev/null
 specforge --help >/dev/null

@@ -48,18 +48,26 @@ from primus.core.backend.env_registry import (
 def _build_xla_flags() -> str:
     """Assemble the managed ``XLA_FLAGS`` string.
 
-    The autotune level is parameterized via ``XLA_GPU_AUTOTUNE_LEVEL`` (default 4).
+    The autotune level is parameterized via ``XLA_GPU_AUTOTUNE_LEVEL`` (default 3).
     MUST be >= 1: with autotuning off (=0, as baked into some rock/TheRock images)
     XLA/hipBLASLt always picks the default fp8 GEMM kernel, which overflows on the
     fine-grained MoE expert einsums (qwen3-30B-A3B, deepseek-v2-lite) -> NaN loss on
-    ~every fp8 run. autotune_level>=4 lets XLA pick a numerically stable fp8 kernel.
+    ~every fp8 run.
+
+    Default is 3, not 4: level 4 adds the autotuner's correctness checks (redzone and
+    result comparison), which intermittently abort compilation on the JAX 0.11.1 /
+    ROCm 10.2 images with ``Mismatched results with host and device comparison``
+    (redzone_allocator.cc) or ``HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`` on GPU 0
+    (7 of 10 fresh-compile runs on MI325X). Level 3 still autotunes, runs at the same
+    step time, and keeps nanoo_fp8 MoE losses finite on MI325X. Plain fp8 on MI355X
+    has not been verified at level 3; if its MoE runs NaN, set XLA_GPU_AUTOTUNE_LEVEL=4.
 
     ``--xla_gpu_enable_cub_radix_sort=false``: newer XLA packs BF16 TopK into a single S32 sort and, on ROCm,
     rewrites it to a hipCUB segmented sort whose handler does a pageable host->device copy of the segment
     offsets on every call. For the MoE router top_k this costs ~15 ms per sort in single-controller JAX
     (8 GPU threads serialize on the copy), i.e. +0.8 s/step on DeepSeek-V2-16B.
     """
-    autotune_level = os.getenv("XLA_GPU_AUTOTUNE_LEVEL", "4")
+    autotune_level = os.getenv("XLA_GPU_AUTOTUNE_LEVEL", "3")
     flags = (
         "--xla_gpu_memory_limit_slop_factor=95 "
         "--xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 "

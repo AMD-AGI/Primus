@@ -14,9 +14,11 @@ from .mock_datasets import (
     MockDiffusionDataset,
     MockFluxDataset,
     MockFluxSchnellDataset,
+    MockWanDataset,
     ModelPreset,
     PreGeneratedMockFluxDataset,
     PreGeneratedMockFluxSchnellDataset,
+    PreGeneratedMockWanDataset,
     TextEmbeddingConfig,
 )
 
@@ -26,6 +28,8 @@ __all__ = [
     "PreGeneratedMockFluxDataset",
     "MockFluxSchnellDataset",
     "PreGeneratedMockFluxSchnellDataset",
+    "MockWanDataset",
+    "PreGeneratedMockWanDataset",
     "LatentConfig",
     "TextEmbeddingConfig",
     "ModelPreset",

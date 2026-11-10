@@ -13,8 +13,8 @@ modules:
 
     overrides:
       pretrained_checkpoint: ${PRETRAINED_CHECKPOINT:/data/megatron_checkpoints/Llama-2-70b-hf}
-      stderr_sink_level: DEBUG
-      log_interval: 10
+      stderr_sink_level: ERROR
+      log_interval: 99999
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       pipeline_dtype: null
@@ -35,7 +35,7 @@ modules:
       micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:1}
       seq_length: 8192
       eval_interval: ${PRIMUS_EVAL_INTERVAL:48}
-      eval_iters: ${PRIMUS_EVAL_ITERS:24}
+      eval_iters: ${PRIMUS_EVAL_ITERS:22}
       save_interval: null
 
       adam_beta1: 0.9
@@ -52,9 +52,20 @@ modules:
 
       seed: ${SEED:1234}
 
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_rms_norm: false
-      use_turbo_gemm: false
+      # Values come from config_MI355X_1x8x1.sh, which turns on FlyDSL attention and
+      # FlyDSL MXFP4 GEMMs; the fallbacks here apply only when a knob is unset.
+      enable_primus_turbo: ${ENABLE_PRIMUS_TURBO:true}
+      use_turbo_attention: ${PRIMUS_USE_TURBO_ATTENTION:false}
+      use_turbo_rms_norm: ${PRIMUS_USE_TURBO_RMS_NORM:false}
+      use_turbo_gemm: ${PRIMUS_USE_TURBO_GEMM:true}
+      attention_backend: ${PRIMUS_ATTENTION_BACKEND:fused}
+      # Turbo's FP8 attention path (flash_attn_fp8_func instead of flash_attn_func).
+      # Only reachable when use_turbo_attention is on.
+      enable_turbo_attention_float8: ${PRIMUS_TURBO_ATTENTION_FP8:false}
+
+      # Model CUDA graphs stay opt-in: llama2_custom.py only sets the model's
+      # cuda_graph_impl/scope when MCORE_CUDA_GRAPH is truthy.
+      cuda_graph_impl: ${CUDA_GRAPH_IMPL:none}
+      cuda_graph_scope: ${CUDA_GRAPH_SCOPE:none}
 
       check_for_nan_in_loss: false

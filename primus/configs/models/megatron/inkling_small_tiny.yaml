@@ -1,0 +1,41 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Inkling tiny: 2 layers for unit tests and the reference comparison against
+# transformers. Layer 0 slides with a dense MLP, layer 1 is global with the
+# MoE, so one forward covers every Inkling module. The sliding layer has more
+# KV heads than the global one (as in the transformers defaults) to exercise
+# the per-layer head geometry.
+###############################################################################
+extends:
+  - inkling_small.yaml
+
+num_layers: 2
+hidden_size: 256
+local_layer_ids: [0]
+moe_layer_freq: "([0]*1+[1]*1)"
+
+num_attention_heads: 4
+num_query_groups: 2
+kv_channels: 64
+rel_extent: 64
+
+swa_num_attention_heads: 4
+swa_num_query_groups: 4
+swa_kv_channels: 64
+sliding_window_size: 32
+
+d_rel: 16
+log_scaling_n_floor: 64              # small enough that test sequences reach the log-scaling regime
+
+ffn_hidden_size: 512
+num_experts: 8
+moe_ffn_hidden_size: 128
+moe_router_topk: 2
+moe_num_shared_experts: 2
+
+max_position_embeddings: 4096
+seq_length: 128
