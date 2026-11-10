@@ -4,7 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Register the MiniMax-H3 adapter, its transformer-only training pipeline and its sidecar.
+"""Register the MiniMax-H3 adapter, its transformer-only training pipeline, its sidecar, and
+the FP32-accumulating AdaLN modulation gather.
 
 All three have to be in place before the recipe builds the model: the pipeline class
 before ``DiffusionPipeline.from_pretrained`` resolves ``model_index.json``, the
@@ -78,3 +79,17 @@ def apply_parallelize(ctx: PatchContext) -> None:
     from primus.backends.automodel.models.minimax_h3 import parallelize
 
     parallelize.install()
+
+
+@register_patch(
+    "automodel.models.minimax_h3.modulation",
+    backend="automodel",
+    phase="before_train",
+    description="Accumulate MiniMax-H3's AdaLN modulation gradients in FP32",
+    condition=_minimax_h3_configured,
+    priority=6,
+)
+def apply_modulation(ctx: PatchContext) -> None:
+    from primus.backends.automodel.models.minimax_h3 import modulation
+
+    modulation.install()

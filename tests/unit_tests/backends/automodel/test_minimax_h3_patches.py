@@ -22,6 +22,7 @@ import pytest
 
 PIPELINE_ID = "automodel.models.minimax_h3.pipeline"
 ADAPTER_ID = "automodel.models.minimax_h3.adapter"
+MODULATION_ID = "automodel.models.minimax_h3.modulation"
 
 
 def _patches():
@@ -46,27 +47,32 @@ def _ctx(adapter_type):
 class TestRegistration:
     def test_both_patches_are_registered_for_before_train(self):
         patches = _patches()
-        assert PIPELINE_ID in patches and ADAPTER_ID in patches
+        assert PIPELINE_ID in patches and ADAPTER_ID in patches and MODULATION_ID in patches
 
     def test_the_pipeline_is_in_place_before_the_adapter(self):
         """Both have to precede the recipe building the model; the order between them is by priority."""
         patches = _patches()
         assert patches[PIPELINE_ID].priority < patches[ADAPTER_ID].priority
 
+    def test_the_modulation_patch_is_in_place_before_the_model_is_built(self):
+        """It swaps class methods, so it only has to precede the first forward; it runs early anyway."""
+        patches = _patches()
+        assert patches[MODULATION_ID].priority < patches["automodel.models.minimax_h3.parallelize"].priority
+
 
 class TestGating:
-    @pytest.mark.parametrize("patch_id", [PIPELINE_ID, ADAPTER_ID])
+    @pytest.mark.parametrize("patch_id", [PIPELINE_ID, ADAPTER_ID, MODULATION_ID])
     def test_a_minimax_h3_run_registers_both(self, patch_id):
         assert _patches()[patch_id].condition(_ctx("minimax_h3")) is True
 
-    @pytest.mark.parametrize("patch_id", [PIPELINE_ID, ADAPTER_ID])
+    @pytest.mark.parametrize("patch_id", [PIPELINE_ID, ADAPTER_ID, MODULATION_ID])
     @pytest.mark.parametrize(
         "other", ["flux", "flux2", "wan", "hunyuan", "qwen_image", "simple", "ideogram4"]
     )
     def test_another_model_does_not(self, patch_id, other):
         assert _patches()[patch_id].condition(_ctx(other)) is False
 
-    @pytest.mark.parametrize("patch_id", [PIPELINE_ID, ADAPTER_ID])
+    @pytest.mark.parametrize("patch_id", [PIPELINE_ID, ADAPTER_ID, MODULATION_ID])
     def test_an_unreadable_config_defaults_to_registering(self, patch_id):
         patch = _patches()[patch_id]
         assert patch.condition(types.SimpleNamespace(extra={})) is True
