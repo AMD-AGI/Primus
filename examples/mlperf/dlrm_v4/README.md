@@ -1,7 +1,7 @@
 # DLRMv4 MLPerf Training (HSTU on yambda-5b)
 
-MLPerf Training `dlrmv4` on one MI355X node (8 GPUs) with Primus: an HSTU
-sequential ranking model trained in streaming order on the
+MLPerf Training `dlrmv4` on 1, 2 or 4 MI355X nodes (8 GPUs each) with Primus: an
+HSTU sequential ranking model trained in streaming order on the
 [Yambda-5b](https://huggingface.co/datasets/yandex/yambda) music dataset until the
 eval AUC reaches 0.75.
 
@@ -102,6 +102,7 @@ or directly: `./primus-cli direct -- train pretrain --config examples/mlperf/dlr
 
 - `configs/MI355X/dlrm_v4-yambda5b-mlperf.yaml`: the experiment (backend `dlrm_v4`; run shape from the environment)
 - `config_MI355X_1x8x1.sh`: system configuration and environment
+- `config_MI355X_2x8x1.sh`, `config_MI355X_4x8x1.sh`: 2 and 4 nodes (the 1-node file plus what changes with the node count)
 - `run_and_time.sh`: timed run inside the container
 - `run_with_docker.sh`: host launcher (container, trials, compliance check)
 - `data/`: dataset download, verification and staging scripts, checksums
@@ -113,10 +114,11 @@ or directly: `./primus-cli direct -- train pretrain --config examples/mlperf/dlr
   `primus-cli direct` runs one Primus process per node (the `recommendation`
   prepare hook selects single mode), not a torchrun fan-out.
 - **Page cache (C1)**: with `CLEAR_CACHES=1` the dataset is evicted and verified
-  before INIT; with `WARM_CACHE_AFTER_RUN_START=1` a background reader streams it
-  back into the page cache once `run_start` is logged, so all of that I/O is in
-  the timed region. Cold random reads cannot feed 8 MI355X GPUs from
-  network-attached NVMe. Disclose the in-run reader in a submission.
+  before INIT; with `WARM_CACHE_AFTER_RUN_START=1` a background reader on every
+  node streams the node's copy back into the page cache once the node's ranks are
+  past `run_start`, so all of that I/O is in the timed region. Cold random reads
+  cannot feed 8 MI355X GPUs from network-attached NVMe. Disclose the in-run reader
+  in a submission.
 - **Transparent huge pages**: `NUMPY_MADVISE_HUGEPAGE=0` (set by the config and
   the backend) keeps numpy from asking for huge pages; with THP `defrag=madvise`
   a fragmented host otherwise stalls all ranks at once.
@@ -139,8 +141,16 @@ or directly: `./primus-cli direct -- train pretrain --config examples/mlperf/dlr
   [primus-v26.9.md](../../../docs/04-technical-guides/recommendation/dlrm_v4/primus-v26.9.md).
 - **GPU hardware queues**: the experiment yaml sets `GPU_MAX_HW_QUEUES=4` (the HIP
   default) over Primus' runner default of 2 (+0.44%). Keep
-  `TORCH_NCCL_HIGH_PRIORITY=1` (Primus' default): with 2 queues, normal-priority
-  NCCL streams cost 5%.
-- **Multi-node**: the trainer supports it (`NNODES`, `NODE_RANK`, `MASTER_ADDR`,
-  `MASTER_PORT`; MLPerf RCP LR 2e-6 at 2 nodes, 4e-6 at 4 nodes); this recipe has
-  been validated on one node.
+  `TORCH_NCCL_HIGH_PRIORITY=1` (Primus' default) on one node: with 2 queues,
+  normal-priority NCCL streams cost 5.1%. The 2- and 4-node configs set 0 (below).
+- **Multi-node**: `config_MI355X_2x8x1.sh` / `config_MI355X_4x8x1.sh`, one Primus
+  process per node. Under Slurm, `run_and_time.sh` and primus-cli take `NNODES`,
+  `NODE_RANK` and `MASTER_ADDR` from `SLURM_*` (pass `MASTER_ADDR` into a container
+  without `scontrol`); elsewhere set them per node before sourcing the config. The
+  configs set the MLPerf RCP LR (2e-6 at 2 nodes, 4e-6 at 4 nodes) and
+  `TORCH_NCCL_HIGH_PRIORITY=0`, as in the MLPerf submission version: with Primus'
+  default of 1, on v26.9 the ProcessGroupNCCL stream shares a hardware (HSA) queue
+  with the train pipeline's data-dist stream, each step's splits copy waits behind
+  the backward collectives, and time to target was 1.6% (2 nodes) and 1.5% (4 nodes)
+  above the submission version's; with 0 it is 1.7% and 2.1% below it (OLCF Lux,
+  3 seeds; see the comment in `config_MI355X_2x8x1.sh`).
