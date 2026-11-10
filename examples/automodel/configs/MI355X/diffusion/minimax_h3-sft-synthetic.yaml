@@ -14,10 +14,10 @@
 #       --config examples/automodel/configs/MI355X/diffusion/minimax_h3-sft-synthetic.yaml
 #
 # Measured on 8x MI355X, rocm/primus:v26.8, the full 50-block proxy at this clip
-# (5.2 s at 768x1344, about 38K rows): 17.0 s per step, 0.06 samples/s/GPU; 86 GiB
-# allocated per GPU in training. The device peak is higher (159 GB), because loading
-# puts the whole FP32 model (124 GiB) on each GPU before sharding, and the allocator
-# keeps that memory reserved.
+# (5.2 s at 768x1344, about 38K rows): 15.1 s per step, 0.07 samples/s/GPU; 83 GiB
+# allocated per GPU in training. The device peak (127 GiB) is the load, which puts the
+# whole FP32 model (124 GiB) on each GPU before sharding; the H3 parallelizer releases
+# that memory after sharding.
 #
 # Attention: the trainer preset turns on Primus-Turbo's non-deterministic flash
 # attention; `env:` below makes its dq accumulation FP32 (see the preset).

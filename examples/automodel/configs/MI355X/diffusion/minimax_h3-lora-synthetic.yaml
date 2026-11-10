@@ -6,7 +6,7 @@
 # `--dtype bfloat16`.
 #
 # Measured on 8x MI355X, rocm/primus:v26.8, the full 50-block proxy, attention + FFN
-# targets, 5.2 s at 768x1344: 15.4 s per step, 0.06 samples/s/GPU; 45 GiB allocated
+# targets, 5.2 s at 768x1344: 15.2 s per step, 0.07 samples/s/GPU; 45 GiB allocated
 # per GPU in training (the device peak, during the load, is higher). Attention as in
 # minimax_h3-sft-synthetic.yaml.
 # On one GPU: step_scheduler.global_batch_size=1, with a reduced-depth proxy.
