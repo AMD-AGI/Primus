@@ -3258,7 +3258,9 @@ def _pool_depth(dl: Any) -> Tuple[int, int, Any]:
     return int(getattr(dl, "prefetch_factor", 0) or 0) * workers, workers, getattr(dl, "prefetch_factor", None)
 
 
-_PIN_HEADROOM_ENV: str = "DL_PIN_PREWARM_HEADROOM_GIB"  # free memory to keep per NUMA node beyond the pin (128)
+# Free memory (GiB) to keep per NUMA node beyond the pin; default 512 (gin item (121)). A host with less free memory
+# per NUMA node than the pinned share + this headroom stops before RUN_START: lower it there (OLCF Lux ran with 128).
+_PIN_HEADROOM_ENV: str = "DL_PIN_PREWARM_HEADROOM_GIB"
 
 
 def _numa_free_bytes() -> Dict[int, Tuple[int, int, int]]:

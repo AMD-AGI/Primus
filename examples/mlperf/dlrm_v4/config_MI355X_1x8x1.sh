@@ -38,6 +38,9 @@ export MLLOG_CONFIG_FILENAME
 # Recipe environment. The image's HIP device-queue settings (GPU_USE_DEVICE_QUEUE=1,
 # DEBUG_CLR_AQL_DEV_QUEUE=1) are kept: +0.23% 200-step throughput over 0 on v26.9
 # (MI355X, 2 runs each; the ROCm 10.2 port measured 0 vs 1 as neutral and ran 0).
+# On Linux only DEBUG_CLR_AQL_DEV_QUEUE acts: 1 (also HIP 7.17's default) puts the
+# AQL ring buffers in device memory. Only HIP's Windows backend reads
+# GPU_USE_DEVICE_QUEUE.
 export HSTU_HAMMER_KERNEL=TRITON
 export FLYDSL_GPU_ARCH=gfx950
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

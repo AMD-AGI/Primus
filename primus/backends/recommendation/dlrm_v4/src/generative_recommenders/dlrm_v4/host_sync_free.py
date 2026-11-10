@@ -223,11 +223,16 @@ def train_pipe_stream_priority() -> Optional[int]:
     priority they slow the critical rank's main-stream kernels (~0.35 ms of
     4n step per ms of extra data-dist kernel work, probes dd_k1/dd_k2).
 
-    Placement: at priority 0 HIP binds the pair into the NORMAL hardware-queue
-    pool (GPU_MAX_HW_QUEUES per priority, least-referenced reuse), which also
-    holds the main stream. The pair must not land on main's queue (FIFO with
-    the forward); alloc_pregrow / the pipeline check that with
-    shares_hw_queue() and fall back to -1 if it does.
+    Placement: on ROCm 7.2 HIP binds a stream once, at creation, into the pool
+    of its priority (GPU_MAX_HW_QUEUES per priority, least-referenced reuse);
+    at priority 0 that is the NORMAL pool, which also holds the main stream.
+    On ROCm 10.2 (rocm/primus:v26.9) HIP defaults
+    DEBUG_HIP_IGNORE_STREAM_PRIORITY=1: all priorities share one pool of
+    GPU_MAX_HW_QUEUES queues, -1 streams keep their first queue, and
+    priority-0 streams are re-placed by load whenever they go idle, so a
+    placement check before RUN_START is only a snapshot. The pair must not
+    land on main's queue (FIFO with the forward); alloc_pregrow / the pipeline
+    check that with shares_hw_queue() and fall back to -1 if it does.
     """
     p = pipe_stream_priority()
     if p is not None:
