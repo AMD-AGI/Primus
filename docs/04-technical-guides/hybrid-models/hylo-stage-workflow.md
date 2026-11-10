@@ -107,7 +107,7 @@ step from that checkpoint. Tensor counts leave out `_extra_state`.
 
 | Step | Result |
 | --- | --- |
-| all-GDN Enhanced-ILD, 4K | 137.000000 (hidden 91.500000, mixer 45.500000); iteration 1, 162 tensors, all finite |
-| all-MLA Enhanced-ILD, 4K | 134.000000 (hidden 89.000000, mixer 44.500000); iteration 1, 146 tensors, all finite |
+| all-GDN Enhanced-ILD, 4K | 141.000000 (hidden 94.000000, mixer 46.750000); iteration 1, 162 tensors, all finite |
+| all-MLA Enhanced-ILD, 4K | 135.000000 (hidden 90.000000, mixer 45.000000); iteration 1, 146 tensors, all finite |
 | assemble | every mixer/MLP pair matches its ILD source |
-| pure KL from the assembly, 8K | summed masked KL 43.979050; iteration 1, 158 tensors, all finite |
+| pure KL from the assembly, 8K | summed masked KL 6.558015; iteration 1, 158 tensors, all finite |

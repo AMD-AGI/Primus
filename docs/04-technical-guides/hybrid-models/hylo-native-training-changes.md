@@ -127,21 +127,26 @@ On `rocm/primus:v26.8`:
 - One all-GDN constructor step, its upcycle, one Enhanced-ILD step, and one
   pure-KL stage-2 step completed on one GPU at sequence length 128.
 
-After the merge of Megatron-core 0.19, `run_hylo_1b_4mla12gdn.sh` ran one step
+After the merge of `main` (Megatron-core 0.19, and #1404's label-space SFT
+`loss_mask`), `run_hylo_1b_4mla12gdn.sh` ran one step
 of each stage at the recipe context lengths on one MI355X GPU in
 `rocm/primus:v26.9` (tensor counts leave out `_extra_state`):
 
 | Step | Context | Loss | Checkpoint reload |
 | --- | --- | --- | --- |
-| all-GDN Enhanced-ILD | 4096 | total 137.000000, hidden 91.500000, mixer 45.500000 | iteration 1, 162 tensors, all finite |
-| all-MLA Enhanced-ILD | 4096 | total 134.000000, hidden 89.000000, mixer 44.500000 | iteration 1, 146 tensors, all finite |
-| assembled 4MLA12GDN pure KL | 8192 | summed masked KL 43.979050 | iteration 1, 158 tensors, all finite |
+| all-GDN Enhanced-ILD | 4096 | total 141.000000, hidden 94.000000, mixer 46.750000 | iteration 1, 162 tensors, all finite |
+| all-MLA Enhanced-ILD | 4096 | total 135.000000, hidden 90.000000, mixer 45.000000 | iteration 1, 146 tensors, all finite |
+| assembled 4MLA12GDN pure KL | 8192 | summed masked KL 6.558015 | iteration 1, 158 tensors, all finite |
 
 Each step used micro-batch 1, global batch 1, and one optimizer step. Assembly
-checked that every mixer/MLP pair came from the matching ILD checkpoint. A rerun
-gave the same ILD losses. `run_hylo_1b_4mla12gdn.sh` was not executed as a full
+checked that every mixer/MLP pair came from the matching ILD checkpoint.
+`run_hylo_1b_4mla12gdn.sh` was not executed as a full
 1000-iteration job. The earlier `rocm/primus:v26.8` smokes (360.0, 169.0, and
-72.599213) predate the fix to the teacher's attention capture.
+72.599213) predate the fix to the teacher's attention capture. The KL on the
+padded path moved from 43.979050 to 6.558015 with #1404: it now covers each
+position whose next token is supervised, not the supervised tokens' own
+positions. The ILD rose from 137.0 and 134.0 when the real-token mask came to
+include the template text after each response.
 
 In October 2026 the packed all-MLA and all-Mamba-2 recipes ran the reference's
 full schedule, 6934 steps of 96 sequences of 2048 tokens, on the reference's
