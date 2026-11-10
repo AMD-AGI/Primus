@@ -1,3 +1,11 @@
+# Single-node training (8 GPUs):
+#   GPUS_PER_NODE=8 ./primus-cli direct --numa -- train pretrain \
+#     --config examples/megatron/configs/MI355X/zaya1_8B-FP8-pretrain.yaml
+# --numa binds each rank's CPUs and memory to its GPU's NUMA node with
+# numactl, which made FP8 steps faster; BF16 gained under 0.1%. It is a
+# launcher option, not a config key; a runner config with direct: numa: true
+# does the same.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-fp8-pretrain}
@@ -7,6 +15,10 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # autotunes once per new tensor shape. Expert token counts change every step,
 # so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
 # per-shape cost.
+# No ZAYA_* switches: the BF16 recipe's ZAYA_MOE_GEMM=turbo is BF16 only (with
+# FP8 the experts stay split), and ZAYA_ROUTER_DEFER_AR=1 gained under 1%
+# here. The other switches stay at their defaults (on), including the chunked
+# cross-entropy.
 env:
   NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
 
@@ -26,11 +38,12 @@ modules:
 
       # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
       # weights and adds cached FP8 weight copies, so it fits fewer samples
-      # than BF16. micro_batch_size 208 is the largest multiple of 8 that
-      # completes on MI355X with rocm/primus:v26.8: it peaks at 284 of 288 GB
-      # per GPU, and 216 runs out of memory. On fewer GPUs, lower
-      # micro_batch_size or num_layers (keep it even). Do not edit the model
-      # yaml to shrink the architecture.
+      # than BF16. micro_batch_size 208 was sized before the ZAYA1 kernel
+      # changes as the largest multiple of 8 that completed on MI355X with
+      # rocm/primus:v26.8 (284 of 288 GB per GPU; 216 ran out of memory). It
+      # now peaks at 192 GB. Larger micro batches were not tried. On fewer
+      # GPUs, lower micro_batch_size or num_layers (keep it even). Do not edit
+      # the model yaml to shrink the architecture.
       train_iters: 30
       micro_batch_size: 208
       # One micro batch per GPU per step at DP=8.
