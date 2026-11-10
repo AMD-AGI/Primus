@@ -435,3 +435,16 @@ def test_evaluate_benchmark_handles_perf_failure(evaluator, tmp_path, monkeypatc
     assert result.legal is False
     assert n_calls["perf"] == 1 and n_calls["mem"] == 0
     assert "performance --benchmark failed" in (result.reason or "")
+
+
+def test_simulate_mode_holds_selective_recompute_to_the_projected_memory(evaluator, monkeypatch):
+    """No run measures selective recompute's memory here, so the projection's number stands, not a discount."""
+    mem = "  Projected Total Memory: 280.0 GB\n"
+    monkeypatch.setattr(ev_mod, "_run", lambda cmd, cwd, env, timeout: (0, mem, 0.5))
+    monkeypatch.setattr(ev_mod, "write_trial_yaml", lambda arch, cfg, out, tag: out / f"trial_{tag}.yaml")
+    _stub_legality(monkeypatch)
+    cfg = _make_trial_cfg()
+    cfg.recompute_granularity = "selective"
+    result = evaluator.evaluate_memory_only(cfg, "selective")
+    assert result.legal is False and "280.0 GB > cap" in result.reason
+    assert result.memory_per_gpu_gb_adjusted == 280.0

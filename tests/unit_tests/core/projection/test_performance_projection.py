@@ -59,6 +59,7 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _summarize_bench_training_config,
     _upgrade_artifact_to_v2,
     calculate_collective_communication_time,
+    exposed_grad_reduce_ms,
     extract_single_node_time_from_profiling,
     load_hardware_config,
 )
@@ -776,3 +777,27 @@ def test_collective_comm_fsdp_breakdown(_single_node_env):
     )
     assert breakdown["fsdp_allgather_fwd"] > 0
     assert msg["fsdp_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    "reduce_ms, window_ms, exposed_ms",
+    [
+        (30.0, None, 30.0),  # after the backward: all of it
+        (30.0, 1000.0, 6.0),  # fits the window: the overlap inefficiency
+        (30.0, 10.0, 20.0),  # exceeds it: the excess
+        (30.0, 0.0, 30.0),
+    ],
+)
+def test_the_exposed_gradient_reduce(reduce_ms, window_ms, exposed_ms):
+    assert exposed_grad_reduce_ms(reduce_ms, window_ms) == pytest.approx(exposed_ms)
+
+
+def test_a_calibrated_collective_is_scaled_before_its_exposed_part_is_taken():
+    """Traces measure a collective's whole kernel time, overlapped or not.
+
+    The calibration's factor is that time over the modelled collective, so it
+    has to scale the collective; scaling the exposed part instead charged the
+    whole measured kernel time as exposed.
+    """
+    factor, modelled, window = 7.0, 4.0, 1000.0
+    assert exposed_grad_reduce_ms(factor * modelled, window) == pytest.approx(0.2 * 28.0)

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .evaluator import EvalResult
+from .legality import config_signature
 
 
 @dataclass
@@ -111,4 +112,4 @@ class History:
 
 
 def _sig(config: dict) -> str:
-    return ",".join(f"{k}={config[k]}" for k in sorted(config))
+    return config_signature(config)

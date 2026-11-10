@@ -469,14 +469,15 @@ class LanguageModelProfiler(BaseModuleProfiler):
             getattr(mp, "use_torch_fsdp2", False)
         )
         multiplier = 4  # param weights + gradients, bf16
-        # fp32 optimizer state: 2 for main params + 4 + 4 for 1st & 2nd moments.
+        # fp32 optimizer state: 4 for main params + 4 + 4 for 1st & 2nd moments
+        # (a gpt-oss MI355X run holds 16 bytes per parameter outside the step).
         # Muon orthogonalizes the 2D weights with momentum only (no 2nd moment),
         # so it drops the 4 bytes of 2nd-moment state on the matrix params that
-        # dominate the parameter count (2 main + 4 momentum = 6).  Embeddings/
+        # dominate the parameter count (4 main + 4 momentum = 8).  Embeddings/
         # norms nominally stay on Adam, but they are a negligible fraction of
         # params, so approximating the whole model at the Muon rate is accurate.
         is_muon = str(getattr(self.config.model_config, "optimizer", "") or "").lower() == "muon"
-        optimizer_state_multiplier = 6.0 if is_muon else 10.0
+        optimizer_state_multiplier = 8.0 if is_muon else 12.0
         if use_dist:
             # Distributed optimizer / dist_muon shards the fp32 optimizer state
             # across the DP group.  get_dp_size() returns world/(EP·PP) = EDP, the
