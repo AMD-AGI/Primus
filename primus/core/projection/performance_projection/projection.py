@@ -3976,7 +3976,9 @@ def _run_multinode_projection(
             )
         optimizer_step_ms = _measured_opt_ms
 
-    grad_reduce_ms = kernel_report.term("dp_grad_reduce", "step", grad_reduce_ms, kind="comm", scope_name="iteration")
+    grad_reduce_ms = kernel_report.term(
+        "dp_grad_reduce", "step", grad_reduce_ms, kind="comm", scope_name="iteration"
+    )
     optimizer_step_ms = kernel_report.term(
         "optimizer", "step", optimizer_step_ms, kind="optimizer", scope_name="iteration"
     )

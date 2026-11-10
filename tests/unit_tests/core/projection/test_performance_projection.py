@@ -43,7 +43,6 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _estimate_a2a_per_layer_ms,
     _estimate_ep_communication_overhead,
     _estimate_pp_communication_overhead,
-    exposed_grad_reduce_ms,
     _extract_layer_type_timings,
     _get_deepep_overlap_efficiency,
     _get_parameter_memory,
@@ -60,6 +59,7 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _summarize_bench_training_config,
     _upgrade_artifact_to_v2,
     calculate_collective_communication_time,
+    exposed_grad_reduce_ms,
     extract_single_node_time_from_profiling,
     load_hardware_config,
 )
