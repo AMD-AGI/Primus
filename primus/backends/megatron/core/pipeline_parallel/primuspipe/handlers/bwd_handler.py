@@ -25,7 +25,6 @@ def megatron_check_bwd_node_valid(node: SchedulerNode):
     args = node.args
     assert isinstance(args, dict)
     assert "config" in args
-    assert "model_type" in args
 
 
 def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[SchedulerNode]):
@@ -67,7 +66,6 @@ def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
             "input_tensor": input_tensors,
             "output_tensor": outputs,
             "output_tensor_grad": output_grad,
-            "model_type": node.args["model_type"],
             "config": node.args["config"],
         }
     else:
