@@ -23,8 +23,9 @@ What it does:
 4. Writes a Megatron checkpoint as ``<output>/release``:
 
    - ``--ckpt-format torch_dist`` (default): a distributed checkpoint that
-     Megatron reshards on load, so any TP / PP / VPP / EP / DP layout can load
-     it; load it with ``--load <output> --ckpt-format torch_dist --finetune
+     Megatron reshards on load, so any PP / VPP / EP / DP layout can load it
+     (TP must match ``--tensor-model-parallel-size``, which sets the vocabulary
+     padding below); load it with ``--load <output> --ckpt-format torch_dist --finetune
      --no-load-optim --no-load-rng``.
    - ``--ckpt-format torch``: a single-rank (TP=PP=EP=1) file,
      ``release/mp_rank_00/model_optim_rng.pt``, that only a single-rank run
@@ -37,7 +38,7 @@ by default, matching ``trainer_base.yaml``). Pass the training run's values,
 or ``--target-vocab-size``, if they differ.
 
 ``--dry-run`` stops after step 3 and reads only the safetensors headers, so the
-full mapping can be validated without loading any weights. Both modes need one
+full mapping can be validated without loading any weights. Every mode needs one
 visible GPU, because Transformer Engine layers will not build without one, but
 the meta-device build allocates no GPU memory. The converted weights are held
 in host memory (2 bytes per parameter in bf16) until they are written.
@@ -143,8 +144,6 @@ def save_torch_dist(model, state: Dict[str, torch.Tensor], release_dir: Path) ->
             item.data = None
         else:
             raise SystemExit(f"{key}: unexpected sharded_state_dict entry {type(item).__name__}")
-    if os.path.isdir(release_dir) and os.listdir(release_dir):
-        raise SystemExit(f"{release_dir} is not empty")
     os.makedirs(release_dir, exist_ok=True)
     dist_checkpointing.save(
         {"model": sharded, "checkpoint_version": 3.0, "iteration": 0},
@@ -173,6 +172,10 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     if not args.dry_run and args.output is None:
         p.error("--output is required unless --dry-run")
+    release_dir = args.output / "release" if args.output is not None else None
+    if not args.dry_run and args.ckpt_format == "torch_dist" and release_dir.is_dir():
+        if any(release_dir.iterdir()):
+            p.error(f"{release_dir} is not empty")
     if not torch.cuda.is_available():
         raise SystemExit(
             "convert_inkling_hf_megatron.py needs one visible GPU, also with --dry-run: "

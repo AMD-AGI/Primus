@@ -2435,6 +2435,9 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         state dict, so ``weights`` replaces its ``weight{i}`` views there, as a factory that
         builds TE's per-expert tensors (same keys and expert offsets) and stacks them on load.
         """
+        assert not (metadata or {}).get(
+            "singleton_local_shards"
+        ), "Turbo grouped weights support only singleton_local_shards=False (one key, expert-axis offsets)"
         sharded = super()._sharded_state_dict_grouped(tp_axis_map, prefix, sharded_offsets, metadata)
         experts = [sharded.pop(f"{prefix}weight{i}") for i in range(self.num_gemms)]
 

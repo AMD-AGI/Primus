@@ -413,6 +413,39 @@ def test_sharded_state_dict_covers_every_tensor(turbo, turbo_args, monkeypatch):
     assert tensors <= set(sharded), sorted(tensors - set(sharded))
 
 
+@pytest.mark.parametrize("save_turbo", [False, True], ids=["te_to_turbo", "turbo_to_te"])
+def test_torch_dist_moves_between_te_and_turbo(save_turbo, turbo_args, monkeypatch, tmp_path):
+    """A ``torch_dist`` checkpoint written by either expert implementation loads bit-exactly into
+    the other, so Turbo's factory builds TE's keys and offsets and merges them back in order."""
+    from megatron.core import dist_checkpointing
+    from megatron.core.extensions import transformer_engine_spec_provider
+
+    te_provider = transformer_engine_spec_provider.TESpecProvider
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
+    models = {}
+    for turbo, seed in ((save_turbo, 0), (not save_turbo, 1)):
+        if turbo:
+            _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=True)
+        else:
+            monkeypatch.setattr(transformer_engine_spec_provider, "TESpecProvider", te_provider)
+        torch.manual_seed(seed)
+        models[turbo] = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
+    source, target = models[save_turbo], models[not save_turbo]
+    metadata = {"singleton_local_shards": False}
+
+    dist_checkpointing.save(
+        {"model": source.sharded_state_dict(metadata=metadata)}, str(tmp_path), content_metadata=metadata
+    )
+    loaded = dist_checkpointing.load({"model": target.sharded_state_dict(metadata=metadata)}, str(tmp_path))
+    target.load_state_dict(loaded["model"], strict=True)
+
+    expected = {k: v for k, v in source.state_dict().items() if not k.endswith(("_extra_state", ".weights"))}
+    state = target.state_dict()
+    assert any(re.search(r"weight\d+$", k) and "experts" in k for k in expected)
+    for key, tensor in expected.items():
+        torch.testing.assert_close(state[key], tensor, rtol=0, atol=0, msg=key)
+
+
 @pytest.mark.parametrize("keep_fp32", ["0", "1"])
 def test_fp32_activations_global_scale_storage(keep_fp32, monkeypatch):
     """``global_scale`` is stored in fp32 only with the flag and the ``keep_in_fp32`` contract."""

@@ -26,6 +26,7 @@ from megatron.core.transformer.utils import (
     ensure_metadata_has_dp_cp_group,
     make_sharded_tensors_for_checkpoint,
 )
+from megatron.core.utils import get_tensor_model_parallel_group_if_none
 
 __all__ = ["InklingShortConv"]
 
@@ -40,7 +41,7 @@ class InklingShortConv(MegatronModule):
         tensor_parallel: the channels are a TP shard (K/V convs); the
             attention/MLP output convs act on the full hidden size and are
             replicated.
-        tp_group: the tensor-parallel group the channels are sharded over.
+        tp_group: the tensor-parallel group; Megatron's global one if ``None``.
     """
 
     def __init__(self, config, channels: int, kernel_size: int, tensor_parallel: bool = False, tp_group=None):
@@ -70,7 +71,7 @@ class InklingShortConv(MegatronModule):
             prefix,
             {"weight": 0} if self.tensor_parallel else {},
             sharded_offsets,
-            tp_group=self.tp_group,
+            tp_group=get_tensor_model_parallel_group_if_none(self.tp_group),
             dp_cp_group=metadata["dp_cp_group"],
         )
 

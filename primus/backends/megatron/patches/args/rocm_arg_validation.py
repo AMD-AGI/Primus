@@ -134,9 +134,9 @@ def _has_moe_layers(args) -> bool:
         return False
     freq = getattr(args, "moe_layer_freq", 1)
     if isinstance(freq, str):
-        from megatron.training.arguments import moe_freq_type
-
-        freq = moe_freq_type(freq)
+        # Usually already a list (the build_args moe_layer_freq patch); parsed here as Megatron's
+        # moe_freq_type does, without importing megatron.training, which needs a GPU.
+        freq = eval(freq, {}, {}) if "[" in freq else int(freq)
     if isinstance(freq, int):
         return freq > 0
     return any(freq)

@@ -119,3 +119,15 @@ def test_preset_mismatch_is_rejected(tiny_checkpoint):
     (hf_dir / "config.json").write_text(json.dumps(cfg))
     with pytest.raises(SystemExit, match="moe_router_topk_scaling_factor"):
         load_converter().main(["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--dry-run"])
+
+
+def test_torch_dist_refuses_a_used_output(tiny_checkpoint, monkeypatch):
+    """Rejected before any weight is read, not after the conversion."""
+    hf_dir, yaml, _ = tiny_checkpoint
+    out_dir = hf_dir / "dist"
+    (out_dir / "release").mkdir(parents=True)
+    (out_dir / "release" / "stale").write_text("")
+    converter = load_converter()
+    monkeypatch.setattr(converter, "save_torch_dist", lambda *a: pytest.fail("converted a used output"))
+    with pytest.raises(SystemExit):
+        converter.main(["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir)])
