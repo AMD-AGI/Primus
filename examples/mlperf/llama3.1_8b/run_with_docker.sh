@@ -48,7 +48,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${CHECK_COMPLIANCE:=0}"
 : "${MLPERF_RULESET:=6.1.0}"
 : "${MLPERF_LOGGING_REF:=6.1.0-rc2}"
-: "${MLPERF_COMMON_REF:=7771aeabc8b91402e95cb7a33f447d9d9941361f}"
+: "${MLPERF_COMMON_REF:=b708a19e8bd8cb33305c72db2487c366d36ddd03}"
 # Primus-Turbo built into the container; the one rocm/primus:v26.9 ships predates the gfx950
 # dense-GEMM race fixes (see README.md). Empty keeps the image's Primus-Turbo.
 : "${PRIMUS_TURBO_REF:=fda6df0b4264c94c4a7dccb645e02facc97c9fca}"
@@ -260,6 +260,7 @@ echo '[INFO] Installing pinned MLPerf Logging package.'
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/mlcommons/logging.git@${MLPERF_LOGGING_REF}'
 echo '[INFO] Installing pinned AMD MLPerf common package.'
+pip uninstall -q -y primus-mllog 2>/dev/null || true
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}'
 echo '[INFO] Container Primus editable install complete.'
