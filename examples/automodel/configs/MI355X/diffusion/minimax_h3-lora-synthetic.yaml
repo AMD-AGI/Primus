@@ -1,0 +1,29 @@
+# Primus EXP config — MiniMax-H3 LoRA on synthetic data, AutoModel backend.
+#
+# See minimax_h3-sft-synthetic.yaml for what this trains, the one-time setup and the
+# launch line. LoRA needs the proxy's weights on disk (not --config-only) and the
+# storage and compute dtypes to match, hence bfloat16 below; write the proxy with
+# `--dtype bfloat16`.
+#
+# STATUS: single GPU only, until the MiniMax-H3 FSDP2 parallelizer lands.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:minimax_h3-lora-synthetic}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: automodel
+    config: minimax_h3_lora_trainer.yaml
+    model: minimax_h3.yaml
+
+    overrides:
+      model:
+        torch_dtype: bfloat16
+        compute_dtype: bfloat16
+      step_scheduler:
+        max_steps: 24
+        local_batch_size: 1
+        global_batch_size: 1
+      checkpoint:
+        enabled: false

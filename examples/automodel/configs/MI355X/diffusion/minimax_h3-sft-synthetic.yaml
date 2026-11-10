@@ -1,0 +1,45 @@
+# Primus EXP config — MiniMax-H3 full fine-tuning on synthetic data, AutoModel backend.
+#
+# Trains a random-weight PROXY of the model on synthetic latents (MiniMax's weight
+# license excludes the US, EU, UK and South Korea). Per step it costs the same as
+# fine-tuning the released weights, so the throughput and memory it reports carry
+# over; the loss and any quality number do not.
+#
+# One-time setup:
+#   python tools/automodel/make_minimax_h3_proxy_checkpoint.py --out /scratch/h3_proxy [--num-layers 4]
+#   export MINIMAX_H3_PROXY=/scratch/h3_proxy
+#
+# Launch (inside the Primus container):
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/automodel/configs/MI355X/diffusion/minimax_h3-sft-synthetic.yaml
+#
+# STATUS: single GPU only. Sharding across GPUs needs the MiniMax-H3 FSDP2
+# parallelizer, which is the next change; until then AutoModel's generic one does
+# not know this model's blocks. Use a reduced-depth proxy (--num-layers 4) on one GPU.
+#
+# BF16 WEIGHTS ON ONE GPU. AutoModel skips FSDP2 on a single rank, and with it the
+# cast of FP32 master weights to the compute dtype, so FP32 weights would compute in
+# FP32 and flash attention rejects that ("FlashAttention only support fp16 and bf16").
+# Hence the model override below. With the parallelizer and 2+ GPUs the preset's
+# float32 master weights apply again: drop the override.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:minimax_h3-sft-synthetic}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: automodel
+    config: minimax_h3_sft_trainer.yaml
+    model: minimax_h3.yaml
+
+    overrides:
+      model:
+        torch_dtype: bfloat16
+      step_scheduler:
+        max_steps: 24
+        local_batch_size: 1
+        # 1 on a single GPU; 8 with eight GPUs, once sharding lands.
+        global_batch_size: 1
+      checkpoint:
+        enabled: false

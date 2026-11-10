@@ -1,0 +1,27 @@
+# AutoModel trainer — MiniMax-H3 LoRA on synthetic data.
+#
+# The full fine-tuning trainer plus a `peft:` block. LoRA needs the model's storage
+# and compute dtypes to match, so the example sets model.torch_dtype: bfloat16.
+#
+# 13B of H3's 33B parameters sit in the per-block AdaLN projections, so LoRA that
+# targets only attention and the feed-forward layers leaves most of what customers
+# may want to adapt untouched. Three target presets, from the example's overrides:
+#   attention:        "*.attn.to_q" "*.attn.to_k" "*.attn.to_v" "*.attn.to_out.0"
+#   attention + FFN:  the above plus "*.ff.net.0.proj" "*.ff.net.2"
+#   all:              the above plus "*.adaln_proj.linear"
+extends:
+  - minimax_h3_sft_trainer.yaml
+optimizer:
+  lr: 5.0e-5
+peft:
+  _target_: nemo_automodel.components._peft.lora.PeftConfig
+  dim: 64
+  alpha: 64
+  dropout: 0.0
+  target_modules:
+    - "*.attn.to_q"
+    - "*.attn.to_k"
+    - "*.attn.to_v"
+    - "*.attn.to_out.0"
+    - "*.ff.net.0.proj"
+    - "*.ff.net.2"

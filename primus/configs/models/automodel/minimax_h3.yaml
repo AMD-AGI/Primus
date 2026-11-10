@@ -1,0 +1,24 @@
+# AutoModel model preset: MiniMax-H3 (33B dense, single-stream audio+video DiT).
+#
+# Merged (as the `model:` block) into the automodel trainer module config by the
+# Primus launcher. Loads a random-weight PROXY checkpoint through AutoModel's
+# fine-tune path (`mode: finetune`), which is the only path that applies LoRA:
+#
+#   python tools/automodel/make_minimax_h3_proxy_checkpoint.py --out <dir> [--num-layers N]
+#
+# and `export MINIMAX_H3_PROXY=<dir>`. The directory's model_index.json names a
+# transformer-only pipeline class that the Primus MiniMax-H3 patch registers with
+# diffusers. MiniMax's weight license excludes the US, EU, UK and South Korea, so
+# nothing here downloads or reads the released weights.
+model:
+  pretrained_model_name_or_path: ${MINIMAX_H3_PROXY:/path/to/minimax_h3_proxy}
+  mode: finetune
+  model_type: minimax_h3
+  # `flash` routes diffusers' attention dispatch to Primus-Turbo's flash_attn_func
+  # (AITER's gfx950 kernels, forward and backward) through the Primus attention
+  # override. H3 passes no mask, so every backend is available.
+  attention_backend: flash
+  # fp32 master + bf16 compute for full fine-tuning. LoRA needs the two to match:
+  # set both to bfloat16 for it (the LoRA example does).
+  torch_dtype: float32
+  compute_dtype: bfloat16
