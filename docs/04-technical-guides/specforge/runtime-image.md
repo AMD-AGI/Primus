@@ -71,6 +71,43 @@ docker build -f examples/specforge/docker/Dockerfile \
 
 Prefer a digest on `BASE_IMAGE` if you have one, so the override is pinned too.
 
+## CI image publication
+
+The `Build SpecForge Images` workflow builds two separate images in
+`docker.io/tasimage/primus-specforge`, following SGLang's architecture variants:
+
+- `mi30x`: gfx942, based on the pinned SGLang `v0.5.14-rocm700-mi30x` image.
+- `mi35x`: gfx950, based on the pinned SGLang `v0.5.14-rocm700-mi35x` image.
+
+Both base digests are recorded in `.github/workflows/build-specforge-images.yml`.
+The matrix uses the same Dockerfile and SpecForge source pin for both variants.
+It streams the required files from the Primus checkout as the build context and
+requires a Linux Docker runner with BuildKit enabled. No GPU is needed to build.
+
+Relevant non-draft PRs and pushes to `main`, version-tag pushes, and manual
+dispatches trigger the workflow. Draft PRs wait until marked ready for review.
+The `ci:gpu` label does not gate image builds, matching the existing Primus image
+workflow. This workflow only runs the Dockerfile's existing GPU-free checks;
+it does not launch training or add a GPU test.
+
+Each variant gets a unique `run-<run-id>-<attempt>-<variant>` tag. Successful
+publication also updates `pr-<number>-<variant>` for PRs,
+`latest-<variant>` for `main`, or `<version-tag>-<variant>` for version tags.
+Manual branch runs outside `main` publish only the unique run tag.
+There is no architecture-neutral `latest` tag.
+
+The `specforge-image-mi30x` and `specforge-image-mi35x` workflow artifacts record
+the base image, Primus revision, local image ID, and published registry digest.
+Use the published `repository@sha256:...` reference for reproducible downstream
+jobs; convenience tags can move on a later run. These artifacts describe image
+builds, not GPU validation of either architecture.
+
+Maintainers must provision `tasimage/primus-specforge` and grant the existing
+`PRIMUS_DOCKER_HUB_TOKEN` permission to push and, for private images, pull it.
+Trusted runs fail publication if that secret is missing. Fork and Dependabot
+PRs build without publishing or receiving registry credentials. Registry login
+uses a temporary Docker configuration removed when the publish step exits.
+
 ## Run
 
 ```bash

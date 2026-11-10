@@ -1,0 +1,133 @@
+name: Build SpecForge Images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - .github/workflows/build-specforge-images.yml
+      - examples/specforge/**
+      - primus/**
+      - runner/**
+      - primus_cli.py
+      - pyproject.toml
+      - LICENSE
+      - README.md
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/workflows/build-specforge-images.yml
+      - examples/specforge/**
+      - primus/**
+      - runner/**
+      - primus_cli.py
+      - pyproject.toml
+      - LICENSE
+      - README.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: specforge-images-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_REPOSITORY: docker.io/tasimage/primus-specforge
+
+jobs:
+  build:
+    # Match the main CI image build: drafts wait until ready for review.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: build-docker
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: mi30x
+            base_image: lmsysorg/sglang:v0.5.14-rocm700-mi30x@sha256:381a9ece716e75bdeb7a08d7734fb8ba62f2abcda310f0087575e62a6083f092
+          - variant: mi35x
+            base_image: lmsysorg/sglang:v0.5.14-rocm700-mi35x@sha256:f1d38fd8076e69fdd103858149f9953a936cf9b322b2aa2cc97b08474d9a3623
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Build image and run GPU-free image checks
+        id: build
+        env:
+          VARIANT: ${{ matrix.variant }}
+          BASE_IMAGE: ${{ matrix.base_image }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DOCKER_BUILDKIT: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stream the allowlisted context to the daemon; no host-specific mounts
+          # or paths are needed. BuildKit is required for Dockerfile heredocs.
+          tag="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${VARIANT}"
+          alias=""
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            alias="pr-${PR_NUMBER}-${VARIANT}"
+          elif [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            alias="latest-${VARIANT}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            alias="${GITHUB_REF_NAME}-${VARIANT}"
+          fi
+          tar -C "$GITHUB_WORKSPACE" -cf - \
+            pyproject.toml LICENSE README.md primus_cli.py primus runner examples/specforge \
+            | docker build --network=host \
+                -f examples/specforge/docker/Dockerfile \
+                --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
+                --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+                -t "${IMAGE_REPOSITORY}:${tag}" -
+          image_id="$(docker image inspect -f '{{.Id}}' "${IMAGE_REPOSITORY}:${tag}")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "alias=$alias" >> "$GITHUB_OUTPUT"
+          mkdir -p image-metadata
+          printf 'variant=%s\nbase_image=%s\nrevision=%s\nimage=%s:%s\nimage_id=%s\n' \
+            "$VARIANT" "$BASE_IMAGE" "$GITHUB_SHA" "$IMAGE_REPOSITORY" "$tag" "$image_id" \
+            > "image-metadata/${VARIANT}.txt"
+      - name: Publish image
+        # Never expose registry credentials to fork or Dependabot PRs.
+        if: >-
+          github.actor != 'dependabot[bot]' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          PRIMUS_DOCKER_HUB_TOKEN: ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          IMAGE_TAG: ${{ steps.build.outputs.tag }}
+          IMAGE_ALIAS: ${{ steps.build.outputs.alias }}
+          VARIANT: ${{ matrix.variant }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$PRIMUS_DOCKER_HUB_TOKEN" ]]; then
+            echo "::error::PRIMUS_DOCKER_HUB_TOKEN is required to publish SpecForge images."
+            exit 1
+          fi
+          # Keep registry credentials out of the shared Docker config and build.
+          export DOCKER_CONFIG
+          DOCKER_CONFIG="$(mktemp -d "${HOME}/docker-push-auth-specforge-XXXXXX")"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$PRIMUS_DOCKER_HUB_TOKEN" | docker login -u tasimage --password-stdin
+          docker push "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          digest_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE_REPOSITORY}:${IMAGE_TAG}")"
+          printf 'published_image=%s\n' "$digest_ref" >> "image-metadata/${VARIANT}.txt"
+          # Publish convenience aliases only after the unique run tag succeeds.
+          if [[ -n "$IMAGE_ALIAS" ]]; then
+            docker tag "${IMAGE_REPOSITORY}:${IMAGE_TAG}" "${IMAGE_REPOSITORY}:${IMAGE_ALIAS}"
+            docker push "${IMAGE_REPOSITORY}:${IMAGE_ALIAS}"
+            printf 'alias=%s:%s\n' "$IMAGE_REPOSITORY" "$IMAGE_ALIAS" >> "image-metadata/${VARIANT}.txt"
+          fi
+          printf '### SpecForge %s\n\nPublished `%s`\n' "$VARIANT" "$digest_ref" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload image metadata
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: specforge-image-${{ matrix.variant }}
+          path: image-metadata/
+          if-no-files-found: warn
+          retention-days: 14

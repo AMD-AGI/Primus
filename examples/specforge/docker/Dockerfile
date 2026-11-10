@@ -103,6 +103,9 @@ Path("/tmp/base-constraints.txt").unlink(missing_ok=True)
 Path("/tmp/base-versions.json").unlink(missing_ok=True)
 PY
 
+# The editable package exposes primus/, but the standalone primus_cli module
+# also lives at the checkout root. Keep it importable by console scripts.
+ENV PYTHONPATH=/opt/primus
 RUN bash /tmp/smoke-check.sh
 
 ENV SPECFORGE_ROOT=/workspace/SpecForge
