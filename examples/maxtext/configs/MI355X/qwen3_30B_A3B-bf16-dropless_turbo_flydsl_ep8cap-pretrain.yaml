@@ -1,0 +1,62 @@
+# MI355X dropless MoE, expert parallelism 8 with MaxText's capped ring buffer (ragged_buffer_factor 2.0 + exact in-layer dropless fallback): ~11.4k tokens/s/GPU at per_device_batch_size 8
+# (FSDP 8 recipe 17.6k; plain ring EP8 ~8.3k). Exact: no token is dropped (toy convergence == FSDP). Use it when the model does not fit with FSDP alone; smaller EP degree (EP2/EP4 x FSDP) is faster still.
+# Needs maxtext patches 0009 (routing remat fix) and 0010 (turbo gmm + ragged sort) from patches/final, and PRIMUS_FLYDSL backend (scripts/00_setup_all.sh).
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-bf16-dropless_turbo_flydsl_ep8cap-pretrain}
+workspace: ./output
+
+env:
+  # XLA's GEMM autotuner at level >= 2 intermittently faults on this ROCm stack; level 1 still autotunes.
+  XLA_GPU_AUTOTUNE_LEVEL: "1"
+  # Smaller collective combine thresholds than Primus's 8 GB default, so FSDP gathers each weight separately
+  # and XLA can overlap them with compute. Set here, this replaces an XLA_FLAGS_APPEND from the shell.
+  XLA_FLAGS_APPEND: "--xla_gpu_all_gather_combine_threshold_bytes=1073741824 --xla_gpu_reduce_scatter_combine_threshold_bytes=1073741824 --xla_gpu_enable_pipelined_all_gather=true --xla_gpu_enable_pipelined_reduce_scatter=true --xla_gpu_enable_pipelined_all_reduce=true --xla_gpu_executable_terminate_timeout=900 --xla_gpu_executable_warn_stuck_timeout=120"
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: qwen3_30B_A3B.yaml
+    overrides:
+      run_name: "qwen3_30B_A3B_bf16_dropless_turbo_flydsl_ep8cap_training"
+      base_output_directory: "./output"
+      steps: 50
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism: EP 8 with the ring all-gather path and a capped (2x balanced) receive buffer
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: 8
+      use_ring_of_experts: true
+      moe_topk_before_ep_all_gather: true
+      use_ragged_sort: true
+      ragged_gather_fallback: true
+      ragged_gather_reduce_fallback: true
+      ragged_buffer_factor: 2.0
+      moe_dropless_fallback: "layer"
+
+      # dropless MoE through the Primus-Turbo grouped GEMM
+      sparse_matmul: true
+      megablox: false
+      capacity_factor: -1
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: "flydsl"
+
+      max_target_length: 4096
+      per_device_batch_size: 8
+      remat_policy: "save_dot_with_context_except_mlp"

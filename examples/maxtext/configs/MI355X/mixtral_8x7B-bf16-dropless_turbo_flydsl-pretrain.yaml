@@ -59,3 +59,4 @@ modules:
       remat_policy: "custom"
       context: "device"
       moe_mlpwo: "device"
+      moe_routing_maps: "device"   # save the router top-k ids: a recomputed bf16 top-k can differ from the forward and corrupt the gradients of the saved activations
