@@ -35,7 +35,15 @@ def _enabled(ctx: PatchContext) -> bool:
 
 
 def unsupported_reason(
-    qkv, q_freqs, k_freqs, qkv_split_arg_list, tensor_format, start_positions, interleaved, cu_seqlens, cp_size
+    qkv,
+    q_freqs,
+    k_freqs,
+    qkv_split_arg_list,
+    tensor_format,
+    start_positions,
+    interleaved,
+    cu_seqlens,
+    cp_size,
 ):
     """Why FlyDSL cannot take this call, or None when it can."""
     from primus_turbo.pytorch.kernels.rope.rope_impl import rope_shape_error
@@ -95,7 +103,9 @@ def patch_fused_qkv_rope(_ctx: PatchContext) -> None:
         if why is None:
             return fused_qkv_rope(qkv, q_freqs.contiguous(), k_freqs.contiguous(), list(qkv_split_arg_list))
         if te_fn is None:
-            raise RuntimeError(f"[Patch:{_PATCH_KEY}] FlyDSL RoPE cannot take this call ({why}) and TE has none")
+            raise RuntimeError(
+                f"[Patch:{_PATCH_KEY}] FlyDSL RoPE cannot take this call ({why}) and TE has none"
+            )
         if not warned:
             warned.append(True)
             warning_rank_0(f"[Patch:{_PATCH_KEY}] TE fused QKV RoPE fallback: {why}")

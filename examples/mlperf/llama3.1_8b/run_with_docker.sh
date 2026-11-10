@@ -49,6 +49,10 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${MLPERF_RULESET:=6.1.0}"
 : "${MLPERF_LOGGING_REF:=6.1.0-rc2}"
 : "${MLPERF_COMMON_REF:=7771aeabc8b91402e95cb7a33f447d9d9941361f}"
+# Primus-Turbo built into the container; the one rocm/primus:v26.9 ships predates the gfx950
+# dense-GEMM race fixes (see README.md). Empty keeps the image's Primus-Turbo.
+: "${PRIMUS_TURBO_REF:=fda6df0b4264c94c4a7dccb645e02facc97c9fca}"
+: "${PRIMUS_TURBO_GPU_ARCHS:=gfx950}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
@@ -260,6 +264,28 @@ pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}'
 echo '[INFO] Container Primus editable install complete.'
 "
+
+if [[ -n "${PRIMUS_TURBO_REF}" ]]; then
+    docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
+set -e
+_have=\$(python3 -c 'import primus_turbo; print(primus_turbo.__version__)' 2>/dev/null || true)
+if [[ \"\${_have}\" == *+g${PRIMUS_TURBO_REF:0:7}* ]]; then
+    echo \"[INFO] Primus-Turbo \${_have} already installed.\"
+    exit 0
+fi
+echo '[INFO] Building Primus-Turbo ${PRIMUS_TURBO_REF} for ${PRIMUS_TURBO_GPU_ARCHS} (image has '\"\${_have:-none}\"').'
+_src=/tmp/primus_turbo_src
+rm -rf \"\${_src}\"
+git clone -q https://github.com/AMD-AGI/Primus-Turbo.git \"\${_src}\"
+git -C \"\${_src}\" checkout -q '${PRIMUS_TURBO_REF}'
+git -C \"\${_src}\" submodule update -q --init --recursive
+pip uninstall -q -y primus_turbo
+GPU_ARCHS='${PRIMUS_TURBO_GPU_ARCHS}' pip install -q --no-build-isolation --no-deps \"\${_src}\"
+# FlyDSL's cache key does not cover every kernel change, so drop binaries from the old Turbo.
+rm -rf \"\${FLYDSL_RUNTIME_CACHE_DIR:-\${HOME}/.flydsl/cache}\"
+echo \"[INFO] Primus-Turbo \$(python3 -c 'import primus_turbo; print(primus_turbo.__version__)') installed.\"
+"
+fi
 
 _run_cmd="bash ${_example_dir}/run_and_time.sh"
 
