@@ -1,0 +1,130 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:inkling_large-FP8-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Inkling (Large), full 66 layers (2 dense + 64 MoE, 947 B total / 41 B
+# active) on 16 MI355X nodes with Primus-Turbo kernels and FP8 tensorwise
+# GEMMs: the Turbo and FP8 settings of inkling_large_6L-FP8-pretrain.yaml at
+# full depth. Needs Primus-Turbo 0.6 or later (rocm/primus:v26.9).
+#
+# PP=16 across nodes (one stage per node) x EP=8 inside each node, so the
+# expert all-to-all (DeepEP) never leaves a node and dense weights are
+# data-parallel 8 ways. Each GPU holds 1/8 of the experts of its stage's MoE
+# layers. Stage split 3/3/3/3/3, 4/4/4/4/4, 5/5/5/5, 6, 5 (+ LM head): under
+# 1F1B stage r holds 16 - r microbatches, so the early stages get fewer layers.
+# The fullest stage, stage 10, peaked at 285 of 288 GiB per GPU; if a stage
+# runs out of memory, use recompute_granularity: selective with
+# recompute_modules: [layernorm, moe_act].
+#
+# The first step builds and autotunes Turbo's FP8 GEMMs with FlyDSL at each
+# stage in turn: on 16 nodes it took 2 h 10 min, and stage 0 waited 2 h 3 min
+# for its first gradient, hence distributed_timeout_minutes: 300. Allow about
+# 3 hours for the 50 steps.
+#
+# Environment: TORCHINDUCTOR_COMPILE_THREADS=1 on every node, so each rank
+# runs its Inductor compiles in its own process. With a compile-worker pool, a
+# 16-node Turbo run of Inkling hung in its first step, waiting for a compile
+# the pool never returned. Also Primus's usual multi-node variables (NNODES,
+# NODE_RANK, MASTER_ADDR, MASTER_PORT) and the cluster's RCCL network
+# settings.
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:inkling_large}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Inkling_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters. GBS 1024 = 128 microbatches per pipeline per step
+      # (DP=8), which keeps the 1F1B bubble near 15/143.
+      train_iters: ${PRIMUS_TRAIN_ITERS:50}
+      exit_interval: ${PRIMUS_EXIT_INTERVAL:null}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      global_batch_size: ${PRIMUS_GBS:1024}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 3.0e-4
+      min_lr: 3.0e-5
+      lr_warmup_iters: 5
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      clip_grad: 1.0
+      eod_mask_loss: false
+
+      # parallel. Inkling rejects sequence and context parallelism, so TP=1.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 16
+      pipeline_model_parallel_layout: "Et*3|t*3|t*3|t*3|t*3|t*4|t*4|t*4|t*4|t*4|t*5|t*5|t*5|t*5|t*6|t*5,L"
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      sequence_parallel: false
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # Deferring the LM-head wgrad buffers every microbatch's [seq, vocab]
+      # output gradient on the last stage.
+      defer_embedding_wgrad_compute: false
+      # The first step builds and autotunes Turbo's FP8 GEMMs (FlyDSL) at one
+      # stage after another, and stage 0 waits for its first gradient meanwhile.
+      distributed_timeout_minutes: 300
+
+      # data. NullTokenizer puts eod at id vocab_size: 200057 + eod = the
+      # 200058 real Inkling tokens (padded to 200064).
+      mock_data: true
+      vocab_size: 200057
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      # No dataloader mask: the attention builds its own causal / window mask,
+      # and flex caches its block mask only when no mask is passed.
+      create_attention_mask_in_dataloader: false
+
+      # ---------- Inkling ----------
+      inkling_attention_backend: ${PRIMUS_INKLING_ATTN:flex}
+      inkling_fp32_activations: false
+
+      # ---------- Optimizer: fp32 AdamW ----------
+      optimizer: adam
+
+      recompute_granularity: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo grouped GEMM, RMSNorm, DeepEP dispatcher and GEMM (attention,
+      # MLPs, shared experts). Inkling keeps its own attention core, and the
+      # LM head stays Megatron's. DeepEP stays inside a node at EP=8; it needs
+      # fp32 router probs and switches the dispatcher to flex.
+      # PRIMUS_TURBO=false uses TE + alltoall.
+      enable_primus_turbo: ${PRIMUS_TURBO:true}
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: ${PRIMUS_TURBO:true}
+      use_turbo_deepep: ${PRIMUS_TURBO:true}
+      # 64 CUs: 0.8% faster than the default 32 at EP 8 (16 is slower; 160 is about
+      # the same as 64 and uses 2 GB more per GPU)
+      turbo_deepep_num_cu: 64
+      use_turbo_rms_norm: ${PRIMUS_TURBO:true}
+      use_turbo_gemm: ${PRIMUS_TURBO:true}
+      moe_router_dtype: fp32
+      moe_grouped_gemm: true
+      moe_permute_fusion: false
+
+      # fp8 = number format (E4M3 forward, E5M2 backward); fp8_recipe = scaling.
+      # The LM head stays in BF16.
+      fp8: hybrid
+      fp8_recipe: tensorwise
