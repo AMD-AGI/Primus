@@ -19,7 +19,7 @@ loss 3.289 at 196,608 samples, the MLPerf v6.0 submission's sample count, in 78.
 
 ### Image
 
-Use `rocm/primus:v26.9` with Primus-Turbo at or after `d04ffd9b`. The Primus-Turbo that `v26.9`
+Use `rocm/primus:v26.9` with Primus-Turbo at or after `54d628c9`. The Primus-Turbo that `v26.9`
 ships (`de8fa6ca`) lacks the gfx950 dense-GEMM race fixes of Primus-Turbo#570.
 `run_with_docker.sh` builds Primus-Turbo `PRIMUS_TURBO_REF` (default `fda6df0b`) into the
 container; set `PRIMUS_TURBO_REF=` to keep the image's. After changing Primus-Turbo, clear

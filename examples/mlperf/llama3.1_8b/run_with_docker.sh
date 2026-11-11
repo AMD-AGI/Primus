@@ -269,6 +269,8 @@ echo '[INFO] Container Primus editable install complete.'
 if [[ -n "${PRIMUS_TURBO_REF}" ]]; then
     docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
 set -e
+# The config's PYTHONPATH puts Primus's tools/ package ahead of Primus-Turbo's build helpers.
+unset PYTHONPATH
 echo '[INFO] Building Primus-Turbo ${PRIMUS_TURBO_REF} for ${PRIMUS_TURBO_GPU_ARCHS}.'
 _src=/tmp/primus_turbo_src
 rm -rf \"\${_src}\"
