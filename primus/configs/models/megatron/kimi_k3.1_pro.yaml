@@ -1,0 +1,22 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Kimi K3.1 Pro text backbone.
+#
+# ~2.8 T total params, ~104 B active, vocab 163840 -- K3's shapes.
+# Source: https://www.kimi.ai/blog/kimi-k3-1-pro (2026-10-23): "Kimi K3.1 Pro
+# is a post-trained version of Kimi K3". Until moonshotai publishes the K3.1 Pro
+# config.json, this preset extends kimi_k3.yaml without overrides.
+#
+# Once moonshotai publishes the K3.1 Pro config.json, diff its text_config
+# against moonshotai/Kimi-K3's and override only the keys that change here.
+###############################################################################
+
+extends:
+  - kimi_k3.yaml
+
+# tokenizer_model stays moonshotai/Kimi-K3 (inherited) until the K3.1 Pro
+# repository exists. Mock-data runs force NullTokenizer and never build it.

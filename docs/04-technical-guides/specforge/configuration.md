@@ -123,7 +123,7 @@ modules:
     overrides:
       specforge_mode: train              # train | capture
       specforge_train_mode: offline      # online | offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}  # SpecForge Hydra YAML
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-amd.yaml}  # SpecForge Hydra YAML
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
@@ -151,7 +151,7 @@ export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
 export MAX_STEPS=200
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
@@ -188,7 +188,7 @@ modules:
     overrides:
       specforge_mode: train              # train | capture
       specforge_train_mode: online       # online | offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}  # SpecForge Hydra YAML
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-amd.yaml}  # SpecForge Hydra YAML
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
@@ -279,7 +279,7 @@ Inside the docker image:
 From the host:
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+./runner/primus-cli container --image primus-specforge:local-mi35x \
   --shm-size 64g --volume /data:/data --env KEY=VALUE \
   -- train pretrain --config <experiment.yaml> \
   [dotted.overrides...]

@@ -30,6 +30,10 @@ from primus.backends.specforge.argument_builder import (
     flatten_overrides,
     resolve_specforge_root,
 )
+from primus.backends.specforge.capture_plugin import (
+    CAPTURE_BACKEND_KEY,
+    validate_capture_backend,
+)
 
 DEFAULT_MOONCAKE_RPC_PORT = 35551
 DEFAULT_MOONCAKE_HTTP_PORT = 35880
@@ -137,6 +141,10 @@ def _model_section(params: Any, env: Optional[Mapping[str, str]] = None) -> dict
         return {}
     if not isinstance(data, dict):
         raise ValueError(f"{path} must be a mapping")
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    validate_capture_backend(
+        overrides.get(CAPTURE_BACKEND_KEY, flatten_overrides(data).get(CAPTURE_BACKEND_KEY))
+    )
     if "defaults" in data and "model" not in data:
         raise ValueError(
             f"{path} uses Hydra defaults and has no model section; "
@@ -349,6 +357,10 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
 
     environ = os.environ if env is None else env
     raw = flatten_overrides(getattr(params, "specforge_online", None))
+    validate_capture_backend(environ.get("DISAGG_SERVER_CAPTURE"))
+    validate_capture_backend(
+        flatten_overrides(getattr(params, "specforge_overrides", None)).get(CAPTURE_BACKEND_KEY)
+    )
     model = _model_section(params, environ)
     single_node = _as_bool(raw.get("single_node", environ.get("PRIMUS_SPECFORGE_SINGLE_NODE")), False)
     run_id = raw.get("run_id") or environ.get("RUN_ID") or environ.get("DISAGG_STORE_ID")
@@ -655,6 +667,7 @@ def build_online_overrides(
         f"deployment.disaggregated.control_dir={run_root}/control",
         f"deployment.disaggregated.consumer_state_dir={settings['consumer_state_dir']}",
         f"deployment.disaggregated.store_id={settings['run_id']}",
+        f"{CAPTURE_BACKEND_KEY}=plugin",
         f"deployment.disaggregated.server_urls={hydra_quoted_list(urls)}",
         f"deployment.disaggregated.mooncake_metadata_server=http://{head_ip}:{http_port}/metadata",
         f"deployment.disaggregated.mooncake_master_server_addr={head_ip}:{rpc_port}",
@@ -677,7 +690,17 @@ def build_role_argv(
 ) -> list[str]:
     """``specforge train --config ... --role {{producer,consumer}}`` plus Hydra overrides."""
 
-    return build_specforge_argv(params, extra_overrides=list(extra_overrides), role=role, node_rank=node_rank)
+    argv = build_specforge_argv(params, extra_overrides=list(extra_overrides), role=role, node_rank=node_rank)
+    result = []
+    for item in argv:
+        key, _, value = item.partition("=")
+        if key.lstrip("+~") == CAPTURE_BACKEND_KEY:
+            if not key.startswith("~"):
+                validate_capture_backend(value)
+        else:
+            result.append(item)
+    # Remove user assignments/additions/deletions before setting the owned key.
+    return [*result, f"{CAPTURE_BACKEND_KEY}=plugin"]
 
 
 def mooncake_master_argv(settings: Mapping[str, Any]) -> list[str]:
@@ -719,15 +742,33 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         str(settings["server_mem_fraction"]),
         "--chunked-prefill-size",
         "-1",
-        "--enable-spec-capture",
-        "--spec-capture-method",
-        "dflash",
-        "--spec-capture-aux-layer-ids",
+        "--speculative-algorithm",
+        "DFLASH",
+        "--enable-return-aux-hidden-states",
+        "--return-aux-hidden-state-layer-ids",
         *[str(i) for i in settings["capture_layer_ids"]],
+        "--return-hidden-states-mode",
+        "full",
         "--port",
         str(port),
     ]
     extra = [arg for arg in list(settings["sglang_extra_args"]) if arg != "--skip-tokenizer-init"]
+    owned_flags = {
+        "--enable-spec-capture",
+        "--spec-capture-method",
+        "--spec-capture-aux-layer-ids",
+        "--speculative-algorithm",
+        "--enable-return-aux-hidden-states",
+        "--return-aux-hidden-state-layer-ids",
+        "--return-hidden-states-mode",
+        "--chunked-prefill-size",
+    }
+    for arg in extra:
+        if arg.split("=", 1)[0] in owned_flags:
+            raise ValueError(
+                f"[Primus:specforge] {arg} cannot be set in sglang_extra_args; "
+                "Primus owns the capture plugin flags and disables chunked prefill"
+            )
     if _as_bool(settings.get("skip_tokenizer_init", True), True):
         argv.insert(argv.index("--trust-remote-code") + 1, "--skip-tokenizer-init")
     argv.extend(extra)

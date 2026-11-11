@@ -4,6 +4,7 @@
 #
 # This hook is executed by execute_hooks.sh before training. It:
 #   1. Finds --config / --data_path / --patch_args / --backend_path from args
+#      (--data_path defaults to the DATA_PATH env, then ./data/)
 #   2. Detects the framework from the pre_trainer module in the config
 #   3. Dispatches to runner/helpers/hooks/train/pretrain/<framework>/prepare.py
 #      with a stable CLI:
@@ -32,7 +33,13 @@ PRIMUS_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 source "${SCRIPT_DIR}/../../../hook_common.sh"
 
 CONFIG_FILE=""
-DATA_PATH="./data/"
+# --data_path wins, then the DATA_PATH env that base_env.sh and the docs use.
+# A relative env value is taken from the launch directory, as base_env.sh's
+# HF_HOME is, since this script later cds to PRIMUS_ROOT.
+if [[ -n "${DATA_PATH:-}" && "${DATA_PATH}" != /* ]]; then
+    DATA_PATH="${PWD}/${DATA_PATH}"
+fi
+DATA_PATH="${DATA_PATH:-./data/}"
 PATCH_ARGS="/tmp/primus_patch_args.txt"
 BACKEND_PATH=""
 BACKEND_OVERRIDE=""

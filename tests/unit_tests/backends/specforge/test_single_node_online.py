@@ -13,7 +13,8 @@ from primus.backends.specforge.online_launch import (
 
 
 @pytest.fixture
-def setup(tmp_path):
+def setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(supervisor, "require_capture_plugin", lambda *args: None)
     root = tmp_path / "specforge"
     root.mkdir()
     (root / "pyproject.toml").write_text("[project]\nname='specforge'\n")
@@ -190,7 +191,7 @@ def test_capture_startup_failure_cleans_partial_servers(setup, monkeypatch):
     monkeypatch.setattr(supervisor, "_kill_group", killed.append)
     with pytest.raises(RuntimeError, match="capture readiness failed"):
         supervisor._start_local_sglang(settings, "127.0.0.1", "127.0.0.1", Path(settings["run_root"]), 0)
-    assert len(started) == 2 and killed == started
+    assert len(started) == 2 and killed == list(reversed(started))
 
 
 def test_dispatch_single_node_and_existing_multi_node(setup, monkeypatch):
@@ -255,3 +256,4 @@ def test_capture_storage_segment(setup, monkeypatch, configured, expected):
     monkeypatch.setattr(supervisor, "_wait_sglang", lambda *a: None)
     supervisor._start_local_sglang(settings, "127.0.0.1", "127.0.0.1", Path(settings["run_root"]), 0)
     assert seen[0]["MOONCAKE_GLOBAL_SEGMENT_SIZE"] == expected
+    assert seen[0]["SPECFORGE_SPEC_CAPTURE"] == "1"
