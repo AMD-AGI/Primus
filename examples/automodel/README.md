@@ -193,7 +193,7 @@ On top of AutoModel's defaults, the trainer preset and the H3 patches set:
 | What | Why |
 | --- | --- |
 | `primus_turbo.nondeterministic_attention: true`, with `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: "1"` in the experiments' `env:` | Attention is about 60% of the step. Primus-Turbo's non-deterministic backward is 17% faster per step than diffusers' default flash backend. FP32 atomics keep dq's error at 1.5e-4 against SDPA; Primus's MI355X default of BF16 atomics is 1.5 s faster per step but gives dq a 1.5e-2 error. Keep the `env:` block if you copy the preset. |
-| `fsdp.enable_compile: true` | Compiles each block, fusing the element-wise work: 9% faster, slightly less memory. The first step pays about 13 s to compile. |
+| `fsdp.enable_compile: true` | Compiles each block, fusing the element-wise work: about 9% faster for full fine-tuning and 8% for LoRA, slightly less memory. The first step pays 13–20 s to compile. For LoRA the H3 sidecar first gives AutoModel's per-module LoRA classes one shared class; otherwise every block recompiles, and after 8 Dynamo runs the rest uncompiled. |
 | Whole-block activation checkpointing (H3 sidecar) | AutoModel's own checkpointing leaves about 10 GB per block live; without this the full model runs out of memory at step 0. |
 | FP32 compute for the keep-in-FP32 modules (H3 sidecar) | The patch projections, time embedder and rotary buffer run in FP32 under FSDP2, as diffusers declares. Full fine-tuning only: AutoModel's LoRA path stores the whole model in BF16. |
 | AdaLN modulation gradients accumulated in FP32 (H3 patch) | The per-row modulation gather's backward otherwise sums every row into a few table entries in BF16: the AdaLN gradients (13B of the 33B parameters) were 9.7% off against FP32, and are 0.9% with it. |
@@ -214,15 +214,18 @@ step_scheduler.global_batch_size=1` and a reduced-depth proxy.
 768×1344, micro-batch 1, global batch 8. Step time is the median after the first
 five steps. Training memory is PyTorch's peak allocation per GPU during training;
 the device peak is `rocm-smi`'s per GPU over the whole run, loading included.
+The full fine-tuning rows were measured on one node and the LoRA rows on another,
+with `rocm/primus:v26.8`; full fine-tuning at 5.2 s gave the same step time on both
+(14.9 s). The device peak depends on how loading goes and varies between runs.
 
 | Mode | Blocks | Clip (rows) | Step time | Samples/s/GPU | Training memory | Device peak |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
 | Full fine-tuning | 50 (33B) | 5.2 s (~38K) | 14.9 s | 0.067 | 83 GiB | 127 GiB |
 | Full fine-tuning | 50 (33B) | 10 s (~74K) | 45.3 s | 0.022 | 110 GiB | 139 GiB |
 | Full fine-tuning | 12 (reduced depth) | 5.2 s (~38K) | 3.6 s | 0.277 | 34 GiB | 89 GiB |
-| LoRA (attention + FFN, rank 64) | 50 (33B) | 5.2 s (~38K) | 15.2 s | 0.066 | 45 GiB | 116 GiB |
-| LoRA (attention + FFN, rank 64) | 50 (33B) | 10 s (~74K) | 46.0 s | 0.022 | 74 GiB | 112 GiB |
-| LoRA (attention + FFN, rank 64) | 12 (reduced depth) | 5.2 s (~38K) | 3.5 s | 0.287 | 24 GiB | 41 GiB |
+| LoRA (attention + FFN, rank 64) | 50 (33B) | 5.2 s (~38K) | 14.0 s | 0.072 | 44 GiB | 66 GiB |
+| LoRA (attention + FFN, rank 64) | 50 (33B) | 10 s (~74K) | 43.5 s | 0.023 | 72 GiB | 108 GiB |
+| LoRA (attention + FFN, rank 64) | 12 (reduced depth) | 5.2 s (~38K) | 3.4 s | 0.297 | 23 GiB | 32 GiB |
 
 [exited with code 0]
 

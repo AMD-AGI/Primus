@@ -99,8 +99,9 @@ fsdp:
   reduce_dtype: bfloat16
   # Per-block torch.compile (in place, inside the whole-block checkpoint wrappers): fuses
   # the element-wise work around attention and the GEMMs. Full size, 8x MI355X, 5.2 s:
-  # full fine-tuning 16.6 -> 15.1 s per step (-9%), LoRA 15.4 -> 15.2 s; the first step
-  # pays ~13 s to compile. Over 60 steps the loss tracks the eager run (mean relative
+  # full fine-tuning 16.6 -> 15.1 s per step (-9%), LoRA 15.2 -> 14.0 s (-8%, with the H3
+  # sidecar's shared LoRA classes; without them every block recompiles); the first step
+  # pays 13-20 s to compile. Over 60 steps the loss tracks the eager run (mean relative
   # difference 3.6e-4, same mean over the last 20 steps).
   enable_compile: true
   activation_checkpointing: true
