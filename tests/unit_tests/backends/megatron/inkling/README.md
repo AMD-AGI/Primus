@@ -251,20 +251,6 @@ It takes about 5 minutes on 8 MI355X GPUs, most of it FlexAttention and
 aiter compilation. Last run: Oct 19, 2026, `rocm/primus:v26.8`, 14 of 14
 layouts passed.
 
-## 8 GPUs: checkpoint resharding
-
-`dist_checkpoint_check.py` is also a `torchrun` script. It saves `torch_dist`
-checkpoints from several layouts and loads each one in every layout, with TE
-and Turbo experts, and checks the converter's `torch_dist` output the same
-way; see the "Testing" section of the model README:
-
-```bash
-D=tests/unit_tests/backends/megatron/inkling
-torchrun --nproc-per-node 8 $D/dist_checkpoint_check.py
-python $D/dist_checkpoint_check.py --convert-to /tmp/inkling_conv
-torchrun --nproc-per-node 8 $D/dist_checkpoint_check.py --converted /tmp/inkling_conv
-```
-
 ## Not covered by P1 yet
 
 - Faster global-layer FlexAttention. It's 3× faster than eager but about 10×

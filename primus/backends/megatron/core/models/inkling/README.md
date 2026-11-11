@@ -385,24 +385,6 @@ on the number of microbatches; the reference's own fp32 run is off by 1e-6 to
 
 TP stays at 1 in every layout. The script exits non-zero if any layout fails.
 
-### 8 GPUs: checkpoint resharding
-
-```bash
-D=tests/unit_tests/backends/megatron/inkling
-torchrun --nproc-per-node 8 $D/dist_checkpoint_check.py
-python $D/dist_checkpoint_check.py --convert-to /tmp/inkling_conv
-torchrun --nproc-per-node 8 $D/dist_checkpoint_check.py --converted /tmp/inkling_conv
-```
-
-The same 8-layer model, with fixed random weights, is saved as `torch_dist`
-from four layouts (`ep8` and `pp4_vpp2_ep2` with TE experts, `pp2_ep4` and
-`pp8` with Turbo's). Each checkpoint is then loaded by every layout in the
-table above, with TE and with Turbo experts, into a freshly initialised model.
-Every parameter and buffer must come back bit for bit. The `--converted` pass
-does the same for the converter's single-process output: it converts a
-synthetic release checkpoint to `torch` and `torch_dist`, and every layout's
-`torch_dist` load must equal the `torch` one.
-
 ## Known limitations
 
 - FlexAttention global layers are about 10× slower than causal attention
@@ -413,7 +395,9 @@ synthetic release checkpoint to `torch` and `torch_dist`, and every layout's
   unaffected.
 - No Inkling FLOPs formula, so logged TFLOP/s use the GPT formula.
 - Checkpoint save and resume have been run on one node only, on a 4-layer
-  model; the four-node recipes have not saved or resumed yet.
+  model; the four-node recipes have not saved or resumed yet. Checkpoints
+  assume TP 1: the K/V short convs are saved as replicated tensors, not TP
+  shards.
 - Expert load balance and the bias update have not been verified with
   per-expert load logging.
 - FP8 lowers the loss by about 0.045 at 50 steps for reasons not yet known

@@ -40,8 +40,8 @@ class InklingTransformerLayer(TransformerLayer):
         if config.sequence_parallel:
             raise NotImplementedError("Inkling's short convolutions do not support sequence parallelism yet")
         k = config.short_conv_kernel_size
-        self.attn_sconv = InklingShortConv(config, config.hidden_size, k, tp_group=self.pg_collection.tp)
-        self.mlp_sconv = InklingShortConv(config, config.hidden_size, k, tp_group=self.pg_collection.tp)
+        self.attn_sconv = InklingShortConv(config, config.hidden_size, k)
+        self.mlp_sconv = InklingShortConv(config, config.hidden_size, k)
 
     def _norm(self, norm, hidden_states, recompute):
         """``norm(hidden_states)``; with ``recompute_modules: [layernorm]`` its output is

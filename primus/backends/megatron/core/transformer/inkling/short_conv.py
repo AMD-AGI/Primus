@@ -22,11 +22,6 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.utils import (
-    ensure_metadata_has_dp_cp_group,
-    make_sharded_tensors_for_checkpoint,
-)
-from megatron.core.utils import get_tensor_model_parallel_group_if_none
 
 __all__ = ["InklingShortConv"]
 
@@ -41,15 +36,12 @@ class InklingShortConv(MegatronModule):
         tensor_parallel: the channels are a TP shard (K/V convs); the
             attention/MLP output convs act on the full hidden size and are
             replicated.
-        tp_group: the tensor-parallel group; Megatron's global one if ``None``.
     """
 
-    def __init__(self, config, channels: int, kernel_size: int, tensor_parallel: bool = False, tp_group=None):
+    def __init__(self, config, channels: int, kernel_size: int, tensor_parallel: bool = False):
         super().__init__(config=config)
         self.channels = channels
         self.kernel_size = kernel_size
-        self.tensor_parallel = tensor_parallel
-        self.tp_group = tp_group
         self.weight = torch.nn.Parameter(torch.empty(channels, 1, kernel_size, dtype=config.params_dtype))
         if tensor_parallel:
             self.weight.tensor_model_parallel = True
@@ -62,18 +54,6 @@ class InklingShortConv(MegatronModule):
     def reset_parameters(self):
         if self.weight.device.type != "meta" and self.config.perform_initialization:
             self.config.init_method(self.weight)
-
-    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
-        """K/V convs are sharded on the channel axis like ``linear_qkv``'s groups; the rest are replicated."""
-        metadata = ensure_metadata_has_dp_cp_group(metadata)
-        return make_sharded_tensors_for_checkpoint(
-            self.state_dict(prefix="", keep_vars=True),
-            prefix,
-            {"weight": 0} if self.tensor_parallel else {},
-            sharded_offsets,
-            tp_group=get_tensor_model_parallel_group_if_none(self.tp_group),
-            dp_cp_group=metadata["dp_cp_group"],
-        )
 
     def forward(self, x: torch.Tensor, seq_lengths: Optional[torch.Tensor] = None) -> torch.Tensor:
         """``x``: ``[s, b, c]``. Packed sequences (``seq_lengths``) are optional item O8.
