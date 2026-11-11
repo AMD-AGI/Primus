@@ -25,6 +25,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from primus.core.utils.module_utils import warning_rank_0
+
 _SWITCH_ON = ("1", "true", "on", "yes")
 _SWITCH_OFF = ("0", "false", "off", "no", "")
 
@@ -104,18 +106,45 @@ def switch_summary(config) -> str:
     )
 
 
+def _compile_errors() -> tuple:
+    """Exception types meaning torch.compile could not compile ``fn``, as opposed to ``fn`` failing.
+
+    TorchDynamoException covers Inductor's errors. Hitting the recompile limit
+    under fullgraph=True raises a plain Exception, named by torch version.
+    """
+    import torch._dynamo.exc as dynamo_exc
+
+    names = ("TorchDynamoException", "FailOnRecompileLimitHit", "FailOnCacheLimitHit")
+    return tuple(cls for cls in (getattr(dynamo_exc, name, None) for name in names) if cls is not None)
+
+
+def _first_line(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text.splitlines()[0][:500] if text else ''}"
+
+
 def _maybe_compile(fn, enabled: bool, dynamic: bool = False):
-    """torch.compile ``fn``; fall back to eager for good if the first compiled call fails."""
+    """torch.compile ``fn`` when ``enabled``.
+
+    When a compiled call fails to compile (a Dynamo or Inductor error, including
+    hitting the recompile limit), log it and run ``fn`` eagerly from then on.
+    Any other error, such as running out of memory, propagates.
+    """
     if not enabled or not hasattr(torch, "compile"):
         return fn
     try:
-        # emulate_precision_casts keeps the explicit bf16 round-trips of the
-        # eager code (merged.to(bf16) before RMSNorm, q/k .to(bf16) before
-        # RoPE), so the fused forward matches eager bit for bit.
+        # emulate_precision_casts keeps the eager code's explicit bf16 rounding
+        # points (merged.to(bf16) before RMSNorm, q/k .to(bf16) before RoPE).
+        # Inductor can still reorder reductions, so results match eager to
+        # rounding error, not bit for bit.
         compiled = torch.compile(
             fn, dynamic=dynamic, fullgraph=True, options={"emulate_precision_casts": True}
         )
-    except Exception:  # pragma: no cover - depends on the image
+        compile_errors = _compile_errors()
+    except Exception as exc:  # pragma: no cover - depends on the image
+        warning_rank_0(
+            f"ZAYA1: torch.compile is unavailable for {fn.__name__}, running it eagerly: {_first_line(exc)}"
+        )
         return fn
     state = {"ok": True}
 
@@ -123,11 +152,12 @@ def _maybe_compile(fn, enabled: bool, dynamic: bool = False):
         if state["ok"]:
             try:
                 return compiled(*args, **kwargs)
-            except Exception as exc:  # pragma: no cover - depends on the image
+            except compile_errors as exc:
                 state["ok"] = False
-                import warnings
-
-                warnings.warn(f"ZAYA1: torch.compile of {fn.__name__} failed ({exc!r}); using eager.")
+                warning_rank_0(
+                    f"ZAYA1: torch.compile of {fn.__name__} failed, running it eagerly from now on: "
+                    f"{_first_line(exc)}"
+                )
         return fn(*args, **kwargs)
 
     wrapper.compiled_ok = lambda: state["ok"]
