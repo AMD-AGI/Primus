@@ -344,7 +344,7 @@ class TestReleaseCachedMemory:
 
         monkeypatch.setattr(h3, "release_cached_memory", lambda: order.append("released") or 0.0)
         no_ac = types.SimpleNamespace(activation_checkpointing=False, strategy_config=types.SimpleNamespace())
-        model = object()
+        model = torch.nn.Module()
         assert h3.build(Base)().parallelize(model, no_ac) is model
         assert order == ["sharded", "released"]
 
@@ -352,44 +352,81 @@ class TestReleaseCachedMemory:
         assert h3.build(type("Base", (), {})).__name__ == "MiniMaxH3Parallelizer"
 
 
-class TestReleasingCachedMemory:
-    """After sharding, the sidecar returns the load's cached memory to the device, once."""
+def _patched_stack(blocks=4):
+    """Linears patched the way AutoModel's LoRA patches them: one new class per module."""
+    import torch.nn as nn
 
-    def test_it_runs_once_after_the_base_has_sharded(self, monkeypatch):
+    try:
+        from nemo_automodel.components._peft.lora import patch_linear_module
+    except ImportError:  # the same construction, without AutoModel
+        def patch_linear_module(linear, **_):
+            linear.__class__ = type("PatchedLinearLoRA", (type(linear),), {})
+            return linear
+
+    torch.manual_seed(0)
+    model = nn.Sequential(*[nn.Sequential(nn.Linear(8, 8), nn.Linear(8, 8)) for _ in range(blocks)])
+    for block in model:
+        for i, linear in enumerate(block):
+            block[i] = patch_linear_module(linear, dim=2, alpha=2, use_triton=False)
+    return model
+
+
+class TestShareLoraClasses:
+    """AutoModel's LoRA gives every patched module its own class, which makes torch.compile recompile
+    each block until it gives up; one shared class per kind compiles a block once."""
+
+    def test_the_patched_modules_end_up_sharing_one_class(self):
+        model = _patched_stack()
+        linears = [m for m in model.modules() if type(m).__name__ == "PatchedLinearLoRA"]
+        assert len({type(m) for m in linears}) == len(linears)  # what AutoModel produces
+        assert h3.share_lora_classes(model) == len(linears) - 1
+        assert len({type(m) for m in linears}) == 1
+
+    def test_nothing_about_the_modules_changes_but_the_class_object(self):
+        model = _patched_stack()
+        x = torch.randn(3, 8)
+        before = model(x)
+        def bases():
+            return {type(m).__bases__ for m in model.modules() if type(m).__name__ == "PatchedLinearLoRA"}
+
+        before_bases = bases()
+        h3.share_lora_classes(model)
+        assert torch.equal(model(x), before)
+        assert bases() == before_bases
+
+    def test_it_is_idempotent(self):
+        model = _patched_stack()
+        h3.share_lora_classes(model)
+        assert h3.share_lora_classes(model) == 0
+
+    def test_a_patched_class_with_a_body_is_left_alone(self):
+        import torch.nn as nn
+
+        model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))
+        for linear in model:
+            linear.__class__ = type("PatchedLinearLoRA", (nn.Linear,), {"extra": 1})
+        classes = [type(m) for m in model]
+        assert h3.share_lora_classes(model) == 0
+        assert [type(m) for m in model] == classes
+
+    def test_a_model_without_lora_is_untouched(self):
+        import torch.nn as nn
+
+        assert h3.share_lora_classes(nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))) == 0
+
+    def test_the_sidecar_shares_the_classes_before_it_shards(self, monkeypatch):
         order = []
 
         class Base:
             def parallelize(self, model, mesh_context, /):
-                order.append("sharded")
+                patched = {type(m) for m in model.modules() if type(m).__name__ == "PatchedLinearLoRA"}
+                order.append(("sharded", len(patched)))
                 return model
 
-        monkeypatch.setattr(h3, "release_cached_memory", lambda: order.append("released") or 0.0)
+        monkeypatch.setattr(h3, "release_cached_memory", lambda: 0.0)
         context = types.SimpleNamespace(
-            activation_checkpointing=False, strategy_config=types.SimpleNamespace(activation_checkpointing=False)
+            activation_checkpointing=False,
+            strategy_config=types.SimpleNamespace(activation_checkpointing=False),
         )
-        sidecar = h3.build(Base)()
-        model = object()
-        assert sidecar.parallelize(model, context) is model
-        assert order == ["sharded", "released"]
-
-    def test_it_keeps_the_sidecar_name(self):
-        class Base:
-            pass
-
-        assert h3.build(Base).__name__ == "MiniMaxH3Parallelizer"
-
-    def test_it_does_nothing_without_a_gpu(self, monkeypatch):
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-        assert h3.release_cached_memory() == 0.0
-
-    def test_it_empties_the_cache_and_reports_what_it_released(self, monkeypatch):
-        reserved = iter([130 * 2**30, 16 * 2**30, 16 * 2**30])
-        calls = []
-        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-        monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
-        monkeypatch.setattr(torch.cuda, "memory_reserved", lambda *a: next(reserved))
-        monkeypatch.setattr(torch.cuda, "memory_allocated", lambda *a: 15 * 2**30)
-        monkeypatch.setattr(torch.cuda, "synchronize", lambda *a: calls.append("sync"))
-        monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
-        assert h3.release_cached_memory() == pytest.approx(114.0)
-        assert calls == ["sync", "empty"]
+        h3.build(Base)().parallelize(_patched_stack(), context)
+        assert order == [("sharded", 1)]

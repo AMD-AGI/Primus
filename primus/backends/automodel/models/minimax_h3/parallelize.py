@@ -4,8 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 """MiniMax-H3's parallelization sidecar: whole-block checkpointing, FP32 compute for its
-keep-in-FP32 modules under FSDP2, and releasing the load's cached memory after sharding
-(``release_cached_memory``).
+keep-in-FP32 modules under FSDP2, releasing the load's cached memory after sharding
+(``release_cached_memory``), and one class per kind of LoRA-patched module so that
+``torch.compile`` compiles a block once (``share_lora_classes``).
 
 WHOLE-BLOCK CHECKPOINTING:
   AutoModel's default checkpointing reports every transformer block as selected, but
@@ -129,12 +130,54 @@ def build(base: type) -> type:
 
     class MiniMaxH3ReleasingParallelizer(checkpointed):
         def parallelize(self, model, mesh_context, /):
+            share_lora_classes(model)
             result = super().parallelize(model, mesh_context)
             release_cached_memory()
             return result
 
-    MiniMaxH3ReleasingParallelizer.__name__ = MiniMaxH3ReleasingParallelizer.__qualname__ = "MiniMaxH3Parallelizer"
+    MiniMaxH3ReleasingParallelizer.__name__ = "MiniMaxH3Parallelizer"
+    MiniMaxH3ReleasingParallelizer.__qualname__ = "MiniMaxH3Parallelizer"
     return MiniMaxH3ReleasingParallelizer
+
+
+# The attributes ``type(name, bases, {})`` gives a class with an empty body.
+_EMPTY_CLASS_ATTRS = frozenset(type("_Empty", (object,), {}).__dict__)
+
+
+def share_lora_classes(model) -> int:
+    """Make LoRA-patched modules with identical classes share one class. Returns how many changed.
+
+    AutoModel's LoRA patches each targeted linear with ``type("PatchedLinearLoRA", (LoRA cls,
+    orig cls), {})``, called once per module, so every module gets its own class object: 300
+    for the full model's attention and FFN targets. The classes are equal in all but identity,
+    but ``torch.compile`` guards on a submodule's class, so each compiled block fails the guard
+    of the block before it and recompiles. After ``torch._dynamo.config.recompile_limit``
+    (8) recompiles, Dynamo stops compiling and runs the remaining blocks eagerly: measured on
+    8x MI355X at full size, LoRA spent 2.0 s per step in eager element-wise kernels, against
+    0.7 s of fused ones for full fine-tuning.
+
+    Reassigning ``__class__`` to one representative per (bases) pair changes no behaviour,
+    since the classes have empty bodies; a class with anything in its body is left alone.
+    """
+    canonical = {}
+    changed = 0
+    for module in model.modules():
+        cls = type(module)
+        if cls.__name__ != "PatchedLinearLoRA" or set(cls.__dict__) - _EMPTY_CLASS_ATTRS:
+            continue
+        shared = canonical.setdefault(cls.__bases__, cls)
+        if shared is not cls:
+            module.__class__ = shared
+            changed += 1
+    if changed:
+        logger.info(
+            "%s %d LoRA-patched modules now share %d class(es), so torch.compile compiles one block "
+            "for all of them.",
+            _LOG_PREFIX,
+            changed,
+            len(canonical),
+        )
+    return changed
 
 
 def release_cached_memory() -> float:
