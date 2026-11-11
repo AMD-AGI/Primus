@@ -104,17 +104,23 @@ class Zaya1Model(LanguageModule):
         if self.pre_process or self.post_process:
             self.setup_embeddings_and_output_layer()
 
-    def _use_chunked_ce(self) -> bool:
-        """Chunked CE (``ZAYA_CHUNKED_CE``, default on) needs TP=1 and no TE CE fusion."""
+    def _chunked_ce_blocker(self) -> Optional[str]:
+        """Why the loss can't use chunked CE (``ZAYA_CHUNKED_CE``, default on), or None when it can."""
         if not chunked_ce_enabled():
-            return False
-        if getattr(self.config, "cross_entropy_loss_fusion", False) and (
-            getattr(self.config, "cross_entropy_fusion_impl", "native") == "te"
-        ):
-            return False
+            return "ZAYA_CHUNKED_CE is off"
+        if getattr(self.config, "cross_entropy_loss_fusion", False):
+            # A fused cross-entropy was asked for: Megatron's native or TE
+            # kernel, or Turbo's, which only runs with this flag set.
+            impl = getattr(self.config, "cross_entropy_fusion_impl", "native")
+            return f"cross_entropy_loss_fusion is set ({impl})"
         tp = getattr(self.pg_collection, "tp", None) if self.pg_collection is not None else None
         tp_size = tp.size() if tp is not None and hasattr(tp, "size") else 1
-        return tp_size == 1 and not getattr(self.config, "sequence_parallel", False)
+        if tp_size != 1 or getattr(self.config, "sequence_parallel", False):
+            return "it needs TP=1 without sequence parallel"
+        return None
+
+    def _use_chunked_ce(self) -> bool:
+        return self._chunked_ce_blocker() is None
 
     def set_input_tensor(self, input_tensor: Tensor) -> None:
         """Pipeline hook. This port only runs with pipeline size 1."""
