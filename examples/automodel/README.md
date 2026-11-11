@@ -192,7 +192,7 @@ On top of AutoModel's defaults, the trainer preset and the H3 patches set:
 
 | What | Why |
 | --- | --- |
-| `primus_turbo.nondeterministic_attention: true`, with `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: "1"` in the experiments' `env:` | Attention is about 60% of the step. Primus-Turbo's non-deterministic backward is 17% faster per step than diffusers' default flash backend. FP32 atomics keep dq's error at 1.5e-4 against SDPA; Primus's MI355X default of BF16 atomics is 1.5 s faster per step but gives dq a 1.5e-2 error. Keep the `env:` block if you copy the preset. |
+| `primus_turbo.nondeterministic_attention: true` | Attention is about 60% of the step. This routes it to Primus-Turbo's AITER kernels with a non-deterministic backward, 17% faster per step than diffusers' default flash backend. dq accumulates with Primus's MI355X default of BF16 atomics, another 10% faster than FP32 atomics: one call's dq is 1.5e-2 off SDPA, but the parameter gradients move less than switching attention kernels moves them. For FP32 atomics, add `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: "1"` to the experiment's `env:`; `--env` on the launch line is overridden by an `env:` block. |
 | `fsdp.enable_compile: true` | Compiles each block, fusing the element-wise work: about 9% faster for full fine-tuning and 8% for LoRA, slightly less memory. The first step pays 13–20 s to compile. For LoRA the H3 sidecar first gives AutoModel's per-module LoRA classes one shared class; otherwise every block recompiles, and after 8 Dynamo runs the rest uncompiled. |
 | Whole-block activation checkpointing (H3 sidecar) | AutoModel's own checkpointing leaves about 10 GB per block live; without this the full model runs out of memory at step 0. |
 | FP32 compute for the keep-in-FP32 modules (H3 sidecar) | The patch projections, time embedder and rotary buffer run in FP32 under FSDP2, as diffusers declares. Full fine-tuning only: AutoModel's LoRA path stores the whole model in BF16. |
@@ -210,24 +210,20 @@ step_scheduler.global_batch_size=1` and a reduced-depth proxy.
 
 ### Measured throughput and memory
 
-8× MI355X, one node, a Primus v26.8 image, the shipped experiments as they are,
+8× MI355X, one node, `rocm/primus:v26.8`, the shipped experiments as they are,
 768×1344, micro-batch 1, global batch 8. Step time is the median after the first
 five steps. Training memory is PyTorch's peak allocation per GPU during training;
-the device peak is `rocm-smi`'s per GPU over the whole run, loading included.
-The full fine-tuning rows were measured on one node and the LoRA rows on another,
-with `rocm/primus:v26.8`; full fine-tuning at 5.2 s gave the same step time on both
-(14.9 s). The device peak depends on how loading goes and varies between runs.
+the device peak is `rocm-smi`'s per GPU over the whole run, loading included, and
+varies between runs with how loading goes.
 
 | Mode | Blocks | Clip (rows) | Step time | Samples/s/GPU | Training memory | Device peak |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Full fine-tuning | 50 (33B) | 5.2 s (~38K) | 14.9 s | 0.067 | 83 GiB | 127 GiB |
-| Full fine-tuning | 50 (33B) | 10 s (~74K) | 45.3 s | 0.022 | 110 GiB | 139 GiB |
-| Full fine-tuning | 12 (reduced depth) | 5.2 s (~38K) | 3.6 s | 0.277 | 34 GiB | 89 GiB |
-| LoRA (attention + FFN, rank 64) | 50 (33B) | 5.2 s (~38K) | 14.0 s | 0.072 | 44 GiB | 66 GiB |
-| LoRA (attention + FFN, rank 64) | 50 (33B) | 10 s (~74K) | 43.5 s | 0.023 | 72 GiB | 108 GiB |
-| LoRA (attention + FFN, rank 64) | 12 (reduced depth) | 5.2 s (~38K) | 3.4 s | 0.297 | 23 GiB | 32 GiB |
-
-[exited with code 0]
+| Full fine-tuning | 50 (33B) | 5.2 s (~38K) | 13.4 s | 0.074 | 83 GiB | 127 GiB |
+| Full fine-tuning | 50 (33B) | 10 s (~74K) | 39.9 s | 0.025 | 110 GiB | 141 GiB |
+| Full fine-tuning | 12 (reduced depth) | 5.2 s (~38K) | 3.3 s | 0.305 | 33 GiB | 92 GiB |
+| LoRA (attention + FFN, rank 64) | 50 (33B) | 5.2 s (~38K) | 12.5 s | 0.080 | 44 GiB | 120 GiB |
+| LoRA (attention + FFN, rank 64) | 50 (33B) | 10 s (~74K) | 38.3 s | 0.026 | 72 GiB | 108 GiB |
+| LoRA (attention + FFN, rank 64) | 12 (reduced depth) | 5.2 s (~38K) | 3.0 s | 0.332 | 23 GiB | 41 GiB |
 
 Most of the gap between the device peak and training memory is loading: AutoModel
 puts the whole model on each GPU before sharding it (124 GiB for the full model in

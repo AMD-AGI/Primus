@@ -5,8 +5,8 @@
 # storage and compute dtypes to match, hence bfloat16 below; write the proxy with
 # `--dtype bfloat16`.
 #
-# Measured on 8x MI355X, a Primus v26.8 image, the full 50-block proxy, attention + FFN
-# targets, 5.2 s at 768x1344: 14.0 s per step, 0.07 samples/s/GPU; 44 GiB allocated
+# Measured on 8x MI355X, rocm/primus:v26.8, the full 50-block proxy, attention + FFN
+# targets, 5.2 s at 768x1344: 12.5 s per step, 0.08 samples/s/GPU; 44 GiB allocated
 # per GPU in training (the device peak, during the load, is higher). Attention as in
 # minimax_h3-sft-synthetic.yaml.
 # On one GPU: step_scheduler.global_batch_size=1, with a reduced-depth proxy.
@@ -14,10 +14,6 @@ work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:minimax_h3-lora-synthetic}
 workspace: ${PRIMUS_WORKSPACE:./output}
-
-env:
-  # FP32 dq atomics for Primus-Turbo's attention backward (Primus defaults to 0, BF16).
-  PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: "1"
 
 modules:
   pre_trainer:
