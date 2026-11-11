@@ -20,16 +20,23 @@ class FluxPortTest(unittest.TestCase):
     def test_mlp_fallback_outputs_and_gradients(self):
         torch.manual_seed(13)
         mlp = nn.Sequential(nn.Linear(32, 64), nn.GELU(approximate="tanh"), nn.Linear(64, 32))
+        norm = nn.LayerNorm(32, elementwise_affine=False, eps=1e-6)
         x = torch.randn(2, 3, 32, requires_grad=True)
+        shift = torch.randn(2, 1, 32, requires_grad=True)
+        scale = torch.randn(2, 1, 32, requires_grad=True)
         gate = torch.randn(2, 1, 32, requires_grad=True)
-        expected = gate * mlp(x)
-        expected_grads = torch.autograd.grad(expected.sum(), (x, gate, *mlp.parameters()))
+        mod = layers.ModulationOut(shift, scale, gate)
+        x_mod = (1 + scale) * norm(x) + shift
+        expected = gate * mlp(x_mod)
+        inputs = (x, shift, scale, gate, *mlp.parameters())
+        expected_grads = torch.autograd.grad(expected.sum(), inputs)
         # Stock Linear and non-MXFP4 layers must keep working with the recipe's
         # fusion flags enabled, including during the H16 stock ablation.
         with patch.object(layers, "FUSED_DGELU_MLP", True), patch.object(layers, "FWD_GELU_PACK", True):
-            actual = layers._mlp_gelu_fused(mlp, x, gate)
-        actual_grads = torch.autograd.grad(actual.sum(), (x, gate, *mlp.parameters()))
+            actual, residual = layers._mlp_gelu_fused(mlp, norm, x, mod)
+        actual_grads = torch.autograd.grad(actual.sum(), inputs)
         torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(residual, x)
         for actual_grad, expected_grad in zip(actual_grads, expected_grads):
             torch.testing.assert_close(actual_grad, expected_grad)
 
