@@ -124,8 +124,6 @@ def test_chunked_ce_out_of_range_labels_match_stock(tp_group, compile_flag, monk
 
 def test_chunked_ce_fused_kernels_compile_and_match_eager():
     """The fused per-chunk CE math matches the eager formulas (and does compile)."""
-    import warnings
-
     from primus.backends.megatron.core.models.zaya1 import zaya1_chunked_ce as mod
 
     torch.manual_seed(2)
@@ -134,11 +132,10 @@ def test_chunked_ce_fused_kernels_compile_and_match_eager():
     labels = torch.randint(0, vocab, (n,))
     valid = torch.rand(n) > 0.1
     g = torch.rand(n)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")  # _maybe_compile warns on eager fallback
-        fwd, bwd = mod._fused_kernels()
-        lse, loss = fwd(logits, labels, valid)
-        d = bwd(logits, lse, labels, valid, g)
+    fwd, bwd = mod._fused_kernels()
+    lse, loss = fwd(logits, labels, valid)
+    d = bwd(logits, lse, labels, valid, g)
+    assert fwd.compiled_ok() and bwd.compiled_ok()
     lf = logits.float()
     ref_lse = torch.logsumexp(lf, dim=-1)
     m = lf.amax(dim=-1)
