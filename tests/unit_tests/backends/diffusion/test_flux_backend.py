@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 import torch
@@ -50,7 +52,18 @@ def test_flux_argument_builder_selects_flux_defaults():
                 "lr_scheduler_type": "constant_with_warmup",
                 "warmup_steps": 11,
             },
-            "runtime": {"gradient_checkpointing_ratio": 0.25},
+            "mlperf": {
+                "performance_mode": "nemo_mlperf",
+                "warmup_train_steps": 2,
+                "warmup_validation_steps": 2,
+            },
+            "runtime": {
+                "gradient_checkpointing_ratio": 0.25,
+                "compile_strategy": "per_block",
+                "compile_backend": "inductor",
+                "compile_fullgraph": "false",
+                "compile_dynamic": "true",
+            },
         }
     )
 
@@ -63,10 +76,18 @@ def test_flux_argument_builder_selects_flux_defaults():
     assert args.trainer["args"]["per_device_train_batch_size"] == 3
     assert args.trainer["args"]["lr_scheduler_type"] == "constant_with_warmup"
     assert args.trainer["args"]["warmup_steps"] == 11
+    assert args.trainer["args"]["performance_mode"] == "nemo_mlperf"
+    assert args.trainer["args"]["mlperf_warmup_train_steps"] == 2
+    assert args.trainer["args"]["mlperf_warmup_validation_steps"] == 2
     assert args.trainer["args"]["gradient_checkpointing_ratio"] == 0.25
     assert args.trainer["args"]["attention_backend"] == "flash_attn_aiter"
     assert args.trainer["args"]["fsdp_transformer_layer_cls_to_wrap"] == "DoubleStreamBlock,SingleStreamBlock"
     assert args.trainer["args"]["compile_transformer_blocks"] is True
+    assert args.trainer["args"]["compile_strategy"] == "per_block"
+    assert args.trainer["args"]["compile_backend"] == "inductor"
+    assert args.trainer["args"]["compile_fullgraph"] is False
+    assert args.trainer["args"]["compile_dynamic"] is True
+    assert args.trainer["args"]["compile_output_head"] is False
 
 
 def test_flux_argument_builder_maps_raw_dataset_type():
@@ -221,19 +242,170 @@ def test_fsdp2_compile_transformer_blocks_in_place(monkeypatch):
     original_blocks = [*root.double_blocks, *root.single_blocks]
     compiled_inputs = []
 
-    def fake_compile(module, *, fullgraph, mode):
+    def fake_compile(module, *, backend, fullgraph, dynamic, mode):
+        assert backend == "inductor"
         assert fullgraph is True
+        assert dynamic is False
         compiled_inputs.append((module, mode))
 
     monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
     monkeypatch.setenv("TORCH_COMPILE_MODE", "reduce-overhead")
     trainer = FSDP2Trainer.__new__(FSDP2Trainer)
     trainer.rank = 1
+    trainer.args = {
+        "compile_strategy": "per_block",
+        "compile_backend": "inductor",
+        "compile_fullgraph": True,
+        "compile_dynamic": False,
+    }
 
     trainer._compile_transformer_blocks(root)
 
     assert compiled_inputs == [(block, "reduce-overhead") for block in original_blocks]
     assert [*root.double_blocks, *root.single_blocks] == original_blocks
+    trainer.args["compile_strategy"] = "unknown"
+    with pytest.raises(ValueError, match="Unsupported compile_strategy='unknown'"):
+        trainer._compile_transformer_blocks(root)
+
+
+@pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        ("single_stack", ["_run_single_blocks"]),
+        ("double_stack", ["_run_double_blocks"]),
+        ("stack", ["_run_double_blocks", "_run_single_blocks"]),
+        ("full_dit", ["_run_dit"]),
+    ],
+)
+def test_fsdp2_compile_stack_strategies(monkeypatch, strategy, expected):
+    class StackRoot(torch.nn.Module):
+        def _run_double_blocks(self):
+            pass
+
+        def _run_single_blocks(self):
+            pass
+
+        def _run_dit(self):
+            pass
+
+    root = StackRoot()
+    compiled_regions = []
+
+    def fake_compile(region, **kwargs):
+        assert kwargs == {
+            "backend": "inductor",
+            "fullgraph": True,
+            "dynamic": False,
+            "mode": None,
+        }
+        compiled_regions.append(region.__name__)
+        return region
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+    trainer.args = {"compile_strategy": strategy}
+
+    trainer._compile_transformer_blocks(root)
+
+    assert compiled_regions == expected
+
+
+@pytest.mark.parametrize(
+    ("strategy", "wrapped_stacks"),
+    [
+        ("per_block", {"double_blocks", "single_blocks"}),
+        ("single_stack", {"double_blocks"}),
+        ("double_stack", {"single_blocks"}),
+        ("stack", set()),
+        ("full_dit", set()),
+    ],
+)
+def test_fsdp2_compile_strategy_controls_layer_sharding(monkeypatch, strategy, wrapped_stacks):
+    class DoubleStreamBlock(torch.nn.Module):
+        pass
+
+    class SingleStreamBlock(torch.nn.Module):
+        pass
+
+    root = torch.nn.Module()
+    root.double_blocks = torch.nn.ModuleList([DoubleStreamBlock()])
+    root.single_blocks = torch.nn.ModuleList([SingleStreamBlock()])
+    shard_calls = []
+
+    monkeypatch.setattr(
+        "primus.backends.diffusion.trainers.fsdp2.fully_shard",
+        lambda module, **kwargs: shard_calls.append(module),
+    )
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+    trainer.world_size = 8
+    trainer.mesh = object()
+    trainer.sp_group = None
+    trainer.model = root
+    trainer.args = {
+        "bf16": True,
+        "compile_transformer_blocks": True,
+        "compile_strategy": strategy,
+        "fsdp_transformer_layer_cls_to_wrap": "DoubleStreamBlock,SingleStreamBlock",
+    }
+    trainer._compile_transformer_blocks = lambda model: None
+
+    trainer._apply_fsdp2()
+
+    assert shard_calls[-1] is root
+    wrapped_names = {
+        name.split(".", 1)[0] for name, module in root.named_modules() if module in shard_calls[:-1]
+    }
+    assert wrapped_names == wrapped_stacks
+
+
+def test_fsdp2_compile_output_head_in_place(monkeypatch):
+    root = torch.nn.Module()
+    root.final_layer = torch.nn.Linear(2, 2)
+    compiled_inputs = []
+
+    def fake_compile(module, *, backend, fullgraph, dynamic, mode):
+        assert backend == "inductor"
+        assert fullgraph is True
+        assert dynamic is False
+        compiled_inputs.append((module, mode))
+
+    monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank = 1
+    trainer.args = {
+        "compile_backend": "inductor",
+        "compile_fullgraph": True,
+        "compile_dynamic": False,
+    }
+
+    trainer._compile_output_head(root)
+
+    assert compiled_inputs == [(root.final_layer, None)]
+
+
+def test_flux_precomputed_processor_pins_t5_by_default(monkeypatch):
+    t5 = Mock()
+    t5.is_cuda = False
+    t5.pin_memory.return_value = t5
+    clip = Mock()
+    processor = FluxPrecomputedProcessor({})
+    monkeypatch.delenv("PIN_FLUX_T5_STACK", raising=False)
+    monkeypatch.setattr(
+        processor,
+        "_collate_raw",
+        lambda batch: {"t5_encodings": t5, "clip_encodings": clip},
+    )
+
+    processor.prepare_batch(batch=[], device=torch.device("cuda"), dtype=torch.float32)
+
+    t5.pin_memory.assert_called_once_with()
+    clip.pin_memory.assert_not_called()
+
+    monkeypatch.setenv("PIN_FLUX_T5_STACK", "0")
+    processor.prepare_batch(batch=[], device=torch.device("cuda"), dtype=torch.float32)
+    t5.pin_memory.assert_called_once_with()
 
 
 def test_flux_precomputed_processor_stacks_and_drops_empty_encodings(tmp_path):
@@ -318,9 +490,14 @@ def test_flux_eval_dataset_preserves_integer_timestep(tmp_path):
     assert sample["timestep"].dtype == torch.int64
     assert sample["timestep"].item() == 7
 
+    collated = dataset.get_collator()([sample, sample])
+    assert collated["t5_encodings"].shape == (2, 3, 8)
+    assert collated["timestep"].tolist() == [7, 7]
+
     processor = FluxPrecomputedProcessor({})
-    batch = processor.prepare_batch(batch=[sample], device=torch.device("cpu"), dtype=torch.bfloat16)
+    batch = processor.prepare_batch(batch=collated, device=torch.device("cpu"), dtype=torch.bfloat16)
     assert batch["timestep"].dtype == torch.int64
+    assert batch["timestep"].tolist() == [7, 7]
 
 
 def test_flux_eval_uses_fixed_mlperf_timesteps():
@@ -899,3 +1076,104 @@ def test_fused_rope_matches_eager_forward_and_backward(monkeypatch):
     (eager_q + eager_k).sum().backward()
     torch.testing.assert_close(query.grad, eager_query.grad, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(key.grad, eager_key.grad, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "backends",
+    [
+        ("full_flydsl", ""),
+        ("selective_flydsl", "selective_triton"),
+        ("full_flydsl", "selective_flydsl"),
+        ("selective_flydsl", "selective_flydsl"),
+    ],
+)
+def test_flux_fp8_backend_selection_restores_original_dispatch(backends, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from torch._inductor.kernel import mm
+
+    from primus.backends.diffusion.models.registrations import flux
+
+    original = Mock(return_value="original")
+    flydsl = Mock(return_value="flydsl")
+    torchao = ModuleType("torchao")
+    float8 = ModuleType("torchao.float8")
+    ops = ModuleType("torchao.float8.float8_ops")
+    ops.addmm_float8_unwrapped = original
+    float8.float8_ops = ops
+    float8.CastConfig = Mock()
+    float8.Float8LinearConfig = Mock()
+    float8.ScalingType = Mock()
+
+    def convert(dit, *, module_filter_fn, config):
+        for fqn, module in dit.named_modules():
+            module_filter_fn(module, fqn)
+        return dit
+
+    float8.convert_to_float8_training = convert
+    torchao.float8 = float8
+    for name, module in (
+        ("torchao", torchao),
+        ("torchao.float8", float8),
+        ("torchao.float8.float8_ops", ops),
+    ):
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(flux, "_ORIGINAL_FLOAT8_ADDMM", None)
+    monkeypatch.setattr(flux, "_flux_flydsl_scaled_mm", flydsl)
+    monkeypatch.setattr(flux, "_FP8_SELECTIVE_GEMM_SHAPES", {(2, 4, 3)})
+    monkeypatch.setattr(mm, "_PRIMUS_FLUX_SELECTIVE_TRITON", True, raising=False)
+    monkeypatch.delenv("FLUX_FP4_PASSES", raising=False)
+    monkeypatch.delenv("FLUX_FP8_GEMM_BACKEND", raising=False)
+    # Record the environment so builds cannot leak backend selection into other tests.
+    monkeypatch.setenv("PRIMUS_FLUX_FP8_GEMM_BACKEND", "")
+    previous = None
+    for backend in backends:
+        build_flux_model(
+            {
+                "config": {
+                    "float8_recipe": "tensorwise",
+                    "float8_gemm_backend": backend,
+                    "params": {
+                        "in_channels": 16,
+                        "out_channels": 16,
+                        "vec_in_dim": 16,
+                        "context_in_dim": 16,
+                        "hidden_size": 16,
+                        "num_heads": 2,
+                        "depth": 1,
+                        "depth_single_blocks": 1,
+                        "axes_dim": [2, 2, 4],
+                    },
+                }
+            }
+        )
+        selected = ops.addmm_float8_unwrapped
+        if backend in {"", "selective_triton"}:
+            assert selected is original
+        else:
+            assert selected is not original and selected is not previous
+        assert flux._ORIGINAL_FLOAT8_ADDMM is original
+        for rows in (2, 5):
+            result = selected(
+                torch.ones(rows, 3), torch.ones(1), torch.ones(3, 4), torch.ones(1), torch.bfloat16
+            )
+            expected = (
+                "flydsl"
+                if backend == "full_flydsl" or (backend == "selective_flydsl" and rows == 2)
+                else "original"
+            )
+            assert result == expected
+        # Unsupported epilogues must always reach the saved callable.
+        assert (
+            selected(
+                torch.ones(2, 3),
+                torch.ones(1),
+                torch.ones(3, 4),
+                torch.ones(1),
+                torch.bfloat16,
+                bias=torch.ones(4),
+            )
+            == "original"
+        )
+        previous = selected

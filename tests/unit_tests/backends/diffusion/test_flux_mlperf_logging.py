@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import random
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from primus.backends.diffusion.trainers.base import (
@@ -64,6 +66,9 @@ def _trainer() -> BaseWanTrainer:
         ABORTED="aborted",
     )
     trainer.mlperf_logger = RecordingLogger()
+    trainer.mlperf_precision = {"linear": "float8", "attn": "bfloat16", "comm": "bfloat16"}
+    trainer.mlperf_config_filename = "config_test.sh"
+    trainer.sp_size = 1
     trainer.args = {
         "learning_rate": 2.0e-4,
         "warmup_steps": 1600,
@@ -90,6 +95,7 @@ def _trainer() -> BaseWanTrainer:
     trainer.logging_steps = 10
     trainer.global_step = 512
     trainer.mlperf_run_success = False
+    trainer._mlperf_block_open = False
     return trainer
 
 
@@ -133,17 +139,110 @@ def test_mlperf_eval_events_bracket_validation():
     assert all(record[1]["metadata"]["samples_count"] == 262144 for record in trainer.mlperf_logger.records)
 
 
-def test_mlperf_training_blocks_are_paired_at_reference_frequency():
+def test_mlperf_training_blocks_are_paired_at_eval_frequency():
     trainer = _trainer()
-    trainer._mlperf_log_block_start(1)
-    trainer._mlperf_log_block_stop(1)
-    trainer._mlperf_log_block_start(2)
-    trainer._mlperf_log_block_stop(2)
+    trainer._mlperf_log_block_start(0)
+    trainer._mlperf_log_block_stop(512)
+    trainer._mlperf_log_block_start(512)
+    trainer._mlperf_log_block_stop(1024)
 
     assert [record[1]["key"] for record in trainer.mlperf_logger.records] == [
         "block_start",
         "block_stop",
+        "block_start",
+        "block_stop",
     ]
+    assert [record[1]["metadata"]["samples_count"] for record in trainer.mlperf_logger.records] == [
+        0,
+        262144,
+        262144,
+        524288,
+    ]
+
+
+def test_mlperf_warmup_preserves_training_state():
+    trainer = BaseWanTrainer.__new__(BaseWanTrainer)
+    trainer.model = torch.nn.Linear(2, 1)
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.1)
+    trainer.eval_dataloader = [torch.ones(1, 2)]
+    trainer.processing_class = SimpleNamespace(make_synthetic_batch=lambda size: torch.ones(size, 2))
+    trainer.eval_processor = SimpleNamespace(
+        make_synthetic_batch=lambda size, include_timestep: torch.ones(size, 2)
+    )
+    trainer.per_device_train_batch_size = 1
+    trainer.per_device_eval_batch_size = 1
+    trainer.mlperf_warmup_train_steps = 2
+    trainer.mlperf_warmup_validation_steps = 1
+    trainer._clip_grad_norm = lambda: None
+    calls = []
+
+    def compute_loss(batch, processor=None):
+        calls.append(processor)
+        return trainer.model(batch).sum() * (torch.rand(()) + random.random())
+
+    trainer.compute_loss = compute_loss
+    random.seed(7)
+    torch.manual_seed(7)
+    python_rng = random.getstate()
+    torch_rng = torch.random.get_rng_state()
+    parameters = [parameter.detach().clone() for parameter in trainer.model.parameters()]
+
+    trainer._mlperf_warmup()
+
+    assert calls == [None, None, trainer.eval_processor]
+    assert trainer.optimizer.state == {}
+    assert all(parameter.grad is None for parameter in trainer.model.parameters())
+    assert all(torch.equal(before, after) for before, after in zip(parameters, trainer.model.parameters()))
+    assert random.getstate() == python_rng
+    assert torch.equal(torch.random.get_rng_state(), torch_rng)
+    assert trainer.model.training is True
+
+
+@pytest.mark.parametrize("start_step", [0, 1024])
+def test_cumulative_throughput_counts_only_current_session(start_step, monkeypatch):
+    import primus.backends.diffusion.trainers.base as base
+
+    trainer = _trainer()
+    trainer.global_step = start_step
+    trainer.model = torch.nn.Linear(2, 1)
+    trainer.optimizer = torch.optim.AdamW(trainer.model.parameters(), lr=2.0e-4)
+    trainer.lr_scheduler = SimpleNamespace(step=lambda: None)
+    trainer.dataloader = [torch.ones(64, 2)] * 256
+    trainer.sampler = ContiguousDistributedSampler(range(256 * 64), num_replicas=1, rank=0)
+    trainer.device = torch.device("cpu")
+    trainer.num_train_epochs = start_step // 256 + 1
+    trainer.max_steps = trainer.total_steps = start_step + 256
+    trainer.save_steps = 0
+    trainer.logging_steps = 100000
+    trainer.mlperf_eval_freq_steps = 256
+    trainer.mlperf_warmup_train_steps = trainer.mlperf_warmup_validation_steps = 0
+    trainer.use_wandb = False
+    trainer.compute_loss = lambda batch: trainer.model(batch).sum()
+    trainer._clip_grad_norm = lambda: 0.0
+    trainer._start_profiler = trainer._step_profiler = trainer._stop_profiler = lambda: None
+    for name in ("FLUX_FP8_ALL_GATHER", "FLUX_FP4_DEOSC", "FLUX_STEP_TIMING", "FLUX_AG_TIMING"):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setenv("FLUX_FPROP_SWITCH_STEP", "")
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(base.time, "time", lambda: 1000.0)
+
+    def validate_loss():
+        monkeypatch.setattr(base.time, "time", lambda: 1010.0)
+        return 0.585
+
+    trainer.validate_loss = validate_loss
+    trainer.train()
+    events = {record["key"]: record for kind, record in trainer.mlperf_logger.records if kind == "event"}
+    assert trainer.mlperf_train_start_step == start_step
+    assert trainer.global_step == start_step + 256
+    assert events["throughput_samples_per_second"]["value"] == 256 * trainer._global_batch_size() / 10.0
+    assert (
+        events["throughput_samples_per_second"]["metadata"]["samples_count"]
+        == (start_step + 256) * trainer._global_batch_size()
+    )
+    time_key = "time_metrics/resumed_time_to_target(s)" if start_step else "time_metrics/time_to_converge(s)"
+    assert events[time_key]["value"] == 10.0
+    assert ("time_to_train_minutes" in events) is (start_step == 0)
 
 
 def test_rank_offset_rng_is_reproducible_and_distinct():

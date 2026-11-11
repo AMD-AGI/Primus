@@ -1,89 +1,114 @@
-# FLUX.1-Schnell FP8 MLPerf Training
+# FLUX.1-Schnell MLPerf training
 
-This recipe runs FLUX.1-Schnell on MI355X GPUs with the in-tree `diffusion`
-backend. The defaults enable tensorwise FP8 and target the MLPerf validation
-loss threshold of `0.586`.
+The in-tree `diffusion` backend runs FLUX.1-Schnell with A6W4 forward,
+MXFP4 backward and FSDP on MI355X. The default single-node profile follows the
+[AMD recipe](https://github.com/AMD-AGI/mlperf-training/tree/4ae78b35cd5e4a51fbe5a0a4baa5e2b40ae0b597/flux1/primus):
+GBS256, MBS32, GA1, LR `0.00025`, 800 warmup updates and no precision switch.
+Low-precision paths are opt-in; ordinary BF16/FP8 training remains available.
 
-## Docker image
+## Runtime image
 
-The launch scripts use `zirui3/primus-v26.3-flux:v0.1` by default. Pull it
-before starting training:
+The launcher defaults to the verified AMD runtime by immutable digest:
 
 ```bash
-docker pull zirui3/primus-v26.3-flux:v0.1
+docker pull rocm/mlperf@sha256:f4f4df148369ee52ccc79eb699913d321a6a532ad03dc03a6bc951593d503e16
 ```
 
-## Prepare data
+Its build history matches the committed AMD Dockerfile: Primus-Turbo
+`6a4209844cf660042ca133e1662a6fbc519f6c48`, RCCL
+`d75507948fa94106ea2adf5c158af31e6fbda6ef` and checksum-verified ROCr.
+The image carries a Training 6.1 tag; that label alone does not establish MLPerf
+6.0 compliance or performance parity. Use the same digest on every node and
+record any `DOCKER_IMAGE` override. Registry access is required to pull this
+image. If it was transferred with `docker save`/`load`, verify the local image ID
+`sha256:f0a1f5c0641ce55d37ab6ce35ef02f859ed6e3b6573b222dbc701d9715a6e482`
+and pass it as `DOCKER_IMAGE`; loading an archive may not retain RepoDigest
+metadata. The launcher mounts this Primus checkout at
+`/workspace/Primus`, replacing only the packaged Primus source. Linux 6.8+
+is required for RCCL-SDMA. `LAUNCH_MODE=primus` (default) enables the CLI's
+cuMem, allocator and interposer prerequisites; `native` is available for direct
+`torchrun` development but does not execute those hooks.
 
-Approximately 2.5 TB of storage is required. Download the preprocessed MLPerf
-TorchTitan datasets:
+## Data
+
+Allow approximately 2.5 TB for the preprocessed MLPerf datasets:
 
 ```bash
-mkdir -p /path/to/data
-cd /path/to/data
+mkdir -p /path/to/data && cd /path/to/data
 bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) https://training.mlcommons-storage.org/metadata/flux-1-cc12m-preprocessed.uri
 bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) https://training.mlcommons-storage.org/metadata/flux-1-coco-preprocessed.uri
 bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh) https://training.mlcommons-storage.org/metadata/flux-1-empty-encodings.uri
 ```
 
-The resulting data root must contain:
+`DATA_ROOT` must contain `cc12m_preprocessed/`, `coco_preprocessed/` and
+`empty_encodings/`. See the [MLPerf preprocessing instructions](https://github.com/mlcommons/training/tree/master/text_to_image#preprocessing).
 
-```text
-/path/to/data/
-├── cc12m_preprocessed/
-├── coco_preprocessed/
-└── empty_encodings/
-```
+## Profiles and launch
 
-See the [MLPerf FLUX preprocessing instructions](https://github.com/mlcommons/training/tree/master/text_to_image#preprocessing)
-for details.
+Run from the Primus repository root inside an allocation owning all GPUs.
+Each node launches one process, which creates eight workers with `torchrun`.
 
-## Run on one node
+| `FLUX_CONFIG` | Nodes | MBS | GA | GBS | Path |
+|---|---:|---:|---:|---:|---|
+| `config_1n_gbs256_a6w4.sh` (default) | 1 | 32 | 1 | 256 | AMD single-node A6W4 schedule |
+| `config_2n_gbs1024_a6w4.sh` | 2 | 32 | 2 | 1024 | Four-node schedule adapted to two nodes |
+| `config_4n_gbs1024.sh` | 4 | 32 | 1 | 1024 | A6W4 with FP8-forward switch |
+| `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | Legacy TorchAO/Inductor FP8 |
+| `config_1n_gbs1024.sh` | 1 | 32 | 4 | 1024 | Legacy selective FlyDSL FP8 |
+| `config_2n_gbs1024.sh` | 2 | 32 | 2 | 1024 | Legacy selective FlyDSL FP8/HSDP |
 
-`OUTPUT_ROOT` must be writable from the compute node. A full `dtcp_full`
-checkpoint is approximately 93 GB, so use shared storage with enough space.
+Single-node Crusoe launch:
 
 ```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
+FLUX_CLUSTER=crusoe \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/unique-output \
 bash examples/mlperf/flux1/run_with_docker.sh
 ```
 
-For a short training smoke test without saving a checkpoint:
+For DCCS, use `FLUX_CLUSTER=dccs`. Inside a two-node Slurm allocation:
 
 ```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
-MAX_STEPS=1 \
-SAVE_STRATEGY=none \
-COMPILE_TRANSFORMER_BLOCKS=false \
-bash examples/mlperf/flux1/run_with_docker.sh
-```
-
-## Run with Slurm or Spur
-
-From an existing allocation, launch one Docker container per node and one
-training process per GPU. Spur exposes the Slurm environment and `srun`
-interface used by this script, so both schedulers use the same entry point:
-
-```bash
-DATA_ROOT=/path/to/data \
-OUTPUT_ROOT=/path/to/output \
+FLUX_CLUSTER=dccs \
+FLUX_CONFIG=config_2n_gbs1024_a6w4.sh \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/unique-output \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-Common overrides include `GPUS_PER_NODE`, `MAX_STEPS`, `LOCAL_BATCH_SIZE`,
-`SEED`, `MASTER_PORT`, `SAVE_STRATEGY`, `SAVE_STEPS`,
-`RESUME_FROM_CHECKPOINT`, and `MLPERF_CLEAR_CACHES=false`.
+The two-/four-node adaptations keep LR `0.00025`, 1600 warmup updates and
+precompile the FP8-forward switch after update 7325. They are not an official
+AMD two-node submission schedule. The single-node profile leaves the four-node
+C++ wrapper and additional pack/FC1-GELU extensions off to match AMD's baseline;
+those knobs and the existing four-node defaults remain available.
 
-## Files
+For a smoke test, prefix `MAX_STEPS=1 SAVE_STRATEGY=none MLPERF_CLEAR_CACHES=false`.
+Use `FSDP_ALL_GATHER_BACKEND=default` as an SDMA-only control. Common overrides
+include `SEED`, `LOG_FREQ`, `MASTER_PORT`, `SAVE_STRATEGY`,
+`RESUME_FROM_CHECKPOINT`, `EVAL_DATALOADER_NUM_WORKERS` and
+`EVAL_DATALOADER_PREFETCH_FACTOR`. Mixed-precision debug overrides on legacy
+profiles require matching `MLLOG_LOWEST_NUMERICAL_PRECISION_IN_*` disclosures;
+select an A6W4 profile for its configured MXFP4 metadata. `TORCHINDUCTOR_CACHE_SEED` accepts a matching
+prewarmed cache directory/archive and copies it to container-local storage;
+do not share a writable Inductor cache across ranks on NFS.
 
-```text
-examples/mlperf/flux1/
-├── Dockerfile
-├── README.md
-├── flux.1_schnell_t2i-pretrain.yaml
-├── requirements.txt
-├── run_with_docker.sh
-└── run_with_docker_slurm.sh
-```
+## Networking and measurement
+
+| Setting | DCCS | Crusoe |
+|---|---|---|
+| Socket interface | `fenic` | `ens3` |
+| `NCCL_NET_PLUGIN` | `none` | `librccl-anp.so` |
+| `NCCL_RMA_DISABLE` | `0` | `1` |
+| `NCCL_IB_HCA` | `ionic_0,...,ionic_7` | `ionic_1,...,ionic_7` |
+
+Explicit environment overrides win. Validate every selected rail before changing
+`NCCL_IB_HCA`; link-up alone does not prove cross-node GDR integrity. Crusoe's
+unavailable plugin name selects built-in IB rather than the image's IB-CAST
+path. Multi-node launch requires `/dev/infiniband` and the host libionic symlink;
+set `LIBIONIC_ABI4_PATH` for a nonstandard installation.
+
+Full MLPerf validation consumes all 29,696 samples every 262,144 training samples
+and targets loss `0.586`. Compare complete `run_start` to `run_stop` with
+`status=success`, including validation. Keep the node(s), source, image, seed,
+schedule and evaluation fixed, and record all runtime changes. Short throughput
+windows and interrupted runs are not TTQ evidence; one paired run is not an
+official multi-seed MLPerf result. Resumed-session elapsed/throughput excludes
+prior training and is not complete fresh-start TTQ.
