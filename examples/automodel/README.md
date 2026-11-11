@@ -33,10 +33,13 @@ before the first launch (model weights, a dataset, or a cache).
 
 Primus pins AutoModel to the commit in `primus/_thirdparty.lock`, which is also the
 `third_party/Automodel` submodule pointer. That commit requires
-`transformers==5.15.1` and, through its `diffusion` extra, `diffusers>=0.39.0`.
-The prepare hook also holds diffusers below 0.41: 0.41.0 imports a torchao API
-that the image's torchao 0.15 lacks, so no diffusers model would load. These
-examples are verified with diffusers 0.39.0 and 0.40.0.
+`transformers==5.18.0`, `torchao>=0.16.0` and, through its `diffusion` extra,
+`diffusers>=0.39.0`. The prepare hook raises the diffusers floor to 0.42.1: the
+FLUX 3 and Qwen-Image-2.1 recipes import classes first released in 0.42.0, and
+0.42.1 is its security release. So the first launch in an image that ships an
+older diffusers upgrades it, and installs torchao 0.18.0 from PyPI in place of
+the image's ROCm build (its Python API is what diffusers uses; its compiled
+extensions do not load on ROCm). These examples are verified with diffusers 0.42.1.
 Published Primus images may ship no AutoModel or an older one, so
 initialise the submodule before the first launch:
 
@@ -82,7 +85,8 @@ off by default, and the module that implements it documents its remaining keys.
 | --- | --- |
 | `primus_profiler.enabled` | torch profiler traces of a few steady-state steps, one per rank, written under `diffusion_profile/` in the experiment directory |
 | `primus_turbo.fp8_linear`, `primus_turbo.mxfp4_linear`, `primus_te.mxfp4_linear` | FP8 / MXFP4 linear layers. At most one applies, and it turns on `model.transformer_engine_linear`, the AutoModel setting that performs the swap. MXFP4 is experimental. |
-| `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. |
+| `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. Under context parallelism (`fsdp.cp_size` above 1), `nondeterministic_attention` runs Turbo's sequence-parallel kernel on diffusers' ulysses and ring groups; causal attention, `ulysses_anything` / `ring_anything`, cross-attention and head counts that do not divide by the ulysses degree keep the backend's own path, with a warning, as does every context-parallel call with `fp8_attention`. With `fsdp.activation_checkpointing: selective`, the Turbo attention output is kept rather than recomputed in the backward. |
+| `primus_train.defer_host_sync` | Move the train loop's per-step loss and gradient-norm host syncs to logging steps, so the CPU can queue work ahead of the GPU. Logged values are unchanged; between logging steps the loss and gradient norm stay GPU tensors. If AutoModel's loop no longer matches the rewrite, the patch logs an error naming this setting and the loop runs unchanged. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |
 | `primus_ideogram4.zero1` | ZeRO-1 optimizer sharding on the DDP path. A ZeRO-1 run cannot save or resume: model checkpoint saving (`checkpoint.enabled`, which defaults to true) must be set to false, or the optimizer build raises. Single-rank and FSDP2 runs keep the plain optimizer, with a warning. Tested on a single node only. |

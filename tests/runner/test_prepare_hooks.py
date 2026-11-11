@@ -12,6 +12,7 @@ import pytest
 
 from runner.helpers.hooks.train.pretrain.automodel import prepare as automodel_prepare
 from runner.helpers.hooks.train.pretrain.megatron import prepare as megatron_prepare
+from runner.helpers.hooks.train.pretrain.torchtitan import prepare as torchtitan_prepare
 
 
 class FakePrimusConfig:
@@ -119,6 +120,76 @@ def test_automodel_prepare_does_not_read_backend_as_backend_path(monkeypatch, tm
         ],
     )
     assert automodel_prepare.parse_args().backend_path is None
+
+
+def run_torchtitan_prepare(monkeypatch, tmp_path, node_rank=0):
+    exp = tmp_path / "exp.yaml"
+    exp.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare.py",
+            "--primus_path",
+            str(tmp_path),
+            "--data_path",
+            str(tmp_path / "data"),
+            "--config",
+            str(exp),
+            "--patch_args",
+            str(tmp_path / "patch_args.txt"),
+        ],
+    )
+    config = SimpleNamespace(
+        get_module_config=lambda name: SimpleNamespace(
+            model=SimpleNamespace(hf_assets_path="meta-llama/Llama-3.1-8B")
+        )
+    )
+    monkeypatch.setattr(torchtitan_prepare, "get_node_rank", lambda: node_rank)
+    monkeypatch.setattr(
+        torchtitan_prepare, "PrimusParser", lambda: SimpleNamespace(parse=lambda args: config)
+    )
+    monkeypatch.setattr(torchtitan_prepare, "pip_install_editable", lambda path, name: None)
+    # Fail instead of hanging if a rank ever waits for a tokenizer nobody fetches.
+    monkeypatch.setattr(torchtitan_prepare.time, "sleep", lambda s: pytest.fail("waiting for tokenizer.json"))
+    downloads = []
+    monkeypatch.setattr(torchtitan_prepare, "run_titan_hf_download", lambda *args: downloads.append(args))
+    torchtitan_prepare.main()
+    return downloads
+
+
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_torchtitan_cached_tokenizer_needs_no_hf_token(monkeypatch, tmp_path, capsys, node_rank):
+    tokenizer = tmp_path / "data" / "torchtitan" / "Llama-3.1-8B" / "tokenizer.json"
+    tokenizer.parent.mkdir(parents=True)
+    tokenizer.write_text("{}", encoding="utf-8")
+
+    assert run_torchtitan_prepare(monkeypatch, tmp_path, node_rank) == []
+    assert f"extra.model.hf_assets_path={tokenizer.parent}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("node_rank", [0, 1])
+def test_torchtitan_download_without_hf_token_fails_on_every_node(monkeypatch, tmp_path, node_rank):
+    errors = []
+    monkeypatch.setattr(
+        torchtitan_prepare, "log_error_and_exit", lambda msg: errors.append(msg) or sys.exit(1)
+    )
+
+    with pytest.raises(SystemExit):
+        run_torchtitan_prepare(monkeypatch, tmp_path, node_rank)
+    assert errors == ["HF_TOKEN not set. Please export HF_TOKEN before running prepare."]
+
+
+def test_torchtitan_download_passes_hf_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+
+    downloads = run_torchtitan_prepare(monkeypatch, tmp_path)
+    assert len(downloads) == 1
+    assert downloads[0][1:] == (
+        "meta-llama/Llama-3.1-8B",
+        (tmp_path / "data").resolve() / "torchtitan",
+        "hf_test",
+    )
 
 
 def test_megatron_sft_skips_bookcorpus(monkeypatch, tmp_path):
