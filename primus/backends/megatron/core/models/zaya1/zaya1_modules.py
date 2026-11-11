@@ -1043,6 +1043,16 @@ class ZayaMoE(nn.Module):
             keys = [_expert_key(prefix, i, fc) for i in range(self.num_real_experts)]
             if all(k in state_dict for k in keys):
                 state_dict[f"{prefix}{fc}_weight"] = torch.stack([state_dict.pop(k) for k in keys])
+            elif any(k in state_dict for k in keys):
+                # Load the experts that are there, as separate per-expert
+                # weights would, and report the others by their own keys.
+                stacked = getattr(self, f"{fc}_weight").detach().clone()
+                for expert_id, key in enumerate(keys):
+                    if key in state_dict:
+                        stacked[expert_id].copy_(state_dict.pop(key))
+                    else:
+                        missing_keys.append(key)
+                state_dict[f"{prefix}{fc}_weight"] = stacked
 
     def _forward_turbo(self, flat, flat_idx, flat_prob):
         """Grouped-GEMM experts with no host sync.

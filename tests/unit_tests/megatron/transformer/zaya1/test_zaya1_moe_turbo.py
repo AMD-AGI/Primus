@@ -133,6 +133,25 @@ def test_turbo_keeps_per_expert_checkpoint_keys(turbo_cpu, monkeypatch):
     assert "fc1_weight" in names and "fc2_weight" in names
 
 
+def test_turbo_load_reports_missing_expert_keys(turbo_cpu, monkeypatch):
+    split = _build_moe("split", monkeypatch, seed=3)
+    partial = split.state_dict()
+    del partial["local_experts.2.linear_fc1.weight"]
+    turbo = _build_moe("turbo", monkeypatch, seed=4)
+    with pytest.raises(RuntimeError, match=r"Missing key\(s\).*local_experts\.2\.linear_fc1\.weight"):
+        turbo.load_state_dict(partial, strict=True)
+    # Not strict: the other experts load, as separate per-expert weights would.
+    turbo = _build_moe("turbo", monkeypatch, seed=4)
+    kept = turbo.fc1_weight[2].detach().clone()
+    result = turbo.load_state_dict(partial, strict=False)
+    assert result.missing_keys == ["local_experts.2.linear_fc1.weight"]
+    assert result.unexpected_keys == []
+    for i, expert in enumerate(split.local_experts):
+        fc1 = kept if i == 2 else expert.linear_fc1.weight
+        torch.testing.assert_close(turbo.fc1_weight[i], fc1, rtol=0, atol=0)
+        torch.testing.assert_close(turbo.fc2_weight[i], expert.linear_fc2.weight, rtol=0, atol=0)
+
+
 def test_turbo_mod_skip_scales_the_hidden_state(turbo_cpu, monkeypatch):
     moe = _build_moe("turbo", monkeypatch)
     with torch.no_grad():
