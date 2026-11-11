@@ -13,6 +13,7 @@ training entry point: ``get_model_provider("zaya1")`` -> ``zaya1_builder`` ->
 
 import os
 import socket
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -364,3 +365,25 @@ def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
     assert ref_grads.keys() == out_grads.keys()
     for name, ref in ref_grads.items():
         torch.testing.assert_close(out_grads[name], ref, rtol=1e-3, atol=1e-5, msg=name)
+
+
+def _loss_settings(**config):
+    defaults = dict(
+        cross_entropy_loss_fusion=False, cross_entropy_fusion_impl="native", sequence_parallel=False
+    )
+    defaults.update(config)
+    return SimpleNamespace(config=SimpleNamespace(**defaults), pg_collection=None)
+
+
+def test_chunked_ce_steps_aside_for_any_fused_cross_entropy(monkeypatch):
+    monkeypatch.delenv("ZAYA_CHUNKED_CE", raising=False)
+    assert Zaya1Model._chunked_ce_blocker(_loss_settings()) is None
+    for impl in ("native", "te"):
+        # Turbo cross-entropy also runs only with cross_entropy_loss_fusion.
+        blocker = Zaya1Model._chunked_ce_blocker(
+            _loss_settings(cross_entropy_loss_fusion=True, cross_entropy_fusion_impl=impl)
+        )
+        assert blocker == f"cross_entropy_loss_fusion is set ({impl})"
+    assert "sequence parallel" in Zaya1Model._chunked_ce_blocker(_loss_settings(sequence_parallel=True))
+    monkeypatch.setenv("ZAYA_CHUNKED_CE", "0")
+    assert Zaya1Model._chunked_ce_blocker(_loss_settings()) == "ZAYA_CHUNKED_CE is off"
