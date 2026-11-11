@@ -273,6 +273,50 @@ def test_turbo_gpu_matches_split_without_host_sync(monkeypatch):
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
 
 
+def _rel(a, b):
+    return ((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-12)).item()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
+@pytest.mark.parametrize("fuse_moe", [True, False])
+def test_turbo_gpu_backward_matches_split(monkeypatch, fuse_moe):
+    """primus_turbo's grouped GEMM backward, with an empty expert and MoD skip rows, against split."""
+    pytest.importorskip("primus_turbo.pytorch.ops")
+    monkeypatch.setattr(zm, "FUSE_MOE", fuse_moe)
+    shape = dict(hidden_size=256, moe_ffn_hidden_size=128, ffn_hidden_size=128, num_moe_experts=16)
+    split = _build_moe("split", monkeypatch, **shape).cuda().bfloat16()
+    turbo = _build_moe("turbo", monkeypatch, **shape).cuda().bfloat16()
+    for moe in (split, turbo):
+        moe.eval()  # keep the balancing bias fixed between the two runs
+        _skew_routes(moe, empty=(3,))
+    torch.manual_seed(5)
+    hidden = torch.randn(64, 8, 256, device="cuda", dtype=torch.bfloat16)
+    prev = torch.randn(64, 8, 8, device="cuda", dtype=torch.bfloat16)
+    weights = torch.linspace(-1, 1, hidden.numel(), device="cuda").view_as(hidden)
+    runs = {}
+    for name, moe in (("split", split), ("turbo", turbo)):
+        h = hidden.clone().requires_grad_(True)
+        p = prev.clone().requires_grad_(True)
+        out, nxt = moe(h, p)
+        ((out.float() * weights).sum() + nxt.float().square().sum()).backward()
+        runs[name] = (out.detach(), h.grad, p.grad)
+
+    _, idx, _ = split.router(hidden, prev)
+    routed = set(idx.flatten().tolist())
+    assert 3 not in routed and split.num_real_experts in routed
+    for what, a, b in zip(("output", "input grad", "router-state grad"), runs["split"], runs["turbo"]):
+        assert _rel(b, a) < 2e-2, f"{what}: {_rel(b, a):.3e}"
+    for fc in ("fc1", "fc2"):
+        for expert_id, (gs, gt) in enumerate(zip(_expert_grads(split, fc), _expert_grads(turbo, fc))):
+            if expert_id == 3:
+                assert torch.count_nonzero(gt) == 0
+            else:
+                assert _rel(gt, gs) < 2e-2, f"{fc} expert {expert_id}: {_rel(gt, gs):.3e}"
+    for (n_s, p_s), (n_t, p_t) in zip(split.router.named_parameters(), turbo.router.named_parameters()):
+        assert n_s == n_t
+        assert _rel(p_t.grad, p_s.grad) < 2e-2, f"{n_s}: {_rel(p_t.grad, p_s.grad):.3e}"
+
+
 @pytest.mark.parametrize("fuse_moe", [True, False])
 def test_turbo_every_param_gets_a_grad(turbo_cpu, monkeypatch, fuse_moe):
     """--overlap_grad_reduce needs a grad hook on every param every step."""
