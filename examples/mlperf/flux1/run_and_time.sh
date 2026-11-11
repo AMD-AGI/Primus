@@ -73,9 +73,21 @@ if [[ "${node_rank}" -eq 0 && "${local_rank}" -eq 0 ]]; then
     echo "SEED=${SEED}"
 fi
 
-if [[ "${MLPERF_CLEAR_CACHES}" == "true" ]]; then
-    sync
-    echo 3 > /proc/sys/vm/drop_caches || true
+# MLPERF_CACHE_CLEARED is what the trainer logs. The docker launchers set it
+# from the host drop, which can succeed without --privileged. A direct run of
+# this script drops caches here. A failed in-container drop does not override
+# a host result, and it no longer leaves the log saying the caches were cleared.
+if [[ -z "${MLPERF_CACHE_CLEARED:-}" ]]; then
+    if [[ "${MLPERF_CLEAR_CACHES}" == "true" ]]; then
+        if sync && echo 3 > /proc/sys/vm/drop_caches; then
+            export MLPERF_CACHE_CLEARED=true
+        else
+            echo "WARNING: vm.drop_caches failed; MLPerf cache_clear will be false" >&2
+            export MLPERF_CACHE_CLEARED=false
+        fi
+    else
+        export MLPERF_CACHE_CLEARED=false
+    fi
 fi
 
 # Training params come from $EXP plus the env exported by config_*.sh.
