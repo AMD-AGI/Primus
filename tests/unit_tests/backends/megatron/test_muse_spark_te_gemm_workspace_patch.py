@@ -4,52 +4,31 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Muse Spark's TE GEMM-workspace patch reuses GLM-5.3's patch, gated on Muse Spark."""
+"""The shared TE GEMM-workspace helper and the two patches that call it (Muse Spark, GLM-5.3)."""
 
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
 
+from primus.backends.megatron.core.extensions import te_gemm_workspace as ws
+from primus.backends.megatron.patches import glm5_next_patches as glm
 from primus.backends.megatron.patches import muse_spark_te_gemm_workspace_patches as mod
 from primus.core.patches import PatchContext, PatchRegistry
 
 
-def test_the_patch_calls_the_glm5_patch(monkeypatch):
-    import torch
-
-    monkeypatch.setattr(torch.version, "hip", "6.4", raising=False)  # ROCm: the GLM body acts
-    monkeypatch.delenv("PRIMUS_TE_GEMM_WORKSPACE_MB", raising=False)  # restored after the test
-    calls = []
-    monkeypatch.setattr(mod, "patch_glm5_next_te_gemm_workspace", calls.append)
-    ctx = object()
-    mod.patch_muse_spark_te_gemm_workspace(ctx)
-    assert calls == [ctx]
-
-
-@pytest.mark.parametrize("model_type, expected", [("muse_spark", True), ("glm5_next", False), ("gpt", False)])
-def test_the_patch_is_registered_for_muse_spark_only(model_type, expected):
-    patch = PatchRegistry.get("megatron.muse_spark.te_gemm_workspace")
-    assert patch is not None and patch.phase == "before_train"
-    ctx = PatchContext(
-        backend="megatron",
-        phase="before_train",
-        extra={"module_config": SimpleNamespace(params=SimpleNamespace(model_type=model_type))},
-    )
-    assert bool(patch.condition(ctx)) is expected
-
-
-def test_the_real_body_enlarges_the_workspace_for_a_muse_spark_context(monkeypatch):
-    # GLM-5.3's body (not a spy) on a stubbed TE gemm module, with a Muse Spark context
-    import sys
-    import types
-
+@pytest.fixture
+def te_gemm(monkeypatch):
+    """ROCm with a stubbed TE gemm module (64 MiB default workspace)."""
     import torch
 
     monkeypatch.setattr(torch.version, "hip", "6.4", raising=False)
-    cleared = []
+    monkeypatch.delenv(ws.WORKSPACE_ENV, raising=False)
     gemm = types.ModuleType("transformer_engine.pytorch.cpp_extensions.gemm")
     gemm.get_cublas_workspace_size_bytes = lambda: 64 << 20
-    gemm.get_cublas_workspace = SimpleNamespace(cache_clear=lambda: cleared.append(True))
+    gemm.cleared = []
+    gemm.get_cublas_workspace = SimpleNamespace(cache_clear=lambda: gemm.cleared.append(True))
     for name in (
         "transformer_engine",
         "transformer_engine.pytorch",
@@ -58,21 +37,47 @@ def test_the_real_body_enlarges_the_workspace_for_a_muse_spark_context(monkeypat
         monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
     monkeypatch.setitem(sys.modules, gemm.__name__, gemm)
     monkeypatch.setattr(sys.modules["transformer_engine.pytorch.cpp_extensions"], "gemm", gemm, raising=False)
-    monkeypatch.setenv("PRIMUS_TE_GEMM_WORKSPACE_MB", "256")
-    ctx = PatchContext(
+    return gemm
+
+
+def _ctx(model_type):
+    return PatchContext(
         backend="megatron",
         phase="before_train",
-        extra={"module_config": SimpleNamespace(params=SimpleNamespace(model_type="muse_spark"))},
+        extra={"module_config": SimpleNamespace(params=SimpleNamespace(model_type=model_type))},
     )
-    mod.patch_muse_spark_te_gemm_workspace(ctx)
-    assert gemm.get_cublas_workspace_size_bytes() == 256 << 20 and cleared == [True]
 
 
-@pytest.fixture
-def rocm(monkeypatch):
-    import torch
+@pytest.mark.parametrize("model_type, expected", [("muse_spark", True), ("glm5_next", False), ("gpt", False)])
+def test_the_patch_is_registered_for_muse_spark_only(model_type, expected):
+    patch = PatchRegistry.get("megatron.muse_spark.te_gemm_workspace")
+    assert patch is not None and patch.phase == "before_train"
+    assert bool(patch.condition(_ctx(model_type))) is expected
 
-    monkeypatch.setattr(torch.version, "hip", "6.4", raising=False)
+
+@pytest.mark.parametrize(
+    "patch_fn, tag",
+    [
+        (mod.patch_muse_spark_te_gemm_workspace, "megatron.muse_spark.te_gemm_workspace"),
+        (glm.patch_glm5_next_te_gemm_workspace, "megatron.glm5_next.te_gemm_workspace"),
+    ],
+)
+@pytest.mark.parametrize("value, mb", [(None, 512), ("256", 256), (" 1024 ", 1024)])
+def test_both_patches_enlarge_the_workspace_by_one_rule(monkeypatch, te_gemm, patch_fn, tag, value, mb):
+    logs = []
+    monkeypatch.setattr(ws, "log_rank_0", logs.append)
+    if value is not None:
+        monkeypatch.setenv(ws.WORKSPACE_ENV, value)
+    patch_fn(_ctx("x"))
+    assert te_gemm.get_cublas_workspace_size_bytes() == mb << 20 and te_gemm.cleared == [True]
+    assert logs == [f"[Patch:{tag}] TE GEMM workspace -> {mb} MiB"]
+
+
+def test_a_larger_te_workspace_is_kept(monkeypatch, te_gemm):
+    te_gemm.get_cublas_workspace_size_bytes = lambda: 1 << 30
+    monkeypatch.setenv(ws.WORKSPACE_ENV, "256")
+    mod.patch_muse_spark_te_gemm_workspace(None)
+    assert te_gemm.get_cublas_workspace_size_bytes() == 1 << 30 and te_gemm.cleared == []
 
 
 @pytest.mark.parametrize(
@@ -91,47 +96,50 @@ def rocm(monkeypatch):
         "\u00b2",
         "99999999999",
         "65537",
+        "9" * 5000,  # over Python's 4300-digit int() limit: the digit-count guard names the variable
     ],
 )
-def test_a_bad_workspace_size_raises_a_clear_error(monkeypatch, rocm, value):
-    # blank, malformed, non-positive, non-integer spellings and non-ASCII digits
-    calls = []
-    monkeypatch.setattr(mod, "patch_glm5_next_te_gemm_workspace", calls.append)
-    monkeypatch.setenv("PRIMUS_TE_GEMM_WORKSPACE_MB", value)
+def test_a_bad_workspace_size_raises_a_clear_error_on_muse_spark(monkeypatch, te_gemm, value):
+    monkeypatch.setenv(ws.WORKSPACE_ENV, value)
     with pytest.raises(ValueError, match="PRIMUS_TE_GEMM_WORKSPACE_MB must be an integer number of MiB"):
-        mod.patch_muse_spark_te_gemm_workspace(object())
-    assert calls == []
+        mod.patch_muse_spark_te_gemm_workspace(None)
+    assert te_gemm.cleared == []
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "+5", "32"])
+def test_glm5_keeps_its_int_reading(monkeypatch, te_gemm, value):
+    # GLM-5.3's contract is unchanged (strict=False): int() accepts these, and a size below
+    # TE's 64 MiB changes nothing
+    monkeypatch.setenv(ws.WORKSPACE_ENV, value)
+    glm.patch_glm5_next_te_gemm_workspace(None)
+    assert te_gemm.get_cublas_workspace_size_bytes() == 64 << 20 and te_gemm.cleared == []
+
+
+@pytest.mark.parametrize("value", ["abc", "1.5", ""])
+def test_glm5_malformed_value_fails_as_before(monkeypatch, te_gemm, value):
+    monkeypatch.setenv(ws.WORKSPACE_ENV, value)
+    with pytest.raises(ValueError, match="invalid literal for int"):
+        glm.patch_glm5_next_te_gemm_workspace(None)
 
 
 def test_the_workspace_size_value():
-    for good in (" 256 ", "1", "000512", str(mod.MAX_WORKSPACE_MB)):
-        mod.validate_workspace_mb(good)  # no error
+    assert ws.parse_workspace_mb(None) == ws.DEFAULT_WORKSPACE_MB
+    for good, mb in (
+        (" 256 ", 256),
+        ("1", 1),
+        ("000512", 512),
+        (str(ws.MAX_WORKSPACE_MB), ws.MAX_WORKSPACE_MB),
+    ):
+        assert ws.parse_workspace_mb(good) == mb
 
 
-@pytest.mark.parametrize("value", [None, " 256 "])
-def test_the_environment_is_not_changed(monkeypatch, rocm, value):
-    # GLM-5.3's body reads the user's own value (or its default when unset)
-    import os
-
-    seen = []
-    monkeypatch.setattr(
-        mod, "patch_glm5_next_te_gemm_workspace", lambda ctx: seen.append(os.environ.get(mod.WORKSPACE_ENV))
-    )
-    if value is None:
-        monkeypatch.delenv(mod.WORKSPACE_ENV, raising=False)
-    else:
-        monkeypatch.setenv(mod.WORKSPACE_ENV, value)
-    mod.patch_muse_spark_te_gemm_workspace(object())
-    assert seen == [value]
-
-
-def test_off_rocm_the_value_is_not_checked(monkeypatch):
-    # GLM-5.3's body does nothing off ROCm: a blank value does not stop a CUDA run
+def test_off_rocm_nothing_is_done(monkeypatch):
     import torch
 
     monkeypatch.setattr(torch.version, "hip", None, raising=False)
-    calls = []
-    monkeypatch.setattr(mod, "patch_glm5_next_te_gemm_workspace", calls.append)
-    monkeypatch.setenv(mod.WORKSPACE_ENV, "")
-    mod.patch_muse_spark_te_gemm_workspace("ctx")
-    assert calls == []  # GLM-5.3's body would do nothing off ROCm: not called, nothing logged
+    monkeypatch.setenv(ws.WORKSPACE_ENV, "")  # not even checked: a CUDA run is not stopped
+    logs = []
+    monkeypatch.setattr(ws, "log_rank_0", logs.append)
+    mod.patch_muse_spark_te_gemm_workspace(None)
+    glm.patch_glm5_next_te_gemm_workspace(None)
+    assert logs == []

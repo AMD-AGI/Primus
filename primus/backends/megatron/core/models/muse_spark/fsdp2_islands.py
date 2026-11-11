@@ -117,23 +117,23 @@ def shard_dtype_islands(module: torch.nn.Module, fsdp_kwargs: dict, fully_shard)
     plan = []
     for name, m in pairs:  # module.modules() order: parents first
         own = _unmanaged(m, recurse=False)
-        trainable = {p.dtype for p in own if p.requires_grad}
-        if len(trainable) > 1:
+        trainable_dtypes = {p.dtype for p in own if p.requires_grad}
+        if len(trainable_dtypes) > 1:
             raise ValueError(
                 f"FSDP2: island {name} directly owns trainable parameters of several dtypes "
-                f"{sorted(str(d) for d in trainable)}; FSDP2 needs one dtype per group"
+                f"{sorted(str(d) for d in trainable_dtypes)}; FSDP2 needs one dtype per group"
             )
-        if trainable:
-            plan.append((m, next(iter(trainable))))
+        if trainable_dtypes:
+            plan.append((m, next(iter(trainable_dtypes))))
             continue
         # Fully frozen island (e.g. a frozen router in a partial finetune): keep it in its
         # own dtype when it has one. Otherwise the island opted in but gets no group of its
         # own: say so, as nothing else would show it.
         # This function runs once per wrapped submodule and again on the root, so an
         # island without a group is seen again: warn once per module.
-        frozen = {p.dtype for p in own}
-        if len(frozen) == 1:
-            plan.append((m, next(iter(frozen))))
+        frozen_dtypes = {p.dtype for p in own}
+        if len(frozen_dtypes) == 1:
+            plan.append((m, next(iter(frozen_dtypes))))
         elif not getattr(m, _ISLAND_WARNED_ATTR, False):
             setattr(m, _ISLAND_WARNED_ATTR, True)
             if not own:
@@ -144,7 +144,7 @@ def shard_dtype_islands(module: torch.nn.Module, fsdp_kwargs: dict, fully_shard)
             else:
                 warning_rank_0(
                     f"FSDP2: frozen {ISLAND_ATTR} module {name} mixes dtypes "
-                    f"{sorted(str(d) for d in frozen)}; it gets no island dtype policy: its parameters "
+                    f"{sorted(str(d) for d in frozen_dtypes)}; it gets no island dtype policy: its parameters "
                     "are sharded with the model's FSDP settings (as a child group of an enclosing "
                     "island, or in the enclosing wrapped module); FSDP2 does not check frozen dtypes"
                 )

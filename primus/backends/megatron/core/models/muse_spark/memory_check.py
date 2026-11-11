@@ -395,10 +395,8 @@ GiB = 2**30  # bytes per GiB, for messages
 SKIP_ARG = "muse_spark_skip_memory_check"  # config / args key (muse_spark_base.yaml: false)
 
 
-# Alternative to more GPUs: run the cut example config, or cut the model on the CLI.
-CUT_MODEL_HINT = (
-    "cut the model (muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml, or --num_layers / --num_experts)"
-)
+# Alternative to more GPUs: cut the model on the command line.
+CUT_MODEL_HINT = "cut the model (--num_layers / --num_experts)"
 
 
 def _layout_hint(args, total_bytes, n_gpus_per_node):

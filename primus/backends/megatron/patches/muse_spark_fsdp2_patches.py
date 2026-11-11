@@ -12,6 +12,13 @@ Muse Spark keeps the router weight and the residual gates fp32 in a bf16 model.
 ``megatron.muse_spark.fsdp2_fp32_param_grads`` lets Megatron's fp16 optimizer take their
 gradients (FSDP2 sets ``.grad``, not ``main_grad``). Both run for Muse Spark with
 ``use_torch_fsdp2`` only.
+
+Both replace a process-wide function. Each replacement acts only on Muse Spark objects when
+it is called, so a later non-Muse model in the same process takes upstream's path: the
+``fully_shard`` wrapper adds groups only for modules that set ``fsdp2_dtype_island`` (only
+Muse Spark's classes do; otherwise it calls the original ``fully_shard`` alone), and the
+optimizer replacement calls upstream's method unchanged unless the optimizer holds a Muse
+Spark parameter (``holds_muse_spark_params``, as the optimizer-checkpoint patches do).
 """
 
 from primus.backends.megatron.core.models.muse_spark.model_types import (
@@ -20,6 +27,10 @@ from primus.backends.megatron.core.models.muse_spark.model_types import (
 )
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+# per optimizer: (its fp32_from_fp32_groups, the groups without FSDP2 no-main_grad params, or
+# None when it holds no Muse Spark param)
+_CACHE_ATTR = "_primus_muse_spark_fsdp2_groups"
 
 
 def _is_muse_spark_fsdp2(ctx: PatchContext) -> bool:
@@ -74,7 +85,9 @@ def patch_muse_spark_fsdp2_fp32_param_grads(ctx: PatchContext):
     "'DTensor' object has no attribute 'main_grad'". Their ``.grad`` already holds the
     reduced gradient, so upstream's ``grad = main_grad`` step is skipped for exactly
     those params: FSDP2-sharded ``DTensor`` params without ``main_grad``. Any other
-    param without ``main_grad`` is passed to upstream unchanged and fails there.
+    param without ``main_grad`` is passed to upstream unchanged and fails there. An
+    optimizer that holds no Muse Spark parameter (``holds_muse_spark_params``) takes
+    upstream's method unchanged, checked at each call.
     """
     from megatron.core.optimizer import optimizer as opt_module
 
@@ -82,6 +95,10 @@ def patch_muse_spark_fsdp2_fp32_param_grads(ctx: PatchContext):
     if getattr(cls._copy_model_grads_to_main_grads, "_primus_fsdp2_fp32", False):
         return
     from torch.distributed.tensor import DTensor
+
+    from primus.backends.megatron.patches import (
+        muse_spark_optimizer_ckpt_patches as ckpt_patches,
+    )
 
     orig = cls._copy_model_grads_to_main_grads
 
@@ -92,8 +109,20 @@ def patch_muse_spark_fsdp2_fp32_param_grads(ctx: PatchContext):
         # Upstream ends with ``param.grad = param.main_grad`` for every fp32 param.
         # FSDP2 params have no main_grad: their reduce-scattered grad is already in
         # ``.grad``. Hide only those params from upstream's loop, for this call only.
+        # Another model's optimizer takes upstream's path unchanged (and fails loudly there).
+        # The param groups are fixed after setup: the check and the filtered groups are
+        # computed once per optimizer (per groups object), not per step.
         saved = self.fp32_from_fp32_groups
-        self.fp32_from_fp32_groups = [[p for p in group if not _is_fsdp2_grad_param(p)] for group in saved]
+        cached = getattr(self, _CACHE_ATTR, None)
+        if cached is None or cached[0] is not saved:
+            filtered = None
+            if ckpt_patches.holds_muse_spark_params(self):
+                filtered = [[p for p in group if not _is_fsdp2_grad_param(p)] for group in saved]
+            cached = (saved, filtered)
+            setattr(self, _CACHE_ATTR, cached)
+        if cached[1] is None:
+            return orig(self)
+        self.fp32_from_fp32_groups = cached[1]
         try:
             return orig(self)
         finally:

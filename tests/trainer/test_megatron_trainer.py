@@ -686,8 +686,8 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    # Muse Spark (muse_spark): one case per preset (the full preset cut to 4 layers on the
-    # command line, and the proxy preset). Each checks that the Muse Spark model code was built
+    # Muse Spark (muse_spark): one case, the full preset cut to 4 layers and 16 experts on the
+    # command line. It checks that the Muse Spark model code was built
     # (the markers below). The layout is pinned on the command line, so a change of the
     # example's parallel defaults does not change what a case runs. CPU coverage of the model
     # code, patches and converter: tests/unit_tests/backends/megatron/muse_spark/.
@@ -703,7 +703,7 @@ class TestMegatronTrainer(PrimusUT):
 
     _MUSE_SPARK_TRAIN_ITERS = 3  # with --log_interval 1: one loss line each
 
-    def _muse_spark(self, tag, exp_path, extra=None, ep=1):
+    def _muse_spark(self, tag, exp_path, extra=None, ep=1, markers=()):
         out, _ = run_script(
             self.__class__.__name__,
             tag,
@@ -731,7 +731,7 @@ class TestMegatronTrainer(PrimusUT):
                 *(extra or []),
             ],
         )
-        for marker in self._MUSE_SPARK_MARKERS:
+        for marker in (*self._MUSE_SPARK_MARKERS, *markers):
             assert marker in out, f"[{tag}] Muse Spark marker {marker!r} not in the training log"
         # \S+ also takes "nan" / "inf" (float() parses them), so a non-finite loss fails below
         losses = [float(v) for v in re.findall(r"lm loss: (\S+?)(?=\s|\||$)", out)]
@@ -746,8 +746,8 @@ class TestMegatronTrainer(PrimusUT):
 
     @pytest.mark.weekly
     def test_muse_Spark_Open_816B_A42B(self):
-        # The Muse Spark case meant for the per-PR tier once a weekend run is green (then drop
-        # the weekly marker, tests/README.md): the full-model example (62 layers, 256
+        # Weekly burn-in (tests/README.md): promote to the per-PR tier by deleting the marker
+        # once a weekend run shows it green. The full-model example (62 layers, 256
         # experts, >= 16 nodes) cut on the command line to 4 layers and 16 experts so EP 8
         # fits one node; the full depth is covered by the multi-node run, not by CI.
         self._muse_spark(
@@ -764,19 +764,13 @@ class TestMegatronTrainer(PrimusUT):
                 "16",
                 "--moe_router_topk",
                 "4",
+                # a 512-key window (HF count) shorter than the 1024-token sequence, so the
+                # sliding-window mask takes effect; the config passes 511 to TE (checked below)
+                "--window_size",
+                "(512,0)",
             ],
             ep=8,
-        )
-
-    @pytest.mark.weekly
-    def test_muse_spark_816B_A42B_proxy_bf16(self):
-        # The proxy preset (4 released layers, all 256 experts), EP 8 (32 per rank): the
-        # SFT example's model; the case above uses 16 experts.
-        self._muse_spark(
-            f"muse_spark_proxy_{GPU_PLATFORM.lower()}_bf16",
-            f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml",
-            ["--seq_length", "1024", "--max_position_embeddings", "1024"],
-            ep=8,
+            markers=("window=(511, 0)",),
         )
 
     def test_zaya1_8B_bf16(self):

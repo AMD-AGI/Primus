@@ -41,7 +41,10 @@ from megatron.core.transformer.moe.moe_utils import (
     maybe_skip_or_early_return_by_cudagraph,
 )
 
-from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
+from primus.backends.megatron.core.models.muse_spark.model_types import (
+    config_flag,
+    mark_muse_spark_param,
+)
 from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkCenteredRMSNorm,
     MuseSparkInputScaledRMSNorm,
@@ -120,6 +123,7 @@ class MuseSparkTopKRouter(_FSDP2LayoutBase, _RouterBase):
     def __init__(self, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         self.output_multiplier = float(config.moe_router_output_multiplier)
+        mark_muse_spark_param(self.weight)
 
     def _apply(self, fn, *args, **kwargs):
         # Keep the router weight fp32 through Float16Module's blanket ``.bfloat16()``

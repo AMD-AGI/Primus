@@ -40,14 +40,12 @@ def _args(**kw):
 def test_sliding_layers_are_charged_less_and_router_added():
     a = _args()
     d = muse_spark_flops_delta(a, 2)
-    assert a.kv_channels * a.num_attention_heads == 8192  # q width: the 8192 in per_layer
-    assert a.hidden_size == 7168  # router width: the 7168 in router
+    # q width kv_channels * heads = 8192 (per_layer), router width hidden_size = 7168 (router)
     # hand-computed for seq 4096, HF window 2048: a query at position i sees min(i+1, 2048)
     # keys, mean = (2048*2049/2 + 2048*2048) / 4096 = 1536.25; full causal mean = 4097/2 =
     # 2048.5. Megatron charges 6 * 2 * q * (S/2) per token per layer for QK^T + AV; each of
     # the 3 sliding layers (window_attn_skip_freq [1, 0, 1, 1]) is scaled by 1536.25 / 2048.5.
     per_layer = 12 * 8192 * 2048 * (1536.25 / 2048.5 - 1)
-    assert per_layer == pytest.approx(-50_343_933.0007, rel=1e-9)
     attn = 3 * per_layer
     router = 6 * 7168 * 256 * 4
     assert d == pytest.approx(2 * 4096 * (attn + router), rel=1e-12) and attn < 0

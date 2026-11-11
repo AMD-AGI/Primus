@@ -149,7 +149,7 @@ def cut_to_layers(cfg, num_layers):
     itself when ``num_layers`` is None or the full depth.
 
     Layer i of the cut is the released layer i, so its weights are the released tensors
-    (the ``muse_Spark_Open_816B_A42B_proxy`` preset trains such a cut). ``num_hidden_layers`` and
+    (a fine-tune with ``--num_layers 4`` trains such a cut). ``num_hidden_layers`` and
     every per-layer list of the text config (``layer_types``, ``layer_rope_theta``,
     ``mlp_layer_types``, ...: a list with one entry per layer) are cut; nothing else changes.
     """
@@ -1575,17 +1575,19 @@ class MuseSparkConverter:
             # dtypes, so these are the saved dtypes
             check_fp32_tensors(model.state_dict(), margs.num_layers)
             store = self.open_store(hf_dir)
-            # into the model's own tensors, one layer at a time: no second full state dict
-            sd, consumed = stream_into_model(model, store, margs, fields, self.log)
-            common.assert_bridge_free("native conversion")
-            prepare_torch_dist_save(margs, save_dir)
-            # native_convert_common.load_validate_save: its mapping check (exact mapping or
-            # RuntimeError) and the save, which follows margs.ckpt_format (torch_dist)
-            t_save = time.monotonic()
-            with unsplit_expert_fc1_save(model):
-                common.load_validate_save(model, sd, consumed, store, margs, save_dir, self.log)
-            self.log(f"checked and saved in {time.monotonic() - t_save:.1f} s")
-            store.close()
+            try:  # close the store (and its reader threads) on an error too
+                # into the model's own tensors, one layer at a time: no second full state dict
+                sd, consumed = stream_into_model(model, store, margs, fields, self.log)
+                common.assert_bridge_free("native conversion")
+                prepare_torch_dist_save(margs, save_dir)
+                # native_convert_common.load_validate_save: its mapping check (exact mapping or
+                # RuntimeError) and the save, which follows margs.ckpt_format (torch_dist)
+                t_save = time.monotonic()
+                with unsplit_expert_fc1_save(model):
+                    common.load_validate_save(model, sd, consumed, store, margs, save_dir, self.log)
+                self.log(f"checked and saved in {time.monotonic() - t_save:.1f} s")
+            finally:
+                store.close()
         release_output(save_dir)  # the save wrote the tracker: the output is finished
         return save_dir
 
@@ -1772,8 +1774,8 @@ CUT_RECORD_SUFFIX = ".muse_spark_layers"  # <checkpoint>.muse_spark_layers: the 
 def planned_cut(ctx, a=None):
     """The depth to convert for the fine-tune of ``ctx``: None (every layer) when its
     ``num_layers`` is unset or equals the HF checkpoint's, else its ``num_layers`` (the
-    checkpoint cut to its first layers, :func:`cut_to_layers`, as the
-    ``muse_Spark_Open_816B_A42B_proxy`` preset trains). A depth above the checkpoint's raises
+    checkpoint cut to its first layers, :func:`cut_to_layers`, as a
+    fine-tune with ``--num_layers 4`` trains). A depth above the checkpoint's raises
     ``NativeConvertRefused``."""
     a = a or training_args(ctx)
     hf_layers = text_config(ctx.hf_config or {}).get("num_hidden_layers")

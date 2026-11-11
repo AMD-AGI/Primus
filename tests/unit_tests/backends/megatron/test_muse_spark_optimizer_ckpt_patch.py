@@ -21,6 +21,9 @@ pytest.importorskip("megatron.core")
 from megatron.core.dist_checkpointing import ShardedTensor  # noqa: E402
 from megatron.core.optimizer import optimizer as opt_module  # noqa: E402
 
+from primus.backends.megatron.core.models.muse_spark.model_types import (  # noqa: E402
+    mark_muse_spark_param,
+)
 from primus.backends.megatron.patches import (  # noqa: E402
     muse_spark_optimizer_ckpt_patches as patch,
 )
@@ -33,7 +36,7 @@ def _fp16_optimizer_with_an_fp32_param(step=True):
     """One group, the fp32 param first: optimizer order [gate (fp32), main copy of w].
     ``step=False``: no optimizer step, so the Adam state is empty (as before a load)."""
     w = torch.nn.Parameter(torch.ones(4, dtype=torch.bfloat16))  # bf16 model param
-    gate = torch.nn.Parameter(torch.ones(2))  # fp32 model param (no main copy)
+    gate = mark_muse_spark_param(torch.nn.Parameter(torch.ones(2)))  # fp32 model param (no main copy)
     main_w = torch.nn.Parameter(torch.ones(4))  # fp32 main copy of w
     inner = torch.optim.Adam([gate, main_w], lr=0.1)
     for p in (gate, main_w):
@@ -67,8 +70,8 @@ def _two_group_fp16_optimizer():
     group 0 = [main of w0 (id 0), gate0 (id 1)], group 1 = [gate1 (id 2), main of w1 (id 3)]."""
     w0 = torch.nn.Parameter(torch.ones(3, dtype=torch.bfloat16))
     w1 = torch.nn.Parameter(torch.ones(5, dtype=torch.bfloat16))
-    gate0 = torch.nn.Parameter(torch.ones(2))
-    gate1 = torch.nn.Parameter(torch.ones(7))
+    gate0 = mark_muse_spark_param(torch.nn.Parameter(torch.ones(2)))
+    gate1 = mark_muse_spark_param(torch.nn.Parameter(torch.ones(7)))
     main0, main1 = torch.nn.Parameter(torch.ones(3)), torch.nn.Parameter(torch.ones(5))
     inner = torch.optim.Adam(
         [{"params": [main0, gate0], "weight_decay": 0.1}, {"params": [gate1, main1], "weight_decay": 0.0}],
@@ -173,17 +176,27 @@ def test_fp16_patch_takes_upstream_without_fp32_params(monkeypatch):
     assert patched is not upstream and patched._primus_muse_spark
     plain = SimpleNamespace(fp32_from_fp32_groups=[[]])
     assert patched(plain, {}) == "upstream" and seen == [plain]
-    stub = SimpleNamespace(is_stub_optimizer=True, fp32_from_fp32_groups=[[object()]])
+    # a stub holding a marked Muse Spark fp32 param: only the is_stub_optimizer check sends
+    # it upstream (the patched mapping would fail on this bare namespace)
+    marked = mark_muse_spark_param(torch.nn.Parameter(torch.ones(2)))
+    stub = SimpleNamespace(is_stub_optimizer=True, fp32_from_fp32_groups=[[marked]])
+    assert patch.holds_muse_spark_params(stub)
     assert patched(stub, {}) == "upstream"
-    # with an fp32 param the patched mapping runs
-    opt, _, _, model_sd = _fp16_optimizer_with_an_fp32_param()
+    # with a Muse Spark fp32 param the patched mapping runs
+    opt, _, gate, model_sd = _fp16_optimizer_with_an_fp32_param()
     assert patched(opt, model_sd)["optimizer"]["state"][0]["exp_avg"].key.endswith(".gate")
+    # another model's fp32 param (no Muse Spark mark) in the same process: upstream's method
+    seen.clear()
+    del gate.is_muse_spark_param
+    assert patched(opt, model_sd) == "upstream" and seen == [opt]
     patch.patch_muse_spark_fp16_optimizer_ckpt(SimpleNamespace())  # idempotent
     assert FP16_CLS.sharded_state_dict is patched
 
 
-def _opt(n_params, **group):
+def _opt(n_params, muse=True, **group):
     params = [torch.nn.Parameter(torch.zeros(1)) for _ in range(n_params)]
+    if muse:
+        mark_muse_spark_param(params[0])
     return SimpleNamespace(optimizer=SimpleNamespace(param_groups=[{"params": params, "lr": 0.1, **group}]))
 
 
@@ -325,6 +338,21 @@ def test_chained_load_patch_relayouts_or_calls_upstream(monkeypatch):
     )
     load(single, {0: {"optimizer": {"state": {"common_step": 2}}}, "optimizer": {"state": {}}})
     assert calls == [("member", patch.own_param_groups(single.chained_optimizers[0]), {"common_step": 2})]
+    # another model (no Muse Spark param) in the same process: upstream's method, even for a
+    # checkpoint of another layout
+    calls.clear()
+    other = SimpleNamespace(chained_optimizers=[_opt(1, muse=False), _opt(2, muse=False)])
+    saved = {0: {}, 1: {}, "optimizer": {"state": {"common_step": 1}}}
+    load(other, saved)
+    assert calls == [("upstream", saved)]
+
+
+def test_holds_muse_spark_params_looks_at_every_chained_member():
+    plain, muse = _opt(2, muse=False), _opt(1)
+    assert not patch.holds_muse_spark_params(plain)
+    assert patch.holds_muse_spark_params(muse)
+    assert patch.holds_muse_spark_params(SimpleNamespace(chained_optimizers=[plain, muse]))
+    assert not patch.holds_muse_spark_params(SimpleNamespace(chained_optimizers=[plain]))
 
 
 def test_the_copy_calls_every_helper_upstream_calls():

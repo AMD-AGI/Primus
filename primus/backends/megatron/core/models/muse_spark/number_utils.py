@@ -131,9 +131,9 @@ def require_positive_int(value, error: str) -> int:
 def parse_softcap(cap, tag: str = "Muse Spark:"):
     """``final_logit_softcapping``: None / 0 (no cap) or a finite number > 0, as a float.
 
-    ``cap * tanh(x / cap)`` with an inf cap is NaN for every logit and a negative cap flips
-    the sign of every logit, so those (and NaN, bools including ``numpy.bool_``, and
-    non-numbers) raise ValueError. None stays None; ``"0"`` / ``-0.0`` give 0.0 and ``"20"``
+    ``cap * tanh(x / cap)`` with an inf cap is NaN for every logit, and a negative cap acts as
+    its absolute value (tanh is odd), so it is a config typo; those (and NaN, bools including
+    ``numpy.bool_``, and non-numbers) raise ValueError. None stays None; ``"0"`` / ``-0.0`` give 0.0 and ``"20"``
     20.0."""
     if cap is None:
         return None

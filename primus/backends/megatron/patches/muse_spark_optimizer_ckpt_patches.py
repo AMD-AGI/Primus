@@ -21,13 +21,34 @@ in either layout, but the checkpoint's common part (param groups, the shared ste
 the shape of the saving layout and ``ChainedOptimizer.load_state_dict`` then fails
 ("Expected 2 entries in state dict, but got 3"). The second patch takes the param
 groups from the loading optimizer and the step from the checkpoint in that case.
+
+Both patches replace a method of a shared Megatron class for the rest of the process. The
+replacement checks, each time it runs, that the optimizer holds a Muse Spark parameter
+(``model_types.mark_muse_spark_param``: the residual gates and the router weight); for any
+other model it calls upstream's method unchanged.
 """
 
 from primus.backends.megatron.core.models.muse_spark.model_types import (
+    has_muse_spark_param,
     is_muse_spark_model_type,
 )
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+_MODEL_PARAM_GROUPS = ("float16_groups", "fp32_from_fp32_groups", "model_float16_groups", "model_fp32_groups")
+
+
+def holds_muse_spark_params(optimizer) -> bool:
+    """True when ``optimizer`` (a Megatron optimizer, or a chain of them) optimizes a
+    Muse Spark model: one of its model params is marked by ``mark_muse_spark_param``."""
+    members = getattr(optimizer, "chained_optimizers", None) or [optimizer]
+    for opt in members:
+        groups = [g for name in _MODEL_PARAM_GROUPS for g in (getattr(opt, name, None) or [])]
+        inner = getattr(opt, "optimizer", None)
+        groups += [g["params"] for g in (getattr(inner, "param_groups", None) or [])]
+        if any(has_muse_spark_param(g) for g in groups):
+            return True
+    return False
 
 
 def optimizer_order_model_params(optimizer):
@@ -118,8 +139,10 @@ def patch_muse_spark_fp16_optimizer_ckpt(ctx: PatchContext):
         return
 
     def sharded_state_dict(self, model_sharded_state_dict, is_loading=False, metadata=None):
-        if getattr(self, "is_stub_optimizer", False) or not any(
-            getattr(self, "fp32_from_fp32_groups", None) or []
+        if (
+            getattr(self, "is_stub_optimizer", False)
+            or not any(getattr(self, "fp32_from_fp32_groups", None) or [])
+            or not holds_muse_spark_params(self)
         ):
             return orig(self, model_sharded_state_dict, is_loading, metadata)
         return fp16_optimizer_sharded_state_dict(self, model_sharded_state_dict, is_loading, metadata)
@@ -216,7 +239,7 @@ def patch_muse_spark_chained_optimizer_load(ctx: PatchContext):
         return
 
     def load_state_dict(self, state_dict):
-        parts = relayout_chained_optimizer_state(self, state_dict)
+        parts = relayout_chained_optimizer_state(self, state_dict) if holds_muse_spark_params(self) else None
         if parts is None:
             return orig(self, state_dict)
         log_rank_0(

@@ -87,6 +87,12 @@ def built_module_summary(model) -> str:
             router=type(getattr(mlp, "router", None)).__name__,
             experts=type(getattr(mlp, "experts", None)).__name__,
         )
+        # the sliding window the first layer's core attention was built with (layer 1 is a
+        # sliding layer in every Muse Spark pattern): TE's (left, right); TE stores (-1, 0) for a causal
+        # layer without a window, None if the core attention has no window_size attribute
+        core = getattr(getattr(layer, "self_attention", None), "core_attention", None)
+        window = getattr(core, "window_size", None)
+        parts["window"] = None if window is None else tuple(int(w) for w in window)
     return " ".join(f"{k}={v}" for k, v in parts.items())
 
 

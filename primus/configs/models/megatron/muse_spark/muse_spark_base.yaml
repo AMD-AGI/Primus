@@ -6,7 +6,7 @@
 # latent sigmoid MoE, soft-capped untied head.
 # Generic: no sizes and no tokenizer model / path (only tokenizer_type). Not a model preset itself (it lives in a
 # subdirectory, like diffusion/flux_base.yaml); the size presets extend it:
-# muse_Spark_Open_816B_A42B.yaml (released sizes) and muse_Spark_Open_816B_A42B_proxy.yaml (4 layers).
+# muse_Spark_Open_816B_A42B.yaml (released sizes; cut the depth with --num_layers).
 # Model code: primus/backends/megatron/core/models/muse_spark/.
 ###############################################################################
 
@@ -74,7 +74,7 @@ moe_router_dtype: fp32
 moe_token_dispatcher_type: alltoall
 moe_grouped_gemm: true
 moe_use_legacy_grouped_gemm: false
-moe_permute_fusion: false          # Megatron default here; the full-model / proxy experiment configs set true
+moe_permute_fusion: false          # Megatron default here; the experiment configs set true
 moe_shared_expert_overlap: false
 moe_shared_expert_intermediate_size: null
 # per-expert post_expert_norm + routing prob (and the post-MoE norm) as one Triton kernel

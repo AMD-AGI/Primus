@@ -67,6 +67,20 @@ def _gated_residual(kind="attn", init=0.0):
     return MuseSparkGatedResidual(cfg, kind=kind)
 
 
+def test_fp32_islands_are_marked_as_muse_spark_params():
+    # the optimizer checkpoint patches take their Muse Spark path only for an optimizer that
+    # holds a marked param (muse_spark_optimizer_ckpt_patches.holds_muse_spark_params)
+    import inspect
+
+    from primus.backends.megatron.core.models.muse_spark.model_types import (
+        MUSE_SPARK_PARAM_ATTR,
+    )
+
+    assert getattr(_gated_residual().gate, MUSE_SPARK_PARAM_ATTR) is True
+    # the router marks its weight in __init__ (a real build needs the parallel state)
+    assert "mark_muse_spark_param(self.weight)" in inspect.getsource(MuseSparkTopKRouter.__init__)
+
+
 def test_gate_init_value_starts_near_identity_residual():
     # 0.0: zero (HF-like) init
     assert torch.equal(_gated_residual().gate.detach(), torch.zeros(8))
@@ -928,3 +942,20 @@ def test_the_ignored_vocab_multiple_reads_the_module_default_from_its_yaml():
     assert lp.ignored_vocab_multiple(SimpleNamespace(make_vocab_size_divisible_by=default)) is None
     assert lp.ignored_vocab_multiple(SimpleNamespace(make_vocab_size_divisible_by=64)) is None
     assert lp.ignored_vocab_multiple(SimpleNamespace(make_vocab_size_divisible_by=256)) == 256
+
+
+def test_built_module_summary_reports_the_core_attention_window():
+    # the trainer test checks "window=(511, 0)": the TE window the first layer was built with
+    from types import SimpleNamespace
+
+    from primus.backends.megatron.core.models.muse_spark.muse_spark_model import (
+        built_module_summary,
+    )
+
+    def model(window):
+        attn = SimpleNamespace(core_attention=SimpleNamespace(window_size=window))
+        layer = SimpleNamespace(self_attention=attn, mlp=None, mlp_bda=None)
+        return SimpleNamespace(embedding=None, decoder=SimpleNamespace(layers=[layer]))
+
+    assert built_module_summary(model([511, 0])).endswith("window=(511, 0)")
+    assert built_module_summary(model(None)).endswith("window=None")

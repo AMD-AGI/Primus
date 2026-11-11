@@ -40,8 +40,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # (max_position_embeddings must be >= seq_length; both default to 4096). Longer
 # sequences need more activation memory: add context parallel or GPUs.
 #
-# Single node: use muse_Spark_Open_816B_A42B-proxy-BF16-pretrain.yaml (first 4 released
-# layers, all 256 experts, EP 8). The trainer test
+# Single node: set PRIMUS_PP=1 PRIMUS_EP=8 (this file defaults to PP 2, and EP 8 must divide
+# the 8 GPUs / PP) and cut the model on the command line (--num_layers 4 keeps the first 4
+# released layers and all 256 experts). The trainer test
 # (test_muse_Spark_Open_816B_A42B, a weekly test) runs THIS file on one node with
 # command-line cuts (--num_layers 4 --num_experts 16 --moe_router_topk 4,
 # --expert_model_parallel_size 8, PRIMUS_EP=8 PRIMUS_PP=1, seq 1024, GBS 8): the alltoall

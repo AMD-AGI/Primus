@@ -22,7 +22,10 @@ The module signatures follow Megatron's norm builders
 import torch
 from torch import nn
 
-from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
+from primus.backends.megatron.core.models.muse_spark.model_types import (
+    config_flag,
+    mark_muse_spark_param,
+)
 from primus.backends.megatron.core.transformer.muse_spark.centered_norm import (
     centered_rms_norm,
     weighted_rms_norm,
@@ -150,9 +153,6 @@ class MuseSparkCenteredRMSNorm(_ZeroInitRMSNorm):
 
     FUSED_FLAG = "muse_spark_fused_centered_norm"
 
-    def __init__(self, config=None, hidden_size: int = None, eps: float = 1e-5, **kw):
-        super().__init__(config, hidden_size, eps, **kw)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return centered_rms_norm(x, self.weight, self.eps, self.fused)
 
@@ -211,7 +211,9 @@ class MuseSparkGatedResidual(nn.Module):
         # Initial gate value for a run from random weights (a checkpoint load overwrites it).
         # A constant: the gate is replicated over TP ranks and must start equal on all of them.
         self.init_value = float(config.residual_gate_init_value)
-        self.gate = nn.Parameter(torch.full((h,), self.init_value, dtype=torch.float32))
+        self.gate = mark_muse_spark_param(
+            nn.Parameter(torch.full((h,), self.init_value, dtype=torch.float32))
+        )
         if getattr(config, "sequence_parallel", False):
             setattr(self.gate, "sequence_parallel", True)
         self.temperature = float(config.residual_gate_temperature)

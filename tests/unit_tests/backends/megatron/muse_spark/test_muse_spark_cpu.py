@@ -491,7 +491,7 @@ def test_cut_to_layers_cuts_every_per_layer_list():
     assert cfg["text_config"]["num_hidden_layers"] == 62  # the input is not changed
     f = conv.derive_megatron_fields(cut)
     assert f["num_layers"] == 4
-    assert 55e9 < conv.estimate_num_params(f, 202048) < 57e9  # the proxy
+    assert 55e9 < conv.estimate_num_params(f, 202048) < 57e9  # the 4-layer cut
     assert conv.cut_to_layers(cfg, None) is cfg and conv.cut_to_layers(cfg, 62) is cfg
     assert conv.cut_to_layers(TEXT, 2)["num_hidden_layers"] == 2  # a text-only config
     for bad in (0, 63):
@@ -1937,7 +1937,7 @@ def test_the_prepare_step_reads_the_training_args_once(monkeypatch):
 
 
 def test_a_shallower_fine_tune_converts_a_cut_of_the_released_checkpoint(tmp_path):
-    # the proxy preset (or --num_layers 4) against the 62-layer release: the hook passes the
+    # a --num_layers 4 fine-tune against the 62-layer release: the hook passes the
     # cut to convert(num_layers=4), into its own directory, and records the depth
     skip = {**_FULL_TRAINING, "muse_spark_skip_memory_check": True}  # no GPU-dependent check
     ctx = _train_ctx(62, skip, ["train", "posttrain", "--num_layers", "4"])
@@ -2092,7 +2092,7 @@ def _preset(name):
     return parse_yaml(str(pathlib.Path(primus.__file__).parent / "configs/models/megatron" / name))
 
 
-@pytest.mark.parametrize("name", ["muse_Spark_Open_816B_A42B.yaml", "muse_Spark_Open_816B_A42B_proxy.yaml"])
+@pytest.mark.parametrize("name", ["muse_Spark_Open_816B_A42B.yaml"])
 def test_presets_set_the_checkpoint_vocab_and_freeze_the_router_bias(name):
     cfg = _preset(name)
     assert cfg["vocab_size"] == TEXT["vocab_size"] == 202048

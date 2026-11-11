@@ -18,9 +18,29 @@ __all__ = [
     "backend_args_of",
     "bool_flag",
     "config_flag",
+    "has_muse_spark_param",
     "is_muse_spark_model_type",
+    "mark_muse_spark_param",
     "merged_args_of",
+    "MUSE_SPARK_PARAM_ATTR",
 ]
+
+# Set on the fp32 parameters Muse Spark keeps in a bf16 model (residual gates, router
+# weight). Patches that replace a method of a shared Megatron class check it when the
+# method is called, so a later non-Muse model in the same process takes upstream's path.
+MUSE_SPARK_PARAM_ATTR = "is_muse_spark_param"
+
+
+def mark_muse_spark_param(param):
+    """Mark ``param`` as a Muse Spark parameter (see ``MUSE_SPARK_PARAM_ATTR``)."""
+    setattr(param, MUSE_SPARK_PARAM_ATTR, True)
+    return param
+
+
+def has_muse_spark_param(params) -> bool:
+    """True when any of ``params`` is marked by :func:`mark_muse_spark_param`."""
+    return any(getattr(p, MUSE_SPARK_PARAM_ATTR, False) for p in params)
+
 
 TRUE_TEXT = ("1", "true", "yes", "on")
 FALSE_TEXT = ("0", "false", "no", "off")

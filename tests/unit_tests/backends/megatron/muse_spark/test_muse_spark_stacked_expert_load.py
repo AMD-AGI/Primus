@@ -12,10 +12,19 @@ makes both checkpoint forms load strictly: torch_dist (``weights``) and TE / leg
 (``weight{i}``), with and without the views.
 """
 
+import re
 from types import SimpleNamespace
 
 import pytest
 import torch
+
+# the GPU-property read of fla -> mamba_ssm on a CPU-only node: torch's "no GPU" messages
+# and Triton's "0 active drivers" (no GPU backend). A narrow match, so an unrelated
+# RuntimeError ("... on the same device", "device-side assert") fails, not skips
+_GPU_PROBE_ERROR = re.compile(
+    r"No (CUDA|HIP) GPUs are available|Found no NVIDIA driver|no (CUDA|HIP|ROCm)-capable device"
+    r"|0 active drivers"
+)
 
 pytest.importorskip("megatron.core")
 
@@ -35,7 +44,7 @@ def _import_megatron_training():
 
             return
         except RuntimeError as e:
-            if not any(w in str(e) for w in ("CUDA", "GPU", "HIP", "device")):
+            if not _GPU_PROBE_ERROR.search(str(e)):
                 raise
     pytest.skip("megatron.training does not import on this CPU-only node")
 

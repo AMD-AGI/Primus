@@ -12,10 +12,19 @@ output is rounded to the model dtype, then multiplied by the fp32 prob), no norm
 bias error.
 """
 
+import re
 from types import SimpleNamespace
 
 import pytest
 import torch
+
+# the GPU-property read of fla -> mamba_ssm on a CPU-only node: torch's "no GPU" messages
+# and Triton's "0 active drivers" (no GPU backend). A narrow match, so an unrelated
+# RuntimeError ("... on the same device", "device-side assert") fails, not skips
+_GPU_PROBE_ERROR = re.compile(
+    r"No (CUDA|HIP) GPUs are available|Found no NVIDIA driver|no (CUDA|HIP|ROCm)-capable device"
+    r"|0 active drivers"
+)
 
 # skip only when the optional dependency (Megatron) is missing; a broken import inside
 # moe.py itself (a renamed norms / post_expert_norm / moe_utils symbol) must fail, not skip
@@ -31,7 +40,7 @@ if not torch.cuda.is_available():
         except RuntimeError as e:
             # only the GPU-property read of that import chain is retried / skipped; any
             # other RuntimeError is a broken import and fails the module
-            if not any(w in str(e) for w in ("CUDA", "GPU", "HIP", "device")):
+            if not _GPU_PROBE_ERROR.search(str(e)):
                 raise
             continue
     else:

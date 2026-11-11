@@ -23,8 +23,14 @@ from megatron.core.optimizer import optimizer as opt_module  # noqa: E402
 from torch.distributed.device_mesh import init_device_mesh  # noqa: E402
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor  # noqa: E402
 
+from primus.backends.megatron.core.models.muse_spark.model_types import (  # noqa: E402
+    mark_muse_spark_param,
+)
 from primus.backends.megatron.patches import (  # noqa: E402
     muse_spark_fsdp2_patches as patch,
+)
+from primus.backends.megatron.patches import (  # noqa: E402
+    muse_spark_optimizer_ckpt_patches as patch_ckpt,
 )
 
 CLS = opt_module.Float16OptimizerWithFloat16Params
@@ -60,7 +66,7 @@ def _dparam(mesh, value, dtype=torch.float32):
 
 def test_grads_reach_the_optimizer(mesh, patched):
     # FSDP2 fp32 island param: reduce-scattered grad in .grad, no main_grad
-    fsdp_fp32 = _dparam(mesh, 1.0)
+    fsdp_fp32 = mark_muse_spark_param(_dparam(mesh, 1.0))  # e.g. a Muse Spark router weight
     fsdp_fp32.grad = distribute_tensor(torch.full((4,), 3.0), mesh, [Shard(0)])
     # a DTensor that does have main_grad must still take it (only the no-main_grad half is hidden)
     dt_main = _dparam(mesh, 1.0)
@@ -89,11 +95,40 @@ def test_grads_reach_the_optimizer(mesh, patched):
 
 def test_plain_param_without_main_grad_still_fails(mesh, patched):
     plain = torch.nn.Parameter(torch.zeros(4))  # not FSDP2: the patch must not hide it
-    groups = [[plain]]
+    groups = [[plain, mark_muse_spark_param(_dparam(mesh, 1.0))]]
     opt = SimpleNamespace(float16_groups=[], fp32_from_float16_groups=[], fp32_from_fp32_groups=groups)
     with pytest.raises(AttributeError, match="main_grad"):
         patched(opt)
     assert opt.fp32_from_fp32_groups is groups  # restored on the error path too (finally)
+
+
+def test_a_non_muse_optimizer_takes_upstreams_path(mesh, patched):
+    # the class method stays replaced for the process: another model's FSDP2 fp32 DTensor
+    # param without main_grad must still fail in upstream's loop, not be skipped
+    other = _dparam(mesh, 1.0)
+    other.grad = distribute_tensor(torch.full((4,), 3.0), mesh, [Shard(0)])
+    groups = [[other]]
+    opt = SimpleNamespace(float16_groups=[], fp32_from_float16_groups=[], fp32_from_fp32_groups=groups)
+    with pytest.raises(AttributeError, match="main_grad"):
+        patched(opt)
+    assert opt.fp32_from_fp32_groups is groups
+
+
+def test_the_muse_check_runs_once_per_optimizer(mesh, patched, monkeypatch):
+    calls = []
+    real = patch_ckpt.holds_muse_spark_params
+    monkeypatch.setattr(patch_ckpt, "holds_muse_spark_params", lambda o: calls.append(o) or real(o))
+    p = mark_muse_spark_param(_dparam(mesh, 1.0))
+    p.grad = distribute_tensor(torch.full((4,), 3.0), mesh, [Shard(0)])
+    groups = [[p]]
+    opt = SimpleNamespace(float16_groups=[], fp32_from_float16_groups=[], fp32_from_fp32_groups=groups)
+    for _ in range(3):  # one check, then the cached groups
+        patched(opt)
+        assert opt.fp32_from_fp32_groups is groups
+    assert calls == [opt]
+    opt.fp32_from_fp32_groups = new = [[p]]  # new groups object: checked again
+    patched(opt)
+    assert calls == [opt, opt] and opt.fp32_from_fp32_groups is new
 
 
 def test_patch_is_idempotent(patched):
