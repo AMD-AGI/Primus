@@ -4,19 +4,16 @@
 #
 # Build, ownership, and docker run: docs/04-technical-guides/specforge/runtime-image.md
 # Build from the Primus repository root:
-#   docker build -f examples/specforge/docker/Dockerfile \
-#     -t primus-specforge:v0.5.23-rocm720-mi35x-20261103 .
+#   uv run --no-project python examples/specforge/docker/build.py mi35x --build
 
-# Nightly with the required generic capture extension APIs.
-# Pin the tested digest so a re-pushed nightly tag cannot change the stack.
-# Override BASE_IMAGE only with an image providing the required plugin APIs.
-ARG BASE_IMAGE=lmsysorg/sglang-rocm:v0.5.23-rocm720-mi35x-20261103@sha256:4c9b1497e3793b2f5d216440688a53151ad67d656b8dcdc99311e79fbf734577
+# Required plugin-capable base pin is supplied by build.py from images.json.
+ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG SPECFORGE_REF=af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5
+ARG SPECFORGE_REF
 
 LABEL org.opencontainers.image.title="Primus SpecForge ROCm runtime"
-LABEL org.opencontainers.image.description="SGLang v0.5.23 ROCm base with SpecForge capture plugin and Primus SpecForge backend"
+LABEL org.opencontainers.image.description="SGLang ROCm base with SpecForge capture plugin and Primus SpecForge backend"
 
 # The SGLang base image already ships git.
 RUN command -v git >/dev/null
@@ -106,6 +103,8 @@ Path("/tmp/base-constraints.txt").unlink(missing_ok=True)
 Path("/tmp/base-versions.json").unlink(missing_ok=True)
 PY
 
+# Keep the standalone source-tree CLI module importable by console scripts.
+ENV PYTHONPATH=/opt/primus
 RUN bash /tmp/smoke-check.sh
 
 ENV SPECFORGE_ROOT=/workspace/SpecForge

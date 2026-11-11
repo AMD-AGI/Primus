@@ -37,7 +37,7 @@ Inside the image:
 From the host, offline train (set `HIDDEN_STATES_PATH` to precomputed features):
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+./runner/primus-cli container --image primus-specforge:local-mi35x \
   --shm-size 64g --volume /data:/data \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
@@ -47,7 +47,7 @@ Multi-node offline train (shared feature path; `-N` is the trainer node count):
 
 ```bash
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
-  -- container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
@@ -103,7 +103,7 @@ export NPROC_PER_NODE=8
 From the host, with the same capture variables exported and `/data` mounted:
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+./runner/primus-cli container --image primus-specforge:local-mi35x \
   --shm-size 64g --volume /data:/data \
   --env CAPTURE_DATA_PATH --env OUTPUT_DIR --env NPROC_PER_NODE \
   -- train pretrain \
@@ -188,7 +188,7 @@ export MAX_STEPS=20
 cd /opt/primus
 ./runner/primus-cli slurm srun -N 2 \
   --gres=gpu:1 \
-  -- container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
@@ -295,7 +295,7 @@ export SERVER_COUNT=8
 export SERVER_TP=1
 # SERVER_GPUS / TRAINER_GPUS default 0 → 0..7 when the counts above are 8.
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:8 \
-  -- container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml \

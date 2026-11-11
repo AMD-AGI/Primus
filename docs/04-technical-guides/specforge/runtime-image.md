@@ -32,37 +32,42 @@ CUDA wheels and will clobber the ROCm stack.
 
 ## Build
 
-Build from the **Primus repository root** (this repository). The trailing `.`
-is the Docker build context; the Dockerfile copies `primus/`, `runner/`,
-`primus_cli.py`, and `examples/specforge/` from that context into `/opt/primus`.
-Do not use a SpecForge checkout as the context.
+Build from the **Primus repository root** using the shared helper:
 
 ```bash
-docker build -f examples/specforge/docker/Dockerfile \
-  -t primus-specforge:v0.5.23-rocm720-mi35x-20261103 .
+uv run --no-project python examples/specforge/docker/build.py mi35x --build
+uv run --no-project python examples/specforge/docker/build.py mi30x --build
 ```
 
-`BASE_IMAGE` defaults to the tested nightly tag
-`lmsysorg/sglang-rocm:v0.5.23-rocm720-mi35x-20261103` and `SPECFORGE_REF` to
-`af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5`. Both are Dockerfile `ARG`
-defaults; `--build-arg` overrides them. `BASE_IMAGE` includes the tested digest
-below, so re-pushing the nightly tag does not change the default build.
+[`images.json`](https://github.com/AMD-AGI/Primus/blob/main/examples/specforge/docker/images.json)
+is the single source of truth for SGLang's version, ROCm tag, architecture-specific
+base digests, and SpecForge's commit pin. Primus's version comes from
+its existing `primus/__init__.py`; it is not duplicated in the manifest.
 
-The Dockerfile:
+The helper supplies the Dockerfile build arguments in both CI and local builds.
+It uses an allowlisted tar context from this repository and requires Docker with
+BuildKit. A bare `docker build` no longer supplies the required pins automatically.
+To inspect the resolved pins and default local tag without building:
 
-1. Starts from the tested SGLang ROCm nightly.
-2. Clones SpecForge at `SPECFORGE_REF`.
-3. Installs SpecForge and its SGLang capture plugin editable `--no-deps`.
-   SpecForge also uses `--ignore-requires-python` for the tested base interpreter.
-4. Copies this Primus tree and installs it editable `--no-deps`. It links
-   `primus/runner` to the copied `runner/` directory so the packaged `primus-cli`
-   entry point can find its Bash launcher. Runner scripts are normalized to LF.
-5. Fills missing light packages (`accelerate`, `wandb`, …) `--no-deps`.
-6. Installs `tensorboard>=2.14,<2.21` with dependencies, constrained to the
-   base image's already-installed versions.
-7. Runs GPU-free smoke checks (plugin entry-point discovery, forward-observer
-   and deferred-completion APIs, capture server arguments, `import specforge`,
-   a `SummaryWriter` event-file write, `primus-cli --help`, HIP torch).
+```bash
+uv run --no-project python examples/specforge/docker/build.py mi35x
+```
+
+The default tag combines Primus and SGLang versions, the first 12 characters of
+SpecForge's commit, and the architecture variant:
+`v<primus>-sglang<sglang>-specforge-<commit>-mi35x`.
+SpecForge is identified by its source commit, not a package release version.
+For the convenient local name used in this guide's run examples:
+
+```bash
+uv run --no-project python examples/specforge/docker/build.py mi35x --build \
+  --tag primus-specforge:local-mi35x
+```
+
+The Dockerfile installs the SpecForge SGLang capture plugin. It installs both
+source trees with `--no-deps` (SpecForge also uses `--ignore-requires-python`), preserves the base ROCm stack, installs the constrained
+tensorboard dependencies, and runs the existing GPU-free smoke checks.
+Changing pins still requires rebuilding and validating the resulting runtime.
 
 On 2026-11-04, this image passed GPU-free build checks and a Primus Qwen3.5-4B
 DFlash online smoke test on MI355X: one capture GPU, one trainer GPU, 55 captured
@@ -118,6 +123,44 @@ Once SpecForge ships native plugin-backed offline preparation, update
 and remove `offline_capture.py` and its bridge tests/help smoke check. No capture
 YAML or shard-format migration should be needed.
 
+## CI image publication
+
+The `Build SpecForge Images` workflow builds two separate images in
+`docker.io/tasimage/primus-specforge`, following SGLang's architecture variants:
+
+- `mi30x`: gfx942, using the corresponding pinned SGLang base image.
+- `mi35x`: gfx950, using the corresponding pinned SGLang base image.
+
+Both base digests are recorded in `examples/specforge/docker/images.json`.
+The matrix uses the same Dockerfile and SpecForge source pin for both variants.
+It streams the required files from the Primus checkout as the build context and
+requires a Linux Docker runner with BuildKit enabled. No GPU is needed to build.
+
+Relevant non-draft PRs and pushes to `main`, version-tag pushes, and manual
+dispatches trigger the workflow. Draft PRs wait until marked ready for review.
+The `ci:gpu` label does not gate image builds, matching the existing Primus image
+workflow. The build runs the Dockerfile's existing GPU-free checks.
+
+Main and version-tag builds publish the version-bearing tag described above.
+PR builds publish `pr-<number>-<version-bearing-tag>` so they cannot overwrite
+main/release tags. Manual branch runs outside `main` prepend
+`sha-<Primus-commit-prefix>-` to avoid overwriting main/release tags.
+No CI run IDs or attempt numbers are included in image tags.
+There is no architecture-neutral `latest` tag. Tags can move on rebuild;
+use a registry digest to identify exact image contents.
+
+The `specforge-image-mi30x` and `specforge-image-mi35x` workflow artifacts record
+the base image, Primus revision, local image ID, and published registry digest.
+Use the published `repository@sha256:...` reference for reproducible downstream
+jobs; convenience tags can move on a later run. These artifacts describe image
+builds, not GPU validation of either architecture.
+
+Maintainers must provision `tasimage/primus-specforge` and grant the existing
+`PRIMUS_DOCKER_HUB_TOKEN` permission to push and, for private images, pull it.
+Trusted runs fail publication if that secret is missing. Fork and Dependabot
+PRs build without publishing or receiving registry credentials. Registry login
+uses a temporary Docker configuration removed when the publish step exits.
+
 ## Run
 
 ```bash
@@ -128,7 +171,7 @@ docker run -it --name primus-specforge \
   -e HF_HOME=/data/hf-cache \
   -e HF_TOKEN \
   -v /path/to/data:/data \
-  primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+  primus-specforge:local-mi35x \
   bash
 ```
 
@@ -141,7 +184,7 @@ From the host, `primus-cli container` is the same as `docker run` plus
 `--shm-size 64g` and this image (not the default `rocm/primus` tag):
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.23-rocm720-mi35x-20261103 \
+./runner/primus-cli container --image primus-specforge:local-mi35x \
   --shm-size 64g --volume /path/to/data:/data \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml

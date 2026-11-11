@@ -12,6 +12,6 @@ Example YAMLs stay in [`configs/`](configs/). Build the image from the
 repository root:
 
 ```bash
-docker build -f examples/specforge/docker/Dockerfile \
-  -t primus-specforge:v0.5.23-rocm720-mi35x-20261103 .
+uv run --no-project python examples/specforge/docker/build.py mi35x --build \
+  --tag primus-specforge:local-mi35x
 ```
