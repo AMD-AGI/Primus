@@ -23,13 +23,19 @@ from megatron.core.transformer.enums import ModelType
 from torch import Tensor
 
 from primus.backends.megatron.core.models.zaya1.zaya1_chunked_ce import (
+    chunked_ce_chunk_tokens,
+    chunked_ce_compile_enabled,
     chunked_ce_enabled,
     chunked_linear_cross_entropy,
 )
-from primus.backends.megatron.core.models.zaya1.zaya1_modules import ZayaStack
+from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
+    ZayaStack,
+    switch_summary,
+)
 from primus.backends.megatron.core.models.zaya1.zaya1_transformer_config import (
     Zaya1TransformerConfig,
 )
+from primus.core.utils.module_utils import log_rank_0
 
 __all__ = ["Zaya1Model"]
 
@@ -104,6 +110,8 @@ class Zaya1Model(LanguageModule):
         if self.pre_process or self.post_process:
             self.setup_embeddings_and_output_layer()
 
+        log_rank_0(f"ZAYA1: {switch_summary(self.config)}; loss: {self._loss_summary()}")
+
     def _chunked_ce_blocker(self) -> Optional[str]:
         """Why the loss can't use chunked CE (``ZAYA_CHUNKED_CE``, default on), or None when it can."""
         if not chunked_ce_enabled():
@@ -121,6 +129,13 @@ class Zaya1Model(LanguageModule):
 
     def _use_chunked_ce(self) -> bool:
         return self._chunked_ce_blocker() is None
+
+    def _loss_summary(self) -> str:
+        blocker = self._chunked_ce_blocker()
+        if blocker is not None:
+            return f"Megatron's cross-entropy, as {blocker}"
+        mode = "compiled" if chunked_ce_compile_enabled() else "eager"
+        return f"chunked cross-entropy ({chunked_ce_chunk_tokens()} tokens per chunk, {mode})"
 
     def set_input_tensor(self, input_tensor: Tensor) -> None:
         """Pipeline hook. This port only runs with pipeline size 1."""

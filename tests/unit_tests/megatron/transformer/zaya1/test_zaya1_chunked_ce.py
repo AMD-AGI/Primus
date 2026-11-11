@@ -18,6 +18,7 @@ import torch
 import torch.distributed as dist
 
 from primus.backends.megatron.core.models.zaya1.zaya1_chunked_ce import (
+    chunked_ce_chunk_tokens,
     chunked_ce_enabled,
     chunked_linear_cross_entropy,
 )
@@ -152,7 +153,22 @@ def test_chunked_ce_fused_kernels_compile_and_match_eager():
 def test_chunked_ce_env_toggle(monkeypatch):
     monkeypatch.delenv("ZAYA_CHUNKED_CE", raising=False)
     assert chunked_ce_enabled()
-    monkeypatch.setenv("ZAYA_CHUNKED_CE", "0")
-    assert not chunked_ce_enabled()
+    for off in ("0", "off", "FALSE", " no "):
+        monkeypatch.setenv("ZAYA_CHUNKED_CE", off)
+        assert not chunked_ce_enabled()
     monkeypatch.setenv("ZAYA_CHUNKED_CE", "1")
     assert chunked_ce_enabled()
+    monkeypatch.setenv("ZAYA_CHUNKED_CE", "of")
+    with pytest.raises(ValueError, match="ZAYA_CHUNKED_CE"):
+        chunked_ce_enabled()
+
+
+def test_chunked_ce_chunk_tokens_must_be_a_positive_integer(monkeypatch):
+    monkeypatch.delenv("ZAYA_CHUNKED_CE_TOKENS", raising=False)
+    assert chunked_ce_chunk_tokens() == 4096
+    monkeypatch.setenv("ZAYA_CHUNKED_CE_TOKENS", " 2048 ")
+    assert chunked_ce_chunk_tokens() == 2048
+    for bad in ("4k", "0", "-8", ""):
+        monkeypatch.setenv("ZAYA_CHUNKED_CE_TOKENS", bad)
+        with pytest.raises(ValueError, match="ZAYA_CHUNKED_CE_TOKENS"):
+            chunked_ce_chunk_tokens()
