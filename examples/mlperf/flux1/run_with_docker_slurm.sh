@@ -321,12 +321,17 @@ for _experiment_index in $(seq 0 $((NEXP-1))); do
     sleep 5
   done
   _mllog_offset=$(stat -c %s "${_mllog_host}" 2>/dev/null || echo 0)
+  _cache_cleared=false
   if [[ $CLEAR_CACHES == 1 ]]; then
-    bash -c "echo -n 'Clearing cache on ' && hostname && sync && sudo /sbin/sysctl vm.drop_caches=3"
+    if bash -c "echo -n 'Clearing cache on ' && hostname && sync && sudo /sbin/sysctl vm.drop_caches=3"; then
+      _cache_cleared=true
+    else
+      echo "WARNING: vm.drop_caches failed; MLPerf cache_clear will be false" >&2
+    fi
     ${DOCKER} exec "${_cont_name}" python -c "
 from mlperf_logging import mllog
 mllogger = mllog.get_mllogger()
-mllogger.event(key=mllog.constants.CACHE_CLEAR, value=True)"
+mllogger.event(key=mllog.constants.CACHE_CLEAR, value=${_cache_cleared^})"
   fi
 
   export SEED=${_seeds[_experiment_index]}
@@ -341,6 +346,11 @@ mllogger.event(key=mllog.constants.CACHE_CLEAR, value=True)"
     -e GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME}"
     "${_all_env[@]}"
   )
+  # After _all_env, so these win over the config's MLPERF_CLEAR_CACHES=true.
+  _run_env+=(-e "MLPERF_CACHE_CLEARED=${_cache_cleared}")
+  if [[ "${_cache_cleared}" != "true" ]]; then
+    _run_env+=(-e MLPERF_CLEAR_CACHES=false)
+  fi
   _arm_env=()
   if [[ -n "${FLUX_ARMS:-}" ]]; then
     IFS=';' read -r -a _arms <<< "${FLUX_ARMS}"

@@ -177,14 +177,25 @@ for _experiment_index in $(seq 0 $((NEXP-1))); do
     fi
     echo "[flux1] trial ${_experiment_index} arm: ${_this_arm:-<control, no overrides>}"
   fi
+  _cache_cleared=false
+  if [[ $CLEAR_CACHES == 1 ]]; then
+    if bash -c "echo -n 'Clearing cache on ' && hostname && sync && sudo /sbin/sysctl vm.drop_caches=3"; then
+      _cache_cleared=true
+    else
+      echo "WARNING: vm.drop_caches failed; MLPerf cache_clear will be false" >&2
+    fi
+  fi
+  _run_config_env+=(--env=MLPERF_CACHE_CLEARED="${_cache_cleared}")
+  if [[ "${_cache_cleared}" != "true" ]]; then
+    _run_config_env+=(--env=MLPERF_CLEAR_CACHES=false)
+  fi
   (
     echo "Beginning trial ${_experiment_index} of ${NEXP}"
     if [[ $CLEAR_CACHES == 1 ]]; then
-      bash -c "echo -n 'Clearing cache on ' && hostname && sync && sudo /sbin/sysctl vm.drop_caches=3" || true
       docker exec "${_cont_name}" python -c "
 from mlperf_logging import mllog
 mllogger = mllog.get_mllogger()
-mllogger.event(key=mllog.constants.CACHE_CLEAR, value=True)"
+mllogger.event(key=mllog.constants.CACHE_CLEAR, value=${_cache_cleared^})"
     fi
     echo "launching experiment using: ${_run_config_env[*]} ${_cont_name} /workspace/code/run_and_time.sh"
     docker exec "${_run_config_env[@]}" "${_cont_name}" bash /workspace/code/run_and_time.sh

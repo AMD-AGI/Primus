@@ -19,7 +19,6 @@ export MLLOG_CONFIG_FILENAME=${MLLOG_CONFIG_FILENAME:-config_${DGXSYSTEM}.sh}
 export MLLOG_SUBMISSION_ORG=AMD
 export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR='mxfp4'
 export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN='bfloat16'
-export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM='mxfp4'
 export OUTPUT_DIR=${OUTPUT_DIR:-/results/full_logs/flux_mlperf}
 export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-/results/primus_workspace}
 
@@ -141,6 +140,17 @@ export COMPILE_OUTPUT_HEAD=false
 export FSDP2_RESHARD_AFTER_FORWARD=false
 export FSDP2_REDUCE_DTYPE=${FSDP2_REDUCE_DTYPE:-bf16}
 export FLUX_FP8_ALL_GATHER=${FLUX_FP8_ALL_GATHER:-1}
+# The comm disclosure follows the gather left enabled. The shipped 1/4/8-node
+# defaults keep the MXFP4 gather. FLUX_FP4_BF16_EVAL, an unprecompiled fprop
+# switch, and the 8-node config with DP_REPLICATE=1 turn that gather off, and
+# the weight gather then runs at fp8.
+if [ "${FLUX_FP4_ALL_GATHER:-1}" = "1" ]; then
+  export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM='mxfp4'
+elif [ "${FLUX_FP8_ALL_GATHER}" = "1" ]; then
+  export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM='fp8'
+else
+  export MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM='bfloat16'
+fi
 export FLUX_COLPACK_REGROUP_OP=${FLUX_COLPACK_REGROUP_OP:-1}
 export FLUX_AG_COLPACK_KMAJOR=${FLUX_AG_COLPACK_KMAJOR:-1}
 export FLUX_AG_TABLE_ARGS=${FLUX_AG_TABLE_ARGS:-1}
