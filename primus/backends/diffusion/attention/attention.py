@@ -22,9 +22,19 @@ import torch
 from ._flash_common import run_flash_attention_backend
 from .aiter import AITER_FLASH_ATTN_AVAILABLE, aiter_flash_attention
 
+_flydsl_flux = None
 _FLUX_ATTN_FLYDSL = _os.environ.get("FLUX_ATTN_FLYDSL", "0") == "1"
 if _FLUX_ATTN_FLYDSL:
-    from . import flydsl_flux as _flydsl_flux
+    try:
+        from . import flydsl_flux as _flydsl_flux
+    except ImportError as exc:
+        warnings.warn(
+            "FLUX_ATTN_FLYDSL=1 but primus_turbo.flydsl could not be imported "
+            f"({exc}). Falling back to attention_backend.",
+            stacklevel=2,
+        )
+        _FLUX_ATTN_FLYDSL = False
+        _flydsl_flux = None
 
 FLASH_ATTN_3_AVAILABLE = False
 FLASH_ATTN_2_AVAILABLE = False

@@ -101,7 +101,7 @@ def _trainer() -> BaseWanTrainer:
         "context_parallelism": 1,
         "expert_parallelism": 1,
         "micro_batch_size": 64,
-        "config_filename": "config_MI355X_4x8x1x1.sh",
+        "config_filename": "config_MI355X_4x8x32.sh",
     }
     return trainer
 
@@ -121,6 +121,20 @@ def test_mlperf_logs_configured_base_lr_before_warmup():
 
 def test_mlperf_cache_clear_matches_launcher(monkeypatch):
     monkeypatch.setenv("MLPERF_CLEAR_CACHES", "false")
+    trainer = _trainer()
+    trainer._mlperf_log_run_start()
+
+    cache_clear = next(
+        record
+        for kind, record in trainer.mlperf_logger.records
+        if kind == "event" and record["key"] == "cache_clear"
+    )
+    assert cache_clear["value"] is False
+
+
+def test_mlperf_cache_clear_uses_the_recorded_drop(monkeypatch):
+    monkeypatch.setenv("MLPERF_CLEAR_CACHES", "true")
+    monkeypatch.setenv("MLPERF_CACHE_CLEARED", "false")
     trainer = _trainer()
     trainer._mlperf_log_run_start()
 
@@ -197,7 +211,7 @@ def _v61_env(monkeypatch, **overrides):
         "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_LINEAR": "mxfp4",
         "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_ATTN": "bfloat16",
         "MLLOG_LOWEST_NUMERICAL_PRECISION_IN_COMM": "bfloat16",
-        "MLLOG_CONFIG_FILENAME": "config_MI355X_4x8x1x1.sh",
+        "MLLOG_CONFIG_FILENAME": "config_MI355X_4x8x32.sh",
     }
     values.update(overrides)
     for name, value in values.items():
@@ -207,10 +221,83 @@ def _v61_env(monkeypatch, **overrides):
             monkeypatch.setenv(name, value)
 
 
-def test_mlperf_v61_keys_follow_evaluation_frequency():
+def _install_fake_mllog(monkeypatch, trainer):
+    import sys
+    from types import ModuleType
+
+    mllog = ModuleType("mlperf_logging.mllog")
+    mllog.constants = trainer.mlperf_constants
+    mllog.get_mllogger = lambda: trainer.mlperf_logger
+    mllog.config = lambda **kwargs: None
+    package = ModuleType("mlperf_logging")
+    package.mllog = mllog
+    monkeypatch.setitem(sys.modules, "mlperf_logging", package)
+    monkeypatch.setitem(sys.modules, "mlperf_logging.mllog", mllog)
+
+
+def test_constant_with_warmup_is_nonzero_on_the_first_update():
+    from primus.backends.diffusion.trainers.base import create_lr_scheduler
+
+    parameter = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.SGD([parameter], lr=1.0)
+    scheduler = create_lr_scheduler(optimizer, "constant_with_warmup", warmup_steps=4, total_steps=8)
+    # LambdaLR applies the lambda at last_epoch 0 before the first update.
+    assert scheduler.get_last_lr() == [0.25]
+    for expected in (0.5, 0.75, 1.0, 1.0):
+        optimizer.step()
+        scheduler.step()
+        assert scheduler.get_last_lr() == [expected]
+
+    linear = create_lr_scheduler(
+        torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=1.0),
+        "linear",
+        warmup_steps=4,
+        total_steps=8,
+    )
+    assert linear.get_last_lr() == [0.0]
+
+
+def test_mlperf_enable_false_does_not_override_performance_mode(monkeypatch):
+    from primus.backends.diffusion.trainers import base as trainer_base
+
+    messages = []
+    monkeypatch.setattr(trainer_base.logger, "warning", lambda message: messages.append(message))
+
+    assert (
+        trainer_base._resolve_performance_mode({"performance_mode": "nemo_mlperf", "mlperf_enable": False})
+        == "nemo_mlperf"
+    )
+    assert messages
+    assert trainer_base._resolve_performance_mode({"mlperf_enable": False}) == "performance_only"
+    assert (
+        trainer_base._resolve_performance_mode({"performance_mode": "nemo_mlperf", "mlperf_enable": True})
+        == "nemo_mlperf"
+    )
+    assert len(messages) == 1
+
+
+def test_h2d_prefetch_is_a_passthrough_when_disabled(monkeypatch):
+    from primus.backends.diffusion.trainers.base import _flux_h2d_prefetch
+
+    monkeypatch.delenv("FLUX_BATCH_PREFETCH", raising=False)
+    batches = [{"x": torch.zeros(1)}, {"x": torch.ones(1)}]
+    yielded = list(_flux_h2d_prefetch(batches, "cpu"))
+    assert yielded[0] is batches[0]
+    assert yielded[1] is batches[1]
+
+
+def test_mlperf_v61_keys_follow_evaluation_frequency(monkeypatch):
+    _v61_env(monkeypatch)
     trainer = _trainer()
     trainer.sp_size = 2
-    trainer.mlperf_v61_disclosure["context_parallelism"] = 2
+    trainer.per_device_train_batch_size = 32
+    trainer.output_dir = "/tmp"
+    trainer.mlperf_v61_disclosure = {}
+    _install_fake_mllog(monkeypatch, trainer)
+    trainer._setup_mlperf()
+    assert trainer.mlperf_v61_disclosure["context_parallelism"] == 2
+    assert trainer.mlperf_v61_disclosure["micro_batch_size"] == 32
+    assert trainer.mlperf_v61_disclosure["config_filename"] == "config_MI355X_4x8x32.sh"
     trainer._mlperf_log_run_start()
 
     keys = [record["key"] for kind, record in trainer.mlperf_logger.records if kind == "event"]
@@ -232,7 +319,7 @@ def test_mlperf_v61_keys_follow_evaluation_frequency():
         if kind == "event" and record["key"] in keys[start:]
     }
     assert logged["context_parallelism"] == 2
-    assert logged["micro_batch_size"] == 64
+    assert logged["micro_batch_size"] == 32
     assert trainer.mlperf_logger.records[-1] == ("start", {"key": "init_start"})
 
 

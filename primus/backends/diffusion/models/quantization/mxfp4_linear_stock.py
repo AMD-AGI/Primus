@@ -31,7 +31,6 @@ untouched; quantization happens at each GEMM's use site.
 
 from __future__ import annotations
 
-import math
 import os
 
 _BF16_EVAL = os.getenv("FLUX_FP4_BF16_EVAL", "0") == "1"
@@ -42,6 +41,8 @@ import torch
 import torch.nn as nn
 
 from primus.backends.diffusion.utils.log import logger
+
+from .mxfp4_hadamard import hadamard_matrix, rotate_last_dim
 
 FP4_DTYPE = torch.float4_e2m1fn_x2
 MX_BLOCK_SIZE = 32
@@ -149,48 +150,6 @@ def _init_turbo() -> None:
     _GEMM_FP4_EAGER = _gemm_fp4_impl_eager
     extra = f", dispatch={_FP4_DISPATCH}" if _FP4_DISPATCH else ""
     logger.info(f"MXFP4 GEMM backend: {backend.name} (preshuffle off){extra}")
-
-
-# ---------------------------------------------------------------------------
-# Deterministic Hadamard rotation
-# ---------------------------------------------------------------------------
-
-_HADAMARD_CACHE: dict[tuple, torch.Tensor] = {}
-
-
-def hadamard_matrix(n: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    """Sylvester Hadamard of order ``n``, scaled by 1/sqrt(n) to be orthogonal."""
-    key = (n, dtype, str(device))
-    cached = _HADAMARD_CACHE.get(key)
-    if cached is None:
-        if n <= 0 or n & (n - 1):
-            raise ValueError(f"Hadamard order must be a power of two, got {n}")
-        h = torch.ones(1, 1, dtype=torch.float64, device=device)
-        while h.shape[0] < n:
-            h = torch.cat((torch.cat((h, h), 1), torch.cat((h, -h), 1)), 0)
-        cached = (h / math.sqrt(n)).to(dtype)
-        _HADAMARD_CACHE[key] = cached
-    return cached
-
-
-def rotate_last_dim(x: torch.Tensor, h: torch.Tensor | None) -> torch.Tensor:
-    """Apply the block-diagonal Hadamard ``h`` along ``x``'s last dim.
-
-    Both operands of a GEMM are rotated along the dim they contract over, so
-    the rotations cancel -- (XH)(WH)^T = X H H^T W^T = X W^T -- leaving the
-    result unchanged while spreading per-channel outliers across each
-    32-element micro-scaling block.
-
-    ``h`` is passed in rather than looked up so nothing in the traced path
-    touches a module-level cache.
-    """
-    if h is None:
-        return x
-    n = h.shape[0]
-    *lead, d = x.shape
-    if d % n:
-        raise ValueError(f"last dim {d} is not divisible by Hadamard order {n}")
-    return torch.matmul(x.reshape(*lead, d // n, n), h.to(x.dtype)).reshape(*lead, d)
 
 
 # ---------------------------------------------------------------------------

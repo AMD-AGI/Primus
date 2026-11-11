@@ -26,7 +26,13 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
 )
-from torch.distributed.fsdp._fully_shard._fsdp_api import AllGather
+
+try:
+    from torch.distributed.fsdp._fully_shard._fsdp_api import AllGather
+except ImportError:
+    # Only FSDP_ALL_GATHER_IMPL=copy needs this private symbol. Importing the
+    # trainer should still succeed on a torch that does not have it.
+    AllGather = None
 
 from primus.backends.diffusion.distributed import (
     create_device_mesh,
@@ -54,24 +60,35 @@ def _sdma_all_gather():
     return _SDMA_ALL_GATHER
 
 
-class _CopyEngineAllGather(AllGather):
-    """Parameter all-gather on the GPU copy engines.
+if AllGather is not None:
 
-    Copies are queued on side streams, then the FSDP all-gather stream waits
-    for those streams. That wait is device-side, so the host returns before
-    the copies finish and FSDP's completion event overlaps them with compute.
-    """
+    class _CopyEngineAllGather(AllGather):
+        """Parameter all-gather on the GPU copy engines.
 
-    def allocate(self, size, *, dtype, device):
-        return torch.empty(*size, dtype=dtype, device=device)
+        Copies are queued on side streams, then the FSDP all-gather stream waits
+        for those streams. That wait is device-side, so the host returns before
+        the copies finish and FSDP's completion event overlaps them with compute.
+        """
 
-    def __call__(self, output_tensor, input_tensor, group, async_op=False):
-        del async_op
-        handle = _sdma_all_gather()(output_tensor, input_tensor, group=group, async_op=True)
-        # Queue the stream dependency. FSDP only waits on a dist.Work, so the
-        # completion event recorded on this stream is what overlaps the copies.
-        handle.wait()
-        return None
+        def allocate(self, size, *, dtype, device):
+            return torch.empty(*size, dtype=dtype, device=device)
+
+        def __call__(self, output_tensor, input_tensor, group, async_op=False):
+            del async_op
+            handle = _sdma_all_gather()(output_tensor, input_tensor, group=group, async_op=True)
+            # Queue the stream dependency. FSDP only waits on a dist.Work, so the
+            # completion event recorded on this stream is what overlaps the copies.
+            handle.wait()
+            return None
+
+else:
+
+    class _CopyEngineAllGather:  # type: ignore[no-redef]
+        def __init__(self):
+            raise ImportError(
+                "FSDP_ALL_GATHER_IMPL=copy requires "
+                "torch.distributed.fsdp._fully_shard._fsdp_api.AllGather"
+            )
 
 
 def _pin_symm_mem_pools() -> None:

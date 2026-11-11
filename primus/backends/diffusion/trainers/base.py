@@ -99,6 +99,11 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
         return 0.5 * (1.0 + math.cos(math.pi * progress))
 
     def constant_with_warmup(step):
+        # Not linear_warmup. LambdaLR calls this with last_epoch, and the first
+        # optimizer update sees step 0. (step + 1) / warmup_steps makes that
+        # update non-zero and reaches the base LR at warmup_steps - 1. That is
+        # the Flux MLPerf curve checked against the 6.1 loss. linear, cosine,
+        # and polynomial stay on step / warmup_steps.
         if warmup_steps == 0:
             return 1.0
         return min(1.0, float(step + 1) / float(warmup_steps))
@@ -126,6 +131,31 @@ def create_lr_scheduler(optimizer, scheduler_type, warmup_steps, total_steps):
             return 1.0
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def _resolve_performance_mode(args: dict) -> str:
+    """Pick the diffusion performance mode.
+
+    ``performance_mode`` wins when it is set. ``mlperf_enable`` only fills in
+    the mode when ``performance_mode`` is absent, which is how the non-Flux
+    trainers behave. The Flux recipe sets both, and ``FLUX_PERFORMANCE_MODE``
+    defaults to ``nemo_mlperf``, so ``MLPERF_ENABLE=false`` does not turn the
+    MLPerf sampler, warmup, or disclosure off. Warn instead of flipping the
+    mode: the checked Flux runs set both to the MLPerf path.
+    """
+    performance_mode = args.get("performance_mode")
+    mlperf_enable = bool(args.get("mlperf_enable", False))
+    if performance_mode is None:
+        performance_mode = "nemo_mlperf" if mlperf_enable else "performance_only"
+    if performance_mode not in {"performance_only", "nemo_mlperf"}:
+        raise ValueError(f"Unsupported performance_mode={performance_mode!r}")
+    if performance_mode == "nemo_mlperf" and "mlperf_enable" in args and not mlperf_enable:
+        logger.warning(
+            "performance_mode=nemo_mlperf keeps MLPerf logging, the contiguous sampler, "
+            "and the v6.1 disclosure on. mlperf_enable=false does not turn them off. "
+            "Set performance_mode=performance_only to opt out."
+        )
+    return performance_mode
 
 
 class ContiguousDistributedSampler(Sampler[int]):
@@ -301,11 +331,7 @@ class BaseWanTrainer:
             self.args.get("per_device_eval_batch_size", self.per_device_train_batch_size)
         )
 
-        performance_mode = self.args.get("performance_mode")
-        if performance_mode is None:
-            performance_mode = "nemo_mlperf" if self.args.get("mlperf_enable", False) else "performance_only"
-        if performance_mode not in {"performance_only", "nemo_mlperf"}:
-            raise ValueError(f"Unsupported performance_mode={performance_mode!r}")
+        performance_mode = _resolve_performance_mode(self.args)
         self.performance_mode = performance_mode
         mlperf_mode = performance_mode == "nemo_mlperf"
         if mlperf_mode:
@@ -637,7 +663,14 @@ class BaseWanTrainer:
             return
         c = self.mlperf_constants
         opt = self.optimizer.param_groups[0]
-        cache_cleared = os.getenv("MLPERF_CLEAR_CACHES", "true").strip().lower() == "true"
+        # MLPERF_CACHE_CLEARED is the drop that actually happened. The docker
+        # launchers set it from the host sysctl. MLPERF_CLEAR_CACHES is only
+        # the request, and a failed drop used to leave this event True.
+        recorded = os.getenv("MLPERF_CACHE_CLEARED")
+        if recorded is None:
+            cache_cleared = os.getenv("MLPERF_CLEAR_CACHES", "true").strip().lower() == "true"
+        else:
+            cache_cleared = recorded.strip().lower() == "true"
         self.mlperf_logger.event(key=c.CACHE_CLEAR, value=cache_cleared)
         self.mlperf_logger.event(key=c.SUBMISSION_BENCHMARK, value="flux1")
         self.mlperf_logger.event(
