@@ -15,8 +15,10 @@ fp32 and keeps an fp32 softmax for backward. At mbs 248 x seq 128 that is
 the fp32 log-sum-exp per token. Backward recomputes each chunk's logits,
 forms ``g * (softmax - onehot)`` in fp32, rounds it to the activation dtype
 (as autograd does on the stock path), and runs the dx / dW GEMMs per chunk.
-dW is accumulated in fp32 and rounded once at the end. No tensor larger than
-``chunk x vocab`` is ever live.
+Each chunk's dW leaves its GEMM in the activation dtype and is summed into an
+fp32 buffer, which is rounded to the weight dtype once at the end (the stock
+path's single dW GEMM rounds once). No tensor larger than ``chunk x vocab`` is
+ever live.
 
 Semantics match ``LanguageModule.compute_language_model_loss`` with
 ``vocab_parallel_cross_entropy`` at TP=1 and label_smoothing=0, including
@@ -135,25 +137,21 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
                 lse[start:end] = lse_c
                 loss[start:end] = loss_c
                 del logits
-            ctx.save_for_backward(x, weight, safe_labels, valid, lse)
-            ctx.chunk = chunk
-            ctx.logit_scale = logit_scale
-            return loss
-
-        for start in range(0, n_tok, chunk):
-            end = min(start + chunk, n_tok)
-            lf = _chunk_logits_fp32(x[start:end], weight, logit_scale)
-            # Same op order as VocabParallelCrossEntropy: shift by the row max
-            # in place, take the target from the shifted logits (0 for an
-            # out-of-range label), exp in place, sum, log.
-            m = lf.amax(dim=-1)
-            lf.sub_(m.unsqueeze(1))
-            tgt = lf.gather(1, safe_labels[start:end].unsqueeze(1)).squeeze(1)
-            tgt = torch.where(valid[start:end], tgt, torch.zeros_like(tgt))
-            log_sum = lf.exp_().sum(dim=-1).log_()
-            lse[start:end] = log_sum + m
-            loss[start:end] = log_sum - tgt
-            del lf
+        else:
+            for start in range(0, n_tok, chunk):
+                end = min(start + chunk, n_tok)
+                lf = _chunk_logits_fp32(x[start:end], weight, logit_scale)
+                # Same op order as VocabParallelCrossEntropy: shift by the row max
+                # in place, take the target from the shifted logits (0 for an
+                # out-of-range label), exp in place, sum, log.
+                m = lf.amax(dim=-1)
+                lf.sub_(m.unsqueeze(1))
+                tgt = lf.gather(1, safe_labels[start:end].unsqueeze(1)).squeeze(1)
+                tgt = torch.where(valid[start:end], tgt, torch.zeros_like(tgt))
+                log_sum = lf.exp_().sum(dim=-1).log_()
+                lse[start:end] = log_sum + m
+                loss[start:end] = log_sum - tgt
+                del lf
 
         ctx.save_for_backward(x, weight, safe_labels, valid, lse)
         ctx.chunk = chunk
@@ -171,13 +169,14 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
         need_dw = ctx.needs_input_grad[1]
         dx = torch.empty_like(x) if need_dx else None
         dw_acc = torch.zeros(weight.shape, dtype=torch.float32, device=weight.device) if need_dw else None
+        if ctx.fused:
+            _, bwd_dlogits = _fused_kernels()
 
         for start in range(0, n_tok, chunk):
             end = min(start + chunk, n_tok)
             x_c = x[start:end]
             g = grad_loss[start:end]
             if ctx.fused:
-                _, bwd_dlogits = _fused_kernels()
                 logits = _chunk_logits(x_c, weight, logit_scale)
                 d = bwd_dlogits(logits, lse[start:end], safe_labels[start:end], valid[start:end], g)
                 del logits
