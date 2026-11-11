@@ -25,11 +25,31 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+_SWITCH_ON = ("1", "true", "on", "yes")
+_SWITCH_OFF = ("0", "false", "off", "no", "")
+
+
+def _env_on(name: str, default: str = "1") -> bool:
+    """Read an on/off switch: 1, true, on or yes; 0, false, off, no or empty; any case."""
+    value = os.environ.get(name, default).strip().lower()
+    if value not in _SWITCH_ON + _SWITCH_OFF:
+        raise ValueError(f"{name}={os.environ[name]!r}: expected one of 1, true, on, yes, 0, false, off, no.")
+    return value in _SWITCH_ON
+
+
+def _env_choice(name: str, default: str, choices: Sequence[str]) -> str:
+    """Read a setting that takes one of ``choices``, any case."""
+    value = os.environ.get(name, default).strip().lower()
+    if value not in choices:
+        raise ValueError(f"{name}={os.environ[name]!r}: expected one of {', '.join(choices)}.")
+    return value
+
+
 # ZAYA_ATTN_FLASH=1 (default): drop a purely causal dense mask once per forward
 # and run CCA attention through flash_attn_func with native GQA, or through
 # SDPA enable_gqa when flash_attn is unavailable. ZAYA_ATTN_FLASH=0 restores
 # the dense-mask + repeat_interleave path.
-ATTN_FLASH = os.environ.get("ZAYA_ATTN_FLASH", "1") not in ("0", "false", "False", "")
+ATTN_FLASH = _env_on("ZAYA_ATTN_FLASH")
 try:
     from flash_attn import flash_attn_func as _flash_attn_func
 except Exception:  # pragma: no cover - depends on the image
@@ -43,10 +63,6 @@ except Exception:  # pragma: no cover - depends on the image
 # CCA query/key post-processing (grouped means, qk-norm, temperature, partial
 # RoPE). Both are free functions with tensor arguments, so every layer shares
 # one graph (no per-module recompiles). Set either to 0 for the eager path.
-def _env_on(name: str, default: str = "1") -> bool:
-    return os.environ.get(name, default) not in ("0", "false", "False", "")
-
-
 FUSE_NORM = _env_on("ZAYA_FUSE_NORM")
 FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
 
@@ -58,7 +74,7 @@ FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
 # keys stay local_experts.N.linear_fc{1,2}.weight in both modes; the
 # distributed-optimizer state is shaped per parameter, so it does not carry
 # across a mode switch (load with --no-load-optim when switching).
-MOE_GEMM = os.environ.get("ZAYA_MOE_GEMM", "split").strip().lower()
+MOE_GEMM = _env_choice("ZAYA_MOE_GEMM", "split", ("split", "turbo"))
 # ZAYA_ROUTER_DEFER_AR=1: accumulate each router's token counts during the
 # forward and apply all balancing-bias updates after the decoder's backward
 # (or, failing that, at the start of the next forward) with one all-reduce for
@@ -66,6 +82,26 @@ MOE_GEMM = os.environ.get("ZAYA_MOE_GEMM", "split").strip().lower()
 # own update, so with one microbatch per step (or non-pipelined microbatches)
 # the bias each forward sees is bit-identical to the per-layer path.
 ROUTER_DEFER_AR = _env_on("ZAYA_ROUTER_DEFER_AR", "0")
+
+
+def switch_summary(config) -> str:
+    """The ZAYA_* kernel switches in effect for ``config``, as one line for the build log."""
+
+    def on(flag: bool) -> str:
+        return "on" if flag else "off"
+
+    if not ATTN_FLASH:
+        attention = "dense mask"
+    else:
+        attention = "flash_attn" if _flash_attn_func is not None else "SDPA, flash_attn not importable"
+    experts = MOE_GEMM
+    if MOE_GEMM == "turbo" and _fp8_requested(config):
+        experts = "split, turbo is BF16-only"
+    return (
+        f"ZAYA_ATTN_FLASH={on(ATTN_FLASH)} ({attention}), ZAYA_FUSE_NORM={on(FUSE_NORM)}, "
+        f"ZAYA_FUSE_CCA={on(FUSE_CCA)}, ZAYA_CONV_GEMM={on(CONV_GEMM)}, ZAYA_FUSE_MOE={on(FUSE_MOE)}, "
+        f"ZAYA_MOE_GEMM={MOE_GEMM} (experts: {experts}), ZAYA_ROUTER_DEFER_AR={on(ROUTER_DEFER_AR)}"
+    )
 
 
 def _maybe_compile(fn, enabled: bool, dynamic: bool = False):

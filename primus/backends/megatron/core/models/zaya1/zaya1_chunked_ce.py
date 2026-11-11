@@ -31,6 +31,11 @@ from typing import Optional
 import torch
 from torch import Tensor
 
+from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
+    _env_on,
+    _maybe_compile,
+)
+
 __all__ = [
     "ChunkedLinearCrossEntropy",
     "chunked_linear_cross_entropy",
@@ -42,27 +47,24 @@ __all__ = [
 
 def chunked_ce_enabled() -> bool:
     """``ZAYA_CHUNKED_CE`` (default 1). Set 0 to restore the stock logits + CE path."""
-    return os.environ.get("ZAYA_CHUNKED_CE", "1").strip().lower() not in ("0", "false", "off", "no", "")
+    return _env_on("ZAYA_CHUNKED_CE")
 
 
 def chunked_ce_chunk_tokens() -> int:
-    """``ZAYA_CHUNKED_CE_TOKENS`` (default 4096): tokens per chunk."""
+    """``ZAYA_CHUNKED_CE_TOKENS`` (default 4096): tokens per chunk, a positive integer."""
+    value = os.environ.get("ZAYA_CHUNKED_CE_TOKENS", "4096")
     try:
-        n = int(os.environ.get("ZAYA_CHUNKED_CE_TOKENS", "4096"))
+        n = int(value)
     except ValueError:
-        n = 4096
-    return max(1, n)
+        n = 0
+    if n < 1:
+        raise ValueError(f"ZAYA_CHUNKED_CE_TOKENS={value!r}: expected a positive integer.")
+    return n
 
 
 def chunked_ce_compile_enabled() -> bool:
     """``ZAYA_CHUNKED_CE_COMPILE`` (default 1): fuse each chunk's CE math with torch.compile."""
-    return os.environ.get("ZAYA_CHUNKED_CE_COMPILE", "1").strip().lower() not in (
-        "0",
-        "false",
-        "off",
-        "no",
-        "",
-    )
+    return _env_on("ZAYA_CHUNKED_CE_COMPILE")
 
 
 def _chunk_logits(x_c: Tensor, weight: Tensor, logit_scale: Optional[float]) -> Tensor:
@@ -105,10 +107,6 @@ _FUSED = {}
 def _fused_kernels():
     """(fwd_stats, bwd_dlogits) compiled once per process; eager fallback inside."""
     if "fns" not in _FUSED:
-        from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
-            _maybe_compile,
-        )
-
         _FUSED["fns"] = (_maybe_compile(_ce_fwd_stats, True), _maybe_compile(_ce_bwd_dlogits, True))
     return _FUSED["fns"]
 
