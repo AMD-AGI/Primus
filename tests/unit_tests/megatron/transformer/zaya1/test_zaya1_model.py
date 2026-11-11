@@ -337,7 +337,10 @@ def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
     set_args(args)
     model = get_model_provider("zaya1")(pre_process=True, post_process=True, config=config)
     device = torch.device("cuda")
-    model.to(device)
+    # Both runs must see the same model. In training mode the embedding applies
+    # hidden_dropout (Megatron's default of 0.1 here) and every forward moves the
+    # routers' balancing biases.
+    model.to(device).eval()
     batch, seq, vocab = 3, 8, args.padded_vocab_size
     torch.manual_seed(0)
     input_ids = torch.randint(0, vocab, (batch, seq), device=device)
