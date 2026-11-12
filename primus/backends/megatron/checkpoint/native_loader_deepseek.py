@@ -202,7 +202,7 @@ def build_margs(cfg_fields, args):
 
     # checkpoint saving
     m.save = args.save_dir
-    m.ckpt_format = "torch"
+    m.ckpt_format = args.ckpt_format
     m.no_save_optim = True
     m.no_save_rng = True
     m.no_load_optim = True
@@ -312,12 +312,17 @@ def convert(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
     expert_parallel_size=1,
+    ckpt_format=common.DEFAULT_CKPT_FORMAT,
     seq_length=4096,
     make_vocab_size_divisible_by=128,
     master_port=29561,
     log=None,
 ):
-    """Convert a DeepSeek-V2/V3 HF checkpoint to a legacy Megatron torch ckpt.
+    """Convert a DeepSeek-V2/V3 HF checkpoint to a Megatron checkpoint.
+
+    ``ckpt_format`` is ``"torch_dist"`` (default; Megatron reshards it on load, so
+    it fine-tunes at any TP / PP / EP) or ``"torch"`` (legacy, TP = PP = EP = 1
+    only); see ``native_convert_common.CKPT_FORMATS``.
 
     Single process, CPU-only, ~1 min. Assumes the ``phase="convert"`` patches
     have already been applied in this process (the conversion hook does so).
@@ -337,6 +342,7 @@ def convert(
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         expert_parallel_size=expert_parallel_size,
+        ckpt_format=common.check_ckpt_format(ckpt_format),
         seq_length=seq_length,
         make_vocab_size_divisible_by=make_vocab_size_divisible_by,
     )

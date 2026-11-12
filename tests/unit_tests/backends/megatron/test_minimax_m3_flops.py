@@ -60,6 +60,7 @@ def _args(**overrides):
         swiglu=False,
         quick_geglu=True,
         seq_length=SEQ,
+        decoder_seq_length=None,  # read by Megatron-LM main's num_floating_point_operations
         padded_vocab_size=200064,
         sparse_attention_freq="([0]*3+[1]*5)",
         sparse_block_size=128,
@@ -117,6 +118,15 @@ def test_only_layers_the_sparse_freq_marks_are_charged_as_msa():
     indexer = 2 * TOKENS * (H * (4 * 128 + 128) * 2 + 4 * 128 * (SEQ + 1) / 2 + 2 * 4 * 128 * 16)
     assert per_layer == pytest.approx(attention + indexer, rel=1e-12)
     assert per_layer < 0
+
+
+def test_int_sparse_freq_charges_every_layer():
+    """M3.1-Flash's preset spells "every layer" as `1`, so its proxy has no dense-attention layer."""
+    wrapped = m3_flops.make_m3_num_floating_point_operations(_upstream())
+    assert m3_flops.compute_m3_flops(_args(sparse_attention_freq=1), GBS, _upstream()).num_msa_layers == 8
+    assert wrapped(_args(sparse_attention_freq=1), GBS) == wrapped(
+        _args(sparse_attention_freq="([1]*8)"), GBS
+    )
 
 
 def test_frozen_indexer_counts_only_its_forward():

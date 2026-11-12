@@ -15,11 +15,17 @@ boundary to invalidate that cache, so initialization, checkpointing and the opti
 unchanged.
 
 The expert activation is SiLU-SwiGLU or Megatron's ``quick_geglu`` (``activation_func =
-quick_gelu`` with ``glu_linear_offset`` / ``activation_func_clamp_value``, i.e. MiniMax-M3's
-``swigluoai``); see :func:`mega_moe_activation`.
+quick_gelu`` with ``glu_linear_offset`` / ``activation_func_clamp_value``, i.e. MiniMax-M3's and
+GPT-OSS's ``swigluoai``); see :func:`mega_moe_activation`.
+
+``add_bias_linear`` gives every expert an fc1 and an fc2 bias (GPT-OSS), applied the way Megatron's
+grouped experts do: the fc1 bias before the activation and its clamp, the fc2 bias scaled by the
+routing weight. Both flavours take them; the ops own how each is applied.
 """
 
 import contextlib
+import functools
+import inspect
 from typing import Optional, Tuple
 
 import torch
@@ -27,13 +33,14 @@ import torch.nn.functional as F
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedTensor
 from megatron.core.fusions.fused_bias_geglu import quick_gelu
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
 )
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.spec_utils import build_module
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
 from primus_turbo.pytorch.ops.moe.fused_mega_moe import (
@@ -45,6 +52,8 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
     fused_mega_moe_fp8_stage1,
     fused_mega_moe_fp8_stage2,
 )
+
+from primus.core.utils.module_utils import log_rank_0
 
 # Megatron's quick_gelu hardcodes its sigmoid scale.
 _QUICK_GELU_ALPHA = 1.702
@@ -87,16 +96,85 @@ def mega_moe_precision() -> str:
     return precision
 
 
-class MegaMoEWeightModule(MegatronModule):
-    """Callable expert-weight module used as a DDP overlap boundary."""
+def mega_moe_wgrad_accum_fusion(config: TransformerConfig) -> bool:
+    """``turbo_mega_moe_wgrad_accum_fusion``, where null follows ``gradient_accumulation_fusion``.
 
-    def __init__(self, config: TransformerConfig, weight_shape) -> None:
+    Off under Megatron-FSDP whatever the setting: the stages set ``grad_added_to_main_grad`` in
+    forward, Megatron DDP's contract, but Megatron-FSDP clears it before every backward and its
+    hook would then add the stages' dummy gradient into ``main_grad``.
+    """
+    from megatron.training import get_args
+
+    args = get_args()
+    flag = getattr(args, "turbo_mega_moe_wgrad_accum_fusion", None)
+    fuse = bool(config.gradient_accumulation_fusion if flag is None else flag)
+    if fuse and (getattr(args, "use_megatron_fsdp", False) or getattr(args, "use_custom_fsdp", False)):
+        _log_once(
+            "[MegaMoE] Megatron-FSDP: the expert wgrads keep the separate main_grad add "
+            "(turbo_mega_moe_wgrad_accum_fusion needs Megatron DDP)"
+        )
+        return False
+    return fuse
+
+
+@functools.lru_cache(maxsize=None)
+def _log_once(message: str) -> None:
+    log_rank_0(message)
+
+
+@functools.lru_cache(maxsize=None)
+def _turbo_stages_take_wgrad_accum() -> bool:
+    """Whether this Primus-Turbo's staged MegaMoE ops take ``fuse_wgrad_accum_pattern`` (logged once)."""
+    takes = all(
+        "fuse_wgrad_accum_pattern" in inspect.signature(fn).parameters
+        for fn in (fused_mega_moe_stage1, fused_mega_moe_stage2)
+    )
+    if not takes:
+        log_rank_0(
+            "[MegaMoE] this Primus-Turbo's staged ops cannot accumulate the expert wgrads into "
+            "main_grad; keeping the separate DDP add"
+        )
+    return takes
+
+
+def mega_moe_router(router):
+    """The router builder MegaMoE uses: Megatron's ``TopKRouter`` becomes ``PrimusTopKRouter``.
+
+    The ``megatron.moe.primus_topk_router`` patch makes that swap in ``MoELayer.__init__``, which this
+    layer replaces, and in specs from the GPT MoE spec builders it wraps, which reach only modules that
+    import those builders after the patch runs. So MegaMoE applies the same rule itself, unless
+    ``disable_primus_topk_router`` is set.
+    """
+    from megatron.training import get_args
+
+    from primus.backends.megatron.core.transformer.moe.router import (
+        primus_topk_router_for,
+    )
+
+    primus_router = primus_topk_router_for(router)
+    if primus_router is router or getattr(get_args(), "disable_primus_topk_router", False):
+        return router
+    return primus_router
+
+
+class MegaMoEWeightModule(MegatronModule):
+    """Callable expert-weight module used as a DDP overlap boundary.
+
+    ``forward`` returns ``(weight, bias)``; ``bias`` is None unless ``bias_shape`` is given."""
+
+    def __init__(self, config: TransformerConfig, weight_shape, bias_shape=None) -> None:
         super().__init__(config)
         device = torch.device("cpu") if config.use_cpu_initialization else torch.cuda.current_device()
         self.weight = torch.nn.Parameter(torch.empty(weight_shape, device=device, dtype=config.params_dtype))
+        # zeros, like the bias of Megatron's grouped expert linears
+        self.bias = (
+            torch.nn.Parameter(torch.zeros(bias_shape, device=device, dtype=config.params_dtype))
+            if bias_shape is not None
+            else None
+        )
 
-    def forward(self) -> torch.Tensor:
-        return self.weight
+    def forward(self) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return self.weight, self.bias
 
     def backward_dw(self) -> None:
         # wgrad produced in custom autograd backward
@@ -118,13 +196,23 @@ class MegaMoEExperts(MegatronModule):
         self.ep_group = ep_group
         self.experts_per_rank = experts_per_rank
         self.activation = mega_moe_activation(config)
-        # w1 [g, 2I, H] gate+up; w2 [g, H, I] down
-        self.fc1_weight = MegaMoEWeightModule(config, (experts_per_rank, 2 * intermediate_size, hidden_size))
-        self.fc2_weight = MegaMoEWeightModule(config, (experts_per_rank, hidden_size, intermediate_size))
+        self.wgrad_accum_pattern = self._wgrad_accum_pattern(config)
+        bias = config.add_bias_linear
+        # w1 [g, 2I, H] gate+up; w2 [g, H, I] down; biases b1 [g, 2I], b2 [g, H]
+        self.fc1_weight = MegaMoEWeightModule(
+            config,
+            (experts_per_rank, 2 * intermediate_size, hidden_size),
+            (experts_per_rank, 2 * intermediate_size) if bias else None,
+        )
+        self.fc2_weight = MegaMoEWeightModule(
+            config,
+            (experts_per_rank, hidden_size, intermediate_size),
+            (experts_per_rank, hidden_size) if bias else None,
+        )
         # Expert weights are already EP-sharded, so the DP allreduce hook must
         # not touch them.
         expert_parallel = config.expert_model_parallel_size > 1
-        for p in (self.fc1_weight.weight, self.fc2_weight.weight):
+        for p in self.parameters():
             setattr(p, "allreduce", not expert_parallel)
 
     def reset_parameters(self, ep_rank: int) -> None:
@@ -137,6 +225,9 @@ class MegaMoEExperts(MegatronModule):
             (self.fc1_weight.weight, init_fc1),
             (self.fc2_weight.weight, init_fc2),
         )
+        for module in (self.fc1_weight, self.fc2_weight):
+            if module.bias is not None:
+                module.bias.data.zero_()
 
         if self.config.use_cpu_initialization:
             # cpu rng is rank-identical: draw all experts, keep this rank's shard
@@ -161,13 +252,36 @@ class MegaMoEExperts(MegatronModule):
                 for expert_weight in weight.data:
                     init_method(expert_weight)
 
+    def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
+        """``"megatron"`` when DDP's add of the expert wgrads may be fused into the staged ops.
+
+        The ops resolve ``main_grad`` per call and fall back to the ordinary gradient when they
+        cannot accumulate into it, so this only says that DDP's add may be fused away.
+        """
+        if mega_moe_wgrad_accum_fusion(config) and _turbo_stages_take_wgrad_accum():
+            return "megatron"
+        return None
+
     def forward(self, x, topk_idx, topk_weights):
+        # only passed when set, so a Primus-Turbo without the argument still runs
+        accum = {"fuse_wgrad_accum_pattern": self.wgrad_accum_pattern} if self.wgrad_accum_pattern else {}
         # w2 is fetched only after stage1 so the two weight modules keep their fc1-then-fc2 order.
-        w1 = self.fc1_weight()
-        l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
-        w2 = self.fc2_weight()
+        w1, b1 = self.fc1_weight()
+        l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group, **accum)
+        w2, b2 = self.fc2_weight()
+        # stage2 owns the activation, so fc1's bias, which sits in front of it, is applied there
         return fused_mega_moe_stage2(
-            l1_out, dwib, handle, topk_idx, topk_weights, w2, self.ep_group, self.activation
+            l1_out,
+            dwib,
+            handle,
+            topk_idx,
+            topk_weights,
+            w2,
+            self.ep_group,
+            self.activation,
+            fc1_bias=b1,
+            fc2_bias=b2,
+            **accum,
         )
 
     def backward_dw(self) -> None:
@@ -183,16 +297,35 @@ class MegaMoEFP8Experts(MegaMoEExperts):
     quantized operands that cannot ride autograd's gradient slots.
     """
 
+    def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
+        """None: the mxfp8 stages take no accumulation pattern, so DDP keeps adding their wgrads."""
+        if mega_moe_wgrad_accum_fusion(config):
+            _log_once(
+                "[MegaMoE] mxfp8 experts: the expert wgrads keep the separate main_grad add "
+                "(turbo_mega_moe_wgrad_accum_fusion applies to the bf16 experts)"
+            )
+        return None
+
     # The mxfp8 weight-quant cache is dropped by the megatron.turbo.mega_moe_weight_generation
     # patch, which advances the generation once per optimizer step. Doing it there rather than
     # here keeps the refresh tied to the weights actually moving, not to how often this layer
     # happens to run a forward.
     def forward(self, x, topk_idx, topk_weights):
-        w1 = self.fc1_weight()
+        w1, b1 = self.fc1_weight()
         l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
-        w2 = self.fc2_weight()
+        w2, b2 = self.fc2_weight()
         return fused_mega_moe_fp8_stage2(
-            l1_out, dwib, handle, state, topk_idx, topk_weights, w2, self.ep_group, self.activation
+            l1_out,
+            dwib,
+            handle,
+            state,
+            topk_idx,
+            topk_weights,
+            w2,
+            self.ep_group,
+            self.activation,
+            fc1_bias=b1,
+            fc2_bias=b2,
         )
 
 
@@ -206,6 +339,8 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         layer_number: Optional[int] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         is_mtp_layer: bool = False,
+        hash_moe_layer_threshold: Optional[int] = None,
+        name: Optional[str] = None,
     ) -> None:
         super().__init__(config)
 
@@ -230,7 +365,17 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         self.intermediate_size = config.moe_ffn_hidden_size
 
         # router owns all routing logic
-        self.router = submodules.router(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)
+        self.router = mega_moe_router(submodules.router)(
+            config=config,
+            pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
+            # passed by Megatron-LM main (core 0.20), whose routers take it
+            **(
+                {"hash_moe_layer_threshold": hash_moe_layer_threshold}
+                if hash_moe_layer_threshold is not None
+                else {}
+            ),
+        )
 
         # separate w1/w2 modules give DDP overlap boundaries
         experts_cls = MegaMoEFP8Experts if mega_moe_precision() == "mxfp8" else MegaMoEExperts
@@ -247,12 +392,19 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         # optional shared expert
         self.use_shared_expert = config.moe_shared_expert_intermediate_size is not None
         if self.use_shared_expert:
-            self.shared_experts = build_module(
-                submodules.shared_experts,
-                config=config,
-                pg_collection=pg_collection,
-                gate=config.moe_shared_expert_gate,
+            assert (
+                submodules.shared_experts is not None
+            ), "Shared experts builder is not provided in the module spec."
+            shared_experts_kwargs = dict(
+                config=config, pg_collection=pg_collection, gate=config.moe_shared_expert_gate
             )
+            if isinstance(submodules.shared_experts, ModuleSpec):
+                self.shared_experts = build_module(submodules.shared_experts, **shared_experts_kwargs)
+            else:
+                # Megatron-LM core_v0.19+: a builder callable, which also takes the module name
+                self.shared_experts = submodules.shared_experts(
+                    **shared_experts_kwargs, name=(name + ".shared_experts") if name is not None else None
+                )
         else:
             self.shared_experts = None
 
@@ -275,7 +427,6 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         assert (
             config.moe_expert_capacity_factor is None
         ), "MegaMoE is dropless; moe_expert_capacity_factor must be None"
-        assert not config.add_bias_linear, "MegaMoE fused expert has no bias; set add_bias_linear=False"
         assert not config.init_model_with_meta_device, "MegaMoE does not support meta-device init"
         load_balancing_type = config.moe_router_load_balancing_type
         load_balancing_types = (
@@ -288,14 +439,23 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         hidden_states: torch.Tensor,
         intermediate_tensors: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        packed_seq_params: Optional[PackedSeqParams] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         in_shape = hidden_states.shape
         # transpose [bsz, seq] -> [seq, bsz]
         if padding_mask is not None:
             padding_mask = padding_mask.transpose(0, 1).bool()
 
+        # Megatron-LM main hands its router the token ids (hash routing) and the packed-sequence
+        # params (aux-loss groups) through the MoE layer; older routers take neither
+        router_kwargs = {
+            key: value
+            for key, value in (("input_ids", input_ids), ("packed_seq_params", packed_seq_params))
+            if value is not None
+        }
         # dense probs [T, E], aux-loss grad baked in
-        probs, _ = self.router(hidden_states, padding_mask)
+        probs, _ = self.router(hidden_states, padding_mask, **router_kwargs)
         probs = probs.reshape(-1, self.config.num_moe_experts)
 
         # dense -> sparse top-k
@@ -325,20 +485,22 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         expert_replica_id = (0, 0, edp_rank)
 
         sharded_sd: dict = {}
-        # expert weights: EP-sharded on axis 0
-        for name, weight in (
-            ("fc1_weight", self.experts.fc1_weight.weight),
-            ("fc2_weight", self.experts.fc2_weight.weight),
-        ):
-            key = f"{prefix}experts.{name}.weight"
-            sharded_sd[key] = ShardedTensor.from_rank_offsets(
-                key,
-                weight,
-                *sharded_offsets,
-                (prepend_axis_num, self.ep_rank, self.ep_size),
-                replica_id=expert_replica_id,
-                prepend_axis_num=prepend_axis_num,
-            )
+        # expert weights and biases: EP-sharded on axis 0
+        for module_name in ("fc1_weight", "fc2_weight"):
+            module = getattr(self.experts, module_name)
+            for param_name in ("weight", "bias"):
+                param = getattr(module, param_name)
+                if param is None:
+                    continue
+                key = f"{prefix}experts.{module_name}.{param_name}"
+                sharded_sd[key] = ShardedTensor.from_rank_offsets(
+                    key,
+                    param,
+                    *sharded_offsets,
+                    (prepend_axis_num, self.ep_rank, self.ep_size),
+                    replica_id=expert_replica_id,
+                    prepend_axis_num=prepend_axis_num,
+                )
         # router + shared expert: delegate to their own sharded_state_dict
         sharded_sd.update(self.router.sharded_state_dict(f"{prefix}router.", sharded_offsets, metadata))
         if self.shared_experts is not None:

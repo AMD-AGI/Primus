@@ -39,6 +39,7 @@ from primus.backends.torchtitan.patches import (  # noqa: F401
     model_override_patches,
     peak_flops_patches,
     pipelining_schedule_patches,
+    sac_profiler_ops_patches,
     sdma_symm_mem_collectives,
     triton_fused_adamw_patches,
     turbo,

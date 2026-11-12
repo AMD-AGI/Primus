@@ -56,7 +56,7 @@ import torch
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu
+from flydsl.expr import arith, const_expr, gpu
 from flydsl.expr import math as fmath
 from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
@@ -64,6 +64,7 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
+from primus_turbo.flydsl.utils import buffer_ops
 
 _LOG2E = 1.4426950408889634
 HPW = 16  # query heads per GQA group == MFMA rows
@@ -783,6 +784,15 @@ def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, retu
         ``o`` ``[S, B, Hq, 128]`` bf16 and ``lse`` ``[S, B, Hq]`` fp32 (and
         ``slot_lse``).
     """
+    # gfx1250 is wave32 with WMMA instead of MFMA and has no permlane32.
+    if "gfx1250" in get_hip_arch():
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
+            msa_token_fwd_wave32,
+        )
+
+        return msa_token_fwd_wave32(
+            q, k, v, block_table, softmax_scale, block_size, return_slot_lse, **config
+        )
     S, B, Hq, Dq = q.shape
     Hkv = k.shape[2]
     topk = block_table.shape[-1]

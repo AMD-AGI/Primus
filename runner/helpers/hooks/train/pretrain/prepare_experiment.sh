@@ -4,6 +4,7 @@
 #
 # This hook is executed by execute_hooks.sh before training. It:
 #   1. Finds --config / --data_path / --patch_args / --backend_path from args
+#      (--data_path defaults to the DATA_PATH env, then ./data/)
 #   2. Detects the framework from the pre_trainer module in the config
 #   3. Dispatches to runner/helpers/hooks/train/pretrain/<framework>/prepare.py
 #      with a stable CLI:
@@ -32,7 +33,13 @@ PRIMUS_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 source "${SCRIPT_DIR}/../../../hook_common.sh"
 
 CONFIG_FILE=""
-DATA_PATH="./data/"
+# --data_path wins, then the DATA_PATH env that base_env.sh and the docs use.
+# A relative env value is taken from the launch directory, as base_env.sh's
+# HF_HOME is, since this script later cds to PRIMUS_ROOT.
+if [[ -n "${DATA_PATH:-}" && "${DATA_PATH}" != /* ]]; then
+    DATA_PATH="${PWD}/${DATA_PATH}"
+fi
+DATA_PATH="${DATA_PATH:-./data/}"
 PATCH_ARGS="/tmp/primus_patch_args.txt"
 BACKEND_PATH=""
 BACKEND_OVERRIDE=""
@@ -120,6 +127,21 @@ _dbg(f'pre_trainer.framework: {pre_trainer.framework}')
 
 print(pre_trainer.framework)
 " | tail -n 1 | tr -d '\r' || true)"
+
+# Renamed backends, from primus/backends/backend_aliases.py; the config route above
+# is already mapped by the parser.
+if [[ -n "$BACKEND_OVERRIDE" ]]; then
+    CURRENT_BACKEND="$(python3 -c "
+import sys
+sys.path.insert(0, '${PRIMUS_ROOT}')
+from primus.backends.backend_aliases import RENAMED_BACKENDS
+print(RENAMED_BACKENDS.get(sys.argv[1], sys.argv[1]))
+" "$BACKEND_OVERRIDE" | tail -n 1 | tr -d '\r' || true)"
+    if [[ -n "$CURRENT_BACKEND" && "$CURRENT_BACKEND" != "$BACKEND_OVERRIDE" ]]; then
+        LOG_WARN "prepare_experiment.sh: --backend $BACKEND_OVERRIDE is deprecated; use --backend $CURRENT_BACKEND"
+        BACKEND_OVERRIDE="$CURRENT_BACKEND"
+    fi
+fi
 
 if [[ -n "$BACKEND_OVERRIDE" ]]; then
     FRAMEWORK="$BACKEND_OVERRIDE"

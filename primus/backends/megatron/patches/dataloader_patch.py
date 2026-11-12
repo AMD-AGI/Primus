@@ -55,6 +55,38 @@ def _preload_forkserver_torch() -> None:
         pass
 
 
+_MEGATRON_WORKER_INIT_QUALNAME = "build_pretraining_data_loader.<locals>.worker_init_fn"
+
+
+def _megatron_worker_init(_worker_id, exit_signal=None) -> None:
+    """Picklable copy of the local ``worker_init_fn`` Megatron-core 0.19+ always install."""
+    import os
+
+    for fd in os.listdir("/proc/self/fd"):
+        try:
+            if os.readlink(f"/proc/self/fd/{fd}").startswith("/dev/nvidia"):
+                os.close(int(fd))
+        except OSError:
+            pass
+    if exit_signal is not None:
+        from megatron.training.dist_signal_handler import DistributedSignalHandler
+
+        DistributedSignalHandler(exit_signal).__enter__()
+
+
+def _picklable_worker_init_fn(worker_init_fn):
+    """Spawn and forkserver pickle ``worker_init_fn``; swap out Megatron's local one."""
+    if getattr(worker_init_fn, "__qualname__", None) != _MEGATRON_WORKER_INIT_QUALNAME:
+        return worker_init_fn
+    import functools
+
+    from megatron.training import get_args as get_megatron_args
+
+    margs = get_megatron_args()
+    exit_signal = margs.exit_signal if getattr(margs, "exit_signal_handler", False) else None
+    return functools.partial(_megatron_worker_init, exit_signal=exit_signal)
+
+
 def _install_dataloader_monkeypatch(mp_context) -> None:
     """Patch ``DataLoader.__init__`` to inject ``multiprocessing_context``
     when the caller has ``num_workers > 0`` and did not set one."""
@@ -77,6 +109,8 @@ def _install_dataloader_monkeypatch(mp_context) -> None:
             and "multiprocessing_context" not in bound.arguments
         ):
             kwargs["multiprocessing_context"] = mp_context
+            if mp_context != "fork" and "worker_init_fn" in kwargs:
+                kwargs["worker_init_fn"] = _picklable_worker_init_fn(kwargs["worker_init_fn"])
             log_rank_0(f"Setting DataLoader multiprocessing_context='{mp_context}'.")
         return original_init(self, *args, **kwargs)
 

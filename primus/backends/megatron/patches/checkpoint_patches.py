@@ -108,26 +108,15 @@ def patch_load_checkpoint_for_distributed(ctx: PatchContext):
 
     original_load_checkpoint = checkpointing.load_checkpoint
 
-    def patched_load_checkpoint(
-        ddp_model,
-        optimizer,
-        opt_param_scheduler,
-        load_arg="load",
-        strict=True,
-        checkpointing_context=None,
-        skip_load_to_model_and_opt=False,
-    ):
-        """Wrapper that handles missing 'model' key for torch_dist checkpoints in finetune mode."""
+    def patched_load_checkpoint(*args, **kwargs):
+        """Wrapper that handles missing 'model' key for torch_dist checkpoints in finetune mode.
+
+        All arguments are forwarded unchanged, so the wrapper follows the signature of the
+        installed Megatron (newer versions add e.g. tp_group, pp_group, dp_group,
+        rng_state_key_prefix).
+        """
         try:
-            return original_load_checkpoint(
-                ddp_model,
-                optimizer,
-                opt_param_scheduler,
-                load_arg,
-                strict,
-                checkpointing_context,
-                skip_load_to_model_and_opt,
-            )
+            return original_load_checkpoint(*args, **kwargs)
         except KeyError as e:
             if str(e) == "'model'":
                 # For torch_dist checkpoints in finetune mode, model weights are already loaded
@@ -164,7 +153,14 @@ def patch_filesystem_writer_async(ctx: PatchContext):
     """
     log_rank_0("[Patch:megatron.checkpoint.filesystem_writer_async] Patching FileSystemWriterAsync...")
 
-    import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
+    try:
+        import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
+    except ModuleNotFoundError:
+        # Removed in Megatron-LM main (core 0.20); nothing to replace there.
+        log_rank_0(
+            "[Patch:megatron.checkpoint.filesystem_writer_async] filesystem_async not present, skipped."
+        )
+        return
 
     from primus.backends.megatron.core.dist_checkpointing.strategies.filesystem_async import (
         PrimusFileSystemWriterAsync,
@@ -221,6 +217,7 @@ def patch_save_checkpoint(ctx: PatchContext):
         train_data_iterator=None,
         preprocess_common_state_dict_fn=None,
         release=False,
+        **save_kwargs,  # e.g. tp_group on newer Megatron
     ):
         args = ctx.extra.get("backend_args", {})
 
@@ -247,6 +244,7 @@ def patch_save_checkpoint(ctx: PatchContext):
             train_data_iterator=train_data_iterator,
             preprocess_common_state_dict_fn=preprocess_common_state_dict_fn,
             release=release,
+            **save_kwargs,
         )
 
     training_module.save_checkpoint = wrapped_save_checkpoint

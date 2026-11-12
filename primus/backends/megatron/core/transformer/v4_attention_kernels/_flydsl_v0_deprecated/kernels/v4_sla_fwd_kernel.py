@@ -29,13 +29,14 @@ from flydsl._mlir.dialects import fly as _fly
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import math as math_dialect
 from flydsl._mlir.dialects import memref as _memref
-from flydsl._mlir.dialects import scf
+from flydsl._mlir.dialects import scf, vector
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl, vector
+from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from kernels.kernels_common import dtype_to_elem_type
+from primus_turbo.flydsl.utils import buffer_ops
 
 # ---- Module-level constants ----
 
@@ -856,9 +857,9 @@ def build_v4_swa_fwd_module(
                 k_packs_lo = [None] * K_STEPS_QK
                 k_packs_hi = [None] * K_STEPS_QK
                 for p in range_constexpr(_QK_PREFETCH_DEPTH):
-                    k_packs_lo[p] = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_lo(p)])
+                    k_packs_lo[p] = vector.load(mfma_pack_type, lds_kv, [_k_idx_lo(p)])
                     if N_HALVES == 2:
-                        k_packs_hi[p] = vector.load_op(mfma_pack_type, lds_kv, [_k_idx_hi(p)])
+                        k_packs_hi[p] = vector.load(mfma_pack_type, lds_kv, [_k_idx_hi(p)])
 
                 if ENABLE_DMA and not ENABLE_PREFETCH_3BUF and not _use_dma_dbuf:
                     # Single-buf DMA path: fire V into buf 0 inside the iter.
@@ -872,11 +873,11 @@ def build_v4_swa_fwd_module(
                     if N_HALVES == 2:
                         s_acc_hi = mfma_acc(k_packs_hi[ks], q_b_packs[ks], s_acc_hi)
                     if ks + _QK_PREFETCH_DEPTH < K_STEPS_QK:
-                        k_packs_lo[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
+                        k_packs_lo[ks + _QK_PREFETCH_DEPTH] = vector.load(
                             mfma_pack_type, lds_kv, [_k_idx_lo(ks + _QK_PREFETCH_DEPTH)]
                         )
                         if N_HALVES == 2:
-                            k_packs_hi[ks + _QK_PREFETCH_DEPTH] = vector.load_op(
+                            k_packs_hi[ks + _QK_PREFETCH_DEPTH] = vector.load(
                                 mfma_pack_type, lds_kv, [_k_idx_hi(ks + _QK_PREFETCH_DEPTH)]
                             )
 

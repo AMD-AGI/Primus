@@ -171,7 +171,10 @@ def test_snapshot_section_is_the_settings_and_details_follow(tmp_path):
     snapshot, settings = tmp_path / "batch_host.txt", tmp_path / "settings.txt"
     bash(f"perf_host_snapshot > {snapshot}\nperf_host_settings > {settings}\n")
     section = bash(f'perf_host_section {snapshot} "$(hostname)"')
-    assert section == settings.read_text()
+    # Values are live readings (clocks, NIC state) that can change between the two calls.
+    assert [line.split(":", 1)[0] for line in section.splitlines()] == [
+        line.split(":", 1)[0] for line in settings.read_text().splitlines()
+    ]
     text = snapshot.read_text()
     assert text.startswith(f"== {socket.gethostname()} ==\n")
     for name in (

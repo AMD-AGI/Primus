@@ -8,10 +8,10 @@
 
 ``MinimaxSparseAttention`` writes the loss into Megatron's MoE aux-loss tracker,
 which already handles the pipeline reduction and the per-layer slots. But
-``training_log`` passes ``track_moe_metrics`` an explicit ``track_names`` list
-built from the MoE router options, and ``reduce_aux_losses_tracker_across_ranks``
-iterates exactly that list -- so a key outside it is written every step, zeroed,
-and never reported. This appends the key to that list.
+``training_log`` passes ``MoEMetricsTracker.report`` an explicit ``track_names``
+list built from the MoE router options, and the report reduces exactly that list
+-- so a key outside it is written every step, zeroed, and never reported. This
+appends the key to that list.
 
 Same mechanism as ``deepseek_v4_indexer_loss_patches``. Both predicates read
 ``args``, which is identical on every rank, so the ranks agree on whether the
@@ -55,7 +55,7 @@ def _indexer_loss_enabled(ctx: PatchContext) -> bool:
 
 
 def _make_tracked_with_indexer_loss(original_fn):
-    """Wrap ``track_moe_metrics`` so it also reduces and reports our key."""
+    """Wrap ``MoEMetricsTracker.report`` so it also reduces and reports our key."""
 
     def wrapped(*args, track_names=None, **kwargs):
         # None means "every key in the tracker", which already covers ours.
@@ -78,18 +78,13 @@ def _make_tracked_with_indexer_loss(original_fn):
     condition=_indexer_loss_enabled,
 )
 def patch_minimax_m3_indexer_loss_logging(ctx: PatchContext):
-    import megatron.training.training as training_module
+    from megatron.core.transformer.moe.moe_logging import MoEMetricsTracker
 
-    original_fn = getattr(training_module, "track_moe_metrics", None)
-    if original_fn is None:
-        log_rank_0(
-            "[Patch:megatron.minimax_m3.indexer_loss_logging][SKIP] training.track_moe_metrics not found"
-        )
-        return
+    original_fn = MoEMetricsTracker.report
     if getattr(original_fn, _PATCHED_MARKER, False):
         return
 
-    training_module.track_moe_metrics = _make_tracked_with_indexer_loss(original_fn)
+    MoEMetricsTracker.report = _make_tracked_with_indexer_loss(original_fn)
     log_rank_0(
         f"[Patch:megatron.minimax_m3.indexer_loss_logging] '{_LOSS_NAME}' will be reported "
         "alongside the MoE aux losses"
