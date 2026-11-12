@@ -79,6 +79,41 @@ def test_single_node_matches_amd_schedule_without_four_node_extensions():
     assert {name: env[name] for name in expected} == expected
 
 
+def test_v269_single_node_profile_preserves_schedule_and_tunes_communication():
+    env = _profile_env(profile="config_1n_gbs256_a6w4_v26_9.sh")
+    baseline = _profile_env(profile="config_1n_gbs256_a6w4.sh")
+    expected = {
+        "GPU_MAX_HW_QUEUES": "4",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "2",
+        "FLUX_FSDP_RS_STREAM": "normal",
+        "TORCH_DIST_USE_NCCL2": "1",
+        "MLLOG_CONFIG_FILENAME": "config_1n_gbs256_a6w4_v26_9.sh",
+    }
+    assert {key: env[key] for key in expected} == expected
+    for key in (
+        "NNODES",
+        "LOCAL_BATCH_SIZE",
+        "GRADIENT_ACCUMULATION_STEPS",
+        "GLOBAL_BATCH_SIZE",
+        "LR",
+        "WARMUP_STEPS",
+        "SEED",
+        "EVAL_BATCH_SIZE",
+        "VAL_CHECK_INTERVAL",
+        "FSDP_ALL_GATHER_BACKEND",
+        "FSDP_SDMA_MODULES",
+        "FLUX_AG_COLPACK_KMAJOR",
+    ):
+        assert env[key] == baseline[key]
+    overrides = {
+        "GPU_MAX_HW_QUEUES": "2",
+        "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+        "FLUX_FSDP_RS_STREAM": "default",
+    }
+    overridden = _profile_env(profile="config_1n_gbs256_a6w4_v26_9.sh", extra_env=overrides)
+    assert {key: overridden[key] for key in overrides} == overrides
+
+
 def test_two_node_adaptation_preserves_four_node_schedule():
     env = _profile_env(profile="config_2n_gbs1024_a6w4.sh")
     four_node = _profile_env()
@@ -97,6 +132,21 @@ def test_two_node_adaptation_preserves_four_node_schedule():
         "VAL_CHECK_INTERVAL",
     ):
         assert env[name] == four_node[name]
+
+
+@pytest.mark.parametrize(
+    "profile", ["config_1n_gbs256_a6w4.sh", "config_2n_gbs1024_a6w4.sh", "config_4n_gbs1024.sh"]
+)
+@pytest.mark.parametrize(
+    "backend,override,expected",
+    [("rccl_sdma", None, "1"), ("rccl_sdma", "0", "0"), ("default", None, None)],
+)
+def test_sdma_selects_nccl2_without_overriding_controls(profile, backend, override, expected):
+    overrides = {"FSDP_ALL_GATHER_BACKEND": backend}
+    if override is not None:
+        overrides["TORCH_DIST_USE_NCCL2"] = override
+    env = _profile_env(profile=profile, extra_env=overrides)
+    assert env.get("TORCH_DIST_USE_NCCL2") == expected
 
 
 def test_cluster_network_profiles():
@@ -204,9 +254,27 @@ def test_launchers_forward_conditional_flux_vars_but_not_path(script, tmp_path):
     args = _fake_launcher(script, tmp_path)
     assert not any(arg == "PATH" or arg.startswith("PATH=") or arg == "--env=PATH" for arg in args)
     assert any(arg == "FLUX_FP4_ALL_GATHER" or arg == "FLUX_FP4_ALL_GATHER=0" for arg in args)
-    for name in ("NCCL_NET_PLUGIN", "NCCL_RMA_DISABLE", "NCCL_IB_HCA"):
+    for name in ("NCCL_NET_PLUGIN", "NCCL_RMA_DISABLE", "NCCL_IB_HCA", "TORCH_DIST_USE_NCCL2"):
         assert any(arg == name or arg.startswith(f"{name}=") for arg in args)
     assert IMAGE in args or f"DOCKER_IMAGE={IMAGE}" in args
+
+
+@pytest.mark.parametrize("privileged", ["0", "1"])
+def test_v269_launcher_forwards_image_dependency_contract(tmp_path, privileged):
+    dependency_env = {"PRIMUS_SKIP_PIP": "1", "PRIMUS_AUTO_INSTALL": "0", "PRIMUS_AUTO_DEPS_SYNC": "0"}
+    args = _fake_launcher(
+        "run_with_docker.sh",
+        tmp_path,
+        profile="config_1n_gbs256_a6w4_v26_9.sh",
+        extra_env={"DOCKER_PRIVILEGED": privileged, **dependency_env},
+    )
+    assert ("--privileged" in args) == (privileged == "1")
+    forwarded = dict(arg[4:].split("=", 1) for arg in args if arg.startswith("ENV:"))
+    assert {key: forwarded[key] for key in dependency_env} == dependency_env
+    assert forwarded["FLUX_FSDP_RS_STREAM"] == "normal"
+    assert forwarded["GPU_MAX_HW_QUEUES"] == "4"
+    assert forwarded["CUDA_DEVICE_MAX_CONNECTIONS"] == "2"
+    assert forwarded["TORCH_DIST_USE_NCCL2"] == "1"
 
 
 @pytest.mark.parametrize("script", ["run_with_docker.sh", "run_with_docker_slurm.sh"])
@@ -254,6 +322,7 @@ def test_legacy_profiles_initialize_mlperf_from_clean_environment(profile, overr
     from primus.backends.diffusion.trainers.base import BaseWanTrainer
 
     env = _profile_env(profile=profile, extra_env=overrides)
+    assert "TORCH_DIST_USE_NCCL2" not in env
     trainer = BaseWanTrainer.__new__(BaseWanTrainer)
     trainer.rank = 1
     trainer.mlperf_enabled = True

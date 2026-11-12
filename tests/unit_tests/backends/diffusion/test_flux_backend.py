@@ -37,6 +37,24 @@ def _finalize(params: dict):
     return builder.finalize()
 
 
+@pytest.mark.parametrize("with_output_fn", [False, True])
+def test_flux_kmajor_copy_out_forwards_optional_output_fn(monkeypatch, with_output_fn):
+    from primus.backends.diffusion.models.quantization import mxfp4_linear_dual as dual
+
+    output = torch.empty(0)
+    result = (output, None, None, [], [], [])
+    group = Mock()
+    group.size.return_value = 2
+    original = Mock()
+    monkeypatch.setattr(dual, "_AG_PLANS", {((), (), output.dtype, 2): False})
+    monkeypatch.setattr(dual, "_AG_COPY_OUT", original)
+    kwargs = {"all_gather_output_fn": Mock()} if with_output_fn else {}
+
+    dual._ag_kmajor_copy_out(result, [], group, **kwargs)
+
+    original.assert_called_once_with(result, [], group, **kwargs)
+
+
 def test_flux_argument_builder_selects_flux_defaults():
     args = _finalize(
         {
@@ -358,6 +376,46 @@ def test_fsdp2_compile_strategy_controls_layer_sharding(monkeypatch, strategy, w
         name.split(".", 1)[0] for name, module in root.named_modules() if module in shard_calls[:-1]
     }
     assert wrapped_names == wrapped_stacks
+
+
+@pytest.mark.parametrize("normal_stream", [False, True])
+def test_fsdp2_reduce_scatter_stream_initializes_after_fsdp(monkeypatch, normal_stream):
+    monkeypatch.setenv("FLUX_FSDP_RS_STREAM", "normal" if normal_stream else "")
+    monkeypatch.delenv("FSDP_ALL_GATHER_BACKEND", raising=False)
+    stream, state = Mock(), Mock(_comm_ctx=None)
+
+    def initialize_context(_module, _inputs):
+        if state._comm_ctx is None:
+            state._comm_ctx = Mock()
+
+    def fake_shard(module, **kwargs):
+        module.register_forward_pre_hook(initialize_context, prepend=True)
+
+    def make_stream():
+        assert state._comm_ctx is not None
+        return stream
+
+    monkeypatch.setattr("primus.backends.diffusion.trainers.fsdp2.fully_shard", fake_shard)
+    new_stream = Mock(side_effect=make_stream)
+    monkeypatch.setattr(torch.cuda, "Stream", new_stream)
+    root = torch.nn.Linear(2, 2)
+    root._get_fsdp_state = Mock(return_value=state)
+    trainer = FSDP2Trainer.__new__(FSDP2Trainer)
+    trainer.rank, trainer.world_size = 1, 8
+    trainer.mesh, trainer.sp_group = None, None
+    trainer.model, trainer.args = root, {"bf16": True}
+
+    trainer._apply_fsdp2()
+
+    new_stream.assert_not_called()
+    root(torch.zeros(1, 2))
+    root(torch.zeros(1, 2))
+    if normal_stream:
+        new_stream.assert_called_once_with()
+        assert state._comm_ctx.reduce_scatter_stream is stream
+    else:
+        new_stream.assert_not_called()
+    assert list(root._forward_pre_hooks.values()) == [initialize_context]
 
 
 def test_fsdp2_compile_output_head_in_place(monkeypatch):

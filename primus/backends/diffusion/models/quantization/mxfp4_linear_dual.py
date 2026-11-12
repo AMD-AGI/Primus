@@ -3557,7 +3557,7 @@ def _ag_check(all_gather_output, split_sizes, plan, outs, world) -> None:
             raise RuntimeError(f"FLUX_AG_COLPACK_KMAJOR: output {i} (K={k}, rb={rb}) differs in {bad} bytes")
 
 
-def _ag_kmajor_copy_out(all_gather_result, fsdp_params, group) -> None:
+def _ag_kmajor_copy_out(all_gather_result, fsdp_params, group, *, all_gather_output_fn=None) -> None:
     from torch.distributed.device_mesh import _get_device_handle
 
     (
@@ -3589,6 +3589,10 @@ def _ag_kmajor_copy_out(all_gather_result, fsdp_params, group) -> None:
             raise RuntimeError("FLUX_AG_COLPACK_KMAJOR: a gathered weight changed col-pack layout")
         inner._ag_kmajor = ok
     if not plan:
+        if all_gather_output_fn is not None:
+            return _AG_COPY_OUT(
+                all_gather_result, fsdp_params, group, all_gather_output_fn=all_gather_output_fn
+            )
         return _AG_COPY_OUT(all_gather_result, fsdp_params, group)
     device_handle = _get_device_handle(all_gather_output.device.type)
     if all_gather_event is not None:

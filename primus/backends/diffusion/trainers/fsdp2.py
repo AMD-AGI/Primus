@@ -395,6 +395,19 @@ class FSDP2Trainer(BaseWanTrainer):
                 f"with mp={mp_dtype}, reduce={reduce_dtype}"
             )
 
+        # On ROCm, a normal-priority RS stream with sufficient hardware queues
+        # can overlap collectives with GEMMs instead of sharing their queue.
+        if os.getenv("FLUX_FSDP_RS_STREAM", "") == "normal":
+
+            def _use_normal_priority_rs_stream(_module, _inputs):
+                ctx = wrap_root._get_fsdp_state()._comm_ctx
+                ctx.reduce_scatter_stream = torch.cuda.Stream()
+                handle.remove()
+                if self.rank == 0:
+                    logger.info("FSDP2: reduce-scatter on a normal-priority stream")
+
+            handle = wrap_root.register_forward_pre_hook(_use_normal_priority_rs_stream)
+
         if int(os.getenv("FLUX_FSDP_FWD_PREFETCH", "0") or 0) > 0:
             from torch.distributed.fsdp import FSDPModule
 

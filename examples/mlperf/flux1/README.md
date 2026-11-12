@@ -29,6 +29,13 @@ is required for RCCL-SDMA. `LAUNCH_MODE=primus` (default) enables the CLI's
 cuMem, allocator and interposer prerequisites; `native` is available for direct
 `torchrun` development but does not execute those hooks.
 
+For **v26.9 single-node training**, use the source-only layer in
+`Dockerfile.v26.9` and `config_1n_gbs256_a6w4_v26_9.sh`. Paired throughput
+qualification passed without rebuilding the image's native dependencies. See
+[V26_9_VALIDATION.md](V26_9_VALIDATION.md) for build/launch commands, the precise
+Turbo source/native composition, results and scope. Full convergence and
+multi-node v26.9 performance are not qualified by these short runs.
+
 ## Data
 
 Allow approximately 2.5 TB for the preprocessed MLPerf datasets:
@@ -51,6 +58,7 @@ Each node launches one process, which creates eight workers with `torchrun`.
 | `FLUX_CONFIG` | Nodes | MBS | GA | GBS | Path |
 |---|---:|---:|---:|---:|---|
 | `config_1n_gbs256_a6w4.sh` (default) | 1 | 32 | 1 | 256 | AMD single-node A6W4 schedule |
+| `config_1n_gbs256_a6w4_v26_9.sh` | 1 | 32 | 1 | 256 | Same schedule, v26.9 communication settings |
 | `config_2n_gbs1024_a6w4.sh` | 2 | 32 | 2 | 1024 | Four-node schedule adapted to two nodes |
 | `config_4n_gbs1024.sh` | 4 | 32 | 1 | 1024 | A6W4 with FP8-forward switch |
 | `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | Legacy TorchAO/Inductor FP8 |
