@@ -127,15 +127,6 @@ def missing_data(data_path: Optional[str], history_length: Optional[int]) -> Lis
     return [str(p) for p in needed if not p.exists()]
 
 
-def mlperf_run_started(log_path: str) -> bool:
-    """True once the MLPerf log holds the run_start event."""
-    try:
-        with open(log_path, errors="replace") as f:
-            return any('"run_start"' in line for line in f)
-    except OSError:
-        return False
-
-
 def run_summary(log_path: str) -> Dict[str, Any]:
     """Time to train, status and evals from an MLPerf log (empty if absent)."""
     import json

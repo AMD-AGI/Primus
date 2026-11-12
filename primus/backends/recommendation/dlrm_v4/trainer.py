@@ -118,9 +118,10 @@ class DlrmV4Trainer(BaseTrainer):
         # of each node writes it right after RUN_START. Only global rank 0 writes the
         # MLPerf log, so with one log per node, nodes 1+ never saw run_start and never
         # warmed; and a shared log must not be deleted by another node.
-        out.mkdir(parents=True, exist_ok=True)
-        self.run_start_marker = str(out / f"run_start.node{os.environ.get('NODE_RANK', '0')}")
-        os.environ["DLRM_RUN_START_MARKER"] = self.run_start_marker
+        if self._p("warm_cache_after_run_start", False):
+            out.mkdir(parents=True, exist_ok=True)
+            self.run_start_marker = str(out / f"run_start.node{os.environ.get('NODE_RANK', '0')}")
+            os.environ["DLRM_RUN_START_MARKER"] = self.run_start_marker
 
         missing = run_config.missing_data(os.environ.get("DLRM_DATA_PATH"), self._p("history_length"))
         if missing:
@@ -203,6 +204,10 @@ class DlrmV4Trainer(BaseTrainer):
             )
         finally:
             self._warm_stop.set()
+        if self._warm_thread is not None and not os.path.exists(self.run_start_marker):
+            # The marker is written at RUN_START of an MLPerf cold start only: not with MLPerf
+            # logging off, on a resume, or by a trainer_src without the write.
+            warning_rank_0(f"[Primus:dlrm_v4] page cache not warmed: no {self.run_start_marker}")
         if self.mlperf_log:
             summary = run_config.run_summary(self.mlperf_log)
             log_rank_0(f"[Primus:dlrm_v4] MLPerf summary: {summary} ({self.mlperf_log})")

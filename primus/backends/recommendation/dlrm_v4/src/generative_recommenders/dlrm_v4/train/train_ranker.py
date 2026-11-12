@@ -602,7 +602,7 @@ def _main_func(
         # there. log_run_start ends with a barrier, so every rank is past
         # RUN_START here; each node's local rank 0 writes the node's marker.
         _marker = os.environ.get("DLRM_RUN_START_MARKER")
-        if _marker and rank % max(1, torch.cuda.device_count()) == 0:
+        if _marker and local_rank == 0:
             try:
                 with open(_marker, "w") as _f:
                     _f.write("%.3f\n" % time.time())

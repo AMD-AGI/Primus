@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -100,12 +101,10 @@ def _mllog(key, time_ms, value=None, metadata=None):
     return ":::MLLOG " + json.dumps(event) + "\n"
 
 
-def test_run_started_and_summary(tmp_path):
+def test_run_summary(tmp_path):
     log = tmp_path / "mlperf.log"
-    assert not run_config.mlperf_run_started(str(log))
     assert run_config.run_summary(str(log)) == {}
     log.write_text(_mllog("init_start", 1000) + "noise\n" + _mllog("run_start", 201000))
-    assert run_config.mlperf_run_started(str(log))
     log.write_text(
         log.read_text()
         + _mllog("eval_accuracy", 500000, 0.74)
@@ -245,6 +244,7 @@ def test_trainer_setup_and_init_keep_paths_of_the_launch_directory(tmp_path, mon
         "PYTHONPATH",
         "MLPERF_CACHE_CLEARED",
         "MLPERF_LOGGING",
+        "DLRM_RUN_START_MARKER",
     ):
         monkeypatch.delenv(name, raising=False)
     params = {
@@ -263,6 +263,7 @@ def test_trainer_setup_and_init_keep_paths_of_the_launch_directory(tmp_path, mon
         assert os.getcwd() == str(src) and os.environ["SEED"] == "7"
         assert os.environ["PYTHONPATH"].split(os.pathsep)[0] == str(src)  # no private dir: not added
         assert os.environ["MLPERF_LOG_PATH"] == str(launch / "rel_out" / "mlperf_dlrm_v4.log")
+        assert not t.run_start_marker and "DLRM_RUN_START_MARKER" not in os.environ  # no warm: no marker
         t.init()
         gin = launch / "rel_out" / "dlrm_v4.gin"
         assert t.gin_path == str(gin) and "a.b = 2" in gin.read_text()
@@ -274,12 +275,12 @@ def test_trainer_setup_and_init_keep_paths_of_the_launch_directory(tmp_path, mon
         os.chdir(launch)
 
 
-@pytest.mark.parametrize("node_rank", ["0", "3"])
-def test_trainer_warm_waits_for_its_node_run_start_marker(tmp_path, monkeypatch, node_rank):
+@pytest.mark.parametrize("node_rank, writes_marker", [("0", True), ("3", True), ("3", False)])
+def test_trainer_warm_waits_for_its_node_run_start_marker(tmp_path, monkeypatch, node_rank, writes_marker):
     """The in-run warm keys on a per-node RUN_START marker (written by the trainer's
     local rank 0 of each node), not on the MLPerf log: only global rank 0 writes that
     log, so nodes 1+ never saw run_start in it. Node 0 still starts a fresh log; a
-    shared log must not be deleted by another node."""
+    shared log must not be deleted by another node. No marker: no warm, a warning."""
     from primus.backends.recommendation.dlrm_v4 import trainer as T
 
     src, data = _fake_trainer_tree(tmp_path)
@@ -312,16 +313,20 @@ def test_trainer_warm_waits_for_its_node_run_start_marker(tmp_path, monkeypatch,
         log = Path(os.environ["MLPERF_LOG_PATH"])
         log.write_text(':::MLLOG {"key": "run_start"}\n')
         marker.write_text("stale\n")
-        warmed = []
+        warmed, warned = [], []
         monkeypatch.setattr(t, "_pagecache", lambda mode: warmed.append(mode))
+        monkeypatch.setattr(T, "warning_rank_0", warned.append)
 
         class _TR:
             @staticmethod
             def launch(*args):
                 assert not marker.exists()  # the stale marker was removed before launch
                 assert log.exists() == (node_rank != "0")
-                marker.write_text("1.0\n")  # what each node's local rank 0 does at RUN_START
-                t._warm_thread.join(timeout=10)
+                time.sleep(0.6)  # over one 0.5 s poll: nothing but the marker starts the warm
+                assert warmed == []
+                if writes_marker:
+                    marker.write_text("1.0\n")  # what each node's local rank 0 does at RUN_START
+                    t._warm_thread.join(timeout=10)
 
         monkeypatch.setitem(sys.modules, "generative_recommenders.dlrm_v4.train.train_ranker", _TR)
         import importlib
@@ -337,11 +342,22 @@ def test_trainer_warm_waits_for_its_node_run_start_marker(tmp_path, monkeypatch,
             pass
         monkeypatch.setattr(T.run_config, "run_summary", lambda path: {})
         t.train()
-        assert warmed == ["warm"]
+        assert warmed == (["warm"] if writes_marker else [])
+        assert warned == ([] if writes_marker else [f"[Primus:dlrm_v4] page cache not warmed: no {marker}"])
         t.cleanup()
     finally:
         sys.path[:] = saved
         os.chdir(launch)
+
+
+def test_trainer_writes_the_run_start_marker_on_local_rank_0_of_each_node():
+    # The writer the warm test stands in for, parsed (importing the trainer needs
+    # torch/torchrec): it reads the variable setup() exports, after RUN_START, on local
+    # rank 0 (rank % device count misses nodes when GPUS_PER_NODE < visible GPUs).
+    src = (SRC_ROOT / "generative_recommenders/dlrm_v4/train/train_ranker.py").read_text()
+    read = src.index('_marker = os.environ.get("DLRM_RUN_START_MARKER")')
+    gate = src.index("if _marker and local_rank == 0:", read)
+    assert src.index("mlperf_logger.log_run_start(") < read < gate
 
 
 def test_trainer_refuses_missing_data(tmp_path, monkeypatch):
