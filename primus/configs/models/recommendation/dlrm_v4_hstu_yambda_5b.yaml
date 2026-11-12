@@ -1,0 +1,7 @@
+# DLRMv4: the HSTU ranker on yambda-5b (MLPerf Training dlrmv4). The model,
+# kernels and precision are set by the trainer's gin file:
+#   primus/backends/recommendation/dlrm_v4/src/generative_recommenders/dlrm_v4/train/gin/yambda_5b.gin
+model_family: dlrm_v4
+dataset: yambda-5b
+gin_file: null
+history_length: null        # 4086 (the staged cache is hstu_cache_L4086)
