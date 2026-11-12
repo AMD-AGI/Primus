@@ -13,11 +13,12 @@ The image's Primus source stays at `/opt/primus`. Use a persistent session and a
 fresh directory for every attempt:
 
 ```bash
-python /smoke/tests/scripts/run_specforge_single_node_smoke.py \
+uv run --no-project --python "$(command -v python)" python /smoke/tests/scripts/run_specforge_single_node_smoke.py \
   --primus-root /opt/primus \
   --data /data/dataset/sharegpt_train.jsonl \
   --data-sha256 "$FIXTURE_SHA256" \
-  --run-dir /data/runs/unique-attempt
+  --run-dir /data/runs/unique-attempt \
+  --baseline /smoke/tests/scripts/specforge_smoke_baseline_mi355x.json
 ```
 
 `FIXTURE_SHA256` must be the recorded checksum of an already frozen dataset.
@@ -43,7 +44,7 @@ seeds, and GPU architecture. The image currently includes PR #1421; refreshing
 that runtime requires new calibration. Model and tokenizer use the same exact
 predownloaded Hugging Face snapshot, with offline loading during training.
 
-The source is `Aeala/ShareGPT_Vicuna_unfiltered`, specifically
+The source is [`Aeala/ShareGPT_Vicuna_unfiltered`](https://huggingface.co/datasets/Aeala/ShareGPT_Vicuna_unfiltered), specifically
 `ShareGPT_V4.3_unfiltered_cleaned_split.json`. Its dataset card describes a cleaned
 reupload and lists Apache-2.0. The fixture contains the first 8,192 valid,
 unique-ID conversations in source order, retaining complete alternating
@@ -112,10 +113,31 @@ CPU checks:
 uv run --no-project python -m unittest discover -s tests/scripts -p test_specforge_smoke_results.py
 ```
 
-## Work remaining before CI qualification
+## MI355X qualification (2026-11-12)
 
-- Complete GPU calibration and two independent validation executions, then check
-  in the reviewed baseline and a compact result report.
+Three calibration runs and two subsequent independent validation runs completed
+all 200 steps, with zero role statuses and nonempty shared/rank-0 checkpoints.
+All 40 logged loss, accuracy, and gradient-norm records matched exactly across
+all five executions at the logged precision. Runtime preprocessing retained
+7,846 of the 8,192 fixture conversations.
+
+The accepted `specforge_smoke_baseline_mi355x.json` was frozen before validation
+and remained byte-for-byte unchanged. Its late-window loss is 7.3862574100494385
+with absolute tolerance 0.07386257410049439 (1%); accuracy is 0.06316577829420567
+with absolute tolerance 0.005 (0.5 percentage points). With zero observed spread,
+these tolerances come from the predeclared floors, not a measured statistical
+confidence interval. This small experiment does not establish a long-term
+flake rate or coverage of other hardware/runtime stacks.
+
+`specforge_smoke_qualification_mi355x.json` records the five summaries' hashes,
+metrics, runtime versions, and unchanged baseline checksum. Runtime was PyTorch
+`2.9.1+rocm7.2.0.git7e1940d4`, HIP `7.2.26015-fc0010cf6a`, with two MI355X GPUs.
+A prior attempt failed in launcher preflight before training because the default
+HIP visibility list exceeded the allocated ROCr mask. The runner now explicitly
+preserves the allocated pair; that failed attempt is excluded from calibration.
+
+## Work remaining before CI integration
+
 - Add a trainer pytest entry point, JUnit reporting, backend selection, cleanup,
   and the existing non-draft `ci:gpu` gate. Keep the SpecForge runtime isolated.
 - Checkpoint reload correctness and end-to-end hard-timeout cleanup remain

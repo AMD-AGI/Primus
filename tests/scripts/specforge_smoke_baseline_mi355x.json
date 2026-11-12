@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "reference_identity": "61878fef410cca9dfab1730f756dd93bb7e7a071b15e0c77eb8540906ac94c32",
+  "metric": "mean of logged training observations at steps 155,160,...,200",
+  "rule": "two-sided; max(2 * maximum absolute deviation from median, floor); loss floor=max(1% of median,1e-6); accuracy floor=0.005",
+  "calibration_summary_sha256": [
+    "1107965dd4b1a38337a95b67e50d20c91bac22619192e8af57f953e3475b046f",
+    "4acd92e57cc32a9cb1bf024887d3b15a6b46d9e94ea29d54c8a80dd4bf388e01",
+    "10190f831c7f38a567b6857ecb66828cd048223a2f60008c126d41c6bb25775a"
+  ],
+  "bounds": {
+    "train/loss": {
+      "reference": 7.3862574100494385,
+      "absolute_tolerance": 0.07386257410049439,
+      "calibration_values": [
+        7.3862574100494385,
+        7.3862574100494385,
+        7.3862574100494385
+      ]
+    },
+    "train/acc": {
+      "reference": 0.06316577829420567,
+      "absolute_tolerance": 0.005,
+      "calibration_values": [
+        0.06316577829420567,
+        0.06316577829420567,
+        0.06316577829420567
+      ]
+    }
+  }
+}
