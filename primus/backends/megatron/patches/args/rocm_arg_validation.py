@@ -101,6 +101,18 @@ def validate_fsdp2_optimizer_exclusivity(args) -> None:
         )
 
 
+def validate_cross_entropy_exclusivity(args) -> None:
+    """Reject Turbo cross entropy together with the deferred TE cross entropy.
+
+    Both replace Megatron's ``te_parallel_cross_entropy``, and patch failures are only
+    logged, so the check has to stop the run here rather than in either patch.
+    """
+    if getattr(args, "deferred_cross_entropy", False) and getattr(args, "use_turbo_cross_entropy", False):
+        raise ValueError(
+            "deferred_cross_entropy and use_turbo_cross_entropy are mutually exclusive; enable at most one."
+        )
+
+
 def validate_turbo_grouped_gemm_without_padding(args) -> None:
     """Validate the no-padding PrimusTurbo grouped-GEMM path."""
     option = "turbo_grouped_gemm_without_padding"
@@ -208,6 +220,7 @@ def validate_args_on_rocm(args):
     ), "use_turbo_parallel_linear has been removed; please use use_turbo_gemm instead."
 
     validate_fsdp2_optimizer_exclusivity(args)
+    validate_cross_entropy_exclusivity(args)
 
     use_turbo_gemm = getattr(args, "use_turbo_gemm", False)
     # Turbo FP8 linear check
