@@ -110,9 +110,7 @@ class TestHybridRoute:
         """The Task 6 recipe is a routing contract, not just a config label."""
         calls = []
         fp6_impl_module = types.ModuleType("primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl")
-        fp6_pack_module = types.ModuleType(
-            "primus_turbo.pytorch.kernels.quantization.mxfp6_pack"
-        )
+        fp6_pack_module = types.ModuleType("primus_turbo.pytorch.kernels.quantization.mxfp6_pack")
         backend_module = types.ModuleType("primus_turbo.pytorch.core.backend")
         precision_module = types.ModuleType("primus_turbo.pytorch.core.low_precision")
         fp4_impl_module = types.ModuleType("primus_turbo.pytorch.kernels.gemm.gemm_fp4_impl")
@@ -192,7 +190,11 @@ class TestHybridRoute:
             granularity=types.SimpleNamespace(value=3),
             block_size=32,
         )
-        out = mxfp6_fwd_mxfp4_bwd(x, weight, object(), fp4_config)
+        fp6_config = types.SimpleNamespace(
+            block_size=32,
+            granularity=types.SimpleNamespace(value=3),
+        )
+        out = mxfp6_fwd_mxfp4_bwd(x, weight, fp6_config, fp4_config)
         grad = torch.randn_like(out)
         out.backward(grad)
 
