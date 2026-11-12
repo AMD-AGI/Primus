@@ -140,6 +140,14 @@ subtrees:
                 title: Adding new models
               - file: 04-technical-guides/diffusion-models/api_reference.md
                 title: API reference
+      - file: 04-technical-guides/recommendation/README.md
+        title: Recommendation models
+        subtrees:
+          - entries:
+              - file: 04-technical-guides/recommendation/dlrm_v4/README.md
+                title: DLRMv4 guide
+              - file: 04-technical-guides/recommendation/dlrm_v4/benchmark.md
+                title: DLRMv4 benchmark reference
       - file: 04-technical-guides/specforge/introduction.md
         title: SpecForge
         subtrees:
