@@ -145,10 +145,9 @@ def scan(part, nparts, out, shift=0, slow_ms=40.0, table=None):
                         # 50-200 ms kernel for the 1024->256 dgrad at M >= ~0.8M, rows the dedup chain never
                         # reaches). Only the part of the first call above a second one is a first-use cost.
                         a = time.perf_counter()
-                        del_y = run_op(torch, bufs, k, n, op, m)
+                        run_op(torch, bufs, k, n, op, m)
                         torch.cuda.synchronize()
                         ms2 = (time.perf_counter() - a) * 1e3
-                        del del_y
                         if ms - ms2 <= slow_ms:
                             continue
                         r = dict(

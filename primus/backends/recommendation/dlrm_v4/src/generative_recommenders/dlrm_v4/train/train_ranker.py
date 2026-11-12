@@ -19,6 +19,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 import os
 import sys
+import time
 import traceback
 
 import gin
@@ -595,6 +596,18 @@ def _main_func(
             micro_batch_size=int(train_dataloader.batch_size),
             config_filename=gin_file,
         )
+        # Per-node RUN_START marker for the launcher's in-run page-cache warm
+        # (Primus DlrmV4Trainer, WARM_CACHE_AFTER_RUN_START): only global rank 0
+        # writes the MLPerf log, so a node other than 0 cannot see run_start
+        # there. log_run_start ends with a barrier, so every rank is past
+        # RUN_START here; each node's local rank 0 writes the node's marker.
+        _marker = os.environ.get("DLRM_RUN_START_MARKER")
+        if _marker and rank % max(1, torch.cuda.device_count()) == 0:
+            try:
+                with open(_marker, "w") as _f:
+                    _f.write("%.3f\n" % time.time())
+            except OSError as _e:
+                logger.warning("run_start marker %s not written: %s", _marker, _e)
         # TSPEC: Triton compiles from here on are "post" RUN_START (recorder
         # phase, monitor count).
         _tspec.mark_run_start()
