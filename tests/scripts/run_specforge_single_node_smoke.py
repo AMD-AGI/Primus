@@ -124,7 +124,19 @@ def main():
     config_path = run_dir / "recipe.yaml"
     config_path.write_text(yaml.safe_dump(recipe, sort_keys=False), encoding="utf-8")
     env = dict(os.environ)
+    # HIP ordinals are relative to the ROCr mask. Keep launcher preflight on
+    # exactly the allocated pair; base_env otherwise defaults to all devices.
+    mask = (
+        env.get("ROCR_VISIBLE_DEVICES") or env.get("HIP_VISIBLE_DEVICES") or env.get("CUDA_VISIBLE_DEVICES")
+    )
+    if mask:
+        if len(mask.split(",")) != 2:
+            parser.error("Expected a visibility mask containing exactly two allocated GPUs")
+        env["ROCR_VISIBLE_DEVICES"] = mask
     env.update(
+        HIP_VISIBLE_DEVICES="0,1",
+        CUDA_VISIBLE_DEVICES="0,1",
+        GPUS_PER_NODE="2",
         PRIMUS_SPECFORGE_SINGLE_NODE="true",
         CAPTURE_NNODES="1",
         TRAINER_NNODES="1",
