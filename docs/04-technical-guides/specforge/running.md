@@ -90,18 +90,24 @@ Use a runtime image matching the GPU architecture (see [runtime image](runtime-i
 Inside the image, the same environment and recipe work with
 `./runner/primus-cli direct -- train pretrain --config ...`.
 Without Slurm, omit `slurm srun -N 1 --gres=gpu:2 --` to launch via `container`.
-Use a fresh run root and consumer-state directory for each attempt.
+Use an empty run root and a nonexistent consumer-state directory for each attempt.
+Do not pre-create output/state directories under the run root; existing entries
+are reported by name to avoid accidentally reusing state. Prefer local storage
+for consumer state on a single node.
 Single-node services communicate over loopback. Capture storage defaults to a
 32 GiB Mooncake segment to accommodate trainer warm-up; an explicit
 `MOONCAKE_GLOBAL_SEGMENT_SIZE` overrides this default.
 With `SERVER_COUNT * SERVER_TP` capture GPUs and `NPROC_PER_NODE` trainer GPUs,
 request their **sum** from Slurm. GPU IDs refer to devices visible inside the container.
 
-Primus keeps sidecars alive until both roles finish, propagates either role's
-failure, and tears down the local processes on failure or interruption.
+Primus treats successful consumer completion as training completion and stops
+the producer and sidecars. A producer that finishes first gives the consumer a
+bounded time to finish. Observed role failures still propagate; interruption
+also tears down the local processes.
 Logs are `mooncake.log`, `sglang-server-0-*.log`, `producer.log`, and
 `consumer.log` under `RUN_ROOT`. Successful completion leaves both
-`consumer.done` and `inference.done` set to `0`.
+`consumer.done` and `inference.done` set to `0`. On failure, consumer status
+is its exit code, `not_started`, or `terminated_by_supervisor`, as applicable.
 
 ## Offline
 

@@ -459,8 +459,13 @@ def validate_online_identity(settings: Mapping[str, Any], *, rank: int, nodes: i
     if settings.get("single_node"):
         if capture_nnodes != 1 or trainer_nnodes != 1:
             issues.append("single_node requires capture_nnodes=trainer_nnodes=1")
-        server_devices = str(settings["server_gpus"]).split(",")
-        trainer_devices = str(settings["trainer_gpus"]).split(",")
+
+        def canonical_devices(value):
+            tokens = [token.strip() for token in str(value).split(",")]
+            return [str(int(token)) if token.isdecimal() else token for token in tokens]
+
+        server_devices = canonical_devices(settings["server_gpus"])
+        trainer_devices = canonical_devices(settings["trainer_gpus"])
         if set(server_devices) & set(trainer_devices):
             issues.append("single_node requires disjoint server_gpus and trainer_gpus")
         for name, devices in (("server_gpus", server_devices), ("trainer_gpus", trainer_devices)):

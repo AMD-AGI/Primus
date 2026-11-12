@@ -54,6 +54,10 @@ from primus.backends.specforge.online_launch import (
 )
 from primus.core.utils.module_utils import log_rank_0
 
+# Size capture storage for trainer warm-up; preserve explicit environment overrides.
+MOONCAKE_SEGMENT_BYTES = 32 << 30
+MOONCAKE_LOCAL_BUFFER_BYTES = 1 << 30
+
 # SpecForge producer is a 1-node job. Trainer NODE_RANK must be relative to
 # the consumer group (0..trainer_nnodes), not the Slurm allocation, or
 # SpecForge raises ``node_rank=N must be in [0, nnodes)``.
@@ -213,15 +217,19 @@ def _start_local_sglang(
             gpus = server_gpu_group(settings["server_gpus"], index, int(settings["server_tp"]))
             server_env = capture_server_env(_merge_env(mooncake_env(head_ip, settings, local_ip), gpus))
             if settings.get("single_node"):
-                server_env.setdefault("MOONCAKE_GLOBAL_SEGMENT_SIZE", str(32 << 30))
+                server_env.setdefault("MOONCAKE_GLOBAL_SEGMENT_SIZE", str(MOONCAKE_SEGMENT_BYTES))
             log_path = log_root / f"sglang-server-{capture_rank}-{index}.log"
             proc = _popen(sglang_server_argv(index, settings), server_env, log_path)
             servers.append(proc)
             _wait_sglang(local_ip, index, settings, proc, log_path)
             require_capture_plugin(f"http://{local_ip}:{int(settings['server_port']) + index}", log_path)
     except BaseException:
-        for proc in reversed(servers):
-            _kill_group(proc)
+        previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            for proc in reversed(servers):
+                _kill_group(proc)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
         raise
     write_lines(sglang_url_path(str(log_root), capture_rank), server_urls(local_ip, settings))
     log_rank_0(f"SGLang capture server(s) healthy on rank {capture_rank}")
@@ -302,6 +310,25 @@ def run_online(params: Any) -> None:
     _run_trainer_node(params, settings, trainer_node_rank(rank, settings))
 
 
+def _start_mooncake_master(head_ip, settings, paths, extra_env):
+    mc_env = {**os.environ, **extra_env}
+    mc_env.setdefault("MOONCAKE_GLOBAL_SEGMENT_SIZE", str(MOONCAKE_SEGMENT_BYTES))
+    mc_env.setdefault("MOONCAKE_LOCAL_BUFFER_SIZE", str(MOONCAKE_LOCAL_BUFFER_BYTES))
+    master = _popen(mooncake_master_argv(settings), mc_env, paths["mooncake_log"])
+    try:
+        _wait_mooncake(head_ip, settings, master, paths["mooncake_log"])
+        write_status(paths["head_ip"], head_ip)
+    except BaseException:
+        previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            _kill_group(master)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        raise
+    log_rank_0(f"Mooncake ready at {head_ip}:{settings['mooncake_rpc_port']}")
+    return master
+
+
 def _run_single_node(params: Any, settings: dict[str, Any]) -> None:
     """Own both role processes and their sidecars on one host."""
     paths = ready_paths(settings["run_root"])
@@ -309,28 +336,32 @@ def _run_single_node(params: Any, settings: dict[str, Any]) -> None:
     if shutil.which("mooncake_master") is None:
         raise RuntimeError("[Primus:specforge] mooncake_master is not on PATH")
     paths["root"].mkdir(parents=True, exist_ok=True)
-    if any(paths["root"].iterdir()):
-        raise RuntimeError("[Primus:specforge] run root is not empty; choose a fresh RUN_ID")
-    Path(settings["consumer_state_dir"]).mkdir(parents=True, exist_ok=False)
+    leftovers = sorted(path.name for path in paths["root"].iterdir())
+    if leftovers:
+        raise RuntimeError(
+            f"[Primus:specforge] run root contains {leftovers}; choose a fresh RUN_ID: {paths['root']}"
+        )
+    consumer_dir = Path(settings["consumer_state_dir"])
+    try:
+        consumer_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            f"[Primus:specforge] choose a fresh CONSUMER_STATE_DIR; path already exists: {consumer_dir}"
+        ) from exc
 
     master = producer = consumer = None
     servers: list[subprocess.Popen] = []
     result = 1
-    consumer_result = 1
+    consumer_result = "not_started"
     previous_sigterm = signal.getsignal(signal.SIGTERM)
 
     def terminate(signum, frame):
         raise SystemExit(128 + signum)
 
+    extra_env = mooncake_env(head_ip, settings, head_ip)
     signal.signal(signal.SIGTERM, terminate)
     try:
-        mc_env = os.environ.copy()
-        mc_env.update(mooncake_env(head_ip, settings, head_ip))
-        mc_env.setdefault("MOONCAKE_GLOBAL_SEGMENT_SIZE", str(32 << 30))
-        mc_env.setdefault("MOONCAKE_LOCAL_BUFFER_SIZE", str(1 << 30))
-        master = _popen(mooncake_master_argv(settings), mc_env, paths["mooncake_log"])
-        _wait_mooncake(head_ip, settings, master, paths["mooncake_log"])
-        write_status(paths["head_ip"], head_ip)
+        master = _start_mooncake_master(head_ip, settings, paths, extra_env)
         servers = _start_local_sglang(settings, head_ip, head_ip, paths["root"], capture_rank=0)
         urls = server_urls(head_ip, settings)
         write_lines(paths["server_urls"], urls)
@@ -341,14 +372,17 @@ def _run_single_node(params: Any, settings: dict[str, Any]) -> None:
             output_dir=getattr(params, "output_dir", None) or None,
             server_url_list=urls,
         )
-        extra_env = mooncake_env(head_ip, settings, head_ip)
+        producer_argv = build_role_argv(params, "producer", overrides)
+        consumer_argv = build_role_argv(params, "consumer", overrides)
+        log_rank_0(f"SpecForge producer command: {' '.join(producer_argv)}")
+        log_rank_0(f"SpecForge consumer command: {' '.join(consumer_argv)}")
         producer = _popen(
-            build_role_argv(params, "producer", overrides),
+            producer_argv,
             _specforge_child_env(extra_env, None),
             paths["producer_log"],
         )
         consumer = _popen(
-            build_role_argv(params, "consumer", overrides),
+            consumer_argv,
             _specforge_child_env(extra_env, settings["trainer_gpus"]),
             paths["consumer_log"],
         )
@@ -360,13 +394,13 @@ def _run_single_node(params: Any, settings: dict[str, Any]) -> None:
             for role, code in (("producer", producer_code), ("consumer", consumer_code)):
                 if code not in (None, 0):
                     raise RuntimeError(f"[Primus:specforge] {role} exited with status {code}")
-            if producer_code == 0 and consumer_code == 0:
+            if consumer_code == 0:
                 result = 0
                 break
             failure = _capture_stack_failed(head_ip, settings, master, servers)
             if failure:
                 raise RuntimeError(f"[Primus:specforge] {failure}")
-            if producer_code is not None or consumer_code is not None:
+            if producer_code is not None:
                 if peer_deadline is None:
                     peer_deadline = time.monotonic() + settings["peer_timeout_s"]
                 if time.monotonic() >= peer_deadline:
@@ -374,7 +408,12 @@ def _run_single_node(params: Any, settings: dict[str, Any]) -> None:
             time.sleep(2)
         log_rank_0("Single-node online training finished; tearing down sidecars")
     finally:
+        # A repeated launcher SIGTERM must not interrupt sidecar cleanup.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         try:
+            if consumer is not None:
+                code = consumer.poll()
+                consumer_result = code if code is not None else "terminated_by_supervisor"
             _kill_group(consumer)
             _kill_group(producer)
             for proc in servers:
@@ -405,14 +444,7 @@ def _run_capture_node(params: Any, settings: dict[str, Any]) -> None:
     servers: list[subprocess.Popen] = []
     producer = None
     try:
-        mc_env = os.environ.copy()
-        mc_env.update(mooncake_env(head_ip, settings, head_ip))
-        mc_env.setdefault("MOONCAKE_GLOBAL_SEGMENT_SIZE", str(32 << 30))
-        mc_env.setdefault("MOONCAKE_LOCAL_BUFFER_SIZE", str(1 << 30))
-        master = _popen(mooncake_master_argv(settings), mc_env, paths["mooncake_log"])
-        _wait_mooncake(head_ip, settings, master, paths["mooncake_log"])
-        write_status(paths["head_ip"], head_ip)
-        log_rank_0(f"Mooncake ready at {head_ip}:{settings['mooncake_rpc_port']}")
+        master = _start_mooncake_master(head_ip, settings, paths, mooncake_env(head_ip, settings, head_ip))
 
         servers = _start_local_sglang(settings, head_ip, head_ip, paths["root"], capture_rank=0)
         url_list = _collect_server_urls(settings, settings["start_timeout_s"])

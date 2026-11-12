@@ -193,6 +193,7 @@ modules:
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
       specforge_online:
+        single_node: ${PRIMUS_SPECFORGE_SINGLE_NODE:false}  # both roles on one host
         run_id: ${RUN_ID}                # required; letters, digits, . _ -
         run_root: ${RUN_ROOT}            # required; shared control dir
         consumer_state_dir: ${CONSUMER_STATE_DIR}  # required; local NVMe

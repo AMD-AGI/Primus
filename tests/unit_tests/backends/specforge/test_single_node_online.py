@@ -15,6 +15,8 @@ from primus.backends.specforge.online_launch import (
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "require_capture_plugin", lambda *args: None)
+    monkeypatch.delenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", raising=False)
+    monkeypatch.delenv("MOONCAKE_LOCAL_BUFFER_SIZE", raising=False)
     root = tmp_path / "specforge"
     root.mkdir()
     (root / "pyproject.toml").write_text("[project]\nname='specforge'\n")
@@ -124,6 +126,8 @@ def test_both_roles_gpu_isolation_and_cleanup(setup, harness, monkeypatch):
         assert "RANK" not in env and "SLURM_PROCID" not in env
         assert argv[argv.index("--role") + 1] == role
         assert proc in killed
+    assert launched["master"][1]["MOONCAKE_GLOBAL_SEGMENT_SIZE"] == str(32 << 30)
+    assert launched["master"][1]["MOONCAKE_LOCAL_BUFFER_SIZE"] == str(1 << 30)
     assert server in killed and launched["master"][0] in killed
     assert (Path(settings["run_root"]) / "inference.done").read_text().strip() == "0"
     assert (Path(settings["run_root"]) / "consumer.done").read_text().strip() == "0"
@@ -195,6 +199,10 @@ def test_capture_startup_failure_cleans_partial_servers(setup, monkeypatch):
 
 
 def test_dispatch_single_node_and_existing_multi_node(setup, monkeypatch):
+    from primus.backends.specforge import specforge_pretrain_trainer as trainer
+
+    monkeypatch.setattr(trainer, "clear_partial_distributed_env", lambda: [])
+    monkeypatch.setattr(trainer, "align_visible_devices", lambda: None)
     params, settings = setup
     calls = []
     monkeypatch.setattr(supervisor, "online_settings", lambda params: settings)
@@ -257,3 +265,86 @@ def test_capture_storage_segment(setup, monkeypatch, configured, expected):
     supervisor._start_local_sglang(settings, "127.0.0.1", "127.0.0.1", Path(settings["run_root"]), 0)
     assert seen[0]["MOONCAKE_GLOBAL_SEGMENT_SIZE"] == expected
     assert seen[0]["SPECFORGE_SPEC_CAPTURE"] == "1"
+
+
+@pytest.mark.parametrize("devices", ["00", " 0"])
+def test_gpu_aliases_are_not_disjoint(setup, devices):
+    _, settings = setup
+    settings["trainer_gpus"] = devices
+    assert any("disjoint" in issue for issue in validate_online_identity(settings, rank=0, nodes=1))
+
+
+def test_duplicate_gpu_aliases(setup):
+    _, settings = setup
+    settings["trainer_gpus"] = "1,01"
+    assert any("unique" in issue for issue in validate_online_identity(settings, rank=0, nodes=1))
+
+
+def test_existing_consumer_state_has_actionable_error(setup, harness):
+    params, settings = setup
+    Path(settings["consumer_state_dir"]).mkdir()
+    with pytest.raises(RuntimeError, match="fresh CONSUMER_STATE_DIR"):
+        supervisor._run_single_node(params, settings)
+    assert not harness[0]
+
+
+def test_consumer_success_stops_lingering_producer(setup, harness):
+    params, settings = setup
+    launched, killed, codes, _ = harness
+    codes.update(consumer=[0], producer=[None])
+    settings["peer_timeout_s"] = 0
+    supervisor._run_single_node(params, settings)
+    assert launched["producer"][0] in killed
+    assert (Path(settings["run_root"]) / "inference.done").read_text().strip() == "0"
+
+
+def test_second_sigterm_cannot_interrupt_cleanup(setup, harness, monkeypatch):
+    params, settings = setup
+    launched, killed, codes, server = harness
+    codes.update(producer=[None], consumer=[None])
+    original = supervisor.signal.getsignal(supervisor.signal.SIGTERM)
+
+    def terminate(*args):
+        supervisor.signal.getsignal(supervisor.signal.SIGTERM)(supervisor.signal.SIGTERM, None)
+
+    def kill(proc):
+        # Model another TERM arriving at each cleanup step without signalling pytest.
+        handler = supervisor.signal.getsignal(supervisor.signal.SIGTERM)
+        if callable(handler):
+            handler(supervisor.signal.SIGTERM, None)
+        assert handler == supervisor.signal.SIG_IGN
+        if proc:
+            killed.append(proc)
+
+    monkeypatch.setattr(supervisor.time, "sleep", terminate)
+    monkeypatch.setattr(supervisor, "_kill_group", kill)
+    with pytest.raises(SystemExit):
+        supervisor._run_single_node(params, settings)
+    assert all(proc in killed for proc, _, _ in launched.values())
+    assert server in killed
+    assert supervisor.signal.getsignal(supervisor.signal.SIGTERM) == original
+    assert (Path(settings["run_root"]) / "consumer.done").read_text().strip() == "terminated_by_supervisor"
+    assert (Path(settings["run_root"]) / "inference.done").read_text().strip() == "1"
+
+
+def test_master_explicit_storage_overrides(setup, harness, monkeypatch):
+    params, settings = setup
+    monkeypatch.setenv("MOONCAKE_GLOBAL_SEGMENT_SIZE", "12345")
+    monkeypatch.setenv("MOONCAKE_LOCAL_BUFFER_SIZE", "6789")
+    supervisor._run_single_node(params, settings)
+    env = harness[0]["master"][1]
+    assert env["MOONCAKE_GLOBAL_SEGMENT_SIZE"] == "12345"
+    assert env["MOONCAKE_LOCAL_BUFFER_SIZE"] == "6789"
+
+
+def test_master_readiness_failure_cleans_master(setup, harness, monkeypatch):
+    params, settings = setup
+
+    def fail(*args):
+        raise RuntimeError("master readiness failed")
+
+    monkeypatch.setattr(supervisor, "_wait_mooncake", fail)
+    with pytest.raises(RuntimeError, match="master readiness failed"):
+        supervisor._run_single_node(params, settings)
+    assert harness[0]["master"][0] in harness[1]
+    assert (Path(settings["run_root"]) / "consumer.done").read_text().strip() == "not_started"
