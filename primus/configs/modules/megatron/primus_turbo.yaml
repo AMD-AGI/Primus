@@ -103,6 +103,12 @@ turbo_mega_moe_precision: bf16
 # the MegaMoE experts alone.
 turbo_mega_moe_wgrad_accum_fusion: null
 
+# ===== Ulysses fused all-to-all =====
+# Ulysses CP with the QKV / o_proj GEMMs fused with their all-to-alls (TP=1, CP>1 within a node, no MLA).
+# 0: stock Megatron CP; 1: fused GemmA2A / A2AGemm; -1: the same attention path with the GEMM,
+# pack / unpack and RCCL all-to-all in series (ablation baseline).
+turbo_ulysses_fused_a2a: 0
+
 # ===== Layer Norm =====
 # operator switch
 use_turbo_rms_norm: false
