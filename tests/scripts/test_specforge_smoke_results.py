@@ -3,13 +3,16 @@
 """CPU-only checks of the numerical regression gate and incomplete-run rejection."""
 
 import hashlib
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from calibrate_specforge_smoke import calibrate, compare
-from run_specforge_single_node_smoke import validate_run
+from check_specforge_smoke import main, validate_run
 
 
 class SmokeResultsTest(unittest.TestCase):
@@ -39,6 +42,20 @@ class SmokeResultsTest(unittest.TestCase):
         self.assertEqual(result["final_window_observations"], 10)
         self.assertEqual(result["final_window_mean"]["train/loss"], 3)
         self.assertEqual(result["consumed_samples"], 800)
+
+    def test_checker_cli_requires_successful_launcher(self):
+        inputs = self.root / "reference-inputs.json"
+        inputs.write_text('{"recipe": "test"}', encoding="utf-8")
+        argv = ["check", "--run-dir", str(self.root), "--inputs", str(inputs), "--launcher-exit-code"]
+        with patch("sys.argv", argv + ["1"]), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                main()
+        self.assertFalse((self.root / "summary.json").exists())
+        with patch("sys.argv", argv + ["0"]), redirect_stdout(io.StringIO()):
+            main()
+        summary = json.loads((self.root / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["step"], 100)
+        self.assertEqual(summary["numerical_check"], "not_requested")
 
     def test_checked_in_fixture(self):
         scripts = Path(__file__).resolve().parent
