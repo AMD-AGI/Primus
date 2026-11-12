@@ -873,6 +873,28 @@ def _ionic_rank(path: str) -> int:
     return 0 if "rdma-core-debs" in path else 1
 
 
+def _ionic_bundle_version(archive: Path, scratch: Path) -> Optional[str]:
+    """The AINIC bundle version an unversioned archive (e.g. host_sw_pkg.tar.gz) was built for.
+
+    Official AINIC bundles carry a top-level VERSION.json whose sw.version is the same
+    string the ionic driver reports as fw_ver; the nested libionic1 .deb's own Version
+    field uses an unrelated rdma-core numbering scheme, so it cannot be compared to fw_ver.
+    """
+    members = [m for m in archive_members(archive) if os.path.basename(m) == "VERSION.json"]
+    if not members:
+        return None
+    # Components may carry their own VERSION.json; the bundle's is the shallowest one.
+    top = min(members, key=lambda m: m.strip("/").count("/"))
+    try:
+        manifest = extract_member(archive, top, scratch)
+        data = json.loads(manifest.read_text())
+    except (SetupError, OSError, ValueError):
+        return None
+    sw = data.get("sw") if isinstance(data, dict) else None
+    version = sw.get("version") if isinstance(sw, dict) else None
+    return version if isinstance(version, str) and version else None
+
+
 class IonicFamily(Family):
     provider = "ionic"
     label = "AMD Pensando AINIC (ionic)"
@@ -911,7 +933,15 @@ class IonicFamily(Family):
                 and in_codename_dir(str(f))
             ]
             yield from sorted(local, key=lambda c: _ionic_rank(c.path))
-            for archive in (f for f in files if is_archive_name(f.name) and want in f.name):
+            for archive in (f for f in files if is_archive_name(f.name)):
+                if want in archive.name:
+                    pass  # the bundle names its release, e.g. ainic_<fw_ver>.tar.gz
+                elif _ionic_descend(archive.name):
+                    version = _ionic_bundle_version(archive, ctx.scratch)
+                    if version != want:
+                        continue  # no VERSION.json, or it is for a different bundle
+                else:
+                    continue
                 found = [
                     Candidate(want, "deb", str(holder), origin, member=member)
                     for holder, member, origin in iter_archive_files(
