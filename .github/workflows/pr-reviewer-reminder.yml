@@ -1,0 +1,38 @@
+name: PR reviewer reminder
+
+on:
+  # pull_request_target so the comment can also be posted on PRs from forks.
+  # This workflow must never check out or run code from the PR.
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  remind:
+    name: Ping North America reviewers
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post reminder comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          NA_REVIEWERS: "vidushi8 lorri-rao GeneDer amd-fuyuajin JohnQin-llm"
+        with:
+          script: |
+            const author = context.payload.pull_request.user.login.toLowerCase();
+            const reviewers = process.env.NA_REVIEWERS.split(/\s+/)
+              .filter((login) => login && login.toLowerCase() !== author);
+            if (reviewers.length === 0) {
+              return;
+            }
+            const mentions = reviewers.map((login) => `@${login}`).join(' ');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `North America reviewers: ${mentions}, please take a look at this PR.`,
+            });
