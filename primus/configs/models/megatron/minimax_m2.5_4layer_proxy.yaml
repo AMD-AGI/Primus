@@ -1,0 +1,5 @@
+extends:
+  - minimax_m2.5.yaml
+
+# Single-node proxy: keep the MiniMax-M2.5 attention and MoE architecture, reduce depth.
+num_layers: 4
