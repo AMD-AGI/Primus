@@ -20,7 +20,7 @@ jobs:
       - name: Post reminder comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          MAINTAINERS: "Xiaoming-AMD wenxie-amd"
+          MAINTAINERS: "wenxie-amd Xiaoming-AMD"
           # Linked rather than @-mentioned so they are not notified on every PR.
           BACKUP_CONTACTS: "vidushi8 lorri-rao GeneDer amd-fuyuajin JohnQin-llm"
         with:
