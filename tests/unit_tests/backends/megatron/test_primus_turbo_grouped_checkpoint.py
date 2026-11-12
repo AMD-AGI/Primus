@@ -25,7 +25,14 @@ skip_if_no_cuda()
 pytest.importorskip("primus_turbo")
 
 NUM_EXPERTS = 4
-FULLY_RESHARDABLE = {"distrib_optim_sharding_type": "fully_reshardable"}
+# What Megatron's training saves pass (checkpointing.py), with the optimizer format that can change EP.
+FULLY_RESHARDABLE = {
+    "distrib_optim_sharding_type": "fully_reshardable",
+    "singleton_local_shards": False,
+    "chained_optim_avoid_prefix": True,
+}
+# GPTModel's default attention backend (auto) asserts these are unset; other tests set them.
+TE_ATTENTION_ENVS = ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN")
 
 # The Primus fields Turbo's layers read from Megatron's global args.
 GLOBAL_ARGS = dict(
@@ -105,14 +112,20 @@ def _gpt_moe(turbo: bool, seed: int, expert_parallel: int = 1):
     return model.cuda()
 
 
-def _expert_type(model):
-    return type(model.decoder.layers[0].mlp.experts.linear_fc1).__name__
+def _is_turbo(model):
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboGroupedLinear,
+    )
+
+    return isinstance(model.decoder.layers[0].mlp.experts.linear_fc1, PrimusTurboGroupedLinear)
 
 
 @pytest.fixture
-def turbo_global_args(init_parallel_state):
+def turbo_global_args(init_parallel_state, monkeypatch):
     from megatron.training.global_vars import set_args
 
+    for name in TE_ATTENTION_ENVS:
+        monkeypatch.delenv(name, raising=False)
     set_args(SimpleNamespace(**GLOBAL_ARGS))
 
 
@@ -122,7 +135,7 @@ def test_turbo_experts_save_through_a_factory(turbo_global_args):
     from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 
     model = _gpt_moe(turbo=True, seed=0)
-    assert _expert_type(model) == "PrimusTurboGroupedLinear"
+    assert _is_turbo(model)
     sharded = model.sharded_state_dict(metadata={"singleton_local_shards": False})
     stacked = [k for k in model.state_dict() if k.endswith(".weights")]
     assert len(stacked) == 4  # fc1 and fc2 of both layers
@@ -141,7 +154,7 @@ def test_torch_dist_moves_between_te_and_turbo(save_turbo, turbo_global_args, tm
 
     source = _gpt_moe(turbo=save_turbo, seed=0)
     target = _gpt_moe(turbo=not save_turbo, seed=1)
-    assert _expert_type(source) != _expert_type(target)
+    assert _is_turbo(source) == save_turbo and _is_turbo(target) != save_turbo
     metadata = {"singleton_local_shards": False}
     dist_checkpointing.save(
         {"model": source.sharded_state_dict(metadata=metadata)}, str(tmp_path), content_metadata=metadata
@@ -168,10 +181,14 @@ def _model_and_optimizer(turbo, seed, expert_parallel):
         DistributedDataParallelConfig,
     )
     from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+    from megatron.core.transformer.module import Float16Module
 
     gpt = _gpt_moe(turbo, seed, expert_parallel)
+    assert _is_turbo(gpt) == turbo
     model = DistributedDataParallel(
-        gpt.config, DistributedDataParallelConfig(use_distributed_optimizer=True), gpt
+        gpt.config,
+        DistributedDataParallelConfig(use_distributed_optimizer=True),
+        Float16Module(gpt.config, gpt),
     )
     optimizer = get_megatron_optimizer(
         OptimizerConfig(
@@ -183,13 +200,16 @@ def _model_and_optimizer(turbo, seed, expert_parallel):
         ),
         [model],
     )
-    return model, optimizer
+    return gpt, model, optimizer
 
 
-def _save(model, optimizer, ckpt_dir):
+def _save(gpt, optimizer, ckpt_dir):
+    import os
+
     from megatron.core import dist_checkpointing
 
-    model_sharded = model.sharded_state_dict()
+    os.makedirs(ckpt_dir, exist_ok=True)
+    model_sharded = gpt.sharded_state_dict(metadata=FULLY_RESHARDABLE)
     state = {
         "model": model_sharded,
         "optimizer": optimizer.sharded_state_dict(model_sharded, metadata=FULLY_RESHARDABLE),
@@ -197,26 +217,35 @@ def _save(model, optimizer, ckpt_dir):
     dist_checkpointing.save(state, ckpt_dir)
 
 
+def _plain_tensors(ckpt_dir):
+    """Every tensor in a ``torch_dist`` checkpoint, unsharded (``_extra_state`` objects are skipped)."""
+    from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
+
+    dcp_to_torch_save(ckpt_dir, f"{ckpt_dir}.pt")
+    state = torch.load(f"{ckpt_dir}.pt", weights_only=False)
+    return {k: v for k, v in state.items() if isinstance(v, torch.Tensor)}
+
+
 def _reshard_worker(rank, port, save_turbo, tmp):
-    """Save at EP 2 after one Adam step, load at EP 1 with the other expert implementation, save
+    """Save at EP 4 after one Adam step, load at EP 2 with the other expert implementation, save
     again, and compare the two checkpoints' plain tensors (weights, fp32 master weights, moments)."""
     import os
 
     import torch.distributed as dist
     from megatron.core import dist_checkpointing
     from megatron.core import parallel_state as ps
-    from megatron.core.dist_checkpointing.dict_utils import diff
-    from megatron.core.dist_checkpointing.serialization import load_plain_tensors
     from megatron.training.global_vars import set_args
 
     os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    for name in TE_ATTENTION_ENVS:
+        os.environ.pop(name, None)
     torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=2)
+    dist.init_process_group("nccl", rank=rank, world_size=4)
     set_args(SimpleNamespace(**GLOBAL_ARGS))
-    first, second = os.path.join(tmp, "ep2"), os.path.join(tmp, "ep1")
+    first, second = os.path.join(tmp, "ep4"), os.path.join(tmp, "ep2")
 
-    ps.initialize_model_parallel(expert_model_parallel_size=2)
-    model, optimizer = _model_and_optimizer(save_turbo, seed=0, expert_parallel=2)
+    ps.initialize_model_parallel(expert_model_parallel_size=4)
+    gpt, model, optimizer = _model_and_optimizer(save_turbo, seed=0, expert_parallel=4)
     ids = torch.randint(0, 128, (2, 64), generator=torch.Generator().manual_seed(rank)).cuda()
     positions = torch.arange(64, device="cuda").unsqueeze(0).expand(2, -1)
     model.zero_grad_buffer()
@@ -224,12 +253,12 @@ def _reshard_worker(rank, port, save_turbo, tmp):
     model(ids, positions, None, labels=torch.roll(ids, -1, dims=1)).float().mean().backward()
     model.finish_grad_sync()
     assert optimizer.step()[0], "Adam step failed"
-    _save(model, optimizer, first)
+    _save(gpt, optimizer, first)
     ps.destroy_model_parallel()
 
-    ps.initialize_model_parallel(expert_model_parallel_size=1)
-    model, optimizer = _model_and_optimizer(not save_turbo, seed=1, expert_parallel=1)
-    model_sharded = model.sharded_state_dict()
+    ps.initialize_model_parallel(expert_model_parallel_size=2)
+    gpt, model, optimizer = _model_and_optimizer(not save_turbo, seed=1, expert_parallel=2)
+    model_sharded = gpt.sharded_state_dict(metadata=FULLY_RESHARDABLE)
     loaded = dist_checkpointing.load(
         {
             "model": model_sharded,
@@ -239,26 +268,28 @@ def _reshard_worker(rank, port, save_turbo, tmp):
         },
         first,
     )
-    model.load_state_dict(loaded["model"], strict=True)
+    gpt.load_state_dict(loaded["model"], strict=True)
     optimizer.load_state_dict(loaded["optimizer"])
-    _save(model, optimizer, second)
+    _save(gpt, optimizer, second)
     ps.destroy_model_parallel()
 
     if rank == 0:
-        before, after = load_plain_tensors(first), load_plain_tensors(second)
+        before, after = _plain_tensors(first), _plain_tensors(second)
+        assert before.keys() == after.keys()
         assert any("exp_avg" in k and "experts" in k for k in before), sorted(before)
-        differences = diff(before, after)
-        assert not any(map(bool, differences)), differences
+        for key, tensor in before.items():
+            torch.testing.assert_close(after[key], tensor, rtol=0, atol=0, msg=key)
     dist.barrier()
     dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("save_turbo", [True, False], ids=["turbo_ep2_to_te_ep1", "te_ep2_to_turbo_ep1"])
+@pytest.mark.parametrize("save_turbo", [True, False], ids=["turbo_ep4_to_te_ep2", "te_ep4_to_turbo_ep2"])
 def test_optimizer_state_reshards_across_expert_parallel(save_turbo, tmp_path):
-    """Fully reshardable distributed-optimizer state, saved at EP 2, loads at EP 1 with the other
+    """Fully reshardable distributed-optimizer state, saved at EP 4, loads at EP 2 with the other
     expert implementation; this needs Turbo's ``weights`` in the checkpoint layout."""
     import torch.multiprocessing as mp
 
-    if torch.cuda.device_count() < 2:
-        pytest.skip("needs 2 GPUs")
-    mp.spawn(_reshard_worker, args=(_free_port(), save_turbo, str(tmp_path)), nprocs=2, join=True)
+    # Both layouts need a chained (dense + expert) optimizer; at EP 1 on 2 GPUs Megatron builds one.
+    if torch.cuda.device_count() < 4:
+        pytest.skip("needs 4 GPUs")
+    mp.spawn(_reshard_worker, args=(_free_port(), save_turbo, str(tmp_path)), nprocs=4, join=True)
