@@ -1,0 +1,20 @@
+# Stage 1: geometry transformer plus camera, point, depth, and normal heads.
+# The Gaussian head stays off. Attention uses aiter when that package is installed.
+model:
+  name: worldmirror
+  config:
+    img_size: 518
+    patch_size: 14
+    embed_dim: 1024
+    gs_dim: 256
+    enable_cam: true
+    enable_pts: true
+    enable_depth: true
+    enable_norm: true
+    enable_gs: false
+    enable_cond: true
+    pretrained: ${PRETRAINED_PATH:tencent/HunyuanWorld-Mirror}
+    freeze_params: []
+    pretrained_lr: 2.0e-5
+    backbone_lr: 1.0e-4
+    new_lr: 2.0e-4

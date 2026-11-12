@@ -1,0 +1,24 @@
+# Stage 2: load a stage-1 checkpoint, freeze the geometry backbone, train the Gaussian head.
+model:
+  name: worldmirror
+  config:
+    img_size: 518
+    patch_size: 14
+    embed_dim: 1024
+    gs_dim: 256
+    enable_cam: true
+    enable_pts: true
+    enable_depth: true
+    enable_norm: true
+    enable_gs: true
+    enable_cond: true
+    pretrained: ${PRETRAINED_PATH:}
+    freeze_params:
+      - visual_geometry_transformer
+      - cam_head
+      - pts_head
+      - depth_head
+      - norm_head
+    pretrained_lr: 2.0e-5
+    backbone_lr: 1.0e-4
+    new_lr: 2.0e-4
