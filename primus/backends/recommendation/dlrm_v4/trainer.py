@@ -41,7 +41,7 @@ from primus.core.utils.yaml_utils import nested_namespace_to_dict
 # The DLRMv4 trainer package (generative_recommenders), imported into Primus.
 SRC_ROOT = Path(__file__).resolve().parent / "src"
 
-# The recipe's environment (docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md).
+# The recipe's environment (training_dlrmv4 7879b4b, docs/rocm_10_port.md).
 # setdefault semantics: an image ENV, an outer export or the config `env:` block wins.
 ENV_DEFAULTS = [
     EnvVar("HSTU_HAMMER_KERNEL", "TRITON", note="HSTU Triton kernels"),

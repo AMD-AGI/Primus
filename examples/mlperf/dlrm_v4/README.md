@@ -10,13 +10,13 @@ eval AUC reaches 0.75.
 ### Configuration
 
 - **Model**: HSTU ranker (generative recommenders), FP8 + BF16, Triton / FlyDSL / HIP kernels
-- **Training**: streaming train-on-window-T / eval-on-T+1, global batch 8192 (1024 per GPU), LR 1e-6, 24k-step warmup
-- **Eval**: the full eval set every 0.1% of the data, first eval by the MLPerf rule; target AUC 0.75
+- **Training**: streaming, daily windows 0-298 in time order, global batch 8192 (1024 per GPU), LR 1e-6, 24k-step warmup
+- **Eval**: a fixed held-out day (window 299, 2,058,204 samples) every 0.1% of the data, first eval by the MLPerf rule; target AUC 0.75
 - **Backend**: `recommendation`, model family `dlrm_v4`
   (`primus/backends/recommendation/`). The model, kernel and precision settings
   are the trainer's gin file
   `primus/backends/recommendation/dlrm_v4/src/generative_recommenders/dlrm_v4/train/gin/yambda_5b.gin`.
-  Benchmark description and engineering notes:
+  User guide and benchmark reference:
   [docs/04-technical-guides/recommendation](../../../docs/04-technical-guides/recommendation/README.md).
 - **Image**: `rocm/primus:v26.9`. The `recommendation` hook adds `polars-u64-idx`,
   `gin-config` and the MLPerf logging package (all `--no-deps`) and links
@@ -131,14 +131,14 @@ or directly: `./primus-cli direct -- train pretrain --config examples/mlperf/dlr
   `/tmp/dlrm_hstu_*` before `run_start` (init ~3-7 min); later runs reuse them.
   Use a fresh container (or `/tmp`) after changing the image: builds are reused
   when the sources match, even across stacks.
-- **Per-stack tables and pins**: the Triton spec replay, BLAS replay and HIP
-  preload tables and the FP8 BLAS solution pins are recorded for one software
-  stack and turn themselves off on another: library loads then stall the timed
+- **Per-stack tables and pins**: the BLAS replay and HIP preload tables and the
+  FP8 BLAS solution pins are recorded for one software stack and turn themselves
+  off on another (the Triton spec replay is keyed by Triton version instead): library loads then stall the timed
   region (five 3-6 s stalls, ~19 s, before the v26.9 tables) and the X2L-B
   fused backward fails closed. After an image change, re-record them with
   `tools/recommendation/dlrm_v4/record_stack_tables.sh` and check the m4 lines of
   a full run; see
-  [primus-v26.9.md](../../../docs/04-technical-guides/recommendation/dlrm_v4/primus-v26.9.md).
+  [Updating the image](../../../docs/04-technical-guides/recommendation/dlrm_v4/README.md#updating-the-image).
 - **GPU hardware queues**: the experiment yaml sets `GPU_MAX_HW_QUEUES=4` (the HIP
   default) over Primus' runner default of 2 (+0.44%). Keep
   `TORCH_NCCL_HIGH_PRIORITY=1` (Primus' default) on one node: with 2 queues,

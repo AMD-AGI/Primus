@@ -3,7 +3,7 @@
 //   (pointer resolved with dladdr -> library + offset), hsa_executable_load_agent_code_object (load duration).
 // Env COLOAD_LOG_DIR=<dir>: one file per process, <dir>/coload.<pid>.log. Unset: pass-through, no file.
 // A 'reader' line also names the code object's first kernel (kd=<name>.kd, nkd=<count>) and its size / FNV-1a.
-// Diagnostic only (never in production). Input of gen_hip_preload_table.py --loads (T12, docs/04-technical-guides/recommendation/dlrm_v4/rocm-port.md).
+// Diagnostic only (never in production). Input of gen_hip_preload_table.py --loads (T12, training_dlrmv4 7879b4b docs/rocm_10_port.md).
 //   build (in the image):  gcc -O2 -fPIC -shared -Wall -o coload_shim.so tools/recommendation/dlrm_v4/coload_shim.c -ldl -lpthread
 //   use:                   LD_PRELOAD=<dir>/coload_shim.so COLOAD_LOG_DIR=<log dir> <training command>
 //   regenerate the table:  gen_hip_preload_table.py --lib ... --trace 1n=<traces> --loads '1n=<log dir>/coload.*.log'

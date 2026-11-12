@@ -43,8 +43,19 @@ The package is excluded from the pre-commit formatters (kept diffable with its
 origin). Some of its tests are text-sensitive: `ops/tests/outproj_mx6_seam_test.py`
 allow-lists exact bytes of `ops/triton/bwd_fp8.py`, and several gin tests check
 the comment blocks of `yambda_5b.gin` (80 columns, item headers). Both files keep
-their imported text, including doc paths of the original repository
-(`docs/perf_opt.md` is now `docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md`,
-`docs/rocm_10_port.md` -> `rocm-port.md`, `docs/fp8/fp8.md` -> `fp8.md`). Even a
+their imported text, including doc paths of the original repository.
+
+The engineering records of the trainer (the ROCm port log, the optimization
+log, the FP8 design, the multi-node bring-up) were not kept in Primus; they are
+in `training_dlrmv4` at `7879b4b`, under `recommendation/docs/`. Code comments
+cite them by item (T*, U*, C* or numbered rows), as
+`docs/perf_opt.md` (also cited as
+`docs/04-technical-guides/recommendation/dlrm_v4/perf-notes.md`),
+`docs/rocm_10_port.md` (`.../dlrm_v4/rocm-port.md`) and `docs/fp8/fp8.md`
+(`.../dlrm_v4/fp8.md`). The gin file documents each setting's purpose and opt-out
+at its binding.
+
+The package's comments are left as imported: source text is part of kernel
+cache and replay keys, and some tests compare it. Even a
 comment edit in the package needs its tests run again (in the image, on a GPU node). License: Apache-2.0
 (`dlrm_v4/src/LICENSE`).
