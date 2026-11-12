@@ -4,6 +4,7 @@ model:
     load_from_pretrained_path: ${PRETRAINED_PATH:}
     config:
       trainable_modules: dit
+      float8_recipe: ${FLUX_FLOAT8_RECIPE:}
       guidance: ${FLUX_GUIDANCE:1.0}
       autoencoder_scale_factor: 0.3611
       autoencoder_shift_factor: 0.1159
