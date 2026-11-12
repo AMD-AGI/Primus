@@ -132,11 +132,8 @@ def _primus_turbo_installed() -> bool:
 def _has_moe_layers(args) -> bool:
     if not getattr(args, "num_experts", None):
         return False
+    # Pattern strings are already lists here: the build_args moe_layer_freq patch evaluates them.
     freq = getattr(args, "moe_layer_freq", 1)
-    if isinstance(freq, str):
-        # Usually already a list (the build_args moe_layer_freq patch); parsed here as Megatron's
-        # moe_freq_type does, without importing megatron.training, which needs a GPU.
-        freq = eval(freq, {}, {}) if "[" in freq else int(freq)
     if isinstance(freq, int):
         return freq > 0
     return any(freq)

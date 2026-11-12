@@ -331,9 +331,10 @@ unchanged and only that logged value differs.
 - **Pipeline parallelism**, with or without virtual (interleaved) stages, is
   covered by the 8-GPU parallel check. The four-node recipes use PP 4 but have
   not been run on this code yet.
-- **Tensor parallelism** has not been run. **Sequence parallelism** and
-  **context parallelism** are rejected: the output ShortConvs would need a
-  3-token halo exchange across ranks, which isn't written.
+- **Tensor, sequence and context parallelism** are rejected. With TP, MoE needs
+  sequence parallelism, and the output ShortConvs would then need a 3-token
+  halo exchange across ranks, which isn't written; their checkpoint entries
+  would also need to be TP-sharded.
 
 ## Testing
 
@@ -395,9 +396,7 @@ TP stays at 1 in every layout. The script exits non-zero if any layout fails.
   unaffected.
 - No Inkling FLOPs formula, so logged TFLOP/s use the GPT formula.
 - Checkpoint save and resume have been run on one node only, on a 4-layer
-  model; the four-node recipes have not saved or resumed yet. Checkpoints
-  assume TP 1: the K/V short convs are saved as replicated tensors, not TP
-  shards.
+  model; the four-node recipes have not saved or resumed yet.
 - Expert load balance and the bias update have not been verified with
   per-expert load logging.
 - FP8 lowers the loss by about 0.045 at 50 steps for reasons not yet known

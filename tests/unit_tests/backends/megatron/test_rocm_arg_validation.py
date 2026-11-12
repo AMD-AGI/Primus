@@ -107,7 +107,7 @@ def test_turbo_grouped_gemm_rejects_muon(turbo_installed, optimizer):
         validate_turbo_grouped_gemm_with_muon(_muon_args(optimizer=optimizer))
 
 
-@pytest.mark.parametrize("freq", [1, 2, [0, 1, 0, 0], "([0]*1+[1]*3)", "2"])
+@pytest.mark.parametrize("freq", [1, 2, [0, 1, 0, 0]])
 def test_turbo_grouped_gemm_with_muon_rejects_any_moe_layer(turbo_installed, freq):
     with pytest.raises(ValueError, match="use_turbo_grouped_gemm=false.$"):
         validate_turbo_grouped_gemm_with_muon(_muon_args(moe_layer_freq=freq))
@@ -128,7 +128,6 @@ def test_turbo_grouped_gemm_with_muon_advises_sync_free_stage(turbo_installed, s
         {"num_experts": None},
         {"moe_grouped_gemm": False},
         {"moe_layer_freq": [0, 0, 0, 0]},
-        {"moe_layer_freq": "([0]*4)"},
     ],
 )
 def test_turbo_grouped_gemm_with_muon_allows_other_configs(turbo_installed, overrides):

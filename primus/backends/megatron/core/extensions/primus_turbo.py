@@ -2435,11 +2435,20 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         state dict, so ``weights`` replaces its ``weight{i}`` views there, as a factory that
         builds TE's per-expert tensors (same keys and expert offsets) and stacks them on load.
         """
+        # With singleton_local_shards, TE gives every expert its own key, which build() below would
+        # collapse onto one; Megatron's training saves always use False.
+        assert not (metadata or {}).get(
+            "singleton_local_shards"
+        ), "Turbo grouped weights support only singleton_local_shards=False"
         sharded = super()._sharded_state_dict_grouped(tp_axis_map, prefix, sharded_offsets, metadata)
         experts = [sharded.pop(f"{prefix}weight{i}") for i in range(self.num_gemms)]
 
         def build(key, data, replica_id, flattened_range):
-            assert flattened_range is None, "flattened Turbo grouped weights are not supported"
+            assert flattened_range is None, (
+                "Turbo grouped weights don't support the distributed optimizer's flattened "
+                "(fully_sharded_model_space) checkpoint format; use dist_ckpt_optim_fully_reshardable "
+                "or the default dp_reshardable format"
+            )
             return {
                 i: replace(expert, key=key, data=data[i], dtype=data.dtype, replica_id=replica_id)
                 for i, expert in enumerate(experts)

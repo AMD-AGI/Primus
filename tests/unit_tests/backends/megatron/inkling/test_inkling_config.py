@@ -99,6 +99,7 @@ def test_default_local_layer_ids():
         ({"swa_num_query_groups": 3}, "not divisible"),
         ({"inkling_attention_backend": "sdpa"}, "inkling_attention_backend"),
         ({"moe_num_shared_experts": 0, "moe_shared_expert_intermediate_size": None}, "shared expert"),
+        ({"tensor_model_parallel_size": 2}, "tensor_model_parallel_size=1"),
     ],
 )
 def test_invalid_configs(overrides, message):
