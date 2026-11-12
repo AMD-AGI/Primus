@@ -43,6 +43,7 @@ Settings (module config, ``primus_turbo:`` section):
   fp8_linear_granularity: tensorwise  rowwise|tensorwise|blockwise|mx_blockwise
   fp8_linear_format: e4m3             e4m3|e5m2|hybrid
   fp8_linear_block_size: 128          blockwise only
+  fp8_linear_min_features: 0          keep smaller input/output dimensions in bf16
 """
 from __future__ import annotations
 
@@ -65,6 +66,24 @@ _FORMATS = ("E4M3", "E5M2", "HYBRID")
 _EXTRA_BF16_PREFIXES = ("condition_embedder.",)
 
 
+def min_features() -> int:
+    """Minimum static input/output width eligible for the FP8 swap.
+
+    A backend can impose a lower bound on a GEMM's contraction dimension. The
+    forward contracts over ``in_features`` and input-gradient GEMM over
+    ``out_features``, so filtering both here prevents an unsupported layer from
+    failing only after backward starts. The weight-gradient contraction is the
+    runtime token count and remains the launcher's responsibility to validate.
+    """
+    value = options.integer("primus_turbo.fp8_linear_min_features", 0)
+    if value < 0:
+        raise ValueError(
+            "primus_turbo.fp8_linear_min_features="
+            f"{value!r} invalid; expected 0 or a positive feature count"
+        )
+    return value
+
+
 def should_convert(name: str, linear) -> bool:
     """Whether a Linear is eligible for the FP8 swap.
 
@@ -76,6 +95,9 @@ def should_convert(name: str, linear) -> bool:
     )
 
     if name.startswith(_EXTRA_BF16_PREFIXES):
+        return False
+    minimum = min_features()
+    if minimum and (linear.in_features < minimum or linear.out_features < minimum):
         return False
     return _is_fp8_training_safe_linear(name, linear)
 

@@ -23,6 +23,7 @@ options.declare(
     "fp8_linear_granularity",
     "fp8_linear_format",
     "fp8_linear_block_size",
+    "fp8_linear_min_features",
 )
 
 
