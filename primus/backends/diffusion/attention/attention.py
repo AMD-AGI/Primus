@@ -14,12 +14,27 @@ Public API:
 
 from __future__ import annotations
 
+import os as _os  # FLUX_ATTN_FLYDSL
 import warnings
 
 import torch
 
 from ._flash_common import run_flash_attention_backend
 from .aiter import AITER_FLASH_ATTN_AVAILABLE, aiter_flash_attention
+
+_flydsl_flux = None
+_FLUX_ATTN_FLYDSL = _os.environ.get("FLUX_ATTN_FLYDSL", "0") == "1"
+if _FLUX_ATTN_FLYDSL:
+    try:
+        from . import flydsl_flux as _flydsl_flux
+    except ImportError as exc:
+        warnings.warn(
+            "FLUX_ATTN_FLYDSL=1 but primus_turbo.flydsl could not be imported "
+            f"({exc}). Falling back to attention_backend.",
+            stacklevel=2,
+        )
+        _FLUX_ATTN_FLYDSL = False
+        _flydsl_flux = None
 
 FLASH_ATTN_3_AVAILABLE = False
 FLASH_ATTN_2_AVAILABLE = False
@@ -296,6 +311,10 @@ def attention(
     k: [B, Lk, N, D]
     v: [B, Lk, N, D]
     """
+    if _FLUX_ATTN_FLYDSL and _flydsl_flux.eligible(  # FLUX_ATTN_FLYDSL
+        q, k, v, q_lens, k_lens, dropout_p, softmax_scale, q_scale, causal, window_size
+    ):
+        return _flydsl_flux.flydsl_flux_attention(q, k, v)
     if _ATTENTION_BACKEND == "flash_attn_aiter":
         if q.device.type != "cuda":
             raise RuntimeError("attention_backend='flash_attn_aiter' requires CUDA tensors.")
