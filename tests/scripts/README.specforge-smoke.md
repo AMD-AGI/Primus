@@ -1,7 +1,8 @@
 # Qwen3.5-4B / DFlash single-node reference (draft)
 
 This PR is a data, recipe, commands, and reference-results handoff; it is not an
-integration-ready test framework. The 100-step GPU reference is **pending**.
+integration-ready test framework. The 100-step MI355X reference passed three
+calibration runs and two independent validation runs on 2026-11-12.
 The old 200-step measurements do not apply to this fixture/schedule.
 
 Use the existing `examples/specforge/configs/qwen3.5-4b-dflash-online.yaml` from a
@@ -176,14 +177,56 @@ This exercises **Primus's Slurm launcher**, rather than an external sbatch scrip
 that invokes a Python wrapper around direct mode. Queue waiting is separate from
 the scheduler's execution time limit. Container cleanup after a hard timeout
 must be verified for your runtime; retain logs and check for surviving processes.
-All three 100-step command paths remain GPU-unqualified in this draft.
+The recorded batch used native `primus-cli slurm sbatch` to start one container,
+then a private batch driver invoked the direct training command five times with
+fresh processes, run directories, and dataset caches. All five executions used
+the same two GPUs, allocation, container, and fixed seed. The `srun` variant above
+and five separate container launches were not independently tested. For `sbatch`,
+submission success is not training success: wait for the job to finish and verify
+its final exit status before running the checker.
+
+## Accepted MI355X reference
+
+[specforge_smoke_baseline_mi355x.json](specforge_smoke_baseline_mi355x.json)
+contains the frozen numerical bounds. The
+[qualification record](specforge_smoke_qualification_mi355x.json) includes the
+exact reference inputs, runtime versions, five run summaries and their hashes,
+and every logged loss/accuracy/gradient-norm observation.
+
+All five runs completed 100 optimizer steps, consumed all 800 conversations,
+reported successful role/launcher exits, and wrote nonempty step-100 shared and
+rank-0 checkpoints. All 800 rows survived preprocessing. The logged loss,
+accuracy, and gradient norm matched exactly across all five runs; this is
+repeatability under these fixed conditions, not a guarantee across hardware or
+software revisions.
+
+The means of the ten logged observations at steps 55–100 are:
+
+- Training loss: **7.522446346282959**, tolerance **±0.0752244634628296** (1%).
+- Training accuracy: **0.05101585015654564**, tolerance **±0.005** (0.5 percentage points).
+- Gradient norm: **0.21905557662248612**, recorded for inspection; only finiteness is asserted.
+
+Both validations passed the bounds frozen after the third calibration run,
+without retuning. The runtime checkout was
+`55fec472fda464449ebc417c3e0e1037f0bb912d` from #1421, with the manifest's pinned
+image, SpecForge, model/tokenizer, and data. PyTorch was
+`2.9.1+rocm7.2.0.git7e1940d4`; HIP was `7.2.26015-fc0010cf6a`.
+The manifest's image Primus revision describes the image contents; the mounted
+runtime checkout revision above is the source actually executed.
+
+The baseline identity includes the runtime checkout revision. To compare against
+this reference, use that exact revision and the recorded inputs. A changed
+revision requires deliberate review/recalibration; do not bypass the identity
+check or automatically regenerate bounds. These runs do not qualify other GPU
+types, seeds, model configurations, checkpoint reload, or performance.
 
 ## Check a completed run (optional Python helper)
 
 ```bash
 uv run --no-project python "$SMOKE_CHECKOUT/tests/scripts/check_specforge_smoke.py" \
   --run-dir "$RUN_DIR" --launcher-exit-code "$(cat "$RUN_DIR/launcher.exit")" \
-  --inputs "$RUN_DIR/reference-inputs.json"
+  --inputs "$RUN_DIR/reference-inputs.json" \
+  --baseline "$SMOKE_CHECKOUT/tests/scripts/specforge_smoke_baseline_mi355x.json"
 ```
 
 The checker never launches training. It requires launcher success, both role
@@ -192,8 +235,9 @@ loss/accuracy/gradient norm, and nonempty step-100 shared/rank-0 checkpoints.
 It writes final metrics and means of the ten observations at steps 55–100 to
 `summary.json`. Checkpoint reload correctness is not tested.
 
-There is **no accepted 100-step reference yet**. GPU runs remain pending. When
-requested, collect three runs with identical inputs, then freeze bounds:
+Omit `--baseline` when collecting a new calibration run. To deliberately collect
+a new reference, run three executions with identical inputs, then freeze bounds
+to a new file:
 
 ```bash
 uv run --no-project python "$SMOKE_CHECKOUT/tests/scripts/calibrate_specforge_smoke.py" calibrate \
