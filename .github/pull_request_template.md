@@ -12,7 +12,5 @@
 
 ## Reviewers
 
-Code owners are requested automatically, and a bot pings the North America reviewers when the PR is opened.
-
-- North America: `vidushi8`, `lorri-rao`, `GeneDer`, `amd-fuyuajin`, `JohnQin-llm`
-- Other maintainers: `Xiaoming-AMD`, `wenxie-amd`
+- Code owners: `Xiaoming-AMD`, `wenxie-amd`. Please contact them for review or any questions.
+- Outside China Standard Time (UTC+8) working hours, for urgent issues: `vidushi8`, `lorri-rao`, `GeneDer`, `amd-fuyuajin`, `JohnQin-llm`

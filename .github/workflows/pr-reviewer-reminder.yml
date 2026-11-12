@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   remind:
-    name: Ping North America reviewers
+    name: Post review contacts
     if: github.event.pull_request.user.type != 'Bot'
     runs-on: ubuntu-latest
     permissions:
@@ -20,19 +20,26 @@ jobs:
       - name: Post reminder comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          NA_REVIEWERS: "vidushi8 lorri-rao GeneDer amd-fuyuajin JohnQin-llm"
+          OWNERS: "Xiaoming-AMD wenxie-amd"
+          # Linked rather than @-mentioned so they are not notified on every PR.
+          BACKUP_CONTACTS: "vidushi8 lorri-rao GeneDer amd-fuyuajin JohnQin-llm"
         with:
           script: |
-            const author = context.payload.pull_request.user.login.toLowerCase();
-            const reviewers = process.env.NA_REVIEWERS.split(/\s+/)
-              .filter((login) => login && login.toLowerCase() !== author);
-            if (reviewers.length === 0) {
-              return;
-            }
-            const mentions = reviewers.map((login) => `@${login}`).join(' ');
+            const logins = (value) => value.split(/\s+/).filter(Boolean);
+            const owners = logins(process.env.OWNERS)
+              .map((login) => `@${login}`).join(' ');
+            const backups = logins(process.env.BACKUP_CONTACTS)
+              .map((login) => `[${login}](https://github.com/${login})`).join(', ');
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `North America reviewers: ${mentions}, please take a look at this PR.`,
+              body: [
+                `**Code owners:** ${owners}`,
+                '',
+                'Please contact the code owners for review or any questions about this PR.',
+                '',
+                'Outside China Standard Time (UTC+8) working hours, for urgent issues ' +
+                  `you can also reach out to: ${backups}.`,
+              ].join('\n'),
             });
