@@ -38,3 +38,8 @@ pp_simulation_result
 .triton_cache_shared/
 .jax_cache/
 .cursor/
+# hipify output of the fused Adam clip extension, written next to its .cu at build time
+primus/backends/megatron/patches/te_patches/fused_adam_clip_kernel.hip
+
+# Slurm job stdout/stderr captures (e.g. spur-<jobid>.out) dropped at the repo root; keep them out of the history.
+spur-*.out

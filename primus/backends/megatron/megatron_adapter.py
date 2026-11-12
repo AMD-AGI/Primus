@@ -11,6 +11,7 @@ import primus.backends.megatron.patches  # noqa: F401  # Register patches
 from primus.backends.megatron.argument_builder import MegatronArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
+from primus.core.utils.import_utils import MLPERF_COMMON_MODULES, lazy_import
 from primus.core.utils.module_utils import log_rank_0
 
 
@@ -41,16 +42,21 @@ class MegatronAdapter(BackendAdapter):
         if trainer_class:
             return self._load_trainer_class_by_name(trainer_class)
 
-        # primus_mllog's trainer subclasses MegatronPretrainTrainer. Import it
+        # mlperf_common's trainer subclasses MegatronPretrainTrainer. Import it
         # only after this backend package has finished initializing to avoid:
-        # primus_mllog -> primus.backends.megatron -> primus_mllog.
+        # mlperf_common -> primus.backends.megatron -> mlperf_common.
         if stage == "mlperf_pretrain":
             try:
-                from primus_mllog import MLPerfMegatronPretrainTrainer
+                MLPerfMegatronPretrainTrainer = lazy_import(
+                    MLPERF_COMMON_MODULES,
+                    "MLPerfMegatronPretrainTrainer",
+                    log_prefix="[Primus:MegatronAdapter]",
+                )
             except ImportError as exc:
                 raise ImportError(
-                    "Stage 'mlperf_pretrain' requires the optional dependency 'primus_mllog'. "
-                    "Install primus_mllog (or select a different stage) to proceed."
+                    "Stage 'mlperf_pretrain' requires AMD's mlperf-common "
+                    "(pip install git+https://github.com/AMD-AGI/mlperf-common.git), "
+                    "or select a different stage."
                 ) from exc
 
             BackendRegistry.register_trainer_class(
@@ -90,6 +96,7 @@ class MegatronAdapter(BackendAdapter):
         MEGATRON_TRAINERS = {
             "MegatronPretrainTrainer": "primus.backends.megatron.megatron_pretrain_trainer.MegatronPretrainTrainer",
             "FluxPretrainTrainer": "primus.backends.megatron.flux_pretrain_trainer.FluxPretrainTrainer",
+            "WanPretrainTrainer": "primus.backends.megatron.wan_pretrain_trainer.WanPretrainTrainer",
         }
 
         if trainer_class not in MEGATRON_TRAINERS:
