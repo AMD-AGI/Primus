@@ -8,41 +8,41 @@
 # ---------------------------------------------------------------------------
 # Default fallback owners (everything not matched by a more specific rule)
 # ---------------------------------------------------------------------------
-*                               @Xiaoming-AMD @wenxie-amd @limou102
+*                               @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
 
 # ---------------------------------------------------------------------------
 # CI/CD and automation — highest-risk, require explicit review
 # ---------------------------------------------------------------------------
-/.github/                       @Xiaoming-AMD @wenxie-amd @limou102
-/.github/workflows/             @Xiaoming-AMD @wenxie-amd @limou102
-/.github/CODEOWNERS             @Xiaoming-AMD @wenxie-amd @limou102
+/.github/                       @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
+/.github/workflows/             @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
+/.github/CODEOWNERS             @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
 
 # ---------------------------------------------------------------------------
 # Release
 # ---------------------------------------------------------------------------
-/.github/workflows/release-build-wheel.yml   @Xiaoming-AMD @wenxie-amd @limou102
+/.github/workflows/release-build-wheel.yml   @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
 
 # ---------------------------------------------------------------------------
 # Docker images / build inputs (CI + release Dockerfiles)
 # ---------------------------------------------------------------------------
-/.github/workflows/docker/          @Xiaoming-AMD @wenxie-amd @limou102
-/.github/workflows/docker-release/  @Xiaoming-AMD @wenxie-amd @limou102
+/.github/workflows/docker/          @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
+/.github/workflows/docker-release/  @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
 
 # ---------------------------------------------------------------------------
 # Dependencies & packaging
 # ---------------------------------------------------------------------------
-/pyproject.toml                 @Xiaoming-AMD @wenxie-amd @limou102
-/requirements.txt               @Xiaoming-AMD @wenxie-amd @limou102
-/requirements-jax.txt           @Xiaoming-AMD @wenxie-amd @limou102
-/requirements-torchft.txt       @Xiaoming-AMD @wenxie-amd @limou102
+/pyproject.toml                 @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
+/requirements.txt               @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
+/requirements-jax.txt           @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
+/requirements-torchft.txt       @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
 
 # ---------------------------------------------------------------------------
 # Core framework & GPU/runtime backends
 # ---------------------------------------------------------------------------
-/primus/core/                   @Xiaoming-AMD @wenxie-amd @limou102
-/primus/backends/               @Xiaoming-AMD @wenxie-amd @limou102
+/primus/core/                   @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
+/primus/backends/               @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-/tests/                         @Xiaoming-AMD @wenxie-amd @limou102
+/tests/                         @Xiaoming-AMD @wenxie-amd @limou102 @vidushi8 @lorri-rao @GeneDer
