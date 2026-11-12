@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -37,14 +37,6 @@ def _env_on(name: str, default: str = "1") -> bool:
     if value not in _SWITCH_ON + _SWITCH_OFF:
         raise ValueError(f"{name}={os.environ[name]!r}: expected one of 1, true, on, yes, 0, false, off, no.")
     return value in _SWITCH_ON
-
-
-def _env_choice(name: str, default: str, choices: Sequence[str]) -> str:
-    """Read a setting that takes one of ``choices``, any case."""
-    value = os.environ.get(name, default).strip().lower()
-    if value not in choices:
-        raise ValueError(f"{name}={os.environ[name]!r}: expected one of {', '.join(choices)}.")
-    return value
 
 
 # ZAYA_ATTN_FLASH=1 (default): drop a purely causal dense mask once per forward
@@ -68,16 +60,6 @@ except Exception:  # pragma: no cover - depends on the image
 FUSE_NORM = _env_on("ZAYA_FUSE_NORM")
 FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
 
-# ZAYA_MOE_GEMM=split (default): per-expert nn.Linear GEMMs over host-sized
-# chunks (three host syncs per MoE layer: bincount reads its input's min and
-# max, then counts.tolist()). ZAYA_MOE_GEMM=turbo: the 16
-# experts' weights live in two stacked [E, out, in] parameters and run as two
-# primus_turbo grouped GEMMs whose group sizes stay on device, so a MoE layer
-# never syncs with the host. BF16 only (FP8 keeps the split path). Checkpoint
-# keys stay local_experts.N.linear_fc{1,2}.weight in both modes; the
-# distributed-optimizer state is shaped per parameter, so it does not carry
-# across a mode switch (load with --no-load-optim when switching).
-MOE_GEMM = _env_choice("ZAYA_MOE_GEMM", "split", ("split", "turbo"))
 # ZAYA_ROUTER_DEFER_AR=1: accumulate each router's token counts during the
 # forward and apply all balancing-bias updates after the decoder's backward
 # (or, failing that, at the start of the next forward) with one all-reduce for
@@ -87,8 +69,53 @@ MOE_GEMM = _env_choice("ZAYA_MOE_GEMM", "split", ("split", "turbo"))
 ROUTER_DEFER_AR = _env_on("ZAYA_ROUTER_DEFER_AR", "0")
 
 
+# By default the experts run split: per-expert nn.Linear GEMMs over host-sized
+# chunks (three host syncs per MoE layer: bincount reads its input's min and
+# max, then counts.tolist()). With Primus Turbo's enable_primus_turbo and
+# use_turbo_grouped_gemm, the 16 experts' weights live in two stacked
+# [E, out, in] parameters and run as two Primus Turbo grouped GEMMs whose
+# group sizes stay on device, so a MoE layer never syncs with the host;
+# turbo_grouped_gemm_backend picks the kernel. BF16 only (FP8 keeps the split
+# path). Checkpoint keys stay local_experts.N.linear_fc{1,2}.weight either
+# way; the distributed-optimizer state is shaped per parameter, so it does not
+# carry across a switch (load with --no-load-optim when switching).
+def _megatron_args():
+    """Megatron's parsed arguments, which hold the Primus Turbo settings, or None.
+
+    The Turbo settings are Megatron arguments, not TransformerConfig fields.
+    get_args raises before Megatron is initialized, as in the CPU unit tests,
+    which reads as every Turbo setting off.
+    """
+    try:
+        from megatron.training import get_args
+
+        return get_args()
+    except Exception:
+        return None
+
+
+def _turbo_experts(config) -> Tuple[bool, str]:
+    """Whether the experts run as Primus Turbo grouped GEMMs, and their path as the build log names it."""
+    args = _megatron_args()
+    if not (getattr(args, "enable_primus_turbo", False) and getattr(args, "use_turbo_grouped_gemm", False)):
+        return False, "split"
+    if _fp8_requested(config):
+        return False, "split (Turbo grouped GEMM is BF16-only)"
+    backend = getattr(args, "turbo_grouped_gemm_backend", "default")
+    return True, f"Primus Turbo grouped GEMM (backend: {backend})"
+
+
+def _publish_turbo_grouped_gemm_backend() -> None:
+    """Hand turbo_grouped_gemm_backend to Turbo the way Primus's own grouped linear does."""
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        _apply_turbo_grouped_gemm_backend_env,
+    )
+
+    _apply_turbo_grouped_gemm_backend_env()
+
+
 def switch_summary(config) -> str:
-    """The ZAYA_* kernel switches in effect for ``config``, as one line for the build log."""
+    """The ZAYA_* switches and the experts' path in effect for ``config``, as one line for the build log."""
 
     def on(flag: bool) -> str:
         return "on" if flag else "off"
@@ -97,13 +124,10 @@ def switch_summary(config) -> str:
         attention = "dense mask"
     else:
         attention = "flash_attn" if _flash_attn_func is not None else "SDPA, flash_attn not importable"
-    experts = MOE_GEMM
-    if MOE_GEMM == "turbo" and _fp8_requested(config):
-        experts = "split, turbo is BF16-only"
     return (
         f"ZAYA_ATTN_FLASH={on(ATTN_FLASH)} ({attention}), ZAYA_FUSE_NORM={on(FUSE_NORM)}, "
         f"ZAYA_FUSE_CCA={on(FUSE_CCA)}, ZAYA_CONV_GEMM={on(CONV_GEMM)}, ZAYA_FUSE_MOE={on(FUSE_MOE)}, "
-        f"ZAYA_MOE_GEMM={MOE_GEMM} (experts: {experts}), ZAYA_ROUTER_DEFER_AR={on(ROUTER_DEFER_AR)}"
+        f"ZAYA_ROUTER_DEFER_AR={on(ROUTER_DEFER_AR)}; experts: {_turbo_experts(config)[1]}"
     )
 
 
@@ -1012,8 +1036,9 @@ class ZayaMoE(nn.Module):
         experts = [
             SwiGLUExpert(int(config.hidden_size), intermediate, config) for _ in range(self.num_real_experts)
         ]
-        self.use_turbo_gemm = MOE_GEMM == "turbo" and not _fp8_requested(config)
+        self.use_turbo_gemm, _ = _turbo_experts(config)
         if self.use_turbo_gemm:
+            _publish_turbo_grouped_gemm_backend()
             # Built from the same per-expert modules (same init RNG stream),
             # then stacked into [E, out, in] (nn.Linear layout per expert, so
             # the grouped GEMM runs with trans_b=True). The per-expert copies
@@ -1107,7 +1132,7 @@ class ZayaMoE(nn.Module):
             # parameter gets a grad each step, which Megatron DDP's
             # --overlap_grad_reduce per-bucket hook count requires. Together
             # with the stacked experts (every expert weight is in each grouped
-            # GEMM, empty groups get a zero wgrad) turbo mode leaves no
+            # GEMM, empty groups get a zero wgrad) the Turbo path leaves no
             # parameter without a grad.
             hidden_states = _ZeroGradFor.apply(hidden_states, self.router.router_states_scale)
         probs, index, next_router = self.router(hidden_states, prev_router)

@@ -6,6 +6,8 @@
 
 """ZAYA_* switch parsing and the line that logs the switches in effect."""
 
+from types import SimpleNamespace
+
 import pytest
 from test_zaya1_math import _cfg  # noqa: E402  (pytest puts this dir on sys.path)
 
@@ -31,20 +33,17 @@ def test_unknown_switch_values_raise(monkeypatch, value):
         zm._env_on("ZAYA_TEST_SWITCH")
 
 
-def test_moe_gemm_takes_split_or_turbo(monkeypatch):
-    monkeypatch.delenv("ZAYA_MOE_GEMM", raising=False)
-    assert zm._env_choice("ZAYA_MOE_GEMM", "split", ("split", "turbo")) == "split"
-    monkeypatch.setenv("ZAYA_MOE_GEMM", " Turbo ")
-    assert zm._env_choice("ZAYA_MOE_GEMM", "split", ("split", "turbo")) == "turbo"
-    monkeypatch.setenv("ZAYA_MOE_GEMM", "trubo")
-    with pytest.raises(ValueError, match="trubo"):
-        zm._env_choice("ZAYA_MOE_GEMM", "split", ("split", "turbo"))
-
-
 def test_switch_summary_names_the_experts_that_run(monkeypatch):
-    monkeypatch.setattr(zm, "MOE_GEMM", "turbo")
-    assert "ZAYA_MOE_GEMM=turbo (experts: turbo)" in zm.switch_summary(_cfg())
-    assert "ZAYA_MOE_GEMM=turbo (experts: split, turbo is BF16-only)" in zm.switch_summary(_cfg(fp8="hybrid"))
+    turbo = SimpleNamespace(
+        enable_primus_turbo=True, use_turbo_grouped_gemm=True, turbo_grouped_gemm_backend="triton"
+    )
+    monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
+    assert zm.switch_summary(_cfg()).endswith("; experts: Primus Turbo grouped GEMM (backend: triton)")
+    assert zm.switch_summary(_cfg(fp8="hybrid")).endswith(
+        "; experts: split (Turbo grouped GEMM is BF16-only)"
+    )
+    monkeypatch.setattr(zm, "_megatron_args", lambda: SimpleNamespace(enable_primus_turbo=True))
+    assert zm.switch_summary(_cfg()).endswith("; experts: split")
     monkeypatch.setattr(zm, "ATTN_FLASH", False)
     monkeypatch.setattr(zm, "FUSE_NORM", False)
     line = zm.switch_summary(_cfg())

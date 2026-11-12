@@ -4,13 +4,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""ZAYA_MOE_GEMM=turbo and ZAYA_ROUTER_DEFER_AR=1 against the default paths.
+"""Primus Turbo grouped-GEMM experts and ZAYA_ROUTER_DEFER_AR=1 against the default paths.
 
-The CPU tests swap primus_turbo's grouped GEMM for a reference with the same
-contract (rows past group_offs[-1] come back zero), so they check the
-dispatch, the MoD skip slot, empty experts, gradients and checkpoint keys of
-the grouped path against the per-expert split path.
+The experts run as Turbo grouped GEMMs when Primus Turbo's enable_primus_turbo
+and use_turbo_grouped_gemm are set. The CPU tests swap primus_turbo's grouped
+GEMM for a reference with the same contract (rows past group_offs[-1] come
+back zero), so they check the dispatch, the MoD skip slot, empty experts,
+gradients and checkpoint keys of the grouped path against the per-expert split
+path.
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -33,8 +37,17 @@ def turbo_cpu(monkeypatch):
     monkeypatch.setattr(zm, "_turbo_grouped_gemm", _reference_grouped_gemm)
 
 
+def _turbo_settings(monkeypatch, on):
+    """Megatron arguments with Turbo's grouped GEMM on or off, and its default backend left as is."""
+    args = SimpleNamespace(
+        enable_primus_turbo=on, use_turbo_grouped_gemm=on, turbo_grouped_gemm_backend="default"
+    )
+    monkeypatch.setattr(zm, "_megatron_args", lambda: args)
+    monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: None)
+
+
 def _build_moe(mode, monkeypatch, seed=0, **cfg_overrides):
-    monkeypatch.setattr(zm, "MOE_GEMM", mode)
+    _turbo_settings(monkeypatch, mode == "turbo")
     torch.manual_seed(seed)
     return zm.ZayaMoE(_cfg(**cfg_overrides))
 
@@ -164,13 +177,56 @@ def test_turbo_mod_skip_scales_the_hidden_state(turbo_cpu, monkeypatch):
     torch.testing.assert_close(out, hidden / (moe.num_real_experts + 1))
 
 
-def test_turbo_falls_back_to_split_under_fp8(monkeypatch):
-    monkeypatch.setattr(zm, "MOE_GEMM", "turbo")
-    monkeypatch.setattr(zm, "_fp8_requested", lambda config: False)
-    assert zm.ZayaMoE(_cfg()).use_turbo_gemm
+def test_turbo_needs_both_settings_and_bf16(monkeypatch):
+    published = []
+    monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: published.append(True))
+    for enable, grouped in ((True, True), (True, False), (False, True), (False, False)):
+        args = SimpleNamespace(enable_primus_turbo=enable, use_turbo_grouped_gemm=grouped)
+        monkeypatch.setattr(zm, "_megatron_args", lambda: args)
+        assert zm.ZayaMoE(_cfg()).use_turbo_gemm == (enable and grouped)
+    assert len(published) == 1
+    # Megatron not initialized: no Turbo settings, so split.
+    monkeypatch.setattr(zm, "_megatron_args", lambda: None)
+    assert not zm.ZayaMoE(_cfg()).use_turbo_gemm
+    # Turbo's grouped GEMM is BF16 only: FP8 keeps the split experts.
+    _turbo_settings(monkeypatch, True)
+    monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: published.append(True))
     monkeypatch.setattr(zm, "_fp8_requested", lambda config: True)
     monkeypatch.setattr(zm, "_linear", lambda i, o, b, c, fp8=True: torch.nn.Linear(i, o, bias=b))
     assert not zm.ZayaMoE(_cfg()).use_turbo_gemm
+    assert len(published) == 1
+
+
+def test_turbo_settings_come_from_megatron_args(monkeypatch):
+    import megatron.training.global_vars as global_vars
+
+    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", None)
+    assert zm._megatron_args() is None
+    args = SimpleNamespace(enable_primus_turbo=True, use_turbo_grouped_gemm=True)
+    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", args)
+    assert zm._megatron_args() is args
+
+
+def test_turbo_publishes_the_grouped_gemm_backend(monkeypatch):
+    """turbo_grouped_gemm_backend reaches Turbo through the helper Primus's grouped linear uses."""
+    pytest.importorskip("primus_turbo")
+    from primus.backends.megatron.core.extensions import (
+        primus_turbo as primus_turbo_ext,
+    )
+
+    calls = []
+    helper = primus_turbo_ext._apply_turbo_grouped_gemm_backend_env
+    monkeypatch.setattr(primus_turbo_ext, "_set_turbo_env", lambda name, value: calls.append((name, value)))
+    monkeypatch.setattr(
+        primus_turbo_ext, "get_args", lambda: SimpleNamespace(turbo_grouped_gemm_backend="triton")
+    )
+    monkeypatch.setattr(primus_turbo_ext, "warning_rank_0", lambda *args, **kwargs: None)
+    helper.cache_clear()
+    try:
+        zm._publish_turbo_grouped_gemm_backend()
+    finally:
+        helper.cache_clear()
+    assert calls == [("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", "triton")]
 
 
 def _build_stack(defer, monkeypatch):
@@ -321,10 +377,10 @@ def test_turbo_gpu_backward_matches_split(monkeypatch, fuse_moe):
 def test_turbo_every_param_gets_a_grad(turbo_cpu, monkeypatch, fuse_moe):
     """--overlap_grad_reduce needs a grad hook on every param every step."""
     monkeypatch.setattr(zm, "FUSE_MOE", fuse_moe)
-    monkeypatch.setattr(zm, "MOE_GEMM", "split")
+    _turbo_settings(monkeypatch, False)
     torch.manual_seed(11)
     split = zm.ZayaStack(_cfg(num_layers=6))
-    monkeypatch.setattr(zm, "MOE_GEMM", "turbo")
+    _turbo_settings(monkeypatch, True)
     torch.manual_seed(11)
     turbo = zm.ZayaStack(_cfg(num_layers=6))
     turbo.load_state_dict(split.state_dict(), strict=True)
