@@ -20,13 +20,13 @@ jobs:
       - name: Post reminder comment
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          OWNERS: "Xiaoming-AMD wenxie-amd"
+          MAINTAINERS: "Xiaoming-AMD wenxie-amd"
           # Linked rather than @-mentioned so they are not notified on every PR.
           BACKUP_CONTACTS: "vidushi8 lorri-rao GeneDer amd-fuyuajin JohnQin-llm"
         with:
           script: |
             const logins = (value) => value.split(/\s+/).filter(Boolean);
-            const owners = logins(process.env.OWNERS)
+            const maintainers = logins(process.env.MAINTAINERS)
               .map((login) => `@${login}`).join(' ');
             const backups = logins(process.env.BACKUP_CONTACTS)
               .map((login) => `[${login}](https://github.com/${login})`).join(', ');
@@ -35,9 +35,9 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
               body: [
-                `**Code owners:** ${owners}`,
+                `**Primary maintainers:** ${maintainers}`,
                 '',
-                'Please contact the code owners for review or any questions about this PR.',
+                'Reach out to the primary maintainers with any questions about this PR.',
                 '',
                 'Outside China Standard Time (UTC+8) working hours, for urgent issues ' +
                   `you can also reach out to: ${backups}.`,
