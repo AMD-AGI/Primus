@@ -203,7 +203,9 @@ class TestPatchRegistration:
         import primus.backends.automodel.patches  # noqa: F401
         from primus.core.patches.patch_registry import PatchRegistry
 
-        return {patch.id: patch for patch in PatchRegistry.iter_patches(backend="automodel", phase="before_train")}
+        return {
+            patch.id: patch for patch in PatchRegistry.iter_patches(backend="automodel", phase="before_train")
+        }
 
     def test_patch_is_registered_and_off(self):
         patch = self._patches()["automodel.quantization.mxfp6_linear"]
