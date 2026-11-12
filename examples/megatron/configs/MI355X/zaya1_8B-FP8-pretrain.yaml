@@ -99,8 +99,8 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Off: the BF16 recipe's Turbo grouped-GEMM experts are BF16 only, so
-      # with FP8 the experts stay split.
+      # Off: Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet, so with
+      # FP8 the experts stay split.
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_gemm: false

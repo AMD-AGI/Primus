@@ -188,7 +188,7 @@ def test_turbo_needs_both_settings_and_bf16(monkeypatch):
     # Megatron not initialized: no Turbo settings, so split.
     monkeypatch.setattr(zm, "_megatron_args", lambda: None)
     assert not zm.ZayaMoE(_cfg()).use_turbo_gemm
-    # Turbo's grouped GEMM is BF16 only: FP8 keeps the split experts.
+    # Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet: FP8 keeps the split experts.
     _turbo_settings(monkeypatch, True)
     monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: published.append(True))
     monkeypatch.setattr(zm, "_fp8_requested", lambda config: True)

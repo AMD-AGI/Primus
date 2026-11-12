@@ -40,7 +40,7 @@ def test_switch_summary_names_the_experts_that_run(monkeypatch):
     monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
     assert zm.switch_summary(_cfg()).endswith("; experts: Primus Turbo grouped GEMM (backend: triton)")
     assert zm.switch_summary(_cfg(fp8="hybrid")).endswith(
-        "; experts: split (Turbo grouped GEMM is BF16-only)"
+        "; experts: split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)"
     )
     monkeypatch.setattr(zm, "_megatron_args", lambda: SimpleNamespace(enable_primus_turbo=True))
     assert zm.switch_summary(_cfg()).endswith("; experts: split")
