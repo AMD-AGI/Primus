@@ -75,10 +75,11 @@ ROUTER_DEFER_AR = _env_on("ZAYA_ROUTER_DEFER_AR", "0")
 # use_turbo_grouped_gemm, the 16 experts' weights live in two stacked
 # [E, out, in] parameters and run as two Primus Turbo grouped GEMMs whose
 # group sizes stay on device, so a MoE layer never syncs with the host;
-# turbo_grouped_gemm_backend picks the kernel. BF16 only (FP8 keeps the split
-# path). Checkpoint keys stay local_experts.N.linear_fc{1,2}.weight either
-# way; the distributed-optimizer state is shaped per parameter, so it does not
-# carry across a switch (load with --no-load-optim when switching).
+# turbo_grouped_gemm_backend picks the kernel. Only Turbo's BF16 grouped GEMM
+# is wired up here; Turbo's FP8 grouped GEMM isn't yet, so under FP8 the
+# experts stay split. Checkpoint keys stay local_experts.N.linear_fc{1,2}.weight
+# either way; the distributed-optimizer state is shaped per parameter, so it
+# does not carry across a switch (load with --no-load-optim when switching).
 def _megatron_args():
     """Megatron's parsed arguments, which hold the Primus Turbo settings, or None.
 
@@ -100,7 +101,7 @@ def _turbo_experts(config) -> Tuple[bool, str]:
     if not (getattr(args, "enable_primus_turbo", False) and getattr(args, "use_turbo_grouped_gemm", False)):
         return False, "split"
     if _fp8_requested(config):
-        return False, "split (Turbo grouped GEMM is BF16-only)"
+        return False, "split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)"
     backend = getattr(args, "turbo_grouped_gemm_backend", "default")
     return True, f"Primus Turbo grouped GEMM (backend: {backend})"
 
