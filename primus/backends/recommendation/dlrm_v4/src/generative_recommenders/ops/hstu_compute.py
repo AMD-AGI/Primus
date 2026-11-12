@@ -1,0 +1,490 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#!/usr/bin/env python3
+
+# pyre-strict
+
+from typing import Optional, Tuple
+
+import torch
+import torch.nn.functional as F
+from generative_recommenders.ops.blas_solution_pins import install_for_tokens
+from generative_recommenders.ops.layer_norm import layer_norm
+from generative_recommenders.ops.mm import addmm
+from generative_recommenders.ops.pytorch.pt_hstu_linear import (
+    pytorch_hstu_compute_output,
+)
+
+try:
+    from hammer.ops.triton.cc.addmm.triton_cc_addmm import triton_cc_addmm
+    from hammer.ops.triton.cc.group_norm_mul_dropout.triton_cc_group_norm_mul_dropout import (
+        triton_cc_group_norm_mul_dropout_wrapper,
+    )
+    from hammer.ops.triton.cc.layer_norm_mul_dropout.triton_cc_layer_norm_mul_dropout import (
+        triton_cc_layer_norm_mul_dropout_wrapper,
+    )
+except ImportError:
+    triton_cc_addmm = None
+    triton_cc_group_norm_mul_dropout_wrapper = None
+    triton_cc_layer_norm_mul_dropout_wrapper = None
+from generative_recommenders.common import HammerKernel
+from generative_recommenders.ops.hstu_attention import hstu_mha, hstu_mha_cuda
+from generative_recommenders.ops.triton.triton_hstu_linear import (
+    triton_hstu_compute_output,
+)
+from generative_recommenders.ops.triton.triton_hstu_preprocess_and_attention import (
+    triton_hstu_preprocess_and_attention,
+    triton_hstu_preprocess_and_attention_targets_only,
+)
+from generative_recommenders.ops.flydsl.hstu_do8_registry import carry_site
+from torch.fx._symbolic_trace import is_fx_tracing
+
+try:
+    # @manual=//generative_recommenders/ops/triton_aot:triton_group_norm_mul_dropout
+    from generative_recommenders.ops.triton_aot.triton_group_norm_mul_dropout import (  # pyre-ignore[21]
+        aot_triton_kernel_wrapper_group_norm_mul_dropout,
+    )
+
+    # @manual=//generative_recommenders/ops/triton_aot:triton_layer_norm_mul_dropout
+    from generative_recommenders.ops.triton_aot.triton_layer_norm_mul_dropout import (  # pyre-ignore[21]
+        aot_triton_kernel_wrapper_layer_norm_mul_dropout,
+    )
+except ImportError:
+
+    def aot_triton_kernel_wrapper_group_norm_mul_dropout(
+        *args: object,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        raise ImportError(
+            "AOT-T is required for the TRITON_INFERENCE group_norm_mul_dropout kernel."
+        )
+
+    def aot_triton_kernel_wrapper_layer_norm_mul_dropout(
+        *args: object,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        raise ImportError(
+            "AOT-T is required for the TRITON_INFERENCE layer_norm_mul_dropout kernel."
+        )
+
+
+torch.fx.wrap("triton_hstu_compute_output")
+
+
+def hstu_compute_uqvk(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    norm_eps: float,
+    num_heads: int,
+    attn_dim: int,
+    hidden_dim: int,
+    uvqk_weight: torch.Tensor,
+    uvqk_bias: torch.Tensor,
+    kernel: HammerKernel = HammerKernel.PYTORCH,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if torch.jit.is_scripting():
+        # Script-mode fast path: pure PyTorch, no HammerKernel dispatch.
+        normed_x = F.layer_norm(
+            x,
+            normalized_shape=(x.shape[-1],),
+            weight=norm_weight,
+            bias=norm_bias,
+            eps=norm_eps,
+        )
+        uvqk = torch.addmm(uvqk_bias, normed_x, uvqk_weight)
+    else:
+        normed_x = layer_norm(
+            x,
+            weight=norm_weight,
+            bias=norm_bias,
+            eps=norm_eps,
+            kernel=kernel,
+        )
+        # The projection GEMMs' tuned solutions are keyed on the token count,
+        # which changes every step, so they have to be registered per batch.
+        # normed_x.shape[0] is that count, and this covers the backward GEMMs
+        # too since all six pins are registered together. Under the pipeline's
+        # fx trace the shape is a Proxy rather than an int, hence the guard.
+        num_tokens = normed_x.shape[0]
+        if isinstance(num_tokens, int):
+            install_for_tokens(num_tokens)
+        # NOTE: for AMD training, we go with torch.addmm instead of the triton
+        # version before Triton on AMD achieves on-par perf with NV GPU.
+        if torch.version.hip and kernel == HammerKernel.TRITON:
+            uvqk = torch.addmm(uvqk_bias, normed_x, uvqk_weight)
+        else:
+            uvqk = addmm(uvqk_bias, normed_x, uvqk_weight, kernel)
+    u, v, q, k = torch.split(
+        uvqk,
+        [
+            hidden_dim * num_heads,
+            hidden_dim * num_heads,
+            attn_dim * num_heads,
+            attn_dim * num_heads,
+        ],
+        dim=1,
+    )
+    u = F.silu(u)
+    q = q.view(-1, num_heads, attn_dim)
+    k = k.view(-1, num_heads, attn_dim)
+    v = v.view(-1, num_heads, hidden_dim)
+    return u, q, k, v
+
+
+def hstu_compute_output(
+    attn: torch.Tensor,
+    u: torch.Tensor,
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    norm_eps: float,
+    output_weight: torch.Tensor,
+    num_heads: int,
+    linear_dim: int,
+    dropout_ratio: float,
+    training: bool,
+    concat_u: bool,
+    concat_x: bool,
+    mul_u_activation_type: str,
+    group_norm: bool,
+    recompute_y_in_backward: bool,
+    kernel: HammerKernel = HammerKernel.PYTORCH,
+    rng_row_indices: Optional[torch.Tensor] = None,
+    fp8_output_scale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    if torch.jit.is_scripting():
+        return pytorch_hstu_compute_output(
+            attn=attn,
+            u=u,
+            x=x,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
+            output_weight=output_weight,
+            eps=norm_eps,
+            dropout_ratio=dropout_ratio,
+            training=training,
+            silu_u=mul_u_activation_type == "silu",
+            concat_u=concat_u,
+            concat_x=concat_x,
+            mul_u_activation_type=mul_u_activation_type,
+            group_norm=group_norm,
+            num_heads=num_heads,
+            linear_dim=linear_dim,
+        )
+    if kernel == HammerKernel.TRITON:
+        return triton_hstu_compute_output(
+            attn=attn,
+            u=u,
+            x=x,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
+            output_weight=output_weight,
+            eps=norm_eps,
+            dropout_ratio=dropout_ratio,
+            training=training,
+            silu_u=mul_u_activation_type == "silu",
+            concat_u=concat_u,
+            concat_x=concat_x,
+            mul_u_activation_type=mul_u_activation_type,
+            group_norm=group_norm,
+            num_heads=num_heads,
+            linear_dim=linear_dim,
+            seed=None,
+            recompute_y_in_backward=recompute_y_in_backward,
+            rng_row_indices=rng_row_indices,
+            fp8_output_scale=fp8_output_scale,
+        )
+    elif kernel == HammerKernel.TRITON_INFERENCE:
+        if group_norm:
+            y = aot_triton_kernel_wrapper_group_norm_mul_dropout(
+                x=attn,
+                u=u,
+                weight=norm_weight,
+                bias=norm_bias,
+                eps=norm_eps,
+                silu_u=mul_u_activation_type == "silu",
+                concat_ux=concat_u and concat_x,
+                num_heads=num_heads,
+                linear_dim=linear_dim,
+            )
+        else:
+            y = aot_triton_kernel_wrapper_layer_norm_mul_dropout(
+                x=attn,
+                u=u,
+                weight=norm_weight,
+                bias=norm_bias,
+                eps=norm_eps,
+                dropout_ratio=dropout_ratio,
+                training=training,
+                silu_u=mul_u_activation_type == "silu",
+                concat_ux=concat_u and concat_x,
+                mul_u_activation_type=mul_u_activation_type,
+            )
+        return addmm(x, y, output_weight, kernel)
+    elif kernel == HammerKernel.TRITON_CC:
+        if triton_cc_group_norm_mul_dropout_wrapper is None or triton_cc_addmm is None:
+            raise ImportError(
+                "hammer is required for the TRITON_CC kernel in hstu_compute_output."
+            )
+        if group_norm:
+            y = triton_cc_group_norm_mul_dropout_wrapper(
+                x=attn,
+                u=u,
+                weight=norm_weight,
+                bias=norm_bias,
+                eps=norm_eps,
+                dropout_ratio=dropout_ratio,
+                training=training,
+                concat_ux=concat_u and concat_x,
+                num_heads=num_heads,
+                linear_dim=linear_dim,
+            )
+        else:
+            y = triton_cc_layer_norm_mul_dropout_wrapper(
+                x=attn,
+                u=u,
+                weight=norm_weight,
+                bias=norm_bias,
+                eps=norm_eps,
+                dropout_ratio=dropout_ratio,
+                training=training,
+                concat_u=concat_u,
+                concat_x=concat_x,
+                mul_u_activation_type=mul_u_activation_type,
+            )
+        return triton_cc_addmm(x, y, output_weight)
+    else:
+        return pytorch_hstu_compute_output(
+            attn=attn,
+            u=u,
+            x=x,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
+            output_weight=output_weight,
+            eps=norm_eps,
+            dropout_ratio=dropout_ratio,
+            training=training,
+            silu_u=mul_u_activation_type == "silu",
+            concat_u=concat_u,
+            concat_x=concat_x,
+            mul_u_activation_type=mul_u_activation_type,
+            group_norm=group_norm,
+            num_heads=num_heads,
+            linear_dim=linear_dim,
+        )
+
+
+def hstu_preprocess_and_attention(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    norm_eps: float,
+    num_heads: int,
+    attn_dim: int,
+    hidden_dim: int,
+    uvqk_weight: torch.Tensor,
+    uvqk_bias: torch.Tensor,
+    max_seq_len: int,
+    seq_offsets: torch.Tensor,
+    attn_alpha: float,
+    causal: bool,
+    num_targets: Optional[torch.Tensor],
+    max_attn_len: int,
+    contextual_seq_len: int,
+    recompute_uvqk_in_backward: bool,
+    recompute_normed_x_in_backward: bool,
+    sort_by_length: bool,
+    prefill: bool = False,
+    kernel: HammerKernel = HammerKernel.PYTORCH,
+    enable_tma: Optional[bool] = None,
+    fp8_input_scale: Optional[torch.Tensor] = None,
+    fp8_qkv_scale: Optional[torch.Tensor] = None,
+    defer_silu: bool = False,
+    allow_save_fp8_uvqk: bool = True,
+    return_residual_proxy: bool = False,
+):
+    if not is_fx_tracing():
+        torch._assert(max_seq_len > 0, "max_seq_len must be larger than 0")
+        torch._assert(x.dim() == 2, "x must be 2-D")
+        torch._assert(
+            x.shape[1] == uvqk_weight.shape[0],
+            "x.shape[1] must equal uvqk_weight.shape[0]",
+        )
+        torch._assert(
+            uvqk_weight.shape[1] == 2 * num_heads * (hidden_dim + attn_dim),
+            "uvqk_weight.shape[1] must equal 2 * num_heads * (hidden_dim + attn_dim)",
+        )
+        torch._assert(causal is True, "only causal attention is supported.")
+    if torch.jit.is_scripting():
+        if return_residual_proxy:
+            raise RuntimeError("residual proxy requires the Triton training path")
+        # Script-mode: compute uvqk via PyTorch fallback then call the
+        # libtorch-callable CUDA HSTU MHA op directly. Avoids both the
+        # HammerKernel enum dispatch and the Triton-only fused path.
+        u, q, k, v = hstu_compute_uqvk(
+            x=x,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
+            norm_eps=norm_eps,
+            num_heads=num_heads,
+            attn_dim=attn_dim,
+            hidden_dim=hidden_dim,
+            uvqk_weight=uvqk_weight,
+            uvqk_bias=uvqk_bias,
+            kernel=HammerKernel.PYTORCH,
+        )
+        attn_output = hstu_mha_cuda(
+            max_seq_len=max_seq_len,
+            alpha=attn_alpha,
+            q=q,
+            k=k,
+            v=v,
+            seq_offsets=seq_offsets,
+            num_targets=num_targets,
+            max_attn_len=max_attn_len,
+            contextual_seq_len=contextual_seq_len,
+        ).view(-1, hidden_dim * num_heads)
+        return u, attn_output, k, v
+    if kernel == HammerKernel.TRITON and prefill is False:
+        triton_outputs = triton_hstu_preprocess_and_attention(
+            x=x,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
+            norm_eps=norm_eps,
+            num_heads=num_heads,
+            attn_dim=attn_dim,
+            hidden_dim=hidden_dim,
+            uvqk_weight=uvqk_weight,
+            uvqk_bias=uvqk_bias,
+            max_seq_len=max_seq_len,
+            seq_offsets=seq_offsets,
+            attn_alpha=attn_alpha,
+            num_targets=num_targets,
+            max_attn_len=max_attn_len,
+            contextual_seq_len=contextual_seq_len,
+            recompute_uvqk_in_backward=recompute_uvqk_in_backward,
+            recompute_normed_x_in_backward=recompute_normed_x_in_backward,
+            sort_by_length=sort_by_length,
+            enable_tma=enable_tma,
+            fp8_input_scale=fp8_input_scale,
+            fp8_qkv_scale=fp8_qkv_scale,
+            defer_silu=defer_silu,
+            allow_save_fp8_uvqk=allow_save_fp8_uvqk,
+            return_residual_proxy=return_residual_proxy,
+        )
+        if return_residual_proxy:
+            u, attn_output, residual_proxy = triton_outputs
+        else:
+            u, attn_output = triton_outputs
+        # R15 A11 hook: HSTUComputeOutputFunction receives this [T, H*D] view,
+        # not the attention Function's `out`, so the view carries out's dO8
+        # site (hstu_do8_registry.carry_site; a no-op without a site).
+        attn_output = carry_site(
+            attn_output, attn_output.view(-1, hidden_dim * num_heads)
+        )
+        k = None
+        v = None
+    else:
+        u, q, k, v = hstu_compute_uqvk(
+            x=x,
+            norm_weight=norm_weight,
+            norm_bias=norm_bias,
+            norm_eps=norm_eps,
+            num_heads=num_heads,
+            attn_dim=attn_dim,
+            hidden_dim=hidden_dim,
+            uvqk_weight=uvqk_weight,
+            uvqk_bias=uvqk_bias,
+            kernel=kernel,
+        )
+        attn_output = hstu_mha(
+            max_seq_len=max_seq_len,
+            alpha=attn_alpha,
+            q=q,
+            k=k,
+            v=v,
+            seq_offsets=seq_offsets,
+            causal=causal,
+            dropout_pr=0.0,
+            training=False,
+            num_targets=num_targets,
+            max_attn_len=max_attn_len,
+            contextual_seq_len=contextual_seq_len,
+            sort_by_length=sort_by_length,
+            kernel=kernel,
+        ).view(-1, hidden_dim * num_heads)
+    if return_residual_proxy:
+        if kernel != HammerKernel.TRITON or prefill:
+            raise RuntimeError("residual proxy requires the Triton training path")
+        return u, attn_output, k, v, residual_proxy
+    return u, attn_output, k, v
+
+
+def hstu_preprocess_and_attention_targets_only(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    norm_bias: torch.Tensor,
+    norm_eps: float,
+    num_heads: int,
+    attn_dim: int,
+    hidden_dim: int,
+    uvqk_weight: torch.Tensor,
+    uvqk_bias: torch.Tensor,
+    max_seq_len: int,
+    seq_offsets: torch.Tensor,
+    attn_alpha: float,
+    num_targets: torch.Tensor,
+    kernel: HammerKernel = HammerKernel.TRITON,
+    fp8_input_scale: Optional[torch.Tensor] = None,
+    fp8_qkv_scale: Optional[torch.Tensor] = None,
+    return_residual_proxy: bool = False,
+    residual_rows_only: bool = False,
+    allow_save_fp8_vk: bool = True,
+):
+    """Compute compact final-layer U/Q attention while retaining full K/V.
+
+    With return_residual_proxy and residual_rows_only, the third output is the
+    candidate rows of x (x[seq_offsets[1:] - 1]) rather than x itself.
+    """
+    if not is_fx_tracing():
+        torch._assert(kernel == HammerKernel.TRITON, "targets-only requires Triton")
+        torch._assert(x.dim() == 2, "x must be 2-D")
+        torch._assert(num_targets.dim() == 1, "num_targets must be 1-D")
+    outputs = triton_hstu_preprocess_and_attention_targets_only(
+        x=x,
+        norm_weight=norm_weight,
+        norm_bias=norm_bias,
+        norm_eps=norm_eps,
+        num_heads=num_heads,
+        attn_dim=attn_dim,
+        hidden_dim=hidden_dim,
+        uvqk_weight=uvqk_weight,
+        uvqk_bias=uvqk_bias,
+        max_seq_len=max_seq_len,
+        seq_offsets=seq_offsets,
+        attn_alpha=attn_alpha,
+        num_targets=num_targets,
+        fp8_input_scale=fp8_input_scale,
+        fp8_qkv_scale=fp8_qkv_scale,
+        return_residual_proxy=return_residual_proxy,
+        residual_rows_only=residual_rows_only,
+        allow_save_fp8_vk=allow_save_fp8_vk,
+    )
+    if return_residual_proxy:
+        u, attn_output, residual_proxy = outputs
+        return u, attn_output.view(-1, hidden_dim * num_heads), residual_proxy
+    u, attn_output = outputs
+    return u, attn_output.view(-1, hidden_dim * num_heads)

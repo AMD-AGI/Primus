@@ -1,0 +1,6 @@
+# Installed with --no-deps into a private directory (PRIMUS_RECOMMENDATION_SITE)
+# that only the DLRMv4 trainer puts first on its Python path; the image's copies
+# stay as they are for everything else.
+# The trainer's FlyDSL kernels are written for FlyDSL 0.2.4; the image ships 0.3.4.1
+# (an API change: no flydsl.expr.buffer_ops / vector), which aiter and Primus-Turbo use.
+flydsl==0.2.4

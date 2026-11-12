@@ -80,6 +80,7 @@ Deep technical topics for advanced users.
 - [Fault tolerance and elastic training](./04-technical-guides/fault-tolerance-and-elastic-training.md): graceful exit, auto-resume, in-process restart, torchft
 - [Determinism and reproducibility](./04-technical-guides/determinism-and-reproducibility.md): deterministic mode, seeds, trade-offs
 - [Diffusion models](./04-technical-guides/diffusion-models/README.md): Flux diffusion architecture, data pipeline, and FP8 / MXFP4 training
+- [Recommendation models](./04-technical-guides/recommendation/README.md): DLRMv4 (HSTU on yambda-5b) MLPerf training
 - [Native SFT and LoRA](./04-technical-guides/native-sft-lora.md): Megatron-native SFT/LoRA runbook (BF16 / FP8 / FP4), no Megatron-Bridge dependency
 - [SpecForge](./04-technical-guides/specforge/introduction.md): speculative-decoding draft training — capture, offline train, and online train through `primus-cli`
 
