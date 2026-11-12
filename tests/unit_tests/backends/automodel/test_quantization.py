@@ -306,7 +306,7 @@ class TestFp8Registration:
 class TestFp8Skip:
     """Wan's conditioning linears are not in the FLUX names AutoModel's predicate
     knows. They have to stay in bf16 without taking FLUX's x_embedder, context
-    embedder or proj_out with them."""
+    embedder or normally sized proj_out with them."""
 
     def _predicate(self, monkeypatch, fn):
         import sys
@@ -343,6 +343,31 @@ class TestFp8Skip:
         assert fp8_linear.should_convert("proj_out", linear) is True
         assert fp8_linear.should_convert("time_text_embed.timestep_embedder.linear_1", linear) is False
         assert fp8_linear.should_convert("transformer_blocks.0.attn.to_q", linear) is True
+
+    def test_min_features_keeps_an_unsupported_skinny_projection_in_bf16(self, monkeypatch, set_option):
+        seen = []
+
+        def predicate(name, linear):
+            seen.append(name)
+            return True
+
+        self._predicate(monkeypatch, predicate)
+        set_option("primus_turbo.fp8_linear_min_features", 129)
+        skinny = type("LinearShape", (), {"in_features": 5120, "out_features": 64})()
+        wide = type("LinearShape", (), {"in_features": 5120, "out_features": 5120})()
+        assert fp8_linear.should_convert("proj_out", skinny) is False
+        assert fp8_linear.should_convert("transformer_blocks.0.attn.to_q", wide) is True
+        assert seen == ["transformer_blocks.0.attn.to_q"]
+
+    def test_min_features_is_off_by_default(self, monkeypatch):
+        self._predicate(monkeypatch, lambda name, linear: True)
+        skinny = type("LinearShape", (), {"in_features": 5120, "out_features": 64})()
+        assert fp8_linear.should_convert("proj_out", skinny) is True
+
+    def test_negative_min_features_is_rejected(self, set_option):
+        set_option("primus_turbo.fp8_linear_min_features", -1)
+        with pytest.raises(ValueError, match="fp8_linear_min_features"):
+            fp8_linear.min_features()
 
 
 class TestConfigResolution:
