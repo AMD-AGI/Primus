@@ -8,41 +8,41 @@
 # ---------------------------------------------------------------------------
 # Default fallback owners (everything not matched by a more specific rule)
 # ---------------------------------------------------------------------------
-*                               @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
+*                               @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
 
 # ---------------------------------------------------------------------------
 # CI/CD and automation — highest-risk, require explicit review
 # ---------------------------------------------------------------------------
-/.github/                       @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
-/.github/workflows/             @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
-/.github/CODEOWNERS             @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
+/.github/                       @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
+/.github/workflows/             @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
+/.github/CODEOWNERS             @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
 
 # ---------------------------------------------------------------------------
 # Release
 # ---------------------------------------------------------------------------
-/.github/workflows/release-build-wheel.yml   @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
+/.github/workflows/release-build-wheel.yml   @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
 
 # ---------------------------------------------------------------------------
 # Docker images / build inputs (CI + release Dockerfiles)
 # ---------------------------------------------------------------------------
-/.github/workflows/docker/          @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
-/.github/workflows/docker-release/  @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
+/.github/workflows/docker/          @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
+/.github/workflows/docker-release/  @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
 
 # ---------------------------------------------------------------------------
 # Dependencies & packaging
 # ---------------------------------------------------------------------------
-/pyproject.toml                 @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
-/requirements.txt               @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
-/requirements-jax.txt           @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
-/requirements-torchft.txt       @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
+/pyproject.toml                 @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
+/requirements.txt               @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
+/requirements-jax.txt           @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
+/requirements-torchft.txt       @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
 
 # ---------------------------------------------------------------------------
 # Core framework & GPU/runtime backends
 # ---------------------------------------------------------------------------
-/primus/core/                   @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
-/primus/backends/               @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
+/primus/core/                   @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
+/primus/backends/               @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-/tests/                         @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer
+/tests/                         @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin
