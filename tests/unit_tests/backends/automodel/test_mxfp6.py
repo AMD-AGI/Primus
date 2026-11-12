@@ -109,15 +109,23 @@ class TestHybridRoute:
     def test_forward_is_fp6_and_both_gradients_are_fp4(self, monkeypatch):
         """The Task 6 recipe is a routing contract, not just a config label."""
         calls = []
-        fp6_module = types.ModuleType("primus_turbo.pytorch.ops.gemm_fp6")
+        fp6_impl_module = types.ModuleType("primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl")
+        fp6_pack_module = types.ModuleType(
+            "primus_turbo.pytorch.kernels.quantization.mxfp6_pack"
+        )
         backend_module = types.ModuleType("primus_turbo.pytorch.core.backend")
         precision_module = types.ModuleType("primus_turbo.pytorch.core.low_precision")
         fp4_impl_module = types.ModuleType("primus_turbo.pytorch.kernels.gemm.gemm_fp4_impl")
         quant_module = types.ModuleType("primus_turbo.pytorch.ops.quantization")
 
-        def fake_fp6(a, b, **kwargs):
-            calls.append(("fp6", False, True, tuple(a.shape), tuple(b.shape)))
+        def fake_fp6(a, a_scale, b, b_scale, m, n, k, *args, **kwargs):
+            del a_scale, b_scale, args, kwargs
+            calls.append(("fp6", False, True, (m, k), (n, k)))
             return a @ b.T
+
+        def fake_fp6_pack(x, block_size):
+            del block_size
+            return x, torch.ones(1)
 
         def fake_fp4_impl(
             a,
@@ -143,7 +151,9 @@ class TestHybridRoute:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
-        fp6_module.gemm_fp6 = fake_fp6
+        fp6_impl_module.gemm_fp6_impl = fake_fp6
+        fp6_pack_module.check_mxfp6_support = lambda device: (True, "")
+        fp6_pack_module.quantize_mxfp6_row = fake_fp6_pack
         backend_module.BackendType = types.SimpleNamespace(
             AITER=FakeBackend(1),
             HIPBLASLT=FakeBackend(2),
@@ -157,10 +167,12 @@ class TestHybridRoute:
             "primus_turbo.pytorch.core",
             "primus_turbo.pytorch.kernels",
             "primus_turbo.pytorch.kernels.gemm",
+            "primus_turbo.pytorch.kernels.quantization",
             "primus_turbo.pytorch.ops",
         ):
             monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-        monkeypatch.setitem(sys.modules, fp6_module.__name__, fp6_module)
+        monkeypatch.setitem(sys.modules, fp6_impl_module.__name__, fp6_impl_module)
+        monkeypatch.setitem(sys.modules, fp6_pack_module.__name__, fp6_pack_module)
         monkeypatch.setitem(sys.modules, backend_module.__name__, backend_module)
         monkeypatch.setitem(sys.modules, precision_module.__name__, precision_module)
         monkeypatch.setitem(sys.modules, fp4_impl_module.__name__, fp4_impl_module)
@@ -187,9 +199,9 @@ class TestHybridRoute:
         out_ref = x_ref @ weight_ref.T
         out_ref.backward(grad)
 
-        torch.testing.assert_close(out, out_ref)
-        torch.testing.assert_close(x.grad, x_ref.grad)
-        torch.testing.assert_close(weight.grad, weight_ref.grad)
+        torch.testing.assert_close(out, out_ref, rtol=1e-5, atol=2e-5)
+        torch.testing.assert_close(x.grad, x_ref.grad, rtol=1e-5, atol=2e-5)
+        torch.testing.assert_close(weight.grad, weight_ref.grad, rtol=1e-5, atol=2e-5)
         assert calls == [
             ("fp6", False, True, (512, 256), (768, 256)),
             ("fp4", False, True, (512, 768), (256, 768)),

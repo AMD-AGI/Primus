@@ -15,9 +15,21 @@ with zeros, and those added rows contribute zero to the weight gradient.
 """
 from __future__ import annotations
 
+import os
+
 import torch
 
 from primus.backends.automodel.quantization import _fp6_common
+
+_SEEN_SHAPES: set[tuple[str, int, int, int]] = set()
+
+
+def _record_shape(family: str, m: int, n: int, k: int) -> None:
+    """Print each model GEMM shape once when the launch witness requests it."""
+    key = (family, m, n, k)
+    if os.environ.get("PRIMUS_MXFP6_SHAPE_LOG") == "1" and key not in _SEEN_SHAPES:
+        _SEEN_SHAPES.add(key)
+        print(f"PRIMUS_MXFP6_SHAPE family={family} M={m} N={n} K={k}", flush=True)
 
 
 def _pad_tokens(x: torch.Tensor) -> tuple[torch.Tensor, int]:
@@ -34,15 +46,43 @@ class _MXFP6FwdMXFP4Bwd(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, weight, fp6_config, fp4_config):
-        from primus_turbo.pytorch.ops.gemm_fp6 import gemm_fp6
+        from primus_turbo.pytorch.kernels.gemm.gemm_fp6_impl import gemm_fp6_impl
+        from primus_turbo.pytorch.kernels.quantization.mxfp6_pack import (
+            check_mxfp6_support,
+            quantize_mxfp6_row,
+        )
 
-        out = gemm_fp6(
-            x,
-            weight,
-            trans_a=False,
-            trans_b=True,
-            out_dtype=x.dtype,
-            config=fp6_config,
+        supported, reason = check_mxfp6_support(x.device)
+        if not supported:
+            raise RuntimeError(reason)
+        if x.ndim != 2 or weight.ndim != 2:
+            raise ValueError(f"MXFP6 linear needs 2D operands, got x={x.ndim}D weight={weight.ndim}D")
+        if x.device != weight.device or x.dtype != weight.dtype:
+            raise ValueError(
+                "MXFP6 linear operands must share device and dtype, got "
+                f"x={x.device}/{x.dtype} weight={weight.device}/{weight.dtype}"
+            )
+        m, k = x.shape
+        n, weight_k = weight.shape
+        if k != weight_k or any(dim % _fp6_common.MXFP6_TILE_SIZE for dim in (m, n, k)):
+            raise ValueError(f"MXFP6 linear needs matching 256-aligned M/N/K, got M={m} N={n} K={k}")
+
+        # Only row packs feed the forward GEMM. Turbo's autograd-aware
+        # gemm_fp6 also creates column packs for an MXFP6 backward; this hybrid
+        # recipe deliberately uses MXFP4 backward, so those packs are waste.
+        x_row, x_scale = quantize_mxfp6_row(x, fp6_config.block_size)
+        weight_row, weight_scale = quantize_mxfp6_row(weight, fp6_config.block_size)
+        _record_shape("A6W6", m, n, k)
+        out = gemm_fp6_impl(
+            x_row,
+            x_scale,
+            weight_row,
+            weight_scale,
+            m,
+            n,
+            k,
+            x.dtype,
+            fp6_config.granularity.value,
         )
         ctx.save_for_backward(x, weight)
         ctx.out_dtype = x.dtype
@@ -136,6 +176,7 @@ class _MXFP6FwdMXFP4Bwd(torch.autograd.Function):
             preshuffled=preshuffled,
         )
         # dgrad = grad_out @ weight
+        _record_shape("A4W4", grad_2d.shape[0], weight.shape[1], weight.shape[0])
         grad_x = gemm_fp4_impl(
             g_row,
             g_row_scale,
@@ -146,6 +187,7 @@ class _MXFP6FwdMXFP4Bwd(torch.autograd.Function):
             **common,
         )
         # wgrad = grad_out.T @ x
+        _record_shape("A4W4", weight.shape[0], weight.shape[1], x.shape[0])
         grad_weight = gemm_fp4_impl(
             g_col,
             g_col_scale,

@@ -84,10 +84,10 @@ def replace_linears(module, module_name: str, *, fp8_safe_only: bool = False) ->
         log_prefix=_LOG_PREFIX,
     )
     logger.info(
-        "%s %s: %d -> Float6Linear (MXFP6 fwd / MXFP4 bwd), %d kept in BF16",
+        "%s replaced %d torch.nn.Linear with Float6Linear in %s; skipped=%d",
         _LOG_PREFIX,
-        module_name,
         converted,
+        module_name,
         skipped,
     )
     return converted
