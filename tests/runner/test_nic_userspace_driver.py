@@ -267,7 +267,9 @@ def test_ionic_finds_codename_deb_in_nested_bundle_before_repo(tmp_path, monkeyp
     assert all(c.kind != "download" for c in nud.IonicFamily().candidates(ctx))
 
 
-def _host_sw_pkg_bundle(path: Path, bundle_version: str, deb_version: str = "50.0.26.08.28.001-1~ubu24.04") -> None:
+def _host_sw_pkg_bundle(
+    path: Path, bundle_version: str, deb_version: str = "50.0.26.08.28.001-1~ubu24.04"
+) -> None:
     """An unversioned host_sw_pkg.tar.gz, as AMD ships it: no release in the filename, a top-level
     VERSION.json naming the bundle, and libionic1 nested under ionic_driver/deb/libionic-debs.tar.xz."""
     version_json = (
