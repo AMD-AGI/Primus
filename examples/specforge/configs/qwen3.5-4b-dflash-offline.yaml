@@ -10,7 +10,7 @@
 #
 # The specforge prepare hook emits RUN_MODE=single, so this runs as one plain
 # Python process that execs `specforge train`; SpecForge launches its own
-# workers. Defaults here are a 200-step smoke, not a full epoch.
+# workers. Defaults here are a 20-step smoke, not a full epoch.
 
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
@@ -30,9 +30,9 @@ modules:
       output_dir: ${OUTPUT_DIR}
 
       specforge_overrides:
-        training.max_steps: ${MAX_STEPS:200}
+        training.max_steps: ${MAX_STEPS:20}
         training.num_epochs: 1
-        training.save_interval: ${MAX_STEPS:200}
+        training.save_interval: ${MAX_STEPS:20}
         training.log_interval: 5
         # Liger kernels are not built in this SpecForge ROCm image.
         model.use_liger_kernel: false

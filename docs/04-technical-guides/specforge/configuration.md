@@ -101,7 +101,7 @@ Example config and usage:
 export HIDDEN_STATES_PATH=/data/runs/capture/hidden_states
 export OUTPUT_DIR=/data/runs/train
 export NPROC_PER_NODE=8
-export MAX_STEPS=200
+export MAX_STEPS=20
 ./runner/primus-cli direct -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
@@ -128,9 +128,9 @@ modules:
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
       specforge_overrides:
-        training.max_steps: ${MAX_STEPS:200}  # optimizer steps
+        training.max_steps: ${MAX_STEPS:20}  # optimizer steps
         training.num_epochs: 1           # epoch cap (max_steps usually wins first)
-        training.save_interval: ${MAX_STEPS:200}  # checkpoint every N steps
+        training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
         training.log_interval: 5         # log every N steps
         model.use_liger_kernel: false    # not shipped in this image
         data.hidden_states_path: ${HIDDEN_STATES_PATH}  # filtered capture output
@@ -149,7 +149,7 @@ export RUN_ROOT=/path/to/shared/run/$RUN_ID
 export OUTPUT_DIR=$RUN_ROOT/output
 export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
-export MAX_STEPS=200
+export MAX_STEPS=20
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
   -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
@@ -222,9 +222,9 @@ modules:
         # peer_timeout_s: 1800           # wait for the other ranks
 
       specforge_overrides:
-        training.max_steps: ${MAX_STEPS:200}  # optimizer steps
+        training.max_steps: ${MAX_STEPS:20}  # optimizer steps
         training.num_epochs: 1           # epoch cap (max_steps usually wins first)
-        training.save_interval: ${MAX_STEPS:200}  # checkpoint every N steps
+        training.save_interval: ${MAX_STEPS:20}  # checkpoint every N steps
         training.log_interval: 5         # log every N steps
         model.use_liger_kernel: false    # not shipped in this image
         data.train_data_path: ${TRAIN_DATA_PATH}  # ShareGPT-style JSONL

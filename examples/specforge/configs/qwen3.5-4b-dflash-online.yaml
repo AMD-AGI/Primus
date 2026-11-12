@@ -17,7 +17,7 @@
 #   export RUN_ROOT=/path/to/shared/run/$RUN_ID
 #   export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 #   export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
-#   export MAX_STEPS=200
+#   export MAX_STEPS=20
 #   ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
 #     -- container --image primus-specforge:local-mi35x \
 #     --volume /shared:/shared \
@@ -64,9 +64,9 @@ modules:
         # skip_tokenizer_init: true  # or SKIP_TOKENIZER_INIT; false inits the tokenizer
 
       specforge_overrides:
-        training.max_steps: ${MAX_STEPS:200}
+        training.max_steps: ${MAX_STEPS:20}
         training.num_epochs: 1
-        training.save_interval: ${MAX_STEPS:200}
+        training.save_interval: ${MAX_STEPS:20}
         training.log_interval: 5
         # Liger kernels are not built in this SpecForge ROCm image.
         model.use_liger_kernel: false

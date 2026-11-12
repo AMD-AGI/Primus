@@ -65,7 +65,7 @@ Set `PRIMUS_SPECFORGE_SINGLE_NODE=true` (or
 SGLang capture, the CPU producer, and the GPU trainer on one node.
 Both `CAPTURE_NNODES` and `TRAINER_NNODES` remain `1`; they share the host.
 Capture and trainer GPU lists must be disjoint. The default lists both select
-GPU 0, so explicitly assign `TRAINER_GPUS=1` for a two-GPU smoke test.
+GPU 0, so explicitly assign `TRAINER_GPUS=1` for a two-GPU run.
 
 ```bash
 export PRIMUS_SPECFORGE_SINGLE_NODE=true
@@ -75,7 +75,7 @@ export RUN_ROOT=/data/runs/$RUN_ID
 export CONSUMER_STATE_DIR=/data/runs/$RUN_ID/consumer-state
 export OUTPUT_DIR=/data/runs/$RUN_ID/output
 export TRAIN_DATA_PATH=/data/sharegpt_train.jsonl
-export MAX_STEPS=200
+export MAX_STEPS=20
 ./runner/primus-cli slurm srun -N 1 --gres=gpu:2 \
   -- container --image primus-specforge:local-mi35x \
   --volume /data:/data \
@@ -100,13 +100,13 @@ request their **sum** from Slurm. GPU IDs refer to devices visible inside the co
 Primus keeps sidecars alive until both roles finish, propagates either role's
 failure, and tears down the local processes on failure or interruption.
 Logs are `mooncake.log`, `sglang-server-0-*.log`, `producer.log`, and
-`consumer.log` under `RUN_ROOT`. A successful smoke run reaches step 200,
-writes its checkpoint, and exits cleanly with both completion status files set to `0`.
+`consumer.log` under `RUN_ROOT`. Successful completion leaves both
+`consumer.done` and `inference.done` set to `0`.
 
 ## Offline
 
 Capture, then train on disk hidden states. Example pair for Qwen3.5-4B DFlash
-(200-step smoke defaults).
+(20-step smoke defaults).
 
 **Capture** — `specforge_mode: capture` runs
 `torchrun --module primus.backends.specforge.offline_capture`. The module loads
@@ -169,7 +169,7 @@ modules:
       specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-amd.yaml}
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
       specforge_overrides:
-        training.max_steps: ${MAX_STEPS:200}
+        training.max_steps: ${MAX_STEPS:20}
         data.hidden_states_path: ${HIDDEN_STATES_PATH}
         deployment.trainer.nproc_per_node: ${NPROC_PER_NODE:1}
         deployment.trainer.nnodes: ${NNODES:1}
@@ -180,7 +180,7 @@ cd /opt/primus
 export HIDDEN_STATES_PATH=/data/runs/capture/hidden_states
 export OUTPUT_DIR=/data/runs/train
 export NPROC_PER_NODE=8
-export MAX_STEPS=200
+export MAX_STEPS=20
 ./runner/primus-cli direct -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-offline.yaml
 ```
@@ -223,7 +223,7 @@ export RUN_ROOT=/path/to/shared/run/$RUN_ID
 export OUTPUT_DIR=$RUN_ROOT/output
 export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
-export MAX_STEPS=200
+export MAX_STEPS=20
 cd /opt/primus
 ./runner/primus-cli slurm srun -N 2 \
   --gres=gpu:1 \
