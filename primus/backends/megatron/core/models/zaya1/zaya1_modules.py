@@ -69,7 +69,8 @@ FUSE_NORM = _env_on("ZAYA_FUSE_NORM")
 FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
 
 # ZAYA_MOE_GEMM=split (default): per-expert nn.Linear GEMMs over host-sized
-# chunks (one counts.tolist() sync per MoE layer). ZAYA_MOE_GEMM=turbo: the 16
+# chunks (three host syncs per MoE layer: bincount reads its input's min and
+# max, then counts.tolist()). ZAYA_MOE_GEMM=turbo: the 16
 # experts' weights live in two stacked [E, out, in] parameters and run as two
 # primus_turbo grouped GEMMs whose group sizes stay on device, so a MoE layer
 # never syncs with the host. BF16 only (FP8 keeps the split path). Checkpoint
@@ -1125,10 +1126,12 @@ class ZayaMoE(nn.Module):
         flat_prob = prob.reshape(-1, 1).to(dtype=flat.dtype)
         # Sort-based dispatch. A stable sort keeps the original token order
         # inside each expert group, so every expert sees exactly the rows (in
-        # the same order) that the old boolean-mask loop gave it. The group
-        # sizes cross to the host once per layer instead of one torch.any plus
-        # two nonzero syncs per expert in forward and more in backward. Integer
-        # index_select / index_copy have sync-free backwards.
+        # the same order) that the old boolean-mask loop gave it. The forward
+        # syncs three times per layer (bincount reads its input's min and max,
+        # then counts.tolist()) instead of one torch.any plus two nonzero syncs
+        # per expert in forward and more in backward. Only the first waits for
+        # queued work, so scatter_add_ counts as in _forward_turbo save little
+        # here. Integer index_select / index_copy have sync-free backwards.
         num_groups = self.router.num_scored
         sorted_idx, perm = torch.sort(flat_idx, stable=True)
         counts = torch.bincount(sorted_idx, minlength=num_groups).tolist()
