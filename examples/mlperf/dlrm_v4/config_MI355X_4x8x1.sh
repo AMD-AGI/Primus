@@ -28,7 +28,7 @@ export SPARSE_LR=4e-6
 # 1 unless it is set here. At 2 and 4 nodes, 1 stalls every training step on
 # rocm/primus:v26.9.
 # The comment above this setting in config_MI355X_2x8x1.sh covers 2 and 4 nodes: the
-# mechanism, the evidence, how to re-check it and the related settings.
+# mechanism, how it was checked, how to re-check it and the related settings.
 export TORCH_NCCL_HIGH_PRIORITY=0
 
 MLLOG_CONFIG_FILENAME=$(basename "${BASH_SOURCE[0]}")

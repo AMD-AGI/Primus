@@ -151,6 +151,5 @@ or directly: `./primus-cli direct -- train pretrain --config examples/mlperf/dlr
   `TORCH_NCCL_HIGH_PRIORITY=0`, as in the MLPerf submission version: with Primus'
   default of 1, on v26.9 the ProcessGroupNCCL stream shares a hardware (HSA) queue
   with the train pipeline's data-dist stream, each step's splits copy waits behind
-  the backward collectives, and time to target was 1.6% (2 nodes) and 1.5% (4 nodes)
-  above the submission version's; with 0 it is 1.7% and 2.1% below it (OLCF Lux,
-  3 seeds; see the comment in `config_MI355X_2x8x1.sh`).
+  the backward collectives, and time to target was longer than the submission
+  version's; with 0 it is shorter (see the comment in `config_MI355X_2x8x1.sh`).

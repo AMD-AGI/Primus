@@ -45,42 +45,38 @@ export SPARSE_LR=2e-6
 # show it on the data-dist stream's queue, and main on another. Each step the host
 # waits in torchrec's SplitsAllToAllAwaitable.wait() for a few-KB D2H copy (the next
 # batch's all-to-all split sizes) on the data-dist stream. On the shared queue that
-# copy runs only after the backward's collectives queued ahead of it: 56-87 ms host
-# block and 3.8-5.8 ms GPU idle per step.
+# copy runs only after the backward's collectives queued ahead of it, so every step the
+# host blocks and the GPU idles.
 #
 # Why 0: it matches the submission version. Its ROCm 7.2.1 keeps a queue pool per
-# priority, so there the NCCL stream never shares a queue with the -1 side streams;
-# the copy took at most ~4 ms and the GPU idled under 1 ms per step. On this HIP, 0
-# changes placement, not hardware priority: the NCCL stream is no longer pinned and is
-# placed by load. That can still mean the data-dist (or main) queue.
+# priority, so there the NCCL stream never shares a queue with the -1 side streams and
+# the copy does not wait behind the collectives. On this HIP, 0 changes placement, not
+# hardware priority: the NCCL stream is no longer pinned and is placed by load. That
+# can still mean the data-dist (or main) queue.
 # Same-tree traces (these configs, 2 and 4 nodes, node 0's 8 ranks; only this variable
 # changed): with 0, main, NCCL and data-dist ran on three different HSA queues in every
-# trace, the copy overtook the pending collectives (under 3 ms) and the GPU idled
-# 0.15-0.4 ms per step. With 1 the NCCL and data-dist streams shared a queue again
-# (56-85 ms host block, 4.4-5.8 ms GPU idle per step).
+# trace and the copy overtook the pending collectives. With 1 the NCCL and data-dist
+# streams shared a queue again and the stall came back.
 #
-# Evidence (OLCF Lux, Nov 2026; each pair on the same nodes, compared at the last eval
-# both runs reached): before these configs, time to target was 1.6% (2 nodes) and 1.5%
-# (4 nodes) above the submission version's (3 seeds each); setting 0 on that older tree
-# took 3.1-3.3% off (3 jobs). These configs vs the submission version (3 seeds x 2
-# pairs per node count, both run orders, all runs MLPerf-compliant): -1.6% at 1 node
-# (Primus' 1 stays there), -1.7% at 2 nodes, -2.1% at 4 nodes. Every pair was faster
-# (-1.4% to -2.4%; one 1-node pair with a disturbed submission run left out). Against
-# the submission campaign's HSA_USERPTR_FOR_PAGED_MEM=0 (on Lux its evals ~8% slower at
-# 1 node, ~21% at 2 and 4 nodes): -2.6/-3.9/-4.1%. At 4 nodes ~12% of data windows still
-# start slow with 0 (first-batch wait over 90 ms; submission version ~5%); the cause is
-# not traced.
-# One node keeps Primus' 1 (config_MI355X_1x8x1.sh): rank 0's first-batch wait (see
-# Re-check) is 31-39 ms there with 1 (submission version: 39-44 ms); 0 vs 1: yaml note.
+# Checked on OLCF Lux (Nov 2026) with same-node A/B runs against the submission version
+# at 1, 2 and 4 nodes (3 seeds, both run orders, all runs MLPerf-compliant): time to
+# target was shorter than the submission version's at all three node counts (at 2 and
+# 4 nodes with 0; with Primus' 1 it was longer there). The measurements are in PR #1424
+# (its description, and this comment as merged there). At 4 nodes more data windows
+# still start slowly than in the submission version; the cause is not traced.
+# One node keeps Primus' 1 (config_MI355X_1x8x1.sh): there rank 0's first-batch wait
+# (see Re-check) is no longer than the submission version's, so it shows no stall
+# (1-node queues were not traced); 0 vs 1: yaml note.
 #
 # Re-check after a change of image (HIP, RCCL, torch, torchrec), GPU_MAX_HW_QUEUES,
 # DEBUG_HIP_*, TORCH_DIST_USE_NCCL2 or the trainer's streams, and at other node counts.
 # Log: TORCH_NCCL_HIGH_PRIORITY=0 in the runner's env dump. Median of rank 0's
-# "[boundary] train_ts=N train first-batch data-wait=" lines (one per data window):
-# 27-37 ms with 0, 59-66 ms in the submission version, 106-119 ms with the stall.
-# Trace (OUTPUT_TRACE=1; on v26.9 kernel events carry hsa_queue): the D2H
-# hipMemcpyAsync in "## SplitsAllToAllAwaitable wait() ##" blocks the host 56-87 ms
-# with the stall (its copy behind ncclDevKernel_* on one hsa_queue), under 3 ms with 0.
+# "[boundary] train_ts=N train first-batch data-wait=" lines (one per data window): with
+# the stall it is well above the submission version's; with 0 it is below it.
+# Trace (OUTPUT_TRACE=1; on v26.9 kernel events carry hsa_queue): with the stall the D2H
+# hipMemcpyAsync in "## SplitsAllToAllAwaitable wait() ##" blocks the host while its copy
+# waits behind ncclDevKernel_* on one hsa_queue; with 0 the copy overtakes them and the
+# block is short.
 # Time in the "## splits poll ##" before it is the host waiting ahead of the GPU, not
 # the stall.
 #
