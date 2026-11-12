@@ -1,0 +1,47 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:vggt-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  pre_trainer:
+    framework: vision
+    config: pre_trainer.yaml
+    model: vggt.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      training:
+        steps: ${MAX_STEPS:1000}
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/vggt-pretrain}
+        save_steps: ${SAVE_STEPS:0}
+        run_name: vggt-pretrain
+
+      data:
+        dataset_path: ${CO3D_DIR:/shared_nfs/3dwm/hywm-3dwm-sub20/co3d}
+        annotation_dir: ${CO3D_ANNOTATION_DIR:}
+        max_images_per_gpu: ${MAX_IMAGES_PER_GPU:24}
+        num_workers: ${NUM_WORKERS:4}
+
+      optimizer:
+        lr: ${LR:5.0e-5}
+        weight_decay: 0.05
+
+      lr_scheduler:
+        lr_scheduler_type: cosine
+        warmup_steps: ${WARMUP_STEPS:0}
+        eta_min_ratio: 0.1
+
+      parallelism:
+        mode: ${PARALLELISM_MODE:ddp}
+
+      runtime:
+        attention_backend: ${ATTENTION_BACKEND:aiter}
+        bf16: true
+        seed: ${SEED:42}

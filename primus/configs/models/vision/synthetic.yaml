@@ -1,0 +1,5 @@
+# In-tree stand-in used to check the trainer without VGGT or WorldMirror weights.
+model:
+  name: synthetic
+  config:
+    embed_dim: 32

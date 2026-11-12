@@ -1,0 +1,37 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:worldmirror-stage1}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  pre_trainer:
+    framework: vision
+    config: pre_trainer.yaml
+    model: worldmirror_stage1.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      training:
+        steps: ${MAX_STEPS:100000}
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/vision-worldmirror-stage1}
+        save_steps: ${SAVE_STEPS:1000}
+        run_name: vision-worldmirror-stage1
+
+      data:
+        hypersim_dir: ${HYPERSIM_DIR:/shared_nfs/3dwm/hywm-3dwm-sub20/hypersim}
+        max_images_per_gpu: ${MAX_IMAGES_PER_GPU:24}
+        num_workers: ${NUM_WORKERS:4}
+
+      parallelism:
+        mode: ${PARALLELISM_MODE:ddp}
+
+      runtime:
+        attention_backend: ${ATTENTION_BACKEND:aiter}
+        bf16: true
+        seed: ${SEED:42}
