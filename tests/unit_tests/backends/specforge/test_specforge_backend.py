@@ -65,12 +65,12 @@ from primus.backends.specforge.stack_preflight import (
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.launcher.parser import PrimusParser
 
-# SpecForge stack preflight imports patched sglang / aiter that only exist in
+# SpecForge stack preflight imports sglang / aiter that only exist in
 # the SpecForge overlay image. The Primus CI image does not ship that stack,
 # so these tests fail collection/runtime there. Re-enable once CI has the
 # overlay (or the tests are split into overlay-free vs overlay-only).
 pytestmark = pytest.mark.skip(
-    reason="requires SpecForge overlay image (patched sglang/aiter); not in Primus CI image"
+    reason="requires SpecForge overlay image (sglang capture plugin/aiter); not in Primus CI image"
 )
 
 PRIMUS_ROOT = Path(__file__).resolve().parents[4]
@@ -335,12 +335,13 @@ class TestCaptureArgv:
             },
         )
         argv = build_capture_argv(params)
-        assert argv[:5] == [
+        assert argv[:6] == [
             "torchrun",
             "--standalone",
             "--nproc_per_node",
             "1",
-            "scripts/prepare_hidden_states.py",
+            "--module",
+            "primus.backends.specforge.offline_capture",
         ]
         assert "--trust-remote-code" in argv
         assert "--sglang-disable-radix-cache" in argv
@@ -375,12 +376,13 @@ class TestHomogeneousMultinode:
     def test_capture_nnodes_one_stays_standalone(self):
         params = SimpleNamespace(specforge_mode="capture", specforge_capture={"nproc_per_node": 2})
         argv = build_capture_argv(params, nnodes=1, node_rank=0)
-        assert argv[:5] == [
+        assert argv[:6] == [
             "torchrun",
             "--standalone",
             "--nproc_per_node",
             "2",
-            "scripts/prepare_hidden_states.py",
+            "--module",
+            "primus.backends.specforge.offline_capture",
         ]
         assert "--nnodes" not in argv
 
@@ -395,7 +397,7 @@ class TestHomogeneousMultinode:
         assert argv[argv.index("--master_addr") + 1] == "10.0.0.8"
         assert argv[argv.index("--master_port") + 1] == "29500"
         assert argv[argv.index("--nproc_per_node") + 1] == "1"
-        assert "scripts/prepare_hidden_states.py" in argv
+        assert "primus.backends.specforge.offline_capture" in argv
 
     def test_capture_nnodes_two_requires_master_addr(self):
         params = SimpleNamespace(specforge_mode="capture", specforge_capture={})
@@ -506,7 +508,7 @@ class TestExampleExperiment:
         assert backend_args.specforge_train_mode is None
         argv = build_capture_argv(backend_args)
         assert "--standalone" in argv
-        assert "scripts/prepare_hidden_states.py" in argv
+        assert "primus.backends.specforge.offline_capture" in argv
         assert "--sglang-disable-radix-cache" in argv
         assert "--sglang-disable-radix-cache false" not in " ".join(argv)
         assert argv[argv.index("--sglang-attention-backend") + 1] == "aiter"
