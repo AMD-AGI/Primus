@@ -883,13 +883,16 @@ def _ionic_bundle_version(archive: Path, scratch: Path) -> Optional[str]:
     members = [m for m in archive_members(archive) if os.path.basename(m) == "VERSION.json"]
     if not members:
         return None
+    # Components may carry their own VERSION.json; the bundle's is the shallowest one.
+    top = min(members, key=lambda m: m.strip("/").count("/"))
     try:
-        manifest = extract_member(archive, members[0], scratch)
+        manifest = extract_member(archive, top, scratch)
         data = json.loads(manifest.read_text())
     except (SetupError, OSError, ValueError):
         return None
-    version = data.get("sw", {}).get("version")
-    return version or None
+    sw = data.get("sw") if isinstance(data, dict) else None
+    version = sw.get("version") if isinstance(sw, dict) else None
+    return version if isinstance(version, str) and version else None
 
 
 class IonicFamily(Family):

@@ -307,6 +307,23 @@ def test_ionic_rejects_unversioned_bundle_for_a_different_release(tmp_path, monk
     assert [c for c in nud.IonicFamily().candidates(ctx) if c.kind == "deb"] == []
 
 
+def test_ionic_bundle_version_prefers_the_top_level_manifest(tmp_path):
+    archive = _tar(
+        tmp_path / "host_sw_pkg.tar.gz",
+        {
+            "host_sw_pkg/ionic_driver/VERSION.json": b'{"sw": {"version": "26.08.17.001"}}',
+            "host_sw_pkg/VERSION.json": b'{"sw": {"version": "1.117.5-a-196"}}',
+        },
+    )
+    assert nud._ionic_bundle_version(archive, tmp_path) == "1.117.5-a-196"
+
+
+@pytest.mark.parametrize("manifest", [b"[]", b'{"sw": "1.117.5-a-196"}', b'{"sw": {"version": 1}}', b"{"])
+def test_ionic_bundle_version_ignores_malformed_manifest(tmp_path, manifest):
+    archive = _tar(tmp_path / "host_sw_pkg.tar.gz", {"host_sw_pkg/VERSION.json": manifest})
+    assert nud._ionic_bundle_version(archive, tmp_path) is None
+
+
 def _tar_bytes(members: dict) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
