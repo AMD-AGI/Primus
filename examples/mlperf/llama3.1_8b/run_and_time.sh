@@ -39,6 +39,17 @@ else
     echo "Tokenizer: meta-llama/Llama-3.1-8B (HuggingFace default)"
 fi
 
+# hipBLASLt solution indices are build-specific: take the tuning file made on this image's
+# hipBLASLt build, if there is one. A set HIPBLASLT_TUNING_OVERRIDE_FILE (even empty) wins.
+if [[ -z "${HIPBLASLT_TUNING_OVERRIDE_FILE+set}" ]]; then
+    hipblaslt_tweak=$(sed -n 's/^#define HIPBLASLT_VERSION_TWEAK[[:space:]]*//p' \
+        "${ROCM_PATH:-/opt/rocm}/include/hipblaslt/hipblaslt-version.h" 2>/dev/null | head -1)
+    for f in "${PWD}"/hipblaslt_tuning/*-hipblaslt_"${hipblaslt_tweak:-none}"-*.txt; do
+        [[ -f "$f" ]] && export HIPBLASLT_TUNING_OVERRIDE_FILE="$f"
+    done
+fi
+echo "hipBLASLt tuning: ${HIPBLASLT_TUNING_OVERRIDE_FILE:-none}"
+
 # Start timing
 start=$(date +%s)
 start_fmt=$(date +%Y-%m-%d\ %r)

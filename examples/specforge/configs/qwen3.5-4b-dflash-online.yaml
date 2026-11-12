@@ -15,7 +15,7 @@
 #   export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
 #   export MAX_STEPS=20
 #   ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
-#     -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+#     -- container --image primus-specforge:local-mi35x \
 #     --volume /shared:/shared \
 #     -- train pretrain --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
 #
@@ -38,7 +38,7 @@ modules:
     overrides:
       specforge_mode: train
       specforge_train_mode: online
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-amd.yaml}
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}
       output_dir: ${OUTPUT_DIR}
 

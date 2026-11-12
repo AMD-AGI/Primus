@@ -22,7 +22,7 @@
       "name": "Emerging-Optimizers",
       "path": "third_party/Emerging-Optimizers",
       "url": "https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git",
-      "commit": "93d9eb3a6c899b50de73992826451fba3ab6adfb"
+      "commit": "1f29ffd2acbf047f3dd3efdd8e9469d9305a8f77"
     },
     {
       "name": "Megatron-Bridge",
@@ -52,7 +52,7 @@
       "name": "Automodel",
       "path": "third_party/Automodel",
       "url": "https://github.com/NVIDIA-NeMo/Automodel.git",
-      "commit": "bd1ca5a07fbff806063bca8ce3a9071753ad2036"
+      "commit": "d7ada67a3b977a0306cc8704351c72252cf213e5"
     },
     {
       "name": "HunyuanWorld-Mirror-rocm",
