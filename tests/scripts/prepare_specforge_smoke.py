@@ -22,11 +22,16 @@ def prepare(source, output, manifest):
     if sha256(source) != spec["source_sha256"]:
         raise ValueError("Source checksum differs from the pinned dataset")
     rows = json.loads(source.read_text(encoding="utf-8"))
+    ids_path = Path(__file__).resolve().parents[2] / spec["selected_ids_path"]
+    ids = json.loads(ids_path.read_text(encoding="utf-8"))
+    if len(ids) != spec["rows"] or len(set(ids)) != len(ids):
+        raise ValueError("Canonical IDs must be unique and match the fixture row count")
+    wanted = set(ids)
     selected, seen = [], set()
     for row in rows:
         row_id = str(row.get("id", ""))
         messages = row.get("conversations", [])
-        if not row_id or row_id in seen or not messages or len(messages) % 2:
+        if row_id not in wanted or row_id in seen or not messages or len(messages) % 2:
             continue
         if any(
             message.get("from") != ("human" if i % 2 == 0 else "gpt")
@@ -49,6 +54,8 @@ def prepare(source, output, manifest):
             break
     if len(selected) != spec["rows"]:
         raise ValueError("Not enough valid conversations")
+    by_id = {row["id"]: row for row in selected}
+    selected = [by_id[row_id] for row_id in ids]
     payload = "".join(
         json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in selected
     ).encode("utf-8")

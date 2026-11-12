@@ -6,9 +6,11 @@
     "file": "ShareGPT_V4.3_unfiltered_cleaned_split.json",
     "source_sha256": "dd5828821b7e707ca3dc4d0de07e2502c3ce278fcf1a74b81a3464f26006371e",
     "license_on_dataset_card": "apache-2.0",
-    "rows": 8192,
-    "selection": "first valid rows in source order; unique IDs; alternating human/gpt starting human and ending gpt; nonempty strings; no message rewriting",
-    "fixture_sha256": "ae4cce35fd7a67d859979640c869e20c4cc62561863d58e3b6b75f7801ca5e2d"
+    "rows": 800,
+    "selection": "Canonical IDs in selected_ids_path, in listed order; unchanged conversation text; common contact, credential and infrastructure patterns excluded before freezing",
+    "fixture_sha256": "f4a71e44e0d71b0c9471a69fc5095264975f58f74b2ef655b0878975425447c7",
+    "fixture_path": "tests/trainer/fixtures/specforge/sharegpt_800.jsonl",
+    "selected_ids_path": "tests/trainer/fixtures/specforge/sharegpt_800_ids.json"
   },
   "model": {
     "repository": "Qwen/Qwen3.5-4B",
@@ -20,6 +22,13 @@
     "primus_revision": "f0a95952e4f42e4595a0eba13e789d60061364e9",
     "specforge_revision": "af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5"
   },
-  "training": {"steps": 200, "seed": 42, "prompt_seed": 42, "log_interval": 5},
+  "training": {
+    "steps": 100,
+    "seed": 42,
+    "prompt_seed": 42,
+    "log_interval": 5,
+    "batch_size": 2,
+    "accumulation_steps": 4
+  },
   "hardware": "AMD Instinct MI355X"
 }

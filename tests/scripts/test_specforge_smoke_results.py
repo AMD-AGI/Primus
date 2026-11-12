@@ -2,6 +2,7 @@
 # See LICENSE for license information.
 """CPU-only checks of the numerical regression gate and incomplete-run rejection."""
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -17,7 +18,10 @@ class SmokeResultsTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         (self.root / "control").mkdir()
-        checkpoint = self.root / "output" / "epoch0-step200"
+        inboxes = self.root / "consumer-state/inboxes"
+        inboxes.mkdir(parents=True)
+        (inboxes / "inbox-rank0.jsonl.consumed_count").write_text("800", encoding="utf-8")
+        checkpoint = self.root / "output" / "epoch0-step100"
         checkpoint.mkdir(parents=True)
         for name in ("training_state.pt", "training_state_rank0.pt"):
             (checkpoint / name).write_bytes(b"checkpoint")
@@ -26,7 +30,7 @@ class SmokeResultsTest(unittest.TestCase):
         self.log = self.root / "control" / "consumer.log"
         self.lines = [
             f"step {step}: {{'train/loss': 3.0, 'train/acc': 0.2, 'train/grad_norm': 0.1}}\n"
-            for step in range(5, 201, 5)
+            for step in range(5, 101, 5)
         ]
         self.log.write_text("".join(self.lines), encoding="utf-8")
 
@@ -34,6 +38,25 @@ class SmokeResultsTest(unittest.TestCase):
         result = validate_run(self.root)
         self.assertEqual(result["final_window_observations"], 10)
         self.assertEqual(result["final_window_mean"]["train/loss"], 3)
+        self.assertEqual(result["consumed_samples"], 800)
+
+    def test_checked_in_fixture(self):
+        scripts = Path(__file__).resolve().parent
+        repo = scripts.parents[1]
+        manifest = json.loads((scripts / "specforge_smoke_fixture.json").read_text(encoding="utf-8"))
+        spec = manifest["dataset"]
+        payload = (repo / spec["fixture_path"]).read_bytes()
+        self.assertEqual(hashlib.sha256(payload).hexdigest(), spec["fixture_sha256"])
+        rows = [json.loads(line) for line in payload.decode("utf-8").split("\n") if line]
+        ids = json.loads((repo / spec["selected_ids_path"]).read_text(encoding="utf-8"))
+        self.assertEqual([row["id"] for row in rows], ids)
+        self.assertEqual(len(set(ids)), 800)
+        self.assertEqual(
+            manifest["training"]["steps"]
+            * manifest["training"]["batch_size"]
+            * manifest["training"]["accumulation_steps"],
+            len(rows),
+        )
 
     def test_missing_and_duplicate_records(self):
         for lines in (self.lines[1:], self.lines + self.lines[-1:]):
@@ -44,6 +67,13 @@ class SmokeResultsTest(unittest.TestCase):
 
     def test_failed_role(self):
         (self.root / "control" / "consumer.done").write_text("1", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_run(self.root)
+
+    def test_incomplete_fixture_consumption(self):
+        (self.root / "consumer-state/inboxes/inbox-rank0.jsonl.consumed_count").write_text(
+            "792", encoding="utf-8"
+        )
         with self.assertRaises(ValueError):
             validate_run(self.root)
 

@@ -1,82 +1,79 @@
 # SpecForge single-node online smoke (draft)
 
-This follow-up depends on Primus PR #1421. It does not include that feature's
-implementation; until it merges, run this script against the published PR #1421
-runtime image. The script explicitly requests 200 optimizer steps without changing
-the regular online/offline recipes' defaults.
+This test depends on the single-node online enablement in PR #1421. It runs
+**100 optimizer steps**, with batch size 2, gradient accumulation 4, and one
+trainer GPU: **800 consumed conversation samples**. Capture uses a second GPU
+on the same MI355X host. Regular online/offline recipe defaults are unchanged.
 
-## Run inside the runtime
+## Checked-in data
 
-Expose two allocated GPUs, with capture on visible GPU 0 and the trainer on GPU 1.
-Mount this checkout at `/smoke` and a writable data/results directory at `/data`.
-The image's Primus source stays at `/opt/primus`. Use a persistent session and a
-fresh directory for every attempt:
+The complete 800-conversation fixture is
+`tests/trainer/fixtures/specforge/sharegpt_800.jsonl` (4,243,587 bytes).
+Its source IDs, attribution, and declared Apache-2.0 license are in the same
+directory. No dataset download or conversion is needed for a normal test.
 
-```bash
-uv run --no-project --python "$(command -v python)" python /smoke/tests/scripts/run_specforge_single_node_smoke.py \
-  --primus-root /opt/primus \
-  --data /data/dataset/sharegpt_train.jsonl \
-  --data-sha256 "$FIXTURE_SHA256" \
-  --run-dir /data/runs/unique-attempt \
-  --baseline /smoke/tests/scripts/specforge_smoke_baseline_mi355x.json
-```
+`specforge_smoke_fixture.json` pins the source revision/checksum, fixture checksum,
+Qwen3.5-4B model/tokenizer revision, image digest, seed 42, and prompt seed 42.
+The fixture's conversations were selected from the previously eligible sample
+pool, excluding common contact/credential patterns. The new 800-row dataset is
+shuffled by the pinned runtime; it does not preserve the 200-step run's ordering
+or learning-rate schedule, so the old baseline cannot be reused.
 
-`FIXTURE_SHA256` must be the recorded checksum of an already frozen dataset.
-The script never downloads or prepares data. It checks that checksum, rejects
-existing run directories, sets the single-node layout, and invokes `primus-cli
-direct` with a 90-minute timeout plus a 60-second termination grace period.
-Run it in a disposable container so container teardown also removes any leftover
-processes after a hard timeout. Preserve the mounted results on failure.
+The runner verifies the fixture checksum and requires a consumed-sample count of
+800. The 100-step configuration has not yet been GPU-qualified; if runtime
+filtering or execution loses examples, an early exit is a failure, not a pass.
 
-Success requires a zero launcher exit, both role statuses zero, step-200 finite
-loss/accuracy/gradient metrics, and nonempty step-200 shared/rank-0 state files.
-`summary.json` records final metrics and a final-window mean for baseline collection.
-This checks execution and checkpoint presence, not checkpoint reload correctness.
-Pass `--baseline` to enforce the calibrated numerical gate. Logs and `inputs.json` remain in
-the run directory. Record the image digest, source revision, GPU model, and complete
-training configuration alongside them when collecting a reference.
-
-## Frozen inputs
-
-`specforge_smoke_fixture.json` pins the dataset source file/revision/SHA-256,
-prepared fixture SHA-256, model and tokenizer revision, runtime image digest,
-seeds, and GPU architecture. The image currently includes PR #1421; refreshing
-that runtime requires new calibration. Model and tokenizer use the same exact
-predownloaded Hugging Face snapshot, with offline loading during training.
-
-The source is [`Aeala/ShareGPT_Vicuna_unfiltered`](https://huggingface.co/datasets/Aeala/ShareGPT_Vicuna_unfiltered), specifically
-`ShareGPT_V4.3_unfiltered_cleaned_split.json`. Its dataset card describes a cleaned
-reupload and lists Apache-2.0. The fixture contains the first 8,192 valid,
-unique-ID conversations in source order, retaining complete alternating
-human/assistant conversations with nonempty messages. The preparation script
-records the exact selection rule; it does not sample randomly or rewrite text.
-The resulting JSONL is 44,531,680 bytes. Conversation text is not included in Git
-or the runtime image. Review source terms/content before redistributing a copy;
-the structural filter is not a privacy or sensitive-content scrubber.
-
-Download the source from the revision recorded in the manifest, then prepare it
-once, outside the training job:
+For provenance verification only, regenerate from the pinned original source:
 
 ```bash
 uv run --no-project python tests/scripts/prepare_specforge_smoke.py \
   --source /data/ShareGPT_V4.3_unfiltered_cleaned_split.json \
-  --output /data/dataset/sharegpt_train.jsonl
+  --output /data/regenerated-sharegpt_800.jsonl
 ```
 
-The script verifies both checksums and refuses to replace existing output.
-Pre-download `Qwen/Qwen3.5-4B` at the manifest's exact model revision into the
-runtime's Hugging Face cache. Mount that cache for every run. The runner checks
-that exactly two MI355X GPUs are visible and uses a fresh tokenization cache and
-fresh run/output/control directories for each execution.
+The script selects the checked-in source IDs in canonical order, verifies source
+and output checksums, and refuses to overwrite existing files.
 
-## Calibration and independent validation
+## Run inside the runtime
 
-Run three fresh 200-step executions with the same fixture, seeds, configuration,
-image digest, and MI355X device layout. Preserve `inputs.json`, `recipe.yaml`,
-logs, checkpoints, and `summary.json` from each. All 40 expected five-step metric
-records must exist exactly once and be finite. The comparison uses the mean of
-the ten logged observations at steps 155 through 200. Gradient norm is checked
-for finiteness but is not given a numerical regression threshold.
+Expose exactly two allocated MI355X GPUs. Mount this checkout at `/smoke`, a
+writable results directory at `/data`, and the predownloaded Hugging Face cache
+at `$HF_HOME`. The image's Primus source stays at `/opt/primus`.
+Pre-download `Qwen/Qwen3.5-4B` at revision
+`851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`; both capture and training use that
+exact cached snapshot, with offline model loading during the run.
+
+```bash
+uv run --no-project --python "$(command -v python)" python \
+  /smoke/tests/scripts/run_specforge_single_node_smoke.py \
+  --run-dir /data/runs/unique-attempt
+```
+
+The default data file and manifest come from the smoke checkout. Optional `--data`
+and `--data-sha256` arguments must still match the canonical manifest checksum.
+The runner preserves the allocated GPU pair through Primus preflight, creates
+fresh tokenization/control/output directories, and invokes `primus-cli direct`.
+Each attempt must use a new run directory. The command has a 90-minute timeout
+plus a 60-second termination grace period; use a disposable container to remove
+any leftover processes after a hard timeout. Keep mounted evidence on failure.
+
+Success requires a zero launcher exit, zero producer/trainer role statuses,
+exactly 800 consumed samples, all 20 five-step metric records through step 100,
+finite loss/accuracy/gradient norm, and nonempty step-100 shared/rank-0 checkpoint
+files. `inputs.json`, `recipe.yaml`, logs, and `summary.json` record the execution.
+Checkpoint presence does not establish checkpoint reload correctness.
+
+## Numerical calibration: pending
+
+The old 200-step baseline and qualification report have been removed from this
+branch; the prior measurements remain in Git history. **No GPU run or accepted
+numerical baseline is claimed for the new 100-step fixture.**
+
+The planned budget remains three calibration runs followed by two independent
+validation runs, on MI355X only. Keep inputs, seeds, image, and device layout
+identical across all five executions. The comparison uses the mean of the ten
+logged observations at steps 55,60,...,100. Gradient norm must be finite but has
+no numerical threshold.
 
 ```bash
 uv run --no-project python tests/scripts/calibrate_specforge_smoke.py calibrate \
@@ -84,16 +81,14 @@ uv run --no-project python tests/scripts/calibrate_specforge_smoke.py calibrate 
   --output /data/baseline.json
 ```
 
-The predeclared tolerance is twice the largest absolute deviation from the
+The predeclared two-sided tolerance is twice the largest deviation from the
 three-run median, with a floor of 1% of median loss (at least 1e-6), or 0.005
-absolute accuracy (0.5 percentage points). Bounds are two-sided, since unexpected
-improvements can also indicate changed inputs or execution. Three runs are an
-initial calibration, not a statistical guarantee about the future flake rate.
-Inspect the measured spread before accepting a baseline; do not hide instability
-by automatically widening tolerances after validation failure.
+absolute accuracy (0.5 percentage points). Inspect the measured spread before
+accepting it; three runs do not establish a long-term flake rate.
 
-Freeze that baseline before starting two additional runs, each passing
-`--baseline /data/baseline.json` to the runner. Then independently verify both:
+Freeze the baseline before starting two new runs, each passing
+`--baseline /data/baseline.json` to the runner. Do not widen bounds merely to
+make failed validation pass. Then verify both summaries independently:
 
 ```bash
 uv run --no-project python tests/scripts/calibrate_specforge_smoke.py validate \
@@ -101,11 +96,11 @@ uv run --no-project python tests/scripts/calibrate_specforge_smoke.py validate \
   --summaries /data/runs/validation-{1,2}/summary.json
 ```
 
-Validation rejects reused calibration summaries and mismatched input identities.
-The pinned SpecForge online path does not support held-out evaluation: these are
-training metrics, and “validation runs” means independent executions testing the
-frozen thresholds. If validation fails, investigate before defining a new
-calibration experiment; retain the failed result.
+Input-identity mismatches and reused calibration summaries are rejected.
+The pinned online backend does not support held-out evaluation: these are
+training metrics, and validation means separate executions testing the bounds.
+Always check the runner's exit code: a summary file alone does not prove numerical
+success. Without `--baseline`, the runner performs structural checks only.
 
 CPU checks:
 
@@ -113,32 +108,10 @@ CPU checks:
 uv run --no-project python -m unittest discover -s tests/scripts -p test_specforge_smoke_results.py
 ```
 
-## MI355X qualification (2026-11-12)
+## Remaining work
 
-Three calibration runs and two subsequent independent validation runs completed
-all 200 steps, with zero role statuses and nonempty shared/rank-0 checkpoints.
-All 40 logged loss, accuracy, and gradient-norm records matched exactly across
-all five executions at the logged precision. Runtime preprocessing retained
-7,846 of the 8,192 fixture conversations.
-
-The accepted `specforge_smoke_baseline_mi355x.json` was frozen before validation
-and remained byte-for-byte unchanged. Its late-window loss is 7.3862574100494385
-with absolute tolerance 0.07386257410049439 (1%); accuracy is 0.06316577829420567
-with absolute tolerance 0.005 (0.5 percentage points). With zero observed spread,
-these tolerances come from the predeclared floors, not a measured statistical
-confidence interval. This small experiment does not establish a long-term
-flake rate or coverage of other hardware/runtime stacks.
-
-`specforge_smoke_qualification_mi355x.json` records the five summaries' hashes,
-metrics, runtime versions, and unchanged baseline checksum. Runtime was PyTorch
-`2.9.1+rocm7.2.0.git7e1940d4`, HIP `7.2.26015-fc0010cf6a`, with two MI355X GPUs.
-A prior attempt failed in launcher preflight before training because the default
-HIP visibility list exceeded the allocated ROCr mask. The runner now explicitly
-preserves the allocated pair; that failed attempt is excluded from calibration.
-
-## Work remaining before CI integration
-
-- Add a trainer pytest entry point, JUnit reporting, backend selection, cleanup,
-  and the existing non-draft `ci:gpu` gate. Keep the SpecForge runtime isolated.
-- Checkpoint reload correctness and end-to-end hard-timeout cleanup remain
-  separate validation work.
+- Run three 100-step calibration and two independent validation executions;
+  commit the accepted baseline and qualification report.
+- Add the trainer pytest entry point, backend selection, JUnit reporting, cleanup,
+  and the existing non-draft `ci:gpu` gate. Keep this runtime isolated.
+- Validate checkpoint reload correctness and hard-timeout cleanup separately.

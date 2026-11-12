@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
-"""Run a bounded 200-step online smoke in a single-node-enabled Primus runtime."""
+"""Run a bounded 100-step online smoke in a single-node-enabled Primus runtime."""
 
 import argparse
 import ast
@@ -13,11 +13,16 @@ import re
 import subprocess
 from pathlib import Path
 
-STEPS = 200
+STEPS = 100
+SAMPLES = 800
 METRICS = ("train/loss", "train/acc", "train/grad_norm")
 
 
 def validate_run(run_dir):
+    consumed_path = run_dir / "consumer-state/inboxes/inbox-rank0.jsonl.consumed_count"
+    consumed = int(consumed_path.read_text(encoding="utf-8").strip())
+    if consumed != SAMPLES:
+        raise ValueError(f"Expected {SAMPLES} consumed conversation samples, got {consumed}")
     control = run_dir / "control"
     for name in ("consumer.done", "inference.done"):
         if (control / name).read_text(encoding="utf-8").strip() != "0":
@@ -37,18 +42,19 @@ def validate_run(run_dir):
     expected = set(range(5, STEPS + 1, 5))
     if set(observations) != expected:
         raise ValueError(
-            f"Expected metrics at every fifth step through 200; missing={sorted(expected - observations.keys())}, unexpected={sorted(observations.keys() - expected)}"
+            f"Expected metrics at every fifth step through 100; missing={sorted(expected - observations.keys())}, unexpected={sorted(observations.keys() - expected)}"
         )
     checkpoints = []
-    for shared in (run_dir / "output").glob("**/*-step200/training_state.pt"):
+    for shared in (run_dir / "output").glob("**/*-step100/training_state.pt"):
         rank = shared.with_name("training_state_rank0.pt")
         if shared.stat().st_size > 0 and rank.is_file() and rank.stat().st_size > 0:
             checkpoints.append(str(shared.parent.relative_to(run_dir)))
     if not checkpoints:
-        raise ValueError("Missing nonempty step-200 shared/rank-0 checkpoint files")
-    window = [metrics for step, metrics in observations.items() if 150 < step <= STEPS]
+        raise ValueError("Missing nonempty step-100 shared/rank-0 checkpoint files")
+    window = [metrics for step, metrics in observations.items() if 50 < step <= STEPS]
     return {
         "step": STEPS,
+        "consumed_samples": consumed,
         "final_metrics": observations[STEPS],
         "final_window_observations": len(window),
         "final_window_mean": {key: sum(row[key] for row in window) / len(window) for key in METRICS},
@@ -59,8 +65,16 @@ def validate_run(run_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--primus-root", type=Path, default=Path("/opt/primus"))
-    parser.add_argument("--data", type=Path, required=True, help="Frozen conversation JSONL")
-    parser.add_argument("--data-sha256", required=True, help="Recorded reference checksum, not regenerated")
+    parser.add_argument(
+        "--data",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "trainer/fixtures/specforge/sharegpt_800.jsonl",
+        help="Checked-in frozen conversation JSONL",
+    )
+    parser.add_argument(
+        "--data-sha256",
+        help="Optional additional checksum assertion; the manifest checksum is always required",
+    )
     parser.add_argument("--run-dir", type=Path, required=True, help="New directory; never reused")
     parser.add_argument("--timeout-seconds", type=int, default=5400)
     parser.add_argument(
@@ -71,6 +85,7 @@ def main():
     )
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+    args.data_sha256 = args.data_sha256 or manifest["dataset"]["fixture_sha256"]
     root, data, run_dir = args.primus_root.resolve(), args.data.resolve(), args.run_dir.resolve()
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
@@ -118,6 +133,8 @@ def main():
             "training.seed": manifest["training"]["seed"],
             "training.prompt_seed": manifest["training"]["prompt_seed"],
             "training.log_interval": 5,
+            "training.batch_size": 2,
+            "training.accumulation_steps": 4,
             "data.cache_dir": str(run_dir / "dataset-cache"),
         }
     )

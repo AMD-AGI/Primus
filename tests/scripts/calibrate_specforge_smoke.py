@@ -15,7 +15,7 @@ METRICS = ("train/loss", "train/acc")
 
 def read_summary(path):
     row = json.loads(path.read_text(encoding="utf-8"))
-    if row["step"] != 200 or row["final_window_observations"] != 10:
+    if row["step"] != 100 or row["final_window_observations"] != 10 or row["consumed_samples"] != 800:
         raise ValueError("Incomplete reference run")
     for metric in METRICS:
         value = row["final_window_mean"][metric]
@@ -42,7 +42,7 @@ def calibrate(paths):
     return {
         "schema_version": 1,
         "reference_identity": rows[0]["reference_identity"],
-        "metric": "mean of logged training observations at steps 155,160,...,200",
+        "metric": "mean of logged training observations at steps 55,60,...,100",
         "rule": "two-sided; max(2 * maximum absolute deviation from median, floor); loss floor=max(1% of median,1e-6); accuracy floor=0.005",
         "calibration_summary_sha256": [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths],
         "bounds": bounds,
