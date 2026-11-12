@@ -1,0 +1,45 @@
+name: PR reviewer reminder
+
+on:
+  # pull_request_target so the comment can also be posted on PRs from forks.
+  # This workflow must never check out or run code from the PR.
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  contents: read
+
+jobs:
+  remind:
+    name: Post review contacts
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post reminder comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          MAINTAINERS: "wenxie-amd Xiaoming-AMD"
+          # Linked rather than @-mentioned so they are not notified on every PR.
+          BACKUP_CONTACTS: "vidushi8 lorri-rao GeneDer amd-fuyuajin JohnQin-llm"
+        with:
+          script: |
+            const logins = (value) => value.split(/\s+/).filter(Boolean);
+            const maintainers = logins(process.env.MAINTAINERS)
+              .map((login) => `@${login}`).join(' ');
+            const backups = logins(process.env.BACKUP_CONTACTS)
+              .map((login) => `[${login}](https://github.com/${login})`).join(', ');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                `**Primary maintainers:** ${maintainers}`,
+                '',
+                'Reach out to the primary maintainers with any questions about this PR.',
+                '',
+                'Outside China Standard Time (UTC+8) working hours, for urgent issues ' +
+                  `you can also reach out to: ${backups}.`,
+              ].join('\n'),
+            });
