@@ -15,10 +15,8 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # autotunes once per new tensor shape. Expert token counts change every step,
 # so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
 # per-shape cost.
-# No ZAYA_* switches: the BF16 recipe's ZAYA_MOE_GEMM=turbo is BF16 only (with
-# FP8 the experts stay split), and ZAYA_ROUTER_DEFER_AR=1 gained under 1%
-# here. The other switches stay at their defaults (on), including the chunked
-# cross-entropy.
+# No ZAYA_* switches: ZAYA_ROUTER_DEFER_AR=1 gained under 1% here. The other
+# switches stay at their defaults (on), including the chunked cross-entropy.
 env:
   NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
 
@@ -101,6 +99,8 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
+      # Off: the BF16 recipe's Turbo grouped-GEMM experts are BF16 only, so
+      # with FP8 the experts stay split.
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_gemm: false

@@ -11,22 +11,15 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Switches read by the ZAYA1 model code when it is imported. Primus sets each
 # entry in every training process before it builds the model, and logs it as
 # "[Primus:Runtime] env override".
-#   ZAYA_MOE_GEMM: turbo       The 16 experts run as two primus_turbo grouped
-#                              GEMMs whose group sizes stay on the GPU, so no
-#                              MoE layer waits on the host. Default: split.
-#                              BF16 only: with FP8 the experts stay split. The
-#                              distributed-optimizer state does not carry
-#                              across a switch between split and turbo; load
-#                              with --no-load-optim when switching.
 #   ZAYA_ROUTER_DEFER_AR: "1"  One data-parallel all-reduce per step for every
 #                              router's balancing-bias update, instead of one
 #                              per MoE layer. Default: 0.
 # The other switches stay at their defaults (on): ZAYA_ATTN_FLASH,
 # ZAYA_FUSE_NORM, ZAYA_FUSE_CCA, ZAYA_CONV_GEMM and ZAYA_FUSE_MOE.
 # ZAYA_CHUNKED_CE has no effect here: cross_entropy_loss_fusion below turns
-# the chunked cross-entropy off.
+# the chunked cross-entropy off. The experts' grouped GEMM is a Primus Turbo
+# setting, at the end of this file.
 env:
-  ZAYA_MOE_GEMM: turbo
   ZAYA_ROUTER_DEFER_AR: "1"
 
 modules:
@@ -117,8 +110,11 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # ZAYA_MOE_GEMM=turbo calls primus_turbo directly and does not read
-      # these.
-      enable_primus_turbo: false
+      # The 16 experts run as two Primus Turbo grouped GEMMs whose group sizes
+      # stay on the GPU, so no MoE layer waits on the host. BF16 only: with
+      # FP8 the experts stay split. The distributed-optimizer state does not
+      # carry across a switch between split and grouped experts; load with
+      # --no-load-optim when switching.
+      enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true
