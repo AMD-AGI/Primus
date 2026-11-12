@@ -173,7 +173,7 @@ def main(argv=None) -> int:
     if not args.dry_run and args.output is None:
         p.error("--output is required unless --dry-run")
     release_dir = args.output / "release" if args.output is not None else None
-    if not args.dry_run and args.ckpt_format == "torch_dist" and release_dir.is_dir():
+    if not args.dry_run and release_dir.is_dir():
         if any(release_dir.iterdir()):
             p.error(f"{release_dir} is not empty")
     if not torch.cuda.is_available():

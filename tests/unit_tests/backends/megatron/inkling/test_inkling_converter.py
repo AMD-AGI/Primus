@@ -121,13 +121,16 @@ def test_preset_mismatch_is_rejected(tiny_checkpoint):
         load_converter().main(["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--dry-run"])
 
 
-def test_torch_dist_refuses_a_used_output(tiny_checkpoint, monkeypatch):
-    """Rejected before any weight is read, not after the conversion."""
+@pytest.mark.parametrize("ckpt_format", ["torch_dist", "torch"])
+def test_refuses_a_used_output(tiny_checkpoint, monkeypatch, ckpt_format):
+    """Rejected before any weight is read, in either format: loaders that detect the format would
+    otherwise pick up what was already in ``release/``."""
     hf_dir, yaml, _ = tiny_checkpoint
-    out_dir = hf_dir / "dist"
+    out_dir = hf_dir / "out"
     (out_dir / "release").mkdir(parents=True)
     (out_dir / "release" / "stale").write_text("")
     converter = load_converter()
-    monkeypatch.setattr(converter, "save_torch_dist", lambda *a: pytest.fail("converted a used output"))
+    monkeypatch.setattr(converter, "checkpoint_index", lambda *a: pytest.fail("read the checkpoint"))
+    argv = ["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir)]
     with pytest.raises(SystemExit):
-        converter.main(["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir)])
+        converter.main([*argv, "--ckpt-format", ckpt_format])
