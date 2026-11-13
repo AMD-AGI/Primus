@@ -5,10 +5,12 @@
 ###############################################################################
 """Register FSDP2 reduce-scatters on RCCL's copy engines.
 
-Gated on ``primus_perf.fsdp_ce_reduce_scatter``; see ``distributed/ce_reduce_scatter.py``.
+Gated on ``primus_perf.fsdp_ce_reduce_scatter`` for runs that shard with FSDP2 (not DDP or
+Megatron-FSDP); see ``distributed/ce_reduce_scatter.py``.
 """
 
 from primus.backends.automodel import options
+from primus.backends.automodel.patches._conditions import shards_with_fsdp2
 from primus.core.patches import PatchContext, register_patch
 
 options.declare(
@@ -22,7 +24,7 @@ options.declare(
 def _enabled(ctx: PatchContext) -> bool:
     from primus.backends.automodel.distributed import ce_reduce_scatter
 
-    return ce_reduce_scatter.is_enabled()
+    return ce_reduce_scatter.is_enabled() and shards_with_fsdp2(ctx)
 
 
 @register_patch(

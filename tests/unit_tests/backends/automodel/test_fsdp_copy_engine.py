@@ -9,13 +9,63 @@ Unit tests for the preconditions of the copy-engine FSDP2 collectives (``distrib
 
 WHAT THESE ARE DEFENDING:
   The copy-engine all-gather and reduce-scatter must refuse to install without the kernel and the
-  environment RCCL reads at start-up, and read their module prefixes as written. The collectives
-  themselves need several GPUs and are not run here.
+  environment RCCL reads at start-up, and read their module prefixes as written. Both hook FSDP2's
+  internals, so their patches must also decline on runs that shard with DDP or Megatron-FSDP, where
+  they would do nothing while logging that they are installed. The collectives themselves need
+  several GPUs and are not run here.
 """
+
+import importlib
+from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("torch")
+
+from primus.core.patches import PatchContext  # noqa: E402
+
+CE_PATCHES = [
+    ("fsdp_ce_all_gather_patches", "primus_perf.fsdp_ce_all_gather"),
+    ("fsdp_ce_reduce_scatter_patches", "primus_perf.fsdp_ce_reduce_scatter"),
+]
+
+
+def _ctx(**sections):
+    params = SimpleNamespace(**{name: SimpleNamespace(**keys) for name, keys in sections.items()})
+    return PatchContext(
+        backend="automodel",
+        phase="before_train",
+        extra={"module_config": SimpleNamespace(params=params)},
+    )
+
+
+def _condition(module_name):
+    return importlib.import_module(f"primus.backends.automodel.patches.{module_name}")._enabled
+
+
+class TestCopyEngineConditions:
+    @pytest.mark.parametrize("module_name,flag", CE_PATCHES)
+    def test_off_by_default(self, module_name, flag):
+        assert _condition(module_name)(_ctx(fsdp={})) is False
+
+    @pytest.mark.parametrize("module_name,flag", CE_PATCHES)
+    def test_applies_to_fsdp2(self, module_name, flag, set_option):
+        set_option(flag, True)
+        assert _condition(module_name)(_ctx(fsdp={})) is True
+        assert _condition(module_name)(_ctx()) is True
+
+    @pytest.mark.parametrize("module_name,flag", CE_PATCHES)
+    @pytest.mark.parametrize(
+        "sections",
+        [
+            {"fsdp": {"backend": "megatron_fsdp"}},
+            {"fsdp": {"backend": "mfsdp"}},
+            {"ddp": {"backend": "nccl"}},
+        ],
+    )
+    def test_declines_without_fsdp2(self, module_name, flag, sections, set_option):
+        set_option(flag, True)
+        assert _condition(module_name)(_ctx(**sections)) is False
 
 
 class TestCopyEngineHelpers:

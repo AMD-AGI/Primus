@@ -5,10 +5,12 @@
 ###############################################################################
 """Register FSDP2 all-gathers on RCCL's copy engines.
 
-Gated on ``primus_perf.fsdp_ce_all_gather``; see ``distributed/ce_all_gather.py``.
+Gated on ``primus_perf.fsdp_ce_all_gather`` for runs that shard with FSDP2 (not DDP or
+Megatron-FSDP); see ``distributed/ce_all_gather.py``.
 """
 
 from primus.backends.automodel import options
+from primus.backends.automodel.patches._conditions import shards_with_fsdp2
 from primus.core.patches import PatchContext, register_patch
 
 options.declare("primus_perf", "fsdp_ce_all_gather", "fsdp_ce_all_gather_modules")
@@ -17,7 +19,7 @@ options.declare("primus_perf", "fsdp_ce_all_gather", "fsdp_ce_all_gather_modules
 def _enabled(ctx: PatchContext) -> bool:
     from primus.backends.automodel.distributed import ce_all_gather
 
-    return ce_all_gather.is_enabled()
+    return ce_all_gather.is_enabled() and shards_with_fsdp2(ctx)
 
 
 @register_patch(

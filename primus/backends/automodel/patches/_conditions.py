@@ -68,3 +68,18 @@ def checkpoint_enabled(ctx: PatchContext) -> bool:
     saving happens.
     """
     return bool(as_automodel_reads_it(get_param(ctx, "checkpoint.enabled", True)))
+
+
+def shards_with_fsdp2(ctx: PatchContext) -> bool:
+    """Whether the recipe shards the model with FSDP2.
+
+    It does unless the config has a ``ddp`` section or sets ``fsdp.backend:
+    megatron_fsdp``, which Primus routes to Megatron-FSDP. A patch that hooks
+    FSDP2's internals would do nothing on those paths while saying it is
+    installed, so it declines there.
+    """
+    from primus.backends.automodel.distributed import megatron_fsdp
+
+    if get_param(ctx, "ddp", None) is not None:
+        return False
+    return not megatron_fsdp.is_megatron_fsdp_backend(get_param(ctx, "fsdp.backend", None))
