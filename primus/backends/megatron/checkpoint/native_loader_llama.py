@@ -52,6 +52,8 @@ from primus.backends.megatron.checkpoint import native_convert_common as common
 def derive_megatron_fields(cfg):
     """Translate a Llama (2/3/3.1) HF config dict into Megatron arg values."""
     num_heads = cfg["num_attention_heads"]
+    rope_scaling = cfg.get("rope_scaling") or {}
+    rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
     # Standard MHA when num_key_value_heads is absent or equals num_attention_heads;
     # GQA otherwise. Either way num_query_groups drives the mcore fused-QKV layout.
     num_kv_heads = cfg.get("num_key_value_heads", num_heads)
@@ -62,6 +64,8 @@ def derive_megatron_fields(cfg):
         max_position_embeddings=cfg["max_position_embeddings"],
         norm_epsilon=cfg.get("rms_norm_eps", 1e-5),
         rotary_base=cfg.get("rope_theta", 10000.0),
+        use_rope_scaling=rope_type == "llama3",
+        rope_scaling_factor=float(rope_scaling.get("factor", 8.0)),
         untie_embeddings_and_output_weights=not cfg.get("tie_word_embeddings", False),
         ffn_hidden_size=cfg["intermediate_size"],
         # GQA (num_query_groups == num_attention_heads reduces to plain MHA).
@@ -106,6 +110,8 @@ def build_margs(cfg_fields, args):
     m.add_qkv_bias = cfg_fields["add_qkv_bias"]  # False for all standard Llama
     m.position_embedding_type = "rope"
     m.rotary_base = cfg_fields["rotary_base"]
+    m.use_rope_scaling = cfg_fields["use_rope_scaling"]
+    m.rope_scaling_factor = cfg_fields["rope_scaling_factor"]
     m.apply_rope_fusion = False
 
     # Llama is always dense.
