@@ -43,6 +43,10 @@ download_timeout: 0
 # Keep the container after the run (for debugging)
 keep_container: false
 
+# Start the containers with docker's --privileged. The benchmarks need only the
+# GPU devices, and some clusters (e.g. Crusoe) refuse --privileged.
+privileged: false
+
 # Off: the perf runner benchmarks these models with Primus' own diffusion
 # backend through primus-cli (BACKEND=diffusion, the catalog's
 # examples/diffusion/configs/<GPU>/benchmark_*-posttrain.yaml). Set it to true

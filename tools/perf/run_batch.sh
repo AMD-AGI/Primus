@@ -102,12 +102,17 @@
 #                    container as explicit `--env` flags, e.g.
 #                    EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0". A plain export is
 #                    NOT enough: primus-cli only forwards names listed in
-#                    runner/.primus.yaml's container.options.env plus the
+#                    its config's (PRIMUS_CLI_CONFIG) container.options.env plus the
 #                    PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and
 #                    drops everything else without warning.
 #   DATA_PATH=...    where Primus keeps its Hugging Face downloads (models,
 #                    datasets); <checkout>/data when unset. The runner
 #                    creates it, mounts it and passes it into the container.
+#   PRIMUS_CLI_CONFIG  primus-cli's configuration (`primus-cli --config`);
+#                    default tools/perf/primus-cli.yaml, runner/.primus.yaml
+#                    without docker's --privileged and CAP_SYS_ADMIN, which
+#                    some clusters refuse. Empty: primus-cli's own choice
+#                    (~/.primus.yaml, else runner/.primus.yaml).
 #   PRIMUS_MODE      launcher mode, "container" (default) or "direct" when the
 #                    runner itself already runs inside a container.
 #
@@ -190,7 +195,7 @@ set +m
 # Every knob below is overridable from the environment, so a run never needs
 # this file edited. HF_TOKEN is validated in the sanity-check block; it is
 # deliberately not defaulted here.
-# These three are in runner/.primus.yaml's container.options.env, so exporting
+# These three are in container.options.env of primus-cli's config, so exporting
 # them here does reach the container. Do not add arbitrary variables alongside
 # them: anything outside that list and the PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/
 # HIPBLASLT_ prefixes is dropped without warning. Use EXTRA_ENV instead, e.g.
@@ -249,6 +254,8 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 # the script lives in tools/perf/ rather than at the repo root.
 PRIMUS_PATH=${PRIMUS_PATH:-"$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/../.." && pwd))"}
 PRIMUS_CLI=${PRIMUS_CLI:-"./primus-cli"}
+# primus-cli's configuration; empty leaves it to primus-cli (lib/run.sh).
+PRIMUS_CLI_CONFIG="${PRIMUS_CLI_CONFIG-$SCRIPT_DIR/primus-cli.yaml}"
 
 # Sourced at runtime from the script's own directory; shellcheck cannot
 # resolve the paths statically.
@@ -348,7 +355,7 @@ build_launch_argv() {
     # EXTRA_ENV becomes explicit `--env KEY=VALUE` flags before the `--`, which
     # is the only way to be sure a variable reaches the container.
     # shellcheck disable=SC2206
-    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"} ${framework_args[@]+"${framework_args[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
+    LAUNCH_ARGV=( "$PRIMUS_CLI" ${PERF_CLI_CONFIG_ARGS[@]+"${PERF_CLI_CONFIG_ARGS[@]}"} $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"} ${framework_args[@]+"${framework_args[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
 
     append_train_steps_override "$config_file" "$framework"
 }
@@ -403,7 +410,8 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# RESULT_DIR   : $RESULT_DIR"
     echo "# Config source: $CONFIG_SOURCE"
     echo "# PRIMUS_MODE  : $PRIMUS_MODE"
-    echo "# Docker image : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
+    echo "# CLI config   : $(perf_cli_config_text)"
+    echo "# Docker image : ${DOCKER_IMAGE:-<unset; container mode uses the image in ${PERF_CLI_CONFIG:-the primus-cli default config}>}"
     echo "# Image digest : $(perf_image_digest "${DOCKER_IMAGE:-}")"
     echo "# Image ID     : $(perf_image_id "${DOCKER_IMAGE:-}")"
     echo "# ROCm (host)  : $(perf_rocm_version)"

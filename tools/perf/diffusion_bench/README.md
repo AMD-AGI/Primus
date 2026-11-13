@@ -154,6 +154,7 @@ output_dir: ./results     # relative paths are relative to the config file
 step_timeout: 14400       # seconds per benchmark step, 0 = no timeout
 download_timeout: 0       # seconds for the download step, 0 = no timeout
 keep_container: false     # keep the container afterwards for debugging
+privileged: false         # docker run --privileged (some clusters refuse it)
 
 diffusion:
   enabled: false          # the shipped config's value; true runs the models below
@@ -280,6 +281,7 @@ list.
 | `--output-dir DIR` | `output_dir` |
 | `--timeout SEC` | `step_timeout` |
 | `--keep-container` | `keep_container: true` |
+| `--privileged` | `privileged: true` |
 | `--label KEY=VALUE` | adds a docker label to the containers; repeatable (the perf batch runner finds and stops its containers by label) |
 | `--env KEY[=VALUE]` | sets an environment variable in the containers; repeatable. A bare `KEY` passes this shell's value, which keeps a secret off the `docker run` command line. Only the names are saved in `resolved_config.yaml` |
 | `--dry-run` | starts the container and runs `launcher.py` with `launcher.dry_run=true`; skips downloads and DLRM; uses no GPU time |

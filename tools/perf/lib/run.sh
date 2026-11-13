@@ -32,12 +32,42 @@ check_batch_inputs() {
         echo "[ERROR] primus-cli not found or not executable at: $cli_abs" >&2
         return 1
     fi
+    perf_prepare_cli_config || return 1
 
     if [ -n "$TRAIN_STEPS" ]; then
         if ! [[ "$TRAIN_STEPS" =~ ^[1-9][0-9]*$ ]]; then
             echo "[ERROR] TRAIN_STEPS must be a positive integer, got: '$TRAIN_STEPS'" >&2
             return 1
         fi
+    fi
+}
+
+# The configuration primus-cli loads (`primus-cli --config`): PRIMUS_CLI_CONFIG,
+# by default tools/perf/primus-cli.yaml -- runner/.primus.yaml without docker's
+# --privileged and CAP_SYS_ADMIN, which some clusters refuse. Empty leaves the
+# choice to primus-cli (~/.primus.yaml, else runner/.primus.yaml). Sets
+# PERF_CLI_CONFIG (absolute, or empty) and PERF_CLI_CONFIG_ARGS.
+PERF_CLI_CONFIG=""
+PERF_CLI_CONFIG_ARGS=()
+
+perf_prepare_cli_config() {
+    PERF_CLI_CONFIG=""
+    PERF_CLI_CONFIG_ARGS=()
+    [ -n "${PRIMUS_CLI_CONFIG:-}" ] || return 0
+    PERF_CLI_CONFIG=$(perf_resolve_path "$PRIMUS_CLI_CONFIG")
+    if [ ! -f "$PERF_CLI_CONFIG" ]; then
+        echo "[ERROR] PRIMUS_CLI_CONFIG does not exist: $PERF_CLI_CONFIG" >&2
+        return 1
+    fi
+    PERF_CLI_CONFIG_ARGS=(--config "$PERF_CLI_CONFIG")
+}
+
+# primus-cli's configuration as the batch configuration shows it.
+perf_cli_config_text() {
+    if [ -n "$PERF_CLI_CONFIG" ]; then
+        echo "$PERF_CLI_CONFIG"
+    else
+        echo "<primus-cli default: ~/.primus.yaml, else runner/.primus.yaml>"
     fi
 }
 
@@ -413,7 +443,7 @@ collect_system_info() {
         echo "# CWD            : $(pwd)"
         echo "# PRIMUS_PATH    : $PRIMUS_PATH"
         echo "# PRIMUS_MODE    : $PRIMUS_MODE"
-        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
+        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses the image in ${PERF_CLI_CONFIG:-the primus-cli default config}>}"
         echo "# Script         : $SCRIPT_PATH"
         echo "# Bash           : $BASH_VERSION"
         echo "# Python         : $(command -v python3 >/dev/null && python3 --version 2>&1 || echo 'not found')"

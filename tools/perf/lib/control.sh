@@ -180,8 +180,9 @@ perf_stop_leftover_containers() {
 
 # DATA_PATH: where Primus keeps what it downloads (HF_HOME is
 # $DATA_PATH/huggingface: models, datasets), <checkout>/data when unset.
-# runner/.primus.yaml does not forward it into the container, nor mount a path
-# outside the checkout, so the runner does both. The mount is left out when
+# runner/.primus.yaml does not forward it into the container (the perf
+# primus-cli.yaml does), and neither mounts a path outside the checkout, so
+# the runner does both. The mount is left out when
 # the path is inside the checkout (mounted already) or a volume of the config
 # file primus-cli loads: docker refuses the same mount point twice.
 #
@@ -195,16 +196,16 @@ PERF_DATA_ARGS=()
 PERF_DATA_MOUNT=""
 PERF_DATA_CHECK="<unset; Primus uses <checkout>/data>"
 
-# The container volumes of the one config file primus-cli loads (~/.primus.yaml
-# if it exists, else runner/.primus.yaml), read with primus-cli's own parser.
-# Its "already sourced" guards are cleared, or an exported one would skip the
-# definitions.
+# The container volumes of the one config file primus-cli loads (PERF_CLI_CONFIG
+# when set, else ~/.primus.yaml if it exists, else runner/.primus.yaml), read
+# with primus-cli's own parser. Its "already sourced" guards are cleared, or an
+# exported one would skip the definitions.
 perf_config_volumes() {
     # shellcheck disable=SC2016
     env -u __PRIMUS_COMMON_SOURCED -u __PRIMUS_CONFIG_SOURCED bash -c 'PRIMUS_RUNNER_DIR=$1/runner
         source "$1/runner/lib/common.sh" && source "$1/runner/lib/config.sh" &&
-            load_config_auto "" perf >/dev/null 2>&1 &&
-            printf "%s\n" "${PRIMUS_CONFIG[container.options.volume]:-}"' _ "$PRIMUS_PATH" 2>/dev/null
+            load_config_auto "$2" perf >/dev/null 2>&1 &&
+            printf "%s\n" "${PRIMUS_CONFIG[container.options.volume]:-}"' _ "$PRIMUS_PATH" "${PERF_CLI_CONFIG:-}" 2>/dev/null
 }
 
 # True when the container already gets PERF_DATA_PATH at the same path.

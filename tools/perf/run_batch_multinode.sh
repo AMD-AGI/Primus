@@ -52,7 +52,7 @@
 #
 # EXTRA_ENV="KEY=VALUE KEY2=VALUE2" forwards variables into the container as
 # explicit `--env` flags. A plain export is NOT enough: primus-cli only
-# forwards names listed in runner/.primus.yaml's container.options.env plus the
+# forwards names listed in its config's container.options.env plus the
 # PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and silently drops the
 # rest -- which is why an exported DEBUG_HIP_DYNAMIC_QUEUES never arrived.
 #
@@ -222,6 +222,8 @@ PRIMUS_MODE="${PRIMUS_MODE:-slurm srun}"
 SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+# primus-cli's configuration; empty leaves it to primus-cli (lib/run.sh).
+PRIMUS_CLI_CONFIG="${PRIMUS_CLI_CONFIG-$SCRIPT_DIR/primus-cli.yaml}"
 
 # Sourced at runtime from the script's own directory; shellcheck cannot
 # resolve the paths statically.
@@ -336,7 +338,7 @@ build_launch_argv() {
     # by primus-cli-slurm.sh carries the container label, and EXTRA_ENV as
     # entry-level --env flags.
     LAUNCH_ARGV=(
-        "$PRIMUS_CLI" slurm srun -N "$NNODES"
+        "$PRIMUS_CLI" ${PERF_CLI_CONFIG_ARGS[@]+"${PERF_CLI_CONFIG_ARGS[@]}"} slurm srun -N "$NNODES"
         -- container --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
         ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"}
         ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"}
@@ -396,7 +398,8 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# RESULT_DIR            : $RESULT_DIR"
     echo "# Config source         : $CONFIG_SOURCE"
     echo "# PRIMUS_MODE           : $PRIMUS_MODE"
-    echo "# Docker image          : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
+    echo "# CLI config            : $(perf_cli_config_text)"
+    echo "# Docker image          : ${DOCKER_IMAGE:-<unset; container mode uses the image in ${PERF_CLI_CONFIG:-the primus-cli default config}>}"
     echo "# Image digest          : $(perf_image_digest "${DOCKER_IMAGE:-}")"
     echo "# Image ID              : ${PERF_IMAGE_ID:-$(perf_image_id "${DOCKER_IMAGE:-}")}  ($PERF_IMAGE_CHECK)"
     echo "# ROCm (host)           : $(perf_rocm_version)"

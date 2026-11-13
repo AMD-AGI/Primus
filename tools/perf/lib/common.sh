@@ -1332,7 +1332,7 @@ PERF_ENV_NOTE=""
 perf_print_provenance_banner() {
     local image="${1:-}"
 
-    echo "# Docker image     : ${image:-<unset; container mode uses runner/.primus.yaml>}"
+    echo "# Docker image     : ${image:-<unset; container mode uses the image in ${PERF_CLI_CONFIG:-the primus-cli default config}>}"
     echo "# Image digest     : $(perf_image_digest "$image")"
     echo "# Image ID         : $(perf_image_id "$image")"
     echo "# Primus commit    : $(perf_primus_commit)"

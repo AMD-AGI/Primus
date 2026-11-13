@@ -313,6 +313,8 @@ bash tools/perf/run_batch.sh
 - **Image.** `DOCKER_IMAGE` must contain `/workspace/AMDiffusionBenchmark`
   and `/workspace/DLRMBenchmark`, as `rocm/primus` images do; this is checked
   before the batch starts.
+  diffusion_bench starts its containers without docker's `--privileged`
+  (`privileged: true` in its config turns it back on).
 - Catalog mode, single node only. With `CONFIG_DIR`, `BACKEND` is ignored and
   so is `diffusion_dlrm` (the runner warns); `run_batch_multinode.sh` refuses
   it. It also needs `PRIMUS_MODE=container`, since diffusion_bench starts its
@@ -347,6 +349,7 @@ bash tools/perf/run_batch.sh
 | `DATA_PATH` | `<checkout>/data` | Where Primus keeps its Hugging Face downloads (models, datasets). Set it to keep them out of the checkout; the runner creates it, mounts it and passes it into the container. See below. |
 | `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
+| `PRIMUS_CLI_CONFIG` | `tools/perf/primus-cli.yaml` | primus-cli's configuration; empty for primus-cli's own (`~/.primus.yaml`, else `runner/.primus.yaml`). See "primus-cli's configuration". |
 | `PRIMUS_MODE` | `container` / `slurm srun` | Launcher mode. |
 | `DIFFUSION_HF_CACHE` | `$PRIMUS_HF_HOME`, else `<DATA_PATH>/huggingface_diffusion` | Where `diffusion` configs keep their model downloads (see "Diffusion"). |
 | `DIFFUSION_DLRM_CONFIG` | `tools/perf/diffusion_bench/config.yaml` | diffusion_bench config for `diffusion_dlrm`. |
@@ -395,8 +398,8 @@ EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0 GPU_MAX_HW_QUEUES=2" bash tools/perf/run_b
 does not necessarily reach the training container. primus-cli forwards only
 two categories:
 
-- names listed in [runner/.primus.yaml](../../runner/.primus.yaml) under
-  `container.options.env` (`HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_IS_V3_ATOMIC_FP32`,
+- names listed in its configuration ([`primus-cli.yaml`](./primus-cli.yaml), see
+  below) under `container.options.env` (`HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_IS_V3_ATOMIC_FP32`,
   `GPU_MAX_HW_QUEUES`, `REBUILD_BNXT`, and about 40 more), and
 - anything matching the prefixes `PRIMUS_`, `NCCL_`, `RCCL_`, `GLOO_`,
   `IONIC_`, `HIPBLASLT_`.
@@ -420,8 +423,25 @@ because these are guaranteed to have reached the container, while the others
 were merely present on the host.
 
 The alternative — adding a name to `container.options.env` in
-`runner/.primus.yaml` — is the right move when a variable should always be
-forwarded for everyone, rather than for one batch.
+`runner/.primus.yaml` and `primus-cli.yaml` — is the right move when a
+variable should always be forwarded for everyone, rather than for one batch.
+
+### primus-cli's configuration (`PRIMUS_CLI_CONFIG`)
+
+The runners launch `primus-cli --config tools/perf/primus-cli.yaml`. That file
+is [runner/.primus.yaml](../../runner/.primus.yaml) with these changes: the
+training container starts without docker's `--privileged` and
+`CAP_SYS_ADMIN`, which some clusters' docker refuses (Crusoe's authorization
+plugin rejects both), and with `IPC_LOCK`, the part of `--privileged` that RDMA
+memory registration uses on multi-node runs. The GPUs need only the
+`/dev/kfd`, `/dev/dri` and `/dev/infiniband` devices it already lists. It
+also forwards `DATA_PATH`, so an exported `DATA_PATH` reaches the container.
+
+`PRIMUS_CLI_CONFIG=<file>` uses another configuration, and
+`PRIMUS_CLI_CONFIG=` (empty) leaves the choice to primus-cli, as before:
+`~/.primus.yaml` if it exists, otherwise `runner/.primus.yaml`. The batch
+configuration records which one ran (`# CLI config : ...`), and the launch
+command in every run banner shows it.
 
 ### Where downloads go (`DATA_PATH`)
 
@@ -435,15 +455,15 @@ somewhere bigger:
 DATA_PATH=/tmp/primus-data bash tools/perf/run_batch.sh
 ```
 
-The container sees only the checkout, and primus-cli does not forward
-`DATA_PATH`, so the runner adds `--volume $DATA_PATH:$DATA_PATH` and
+The container sees only the checkout, and only `primus-cli.yaml` (not
+`runner/.primus.yaml`) forwards `DATA_PATH`, so the runner adds `--volume $DATA_PATH:$DATA_PATH` and
 `--env DATA_PATH=$DATA_PATH` to every training launch (`diffusion` configs
 keep their models in `DIFFUSION_HF_CACHE`, below `DATA_PATH` by default;
 `diffusion_dlrm` runs keep their own container and cache,
 `DIFFUSION_DLRM_HF_CACHE`). It leaves the
 mount out when the path is inside the checkout or already a volume of the
-config file primus-cli loads (`~/.primus.yaml` if it exists, otherwise
-`runner/.primus.yaml`), since docker refuses the same mount twice. Before the
+config file primus-cli loads (`PRIMUS_CLI_CONFIG`), since docker refuses the
+same mount twice. Before the
 first run it creates the directory on every node, so it belongs to you
 rather than to root, and the batch configuration records the free space:
 
