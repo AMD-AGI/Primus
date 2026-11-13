@@ -18,6 +18,7 @@ special case: their ``forward`` takes ``[B, S, K, D]`` plus keyword-only
 crash or measure the wrong kernel.
 """
 
+import inspect
 from typing import Optional
 
 import torch
@@ -40,6 +41,28 @@ from primus.core.projection.bench_harness.base import (
 def _unwrap(module):
     """Strip DistributedDataParallel / pipeline wrappers off a model chunk."""
     return _unwrap(module.module) if hasattr(module, "module") else module
+
+
+def _model_rotary(model):
+    """The GPTModel's RotaryEmbedding when it feeds the layers one.
+
+    GPTModel computes ``rotary_pos_emb`` only for plain ``rope``; multi-latent
+    attention builds its own inside the attention module.
+    """
+    config = getattr(model, "config", None)
+    if getattr(model, "position_embedding_type", None) != "rope":
+        return None
+    if getattr(config, "multi_latent_attention", False):
+        return None
+    rotary = getattr(model, "rotary_pos_emb", None)
+    return rotary if callable(rotary) else None
+
+
+def _forward_params(module):
+    try:
+        return inspect.signature(module.forward).parameters
+    except (TypeError, ValueError):
+        return {}
 
 
 class MegatronBenchAdapter(BenchModelAdapter):
@@ -81,7 +104,27 @@ class MegatronBenchAdapter(BenchModelAdapter):
                 if hasattr(unwrapped, "compute_language_model_loss"):
                     parts.loss_owner = unwrapped
 
+            rotary = _model_rotary(unwrapped)
+            if rotary is not None:
+                self._rotary = rotary
+
         return parts
+
+    def _rotary_kwargs(self, module, seq_len: int) -> dict:
+        """``rotary_pos_emb`` as GPTModel hands it to every layer, when it does.
+
+        Without it the layer skips the RoPE kernels training runs on q and k.
+        """
+        rotary = getattr(self, "_rotary", None)
+        if rotary is None or "rotary_pos_emb" not in _forward_params(module):
+            return {}
+        with torch.no_grad():
+            emb = rotary(seq_len)
+        if emb.shape[0] != seq_len:
+            # Context-parallel slicing inside RotaryEmbedding; the layer is fed
+            # the full sequence here, so leave RoPE out rather than mismatch it.
+            return {}
+        return {"rotary_pos_emb": emb}
 
     def layer_submodules(self, layer) -> LayerParts:
         return LayerParts(
@@ -101,14 +144,18 @@ class MegatronBenchAdapter(BenchModelAdapter):
                 return BenchInputs(args=shapes, kwargs=kwargs or {})
 
         if kind == LAYER:
-            return BenchInputs(args=[(ctx.seq_len, ctx.batch_size, ctx.hidden_size)])
+            return BenchInputs(
+                args=[(ctx.seq_len, ctx.batch_size, ctx.hidden_size)],
+                kwargs=self._rotary_kwargs(module, ctx.seq_len),
+            )
 
         if kind == ATTENTION:
             return BenchInputs(
                 args=[
                     (ctx.seq_len, ctx.batch_size, ctx.hidden_size),
                     ((1, 1, ctx.seq_len_per_cp, ctx.seq_len), torch.bool),
-                ]
+                ],
+                kwargs=self._rotary_kwargs(module, ctx.seq_len),
             )
 
         if kind in (MLP, MOE):

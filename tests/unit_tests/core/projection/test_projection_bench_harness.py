@@ -178,6 +178,48 @@ def test_megatron_embedding_takes_token_ids():
     assert list(inputs.args) == [((BATCH, SEQ), torch.int64)]
 
 
+class _MegatronRopeLayer(nn.Module):
+    def forward(self, hidden_states, attention_mask=None, rotary_pos_emb=None):
+        return hidden_states
+
+
+def _gpt_model(position_embedding_type="rope", multi_latent_attention=False, rope_len=SEQ):
+    return SimpleNamespace(
+        decoder=SimpleNamespace(layers=[_MegatronRopeLayer()]),
+        position_embedding_type=position_embedding_type,
+        config=SimpleNamespace(multi_latent_attention=multi_latent_attention),
+        rotary_pos_emb=lambda seq_len: torch.zeros(rope_len, 1, 1, 16),
+    )
+
+
+def test_megatron_layer_gets_the_models_rotary_embedding():
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(_gpt_model())
+    inputs = adapter.inputs(LAYER, parts.layers[0], _ctx())
+    assert inputs.kwargs["rotary_pos_emb"].shape == (SEQ, 1, 1, 16)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        _gpt_model(position_embedding_type="learned_absolute"),
+        _gpt_model(multi_latent_attention=True),
+        _gpt_model(rope_len=SEQ // 2),
+    ],
+    ids=["no-rope", "mla", "cp-sliced"],
+)
+def test_megatron_layer_without_layer_level_rope_gets_none(model):
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(model)
+    assert adapter.inputs(LAYER, parts.layers[0], _ctx()).kwargs == {}
+
+
+def test_megatron_rotary_skipped_when_forward_does_not_take_it():
+    adapter = MegatronBenchAdapter()
+    adapter.discover(_gpt_model())
+    assert adapter.inputs(LAYER, nn.Identity(), _ctx()).kwargs == {}
+
+
 def test_megatron_moe_decomposition_needs_dispatch_and_combine():
     adapter = MegatronBenchAdapter()
     bare = nn.Identity()
