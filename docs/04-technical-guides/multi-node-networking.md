@@ -133,7 +133,7 @@ The system hook `runner/helpers/hooks/02_setup_nic_userspace_driver.sh` fixes th
    | NIC | Sources, in order |
    |-----|-------------------|
    | Broadcom | `PATH_TO_BNXT_TAR_PACKAGE`; `libbnxt_re-<version>.tar.gz`, then `bnxt-rocelib-<version>*.deb`, under `PRIMUS_NIC_DRIVER_SEARCH_PATH`, as plain files (an extracted `bcm_<release>` bundle) or inside bundle archives; the host's own `libbnxt_re` of that version. Without an exact match, the closest release found is tried. |
-   | AINIC | `libionic1_*.deb` for the container's distribution, inside a bundle named after the version under `PRIMUS_NIC_DRIVER_SEARCH_PATH`; otherwise the package from `https://repo.radeon.com/amdainic/pensando/ubuntu/<bundle>/`, checked against the repository's SHA256. |
+   | AINIC | `libionic1_*.deb` for the container's distribution under `PRIMUS_NIC_DRIVER_SEARCH_PATH`: inside a bundle named after the version, an unversioned bundle (`host_sw_pkg.tar.gz`) whose `VERSION.json` names it, or a flat package directory such as `/opt/amd/ainic/deb-repo` whose other packages (`pds-dkms_1.117.5.a.196_all.deb`, ...) name it; otherwise the package from `https://repo.radeon.com/amdainic/pensando/ubuntu/<bundle>/`, checked against the repository's SHA256. |
 
 4. Builds the provider (Broadcom source tarball, about 10 seconds) or unpacks it (`.deb`), installs it, and probes again: every device must be listed and opened and accept a queue pair, libibverbs must have loaded the new file, and for AINIC `libionic.so.1` must resolve to that same file. A provider that fails is rolled back and the next source is tried.
 
@@ -150,7 +150,7 @@ The hook never fails a launch on its own (unless `PRIMUS_NIC_DRIVER_STRICT=1`): 
 
 `primus-cli container`, and therefore `primus-cli slurm` on every node, mounts these into the container read-only:
 
-- every existing entry of `PRIMUS_NIC_DRIVER_SEARCH_PATH` (default `/opt/broadcom:/opt/bnxt-bundles:/opt/ainic-bundles`), at the same path;
+- every existing entry of `PRIMUS_NIC_DRIVER_SEARCH_PATH` (default `/opt/broadcom:/opt/bnxt-bundles:/opt/amd/ainic`), at the same path;
 - `PATH_TO_BNXT_TAR_PACKAGE`, at the same path;
 - the host's `libbnxt_re-rdmav*.so`, when the same directory has `libbnxt_re-<version>.so` for the loaded `bnxt_re` module, which is what Broadcom's installer leaves in `/usr/local/lib`.
 

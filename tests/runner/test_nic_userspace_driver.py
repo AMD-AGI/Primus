@@ -307,6 +307,50 @@ def test_ionic_rejects_unversioned_bundle_for_a_different_release(tmp_path, monk
     assert [c for c in nud.IonicFamily().candidates(ctx) if c.kind == "deb"] == []
 
 
+def _flat_ainic_repo(repo: Path, release: str = "1.117.5.a.196") -> None:
+    """A flat package directory as cluster provisioning leaves it (e.g. /opt/amd/ainic/deb-repo): the
+    release appears only in the other bundle packages, the distribution only in the deb's ~ubu suffix."""
+    for name in (
+        "libionic1_2410mlnx54.26.08.28.001-1~ubu24.04_amd64.deb",
+        "libionic-dev_2410mlnx54.26.08.28.001-1~ubu24.04_amd64.deb",
+        f"pds-dkms_{release}_all.deb",
+        f"nicctl_{release}-1_amd64.deb",
+        "Packages.gz",
+    ):
+        _write(repo / name)
+
+
+def test_ionic_accepts_flat_repo_provisioned_for_the_host_release(tmp_path, monkeypatch):
+    monkeypatch.setattr(nud, "os_codename", lambda: "noble")
+    monkeypatch.setattr(nud, "os_version_id", lambda: "24.04")
+    bundles = tmp_path / "ainic"
+    _flat_ainic_repo(bundles / "deb-repo")
+
+    ctx = _ctx(tmp_path, version="1.117.5-a-196", search_path=[bundles])
+    cands = list(nud.IonicFamily().candidates(ctx))
+    assert [c.kind for c in cands] == ["deb", "download"]
+    assert cands[0].path == str(bundles / "deb-repo" / "libionic1_2410mlnx54.26.08.28.001-1~ubu24.04_amd64.deb")
+    assert cands[0].version == "1.117.5-a-196"
+
+
+@pytest.mark.parametrize(
+    "release, version_id",
+    [
+        ("1.117.5.a.77", "24.04"),  # provisioned for a different bundle
+        ("1.117.5.a.1960", "24.04"),  # the release must not run on into more digits
+        ("1.117.5.a.196", "22.04"),  # built for another distribution
+    ],
+)
+def test_ionic_rejects_flat_repo_for_another_release_or_distro(tmp_path, monkeypatch, release, version_id):
+    monkeypatch.setattr(nud, "os_codename", lambda: "noble")
+    monkeypatch.setattr(nud, "os_version_id", lambda: version_id)
+    bundles = tmp_path / "ainic"
+    _flat_ainic_repo(bundles / "deb-repo", release)
+
+    ctx = _ctx(tmp_path, version="1.117.5-a-196", search_path=[bundles])
+    assert [c for c in nud.IonicFamily().candidates(ctx) if c.kind == "deb"] == []
+
+
 def test_ionic_bundle_version_prefers_the_top_level_manifest(tmp_path):
     archive = _tar(
         tmp_path / "host_sw_pkg.tar.gz",

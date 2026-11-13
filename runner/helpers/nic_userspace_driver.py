@@ -205,12 +205,21 @@ def running_in_container() -> bool:
     return bool(re.search(r"docker|kubepods|containerd|libpod|lxc", _read(Path("/proc/1/cgroup"))))
 
 
-def os_codename(os_release: Path = OS_RELEASE) -> str:
+def _os_release(os_release: Path = OS_RELEASE) -> Dict[str, str]:
     values = {}
     for line in _read(os_release).splitlines():
         key, _, value = line.partition("=")
         values[key.strip()] = value.strip().strip('"')
+    return values
+
+
+def os_codename(os_release: Path = OS_RELEASE) -> str:
+    values = _os_release(os_release)
     return values.get("VERSION_CODENAME") or values.get("UBUNTU_CODENAME", "")
+
+
+def os_version_id(os_release: Path = OS_RELEASE) -> str:
+    return _os_release(os_release).get("VERSION_ID", "")
 
 
 def deb_architecture() -> str:
@@ -873,6 +882,38 @@ def _ionic_rank(path: str) -> int:
     return 0 if "rdma-core-debs" in path else 1
 
 
+def _names_ionic_release(name: str, want: str) -> bool:
+    """Whether a file name carries the AINIC release `want`, e.g. pds-dkms_1.117.5.a.196_all.deb for 1.117.5-a-196.
+
+    Debian versions cannot hold every character of fw_ver, so bundle packages spell the release with
+    dots; '-' and '.' are treated alike, and the release must not run on into more digits or letters.
+    """
+    norm = re.sub(r"[-.]", ".", want)
+    return re.search(rf"(?<![0-9A-Za-z]){re.escape(norm)}(?![0-9A-Za-z])", re.sub(r"[-.]", ".", name)) is not None
+
+
+def _ionic_flat_repo_debs(files: Sequence[Path], want: str, codename: str) -> List[Path]:
+    """libionic1 .debs in a flat package directory (e.g. /opt/amd/ainic/deb-repo) provisioned for release `want`.
+
+    Such a directory names the release only through its other packages (pds-dkms, nicctl, ...), and
+    the distribution only through the deb's own ~ubu<VERSION_ID> suffix or a codename directory.
+    """
+    by_dir: Dict[Path, List[Path]] = {}
+    for f in files:
+        by_dir.setdefault(f.parent, []).append(f)
+    version_id = os_version_id()
+    distro = f"~ubu{version_id}" if version_id else ""
+    found = []
+    for entries in by_dir.values():
+        debs = [f for f in entries if f.name.startswith("libionic1_") and f.name.endswith(".deb")]
+        if not debs or not any(
+            _names_ionic_release(f.name, want) for f in entries if not f.name.startswith("libionic")
+        ):
+            continue
+        found += [f for f in debs if f"/{codename}/" in f"/{f}" or (distro and distro in f.name)]
+    return found
+
+
 def _ionic_bundle_version(archive: Path, scratch: Path) -> Optional[str]:
     """The AINIC bundle version an unversioned archive (e.g. host_sw_pkg.tar.gz) was built for.
 
@@ -933,6 +974,12 @@ class IonicFamily(Family):
                 and in_codename_dir(str(f))
             ]
             yield from sorted(local, key=lambda c: _ionic_rank(c.path))
+            seen = {c.path for c in local}
+            yield from (
+                Candidate(want, "deb", str(f), str(f))
+                for f in _ionic_flat_repo_debs(files, want, codename)
+                if str(f) not in seen
+            )
             for archive in (f for f in files if is_archive_name(f.name)):
                 if want in archive.name:
                     pass  # the bundle names its release, e.g. ainic_<fw_ver>.tar.gz
