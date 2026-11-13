@@ -253,7 +253,7 @@ def flydsl_attn_res_mix(
             f"the FlyDSL attention-residual kernel cannot run these inputs: {reason}. It "
             f"needs a CUDA tensor, hidden % {HIDDEN_ALIGN} == 0, at most "
             f"{MAX_CANDIDATES} candidates, and bf16 or fp32. Select "
-            "attn_res_backend: eager."
+            "attn_res_backend: eager or eager_bcast."
         )
 
     hidden = prefix_sum.shape[-1]
