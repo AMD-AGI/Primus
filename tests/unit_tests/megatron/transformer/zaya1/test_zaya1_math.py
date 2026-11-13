@@ -301,3 +301,24 @@ def test_fp8_rejects_unaligned_gemm():
     # before Transformer Engine is imported.
     with pytest.raises(ValueError, match="divisible by 16"):
         CCA(_cfg(fp8="hybrid", hidden_size=24))
+
+
+def test_cca_conv_gemm_matches_conv1d():
+    import torch.nn.functional as F
+
+    from primus.backends.megatron.core.models.zaya1.zaya1_modules import cca_causal_conv
+
+    torch.manual_seed(0)
+    cca = CCA(_cfg()).double()
+    for conv in cca.conv_qk:
+        torch.nn.init.normal_(conv.weight)
+        torch.nn.init.normal_(conv.bias)
+    seq, batch = 7, 3
+    x = torch.randn(seq, batch, cca.latent_q + cca.latent_k, dtype=torch.float64, requires_grad=True)
+    params = [x] + list(cca.conv_qk.parameters())
+    ref = cca.conv_qk(F.pad(x.permute(1, 2, 0), (cca.total_padding, 0))).permute(2, 0, 1)
+    out = cca_causal_conv(x, cca.conv_qk[0], cca.conv_qk[1])
+    torch.testing.assert_close(out, ref, rtol=1e-5, atol=1e-5)
+    grad = torch.randn_like(ref)
+    for a, b in zip(torch.autograd.grad(out, params, grad), torch.autograd.grad(ref, params, grad)):
+        torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-5)

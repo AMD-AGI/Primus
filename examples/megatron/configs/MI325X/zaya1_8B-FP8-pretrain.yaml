@@ -27,9 +27,10 @@ modules:
 
       # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
       # weights and adds cached FP8 weight copies, so it fits fewer samples
-      # than BF16. micro_batch_size 184 is the largest multiple of 8 that
-      # completes on MI325X with rocm/primus:v26.8: it peaks at 245 of 256 GB
-      # per GPU, and 192 runs out of memory. On fewer GPUs, lower
+      # than BF16. micro_batch_size 184 was the largest multiple of 8 that
+      # completed on MI325X with rocm/primus:v26.8 before the ZAYA1 kernel
+      # changes: it peaked at 245 of 256 GB per GPU, and 192 ran out of memory.
+      # Larger sizes haven't been tried since. On fewer GPUs, lower
       # micro_batch_size or num_layers (keep it even). Do not edit the model
       # yaml to shrink the architecture.
       train_iters: 30

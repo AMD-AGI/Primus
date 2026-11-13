@@ -13,6 +13,7 @@ training entry point: ``get_model_provider("zaya1")`` -> ``zaya1_builder`` ->
 
 import os
 import socket
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -323,3 +324,66 @@ def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch)
     assert torch.isfinite(loss).all()
     loss.sum().backward()
     assert torch.isfinite(cca.linear_q.linear.weight.grad).all()
+
+
+def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
+    """``ZAYA_CHUNKED_CE=1`` (chunked output projection + CE) vs ``=0`` (stock)."""
+    del parallel_state
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.delenv(name, raising=False)
+    from megatron.training.global_vars import set_args
+
+    config = _tiny_config()
+    args = _args()
+    set_args(args)
+    model = get_model_provider("zaya1")(pre_process=True, post_process=True, config=config)
+    device = torch.device("cuda")
+    # Both runs must see the same model. In training mode the embedding applies
+    # hidden_dropout (Megatron's default of 0.1 here) and every forward moves the
+    # routers' balancing biases.
+    model.to(device).eval()
+    batch, seq, vocab = 3, 8, args.padded_vocab_size
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, vocab, (batch, seq), device=device)
+    position_ids = torch.arange(seq, device=device).unsqueeze(0).expand(batch, -1)
+    labels = torch.randint(0, vocab, (batch, seq), device=device)
+    mask = (torch.rand(batch, seq, device=device) > 0.25).float()
+
+    def run(flag):
+        monkeypatch.setenv("ZAYA_CHUNKED_CE", flag)
+        monkeypatch.setenv("ZAYA_CHUNKED_CE_TOKENS", "5")
+        model.zero_grad(set_to_none=True)
+        loss = model(input_ids, position_ids, attention_mask=None, labels=labels)
+        ((loss * mask).sum() / mask.sum()).backward()
+        grads = {n: p.grad.detach().clone() for n, p in model.named_parameters() if p.grad is not None}
+        return loss.detach(), grads
+
+    ref_loss, ref_grads = run("0")
+    out_loss, out_grads = run("1")
+    assert out_loss.shape == ref_loss.shape == (batch, seq)
+    torch.testing.assert_close(out_loss, ref_loss, rtol=1e-4, atol=1e-4)
+    assert ref_grads.keys() == out_grads.keys()
+    for name, ref in ref_grads.items():
+        torch.testing.assert_close(out_grads[name], ref, rtol=1e-3, atol=1e-5, msg=name)
+
+
+def _loss_settings(**config):
+    defaults = dict(
+        cross_entropy_loss_fusion=False, cross_entropy_fusion_impl="native", sequence_parallel=False
+    )
+    defaults.update(config)
+    return SimpleNamespace(config=SimpleNamespace(**defaults), pg_collection=None)
+
+
+def test_chunked_ce_steps_aside_for_any_fused_cross_entropy(monkeypatch):
+    monkeypatch.delenv("ZAYA_CHUNKED_CE", raising=False)
+    assert Zaya1Model._chunked_ce_blocker(_loss_settings()) is None
+    for impl in ("native", "te"):
+        # Turbo cross-entropy also runs only with cross_entropy_loss_fusion.
+        blocker = Zaya1Model._chunked_ce_blocker(
+            _loss_settings(cross_entropy_loss_fusion=True, cross_entropy_fusion_impl=impl)
+        )
+        assert blocker == f"cross_entropy_loss_fusion is set ({impl})"
+    assert "sequence parallel" in Zaya1Model._chunked_ce_blocker(_loss_settings(sequence_parallel=True))
+    monkeypatch.setenv("ZAYA_CHUNKED_CE", "0")
+    assert Zaya1Model._chunked_ce_blocker(_loss_settings()) == "ZAYA_CHUNKED_CE is off"

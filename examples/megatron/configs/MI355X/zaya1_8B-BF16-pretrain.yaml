@@ -1,7 +1,26 @@
+# Single-node training (8 GPUs):
+#   GPUS_PER_NODE=8 ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/zaya1_8B-BF16-pretrain.yaml
+# No --numa: it gained under 0.1% for BF16. The FP8 recipe uses it.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Switches read by the ZAYA1 model code when it is imported. Primus sets each
+# entry in every training process before it builds the model, and logs it as
+# "[Primus:Runtime] env override".
+#   ZAYA_ROUTER_DEFER_AR: "1"  One data-parallel all-reduce per step for every
+#                              router's balancing-bias update, instead of one
+#                              per MoE layer. Default: 0.
+# The other switches stay at their defaults (on): ZAYA_ATTN_FLASH,
+# ZAYA_FUSE_NORM, ZAYA_FUSE_CCA, ZAYA_CONV_GEMM and ZAYA_FUSE_MOE.
+# ZAYA_CHUNKED_CE has no effect here: cross_entropy_loss_fusion below turns
+# the chunked cross-entropy off. The experts' grouped GEMM is a Primus Turbo
+# setting, at the end of this file.
+env:
+  ZAYA_ROUTER_DEFER_AR: "1"
 
 modules:
   pre_trainer:
@@ -18,11 +37,12 @@ modules:
       log_avg_reset_interval: 10
 
       # 30-step mock-data run for one 8-GPU node (DP=8). micro_batch_size 248
-      # is the largest multiple of 8 that completes on MI355X with
-      # rocm/primus:v26.8: it peaks at 282 of 288 GB per GPU, and 256 runs out
-      # of memory. Each sample costs about 0.8 GB, mostly fp32 logits over the
-      # 262k vocabulary. On fewer GPUs, lower micro_batch_size or num_layers
-      # (keep it even). Do not edit the model yaml to shrink the architecture.
+      # was sized before the ZAYA1 kernel changes and the settings in this
+      # file, as the largest multiple of 8 that completed on MI355X with
+      # rocm/primus:v26.8 (282 of 288 GB per GPU; 256 ran out of memory). It
+      # peaks lower now; larger micro batches were not tried. On fewer GPUs,
+      # lower micro_batch_size or num_layers (keep it even). Do not edit the
+      # model yaml to shrink the architecture.
       train_iters: 30
       micro_batch_size: 248
       # One micro batch per GPU per step at DP=8.
@@ -53,6 +73,22 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
+      # Transformer Engine's fused cross-entropy on the output logits. It is
+      # faster here than the ZAYA1 chunked cross-entropy, which it turns off,
+      # but keeps the full bf16 logits (16.6 GB per GPU). A numerics choice:
+      # TE 2.17.1 (rocm/primus:v26.8) returns the logits gradient in bf16,
+      # which is why Megatron rejects this setting. Megatron-LM main accepts
+      # it from TE 2.19, which keeps the gradient in fp32 (TE PR #3193), as
+      # does ROCm TE IFU-release_v2.18. Primus removes the check and logs a
+      # warning.
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te
+
+      # Average gradients inside the reduce-scatter, so Megatron skips its
+      # separate pass that first scales the gradient buffer by 1/DP. At DP=8
+      # the scale is a power of two, so the gradients come out the same.
+      ddp_average_in_collective: true
+
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.
       mock_data: true
@@ -74,6 +110,11 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      enable_primus_turbo: false
+      # The 16 experts run as two Primus Turbo grouped GEMMs whose group sizes
+      # stay on the GPU, so no MoE layer waits on the host. Turbo's FP8 grouped
+      # GEMM isn't wired up for ZAYA1 yet, so with FP8 the experts stay split.
+      # The distributed-optimizer state does not carry across a switch between
+      # split and grouped experts; load with --no-load-optim when switching.
+      enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true
