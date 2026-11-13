@@ -1,0 +1,60 @@
+###############################################################################
+# Mistral family base (Mistral Large 4 and later releases of its architecture).
+#
+# MLA without Q-LoRA, YaRN + learned LeRoPE rope applied interleaved, SSMax query scaling,
+# DSA lightning indexer with index sharing, cross-layer latent KV sharing, softmax top-k MoE
+# with a shared expert, untied head with a tanh logit softcap.
+# Model code: primus/backends/megatron/core/models/mistral_large4/.
+# This base holds only the architecture's fixed choices (norms, rope kind, router policy). Every
+# size (MLA ranks and head dims, indexer heads / top-k, YaRN factor, logit softcap), the token
+# dispatcher, the tokenizer, the checkpoint and the per-layer lists are in each model's preset.
+###############################################################################
+
+extends:
+  - llama3_base.yaml
+
+model_type: mistral_large4
+
+# norms / embeddings
+norm_epsilon: 1.0e-05
+untie_embeddings_and_output_weights: true
+group_query_attention: false
+qk_layernorm: false
+
+# MLA (the decoder block owns the rope table: YaRN + LeRoPE)
+multi_latent_attention: true
+apply_rope_fusion: false
+rotary_base: 10000
+rope_type: yarn
+mscale: 1.0
+mscale_all_dim: 0.0
+
+# DSA indexer (eager reference path)
+index_norm_eps: 1.0e-06
+# the indexer is frozen (as in the reference: no gradient, no indexer loss), so with
+# seq_length > index_topk its top-k must come from a checkpoint; a run without one is refused unless
+# this is true (code-path tests only: the selection then stays random for the whole run)
+allow_untrained_indexer: false
+
+# MoE: softmax over all experts, top-k, renormalised (pre_softmax false), no expert bias
+moe_router_score_function: softmax
+moe_router_pre_softmax: false
+moe_router_enable_expert_bias: false
+moe_router_topk_scaling_factor: 1.0
+moe_router_num_groups: null
+moe_router_group_topk: null
+moe_router_dtype: fp32
+moe_router_load_balancing_type: none
+moe_aux_loss_coeff: 0.0
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true
+moe_shared_expert_overlap: false
+moe_shared_expert_gate: false
+mtp_num_layers: null
+
+init_method_std: 0.02
+
+# fine-tuning on few GPUs: freeze the routed experts (~97% of the parameters); router, shared
+# expert, attention, norms, embedding and head train (mistral_large4_builders.freeze_routed_experts)
+freeze_routed_experts: false

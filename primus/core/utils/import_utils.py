@@ -41,6 +41,7 @@ def get_model_provider(model_type="gpt"):
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
             'kimi_k3', 'glm5_next', 'zaya1' or 'inkling'. Defaults to 'gpt'.
+            Also 'mistral_large4' (the Mistral Large 4 text decoder).
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -83,6 +84,19 @@ def get_model_provider(model_type="gpt"):
             glm5_next_module.model_provider,
             glm5_next_module.glm5_next_builder,
         )
+
+    # Primus-owned: Mistral Large 4 text decoder. A config with this model's per-layer layout and
+    # another model_type is refused before this lookup (megatron.mistral_large4.model_type_check)
+    if model_type == "mistral_large4":
+        mistral_large4_module = importlib.import_module(
+            "primus.backends.megatron.core.models.mistral_large4.mistral_large4_builders"
+        )
+        provider = partial(mistral_large4_module.model_provider, mistral_large4_module.mistral_large4_builder)
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded Mistral-Large-4 model_provider + builder "
+            f"from {mistral_large4_module.__name__}"
+        )
+        return provider
 
     # Primus-owned: ZAYA1 (data parallel only)
     if model_type == "zaya1":

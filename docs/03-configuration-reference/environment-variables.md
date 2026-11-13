@@ -152,6 +152,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `NVTE_CK_USES_BWD_V3` | `1` | `base_env.sh`, container passthrough | TE / CK | Use CK backward v3 kernels. |
 | `NVTE_CK_IS_V3_ATOMIC_FP32` | (unset; examples print `0`) | User / container passthrough (`runner/.primus.yaml`) | TE / CK | Atomic FP32 mode for CK v3 backward. |
 | `PATCH_TE_FLASH_ATTN` | `0` | `base_env.sh`, container passthrough | `runner/helpers/hooks/01_patch_te_flash_attn_max_version.sh` | Trigger TE flash-attn patch hook when `1`. |
+| `PRIMUS_TE_GEMM_WORKSPACE_MB` | `512` | User | `primus/backends/megatron/patches/te_patches/gemm_workspace_size_patches.py` (used by the GLM-5.3 and Mistral Large 4 `te_gemm_workspace` patches) | TE's hipBLASLt GEMM workspace in MiB on ROCm (integer, else a `ValueError` naming it; 0 or below keeps TE's default). Raise it if a GEMM fails with `HIPBLASLT Error: 6`; the workspace is never lowered below TE's default. Handles TE 2.17 (`cpp_extensions.gemm`) and TE 2.8 (`module.base`); a TE with neither layout raises unless this is 0; without TE it logs a warning and does nothing. Not in the container allowlist (`runner/.primus.yaml`): under `primus-cli container`, pass it with `--env`; a host `export` is not forwarded. |
 
 ---
 

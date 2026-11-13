@@ -511,6 +511,8 @@ models:
 | `gradient_accumulation_fusion` | `true` | Fuse gradient accumulation kernels. |
 | `delay_wgrad_compute` | `false` | Delay weight-gradient computation for scheduling. |
 
+`model_type` also takes the Primus-owned values that `get_model_provider` dispatches (`deepseek_v4`, `kimi_k3`, `glm5_next`, `mistral_large4`, `zaya1`, `inkling`); see [10.8](#108-mistral-large-4-model_type-mistral_large4-mistral_baseyaml) for `mistral_large4`.
+
 ### 10.2 Tokenizer and vocabulary
 
 | Parameter | Default | Description |
@@ -606,6 +608,22 @@ models:
 | `final_logit_softcapping` | `null` | Softcap value for final logits; `null` disables. |
 | `attn_logit_softcapping` | `null` | Softcap for attention logits. |
 | `router_logit_softcapping` | `null` | Softcap for MoE router logits. |
+
+### 10.8 Mistral Large 4 (`model_type: mistral_large4`, `mistral_base.yaml`)
+
+`model_type: mistral_large4` selects the Mistral Large 4 text decoder (BF16 training; no KV-cache inference; the sparse DSA path, sequence > `index_topk`, does not run with context parallelism; with pipeline parallelism each stage starts on a `full` indexer layer); the list of `model_type` values is in 10.1. All keys below are *Primus:* keys (Primus' Mistral Large 4 config, not upstream Megatron arguments).
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `no_rope_layers` | `null` | *Primus:* Per-layer list: `1` = rope layer, `0` = NoPE layer (no rotary part; qk head 128 all "nope"). `null` = all rope. |
+| `indexer_types` | `null` | *Primus:* Per-layer list of `"full"` (own DSA indexer) or `"shared"` (reuse the top-k of the last full layer). `null` = all full. |
+| `kv_source_layers` | `null` | *Primus:* Per-layer list: index of the layer whose normalized KV latent a layer uses (itself unless shared). `null` = no sharing. |
+| `index_n_heads` / `index_head_dim` | `32` / `128` | *Primus:* DSA lightning indexer heads and head size. |
+| `index_topk` | `2048` | *Primus:* Keys each query keeps on the sparse path (sequence > `index_topk`); shorter sequences run dense. |
+| `index_norm_eps` | `1e-6` | *Primus:* Epsilon of the indexer's LayerNorms. |
+| `first_k_dense_replace` | `1` | *Primus:* First layers with a dense MLP; the rest are MoE (`moe_layer_freq` is derived from it). |
+| `freeze_routed_experts` | `false` | *Primus:* Fine-tuning: freeze the routed experts (router, shared expert and the rest stay trainable). |
+| `allow_untrained_indexer` | `false` | *Primus:* Accept `seq_length` > `index_topk` without a checkpoint: the frozen DSA indexer stays random (code-path tests only). |
 
 ---
 
