@@ -6,8 +6,10 @@ calibration runs and two independent validation runs on 2026-11-12.
 The old 200-step measurements do not apply to this fixture/schedule.
 
 Use the existing `examples/specforge/configs/qwen3.5-4b-dflash-online.yaml` from a
-Primus checkout containing #1421 (main after merge). Do not use this handoff
-branch as the runtime checkout: it does not duplicate #1421's feature code.
+separate checkout of `AMD-AGI/Primus` main. #1421 merged as
+`aa454b0233346b9cecaa01685d0d217595ac2b4a`; use that commit or a later main
+revision for new runs. Do not use this handoff branch as the runtime checkout:
+it does not include the merged feature code.
 `primus-cli container` mounts and runs its host checkout, so its revision matters
 in addition to the image digest. No generated training YAML or Python launcher
 is needed. The Python tools below only check completed runs and collect bounds.
@@ -208,8 +210,8 @@ The means of the ten logged observations at steps 55–100 are:
 
 Both validations passed the bounds frozen after the third calibration run,
 without retuning. The runtime checkout was
-`55fec472fda464449ebc417c3e0e1037f0bb912d` from #1421, with the manifest's pinned
-image, SpecForge, model/tokenizer, and data. PyTorch was
+`55fec472fda464449ebc417c3e0e1037f0bb912d` (the pre-merge #1421 head), with the
+manifest's pinned image, SpecForge, model/tokenizer, and data. PyTorch was
 `2.9.1+rocm7.2.0.git7e1940d4`; HIP was `7.2.26015-fc0010cf6a`.
 The manifest's image Primus revision describes the image contents; the mounted
 runtime checkout revision above is the source actually executed.
@@ -217,16 +219,18 @@ runtime checkout revision above is the source actually executed.
 The baseline identity includes the runtime checkout revision. To compare against
 this reference, use that exact revision and the recorded inputs. A changed
 revision requires deliberate review/recalibration; do not bypass the identity
-check or automatically regenerate bounds. These runs do not qualify other GPU
-types, seeds, model configurations, checkpoint reload, or performance.
+check or automatically regenerate bounds. The merge does not change this
+historical provenance: main has not been recalibrated against this fixture.
+New main runs can use the structural checker below without `--baseline`.
+These runs do not qualify other GPU types, seeds, model configurations,
+checkpoint reload, or performance.
 
 ## Check a completed run (optional Python helper)
 
 ```bash
 uv run --no-project python "$SMOKE_CHECKOUT/tests/scripts/check_specforge_smoke.py" \
   --run-dir "$RUN_DIR" --launcher-exit-code "$(cat "$RUN_DIR/launcher.exit")" \
-  --inputs "$RUN_DIR/reference-inputs.json" \
-  --baseline "$SMOKE_CHECKOUT/tests/scripts/specforge_smoke_baseline_mi355x.json"
+  --inputs "$RUN_DIR/reference-inputs.json"
 ```
 
 The checker never launches training. It requires launcher success, both role
@@ -235,9 +239,13 @@ loss/accuracy/gradient norm, and nonempty step-100 shared/rank-0 checkpoints.
 It writes final metrics and means of the ten observations at steps 55–100 to
 `summary.json`. Checkpoint reload correctness is not tested.
 
-Omit `--baseline` when collecting a new calibration run. To deliberately collect
-a new reference, run three executions with identical inputs, then freeze bounds
-to a new file:
+For an exact reproduction of the recorded pre-merge runtime and inputs, append
+`--baseline "$SMOKE_CHECKOUT/tests/scripts/specforge_smoke_baseline_mi355x.json"`
+to enable the frozen numerical comparison. A main checkout has a different
+reference identity and will be rejected by that baseline.
+
+To deliberately collect a new reference, run three executions with identical
+inputs, then freeze bounds to a new file:
 
 ```bash
 uv run --no-project python "$SMOKE_CHECKOUT/tests/scripts/calibrate_specforge_smoke.py" calibrate \
