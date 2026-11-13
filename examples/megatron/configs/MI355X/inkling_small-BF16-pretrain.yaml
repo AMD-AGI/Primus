@@ -83,7 +83,6 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: false
       load: null
       save: null
       disable_last_saving: true

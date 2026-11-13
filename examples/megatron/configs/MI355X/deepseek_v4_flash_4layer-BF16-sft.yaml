@@ -168,7 +168,6 @@ modules:
 
       # ---------- ckpt: random init, save nothing ----------
       finetune: false
-      auto_continue_train: false
       load: null
       save: null
       no_save_optim: true

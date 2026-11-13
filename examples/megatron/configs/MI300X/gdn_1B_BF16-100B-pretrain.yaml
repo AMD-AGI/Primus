@@ -470,7 +470,6 @@ modules:
 
       # ── Checkpoints ─
       finetune: false
-      auto_continue_train: true
       load: null
       # Checkpoint save path
       save: ./output/gdn_1B_BF16-100B-pretrain
@@ -480,7 +479,7 @@ modules:
       # the last 3 across all runs in the dir).
       #
       # For Primus we cannot match `99999` literally because
-      # `auto_continue_train: true` needs SOME periodic checkpoint to be able
+      # resuming needs SOME periodic checkpoint to be able
       # to resume mid-flight from a crash on a 48 h run. Set save_interval to
       # 10000 (~10 B tokens, ~10 ckpts over the run) — closer in spirit to
       # FLA's "almost never save" and ~2× lighter than the previous 5000
