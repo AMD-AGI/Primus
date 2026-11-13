@@ -3235,6 +3235,15 @@ def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
                 if gd is not None:
                     gd.normal_()
                     filled = True
+        if not filled and getattr(optimizer, "optimizers", None):
+            # TorchTitan: the optimizer steps the FSDP-sharded parameters, not
+            # the unsharded views the module exposes during the benchmark.
+            for inner in _inner_torch_optimizers(optimizer):
+                for group in inner.param_groups:
+                    for p in group["params"]:
+                        if p.requires_grad:
+                            p.grad = torch.randn_like(p) if p.grad is None else p.grad.normal_()
+                            filled = True
         if not filled:
             for chunk in model:
                 params = chunk.parameters() if hasattr(chunk, "parameters") else []
