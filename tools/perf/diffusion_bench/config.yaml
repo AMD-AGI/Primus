@@ -43,8 +43,12 @@ download_timeout: 0
 # Keep the container after the run (for debugging)
 keep_container: false
 
+# Off: the perf runner benchmarks these models with Primus' own diffusion
+# backend through primus-cli (BACKEND=diffusion, the catalog's
+# examples/diffusion/configs/<GPU>/benchmark_*-posttrain.yaml). Set it to true
+# to run them with AMDiffusionBenchmark here, e.g. to compare the two.
 diffusion:
-  enabled: true
+  enabled: false
 
   # train_args.<key>=<value> hydra overrides applied to every model (per-model values win)
   train_args: {}
