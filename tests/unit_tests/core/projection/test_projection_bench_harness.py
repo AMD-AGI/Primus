@@ -289,7 +289,7 @@ def test_torchtitan_finds_rope_under_either_name():
     assert isinstance(inputs.args[1], torch.Tensor)
 
 
-class _TitanBlock(nn.Module):
+class _TitanForwardBlock(nn.Module):
     def forward(self, x, rope_cache, attention_masks, positions=None):
         return x
 
@@ -302,7 +302,7 @@ class _GptOssBlock(nn.Module):
 def test_torchtitan_layer_forward_gets_mask_and_positions():
     adapter = TorchTitanBenchAdapter()
     adapter.discover(_TitanModel())
-    inputs = adapter.inputs(LAYER, _TitanBlock(), _ctx())
+    inputs = adapter.inputs(LAYER, _TitanForwardBlock(), _ctx())
     # None selects the dense causal path the projection models.
     assert inputs.kwargs == {"attention_masks": None, "positions": None}
 
@@ -611,6 +611,6 @@ def test_a_backend_that_cannot_build_inputs_fails_loudly(monkeypatch, recorded_b
 def test_compiled_block_is_detected_for_whole_layer_timing():
     from primus.core.projection.module_profilers.transformer_layer import _is_compiled_module
 
-    block = _TitanBlock()
+    block = _TitanForwardBlock()
     assert not _is_compiled_module(block)
     assert _is_compiled_module(torch.compile(block))
