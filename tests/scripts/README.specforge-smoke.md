@@ -18,12 +18,15 @@ is needed. The Python tools below only check completed runs and collect bounds.
 
 - Data: `tests/trainer/fixtures/specforge/sharegpt_800.jsonl`, all 800 conversations,
   4,243,587 bytes. Source IDs, provenance, and declared license are alongside it.
-- Pins: `specforge_smoke_fixture.json` records data checksums, model/tokenizer,
-  image digest, SpecForge revision, seeds, and the MI355X reference target.
+- Workload pins: `specforge_smoke_fixture.json` records data checksums,
+  model/tokenizer revisions, training settings, and the MI355X reference target.
+  Its `runtime` section is historical calibration provenance, not a requirement
+  for nightly/weekly candidates. Test new Primus/SpecForge versions and record
+  their actual commits and resolved image digest on every run.
 - Shape: one capture GPU, one trainer GPU, batch size 2, accumulation 4,
   100 optimizer steps = 800 consumed samples. The runtime shuffles with seed 42.
 - Pre-download the Qwen model/tokenizer snapshot below into the Hugging Face
-  cache. Ordinary runs need no dataset download. Use the pinned image's Python
+  cache. Ordinary runs need no dataset download. Use the candidate image's Python
   dependencies; do not install Primus's full dependency tree into it.
 
 The commands are Bash. Set absolute paths without spaces or quotes. For container
@@ -36,12 +39,26 @@ export PRIMUS_CHECKOUT=/path/to/Primus
 export SMOKE_CHECKOUT=/path/to/Primus-smoke
 export HF_HOME=/path/to/hf-cache
 export RESULTS=/path/to/results
-export IMAGE=tasimage/primus-specforge@sha256:2fcef9af3d29d53132b2e548fbda31ca8844e6c043f236249050a3398288ed2d
+export IMAGE="tasimage/primus-specforge:<mi35x-tag-under-test>"
 export MODEL_REVISION=851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
 ```
 
+For container/Slurm runs, select a published candidate tag, resolve it once, and
+record the SpecForge commit from that image (these metadata commands need no GPU):
+
+```bash
+docker pull "$IMAGE"
+export IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")
+export RUNTIME_SPECFORGE_REVISION=$(docker run --rm --entrypoint git "$IMAGE" -C /workspace/SpecForge rev-parse HEAD)
+```
+
+For direct mode, set `SPECFORGE_ROOT` to the actual checkout and export
+`RUNTIME_SPECFORGE_REVISION=$(git -C "$SPECFORGE_ROOT" rev-parse HEAD)` instead.
+Keep the workload settings fixed when changing software; retain the resolved
+recipe with the run evidence.
+
 One-time model download, using Python with `huggingface_hub` installed (for
-example inside the pinned runtime with the cache mounted at `$HF_HOME`):
+example inside the candidate runtime with the cache mounted at `$HF_HOME`):
 
 ```bash
 uv run --no-project --python "$(command -v python)" python - <<'PY'
@@ -87,7 +104,10 @@ from pathlib import Path
 manifest = json.loads((Path(os.environ["SMOKE_CHECKOUT"]) / "tests/scripts/specforge_smoke_fixture.json").read_text())
 assert hashlib.sha256(Path(os.environ["TRAIN_DATA_PATH"]).read_bytes()).hexdigest() == manifest["dataset"]["fixture_sha256"]
 revision = subprocess.check_output(["git", "-C", os.environ["PRIMUS_CHECKOUT"], "rev-parse", "HEAD"], text=True).strip()
-inputs = {"manifest": manifest, "runtime_primus_revision": revision, "runtime_image": os.environ["IMAGE"]}
+manifest.pop("runtime", None)  # Historical software pins are not candidate provenance.
+inputs = {"manifest": manifest, "runtime_primus_revision": revision,
+          "runtime_specforge_revision": os.environ["RUNTIME_SPECFORGE_REVISION"],
+          "runtime_image": os.environ["IMAGE"]}
 (Path(os.environ["RUN_DIR"]) / "reference-inputs.json").write_text(json.dumps(inputs, indent=2) + "\n")
 PY
 printf '%q ' "${train_args[@]}" > "$RUN_DIR/training-command.txt"
@@ -124,7 +144,7 @@ set -e
 
 ### Container, on an already allocated host
 
-First apply the same visibility normalization as the direct example. The pinned
+First apply the same visibility normalization as the direct example. The candidate
 image supplies dependencies; the native launcher runs `PRIMUS_CHECKOUT` source.
 Use your site's approved Primus launcher configuration for Docker permissions.
 The default container settings may require adjustment for your environment.
@@ -190,7 +210,7 @@ its final exit status before running the checker.
 ## Accepted MI355X reference
 
 [specforge_smoke_baseline_mi355x.json](specforge_smoke_baseline_mi355x.json)
-contains the frozen numerical bounds. The
+contains the current numerical regression policy. The
 [qualification record](specforge_smoke_qualification_mi355x.json) includes the
 exact reference inputs, runtime versions, five run summaries and their hashes,
 and every logged loss/accuracy/gradient-norm observation.
@@ -204,33 +224,47 @@ software revisions.
 
 The means of the ten logged observations at steps 55–100 are:
 
-- Training loss: **7.522446346282959**, tolerance **±0.0752244634628296** (1%).
-- Training accuracy: **0.05101585015654564**, tolerance **±0.005** (0.5 percentage points).
+- Training loss reference: **7.522446346282959**; fail above **7.898568663597107** (+5%).
+- Training accuracy reference: **0.05101585015654564**; fail below **0.04101585015654564** (one percentage point lower).
 - Gradient norm: **0.21905557662248612**, recorded for inspection; only finiteness is asserted.
 
-Both validations passed the bounds frozen after the third calibration run,
-without retuning. The runtime checkout was
+The original validations passed tighter two-sided bounds frozen after the third
+calibration run, without retuning. The current one-sided policy was adopted
+after those runs for evolving software versions. Replaying all five recorded
+summaries passes the new policy; no new GPU runs or cross-version calibration
+were performed for this policy change. The historical qualification record and
+its original baseline hash are unchanged. The runtime checkout was
 `55fec472fda464449ebc417c3e0e1037f0bb912d` (the pre-merge #1421 head), with the
 manifest's pinned image, SpecForge, model/tokenizer, and data. PyTorch was
 `2.9.1+rocm7.2.0.git7e1940d4`; HIP was `7.2.26015-fc0010cf6a`.
 The manifest's image Primus revision describes the image contents; the mounted
 runtime checkout revision above is the source actually executed.
 
-The baseline identity includes the runtime checkout revision. To compare against
-this reference, use that exact revision and the recorded inputs. A changed
-revision requires deliberate review/recalibration; do not bypass the identity
-check or automatically regenerate bounds. The merge does not change this
-historical provenance: main has not been recalibrated against this fixture.
-New main runs can use the structural checker below without `--baseline`.
-These runs do not qualify other GPU types, seeds, model configurations,
-checkpoint reload, or performance.
+The gate compares `workload_identity`: fixture checksum/row count, model/tokenizer,
+training settings, and GPU type. Primus/SpecForge commits and the image digest
+are recorded in `reference_inputs` and the full `reference_identity` for diagnosis,
+but do not need to match the baseline. Calibration still requires three runs
+with identical full inputs; candidate comparisons may use new software versions.
+Changed workload settings require a separate reference. The checker relies on
+recorded inputs; it does not attest that the runtime honored those settings.
+
+Lower loss and higher accuracy pass, provided values remain finite and valid.
+Loss improvements over 5% or accuracy improvements over 0.01 add non-failing
+`review_notes` to the summary for investigation. The +5% loss / -0.01 accuracy
+limits are provisional
+engineering choices, not statistically calibrated cross-version tolerances.
+Keep the baseline fixed until deliberately reviewed; never refresh it from each
+passing candidate. These runs do not qualify other GPU types, seeds, model
+configurations, checkpoint reload, or performance. Nightly/weekly scheduling and
+CI wiring remain follow-up work.
 
 ## Check a completed run (optional Python helper)
 
 ```bash
 uv run --no-project python "$SMOKE_CHECKOUT/tests/scripts/check_specforge_smoke.py" \
   --run-dir "$RUN_DIR" --launcher-exit-code "$(cat "$RUN_DIR/launcher.exit")" \
-  --inputs "$RUN_DIR/reference-inputs.json"
+  --inputs "$RUN_DIR/reference-inputs.json" \
+  --baseline "$SMOKE_CHECKOUT/tests/scripts/specforge_smoke_baseline_mi355x.json"
 ```
 
 The checker never launches training. It requires launcher success, both role
@@ -239,10 +273,9 @@ loss/accuracy/gradient norm, and nonempty step-100 shared/rank-0 checkpoints.
 It writes final metrics and means of the ten observations at steps 55–100 to
 `summary.json`. Checkpoint reload correctness is not tested.
 
-For an exact reproduction of the recorded pre-merge runtime and inputs, append
-`--baseline "$SMOKE_CHECKOUT/tests/scripts/specforge_smoke_baseline_mi355x.json"`
-to enable the frozen numerical comparison. A main checkout has a different
-reference identity and will be rejected by that baseline.
+This comparison also applies to newer main checkouts and candidate images with
+the same workload. Omit `--baseline` only when collecting calibration runs or
+when intentionally requesting structural checks without a numerical gate.
 
 To deliberately collect a new reference, run three executions with identical
 inputs, then freeze bounds to a new file:
@@ -260,11 +293,11 @@ uv run --no-project python "$SMOKE_CHECKOUT/tests/scripts/calibrate_specforge_sm
   --baseline "$RESULTS/baseline.json" --summaries "$RESULTS"/validation-{1,2}/summary.json
 ```
 
-Bounds are two-sided: twice the largest calibration deviation from the median,
-with floors of 1% of loss (at least 1e-6) and 0.005 absolute accuracy. These are
-initial engineering tolerances, not a statistical confidence interval. Never
-retune them just to pass validation. The pinned online backend has no held-out
-evaluation support, so these are training metrics. Future Python test cases can
+Bounds are one-sided: loss at most 1.05 times the calibration median, accuracy
+at least max(0, calibration median minus 0.01). These are initial engineering
+tolerances, not a statistical confidence interval. Never
+retune them just to pass validation. This reference collects training metrics,
+not held-out evaluation. Future Python test cases can
 parameterize models, draft architectures, and GPUs after this reference is useful.
 
 CPU checks: `uv run --no-project python -m unittest discover -s tests/scripts -p test_specforge_smoke_results.py`.

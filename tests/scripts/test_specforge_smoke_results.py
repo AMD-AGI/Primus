@@ -2,6 +2,7 @@
 # See LICENSE for license information.
 """CPU-only checks of the numerical regression gate and incomplete-run rejection."""
 
+import copy
 import hashlib
 import io
 import json
@@ -11,7 +12,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from calibrate_specforge_smoke import calibrate, compare
+from calibrate_specforge_smoke import calibrate, compare, workload_identity
 from check_specforge_smoke import main, validate_run
 
 
@@ -36,6 +37,14 @@ class SmokeResultsTest(unittest.TestCase):
             for step in range(5, 101, 5)
         ]
         self.log.write_text("".join(self.lines), encoding="utf-8")
+        self.inputs = {
+            "manifest": json.loads(
+                (Path(__file__).parent / "specforge_smoke_fixture.json").read_text(encoding="utf-8")
+            ),
+            "runtime_primus_revision": "original",
+            "runtime_specforge_revision": "original-specforge",
+            "runtime_image": "original-image",
+        }
 
     def test_complete_run(self):
         result = validate_run(self.root)
@@ -45,7 +54,7 @@ class SmokeResultsTest(unittest.TestCase):
 
     def test_checker_cli_requires_successful_launcher(self):
         inputs = self.root / "reference-inputs.json"
-        inputs.write_text('{"recipe": "test"}', encoding="utf-8")
+        inputs.write_text(json.dumps(self.inputs), encoding="utf-8")
         argv = ["check", "--run-dir", str(self.root), "--inputs", str(inputs), "--launcher-exit-code"]
         with patch("sys.argv", argv + ["1"]), redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
@@ -56,6 +65,8 @@ class SmokeResultsTest(unittest.TestCase):
         summary = json.loads((self.root / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["step"], 100)
         self.assertEqual(summary["numerical_check"], "not_requested")
+        self.assertEqual(summary["reference_inputs"], self.inputs)
+        self.assertEqual(summary["workload_identity"], workload_identity(self.inputs))
 
     def test_checked_in_fixture(self):
         scripts = Path(__file__).resolve().parent
@@ -73,6 +84,31 @@ class SmokeResultsTest(unittest.TestCase):
             * manifest["training"]["batch_size"]
             * manifest["training"]["accumulation_steps"],
             len(rows),
+        )
+
+    def test_checker_cli_accepts_new_software_with_baseline(self):
+        inputs = self.root / "reference-inputs.json"
+        inputs.write_text(json.dumps(self.inputs), encoding="utf-8")
+        baseline = Path(__file__).parent / "specforge_smoke_baseline_mi355x.json"
+        argv = [
+            "check",
+            "--run-dir",
+            str(self.root),
+            "--inputs",
+            str(inputs),
+            "--launcher-exit-code",
+            "0",
+            "--baseline",
+            str(baseline),
+        ]
+        with patch("sys.argv", argv), redirect_stdout(io.StringIO()):
+            main()
+        summary = json.loads((self.root / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["numerical_check"], "passed")
+        self.assertTrue(summary["review_notes"])
+        self.assertNotEqual(
+            summary["reference_identity"],
+            json.loads(baseline.read_text(encoding="utf-8"))["reference_identity"],
         )
 
     def test_missing_and_duplicate_records(self):
@@ -103,7 +139,11 @@ class SmokeResultsTest(unittest.TestCase):
         paths = []
         for index in range(3):
             row = validate_run(self.root)
-            row.update(reference_identity="same-inputs", run_id=str(index))
+            row.update(
+                reference_identity="same-inputs",
+                workload_identity=workload_identity(self.inputs),
+                run_id=str(index),
+            )
             row["final_window_mean"]["train/loss"] += index * 0.01
             path = self.root / f"summary{index}.json"
             path.write_text(json.dumps(row), encoding="utf-8")
@@ -111,19 +151,80 @@ class SmokeResultsTest(unittest.TestCase):
         baseline = calibrate(paths)
         compare(row, baseline)
         self.assertAlmostEqual(baseline["bounds"]["train/loss"]["reference"], 3.01)
-        self.assertEqual(baseline["bounds"]["train/acc"]["absolute_tolerance"], 0.005)
-        for metric, value in (("train/loss", 6), ("train/loss", 0.1), ("train/acc", 0.9)):
+        self.assertAlmostEqual(baseline["bounds"]["train/acc"]["minimum"], 0.19)
+        self.assertAlmostEqual(baseline["bounds"]["train/loss"]["maximum"], 3.01 * 1.05)
+        for metric, value in (
+            ("train/loss", 6),
+            ("train/acc", 0.18),
+            ("train/loss", -1),
+            ("train/acc", 1.1),
+            ("train/loss", float("nan")),
+        ):
             with self.subTest(metric=metric, value=value):
                 changed = json.loads(json.dumps(row))
                 changed["final_window_mean"][metric] = value
                 with self.assertRaises(ValueError):
                     compare(changed, baseline)
+        for metric, value in (
+            ("train/loss", baseline["bounds"]["train/loss"]["maximum"] + 1e-8),
+            ("train/acc", baseline["bounds"]["train/acc"]["minimum"] - 1e-8),
+        ):
+            changed = copy.deepcopy(row)
+            changed["final_window_mean"][metric] = value
+            with self.assertRaises(ValueError):
+                compare(changed, baseline)
         row["reference_identity"] = "different-inputs"
+        compare(row, baseline)  # New software versions are allowed.
+        for metric, value in (
+            ("train/loss", 0.1),
+            ("train/acc", 0.9),
+            ("train/loss", baseline["bounds"]["train/loss"]["maximum"]),
+            ("train/acc", baseline["bounds"]["train/acc"]["minimum"]),
+        ):
+            improved = copy.deepcopy(row)
+            improved["final_window_mean"][metric] = value
+            notes = compare(improved, baseline)
+            if value in (0.1, 0.9):
+                self.assertTrue(notes)
+        row["workload_identity"] = "different-workload"
         with self.assertRaises(ValueError):
             compare(row, baseline)
         paths[0].write_text(json.dumps(row), encoding="utf-8")
         with self.assertRaises(ValueError):
             calibrate(paths)
+
+    def test_workload_identity_excludes_software_but_preserves_workload(self):
+        original = workload_identity(self.inputs)
+        changed = copy.deepcopy(self.inputs)
+        changed["runtime_primus_revision"] = "new-main"
+        changed["runtime_image"] = "new-image"
+        changed["runtime_specforge_revision"] = "new-specforge"
+        changed["manifest"]["runtime"]["specforge_revision"] = "new-specforge"
+        self.assertEqual(workload_identity(changed), original)
+        for section, key, value in (
+            ("dataset", "fixture_sha256", "changed"),
+            ("dataset", "rows", 799),
+            ("model", "revision", "new-model"),
+            ("model", "tokenizer_revision", "new-tokenizer"),
+            ("training", "seed", 123),
+            ("training", "batch_size", 4),
+        ):
+            changed = copy.deepcopy(self.inputs)
+            changed["manifest"][section][key] = value
+            self.assertNotEqual(workload_identity(changed), original)
+        changed = copy.deepcopy(self.inputs)
+        changed["manifest"]["hardware"] = "different GPU"
+        self.assertNotEqual(workload_identity(changed), original)
+
+    def test_checked_in_policy_replays_historical_validation(self):
+        scripts = Path(__file__).parent
+        baseline = json.loads((scripts / "specforge_smoke_baseline_mi355x.json").read_text(encoding="utf-8"))
+        history = json.loads(
+            (scripts / "specforge_smoke_qualification_mi355x.json").read_text(encoding="utf-8")
+        )
+        for run in history["runs"]:
+            row = dict(run["summary"], workload_identity=workload_identity(history["reference_inputs"]))
+            compare(row, baseline)
 
 
 if __name__ == "__main__":

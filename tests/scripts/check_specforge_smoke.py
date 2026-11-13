@@ -11,6 +11,8 @@ import math
 import re
 from pathlib import Path
 
+from calibrate_specforge_smoke import compare, workload_identity
+
 STEPS = 100
 SAMPLES = 800
 METRICS = ("train/loss", "train/acc", "train/grad_norm")
@@ -36,6 +38,8 @@ def validate_run(run_dir):
         for key in METRICS:
             if key not in metrics or not math.isfinite(float(metrics[key])):
                 raise ValueError(f"Missing/non-finite {key} at step {step}")
+        if metrics["train/loss"] < 0 or not 0 <= metrics["train/acc"] <= 1:
+            raise ValueError(f"Invalid loss/accuracy at step {step}")
         observations[step] = {key: float(metrics[key]) for key in METRICS}
     expected = set(range(5, STEPS + 1, 5))
     if set(observations) != expected:
@@ -70,14 +74,18 @@ def main():
     if args.launcher_exit_code != 0:
         parser.error(f"Launcher failed with exit code {args.launcher_exit_code}")
     inputs = json.loads(args.inputs.read_text(encoding="utf-8"))
+    for key in ("runtime_primus_revision", "runtime_specforge_revision", "runtime_image"):
+        if not inputs.get(key):
+            parser.error(f"Missing software provenance: {key}")
     summary = validate_run(args.run_dir)
     summary["run_id"] = args.run_dir.name
     summary["reference_identity"] = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
+    summary["workload_identity"] = workload_identity(inputs)
+    summary["reference_inputs"] = inputs
     summary["numerical_check"] = "not_requested"
+    summary["review_notes"] = []
     if args.baseline:
-        from calibrate_specforge_smoke import compare
-
-        compare(summary, json.loads(args.baseline.read_text(encoding="utf-8")))
+        summary["review_notes"] = compare(summary, json.loads(args.baseline.read_text(encoding="utf-8")))
         summary["numerical_check"] = "passed"
     (args.run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))

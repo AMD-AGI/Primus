@@ -13,6 +13,18 @@ from statistics import median
 METRICS = ("train/loss", "train/acc")
 
 
+def workload_identity(inputs):
+    """Compare workload semantics; software revisions are diagnostic provenance."""
+    manifest = inputs["manifest"]
+    workload = {
+        "dataset": {key: manifest["dataset"][key] for key in ("fixture_sha256", "rows")},
+        "model": manifest["model"],
+        "training": manifest["training"],
+        "hardware": manifest["hardware"],
+    }
+    return hashlib.sha256(json.dumps(workload, sort_keys=True).encode()).hexdigest()
+
+
 def read_summary(path):
     row = json.loads(path.read_text(encoding="utf-8"))
     if row["step"] != 100 or row["final_window_observations"] != 10 or row["consumed_samples"] != 800:
@@ -30,35 +42,46 @@ def calibrate(paths):
     rows = [read_summary(path) for path in paths]
     if len({row["reference_identity"] for row in rows}) != 1:
         raise ValueError("Calibration inputs differ")
+    if len({row["workload_identity"] for row in rows}) != 1:
+        raise ValueError("Calibration workloads differ")
     bounds = {}
     for key in METRICS:
         values = [row["final_window_mean"][key] for row in rows]
         center = median(values)
-        # Predeclared rule: twice the largest calibration deviation, with a
-        # 1% relative loss floor or 0.5 percentage-point accuracy floor.
-        floor = max(abs(center) * 0.01, 1e-6) if key == "train/loss" else 0.005
-        tolerance = max(floor, 2 * max(abs(value - center) for value in values))
-        bounds[key] = {"reference": center, "absolute_tolerance": tolerance, "calibration_values": values}
+        limit = {"maximum": center * 1.05} if key == "train/loss" else {"minimum": max(0, center - 0.01)}
+        bounds[key] = {"reference": center, **limit, "calibration_values": values}
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "workload_identity": rows[0]["workload_identity"],
         "reference_identity": rows[0]["reference_identity"],
         "metric": "mean of logged training observations at steps 55,60,...,100",
-        "rule": "two-sided; max(2 * maximum absolute deviation from median, floor); loss floor=max(1% of median,1e-6); accuracy floor=0.005",
+        "rule": "one-sided; loss <= median * 1.05; accuracy >= max(0, median - 0.01); improvements pass",
+        "policy_status": "provisional engineering limits; not calibrated across software versions",
         "calibration_summary_sha256": [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths],
         "bounds": bounds,
     }
 
 
 def compare(row, baseline):
-    if row["reference_identity"] != baseline["reference_identity"]:
-        raise ValueError("Reference inputs differ")
+    if baseline.get("schema_version") != 2:
+        raise ValueError("Expected schema-version-2 baseline; review legacy policy before migration")
+    if row["workload_identity"] != baseline["workload_identity"]:
+        raise ValueError("Reference workload differs")
     failures = []
+    review_notes = []
     for key, bound in baseline["bounds"].items():
         value = row["final_window_mean"][key]
-        if not math.isfinite(value) or abs(value - bound["reference"]) > bound["absolute_tolerance"]:
-            failures.append(f"{key}: {value} outside {bound['reference']} +/- {bound['absolute_tolerance']}")
+        invalid = not math.isfinite(value) or value < 0 or (key == "train/acc" and value > 1)
+        outside = value > bound["maximum"] if key == "train/loss" else value < bound["minimum"]
+        if invalid or outside:
+            failures.append(f"{key}: {value} violates {bound}")
+        elif (key == "train/loss" and value < bound["reference"] * 0.95) or (
+            key == "train/acc" and value > bound["reference"] + 0.01
+        ):
+            review_notes.append(f"Review large improvement in {key}: {value} versus {bound['reference']}")
     if failures:
         raise ValueError("Numerical regression: " + "; ".join(failures))
+    return review_notes
 
 
 def main():
@@ -82,7 +105,8 @@ def main():
         for path in args.summaries:
             if hashlib.sha256(path.read_bytes()).hexdigest() in baseline["calibration_summary_sha256"]:
                 raise ValueError("Validation must not reuse a calibration summary")
-            compare(read_summary(path), baseline)
+            for note in compare(read_summary(path), baseline):
+                print(f"{path.name}: {note}")
         print("Both independent validation runs passed")
 
 
