@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import re
+from datetime import datetime
 from pathlib import Path
 
 from calibrate_specforge_smoke import compare, workload_identity
@@ -16,6 +17,39 @@ from calibrate_specforge_smoke import compare, workload_identity
 STEPS = 100
 SAMPLES = 800
 METRICS = ("train/loss", "train/acc", "train/grad_norm")
+
+
+def collect_timing(run_dir, step_seconds):
+    """Report timing only; missing/ambiguous evidence is never estimated."""
+    result = {"end_to_end_seconds": None, "steady_state_seconds_per_step": None, "notes": []}
+    launcher = run_dir / "launcher.log"
+    text = launcher.read_text(encoding="utf-8", errors="replace") if launcher.exists() else ""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    prefix = r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*?\[INFO\] "
+    starts = re.findall(prefix + r"primus-cli-direct\.sh\s*$", text, re.MULTILINE)
+    ends = re.findall(
+        prefix + r"\[direct\] (?:python3|python|torchrun) finished successfully \(code 0\)\s*$",
+        text,
+        re.MULTILINE,
+    )
+    if len(starts) == len(ends) == 1:
+        try:
+            duration = (datetime.fromisoformat(ends[0]) - datetime.fromisoformat(starts[0])).total_seconds()
+        except ValueError:
+            duration = 0
+        if duration > 0:
+            result["end_to_end_seconds"] = duration
+        else:
+            result["notes"].append("Invalid or non-positive launcher timestamp interval")
+    else:
+        result["notes"].append("Missing or ambiguous timestamped direct-entry start/completion markers")
+    expected = list(range(55, 101, 5))
+    values = [step_seconds.get(step) for step in expected]
+    if all(value is not None and math.isfinite(value) and value > 0 for value in values):
+        result["steady_state_seconds_per_step"] = sum(values) / len(values)
+    else:
+        result["notes"].append("Missing or invalid perf/optimizer_step_time_s at logged steps 55–100")
+    return result
 
 
 def validate_run(run_dir):
@@ -30,6 +64,7 @@ def validate_run(run_dir):
     text = (control / "consumer.log").read_text(encoding="utf-8", errors="replace")
     text = re.sub(r"\x1b\[[0-9;]*m", "", text)
     observations = {}
+    step_seconds = {}
     for match in re.finditer(r"\bstep\s+(\d+):\s*(\{[^\n]*\})", text):
         step = int(match[1])
         if step in observations:
@@ -41,6 +76,11 @@ def validate_run(run_dir):
         if metrics["train/loss"] < 0 or not 0 <= metrics["train/acc"] <= 1:
             raise ValueError(f"Invalid loss/accuracy at step {step}")
         observations[step] = {key: float(metrics[key]) for key in METRICS}
+        if "perf/optimizer_step_time_s" in metrics:
+            try:
+                step_seconds[step] = float(metrics["perf/optimizer_step_time_s"])
+            except (TypeError, ValueError):
+                step_seconds[step] = None
     expected = set(range(5, STEPS + 1, 5))
     if set(observations) != expected:
         raise ValueError(
@@ -61,6 +101,7 @@ def validate_run(run_dir):
         "final_window_observations": len(window),
         "final_window_mean": {key: sum(row[key] for row in window) / len(window) for key in METRICS},
         "checkpoints": checkpoints,
+        "timing": collect_timing(run_dir, step_seconds),
     }
 
 

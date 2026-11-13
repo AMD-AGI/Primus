@@ -133,7 +133,8 @@ export ROCR_VISIBLE_DEVICES="$mask" HIP_VISIBLE_DEVICES=0,1 CUDA_VISIBLE_DEVICES
 cd "$PRIMUS_CHECKOUT"
 set +e
 timeout --signal=TERM --kill-after=60s 90m \
-  bash runner/primus-cli direct --log_file "$RUN_DIR/launcher.log" -- "${train_args[@]}"
+  bash runner/primus-cli direct --log_file "$RUN_DIR/training.log" -- "${train_args[@]}" \
+  > "$RUN_DIR/launcher.log" 2>&1
 rc=$?
 printf '%s\n' "$rc" > "$RUN_DIR/launcher.exit"
 set -e
@@ -263,6 +264,29 @@ statuses zero, 800 consumed samples, all 20 five-step metric records, finite
 loss/accuracy/gradient norm, and nonempty step-100 shared/rank-0 checkpoints.
 It writes final metrics and means of the ten observations at steps 55–100 to
 `summary.json`. Checkpoint reload correctness is not tested.
+
+The summary also reports two informational timing metrics:
+
+- `end_to_end_seconds`: timestamped native direct-entry start to successful
+  Python completion in `launcher.log`. Includes initialization, model loading,
+  preprocessing, compilation, training, final checkpoint saving, and cleanup.
+  Excludes scheduler queueing and image pulling. This is a log-derived elapsed
+  time with one-second resolution, not a precise external process timer.
+- `steady_state_seconds_per_step`: mean of `perf/optimizer_step_time_s` at
+  logged steps 55,60,...,100. Each logged value averages a five-step interval,
+  covering optimizer steps 51–100 overall and including data waiting. Omitting
+  the first 50 steps is a warm-up convention, not proof that compilation ended.
+
+Keep launcher timestamps enabled and retain a separate `launcher.log` per run.
+Missing, ambiguous, or invalid timing evidence produces `null` and a note;
+it does not fabricate a value or change the numerical pass/fail gate.
+
+The five reference runs yielded end-to-end times of **394, 186, 184, 190, 197 s**
+and late-window times of **0.5463, 0.5462, 0.5442, 0.6289, 0.6335 s/step**, in
+calibration-1/2/3, validation-1/2 order. Per-run timing and source observations
+are in the qualification record, extracted retrospectively from retained logs.
+There are no timing thresholds: the runs shared a container and warmed caches,
+so these measurements do not establish a performance regression tolerance.
 
 This comparison also applies to newer main checkouts and candidate images with
 the same workload. Omit `--baseline` only when collecting calibration runs or

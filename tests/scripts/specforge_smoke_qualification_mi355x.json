@@ -94,7 +94,54 @@
         "run_id": "calibration-1",
         "reference_identity": "66f626be710a2fa73ab2e8d598a66253a62c6326310794760a3d3b92f9cf5ce9",
         "numerical_check": "not_requested"
-      }
+      },
+      "timing": {
+        "end_to_end_seconds": 394.0,
+        "steady_state_seconds_per_step": 0.5463006257172675,
+        "notes": []
+      },
+      "timing_observations": [
+        {
+          "logged_step": 55,
+          "optimizer_step_time_s": 0.5021716049872339
+        },
+        {
+          "logged_step": 60,
+          "optimizer_step_time_s": 0.5936168659944088
+        },
+        {
+          "logged_step": 65,
+          "optimizer_step_time_s": 0.5391971081960947
+        },
+        {
+          "logged_step": 70,
+          "optimizer_step_time_s": 0.5633928033988923
+        },
+        {
+          "logged_step": 75,
+          "optimizer_step_time_s": 0.5657649743836373
+        },
+        {
+          "logged_step": 80,
+          "optimizer_step_time_s": 0.5419298079796135
+        },
+        {
+          "logged_step": 85,
+          "optimizer_step_time_s": 0.5111381215974689
+        },
+        {
+          "logged_step": 90,
+          "optimizer_step_time_s": 0.5897708886303008
+        },
+        {
+          "logged_step": 95,
+          "optimizer_step_time_s": 0.5294277011882513
+        },
+        {
+          "logged_step": 100,
+          "optimizer_step_time_s": 0.5265963808167726
+        }
+      ]
     },
     {
       "summary_sha256": "e0da8c94a3408cb2e6e985034c99e9802ac8905dadc0b86a63c18f205c87d7a2",
@@ -118,7 +165,54 @@
         "run_id": "calibration-2",
         "reference_identity": "66f626be710a2fa73ab2e8d598a66253a62c6326310794760a3d3b92f9cf5ce9",
         "numerical_check": "not_requested"
-      }
+      },
+      "timing": {
+        "end_to_end_seconds": 186.0,
+        "steady_state_seconds_per_step": 0.5461721388110891,
+        "notes": []
+      },
+      "timing_observations": [
+        {
+          "logged_step": 55,
+          "optimizer_step_time_s": 0.5025635092053562
+        },
+        {
+          "logged_step": 60,
+          "optimizer_step_time_s": 0.5951462096069008
+        },
+        {
+          "logged_step": 65,
+          "optimizer_step_time_s": 0.5411277118138969
+        },
+        {
+          "logged_step": 70,
+          "optimizer_step_time_s": 0.5635255713947117
+        },
+        {
+          "logged_step": 75,
+          "optimizer_step_time_s": 0.5659770073834807
+        },
+        {
+          "logged_step": 80,
+          "optimizer_step_time_s": 0.541511244000867
+        },
+        {
+          "logged_step": 85,
+          "optimizer_step_time_s": 0.5106155472341924
+        },
+        {
+          "logged_step": 90,
+          "optimizer_step_time_s": 0.5879141458310186
+        },
+        {
+          "logged_step": 95,
+          "optimizer_step_time_s": 0.5278061252087355
+        },
+        {
+          "logged_step": 100,
+          "optimizer_step_time_s": 0.525534316431731
+        }
+      ]
     },
     {
       "summary_sha256": "786c9cd27a05f6bc4a2b35506e413f483347780b28a6e0a8e8c699d6303af69f",
@@ -142,7 +236,54 @@
         "run_id": "calibration-3",
         "reference_identity": "66f626be710a2fa73ab2e8d598a66253a62c6326310794760a3d3b92f9cf5ce9",
         "numerical_check": "not_requested"
-      }
+      },
+      "timing": {
+        "end_to_end_seconds": 184.0,
+        "steady_state_seconds_per_step": 0.544194805896841,
+        "notes": []
+      },
+      "timing_observations": [
+        {
+          "logged_step": 55,
+          "optimizer_step_time_s": 0.5006263864226639
+        },
+        {
+          "logged_step": 60,
+          "optimizer_step_time_s": 0.5920829261653126
+        },
+        {
+          "logged_step": 65,
+          "optimizer_step_time_s": 0.5388266427908093
+        },
+        {
+          "logged_step": 70,
+          "optimizer_step_time_s": 0.561219296976924
+        },
+        {
+          "logged_step": 75,
+          "optimizer_step_time_s": 0.5638636006042361
+        },
+        {
+          "logged_step": 80,
+          "optimizer_step_time_s": 0.5409607097972184
+        },
+        {
+          "logged_step": 85,
+          "optimizer_step_time_s": 0.5093365638051182
+        },
+        {
+          "logged_step": 90,
+          "optimizer_step_time_s": 0.5869778644293546
+        },
+        {
+          "logged_step": 95,
+          "optimizer_step_time_s": 0.5254781629890204
+        },
+        {
+          "logged_step": 100,
+          "optimizer_step_time_s": 0.5225759049877524
+        }
+      ]
     },
     {
       "summary_sha256": "cb807b96eea39c198bd0a5b9325277c0ce4a4cb1c7d1f90d4a55648d3a6bea70",
@@ -166,7 +307,54 @@
         "run_id": "validation-1",
         "reference_identity": "66f626be710a2fa73ab2e8d598a66253a62c6326310794760a3d3b92f9cf5ce9",
         "numerical_check": "passed"
-      }
+      },
+      "timing": {
+        "end_to_end_seconds": 190.0,
+        "steady_state_seconds_per_step": 0.6289272597059608,
+        "notes": []
+      },
+      "timing_observations": [
+        {
+          "logged_step": 55,
+          "optimizer_step_time_s": 0.5797828151844442
+        },
+        {
+          "logged_step": 60,
+          "optimizer_step_time_s": 0.6915332856122405
+        },
+        {
+          "logged_step": 65,
+          "optimizer_step_time_s": 0.6170310912188143
+        },
+        {
+          "logged_step": 70,
+          "optimizer_step_time_s": 0.647680749790743
+        },
+        {
+          "logged_step": 75,
+          "optimizer_step_time_s": 0.6583079324103892
+        },
+        {
+          "logged_step": 80,
+          "optimizer_step_time_s": 0.6284856520127505
+        },
+        {
+          "logged_step": 85,
+          "optimizer_step_time_s": 0.5965285904239863
+        },
+        {
+          "logged_step": 90,
+          "optimizer_step_time_s": 0.6704270049929619
+        },
+        {
+          "logged_step": 95,
+          "optimizer_step_time_s": 0.5923353350255638
+        },
+        {
+          "logged_step": 100,
+          "optimizer_step_time_s": 0.6071601403877139
+        }
+      ]
     },
     {
       "summary_sha256": "758b6467230163a12faed89f70eea86c911d9dc273e571d2956b7ffc2279bc0d",
@@ -190,7 +378,54 @@
         "run_id": "validation-2",
         "reference_identity": "66f626be710a2fa73ab2e8d598a66253a62c6326310794760a3d3b92f9cf5ce9",
         "numerical_check": "passed"
-      }
+      },
+      "timing": {
+        "end_to_end_seconds": 197.0,
+        "steady_state_seconds_per_step": 0.6334666782617571,
+        "notes": []
+      },
+      "timing_observations": [
+        {
+          "logged_step": 55,
+          "optimizer_step_time_s": 0.6014019237831235
+        },
+        {
+          "logged_step": 60,
+          "optimizer_step_time_s": 0.7072309965733439
+        },
+        {
+          "logged_step": 65,
+          "optimizer_step_time_s": 0.6155380391981453
+        },
+        {
+          "logged_step": 70,
+          "optimizer_step_time_s": 0.6494206449948251
+        },
+        {
+          "logged_step": 75,
+          "optimizer_step_time_s": 0.6590852932073176
+        },
+        {
+          "logged_step": 80,
+          "optimizer_step_time_s": 0.6433673526160419
+        },
+        {
+          "logged_step": 85,
+          "optimizer_step_time_s": 0.5736787987872958
+        },
+        {
+          "logged_step": 90,
+          "optimizer_step_time_s": 0.6836186503991485
+        },
+        {
+          "logged_step": 95,
+          "optimizer_step_time_s": 0.5987069388385862
+        },
+        {
+          "logged_step": 100,
+          "optimizer_step_time_s": 0.6026181442197412
+        }
+      ]
     }
   ],
   "observations_shared_by_all_runs": [
@@ -315,5 +550,11 @@
       "train/grad_norm": 0.17185229063034058
     }
   ],
-  "record_notes": "Identical observations are stored once. Original reference inputs and summary hashes are retained as historical evidence, including metadata for the retired duplicate ID file."
+  "record_notes": "Identical observations are stored once. Original reference inputs and summary hashes are retained as historical evidence, including metadata for the retired duplicate ID file.",
+  "timing_method": {
+    "end_to_end_seconds": "Native direct-entry start through successful Python completion in launcher.log; wall-clock timestamps have one-second resolution. Includes initialization, preprocessing, compilation, training and final checkpoint/cleanup; excludes queueing and image pull.",
+    "steady_state_seconds_per_step": "Mean perf/optimizer_step_time_s at logged steps 55,60,...,100; each observation averages its five-step logging window (optimizer steps 51\u2013100 overall), including data wait. Late-window proxy after omitting first 50 steps, not proof that all compilation has ended.",
+    "policy": "Informational only; no timing regression thresholds. Runs shared one container and warmed caches.",
+    "evidence": "Extracted retrospectively from retained logs; original run summaries and their hashes remain unchanged."
+  }
 }

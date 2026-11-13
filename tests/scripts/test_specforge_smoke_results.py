@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from calibrate_specforge_smoke import calibrate, compare, workload_identity
-from check_specforge_smoke import main, validate_run
+from check_specforge_smoke import collect_timing, main, validate_run
 
 
 class SmokeResultsTest(unittest.TestCase):
@@ -51,6 +51,44 @@ class SmokeResultsTest(unittest.TestCase):
         self.assertEqual(result["final_window_observations"], 10)
         self.assertEqual(result["final_window_mean"]["train/loss"], 3)
         self.assertEqual(result["consumed_samples"], 800)
+
+    def test_timing_excludes_queue_and_early_steps(self):
+        (self.root / "launcher.log").write_text(
+            "[2026-11-12 20:00:00] [INFO] queue submission\n"
+            "[2026-11-12 23:59:30] [NODE-0] [INFO] primus-cli-direct.sh\n"
+            "[2026-11-13 00:01:10] [NODE-0] [INFO] [direct] python3 finished successfully (code 0)\n",
+            encoding="utf-8",
+        )
+        lines = [
+            line.replace(
+                "'train/loss':", f"'perf/optimizer_step_time_s': {10 if step <= 50 else 0.5}, 'train/loss':"
+            )
+            for step, line in zip(range(5, 101, 5), self.lines)
+        ]
+        self.log.write_text("".join(lines), encoding="utf-8")
+        timing = validate_run(self.root)["timing"]
+        self.assertEqual(timing["end_to_end_seconds"], 100)
+        self.assertEqual(timing["steady_state_seconds_per_step"], 0.5)
+        self.assertEqual(timing["notes"], [])
+
+    def test_missing_or_invalid_timing_is_not_invented(self):
+        timing = validate_run(self.root)["timing"]
+        self.assertIsNone(timing["end_to_end_seconds"])
+        self.assertIsNone(timing["steady_state_seconds_per_step"])
+        self.assertEqual(len(timing["notes"]), 2)
+        for value in (float("nan"), -1, 0):
+            with self.subTest(value=value):
+                values = dict.fromkeys(range(55, 101, 5), 0.5)
+                values[100] = value
+                self.assertIsNone(collect_timing(self.root, values)["steady_state_seconds_per_step"])
+
+    def test_ambiguous_launcher_timing(self):
+        (self.root / "launcher.log").write_text(
+            "[2026-11-12 12:00:00] [INFO] primus-cli-direct.sh\n" * 2
+            + "[2026-11-12 12:01:00] [INFO] [direct] python3 finished successfully (code 0)\n",
+            encoding="utf-8",
+        )
+        self.assertIsNone(collect_timing(self.root, {})["end_to_end_seconds"])
 
     def test_checker_cli_requires_successful_launcher(self):
         inputs = self.root / "reference-inputs.json"
@@ -229,6 +267,13 @@ class SmokeResultsTest(unittest.TestCase):
             self.assertEqual(hashlib.sha256(payload).hexdigest(), run["summary_sha256"])
             for metric, mean in row["final_window_mean"].items():
                 self.assertEqual(sum(item[metric] for item in observations[-10:]) / 10, mean)
+            timing_observations = run["timing_observations"]
+            self.assertEqual([item["logged_step"] for item in timing_observations], list(range(55, 101, 5)))
+            self.assertEqual(
+                sum(item["optimizer_step_time_s"] for item in timing_observations) / 10,
+                run["timing"]["steady_state_seconds_per_step"],
+            )
+            self.assertGreater(run["timing"]["end_to_end_seconds"], 0)
             compare(row, baseline)
 
 
