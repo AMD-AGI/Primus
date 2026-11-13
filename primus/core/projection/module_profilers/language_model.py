@@ -651,8 +651,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
             print(f"  Hybrid mix ({mix}): {avg[0]:.2f} ms fwd, {avg[1]:.2f} ms bwd per layer on average")
 
         zero = {"forward_time_ms": 0.0, "backward_time_ms": 0.0, "activation_memory_bytes": 0}
+        moe_pattern = self.config.model_config.moe_pattern
         layer_stats = {
-            "type": "dense",
             "compress_ratio": None,
             "forward_time_ms": avg[0],
             "backward_time_ms": avg[1],
@@ -664,7 +664,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 for k, (f, b, _m) in per_kind.items()
             },
         }
-        return {layer_idx: dict(layer_stats) for layer_idx in self.layers}
+        # The extrapolation buckets layers by type and counts each bucket from
+        # moe_pattern, so every index carries the type moe_pattern gives it.
+        return {
+            layer_idx: dict(layer_stats, type="moe" if moe_pattern[layer_idx] else "dense")
+            for layer_idx in self.layers
+        }
 
     def run_layer_benchmark(self, model, batch_size: int, seq_len: int) -> dict:
         """Benchmark or simulate transformer layers plus embedding/output layers on this rank.
