@@ -412,6 +412,10 @@ def hybrid_layer_types(args) -> Optional[list]:
     pattern = hybrid_layer_pattern(args)
     if pattern is not None:
         return list(pattern)
+    if getattr(args, "model_type", None) == "zaya1":
+        # ZAYA1 alternates CCA-attention-only and MoE-only stages; zaya_layers wins.
+        kinds = getattr(args, "zaya_layers", None) or ["a" if i % 2 == 0 else "m" for i in range(args.num_layers)]
+        return ["*" if k == "a" else "E" for k in kinds]
     if not getattr(args, "is_hybrid_model", False):
         return None
     return allocate_hybrid_layers(args.num_layers, getattr(args, "hybrid_attention_ratio", 0.0) or 0.0)

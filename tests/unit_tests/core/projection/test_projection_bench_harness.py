@@ -192,6 +192,28 @@ def test_megatron_tied_head_gets_the_embedding_weight():
     assert inputs.kwargs["weight"] is shared
 
 
+class ZayaStage(nn.Module):
+    def __init__(self, kind):
+        super().__init__()
+        self.kind = kind
+        self.zaya_block = SimpleNamespace(router=SimpleNamespace(width=64)) if kind == "m" else None
+
+
+def test_megatron_zaya1_stages_are_typed_and_get_the_router_state():
+    model = SimpleNamespace(decoder=SimpleNamespace(layers=[ZayaStage("a"), ZayaStage("m")]))
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(model)
+    assert parts.layer_types == ["*", "E"]
+    inputs = adapter.inputs(LAYER, parts.layers[1], _ctx())
+    assert inputs.args == [(SEQ, BATCH, HIDDEN), (SEQ, BATCH, HIDDEN), (SEQ, BATCH, 64)]
+    assert inputs.kwargs == {"position_ids": None, "attention_mask": None}
+
+
+def test_megatron_hybrid_stack_reports_its_layer_types():
+    model = SimpleNamespace(decoder=SimpleNamespace(layers=[_megatron_layer(), _megatron_layer()], layer_type_list=["M", "-"]))
+    assert MegatronBenchAdapter().discover(model).layer_types == ["M", "-"]
+
+
 def test_megatron_untied_head_gets_no_weight():
     adapter = MegatronBenchAdapter()
     parts = adapter.discover(_megatron_model())

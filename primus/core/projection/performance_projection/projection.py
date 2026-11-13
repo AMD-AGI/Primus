@@ -1186,7 +1186,11 @@ def _limit_hybrid_layers_for_projection(module_config) -> bool:
     else:
         cap = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
     pattern = hybrid_layer_pattern(module_config)
-    if pattern is not None:
+    if getattr(module_config, "model_type", None) == "zaya1":
+        if getattr(module_config, "zaya_layers", None):
+            module_config.zaya_layers = list(module_config.zaya_layers)[:cap]
+        module_config.num_layers = cap
+    elif pattern is not None:
         trimmed = pattern[:cap]
         for name in ("hybrid_layer_pattern", "hybrid_override_pattern"):
             if getattr(module_config, name, None):

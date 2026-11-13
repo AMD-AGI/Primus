@@ -397,6 +397,14 @@ def test_limit_layers_pure_mamba_keeps_one_pair():
     assert cfg.num_layers == 2
 
 
+def test_limit_layers_zaya1_keeps_one_attention_and_one_moe_stage():
+    cfg = _hybrid_cfg(model_type="zaya1", zaya_layers=["a", 16, "a", 16])
+    cfg.num_layers = 4
+    _limit_layers_for_projection(cfg)
+    assert cfg.num_layers == 2
+    assert cfg.zaya_layers == ["a", 16]
+
+
 def test_limit_layers_hybrid_pattern_is_trimmed_to_every_kind():
     cfg = _hybrid_cfg(is_hybrid_model=True, hybrid_override_pattern="M-M-*-M-M-*-", hybrid_layer_pattern=None)
     _limit_layers_for_projection(cfg)

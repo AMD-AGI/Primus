@@ -92,7 +92,15 @@ class MegatronBenchAdapter(BenchModelAdapter):
 
             if hasattr(unwrapped, "decoder") and hasattr(unwrapped.decoder, "layers"):
                 parts.layers.extend(unwrapped.decoder.layers)
-                parts.layer_types.extend(getattr(unwrapped.decoder, "layer_type_list", None) or [])
+                types = getattr(unwrapped.decoder, "layer_type_list", None)
+                if not types and all(type(layer).__name__ == "ZayaStage" for layer in unwrapped.decoder.layers):
+                    # ZAYA1 stages: "a" is CCA attention, "m" is MoE.
+                    types = ["*" if layer.kind == "a" else "E" for layer in unwrapped.decoder.layers]
+                    for layer in unwrapped.decoder.layers:
+                        router = getattr(getattr(layer, "zaya_block", None), "router", None)
+                        if router is not None:
+                            self._router_width = router.width
+                parts.layer_types.extend(types or [])
             elif hasattr(unwrapped, "layers"):
                 parts.layers.extend(unwrapped.layers)
             else:
@@ -149,6 +157,15 @@ class MegatronBenchAdapter(BenchModelAdapter):
             if v4 is not None:
                 shapes, kwargs = v4
                 return BenchInputs(args=shapes, kwargs=kwargs or {})
+
+        if kind == LAYER and type(module).__name__ == "ZayaStage":
+            # forward(hidden, residual, prev_router, position_ids, attention_mask)
+            shape = (ctx.seq_len, ctx.batch_size, ctx.hidden_size)
+            width = getattr(self, "_router_width", 256)
+            return BenchInputs(
+                args=[shape, shape, (ctx.seq_len, ctx.batch_size, width)],
+                kwargs={"position_ids": None, "attention_mask": None},
+            )
 
         if kind == LAYER:
             return BenchInputs(
