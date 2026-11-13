@@ -31,15 +31,12 @@ log_interval: 1
 tensorboard_log_interval: 1
 log_throughput: true
 log_timers_to_tensorboard: true
-log_batch_size_to_tensorboard: true
-log_learning_rate_to_tensorboard: true
 
 # Checkpoint format settings
 # auto_detect_ckpt_format: Automatically detect checkpoint format during loading
 # This is essential for loading HuggingFace converted checkpoints
 auto_detect_ckpt_format: true
 ckpt_format: torch_dist
-fully_parallel_save: true
 
 # Learning rate (lower than pretraining for fine-tuning)
 lr: 1.0e-5
@@ -168,7 +165,6 @@ lora:
     - linear_fc1
     - linear_fc2
 
-# Note: ckpt_format and fully_parallel_save are already declared at the top of
-# this file (lines 41-42). Duplicate declarations were removed here to satisfy
-# yaml strict-mode parsers (e.g. ruamel.yaml) — value identical, behaviour
-# unchanged.
+# Note: ckpt_format is already declared at the top of this file. Duplicate
+# declarations were removed here to satisfy yaml strict-mode parsers
+# (e.g. ruamel.yaml) — value identical, behaviour unchanged.

@@ -60,6 +60,11 @@ torchtitan:
       override, validated at runtime against the flavor dataclass (an unknown
       name raises AttributeError there, so it cannot fail silently).
     consumer: primus/backends/torchtitan/patches/model_override_patches.py
+  - key: optimizer.use_triton_fused_adam
+    reason: >-
+      Selects the Triton fused AdamW. The patch reads it off the optimizer
+      section with getattr rather than get_param, so no rule is derived for it.
+    consumer: primus/backends/torchtitan/patches/triton_fused_adamw_patches.py
 
 maxtext:
   - key: base_config
@@ -77,3 +82,16 @@ megatron:
     reason: >-
       Top-level section of a TE-precision quantization recipe (see `configs`).
     consumer: third_party/Megatron-LM/megatron/core/quantization/quant_config.py
+  - key: hf_path
+    reason: >-
+      Names the HuggingFace model the post-training hook converts to a Megatron
+      checkpoint before the job starts. Read straight out of the yaml by a
+      runner hook, so no `args` access exists for the checker to find.
+    consumer: runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py
+  - key: mamba_expand
+    reason: >-
+      Mamba block expansion factor. It does not build the model -- the layer
+      specs hardcode `expand` -- but Megatron writes it into the checkpoint
+      args, where the hybrid converter reads it back to size the FLA model.
+      That converter lives in tools/, not in a scanned backend package.
+    consumer: tools/hybrid/convert_mamba_hybrid_to_fla_hf.py
