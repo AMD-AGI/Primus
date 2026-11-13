@@ -58,11 +58,25 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     if getattr(parallelism, "pipeline_parallel_degree", 1) > 1:
         raise NotImplementedError(_PIPELINE_UNSUPPORTED.format(pp=parallelism.pipeline_parallel_degree))
 
+    # TorchTitan's Trainer binds each rank to its GPU before init; without it every
+    # rank allocates on GPU 0.
+    import os
+    if torch.cuda.is_available():
+        torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
     world_size = dist_utils.init_distributed(
         job_config.comm,
         enable_cpu_backend=job_config.training.enable_cpu_offload,
         base_folder=job_config.job.dump_folder,
     )
+    # The bench override pins dp_shard = dp_replicate = 1, but the projection still
+    # launches a full node; ParallelDims needs the degrees to multiply to world_size.
+    # Give the remainder to FSDP, as the shipped configs do (dp_shard = -1).
+    fixed = (parallelism.tensor_parallel_degree * parallelism.context_parallel_degree
+             * parallelism.pipeline_parallel_degree)
+    if (parallelism.data_parallel_shard_degree * parallelism.data_parallel_replicate_degree
+            * fixed != world_size):
+        parallelism.data_parallel_shard_degree = world_size // fixed
+        parallelism.data_parallel_replicate_degree = 1
     parallel_dims = ParallelDims(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
@@ -106,11 +120,35 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     model.train()
 
     model_parts = [model]
+    # Projection normalization writes a flat optimizer="adamw" onto the namespace,
+    # clobbering TorchTitan's nested optimizer section; rebuild a default one.
+    if isinstance(job_config.optimizer, str):
+        import dataclasses
+        field = {f.name: f for f in dataclasses.fields(job_config)}["optimizer"]
+        opt_cfg = field.default_factory()
+        opt_cfg.name = {"adam": "Adam", "adamw": "AdamW"}.get(job_config.optimizer.lower(), opt_cfg.name)
+        job_config.optimizer = opt_cfg
     optimizers = train_spec.build_optimizers_fn(model_parts, job_config.optimizer, parallel_dims)
     optimizers.register_step_post_hook(
         lambda *args, **kwargs: model_converters.post_optimizer_hook(model_parts)
     )
 
+    # The benchmark calls attention/MLP submodules directly, bypassing the FSDP hooks
+    # on their parent blocks. Initialize the root (comm streams are set up lazily on
+    # its first forward) and keep every parameter group unsharded so submodules see
+    # full weights; FSDP communication is modeled analytically, not measured here.
+    from torch.distributed.fsdp import FSDPModule
+    for part in model_parts:
+        if isinstance(part, FSDPModule):
+            part._get_fsdp_state()._lazy_init()
+        for m in part.modules():
+            if isinstance(m, FSDPModule):
+                for setter in (m.set_reshard_after_forward, m.set_reshard_after_backward):
+                    try:
+                        setter(False, recurse=False)
+                    except TypeError:
+                        setter(False)
+                m.unshard()
     return model_parts, optimizers, parallel_dims
 
 
