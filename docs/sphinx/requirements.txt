@@ -190,7 +190,7 @@ requests==2.34.2
     #   pygithub
     #   sphinx
 rocm-docs-core[llms]==1.38.0
-    # via -r docs/sphinx/requirements.in
+    # via -r requirements.in
 roman-numerals==4.1.0
     # via sphinx
 rpds-py==2026.6.3
@@ -203,7 +203,7 @@ smmap==5.0.3
     # via gitdb
 snowballstemmer==3.1.1
     # via sphinx
-soupsieve==2.9.2
+soupsieve==4.0
     # via beautifulsoup4
 sphinx==9.1.0
     # via
@@ -243,7 +243,7 @@ sphinxcontrib-htmlhelp==2.1.0
 sphinxcontrib-jsmath==1.0.1
     # via sphinx
 sphinxcontrib-mermaid==2.1.0
-    # via -r docs/sphinx/requirements.in
+    # via -r requirements.in
 sphinxcontrib-qthelp==2.0.0
     # via sphinx
 sphinxcontrib-serializinghtml==2.0.0
