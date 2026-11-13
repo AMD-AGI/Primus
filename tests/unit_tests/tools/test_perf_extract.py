@@ -2443,3 +2443,78 @@ def test_diffusion_model_cache_is_created_before_the_first_run(tmp_path):
     assert target.is_dir()
     line = out.stdout.strip()
     assert line.startswith(f"rc=0 {target} (") and line.endswith("; no container)")
+
+
+def diffusion_step(step: int, fps: float, tflops: float, peak: float = 90.89, rank: int = 0) -> str:
+    """A diffusion benchmark step line as Primus logs it (coloured)."""
+    return (
+        f"[\x1b[32m20261113 04:02:50\x1b[0m][\x1b[36mrank-{rank}/8\x1b[0m][\x1b[1m[INFO]     \x1b[0m"
+        f"\x1b[1mstep={step} step_loss=0.135316 train_loss=0.114623 mem=1.96/105.24GB peak_mem={peak}GB "
+        f"grad_norm=0.0000 step_time_total=0.515924s step_time_gpu=0.514851s fps_gpu={fps} "
+        f"tflops/s={tflops} elapsed=2.79m eta=1.70m\x1b[0m\n"
+    )
+
+
+def diffusion_log(tmp_path, body: str, config_body: str = "") -> Path:
+    return write_log(
+        tmp_path,
+        body,
+        framework="diffusion",
+        config_name="examples/diffusion/configs/MI355X/benchmark_sdxl-posttrain",
+        config_body=config_body or DIFFUSION_CONFIG % 1,
+        name="diffusion-benchmark_sdxl-posttrain-32fba895-MBS12-GBS96-rep1_20261113-035553.log",
+    )
+
+
+def test_diffusion_skips_five_warmup_steps_and_uses_the_harmonic_mean(tmp_path):
+    # Steps 1-5 are warmup (step 1 includes MIOpen's solver search).
+    body = diffusion_step(1, 0.0727, 1.3003, peak=89.61)
+    body += "".join(diffusion_step(s, 5.0, 100.0) for s in range(2, 6))
+    body += diffusion_step(6, 20.0, 400.0) + diffusion_step(7, 30.0, 600.0, peak=92.89)
+    result = extract.parse_log_file(str(diffusion_log(tmp_path, body)))
+    assert result["backend"] == "diffusion"
+    assert (result["model_name"], result["precision"]) == ("benchmark_sdxl", None)
+    assert result["status"] == "ok"
+    assert (result["num_iterations"], result["warmup_steps"], result["num_post_warmup"]) == (7, 5, 2)
+    assert result["hmean_samples_per_gpu"] == pytest.approx(24.0)
+    assert result["hmean_tflops"] == pytest.approx(480.0)
+    assert result["amean_memory_usage"] == pytest.approx(91.89)
+    assert result["hmean_tps_per_gpu"] is None and result["hmean_frames_per_gpu"] is None
+
+
+def test_diffusion_learning_rate_warmup_is_not_the_perf_warmup(tmp_path):
+    config = DIFFUSION_CONFIG % 1 + "      lr_scheduler:\n        warmup_steps: ${WARMUP_STEPS:100}\n"
+    body = "".join(diffusion_step(s, 10.0, 200.0) for s in range(1, 21))
+    result = extract.parse_log_file(str(diffusion_log(tmp_path, body, config)))
+    assert (result["warmup_steps"], result["num_post_warmup"]) == (5, 15)
+
+
+def test_diffusion_keeps_a_single_rank_and_reads_the_other_trainers_line(tmp_path):
+    other = "[20261113 04:02:50][rank-0/8][INFO] step={} loss=0.1 mem=1.0/2.0GB peak_mem=3.50GB gnorm=0.1 step_time=1.00s throughput=2.5000samples/gpu/s elapsed=1.00m\n"
+    body = "".join(other.format(s) for s in range(1, 9))
+    body += "".join(diffusion_step(s, 99.0, 999.0, rank=3) for s in range(1, 9))
+    result = extract.parse_log_file(str(diffusion_log(tmp_path, body)))
+    assert (result["num_iterations"], result["num_post_warmup"]) == (8, 3)
+    assert result["hmean_samples_per_gpu"] == pytest.approx(2.5)
+    assert result["hmean_tflops"] is None
+    assert result["amean_memory_usage"] == pytest.approx(3.5)
+
+
+def test_diffusion_run_that_failed_in_setup_has_its_cause(tmp_path):
+    body = (
+        "[ERROR] diffusion prepare: GatedRepoError: 401 Client Error. (Request ID: Root=1-6af6)\n"
+        "[2026-11-13 03:56:00] [NODE-0(node)] [ERROR] [direct] Hooks execution failed\n"
+    )
+    log = write_log(
+        tmp_path,
+        body,
+        framework="diffusion",
+        config_name="examples/diffusion/configs/MI355X/benchmark_flux_dev-posttrain",
+        config_body=DIFFUSION_CONFIG % 1,
+        exit_code=1,
+        failure_reason="exit: launcher exited with code 1",
+    )
+    result = extract.parse_log_file(str(log))
+    assert (result["status"], result["failed_at"]) == ("failed", "setup")
+    assert result["failure_reason"] == "python_error"
+    assert result["failure_detail"].startswith("GatedRepoError: 401 Client Error.")
