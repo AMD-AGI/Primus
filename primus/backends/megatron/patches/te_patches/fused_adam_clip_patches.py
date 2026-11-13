@@ -37,7 +37,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v6"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v8"
 _extension = None
 
 
@@ -55,6 +55,42 @@ def _bf16_grad_enabled() -> bool:
 
 def _static_bf16_loss_scale_cpu_enabled() -> bool:
     return os.environ.get("PRIMUS_STATIC_BF16_LOSS_SCALE_CPU", "0") == "1"
+
+
+def _split_master_enabled() -> bool:
+    """Hold each FP32 master losslessly as its BF16 model parameter + a 16-bit remainder.
+
+    The BF16 parameter is RNE(master), which Adam writes every step anyway; the master's
+    remaining bits are a 16-bit remainder plus, for an exact tie that rounded down to an
+    even BF16, one flag bit kept in the (always non-negative) exp_avg_sq's sign bit.
+    Adam then moves 26 instead of 28 bytes per parameter with bit-identical results
+    (same x, same arithmetic). The FP32 master tensors are only refreshed (joined) when
+    something reads optimizer state (state_dict / checkpoint paths); the next step
+    splits again.
+    """
+    return os.environ.get("PRIMUS_FUSED_ADAM_SPLIT_MASTER", "0") == "1"
+
+
+def _direct_grad_enabled() -> bool:
+    """Adam reads each parameter's autograd ``.grad`` itself; the DDP buffer is bypassed.
+
+    Only valid when nothing accumulates or reduces gradients: one micro-batch per
+    step on one rank. Then the buffer's value is exactly ``0 + param.grad``, so
+    reading ``param.grad`` is bit-identical while skipping the per-step buffer
+    zeroing and the ``main_grad.add_(grad)`` pass of every parameter.
+    """
+    return os.environ.get("PRIMUS_FUSED_ADAM_DIRECT_GRAD", "0") == "1"
+
+
+def _check_direct_grad_preconditions() -> None:
+    from megatron.core.num_microbatches_calculator import get_num_microbatches
+
+    world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    if world != 1 or get_num_microbatches() != 1:
+        raise RuntimeError(
+            "PRIMUS_FUSED_ADAM_DIRECT_GRAD needs one rank and one micro-batch per step "
+            f"(world size {world}, {get_num_microbatches()} micro-batches)"
+        )
 
 
 def _uses_static_bf16_unity_scale(optimizer) -> bool:
@@ -95,6 +131,22 @@ def _separate_grad_norm_groups() -> tuple:
     return tuple(getattr(mcore_optimizer, "SEPARATE_GRAD_NORM_GROUPS", ()))
 
 
+def _te_l2norm(clip_grads) -> bool:
+    """Megatron's norm is TE's multi_tensor_l2norm with TE's 64K-chunk applier (exact_l2norm's model)."""
+    try:
+        from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_l2norm
+    except ImportError:
+        return False
+    import inspect
+
+    # Primus' te_l2norm_large_tensor wrapper is rebound everywhere, TE's module included.
+    return (
+        inspect.unwrap(clip_grads.l2_norm_impl) is inspect.unwrap(multi_tensor_l2norm)
+        and clip_grads.multi_tensor_applier is multi_tensor_applier
+        and getattr(multi_tensor_applier, "chunk_size", None) == 2048 * 32
+    )
+
+
 def _get_grad_norm_tensor(optimizer) -> torch.Tensor:
     """Megatron's FP32 L2 norm path without its final host synchronization."""
 
@@ -107,12 +159,20 @@ def _get_grad_norm_tensor(optimizer) -> torch.Tensor:
         if dummy_overflow_buf is None or dummy_overflow_buf.device != grad_device:
             dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=grad_device)
             optimizer._primus_norm_overflow_buf = dummy_overflow_buf
-        local_norm, _ = clip_grads.multi_tensor_applier(
-            clip_grads.l2_norm_impl,
-            dummy_overflow_buf,
-            [grads_for_norm],
-            False,
-        )
+        from primus.backends.megatron.core.fusions import exact_l2norm
+
+        if _te_l2norm(clip_grads) and exact_l2norm.supported(grads_for_norm):
+            # Same partials, same reduction order as TE's ROCm kernel, ~15 TB/s instead of ~11.
+            # Views of at most 2^30 elements as the te_l2norm_large_tensor wrapper passes them
+            # (2^30 is a multiple of the 64K chunk, so the chunks are the same either way).
+            local_norm = exact_l2norm.l2norm(exact_l2norm.split_pieces(grads_for_norm), dummy_overflow_buf)
+        else:
+            local_norm, _ = clip_grads.multi_tensor_applier(
+                clip_grads.l2_norm_impl,
+                dummy_overflow_buf,
+                [grads_for_norm],
+                False,
+            )
         total_norm_squared = local_norm.square()
     else:
         total_norm_squared = torch.zeros(1, dtype=torch.float32, device="cuda")
@@ -145,9 +205,10 @@ def _load_extension():
     return _extension
 
 
-def _metadata_key(chunk_size: int, tensor_lists, writeback_by_param_ptr) -> tuple[Any, ...]:
+def _metadata_key(chunk_size: int, tensor_lists, writeback_by_param_ptr, slot1=None) -> tuple[Any, ...]:
     return (
         int(chunk_size),
+        bool(slot1),
         tuple(
             (tensor.data_ptr(), tensor.numel(), tensor.dtype, tensor.device)
             for tensor_list in tensor_lists
@@ -167,7 +228,7 @@ def _metadata_key(chunk_size: int, tensor_lists, writeback_by_param_ptr) -> tupl
     )
 
 
-def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
+def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None, slot1=None):
     if len(tensor_lists) != 4:
         raise RuntimeError(
             "PRIMUS_FUSED_ADAM_CLIP currently requires TE's four-list "
@@ -219,6 +280,9 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
             if not writeback.is_contiguous() or writeback.numel() != tensors[1].numel():
                 raise RuntimeError("PRIMUS_FUSED_ADAM_BF16_WRITEBACK received an incompatible destination")
         addresses.extend(tensor.data_ptr() for tensor in tensors)
+        if slot1:
+            # split master: the kernel reads the 16-bit remainder in place of the FP32 master
+            addresses[-3] = slot1[tensors[1].data_ptr()].data_ptr()
         addresses.append(0 if writeback is None else writeback.data_ptr())
         numel = tensors[0].numel()
         sizes.append(numel)
@@ -238,6 +302,90 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
     )
 
 
+_EMPTY_U8 = {}
+_ROW_SKIP_LOGGED = []
+
+
+def _empty_u8(device):
+    t = _EMPTY_U8.get(device)
+    if t is None:
+        t = _EMPTY_U8[device] = torch.empty(0, dtype=torch.uint8, device=device)
+    return t
+
+
+def _row_skip_args(grads):
+    """(mask, tensor index, row length) of the persistent embedding gradient in ``grads``.
+
+    Its rows whose flag is 0 hold exactly +0 (exact_embedding_grad), so the split-master kernel
+    feeds +0 for them without loading the gradient: the same values, 2 fewer bytes per such
+    parameter read.
+    """
+    try:
+        from primus.backends.megatron.core.fusions import exact_embedding_grad as eeg
+    except Exception:  # pragma: no cover
+        return None, -1, 0
+    if not eeg.ZERO_ROW_MASKS:
+        return None, -1, 0
+    for i, g in enumerate(grads):
+        info = eeg.ZERO_ROW_MASKS.get(g.data_ptr())
+        if info is not None:
+            mask, row_len, nbytes = info
+            if g.numel() * g.element_size() == nbytes and row_len % 4 == 0 and g.numel() < 2**31:
+                if not _ROW_SKIP_LOGGED:
+                    _ROW_SKIP_LOGGED.append(1)
+                    print(f"[fused_adam_clip] embedding-grad row skip: tensor {i}, {g.numel()} elems, row {row_len}", flush=True)
+                return mask, i, int(row_len)
+    return None, -1, 0
+
+
+def _direct_grad_metadata(cache, chunk_size: int, tensor_lists, writeback_by_param_ptr, slot1=None):
+    """Adam metadata when only the gradient addresses change from step to step.
+
+    In direct-grad mode the gradients are fresh autograd tensors every step, so the
+    full-key cache would miss every step, and ``_build_metadata``'s
+    ``torch.tensor(..., device=cuda)`` uploads are pageable copies that block the
+    host until the GPU drains, leaving the GPU idle while Python rebuilds the
+    rest (7 ms a step on the 1-GPU proxy). Everything but the gradient column is
+    cached on the parameters, moments and writeback buffers, which do not move;
+    the address table is rebuilt in pinned memory and uploaded asynchronously.
+    """
+    static_key = (
+        "direct",
+        int(chunk_size),
+        bool(slot1),
+        tuple(
+            (tensor.data_ptr(), tensor.numel(), tensor.dtype)
+            for tensor_list in tensor_lists[1:]
+            for tensor in tensor_list
+        ),
+        tuple(
+            writeback_by_param_ptr[t.data_ptr()].data_ptr() if t.data_ptr() in writeback_by_param_ptr else 0
+            for t in tensor_lists[1]
+        ),
+    )
+    entry = cache.get(static_key)
+    grads = tensor_lists[0]
+    if entry is None:
+        # First step for these parameters: the full validation and layout.
+        # One entry per parameter group; bounded in case the parameters move.
+        if len(cache) >= 8:
+            cache.clear()
+        metadata = _build_metadata(chunk_size, tensor_lists, writeback_by_param_ptr, slot1)
+        grad_info = tuple((g.numel(), g.dtype) for g in grads)
+        cache[static_key] = (metadata, grad_info, metadata[0].cpu())
+        return metadata
+    metadata, grad_info, host_addresses = entry
+    if len(grads) != len(grad_info) or any(
+        g.numel() != n or g.dtype != d or not g.is_contiguous() for g, (n, d) in zip(grads, grad_info)
+    ):
+        raise RuntimeError("PRIMUS_FUSED_ADAM_DIRECT_GRAD: gradient layout changed between steps")
+    host = host_addresses.clone().pin_memory()
+    host_view = host.view(-1, 5)
+    host_view[:, 0] = torch.tensor([g.data_ptr() for g in grads], dtype=torch.int64)
+    addresses = host.to(metadata[0].device, non_blocking=True)
+    return (addresses,) + tuple(metadata[1:])
+
+
 def _copy_model_grads_to_decoupled(distributed_optimizer) -> None:
     """Attach DDP gradient-buffer shards directly to FP32 master parameters."""
 
@@ -253,6 +401,18 @@ def _copy_model_grads_to_decoupled(distributed_optimizer) -> None:
                 if param_range.size != shard_main_param.nelement():
                     raise RuntimeError("Gradient shard range does not match its FP32 master")
                 model_grad = model_param.main_grad
+                # Direct mode: the parameter's own autograd gradient, which is what the
+                # buffer would hold after 0 + grad. A parameter that got no gradient this
+                # step keeps reading its buffer view, which direct mode never writes, so
+                # zeros as before.
+                direct_grad = getattr(model_param, "grad", None) if _direct_grad_enabled() else None
+                if direct_grad is not None:
+                    if direct_grad.dtype != model_grad.dtype or direct_grad.numel() != model_grad.numel():
+                        raise RuntimeError(
+                            "PRIMUS_FUSED_ADAM_DIRECT_GRAD needs param.grad to match its buffer view, got "
+                            f"{direct_grad.dtype}/{direct_grad.numel()} vs {model_grad.dtype}/{model_grad.numel()}"
+                        )
+                    model_grad = direct_grad.contiguous()
                 shard_model_grad = model_grad.view(-1)[param_range.start : param_range.end]
                 if shard_model_grad.dtype not in (torch.bfloat16, torch.float32):
                     raise RuntimeError(
@@ -486,6 +646,46 @@ def _install_patch() -> None:
         self._primus_adam_metadata_cache = {}
         self._primus_bf16_writeback_by_param_ptr = {}
         self._primus_bf16_writeback_tensors = []
+        self._primus_split_rem = {}  # FP32 master data_ptr -> int16 remainder (kept across joins)
+        # FP32 master data_ptr -> (master, bf16 param, remainder, exp_avg_sq) for the masters that are
+        # currently split. FusedAdam calls the kernel once per parameter group, so this is per tensor.
+        self._primus_split_entries = {}
+
+        def split_slot1(tensor_lists, writeback_by_param_ptr):
+            """Split this call's masters if needed; return {master ptr: remainder} or None."""
+            if not _split_master_enabled():
+                return None
+            grads, masters, exp_avgs, exp_avg_sqs = tensor_lists
+            entries = self._primus_split_entries
+            if (
+                grads[0].dtype != torch.bfloat16
+                or exp_avgs[0].dtype != torch.float32
+                or any(x.data_ptr() not in writeback_by_param_ptr for x in masters)
+            ):
+                if any(x.data_ptr() in entries for x in masters):
+                    raise RuntimeError("PRIMUS_FUSED_ADAM_SPLIT_MASTER: a split master lost its split layout")
+                return None
+            rem = self._primus_split_rem
+            for x, v in zip(masters, exp_avg_sqs):
+                key = x.data_ptr()
+                if key in entries:
+                    continue
+                r = rem.get(key)
+                if r is None or r.numel() != x.numel():
+                    r = torch.empty(x.shape, dtype=torch.int16, device=x.device)
+                    rem[key] = r
+                p = writeback_by_param_ptr[key]
+                extension.split_master(x, p, r, v, False)
+                entries[key] = (x, p, r, v)
+            return rem
+
+        def split_materialize():
+            """Write the exact FP32 masters back (and clear the exp_avg_sq flags)."""
+            for x, p, r, v in self._primus_split_entries.values():
+                extension.split_master(x, p, r, v, True)
+            self._primus_split_entries = {}
+
+        self._primus_split_materialize = split_materialize
 
         def fused_multi_tensor_adam(
             chunk_size,
@@ -502,11 +702,17 @@ def _install_patch() -> None:
         ):
             del noop_flag
             writeback_by_param_ptr = self._primus_bf16_writeback_by_param_ptr
-            key = _metadata_key(chunk_size, tensor_lists, writeback_by_param_ptr)
-            metadata = self._primus_adam_metadata_cache.get(key)
-            if metadata is None:
-                metadata = _build_metadata(chunk_size, tensor_lists, writeback_by_param_ptr)
-                self._primus_adam_metadata_cache[key] = metadata
+            slot1 = split_slot1(tensor_lists, writeback_by_param_ptr)
+            if _direct_grad_enabled():
+                metadata = _direct_grad_metadata(
+                    self._primus_adam_metadata_cache, chunk_size, tensor_lists, writeback_by_param_ptr, slot1
+                )
+            else:
+                key = _metadata_key(chunk_size, tensor_lists, writeback_by_param_ptr, slot1)
+                metadata = self._primus_adam_metadata_cache.get(key)
+                if metadata is None:
+                    metadata = _build_metadata(chunk_size, tensor_lists, writeback_by_param_ptr, slot1)
+                    self._primus_adam_metadata_cache[key] = metadata
             (
                 addresses,
                 sizes,
@@ -518,6 +724,9 @@ def _install_patch() -> None:
             ) = metadata
             if self._primus_clip_norm is None:
                 raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP did not receive a device gradient norm")
+            row_mask, mask_tensor, row_len = _row_skip_args(tensor_lists[0]) if slot1 is not None else (None, -1, 0)
+            if row_mask is None:
+                row_mask = _empty_u8(tensor_lists[0][0].device)
             extension.fused_adam_clip(
                 addresses,
                 sizes,
@@ -537,6 +746,10 @@ def _install_patch() -> None:
                 int(grad_dtype),
                 self._primus_clip_norm,
                 float(self._primus_clip_max_norm),
+                slot1 is not None,
+                row_mask,
+                mask_tensor,
+                row_len,
             )
 
         # FusedAdam.step calls this attribute through TE's existing
@@ -633,6 +846,11 @@ def _install_patch() -> None:
         """ChainedOptimizer.step with device clipping delegated to each Adam."""
         return _chained_step_with_device_clip(self, FusedAdam)
 
+    if _direct_grad_enabled():
+        if not _bf16_grad_enabled():
+            raise RuntimeError("PRIMUS_FUSED_ADAM_DIRECT_GRAD needs PRIMUS_FUSED_ADAM_BF16_GRAD=1")
+        _install_direct_grad_ddp_patches()
+
     FusedAdam.__init__ = patched_adam_init
     FusedAdam.step = patched_adam_step
     MegatronOptimizer.scale_loss = patched_scale_loss
@@ -645,6 +863,37 @@ def _install_patch() -> None:
     DistributedOptimizer._copy_model_grads_to_main_grads = patched_copy_model_grads_to_main_grads
     DistributedOptimizer._collect_main_grad_data_for_unscaling = patched_collect_main_grad_data_for_unscaling
     DistributedOptimizer.zero_grad = patched_zero_grad
+
+    if _split_master_enabled():
+        # Anything that reads or replaces optimizer state sees exact FP32 masters and plain
+        # exp_avg_sq; the next Adam step splits again from whatever the masters hold then.
+        def _materializing(fn):
+            @wraps(fn)
+            def wrapper(self, *args, **kwargs):
+                inner = getattr(self, "optimizer", None)
+                materialize = getattr(inner, "_primus_split_materialize", None)
+                if materialize is not None:
+                    materialize()
+                return fn(self, *args, **kwargs)
+
+            return wrapper
+
+        for name in (
+            "state_dict",
+            "sharded_state_dict",
+            "load_state_dict",
+            "save_parameter_state",
+            "load_parameter_state",
+            "get_parameter_state_dp_zero",
+            "get_parameter_state_fs_bucket_space",
+            "load_parameter_state_from_dp_zero",
+            "load_parameter_state_from_fs_bucket_space",
+            "offload_to_cpu",
+            "reload_model_params",
+        ):
+            fn = DistributedOptimizer.__dict__.get(name)
+            if callable(fn):
+                setattr(DistributedOptimizer, name, _materializing(fn))
 
     # The existing TP1/PP1 synchronization-skip patch has already established
     # that the model-parallel reduction is a no-op. Keep a tensor statistic on
@@ -666,12 +915,62 @@ def _install_patch() -> None:
             else "."
         )
         + ("; BF16 DDP gradient shards are consumed directly by Adam." if _bf16_grad_enabled() else "")
+        + ("; Adam reads param.grad directly (no grad-buffer zeroing or accumulation)." if _direct_grad_enabled() else "")
+        + ("; FP32 masters held as BF16 param + 16-bit remainder (lossless split)." if _split_master_enabled() else "")
         + (
             "; static BF16 unity loss scale is logged from CPU without a device sync."
             if _static_bf16_loss_scale_cpu_enabled()
             else ""
         )
     )
+
+
+def _install_direct_grad_ddp_patches() -> None:
+    """DDP side of PRIMUS_FUSED_ADAM_DIRECT_GRAD: keep param.grad, never touch the buffer.
+
+    The backward post-hook no longer folds ``param.grad`` into ``main_grad`` (the hook's
+    ``add_`` and the per-step zeroing of the whole buffer were pure bandwidth with one
+    micro-batch on one rank); ``zero_grad_buffer`` drops last step's ``param.grad``
+    instead of clearing the buffer. The buffer is zeroed once and then never written,
+    so the 1-rank reduce-scatter and any parameter without a gradient still read zeros.
+    """
+    from megatron.core.distributed.distributed_data_parallel import DistributedDataParallel
+
+    original_make_hook = DistributedDataParallel._make_backward_post_hook
+    original_zero_grad_buffer = DistributedDataParallel.zero_grad_buffer
+
+    def patched_make_backward_post_hook(self, param):
+        original_hook = original_make_hook(self, param)
+        if self.ddp_config.overlap_grad_reduce:
+            raise RuntimeError("PRIMUS_FUSED_ADAM_DIRECT_GRAD does not support overlap_grad_reduce")
+
+        def hook(*unused):
+            if (
+                param in self.param_to_bucket_group
+                and param.grad is not None
+                and not param.grad_added_to_main_grad
+            ):
+                return  # Adam reads param.grad directly.
+            return original_hook(*unused)
+
+        return hook
+
+    def patched_zero_grad_buffer(self):
+        # Last step's gradients (or a warmup pass's) must not be accumulated into.
+        for param in self.params_with_grad:
+            param.grad = None
+        if not getattr(self, "_primus_direct_grad_checked", False):
+            _check_direct_grad_preconditions()
+            original_zero_grad_buffer(self)  # zero once; never written afterwards
+            self._primus_direct_grad_checked = True
+            return
+        for param in self.params_with_grad:
+            param.grad_added_to_main_grad = False
+        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+            bucket_group.reset()
+
+    DistributedDataParallel._make_backward_post_hook = patched_make_backward_post_hook
+    DistributedDataParallel.zero_grad_buffer = patched_zero_grad_buffer
 
 
 @register_patch(
