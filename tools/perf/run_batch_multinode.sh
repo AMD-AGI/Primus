@@ -310,6 +310,12 @@ if [ "$PERF_RUN_DIFFUSION_DLRM" = 1 ]; then
     echo "[ERROR] diffusion_dlrm runs single-node benchmarks; use run_batch.sh for it." >&2
     exit "$PERF_EXIT_REFUSED"
 fi
+# The diffusion benchmark configs are single-node benchmarks, and only
+# run_batch.sh keeps their model downloads (lib/control.sh).
+if perf_batch_has_diffusion; then
+    echo "[ERROR] the diffusion configs are single-node benchmarks; use run_batch.sh for them." >&2
+    exit "$PERF_EXIT_REFUSED"
+fi
 
 # ---------------------------- Helper functions -------------------------------
 

@@ -293,6 +293,109 @@ perf_ensure_data_path() {
     perf_log "[INFO] DATA_PATH: $PERF_DATA_CHECK"
 }
 
+# ---------------------------------------------------------------------------
+# Diffusion model cache
+#
+# The diffusion backend's prepare hook downloads a benchmark's checkpoints and
+# dataset (tens of GB per model) into PRIMUS_HF_HOME, and without it into
+# ~/cache/huggingface -- in container mode a directory that goes away with the
+# container, so every run would download them again. For diffusion configs the
+# runner sets PRIMUS_HF_HOME to DIFFUSION_HF_CACHE and mounts that directory
+# when the container would not see it otherwise. The default is PRIMUS_HF_HOME
+# when that is set, else <DATA_PATH, or <checkout>/data>/huggingface_diffusion:
+# next to Primus' other downloads, in a directory of its own, as the backend
+# keeps its benchmark assets apart from the generic Hugging Face cache.
+# ---------------------------------------------------------------------------
+
+DIFFUSION_HF_CACHE="${DIFFUSION_HF_CACHE:-}"
+PERF_DIFFUSION_CACHE=""
+PERF_DIFFUSION_ARGS=()
+PERF_DIFFUSION_MOUNT=""
+PERF_DIFFUSION_CACHE_CHECK="not used (no diffusion config in this batch)"
+
+# True when <path> is <dir> or below it.
+perf_path_under() {
+    case "${1%/}/" in "${2%/}"/*) return 0 ;; esac
+    return 1
+}
+
+# True when a selected config trains the diffusion framework.
+perf_batch_has_diffusion() {
+    local f
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+        [ "$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null)" = diffusion ] &&
+            return 0
+    done
+    return 1
+}
+
+# True when the container already sees PERF_DIFFUSION_CACHE: it is in the
+# checkout, in the DATA_PATH the runner passes, or in a volume of the config
+# file primus-cli loads.
+perf_diffusion_cache_mounted() {
+    local volumes entry host dest
+    perf_path_under "$PERF_DIFFUSION_CACHE" "$PRIMUS_PATH" && return 0
+    [ -n "$PERF_DATA_PATH" ] && perf_path_under "$PERF_DIFFUSION_CACHE" "$PERF_DATA_PATH" && return 0
+    volumes=$(perf_config_volumes) || return 1
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        IFS=: read -r host dest _ <<< "$entry"
+        dest="${dest:-$host}"
+        perf_path_under "$PERF_DIFFUSION_CACHE" "$dest" && return 0
+    done <<< "$volumes"
+    return 1
+}
+
+# Checks DIFFUSION_HF_CACHE and sets PERF_DIFFUSION_ARGS, the launcher's
+# --volume/--env for a diffusion config. No side effects, so DRY_RUN can show
+# them. Returns 1 to refuse.
+perf_prepare_diffusion_cache() {
+    local given="${DIFFUSION_HF_CACHE:-${PRIMUS_HF_HOME:-${DATA_PATH:-$PRIMUS_PATH/data}/huggingface_diffusion}}"
+    PERF_DIFFUSION_ARGS=()
+    PERF_DIFFUSION_CACHE=""
+    perf_batch_has_diffusion || return 0
+    if [ -n "$DIFFUSION_HF_CACHE" ] && perf_extra_env_sets PRIMUS_HF_HOME && [ "${DIFFUSION_HF_CACHE%/}" != "${PRIMUS_HF_HOME%/}" ]; then
+        echo "[ERROR] DIFFUSION_HF_CACHE=$DIFFUSION_HF_CACHE but EXTRA_ENV sets PRIMUS_HF_HOME=$PRIMUS_HF_HOME; set it once." >&2
+        return 1
+    fi
+    PERF_DIFFUSION_CACHE="${given%/}"
+    case "$PERF_DIFFUSION_CACHE" in
+        *:*)
+            echo "[ERROR] DIFFUSION_HF_CACHE cannot contain ':', which separates docker volume fields: '$given'" >&2
+            return 1
+            ;;
+        /?*) ;;
+        *)
+            echo "[ERROR] DIFFUSION_HF_CACHE must be an absolute path below /, got: '$given'" >&2
+            return 1
+            ;;
+    esac
+    PERF_DIFFUSION_ARGS=(--env "PRIMUS_HF_HOME=$PERF_DIFFUSION_CACHE")
+    PERF_DIFFUSION_MOUNT="no container"
+    perf_uses_containers || return 0
+    PERF_DIFFUSION_MOUNT="already mounted"
+    if ! perf_diffusion_cache_mounted; then
+        PERF_DIFFUSION_ARGS=(--volume "$PERF_DIFFUSION_CACHE:$PERF_DIFFUSION_CACHE" "${PERF_DIFFUSION_ARGS[@]}")
+        PERF_DIFFUSION_MOUNT="mounted by the runner"
+    fi
+}
+
+# Before the first run: the cache exists, owned by the user (docker would
+# create a missing one as root), and PERF_DIFFUSION_CACHE_CHECK says where it
+# is and how much room it has. Returns 1 to refuse.
+perf_ensure_diffusion_cache() {
+    local free
+    [ -n "$PERF_DIFFUSION_CACHE" ] || return 0
+    if ! mkdir -p "$PERF_DIFFUSION_CACHE" 2>/dev/null || [ ! -w "$PERF_DIFFUSION_CACHE" ]; then
+        perf_log "[ERROR] the diffusion model cache is not a writable directory: $PERF_DIFFUSION_CACHE"
+        perf_log "        Point DIFFUSION_HF_CACHE at a directory you own."
+        return 1
+    fi
+    free=$(timeout -k 5 10 df -Ph "$PERF_DIFFUSION_CACHE" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    PERF_DIFFUSION_CACHE_CHECK="$PERF_DIFFUSION_CACHE (${free:-?} free; $PERF_DIFFUSION_MOUNT)"
+    perf_log "[INFO] Diffusion model cache: $PERF_DIFFUSION_CACHE_CHECK"
+}
+
 # Make sure every node has the image before the first run. Without this the
 # first `docker run` pulls it, which both counts against the run limits (a
 # silent multi-GB pull can trip MAX_IDLE_SECONDS) and leaves the image digest
@@ -573,6 +676,7 @@ perf_check_socket_ifname() {
 perf_preflight() {
     perf_log "[INFO] Pre-run checks: DATA_PATH, image, leftover containers, GPU memory, NCCL interface."
     perf_ensure_data_path || return 1
+    perf_ensure_diffusion_cache || return 1
     if ! perf_ensure_image; then
         perf_log "[ERROR] the image check failed (see above)."
         return 1

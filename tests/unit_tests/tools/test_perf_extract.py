@@ -2277,3 +2277,169 @@ def test_diffusion_dlrm_rows_reach_the_outputs(tmp_path, monkeypatch):
     dlrm = next(r for r in rows if r["backend"] == "dlrm")
     assert dlrm["rec_per_s"] == "552606.4500"
     assert dlrm["rec_per_s_cv"] == "0.01"
+
+
+# --------------------------------------------------------------------------
+# diffusion configs run through primus-cli
+# --------------------------------------------------------------------------
+
+DIFFUSION_CONFIG = """\
+modules:
+  post_trainer:
+    framework: diffusion
+    config: post_trainer.yaml
+    model: benchmark_flux_dev.yaml
+    overrides:
+      training:
+        local_batch_size: ${LOCAL_BATCH_SIZE:16}
+        steps: ${MAX_STEPS:100}
+        gradient_accumulation_steps: 1
+      parallelism:
+        sp_size: %s
+"""
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "mode,env,extra_env,sp,expected",
+    [
+        pytest.param("container", "", "", 1, "16|128|100|N/A", id="defaults"),
+        pytest.param("container", "", "", 2, "16|64|100|N/A", id="sequence-parallel"),
+        pytest.param("container", "", "LOCAL_BATCH_SIZE=8 MAX_STEPS=50", 1, "8|64|50|N/A", id="extra-env"),
+        # A plain export does not reach primus-cli's container.
+        pytest.param(
+            "container", "export LOCAL_BATCH_SIZE=8", "", 1, "16|128|100|N/A", id="export-container"
+        ),
+        pytest.param("direct", "export LOCAL_BATCH_SIZE=8", "", 1, "8|64|100|N/A", id="export-direct"),
+    ],
+)
+def test_diffusion_config_fields_are_the_values_the_run_uses(tmp_path, mode, env, extra_env, sp, expected):
+    config = tmp_path / "benchmark_flux_dev-posttrain.yaml"
+    config.write_text(DIFFUSION_CONFIG % sp)
+    script = (
+        f"set -uo pipefail\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE={mode}\nNNODES=1\nGPUS_PER_NODE=8\n"
+        f"TRAIN_STEPS=20\nEXTRA_ENV='{extra_env}'\n{env}\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/run.sh\n"
+        f"source {MODULE_PATH.parent}/lib/control.sh\nperf_parse_extra_env || exit 9\n"
+        f'prepare_config {config}; echo "$MBS|$GBS|$YAML_STEPS|$SEQ_LEN|$FRAMEWORK|$TRAIN_SUITE|$STEPS"\n'
+        f'LAUNCH_ARGV=(); append_train_steps_override {config} "$FRAMEWORK"; echo "argv=${{LAUNCH_ARGV[*]}}"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    fields, argv = out.stdout.strip().splitlines()
+    mbs, gbs, steps, seq, framework, suite, shown = fields.split("|")
+    assert "|".join((mbs, gbs, steps, seq)) == expected
+    assert (framework, suite) == ("diffusion", "posttrain")
+    # TRAIN_STEPS does not apply to the diffusion benchmarks.
+    assert shown == f"{steps} (TRAIN_STEPS=20 not applied to diffusion)"
+    assert argv == "argv="
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "mode,data_path,cache,primus_hf_home,extra_env,expected",
+    [
+        pytest.param(
+            "container",
+            "",
+            "",
+            "",
+            "",
+            (0, "--env PRIMUS_HF_HOME={checkout}/data/huggingface_diffusion"),
+            id="default",
+        ),
+        pytest.param(
+            "container",
+            "/scratch/data",
+            "",
+            "",
+            "",
+            (0, "--env PRIMUS_HF_HOME=/scratch/data/huggingface_diffusion"),
+            id="under-data-path",
+        ),
+        pytest.param(
+            "container",
+            "",
+            "/mnt/hf/",
+            "",
+            "",
+            (0, "--volume /mnt/hf:/mnt/hf --env PRIMUS_HF_HOME=/mnt/hf"),
+            id="own",
+        ),
+        pytest.param(
+            "container",
+            "",
+            "",
+            "/mnt/phf",
+            "",
+            (0, "--volume /mnt/phf:/mnt/phf --env PRIMUS_HF_HOME=/mnt/phf"),
+            id="primus-hf-home",
+        ),
+        pytest.param(
+            "container",
+            "",
+            "",
+            "",
+            "PRIMUS_HF_HOME=/b",
+            (0, "--volume /b:/b --env PRIMUS_HF_HOME=/b"),
+            id="extra-env",
+        ),
+        pytest.param("container", "", "/a", "", "PRIMUS_HF_HOME=/b", (1, ""), id="both-differ"),
+        pytest.param(
+            "container", "", "/runner-vol/hf", "", "", (0, "--env PRIMUS_HF_HOME=/runner-vol/hf"), id="volume"
+        ),
+        pytest.param("direct", "", "/mnt/hf", "", "", (0, "--env PRIMUS_HF_HOME=/mnt/hf"), id="direct-mode"),
+        pytest.param("container", "", "hf", "", "", (1, ""), id="relative"),
+        pytest.param("container", "", "/mnt/a:b", "", "", (1, ""), id="colon"),
+    ],
+)
+def test_diffusion_model_cache_reaches_the_container(
+    tmp_path, mode, data_path, cache, primus_hf_home, extra_env, expected
+):
+    checkout = tmp_path / "checkout"
+    (checkout / "runner").mkdir(parents=True)
+    (checkout / "runner" / "lib").symlink_to(REPO_ROOT / "runner" / "lib")
+    (checkout / "runner" / ".primus.yaml").write_text(
+        'container:\n  options:\n    volume:\n      - "/runner-vol"\n'
+    )
+    config = tmp_path / "exp.yaml"
+    config.write_text(DIFFUSION_CONFIG % 1)
+    other = tmp_path / "other.yaml"
+    other.write_text("modules:\n  pre_trainer:\n    framework: megatron\n")
+    guards = "export __PRIMUS_COMMON_SOURCED=1 __PRIMUS_CONFIG_SOURCED=1\n"
+    hf_home = f"export PRIMUS_HF_HOME={primus_hf_home}\n" if primus_hf_home else "unset PRIMUS_HF_HOME\n"
+    script = (
+        f"set -uo pipefail\n{guards}HOME={tmp_path}\nPRIMUS_PATH={checkout}\nPRIMUS_MODE={mode}\n"
+        f"DATA_PATH='{data_path}'\nDIFFUSION_HF_CACHE='{cache}'\nEXTRA_ENV='{extra_env}'\n{hf_home}"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        "perf_parse_extra_env || exit 9\nperf_prepare_data_path || exit 8\n"
+        f"CONFIG_FILES=({other})\n"
+        'perf_prepare_diffusion_cache; echo "none:$?|${PERF_DIFFUSION_ARGS[*]}"\n'
+        f"CONFIG_FILES=({other} {config})\n"
+        'perf_prepare_diffusion_cache 2>/dev/null; echo "$?|${PERF_DIFFUSION_ARGS[*]}"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    without, with_diffusion = out.stdout.strip().splitlines()
+    # A batch without a diffusion config gets nothing.
+    assert without == "none:0|"
+    code, args = with_diffusion.split("|", 1)
+    assert (int(code), args) == (expected[0], expected[1].format(checkout=checkout))
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+def test_diffusion_model_cache_is_created_before_the_first_run(tmp_path):
+    target = tmp_path / "new" / "hf"
+    config = tmp_path / "exp.yaml"
+    config.write_text(DIFFUSION_CONFIG % 1)
+    script = (
+        f"set -uo pipefail\nHOME={tmp_path}\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=direct\n"
+        f"DIFFUSION_HF_CACHE={target}\nsource {MODULE_PATH.parent}/lib/common.sh\n"
+        f"source {MODULE_PATH.parent}/lib/control.sh\nCONFIG_FILES=({config})\n"
+        'perf_prepare_diffusion_cache && perf_ensure_diffusion_cache >/dev/null; echo "rc=$? $PERF_DIFFUSION_CACHE_CHECK"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    assert target.is_dir()
+    line = out.stdout.strip()
+    assert line.startswith(f"rc=0 {target} (") and line.endswith("; no container)")

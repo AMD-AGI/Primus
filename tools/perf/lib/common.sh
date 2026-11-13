@@ -275,18 +275,21 @@ perf_select_from_catalog() {
 
     # BACKEND is required rather than defaulting to every backend, because each
     # training image carries one framework stack only:
-    #   primus_the_rock_ci_* (PyTorch) -> megatron, torchtitan
+    #   primus_the_rock_ci_* (PyTorch) -> megatron, torchtitan, megatron_bridge, diffusion
     #   jax_the_rock_ci_*    (JAX)     -> maxtext, maxdiffusion
     # There is no image for which "all" is correct, so a default would only
     # ever queue runs with no framework to execute them.
-    # diffusion_dlrm is offered by the single-node runner only.
-    local extra_backend=""
-    [ "${PERF_MULTINODE:-0}" = 1 ] || extra_backend="$PERF_DIFFUSION_DLRM_BACKEND"
+    # diffusion and diffusion_dlrm are offered by the single-node runner only.
+    local extra_backend="" pytorch_backends="megatron,torchtitan,megatron_bridge"
+    if [ "${PERF_MULTINODE:-0}" != 1 ]; then
+        extra_backend="$PERF_DIFFUSION_DLRM_BACKEND"
+        pytorch_backends+=",diffusion,$PERF_DIFFUSION_DLRM_BACKEND"
+    fi
 
     if [ -z "${BACKEND:-}" ]; then
         echo "[ERROR] BACKEND is required; each training image supports one framework stack." >&2
         echo "        Available for $GPU: $(yq -r ".[\"$GPU\"] | keys | .[]" "$catalog" 2>/dev/null | tr '\n' ' ')$extra_backend" >&2
-        echo "        PyTorch image: BACKEND=megatron,torchtitan,megatron_bridge${extra_backend:+,$extra_backend}" >&2
+        echo "        PyTorch image: BACKEND=$pytorch_backends" >&2
         echo "        JAX image    : BACKEND=maxtext,maxdiffusion" >&2
         return 1
     fi
@@ -393,6 +396,15 @@ perf_parse_extra_env() {
         # was requested and direct (non-container) mode picks it up too.
         export "${kv?}"
     done
+}
+
+# True when EXTRA_ENV sets <name> (PERF_EXTRA_ENV_ARGS is parsed).
+perf_extra_env_sets() {
+    local arg
+    for arg in ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"}; do
+        [[ "$arg" == "$1="* ]] && return 0
+    done
+    return 1
 }
 
 # ---------------------------------------------------------------------------
