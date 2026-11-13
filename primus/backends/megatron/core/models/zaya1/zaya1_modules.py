@@ -104,8 +104,21 @@ def _path_on(config, name: str) -> bool:
     return bool(getattr(config, name, False))
 
 
+def _conv_path(config) -> Tuple[bool, str]:
+    """Whether CCA's convolutions run as GEMMs (zaya_conv_gemm), and their path as the build log names it.
+
+    The GEMM path covers the released shape: kernel 2 for both convs.
+    """
+    if not _path_on(config, "zaya_conv_gemm"):
+        return False, "nn.Conv1d"
+    time0, time1 = int(getattr(config, "cca_time0", 2)), int(getattr(config, "cca_time1", 2))
+    if (time0, time1) != (2, 2):
+        return False, f"nn.Conv1d: the GEMM path needs cca_time0 and cca_time1 of 2, got {time0} and {time1}"
+    return True, "GEMM"
+
+
 def switch_summary(config) -> str:
-    """The kernel-path fields and the experts' path in effect for ``config``, as one line for the build log."""
+    """The kernel-path fields and the paths in effect for ``config``, as one line for the build log."""
 
     def on(name: str) -> str:
         return "on" if _path_on(config, name) else "off"
@@ -114,9 +127,10 @@ def switch_summary(config) -> str:
         attention = "dense mask"
     else:
         attention = "flash_attn" if _flash_attn_func is not None else "SDPA, flash_attn not importable"
+    conv = _conv_path(config)[1]
     return (
         f"zaya_attn_flash={on('zaya_attn_flash')} ({attention}), zaya_fuse_norm={on('zaya_fuse_norm')}, "
-        f"zaya_fuse_cca={on('zaya_fuse_cca')}, zaya_conv_gemm={on('zaya_conv_gemm')}, "
+        f"zaya_fuse_cca={on('zaya_fuse_cca')}, zaya_conv_gemm={on('zaya_conv_gemm')} ({conv}), "
         f"zaya_fuse_moe={on('zaya_fuse_moe')}, zaya_router_defer_ar={on('zaya_router_defer_ar')}; "
         f"experts: {_turbo_experts(config)[1]}"
     )
@@ -489,14 +503,7 @@ class CCA(nn.Module):
         for conv in self.conv_qk:
             _init_weight(conv.weight, config)
             nn.init.zeros_(conv.bias)
-        # The GEMM conv path covers the released shape: kernel 2 for both convs
-        # (left pad 2) and conv1 groups that split channels evenly.
-        self._conv_gemm_ok = (
-            _path_on(config, "zaya_conv_gemm")
-            and self.cca_time0 == 2
-            and self.cca_time1 == 2
-            and in_ch % (self.num_q_heads + self.num_k_heads) == 0
-        )
+        self._conv_gemm_ok, _ = _conv_path(config)
         self.fuse_cca = _path_on(config, "zaya_fuse_cca")
         self.attn_flash = _path_on(config, "zaya_attn_flash")
         # Ones, not zeros: a zero default is the pre-checkpoint initialization, and a

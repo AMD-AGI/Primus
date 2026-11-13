@@ -62,8 +62,8 @@ modules:
       # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
       # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
       # elementwise chains, CCA's convolutions as GEMMs, and one data-parallel
-      # all-reduce per step for every router's balancing-bias update, instead
-      # of one per MoE layer. The ZAYA1 chunked cross-entropy (zaya_chunked_ce)
+      # all-reduce per micro batch for every router's balancing-bias update,
+      # instead of one per MoE layer. The ZAYA1 chunked cross-entropy (zaya_chunked_ce)
       # stays off: cross_entropy_loss_fusion below takes its place.
       zaya_attn_flash: true
       zaya_fuse_norm: true

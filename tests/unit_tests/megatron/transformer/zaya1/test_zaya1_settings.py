@@ -64,6 +64,8 @@ def test_modules_read_the_fields_when_built():
         assert cca.attn_flash is cca.fuse_cca is cca._conv_gemm_ok is flag
         assert moe.fuse_moe is moe.router.fuse_moe is moe.router.defer_bias_update is flag
         assert all(expert.fuse_moe is flag for expert in moe.local_experts)
+    # The GEMM convolutions cover kernel 2 only; CCA falls back to nn.Conv1d.
+    assert zm.CCA(_cfg(zaya_conv_gemm=True, cca_time1=3))._conv_gemm_ok is False
 
 
 def test_switch_summary_names_the_paths_that_run(monkeypatch):
@@ -79,4 +81,9 @@ def test_switch_summary_names_the_paths_that_run(monkeypatch):
     assert zm.switch_summary(_cfg()).endswith("; experts: split")
     line = zm.switch_summary(_cfg(zaya_attn_flash=False, zaya_fuse_norm=False, zaya_router_defer_ar=True))
     assert "zaya_attn_flash=off (dense mask)" in line and "zaya_fuse_norm=off" in line
-    assert "zaya_router_defer_ar=on" in line
+    assert "zaya_router_defer_ar=on" in line and "zaya_conv_gemm=off (nn.Conv1d)" in line
+    assert "zaya_conv_gemm=on (GEMM)" in zm.switch_summary(_cfg(zaya_conv_gemm=True))
+    assert (
+        "zaya_conv_gemm=on (nn.Conv1d: the GEMM path needs cca_time0 and cca_time1 of 2, got 2 and 3)"
+        in zm.switch_summary(_cfg(zaya_conv_gemm=True, cca_time1=3))
+    )
