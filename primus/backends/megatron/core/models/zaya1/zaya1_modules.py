@@ -42,7 +42,7 @@ except Exception:  # pragma: no cover - depends on the image
 # and bwd, in all 80 stages. zaya_fuse_cca (default on) does the same for the
 # CCA query/key post-processing (grouped means, qk-norm, temperature, partial
 # RoPE). Both are free functions with tensor arguments, so every layer shares
-# one graph (no per-module recompiles). Set either off for the eager path.
+# one graph (no per-module recompiles). Off runs the same functions uncompiled.
 
 # zaya_router_defer_ar (default off): accumulate each router's token counts
 # during the forward and apply all balancing-bias updates after the decoder's
@@ -335,15 +335,14 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        xf = x.float()
-        inv = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (xf * inv * self.weight.float()).to(dtype=x.dtype)
+        return _rms(x, self.weight, self.eps)
 
 
 class ResidualScaling(nn.Module):
-    """Affine ``(x + bias) * scale`` on the mixer output and the residual.
+    """Parameters of the affine ``(x + bias) * scale`` on the mixer output and the residual.
 
-    Stage 0 has no incoming residual, so it stores only the mixer-output affine.
+    ``_scale_merge_norm_res`` and ``_scale_merge_norm_first`` apply it. Stage 0
+    has no incoming residual, so it stores only the mixer-output affine.
     """
 
     def __init__(self, hidden_size: int, has_residual: bool) -> None:
@@ -355,19 +354,35 @@ class ResidualScaling(nn.Module):
             self.residual_scale = nn.Parameter(torch.ones(hidden_size))
             self.residual_bias = nn.Parameter(torch.zeros(hidden_size))
 
-    def forward(self, residual: Optional[torch.Tensor], hidden_states: torch.Tensor):
-        hidden_states = hidden_states.float() + self.hidden_states_bias.float()
-        hidden_states = hidden_states * self.hidden_states_scale.float()
-        if self.has_residual and residual is not None:
-            residual = residual.float() + self.residual_bias.float()
-            residual = residual * self.residual_scale.float()
-        return residual, hidden_states
-
 
 def merge_residual(residual: Optional[torch.Tensor], hidden_states: torch.Tensor) -> torch.Tensor:
     if residual is None:
         return hidden_states.float()
     return residual.float() + hidden_states.float()
+
+
+def _scale_merge_norm(rs: Optional[ResidualScaling], norm: RMSNorm, hidden, residual, compiled: bool):
+    """Residual affine, merge and RMSNorm ahead of a mixer or as the final norm: ``(merged, normed)``.
+
+    ``compiled`` (zaya_fuse_norm) runs the compiled function instead of the plain one.
+    """
+    if rs is None:
+        merged = merge_residual(residual, hidden)
+        return merged, norm(merged.to(dtype=hidden.dtype))
+    if residual is None:
+        first = _fused_smn_first if compiled else _scale_merge_norm_first
+        return first(hidden, rs.hidden_states_bias, rs.hidden_states_scale, norm.weight, norm.eps)
+    res = _fused_smn_res if compiled else _scale_merge_norm_res
+    return res(
+        hidden,
+        residual,
+        rs.hidden_states_bias,
+        rs.hidden_states_scale,
+        rs.residual_bias,
+        rs.residual_scale,
+        norm.weight,
+        norm.eps,
+    )
 
 
 def _cca_qk_post(
@@ -385,14 +400,16 @@ def _cca_qk_post(
     rotary_dim: int,
     rope_base: float,
 ):
-    """CCA._grouped_means + _qk_norm_and_temp + _rope as one function of tensors.
+    """CCA's query/key post-processing: grouped means, qk-norm and temperature, partial RoPE.
 
-    Mirrors the eager methods op for op so a torch.compile of it is shared by all
-    40 CCA stages. Output dtype is ``query_pre.dtype``.
+    A function of tensors, so one torch.compile of it is shared by all 40 CCA
+    stages. Output dtype is ``query_pre.dtype``. ``position_ids`` is
+    ``[batch, seq]``; RoPE uses the NeoX layout, where the two halves of the
+    rotary slice share each angle.
     """
     dtype = query_pre.dtype
     seq, batch = query_pre.shape[0], query_pre.shape[1]
-    # _grouped_means
+    # Grouped means.
     key_base_f = key_base.float()
     query_pre_g = query_pre.view(seq, batch, num_k_heads, gqa_groups, head_dim).float()
     query_conv_g = query_conv.view_as(query_pre_g).float()
@@ -400,7 +417,7 @@ def _cca_qk_post(
     query = query.reshape(seq, batch, num_q_heads, head_dim)
     query_mean = query_pre_g.mean(dim=-2)
     key = key_conv.float() + 0.5 * query_mean + 0.5 * key_base_f
-    # _qk_norm_and_temp
+    # qk-norm and temperature.
     eps = 1e-12
     scale = math.sqrt(head_dim)
     query = query.float() * (torch.rsqrt(query.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
@@ -411,7 +428,7 @@ def _cca_qk_post(
     key = key * t
     query = query.to(dtype)
     key = key.to(dtype)
-    # _rope
+    # Partial RoPE.
     if rotary_dim == 0:
         return query, key
     if position_ids is None:
@@ -555,62 +572,6 @@ class CCA(nn.Module):
         self.temp = nn.Parameter(torch.ones(self.num_k_heads))
         self.o_proj = _linear(self.latent_q, self.hidden_size, bias, config)
 
-    def _qk_norm_and_temp(self, query: torch.Tensor, key: torch.Tensor):
-        eps = 1e-12
-        scale = math.sqrt(self.head_dim)
-        query = query.float() * (torch.rsqrt(query.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
-        key = key.float() * (torch.rsqrt(key.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
-        temp = self.temp.float().view(1, 1, self.num_k_heads, 1)
-        if self.clamp_temp:
-            temp = torch.exp(torch.clamp(temp, 1e-7, 2.0))
-        return query, key * temp
-
-    def _grouped_means(self, query_conv, key_conv, query_pre, key_base):
-        key_base_f = key_base.float()
-        query_pre_g = query_pre.view(
-            query_pre.shape[0], query_pre.shape[1], self.num_k_heads, self.gqa_groups, self.head_dim
-        ).float()
-        query_conv_g = query_conv.view_as(query_pre_g).float()
-        query = query_conv_g + 0.5 * query_pre_g + 0.5 * key_base_f.unsqueeze(-2)
-        query = query.reshape(query_pre.shape[0], query_pre.shape[1], self.num_q_heads, self.head_dim)
-        query_mean = query_pre_g.mean(dim=-2)
-        key = key_conv.float() + 0.5 * query_mean + 0.5 * key_base_f
-        return query, key
-
-    def _rope(self, query, key, position_ids: Optional[torch.Tensor]):
-        if self.rotary_dim == 0:
-            return query, key
-        seq = query.shape[0]
-        if position_ids is None:
-            pos = torch.arange(seq, device=query.device)
-        else:
-            # position_ids is [batch, seq]. Transpose to [seq, batch] so each
-            # row can carry its own positions.
-            pos = position_ids.transpose(0, 1).to(device=query.device)
-        freq_idx = torch.arange(0, self.rotary_dim, 2, device=query.device, dtype=torch.float32)
-        inv_freq = 1.0 / (self.rope_base ** (freq_idx / self.rotary_dim))
-        # NeoX layout: the same angle is shared by the two halves of the rotary slice.
-        if pos.dim() == 1:
-            freqs = torch.outer(pos.float(), inv_freq)
-            cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, None, None, :]
-            sin = torch.cat((freqs.sin(), freqs.sin()), dim=-1)[:, None, None, :]
-        else:
-            freqs = torch.einsum("sb,d->sbd", pos.float(), inv_freq)
-            cos = torch.cat((freqs.cos(), freqs.cos()), dim=-1)[:, :, None, :]
-            sin = torch.sin(freqs)
-            sin = torch.cat((sin, sin), dim=-1)[:, :, None, :]
-
-        def _apply(x):
-            rot, rest = x[..., : self.rotary_dim], x[..., self.rotary_dim :]
-            rot_f = rot.float()
-            half = rot_f.shape[-1] // 2
-            x1, x2 = rot_f[..., :half], rot_f[..., half:]
-            rotated = torch.cat((-x2, x1), dim=-1)
-            out = rot_f * cos + rotated * sin
-            return torch.cat((out, rest.float()), dim=-1).to(dtype=x.dtype)
-
-        return _apply(query), _apply(key)
-
     def project(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor]):
         seq, batch, _ = hidden_states.shape
         q_raw = self.linear_q(hidden_states)
@@ -626,26 +587,22 @@ class CCA(nn.Module):
         query_conv = qk_out[..., : self.latent_q].view(seq, batch, self.num_q_heads, self.head_dim)
         key_conv = qk_out[..., self.latent_q :].view(seq, batch, self.num_k_heads, self.head_dim)
         dtype = hidden_states.dtype
-        if self.fuse_cca:
-            query, key = _fused_cca_qk(
-                query_conv,
-                key_conv,
-                query_pre,
-                key_base,
-                self.temp,
-                position_ids,
-                self.num_q_heads,
-                self.num_k_heads,
-                self.gqa_groups,
-                self.head_dim,
-                self.clamp_temp,
-                self.rotary_dim,
-                self.rope_base,
-            )
-        else:
-            query, key = self._grouped_means(query_conv, key_conv, query_pre, key_base)
-            query, key = self._qk_norm_and_temp(query, key)
-            query, key = self._rope(query.to(dtype), key.to(dtype), position_ids)
+        qk_post = _fused_cca_qk if self.fuse_cca else _cca_qk_post
+        query, key = qk_post(
+            query_conv,
+            key_conv,
+            query_pre,
+            key_base,
+            self.temp,
+            position_ids,
+            self.num_q_heads,
+            self.num_k_heads,
+            self.gqa_groups,
+            self.head_dim,
+            self.clamp_temp,
+            self.rotary_dim,
+            self.rope_base,
+        )
 
         shifted = F.pad(hidden_states[:-1], (0, 0, 0, 0, 1, 0))
         v1 = self.val_proj1(hidden_states)
@@ -726,13 +683,12 @@ def attention(query, key, value, attention_mask: Optional[torch.Tensor], flash: 
     return out.permute(2, 0, 1, 3)
 
 
-# zaya_fuse_moe (default on): fuse the MoE-stage elementwise chains that
+# zaya_fuse_moe (default on): compile the MoE-stage elementwise chains that
 # zaya_fuse_norm/zaya_fuse_cca do not cover: the expert SwiGLU (silu * up, one
 # kernel fwd and bwd, dynamic token count), the router EDA add + RMSNorm and
 # the fp32 softmax/bias/top-k/gather/cast, and the gate multiply + unpermute
-# (one gather*prob kernel replacing the per-expert multiplies, the zero fill
-# and index_copy). Dispatch/unpermute backwards are gathers by the inverse
-# permutation instead of zero fill + atomic index_add. Off restores eager.
+# (one gather*prob kernel replacing the per-expert multiplies). Off runs the
+# same functions uncompiled.
 
 
 def _swiglu(fc1_out: torch.Tensor) -> torch.Tensor:
@@ -801,22 +757,26 @@ class _PermuteRows(torch.autograd.Function):
 
 
 class _UnpermuteScale(torch.autograd.Function):
-    """``out[t] = out_sorted[inv_perm[t]] * prob[t]`` as one fused gather*scale."""
+    """``out[t] = out_sorted[inv_perm[t]] * prob[t]`` as one gather*scale, compiled when ``compiled``."""
 
     @staticmethod
-    def forward(ctx, out_sorted, perm, inv_perm, prob):
+    def forward(ctx, out_sorted, perm, inv_perm, prob, compiled: bool):
         ctx.save_for_backward(out_sorted, perm, inv_perm, prob)
-        return _fused_unpermute_fwd(out_sorted, inv_perm, prob)
+        ctx.compiled = compiled
+        unpermute = _fused_unpermute_fwd if compiled else _unpermute_scale_fwd
+        return unpermute(out_sorted, inv_perm, prob)
 
     @staticmethod
     def backward(ctx, grad):
         out_sorted, perm, inv_perm, prob = ctx.saved_tensors
         grad = grad.contiguous()
         if ctx.needs_input_grad[3]:
-            d_sorted, d_prob = _fused_unpermute_bwd(grad, out_sorted, perm, inv_perm, prob)
+            unpermute_bwd = _fused_unpermute_bwd if ctx.compiled else _unpermute_scale_bwd
+            d_sorted, d_prob = unpermute_bwd(grad, out_sorted, perm, inv_perm, prob)
         else:
-            d_sorted, d_prob = _fused_unpermute_bwd_noprob(grad, perm, prob), None
-        return d_sorted, None, None, d_prob
+            unpermute_bwd = _fused_unpermute_bwd_noprob if ctx.compiled else _unpermute_scale_bwd_noprob
+            d_sorted, d_prob = unpermute_bwd(grad, perm, prob), None
+        return d_sorted, None, None, d_prob, None
 
 
 class SwiGLUExpert(nn.Module):
@@ -827,10 +787,8 @@ class SwiGLUExpert(nn.Module):
         self.fuse_moe = _path_on(config, "zaya_fuse_moe")
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        if self.fuse_moe:
-            return self.linear_fc2(_fused_swiglu(self.linear_fc1(hidden)))
-        gate, up = self.linear_fc1(hidden).chunk(2, dim=-1)
-        return self.linear_fc2(F.silu(gate) * up)
+        swiglu = _fused_swiglu if self.fuse_moe else _swiglu
+        return self.linear_fc2(swiglu(self.linear_fc1(hidden)))
 
 
 class ZayaRouter(nn.Module):
@@ -890,35 +848,11 @@ class ZayaRouter(nn.Module):
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         seq, batch, _ = hidden_states.shape
         routed = self.down_proj(hidden_states.reshape(seq * batch, self.hidden_size))
-        if self.fuse_moe:
-            return self._forward_fused(routed, hidden_states, prev_router)
-        if self.use_eda and prev_router is not None:
-            routed = routed + prev_router.reshape(seq * batch, self.width) * self.router_states_scale
         # EDA state is the post-add, pre-norm router hidden. RMSNorm and the
         # 3-layer MLP both see that state.
-        next_router = routed.view(seq, batch, self.width)
-        logits = self.rmsnorm_eda(routed)
-        for stage in self.router_mlp:
-            logits = stage(logits)
-        if self.high_prec:
-            probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-        else:
-            probs = torch.softmax(logits, dim=-1)
-        # The bias is a buffer updated in place below. Keep it out of the graph.
-        with torch.no_grad():
-            biased = probs.detach().float() + self.balancing_biases.float()
-            _, index = torch.topk(biased, k=self.topk, dim=-1)
-        route_prob = torch.gather(probs, dim=-1, index=index)
-        if self.training and self.balance_lr != 0.0 and self.topk == 1:
-            self._record_bias_update(index.reshape(-1))
-        route_prob = route_prob.to(dtype=hidden_states.dtype).view(seq, batch, self.topk)
-        index = index.view(seq, batch, self.topk)
-        return route_prob, index, next_router
-
-    def _forward_fused(self, routed, hidden_states, prev_router):
-        seq, batch, _ = hidden_states.shape
         if self.use_eda and prev_router is not None:
-            routed, logits = _fused_eda_norm(
+            eda_norm = _fused_eda_norm if self.fuse_moe else _eda_norm
+            routed, logits = eda_norm(
                 routed,
                 prev_router.reshape(seq * batch, self.width),
                 self.router_states_scale,
@@ -930,7 +864,9 @@ class ZayaRouter(nn.Module):
         next_router = routed.view(seq, batch, self.width)
         for stage in self.router_mlp:
             logits = stage(logits)
-        route_prob, index = _fused_route_select(
+        # The bias is a buffer updated in place below; the top-k keeps it out of the graph.
+        route_select = _fused_route_select if self.fuse_moe else _route_select
+        route_prob, index = route_select(
             logits, self.balancing_biases, self.topk, self.high_prec, hidden_states.dtype
         )
         if self.training and self.balance_lr != 0.0 and self.topk == 1:
@@ -1104,27 +1040,18 @@ class ZayaMoE(nn.Module):
         counts.scatter_add_(0, sorted_idx, torch.ones_like(sorted_idx, dtype=torch.int64))
         group_lens = counts[:E].contiguous()
         group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
-        if self.fuse_moe:
-            # Same permute / fused SwiGLU / fused gather*prob unpermute as
-            # _dispatch_fused, with the per-expert loop replaced by two
-            # grouped GEMMs.
-            inv_perm = torch.empty_like(perm)
-            inv_perm.scatter_(0, perm, torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype))
-            x_sorted = _PermuteRows.apply(flat, perm, inv_perm)
-            gate_up = _turbo_grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
-            y = _turbo_grouped_gemm(_fused_swiglu(gate_up), self.fc2_weight, group_lens, group_offs)
-            if self.router.use_mod:
-                y = torch.where((sorted_idx == E).unsqueeze(-1), x_sorted, y)
-            return _UnpermuteScale.apply(y, perm, inv_perm, flat_prob)
-        x_sorted = flat.index_select(0, perm)
-        p_sorted = flat_prob.index_select(0, perm)
+        # The split path's permute, SwiGLU and gather*prob unpermute, with the
+        # per-expert loop replaced by two grouped GEMMs.
+        inv_perm = torch.empty_like(perm)
+        inv_perm.scatter_(0, perm, torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype))
+        x_sorted = _PermuteRows.apply(flat, perm, inv_perm)
+        swiglu = _fused_swiglu if self.fuse_moe else _swiglu
         gate_up = _turbo_grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
-        y = _turbo_grouped_gemm(_swiglu(gate_up), self.fc2_weight, group_lens, group_offs)
+        y = _turbo_grouped_gemm(swiglu(gate_up), self.fc2_weight, group_lens, group_offs)
         if self.router.use_mod:
             # Skip rows take the identity input; the GEMM left them zero.
             y = torch.where((sorted_idx == E).unsqueeze(-1), x_sorted, y)
-        out_sorted = y * p_sorted
-        return flat.new_zeros(flat.shape).index_copy(0, perm, out_sorted)
+        return _UnpermuteScale.apply(y, perm, inv_perm, flat_prob, self.fuse_moe)
 
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         if (
@@ -1143,19 +1070,14 @@ class ZayaMoE(nn.Module):
             # parameter without a grad.
             hidden_states = _ZeroGradFor.apply(hidden_states, self.router.router_states_scale)
         probs, index, next_router = self.router(hidden_states, prev_router)
-        if self.use_turbo_gemm:
-            prob = probs[..., 0]
-            flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-            flat_prob = prob.reshape(-1, 1).to(dtype=flat.dtype)
-            out = self._forward_turbo(flat, index[..., 0].reshape(-1), flat_prob)
-            return out.view_as(hidden_states), next_router
         # Top-1 is the released configuration. The mix weight is the unbiased
         # gathered probability.
         prob = probs[..., 0]
-        idx = index[..., 0]
         flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-        flat_idx = idx.reshape(-1)
+        flat_idx = index[..., 0].reshape(-1)
         flat_prob = prob.reshape(-1, 1).to(dtype=flat.dtype)
+        if self.use_turbo_gemm:
+            return self._forward_turbo(flat, flat_idx, flat_prob).view_as(hidden_states), next_router
         # Sort-based dispatch. A stable sort keeps the original token order
         # inside each expert group, so every expert sees exactly the rows (in
         # the same order) that the old boolean-mask loop gave it. The forward
@@ -1163,50 +1085,30 @@ class ZayaMoE(nn.Module):
         # then counts.tolist()) instead of one torch.any plus two nonzero syncs
         # per expert in forward and more in backward. Only the first waits for
         # queued work, so scatter_add_ counts as in _forward_turbo save little
-        # here. Integer index_select / index_copy have sync-free backwards.
+        # here. The permute and unpermute backwards are gathers by the inverse
+        # permutation, with no host sync.
         num_groups = self.router.num_scored
         sorted_idx, perm = torch.sort(flat_idx, stable=True)
         counts = torch.bincount(sorted_idx, minlength=num_groups).tolist()
-        if self.fuse_moe:
-            return self._dispatch_fused(hidden_states, flat, flat_prob, perm, counts), next_router
-        x_sorted = flat.index_select(0, perm)
-        p_sorted = flat_prob.index_select(0, perm)
-        x_chunks = torch.split(x_sorted, counts, dim=0)
-        p_chunks = torch.split(p_sorted, counts, dim=0)
-        pieces = []
-        for expert_id, expert in enumerate(self.local_experts):
-            # Experts with no tokens are skipped exactly as before: their
-            # params get no autograd grad and their main_grad stays zero.
-            if counts[expert_id] == 0:
-                continue
-            pieces.append(expert(x_chunks[expert_id]) * p_chunks[expert_id])
-        if self.router.use_mod and counts[self.num_real_experts] > 0:
-            # Mixture-of-depths skip slot: identity scaled by its probability.
-            pieces.append(x_chunks[self.num_real_experts] * p_chunks[self.num_real_experts])
-        # Every token lands in exactly one group (real expert or MoD skip), so
-        # the concatenation covers all rows in sorted order.
-        out_sorted = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
-        out = flat.new_zeros(flat.shape).index_copy(0, perm, out_sorted)
-        out = out.view_as(hidden_states)
-        return out, next_router
-
-    def _dispatch_fused(self, hidden_states, flat, flat_prob, perm, counts):
-        """Same rows, order and math as the eager loop, with the gate multiply
-        moved after the unpermute so it is one fused gather*prob over all tokens."""
         inv_perm = torch.empty_like(perm)
         inv_perm.scatter_(0, perm, torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype))
-        x_sorted = _PermuteRows.apply(flat, perm, inv_perm)
-        x_chunks = torch.split(x_sorted, counts, dim=0)
+        x_chunks = torch.split(_PermuteRows.apply(flat, perm, inv_perm), counts, dim=0)
         pieces = []
         for expert_id, expert in enumerate(self.local_experts):
+            # Experts with no tokens are skipped: their params get no autograd
+            # grad and their main_grad stays zero.
             if counts[expert_id] == 0:
                 continue
             pieces.append(expert(x_chunks[expert_id]))
         if self.router.use_mod and counts[self.num_real_experts] > 0:
+            # Mixture-of-depths skip slot: the identity.
             pieces.append(x_chunks[self.num_real_experts])
+        # Every token lands in exactly one group (real expert or MoD skip), so
+        # the concatenation covers all rows in sorted order. The gate multiply
+        # comes after the unpermute, as one gather*prob over all tokens.
         out_sorted = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
-        out = _UnpermuteScale.apply(out_sorted, perm, inv_perm, flat_prob)
-        return out.view_as(hidden_states)
+        out = _UnpermuteScale.apply(out_sorted, perm, inv_perm, flat_prob, self.fuse_moe)
+        return out.view_as(hidden_states), next_router
 
 
 class ZayaStage(nn.Module):
@@ -1229,33 +1131,9 @@ class ZayaStage(nn.Module):
             self.zaya_block = ZayaMoE(config)
 
     def forward(self, hidden_states, residual, prev_router, position_ids, attention_mask):
-        target_dtype = hidden_states.dtype
-        rs = self.res_scale
-        if self.fuse_norm and rs is not None and (residual is None or rs.has_residual):
-            if residual is None:
-                residual, normed = _fused_smn_first(
-                    hidden_states,
-                    rs.hidden_states_bias,
-                    rs.hidden_states_scale,
-                    self.input_norm.weight,
-                    self.input_norm.eps,
-                )
-            else:
-                residual, normed = _fused_smn_res(
-                    hidden_states,
-                    residual,
-                    rs.hidden_states_bias,
-                    rs.hidden_states_scale,
-                    rs.residual_bias,
-                    rs.residual_scale,
-                    self.input_norm.weight,
-                    self.input_norm.eps,
-                )
-        else:
-            if rs is not None:
-                residual, hidden_states = rs(residual, hidden_states)
-            residual = merge_residual(residual, hidden_states)
-            normed = self.input_norm(residual.to(dtype=target_dtype))
+        residual, normed = _scale_merge_norm(
+            self.res_scale, self.input_norm, hidden_states, residual, self.fuse_norm
+        )
         if self.kind == "a":
             hidden_states = self.self_attn(normed, position_ids, attention_mask)
         else:
@@ -1331,21 +1209,7 @@ class ZayaStack(nn.Module):
                 hidden_states, residual, prev_router = layer(
                     hidden_states, residual, prev_router, position_ids, attention_mask
                 )
-            target_dtype = hidden_states.dtype
-            rs = self.res_scale
-            if self.fuse_norm and rs is not None and residual is not None:
-                _, normed = _fused_smn_res(
-                    hidden_states,
-                    residual,
-                    rs.hidden_states_bias,
-                    rs.hidden_states_scale,
-                    rs.residual_bias,
-                    rs.residual_scale,
-                    self.final_norm.weight,
-                    self.final_norm.eps,
-                )
-                return normed
-            if rs is not None:
-                residual, hidden_states = rs(residual, hidden_states)
-            merged = merge_residual(residual, hidden_states)
-            return self.final_norm(merged.to(dtype=target_dtype))
+            _, normed = _scale_merge_norm(
+                self.res_scale, self.final_norm, hidden_states, residual, self.fuse_norm
+            )
+            return normed

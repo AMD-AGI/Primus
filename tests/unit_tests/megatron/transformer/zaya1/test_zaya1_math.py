@@ -17,10 +17,13 @@ from torch import nn
 from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
     CCA,
     ResidualScaling,
+    RMSNorm,
     ZayaMoE,
     ZayaRouter,
     ZayaStack,
     _align_fp8_leading,
+    _cca_qk_post,
+    _scale_merge_norm,
     _unpad_fp8_leading,
     layer_kinds,
 )
@@ -72,23 +75,45 @@ def test_residual_is_implemented_affine_not_paper_affine():
     residual = torch.randn(3, 2, hidden)
     hidden_states = torch.randn(3, 2, hidden)
 
-    got_residual, got_hidden = mod(residual, hidden_states)
+    merged, _ = _scale_merge_norm(mod, RMSNorm(hidden, 1e-5), hidden_states, residual, compiled=False)
     ref_hidden = (hidden_states.float() + mod.hidden_states_bias.float()) * mod.hidden_states_scale.float()
     ref_residual = (residual.float() + mod.residual_bias.float()) * mod.residual_scale.float()
     paper_hidden = mod.hidden_states_scale.float() * hidden_states.float() + mod.hidden_states_bias.float()
+    paper_residual = mod.residual_scale.float() * residual.float() + mod.residual_bias.float()
 
-    torch.testing.assert_close(got_hidden, ref_hidden)
-    torch.testing.assert_close(got_residual, ref_residual)
-    assert not torch.allclose(got_hidden, paper_hidden)
+    torch.testing.assert_close(merged, ref_residual + ref_hidden)
+    assert not torch.allclose(merged, paper_residual + paper_hidden)
 
 
 def test_layer0_has_no_residual_affine():
     mod = ResidualScaling(8, has_residual=False)
     assert not hasattr(mod, "residual_scale")
     hidden = torch.randn(2, 1, 8)
-    residual, out = mod(None, hidden)
-    assert residual is None
-    torch.testing.assert_close(out, (hidden.float() + mod.hidden_states_bias) * mod.hidden_states_scale)
+    merged, _ = _scale_merge_norm(mod, RMSNorm(8, 1e-5), hidden, None, compiled=False)
+    torch.testing.assert_close(merged, (hidden.float() + mod.hidden_states_bias) * mod.hidden_states_scale)
+
+
+def _qk_norm(x, head_dim):
+    return x.float() * (torch.rsqrt(x.float().pow(2).sum(-1, keepdim=True) + 1e-12) * math.sqrt(head_dim))
+
+
+def _qk_post(cca, query_conv, key_conv, query_pre, key_base):
+    """CCA's query/key post-processing with RoPE off."""
+    return _cca_qk_post(
+        query_conv,
+        key_conv,
+        query_pre,
+        key_base,
+        cca.temp,
+        None,
+        cca.num_q_heads,
+        cca.num_k_heads,
+        cca.gqa_groups,
+        cca.head_dim,
+        cca.clamp_temp,
+        0,
+        cca.rope_base,
+    )
 
 
 def test_cca_shapes_value_shift_and_raw_temperature():
@@ -112,17 +137,13 @@ def test_cca_shapes_value_shift_and_raw_temperature():
     raw_k = torch.randn(seq, batch, cca.num_k_heads, cca.head_dim)
     with torch.no_grad():
         cca.temp.fill_(0.5)
-    got_q, got_k = cca._qk_norm_and_temp(raw_q, raw_k)
+    # With zero pre-conv terms the grouped means pass the conv outputs through,
+    # leaving qk-norm and the temperature.
+    got_q, got_k = _qk_post(cca, raw_q, raw_k, torch.zeros_like(raw_q), torch.zeros_like(raw_k))
 
-    eps = 1e-12
-    scale = math.sqrt(cca.head_dim)
-
-    def _norm(x):
-        return x.float() * (torch.rsqrt(x.float().pow(2).sum(-1, keepdim=True) + eps) * scale)
-
-    torch.testing.assert_close(got_q, _norm(raw_q))
-    torch.testing.assert_close(got_k, _norm(raw_k) * 0.5)
-    assert not torch.allclose(got_k, _norm(raw_k) * math.exp(0.5))
+    torch.testing.assert_close(got_q, _qk_norm(raw_q, cca.head_dim))
+    torch.testing.assert_close(got_k, _qk_norm(raw_k, cca.head_dim) * 0.5)
+    assert not torch.allclose(got_k, _qk_norm(raw_k, cca.head_dim) * math.exp(0.5))
 
 
 def test_grouped_qk_mean_matches_independent_formula():
@@ -134,7 +155,8 @@ def test_grouped_qk_mean_matches_independent_formula():
     key_conv = torch.randn(seq, batch, nk, dim)
     query_pre = torch.randn(seq, batch, nq, dim)
     key_base = torch.randn(seq, batch, nk, dim)
-    query, key = cca._grouped_means(query_conv, key_conv, query_pre, key_base)
+    # The temperature starts at one, so the keys come out qk-normed only.
+    query, key = _qk_post(cca, query_conv, key_conv, query_pre, key_base)
 
     query_pre_g = query_pre.view(seq, batch, nk, groups, dim).float()
     query_conv_g = query_conv.view(seq, batch, nk, groups, dim).float()
@@ -142,8 +164,8 @@ def test_grouped_qk_mean_matches_independent_formula():
     ref_q = query_conv_g + 0.5 * query_pre_g + key_term
     ref_q = ref_q.reshape(seq, batch, nq, dim)
     ref_k = key_conv.float() + 0.5 * query_pre_g.mean(dim=-2) + 0.5 * key_base.float()
-    torch.testing.assert_close(query, ref_q)
-    torch.testing.assert_close(key, ref_k)
+    torch.testing.assert_close(query, _qk_norm(ref_q, dim))
+    torch.testing.assert_close(key, _qk_norm(ref_k, dim))
 
 
 def _zero_router(router: ZayaRouter) -> None:

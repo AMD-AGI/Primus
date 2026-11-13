@@ -4,8 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""CPU equivalence of the zaya_fuse_norm and zaya_fuse_cca paths against the
-eager path, forward and backward, fp32 and bf16."""
+"""CPU equivalence of the zaya_fuse_norm and zaya_fuse_cca compiled functions with
+the same functions uncompiled, forward and backward, fp32 and bf16."""
 
 import pytest
 import torch

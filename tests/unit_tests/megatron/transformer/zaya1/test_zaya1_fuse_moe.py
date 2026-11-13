@@ -4,8 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""CPU equivalence of the zaya_fuse_moe path (SwiGLU, router, gate/unpermute)
-against the eager path, forward and backward, fp32 and bf16."""
+"""CPU equivalence of the zaya_fuse_moe path's compiled functions (SwiGLU, router,
+gate/unpermute) with the same functions uncompiled, forward and backward, fp32 and bf16."""
 
 import pytest
 import torch
@@ -169,7 +169,8 @@ def test_moe_layer_matches_eager(compiled, dtype, with_prev):
         torch.testing.assert_close(p_f[k].grad, pe.grad, **tol)
 
 
-def test_unpermute_scale_without_prob_grad(compiled):
+@pytest.mark.parametrize("fused", [False, True])
+def test_unpermute_scale_without_prob_grad(compiled, fused):
     torch.manual_seed(2)
     n, h = 9, 4
     perm = torch.randperm(n)
@@ -177,7 +178,7 @@ def test_unpermute_scale_without_prob_grad(compiled):
     inv[perm] = torch.arange(n)
     x = torch.randn(n, h, requires_grad=True)
     p = torch.rand(n, 1)
-    out = zm._UnpermuteScale.apply(x, perm, inv, p)
+    out = zm._UnpermuteScale.apply(x, perm, inv, p, fused)
     out.sum().backward()
     torch.testing.assert_close(out, x.detach()[inv] * p)
     torch.testing.assert_close(x.grad, p[perm].expand(n, h))

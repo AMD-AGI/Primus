@@ -54,14 +54,13 @@ def _chunk_logits(x_c: Tensor, weight: Tensor, logit_scale: Optional[float]) -> 
     return logits
 
 
-def _chunk_logits_fp32(x_c: Tensor, weight: Tensor, logit_scale: Optional[float]) -> Tensor:
-    return _chunk_logits(x_c, weight, logit_scale).float()
-
-
-# Fused per-chunk CE math. Each reads the bf16 chunk logits once or twice and
-# writes only [chunk] fp32 stats (forward) or the bf16 dlogits (backward),
-# instead of ~6 eager passes over a [chunk, vocab] fp32 tensor.
+# Per-chunk CE math. Compiled (zaya_chunked_ce_compile), each reads the bf16
+# chunk logits once or twice and writes only [chunk] fp32 stats (forward) or
+# the bf16 dlogits (backward), instead of ~6 eager passes over a
+# [chunk, vocab] fp32 tensor.
 def _ce_fwd_stats(logits: Tensor, labels: Tensor, valid: Tensor):
+    # Same op order as VocabParallelCrossEntropy: shift by the row max, take the
+    # target from the shifted logits (0 for an out-of-range label), exp, sum, log.
     lf = logits.float()
     m = lf.amax(dim=-1, keepdim=True)
     shifted = lf - m
@@ -100,7 +99,7 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
         labels: Tensor,
         chunk: int,
         logit_scale: Optional[float],
-        fused: bool,
+        compiled: bool,
     ):
         # x: [N, H] activation dtype, weight: [V, H], labels: [N] int64.
         n_tok = x.shape[0]
@@ -110,35 +109,19 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
 
         loss = torch.empty(n_tok, dtype=torch.float32, device=x.device)
         lse = torch.empty(n_tok, dtype=torch.float32, device=x.device)
-        ctx.fused = fused
-        if fused:
-            fwd_stats, _ = _fused_kernels()
-            for start in range(0, n_tok, chunk):
-                end = min(start + chunk, n_tok)
-                logits = _chunk_logits(x[start:end], weight, logit_scale)
-                lse_c, loss_c = fwd_stats(logits, safe_labels[start:end], valid[start:end])
-                lse[start:end] = lse_c
-                loss[start:end] = loss_c
-                del logits
-        else:
-            for start in range(0, n_tok, chunk):
-                end = min(start + chunk, n_tok)
-                lf = _chunk_logits_fp32(x[start:end], weight, logit_scale)
-                # Same op order as VocabParallelCrossEntropy: shift by the row max
-                # in place, take the target from the shifted logits (0 for an
-                # out-of-range label), exp in place, sum, log.
-                m = lf.amax(dim=-1)
-                lf.sub_(m.unsqueeze(1))
-                tgt = lf.gather(1, safe_labels[start:end].unsqueeze(1)).squeeze(1)
-                tgt = torch.where(valid[start:end], tgt, torch.zeros_like(tgt))
-                log_sum = lf.exp_().sum(dim=-1).log_()
-                lse[start:end] = log_sum + m
-                loss[start:end] = log_sum - tgt
-                del lf
+        fwd_stats = _fused_kernels()[0] if compiled else _ce_fwd_stats
+        for start in range(0, n_tok, chunk):
+            end = min(start + chunk, n_tok)
+            logits = _chunk_logits(x[start:end], weight, logit_scale)
+            lse_c, loss_c = fwd_stats(logits, safe_labels[start:end], valid[start:end])
+            lse[start:end] = lse_c
+            loss[start:end] = loss_c
+            del logits
 
         ctx.save_for_backward(x, weight, safe_labels, valid, lse)
         ctx.chunk = chunk
         ctx.logit_scale = logit_scale
+        ctx.compiled = compiled
         return loss
 
     @staticmethod
@@ -152,37 +135,20 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
         need_dw = ctx.needs_input_grad[1]
         dx = torch.empty_like(x) if need_dx else None
         dw_acc = torch.zeros(weight.shape, dtype=torch.float32, device=weight.device) if need_dw else None
-        if ctx.fused:
-            _, bwd_dlogits = _fused_kernels()
+        bwd_dlogits = _fused_kernels()[1] if ctx.compiled else _ce_bwd_dlogits
 
         for start in range(0, n_tok, chunk):
             end = min(start + chunk, n_tok)
             x_c = x[start:end]
             g = grad_loss[start:end]
-            if ctx.fused:
-                logits = _chunk_logits(x_c, weight, logit_scale)
-                d = bwd_dlogits(logits, lse[start:end], safe_labels[start:end], valid[start:end], g)
-                del logits
-                if logit_scale is not None:
-                    d = d * logit_scale
-                if need_dx:
-                    torch.matmul(d, weight, out=dx[start:end])
-                if need_dw:
-                    dw_acc.add_(torch.matmul(d.t(), x_c))
-                del d
-                continue
-            # softmax - onehot, scaled by the upstream grad (fp32, in place).
-            p = _chunk_logits_fp32(x_c, weight, logit_scale)
-            p.sub_(lse[start:end].unsqueeze(1)).exp_()
-            sub = valid[start:end].to(p.dtype).unsqueeze(1)
-            p.scatter_add_(1, safe_labels[start:end].unsqueeze(1), -sub)
-            p.mul_(g.unsqueeze(1))
+            # softmax - onehot, scaled by the upstream grad, in fp32, then
+            # rounded to the activation dtype.
+            logits = _chunk_logits(x_c, weight, logit_scale)
+            d = bwd_dlogits(logits, lse[start:end], safe_labels[start:end], valid[start:end], g)
+            del logits
             if logit_scale is not None:
                 # d(scaled logits)/d(raw logits); stock autograd does this in bf16.
-                d = p.to(x.dtype) * logit_scale
-            else:
-                d = p.to(x.dtype)
-            del p
+                d = d * logit_scale
             if need_dx:
                 torch.matmul(d, weight, out=dx[start:end])
             if need_dw:
