@@ -31,15 +31,52 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_block_max
     index_dk,
     index_dq,
 )
+from primus.backends.megatron.core.transformer.minimax_m3.flydsl import select_plan
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
     build_block_plan,
 )
+
+
+def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_plan):
+    """:func:`select_plan`'s five-launch form of ``select_from_block_scores`` plus the
+    ``_FusedSelect`` bookkeeping and the :class:`BlockPlan`; None if it does not apply."""
+    indexer = getattr(select_from_block_scores, "__self__", None)
+    if indexer is None or getattr(indexer, "select_from_block_scores", None) is None:
+        return None
+    if type(indexer).select_from_block_scores.__qualname__ != "MinimaxM3Indexer.select_from_block_scores":
+        return None
+    from primus.backends.megatron.core.transformer.minimax_m3.indexer import _forced_blocks
+
+    B, H, S, NB = raw.shape
+    topk = min(indexer.topk_blocks, NB)
+    if not select_plan.supported(B, H, S, NB, topk):
+        return None
+    forced = _forced_blocks(S, NB, indexer.block_size, indexer.local_blocks, indexer.init_blocks, raw.device)
+    block_scores = raw if forced is None else select_plan.boost_forced(raw, forced)
+    topk_scores, topk_idx = block_scores.topk(topk, dim=-1)
+    bi, keys, keys_c, dead, table, plan = select_plan.select_post_and_plan(
+        topk_scores, topk_idx, argmax, block_scores, block_size, want_plan
+    )
+    return bi, block_scores, keys, keys_c, dead, table, plan
 
 
 class _FusedSelect(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, select_from_block_scores, block_size, plan_slot):
         raw, argmax = index_block_max(q, k, block_size)
+        ctx.set_materialize_grads(False)
+        ctx.block_size = block_size
+        want_plan = bool(plan_slot) and plan_slot[0] is True  # fused_select_blocks: grad was on
+        del plan_slot[:]
+        fused = _fused_selection(raw, argmax, select_from_block_scores, block_size, want_plan)
+        if fused is not None:
+            block_indices, block_scores, keys, keys_c, dead, table, plan = fused
+            ctx.save_for_backward(q, k, block_indices, keys, keys_c, dead)
+            ctx.fused = True
+            ctx.plan_slot = [plan] if plan is not None else []
+            plan_slot.append((plan, table))
+            ctx.mark_non_differentiable(block_indices)
+            return block_indices, block_scores
         block_indices, block_scores = select_from_block_scores(raw, q.shape[0])
 
         slots = block_indices.clamp_min(0)
@@ -47,7 +84,7 @@ class _FusedSelect(torch.autograd.Function):
         forced = torch.isposinf(block_scores.gather(-1, slots))
         dead = (block_indices < 0) | forced | (keys < 0)
         ctx.save_for_backward(q, k, block_indices, keys, dead)
-        ctx.block_size = block_size
+        ctx.fused = False
         # filled by fused_select_blocks once the selection exists
         ctx.plan_slot = plan_slot
         ctx.mark_non_differentiable(block_indices)
@@ -55,15 +92,22 @@ class _FusedSelect(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, _grad_indices, grad_scores):
-        q, k, block_indices, keys, dead = ctx.saved_tensors
+        if ctx.fused:
+            q, k, block_indices, keys, keys_c, dead = ctx.saved_tensors
+        else:
+            q, k, block_indices, keys, dead = ctx.saved_tensors
         S, B, H, D = q.shape
         if grad_scores is None:
             return torch.zeros_like(q), torch.zeros_like(k), None, None, None
 
-        g = (
-            grad_scores.gather(-1, block_indices.clamp_min(0)).masked_fill_(dead, 0.0).float()
-        )  # [B, H, S, topk]
-        dq = index_dq(g, keys.clamp_min(0), k.reshape(S, B, D), H)
+        if ctx.fused and grad_scores.dtype == torch.float32:
+            g = select_plan.backward_g(grad_scores, block_indices, dead)
+        else:
+            g = (
+                grad_scores.gather(-1, block_indices.clamp_min(0)).masked_fill_(dead, 0.0).float()
+            )  # [B, H, S, topk]
+            keys_c = keys.clamp_min(0)
+        dq = index_dq(g, keys_c, k.reshape(S, B, D), H)
         plan = ctx.plan_slot[0] if ctx.plan_slot else build_block_plan(block_indices, ctx.block_size)
         dk = index_dk(plan, g, keys, q, ctx.block_size)
         return dq, dk.reshape(k.shape), None, None, None
@@ -79,8 +123,14 @@ def fused_select_blocks(q, k, select_from_block_scores, block_size):
         k: ``[S, B, 1, D]`` bf16 index keys.
         select_from_block_scores: the indexer's boost + top-k.
     """
-    plan_slot = []
+    plan_slot = [torch.is_grad_enabled()]
     block_indices, block_scores = _FusedSelect.apply(q, k, select_from_block_scores, block_size, plan_slot)
+    if plan_slot:
+        # fused selection: the plan (when grad is on) and the int32 table came out of the forward
+        plan, table = plan_slot.pop()
+        if plan is not None:
+            plan = plan._replace(table=table)
+        return block_indices, block_scores, plan
     plan = None
     if torch.is_grad_enabled():
         plan = build_block_plan(block_indices, block_size)

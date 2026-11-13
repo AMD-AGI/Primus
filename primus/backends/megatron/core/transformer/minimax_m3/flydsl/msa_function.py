@@ -19,6 +19,8 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
 class _MSAAttention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan):
+        # lse / slot_lse never carry a gradient: don't materialise zeros for them
+        ctx.set_materialize_grads(False)
         outs = msa_token_fwd(q, k, v, block_table, softmax_scale, block_size, return_slot_lse=return_slot_lse)
         o, lse = outs[0], outs[1]
         ctx.save_for_backward(q, k, v, o, lse, block_table)
@@ -46,5 +48,9 @@ def msa_attention(q, k, v, block_table, softmax_scale, block_size=128, return_sl
     ``o`` carries a gradient.
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
-    block_table = block_table.to(torch.int32).contiguous()
+    table = getattr(plan, "table", None) if plan is not None else None
+    if table is not None and table.shape == block_table.shape:
+        block_table = table  # select_plan's int32 copy of the same table
+    else:
+        block_table = block_table.to(torch.int32).contiguous()
     return _MSAAttention.apply(q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan)

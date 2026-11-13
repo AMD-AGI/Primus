@@ -53,10 +53,11 @@ workspace follows from the input shapes alone, not from the selection.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+
 import torch
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
@@ -1037,6 +1038,8 @@ class BlockPlan(NamedTuple):
     chunk_ptr: torch.Tensor
     n_chunks: int
     n_blocks: int
+    # the int32 block table itself, when the plan's builder already made it (select_plan)
+    table: Optional[torch.Tensor] = None
 
 
 def build_block_plan(block_table: torch.Tensor, block_size: int = 128) -> BlockPlan:
