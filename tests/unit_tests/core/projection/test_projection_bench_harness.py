@@ -656,3 +656,13 @@ def test_compiled_block_is_detected_for_whole_layer_timing():
     block = _TitanForwardBlock()
     assert not _is_compiled_module(block)
     assert _is_compiled_module(torch.compile(block))
+
+
+def test_checkpointed_block_is_detected_for_whole_layer_timing():
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
+
+    from primus.core.projection.module_profilers.transformer_layer import _is_checkpointed_module
+
+    block = nn.Linear(HIDDEN, HIDDEN)
+    assert not _is_checkpointed_module(block)
+    assert _is_checkpointed_module(checkpoint_wrapper(block))
