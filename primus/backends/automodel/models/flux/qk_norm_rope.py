@@ -56,6 +56,7 @@ import torch
 import torch.nn.functional as F
 
 from primus.backends.automodel import options
+from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
 
 logger = logging.getLogger(__name__)
 
@@ -498,16 +499,6 @@ def _norm_eps(norms) -> Optional[float]:
     return eps.pop() if len(eps) == 1 and None not in eps else None
 
 
-def _plain_linear(m) -> bool:
-    """A stock torch.nn.Linear with a bias and no hooks, which F.linear computes exactly."""
-    return (
-        type(m) is torch.nn.Linear
-        and m.bias is not None
-        and not m._forward_hooks
-        and not m._forward_pre_hooks
-    )
-
-
 def _fusable(attn, hidden_states, encoder_hidden_states, image_rotary_emb) -> Optional[float]:
     """eps for the op if this call is one it computes exactly as diffusers does, else None."""
     if not getattr(attn, "fused_projections", False) or attn.head_dim != _HEAD_DIM:
@@ -554,7 +545,7 @@ def _install_processor() -> bool:
         cos, sin = image_rotary_emb
         dual = encoder_hidden_states is not None
         projections = [attn.to_qkv] + ([attn.to_added_qkv] if dual else [])
-        if _state["bias_grad"] and all(_plain_linear(p) for p in projections):
+        if _state["bias_grad"] and all(is_plain_linear(p) for p in projections):
             # The op returns the bias gradients from its backward kernel, so the GEMMs add the
             # biases without differentiating them.
             qkv = F.linear(hidden_states, attn.to_qkv.weight, attn.to_qkv.bias.detach())

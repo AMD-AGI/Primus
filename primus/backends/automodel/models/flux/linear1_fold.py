@@ -35,6 +35,11 @@ REQUIRES:
   with ``qk_norm_rope.py``, on diffusers 0.40.0; uses ``adaln_flydsl.py``'s adaLN op when it is
   installed. Installs at priority 76, before ``block_outputs.py`` and ``last_block.py``. The three
   21504-wide GEMMs run at their tuned speed only with TunableOp entries for them.
+  The folded blocks make the attention call of ``primus_turbo.nondeterministic_attention``
+  themselves, so the fold needs that override and declines where its attention would differ from
+  the unfolded blocks': with the FP8 attention override, and under context parallelism, which
+  the folded blocks' direct kernel call cannot follow. It also declines when a linear swap
+  (``model.transformer_engine_linear``) would replace ``linear1`` after the fold.
 
 Settings (module config, ``primus_perf:`` section):
     flux_fold_linear1: false     apply this patch
@@ -43,11 +48,13 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
 from primus.backends.automodel import options
+from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
 
 logger = logging.getLogger(__name__)
 
@@ -74,9 +81,9 @@ def _foldable(block) -> bool:
         and not hasattr(attn, "to_q")
         and attn.head_dim == _HEAD_DIM
         and qkv is not None
-        and qk_norm_rope._plain_linear(qkv)
+        and is_plain_linear(qkv)
         and mlp is not None
-        and qk_norm_rope._plain_linear(mlp)
+        and is_plain_linear(mlp)
         and qkv.weight.dtype == mlp.weight.dtype
         and qkv.weight.device == mlp.weight.device
         and isinstance(act, torch.nn.GELU)
@@ -400,6 +407,11 @@ def make_forward(orig):
                 "[PrimusFluxLinear1] a folded single-stream block needs BF16 tokens and the "
                 "rotary embedding, and takes no joint_attention_kwargs"
             )
+        if not is_plain_linear(linear1):
+            raise NotImplementedError(
+                f"[PrimusFluxLinear1] linear1 was replaced by a {type(linear1).__name__} after the fold; "
+                "the folded block computes it from its weight and would skip that layer's forward"
+            )
         attn, norm = self.attn, self.norm
         text_seq_len = encoder_hidden_states.shape[1]
         emb = norm.linear(norm.silu(temb))
@@ -439,7 +451,31 @@ def make_forward(orig):
     return forward
 
 
-def install() -> bool:
+def unsupported_reason(*, context_parallel: bool, linear_swap: bool) -> Optional[str]:
+    """Why the fold cannot serve this run, or None if it can (see REQUIRES above)."""
+    from primus.backends.automodel.attention import fp8, nondeterministic
+
+    if not nondeterministic.is_enabled() or fp8.is_enabled():
+        return (
+            "needs primus_turbo.nondeterministic_attention without primus_turbo.fp8_attention: "
+            "the folded blocks make that override's attention call"
+        )
+    if context_parallel:
+        return "context parallelism is on, and the folded blocks call the attention kernel on local tokens"
+    if linear_swap:
+        return (
+            "model.transformer_engine_linear is on, and its linear swap would replace linear1 after the fold"
+        )
+    return None
+
+
+def install(*, context_parallel: bool = False, linear_swap: bool = False) -> bool:
+    """``context_parallel`` and ``linear_swap`` say what the run's config builds."""
+    reason = unsupported_reason(context_parallel=context_parallel, linear_swap=linear_swap)
+    if reason is not None:
+        logger.warning("[PrimusFluxLinear1] %s; not applied.", reason)
+        return False
+
     from diffusers.models.transformers.transformer_flux import (
         FluxSingleTransformerBlock,
     )

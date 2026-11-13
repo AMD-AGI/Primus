@@ -52,6 +52,7 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from primus.backends.automodel import options
+from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,10 @@ def installed() -> bool:
 
 
 def fusable(x: torch.Tensor, linear: torch.nn.Linear, act_is_tanh_gelu: bool) -> bool:
-    """Whether ``gelu_linear`` serves ``act(linear(x))``."""
+    """Whether ``gelu_linear`` serves ``act(linear(x))``; a swapped linear keeps its own forward."""
     return (
         act_is_tanh_gelu
-        and linear.bias is not None
+        and is_plain_linear(linear)
         and x.is_cuda
         and x.dtype == torch.bfloat16
         and linear.weight.dtype == torch.bfloat16

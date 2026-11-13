@@ -83,3 +83,8 @@ def shards_with_fsdp2(ctx: PatchContext) -> bool:
     if get_param(ctx, "ddp", None) is not None:
         return False
     return not megatron_fsdp.is_megatron_fsdp_backend(get_param(ctx, "fsdp.backend", None))
+
+
+def context_parallel(ctx: PatchContext) -> bool:
+    """Whether the recipe splits each sequence across ranks (``fsdp.cp_size`` above 1)."""
+    return int(as_automodel_reads_it(get_param(ctx, "fsdp.cp_size", 1)) or 1) > 1

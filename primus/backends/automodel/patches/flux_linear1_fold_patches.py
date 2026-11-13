@@ -9,11 +9,17 @@ Gated on ``primus_perf.flux_fold_linear1`` for FLUX runs; see ``models/flux/line
 fused GELU and q/k norm (priority 70) and the FlyDSL adaLN (75), whose ops it uses, and before
 the un-aliased block outputs (80) and the image-only last block (85), which wrap its forward.
 Folds the weights when AutoModel fuses the QKV projections, before FSDP2 wraps the model.
+Runs after the low-precision linear swaps (20), which set ``model.transformer_engine_linear``
+when they install, so the fold can decline when a swap would replace ``linear1``.
 """
 
 from primus.backends.automodel import options
-from primus.backends.automodel.patches._conditions import transformer_is
-from primus.core.patches import PatchContext, register_patch
+from primus.backends.automodel.patches._conditions import (
+    as_automodel_reads_it,
+    context_parallel,
+    transformer_is,
+)
+from primus.core.patches import PatchContext, get_param, register_patch
 
 options.declare("primus_perf", "flux_fold_linear1")
 
@@ -37,4 +43,7 @@ def _enabled(ctx: PatchContext) -> bool:
 def apply(ctx: PatchContext) -> None:
     from primus.backends.automodel.models.flux import linear1_fold
 
-    linear1_fold.install()
+    linear1_fold.install(
+        context_parallel=context_parallel(ctx),
+        linear_swap=bool(as_automodel_reads_it(get_param(ctx, "model.transformer_engine_linear", False))),
+    )
