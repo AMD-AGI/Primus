@@ -13,6 +13,11 @@ logic into Primus so the Megatron-LM submodule stays pristine. Each converter
 runs entirely in a *single process*: it builds the mcore ``GPTModel`` with the
 same builder Primus training uses (``get_model_provider`` ->
 ``model_provider(gpt_builder)``), copies HF ``safetensors`` weights directly onto
-those parameters, and saves a legacy ``torch`` checkpoint. No ``megatron.bridge``
-/ ``AutoBridge`` / ``modelopt`` is ever imported.
+those parameters, and saves a ``torch_dist`` checkpoint that Megatron reshards
+to any TP / PP / EP on load (or a legacy TP1/PP1 ``torch`` checkpoint if asked).
+No ``megatron.bridge`` / ``AutoBridge`` / ``modelopt`` is ever imported.
+
+The supported families are registered in ``native_registry`` (built-ins) and in
+``native_families/`` (one module per added family); see ``native_registry`` for
+how to add one.
 """

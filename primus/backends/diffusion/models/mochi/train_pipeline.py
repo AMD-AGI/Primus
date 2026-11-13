@@ -98,7 +98,12 @@ class MochiTrainPipeline:
         sequence_lengths = valid_tokens.sum(dim=1, dtype=torch.int32)
         packed_indices = {
             "cu_seqlens_kv": torch.cat(
-                (torch.zeros(1, device=device, dtype=torch.int32), sequence_lengths.cumsum(dim=0))
+                (
+                    torch.zeros(1, device=device, dtype=torch.int32),
+                    # Keep int32. Bare cumsum promotes integer inputs to int64, and
+                    # AITER's varlen kernel rejects that (cu_seqlens_q must be int32).
+                    sequence_lengths.cumsum(dim=0, dtype=torch.int32),
+                )
             ),
             "max_seqlen_in_batch_kv": int(sequence_lengths.max().item()),
             "valid_token_indices_kv": valid_tokens.flatten().nonzero(as_tuple=False).flatten(),

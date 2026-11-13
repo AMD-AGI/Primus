@@ -6,7 +6,9 @@
 # 2. pre-commit install(the first time you download the repo, it will be cached for future use)
 
 # Vendored code is linted upstream; keep hooks focused on Primus-owned paths.
-exclude: ^third_party/
+# The DLRMv4 trainer package is not reformatted: it is kept close to its MLPerf
+# reference (diffable), and its kernel tests compare source text and bits.
+exclude: ^(third_party/|primus/backends/recommendation/dlrm_v4/src/)
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

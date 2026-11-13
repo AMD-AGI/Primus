@@ -164,8 +164,7 @@ def _enabled(ctx: PatchContext) -> bool:
     priority=60,
 )
 def patch_te_cross_entropy_deferred(ctx: PatchContext) -> None:
-    if bool(getattr(get_args(ctx), "use_turbo_cross_entropy", False)):
-        raise ValueError("deferred_cross_entropy and use_turbo_cross_entropy are mutually exclusive")
+    # validate_args_on_rocm rejects use_turbo_cross_entropy with this patch.
     import megatron.core.extensions.transformer_engine as te_ext
     from megatron.core.models.common.language_module import language_module
 
