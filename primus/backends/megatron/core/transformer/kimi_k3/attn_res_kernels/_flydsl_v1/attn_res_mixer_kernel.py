@@ -75,6 +75,8 @@ Three FlyDSL tracing rules are load-bearing here:
 
 import math
 import os
+import threading
+from typing import Optional, Tuple
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -104,14 +106,17 @@ _LLVM_GEP_DYNAMIC = -2147483648  # LLVM kDynamicIndex sentinel
 #: candidate in registers between the reduction and the mix, so ``v`` is read once.
 #: The scalar layout above moves 2 bytes per lane per load and reads ``v`` twice,
 #: which leaves it several times below HBM bandwidth on gfx1250. Built on gfx1250 for
-#: bf16 when ``H % (VEC_BLOCK * VEC) == 0`` and no test defect is requested;
-#: ``K3P_ATTNRES_VEC=0`` keeps the scalar kernel.
+#: bf16 when ``H % (VEC_BLOCK * VEC) == 0``; see :func:`vector_kernel_knobs` for the
+#: two environment variables that tune it.
 VEC = 8
 VEC_BLOCK = 128
+#: The architecture the vector kernels are built for: they assume 32-lane waves.
+VECTOR_KERNEL_ARCH = "gfx1250"
 #: gfx1250 wave width; the vector kernels reduce inside a wave with ``gpu.shuffle_xor``
 #: and only the per-wave partials go through LDS (one barrier instead of the scalar
 #: kernel's recursive doubling, which costs two barriers per step).
 WAVE = 32
+assert WAVE & (WAVE - 1) == 0, "the butterfly needs a power-of-two wave"
 
 
 def block_sums(vals, tid, block, lds_get, lds_put, fm):
@@ -141,14 +146,31 @@ def block_sums(vals, tid, block, lds_get, lds_put, fm):
     return out
 
 
-def use_vector_kernel(hidden: int, elem_dtype: str, inject: str = "", arch: str = "") -> bool:
-    """Whether the forward / backward builders take the vectorised layout (gfx1250 only)."""
+def vector_kernel_knobs() -> Tuple[bool, Optional[int]]:
+    """``(allowed, waves_per_eu)`` of the vector kernels, from the environment.
+
+    ``K3P_ATTNRES_VEC``: ``0``, ``false``, ``no`` or ``off`` (any case) keeps the scalar
+    kernels on gfx1250; unset or anything else allows the vector kernels.
+    ``K3P_ATTNRES_WPE``: ``rocdl.waves_per_eu`` of the vector kernels, a positive integer
+    (unset: the builders' ``waves_per_eu``, 2).
+
+    Read on every kernel lookup: the mixer's kernel caches are keyed on the result, so a
+    change inside a process builds new kernels instead of being ignored.
+    """
+    allowed = os.environ.get("K3P_ATTNRES_VEC", "1").strip().lower() not in ("0", "false", "no", "off")
+    wpe = os.environ.get("K3P_ATTNRES_WPE", "").strip()
+    if wpe and not (wpe.isdigit() and int(wpe) > 0):
+        raise ValueError(f"K3P_ATTNRES_WPE must be a positive integer; got {wpe!r}")
+    return allowed, (int(wpe) if wpe else None)
+
+
+def use_vector_kernel(hidden: int, elem_dtype: str, arch: str, allowed: bool = True) -> bool:
+    """Whether the forward / backward builders take the vectorised layout (gfx1250 bf16 only)."""
     return (
-        arch.startswith("gfx1250")
+        allowed
+        and arch.startswith(VECTOR_KERNEL_ARCH)
         and elem_dtype == "bf16"
-        and not inject
         and hidden % (VEC_BLOCK * VEC) == 0
-        and os.environ.get("K3P_ATTNRES_VEC", "1") != "0"
     )
 
 
@@ -222,6 +244,8 @@ _ALL_FWD_VARIANTS = FWD_INJECTIONS + FWD_NEUTRAL_VARIANTS
 __all__ = [
     "build_attn_res_mixer_fwd",
     "supports_mixer_geometry",
+    "use_vector_kernel",
+    "vector_kernel_knobs",
     "block_size_for",
     "MAX_BLOCK",
     "MIN_BLOCK",
@@ -291,6 +315,7 @@ def build_attn_res_mixer_fwd(
     eps: float,
     waves_per_eu: int = 2,
     inject: str = "",
+    knobs: Optional[Tuple[bool, Optional[int]]] = None,
 ):
     """Build the forward launcher for one ``(hidden, num_blocks, dtype, eps)``.
 
@@ -303,6 +328,8 @@ def build_attn_res_mixer_fwd(
         inject: **test only.** One of :data:`FWD_INJECTIONS`, which emits a
             deliberately defective kernel so the parity test can be shown to
             catch it. Empty (the production value) emits the correct kernel.
+        knobs: :func:`vector_kernel_knobs` as the caller keyed its cache on;
+            ``None`` reads the environment.
 
     Returns:
         ``launch(BR, PS, W, OUT, RSAV, DSAV, num_tokens)`` over flat tensors.
@@ -325,12 +352,13 @@ def build_attn_res_mixer_fwd(
     if inject and inject not in _ALL_FWD_VARIANTS:
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(_ALL_FWD_VARIANTS)}")
 
-    vec_path = use_vector_kernel(H, elem_dtype, inject, arch)
+    allowed, wpe = vector_kernel_knobs() if knobs is None else knobs
+    vec_path = use_vector_kernel(H, elem_dtype, arch, allowed and not inject)
     BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK  # hidden elements per thread
     EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
-    if vec_path:
-        waves_per_eu = int(os.environ.get("K3P_ATTNRES_WPE", str(waves_per_eu)))
+    if vec_path and wpe is not None:
+        waves_per_eu = wpe
     EPSILON = 0.0 if inject == "drop_eps" else float(eps)
 
     # 2C reduction rows (ss and dot per candidate), one f32 slot per thread.
@@ -708,15 +736,21 @@ def build_attn_res_mixer_fwd(
     }
 
     compiled = []
+    compile_lock = threading.Lock()
 
     def _launch(*args):
         # Calling the @flyc.jit launcher resolves its signature and cache key every time (~0.5 ms of host
         # time per call); the compiled function launches directly.
         if compiled:
             return compiled[0](*args)
-        with CompilationContext.compile_hints(_hints):
-            fn = flyc.compile(launch_attn_res_mixer_fwd, *args)  # also runs it once on these arguments
-        if fn is not None:
-            compiled.append(fn)
+        with compile_lock:
+            if compiled:
+                return compiled[0](*args)
+            # flyc.compile calls the launcher on these arguments before it returns the compiled function
+            # (flydsl.compiler.jit_function._compile_impl), so the first call is launched here, once.
+            with CompilationContext.compile_hints(_hints):
+                fn = flyc.compile(launch_attn_res_mixer_fwd, *args)
+            if fn is not None:
+                compiled.append(fn)
 
     return _launch

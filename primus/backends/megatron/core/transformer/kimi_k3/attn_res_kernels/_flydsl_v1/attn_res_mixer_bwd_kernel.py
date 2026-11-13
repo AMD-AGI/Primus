@@ -56,7 +56,8 @@ rules as the forward; see that module's docstring.
 """
 
 import math
-import os
+import threading
+from typing import Optional, Tuple
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -84,6 +85,7 @@ from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_
     block_sums,
     supports_mixer_geometry,
     use_vector_kernel,
+    vector_kernel_knobs,
 )
 
 _LOG2E = math.log2(math.e)
@@ -131,6 +133,7 @@ def build_attn_res_mixer_bwd(
     elem_dtype: str,
     waves_per_eu: int = 2,
     inject: str = "",
+    knobs: Optional[Tuple[bool, Optional[int]]] = None,
 ):
     """Build the backward launcher for one ``(hidden, num_blocks, dtype)``.
 
@@ -141,6 +144,8 @@ def build_attn_res_mixer_bwd(
     Args:
         inject: **test only.** One of :data:`BWD_INJECTIONS`. Empty (the
             production value) emits the correct adjoint.
+        knobs: ``vector_kernel_knobs()`` as the caller keyed its cache on;
+            ``None`` reads the environment.
 
     Returns ``launch(BR, PS, W, DOUT, RSAV, DSAV, DBR, DPS, DW_TOK, DDOT,
     num_tokens)`` over flat tensors.
@@ -161,12 +166,13 @@ def build_attn_res_mixer_bwd(
     if inject and inject not in BWD_INJECTIONS:
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(BWD_INJECTIONS)}")
 
-    vec_path = use_vector_kernel(H, elem_dtype, inject, arch)
+    allowed, wpe = vector_kernel_knobs() if knobs is None else knobs
+    vec_path = use_vector_kernel(H, elem_dtype, arch, allowed and not inject)
     BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK
     EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
-    if vec_path:
-        waves_per_eu = int(os.environ.get("K3P_ATTNRES_WPE", str(waves_per_eu)))
+    if vec_path and wpe is not None:
+        waves_per_eu = wpe
 
     # One reduction row per candidate: dp[c] only. r and dot are read back from
     # the forward's saved tensors.
@@ -582,14 +588,19 @@ def build_attn_res_mixer_bwd(
     }
 
     compiled = []
+    compile_lock = threading.Lock()
 
     def _launch(*args):
-        # see build_attn_res_mixer_fwd: the compiled function skips the per-call cache-key resolution
+        # see build_attn_res_mixer_fwd: the compiled function skips the per-call cache-key resolution, and
+        # flyc.compile launches the first call itself
         if compiled:
             return compiled[0](*args)
-        with CompilationContext.compile_hints(_hints):
-            fn = flyc.compile(launch_attn_res_mixer_bwd, *args)  # also runs it once on these arguments
-        if fn is not None:
-            compiled.append(fn)
+        with compile_lock:
+            if compiled:
+                return compiled[0](*args)
+            with CompilationContext.compile_hints(_hints):
+                fn = flyc.compile(launch_attn_res_mixer_bwd, *args)
+            if fn is not None:
+                compiled.append(fn)
 
     return _launch

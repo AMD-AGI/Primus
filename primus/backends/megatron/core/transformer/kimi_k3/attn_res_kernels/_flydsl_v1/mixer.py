@@ -24,6 +24,11 @@ Division of labour, following the KDA precedent:
 
 Anything the kernel cannot run raises :class:`ValueError` naming the fallback
 rather than degrading quietly — the rule the KDA kernel already follows.
+
+Two environment variables tune the gfx1250 bf16 vector kernels
+(:func:`..attn_res_mixer_kernel.vector_kernel_knobs`): ``K3P_ATTNRES_VEC=0`` (or
+``false`` / ``no`` / ``off``) keeps the scalar kernels, ``K3P_ATTNRES_WPE=<n>`` sets
+their ``waves_per_eu``. Both are part of the kernel cache keys.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_
     MAX_CANDIDATES,
     build_attn_res_mixer_fwd,
     supports_mixer_geometry,
+    vector_kernel_knobs,
 )
 
 __all__ = [
@@ -61,8 +67,9 @@ __all__ = [
 #: silently narrowed.
 _ELEM_DTYPES = {torch.float32: "f32", torch.bfloat16: "bf16"}
 
-_FWD_CACHE: Dict[Tuple[int, int, str, float, str], object] = {}
-_BWD_CACHE: Dict[Tuple[int, int, str, str], object] = {}
+_Knobs = Tuple[bool, Optional[int]]
+_FWD_CACHE: Dict[Tuple[int, int, str, float, str, _Knobs], object] = {}
+_BWD_CACHE: Dict[Tuple[int, int, str, str, _Knobs], object] = {}
 _CACHE_LOCK = threading.Lock()
 
 #: Test-only build-time defects for the current process, ``(fwd, bwd)``.
@@ -86,27 +93,36 @@ def inject_defect(fwd: str = "", bwd: str = "") -> None:
 
 
 def _get_fwd(hidden: int, num_blocks: int, elem: str, eps: float):
-    key = (int(hidden), int(num_blocks), elem, float(eps), _INJECT[0])
+    key = (int(hidden), int(num_blocks), elem, float(eps), _INJECT[0], vector_kernel_knobs())
     with _CACHE_LOCK:
         launch = _FWD_CACHE.get(key)
         if launch is None:
             launch = build_attn_res_mixer_fwd(
-                hidden=key[0], num_blocks=key[1], elem_dtype=elem, eps=key[3], inject=key[4]
+                hidden=key[0], num_blocks=key[1], elem_dtype=elem, eps=key[3], inject=key[4], knobs=key[5]
             )
             _FWD_CACHE[key] = launch
         return launch
 
 
 def _get_bwd(hidden: int, num_blocks: int, elem: str):
-    key = (int(hidden), int(num_blocks), elem, _INJECT[1])
+    key = (int(hidden), int(num_blocks), elem, _INJECT[1], vector_kernel_knobs())
     with _CACHE_LOCK:
         launch = _BWD_CACHE.get(key)
         if launch is None:
             launch = build_attn_res_mixer_bwd(
-                hidden=key[0], num_blocks=key[1], elem_dtype=elem, inject=key[3]
+                hidden=key[0], num_blocks=key[1], elem_dtype=elem, inject=key[3], knobs=key[4]
             )
             _BWD_CACHE[key] = launch
         return launch
+
+
+def _aligned(t: Tensor) -> Tensor:
+    """``t``, or a contiguous copy when its first element is not 16-byte aligned.
+
+    The gfx1250 vector kernels move 16 bytes per lane per access, and ``contiguous()``
+    keeps a view's storage offset; same rule as the vector loads in ``weight_deosc.py``.
+    """
+    return t.clone(memory_format=torch.contiguous_format) if t.data_ptr() % 16 else t
 
 
 def supports_mixer_inputs(prefix_sum: Tensor, block_residual: Tensor) -> Optional[str]:
@@ -135,6 +151,9 @@ class _FlydslMix(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, prefix_sum: Tensor, block_residual: Tensor, score_weight: Tensor, eps: float):
+        prefix_sum, block_residual, score_weight = (
+            _aligned(t) for t in (prefix_sum, block_residual, score_weight)
+        )
         num_tokens, hidden = prefix_sum.shape
         num_blocks = block_residual.shape[-2]
         elem = _ELEM_DTYPES[prefix_sum.dtype]
@@ -164,7 +183,7 @@ class _FlydslMix(torch.autograd.Function):
         num_tokens, hidden = prefix_sum.shape
         num_blocks = block_residual.shape[-2]
 
-        grad_out = grad_out.contiguous()
+        grad_out = _aligned(grad_out.contiguous())
         d_ps = torch.empty_like(prefix_sum)
         d_br = torch.empty_like(block_residual)
         # dw_tok is the per-token partial of the scorer gradient; see the
