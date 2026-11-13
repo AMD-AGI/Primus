@@ -362,6 +362,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
         flatten_overrides(getattr(params, "specforge_overrides", None)).get(CAPTURE_BACKEND_KEY)
     )
     model = _model_section(params, environ)
+    single_node = _as_bool(raw.get("single_node", environ.get("PRIMUS_SPECFORGE_SINGLE_NODE")), False)
     run_id = raw.get("run_id") or environ.get("RUN_ID") or environ.get("DISAGG_STORE_ID")
     run_root = raw.get("run_root") or environ.get("RUN_ROOT") or environ.get("DISAGG_RUN_ROOT")
     consumer_state = (
@@ -396,6 +397,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
     if not extra:
         extra = ["--attention-backend", "aiter", "--disable-radix-cache"]
     return {
+        "single_node": single_node,
         "run_id": str(run_id).strip() if run_id else "",
         "run_root": str(run_root).strip() if run_root else "",
         "consumer_state_dir": str(consumer_state).strip() if consumer_state else "",
@@ -433,6 +435,8 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
 
 
 def expected_nnodes(settings: Mapping[str, Any]) -> int:
+    if settings.get("single_node"):
+        return 1
     return int(settings["capture_nnodes"]) + int(settings["trainer_nnodes"])
 
 
@@ -452,10 +456,26 @@ def validate_online_identity(settings: Mapping[str, Any], *, rank: int, nodes: i
         issues.append("capture_nnodes must be >= 1")
     if trainer_nnodes < 1:
         issues.append("trainer_nnodes must be >= 1")
+    if settings.get("single_node"):
+        if capture_nnodes != 1 or trainer_nnodes != 1:
+            issues.append("single_node requires capture_nnodes=trainer_nnodes=1")
+
+        def canonical_devices(value):
+            tokens = [token.strip() for token in str(value).split(",")]
+            return [str(int(token)) if token.isdecimal() else token for token in tokens]
+
+        server_devices = canonical_devices(settings["server_gpus"])
+        trainer_devices = canonical_devices(settings["trainer_gpus"])
+        if set(server_devices) & set(trainer_devices):
+            issues.append("single_node requires disjoint server_gpus and trainer_gpus")
+        for name, devices in (("server_gpus", server_devices), ("trainer_gpus", trainer_devices)):
+            if len(set(devices)) != len(devices):
+                issues.append(f"single_node requires unique {name}")
     want = expected_nnodes(settings)
     if capture_nnodes >= 1 and trainer_nnodes >= 1 and nodes != want:
+        shape = "1 (single_node)" if settings.get("single_node") else f"capture_nnodes+trainer_nnodes={want}"
         issues.append(
-            f"online mode expects NNODES=capture_nnodes+trainer_nnodes={want} "
+            f"online mode expects NNODES={shape} "
             f"(capture_nnodes={capture_nnodes}, trainer_nnodes={trainer_nnodes}); got {nodes}"
         )
     if rank < 0 or (want > 0 and rank >= want):
