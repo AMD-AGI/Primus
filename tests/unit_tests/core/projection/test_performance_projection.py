@@ -50,6 +50,7 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _layer_needs_recompute_fwd_in_bwd,
     _limit_layers_for_projection,
     _load_artifact,
+    _megatron_fsdp_insitu_ms,
     _load_profiling_results,
     _normalized_recompute_layer_ids,
     _recompute_layer_count,
@@ -776,3 +777,21 @@ def test_collective_comm_fsdp_breakdown(_single_node_env):
     )
     assert breakdown["fsdp_allgather_fwd"] > 0
     assert msg["fsdp_enabled"] is True
+
+
+def _fsdp_message_info():
+    return {"fsdp_enabled": True, "num_layers": 80, "fsdp_ag_per_layer_ms": 6.8, "fsdp_rs_per_layer_ms": 7.0}
+
+
+def test_megatron_fsdp_insitu_scales_with_layers_comm_and_compute():
+    msg = _fsdp_message_info()
+    got = _megatron_fsdp_insitu_ms(SimpleNamespace(framework="megatron"), msg, 80 * 264.0)
+    per_layer = 0.47 * (2 * 6.8 + 7.0) + 0.09 * 264.0
+    assert got == pytest.approx(80 * per_layer)
+    assert msg["fsdp_insitu_per_layer_ms"] == pytest.approx(per_layer)
+
+
+def test_megatron_fsdp_insitu_only_for_megatron_fsdp():
+    assert _megatron_fsdp_insitu_ms(SimpleNamespace(framework="torchtitan"), _fsdp_message_info(), 1000.0) == 0.0
+    no_fsdp = dict(_fsdp_message_info(), fsdp_enabled=False)
+    assert _megatron_fsdp_insitu_ms(SimpleNamespace(framework="megatron"), no_fsdp, 1000.0) == 0.0

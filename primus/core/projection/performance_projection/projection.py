@@ -4145,6 +4145,40 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
     return num_params * bytes_per_param / _BYTES_PER_GB
 
 
+# Megatron's torch FSDP2 runs every layer slower than the isolated layer benchmark,
+# which builds the model without FSDP. Measured on Llama 3.1 70B, MI325X (8- and
+# 16-layer training sweeps with and without FSDP2, plus kernel traces), per layer and
+# microbatch:
+#   - compute overlapping the all-gathers / reduce-scatters runs 16-25% slower than
+#     the same kernels alone (mostly the recompute forward and backward GEMMs under
+#     the reduce-scatter), which grows with the layer's compute;
+#   - all-gather copy-out, reduce-scatter copy-in and fp32 gradient foreach kernels,
+#     which grow with the layer's FSDP traffic.
+# Fitted on Llama 3.1 70B BF16 and FP8 only; Llama 2/3.3 70B, Qwen 2.5 72B and Qwen 3
+# 32B (BF16 and FP8) are held out. TorchTitan's FSDP2 trains within ~2% of its
+# benchmark and is not corrected.
+_MEGATRON_FSDP_COMM_FACTOR = 0.47
+_MEGATRON_FSDP_COMPUTE_FACTOR = 0.09
+
+
+def _megatron_fsdp_insitu_ms(training_config, message_info, microbatch_time_ms) -> float:
+    """Per-microbatch FSDP2 cost the layer benchmark misses (0 unless Megatron + FSDP2)."""
+    if getattr(training_config, "framework", None) != "megatron" or not message_info.get("fsdp_enabled"):
+        return 0.0
+    num_layers = message_info.get("num_layers", 0)
+    if num_layers <= 0 or microbatch_time_ms <= 0:
+        return 0.0
+    # Two all-gathers (forward, and backward including any recompute) and one
+    # reduce-scatter per layer and microbatch, as traced.
+    comm_ms = 2 * message_info.get("fsdp_ag_per_layer_ms", 0.0) + message_info.get("fsdp_rs_per_layer_ms", 0.0)
+    per_layer = (
+        _MEGATRON_FSDP_COMM_FACTOR * comm_ms
+        + _MEGATRON_FSDP_COMPUTE_FACTOR * microbatch_time_ms / num_layers
+    )
+    message_info["fsdp_insitu_per_layer_ms"] = per_layer
+    return per_layer * num_layers
+
+
 def _run_multinode_projection(
     training_config,
     single_node_time_ms,
@@ -4430,6 +4464,16 @@ def _run_multinode_projection(
     fsdp_exposed = message_info.get("fsdp_exposed_ms", 0)
     if fsdp_exposed > 0:
         projected_time_ms += fsdp_exposed
+
+    if not time_includes_all_microbatches:
+        fsdp_insitu = _megatron_fsdp_insitu_ms(training_config, message_info, single_node_time_ms)
+        if fsdp_insitu > 0:
+            projected_time_ms += fsdp_insitu
+            if is_rank_0:
+                print(
+                    f"  [FSDP2 in-situ] +{fsdp_insitu:.1f} ms per microbatch "
+                    f"({message_info['fsdp_insitu_per_layer_ms']:.2f} ms/layer: overlap contention + FSDP copy kernels)"
+                )
 
     # Calculate values needed for both printing and return
     target_world_size = target_nodes * gpus_per_node
