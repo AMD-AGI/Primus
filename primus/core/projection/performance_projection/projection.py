@@ -3099,14 +3099,18 @@ def _optimizer_shard_elems(model_chunks) -> Dict[str, int]:
     over the expert-DP group.
     """
     dense = expert = 0
+    sharded = False
     for chunk in model_chunks:
         for p in chunk.parameters():
             if not p.requires_grad:
                 continue
+            # FSDP parameters are DTensors; the optimizer steps only the local shard.
+            numel = p.to_local().numel() if hasattr(p, "to_local") else p.numel()
+            sharded = sharded or hasattr(p, "to_local")
             if getattr(p, "allreduce", True):
-                dense += p.numel()
+                dense += numel
             else:
-                expert += p.numel()
+                expert += numel
     dp = edp = 1
     try:
         from megatron.core import parallel_state as ps
@@ -3115,7 +3119,7 @@ def _optimizer_shard_elems(model_chunks) -> Dict[str, int]:
         edp = ps.get_expert_data_parallel_world_size()
     except Exception:  # noqa: BLE001
         pass
-    return {"dense_params": dense, "expert_params": expert, "dp": dp, "expert_dp": edp}
+    return {"dense_params": dense, "expert_params": expert, "dp": dp, "expert_dp": edp, "sharded": sharded}
 
 
 def _inner_torch_optimizers(optimizer):
@@ -3124,6 +3128,10 @@ def _inner_torch_optimizers(optimizer):
         inner = getattr(opt, "optimizer", None)
         if inner is not None and hasattr(inner, "param_groups"):
             found.append(inner)
+        # TorchTitan's OptimizersContainer holds one torch optimizer per model part.
+        for inner in getattr(opt, "optimizers", None) or []:
+            if hasattr(inner, "param_groups"):
+                found.append(inner)
     return found
 
 
@@ -3215,8 +3223,13 @@ def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
         # layout is not exposed.
         filled = False
         for chunk in model:
-            buffers = list(getattr(chunk, "buffers", []) or [])
-            buffers += list(getattr(chunk, "expert_parallel_buffers", []) or [])
+            buffers = []
+            # Megatron's DDP exposes grad buffers as lists; on a plain nn.Module
+            # (TorchTitan's FSDP wrapping) ``buffers`` is the method.
+            for name in ("buffers", "expert_parallel_buffers"):
+                attr = getattr(chunk, name, None)
+                if attr and not callable(attr):
+                    buffers += list(attr)
             for buf in buffers:
                 gd = getattr(buf, "grad_data", None)
                 if gd is not None:
@@ -4470,7 +4483,11 @@ def _run_multinode_projection(
             # it scales with the shard size from the 1-node benchmark model to
             # the target pipeline stage and DP sharding.
             _mp = training_config.model_parallel_config
-            _dist = bool(getattr(_mp, "use_distributed_optimizer", False))
+            _dist = bool(
+                getattr(_mp, "use_distributed_optimizer", False)
+                or getattr(_mp, "use_torch_fsdp2", False)
+                or _optimizer_bench.get("sharded", False)
+            )
             _bench_elems = _optimizer_step_elems(
                 _optimizer_bench["dense_params"],
                 _optimizer_bench["expert_params"],
@@ -4496,7 +4513,10 @@ def _run_multinode_projection(
                 # is removed since the target's is modelled with the grad sync.
                 _bench_gather_ms = 0.0
                 _coll = profiling_results.get("_dp_reduce_scatter_benchmark") or {}
-                if _dist and not _optimizer_bench.get("overlap_param_gather"):
+                # Only Megatron's distributed optimizer gathers params inside step().
+                if getattr(_mp, "use_distributed_optimizer", False) and not _optimizer_bench.get(
+                    "overlap_param_gather"
+                ):
                     _bench_gather_ms = float(_coll.get("all_gather_ms", 0.0))
                 _fixed_ms = max(0.0, _measured_opt_ms - _bench_gather_ms - _per_elem * _bench_elems)
                 if is_rank_0:

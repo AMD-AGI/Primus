@@ -498,9 +498,13 @@ def torchtitan_apply_bench_overrides(args) -> None:
     # microbatch and the projection composes the rest.
     _ns_set(args, "training.global_batch_size", micro_batch_size)
 
+    # Full recompute is priced analytically (one extra forward per recomputed
+    # layer), so the blocks are benchmarked without checkpointing, as on the
+    # Megatron path; a checkpointed block's backward would count it twice.
+    # Selective recompute has no analytic term and stays in the measured backward.
     granularity = getattr(args, "recompute_granularity", None)
     if granularity == "full":
-        _ns_set(args, "activation_checkpoint.mode", "full")
+        _ns_set(args, "activation_checkpoint.mode", "none")
     elif granularity == "selective":
         _ns_set(args, "activation_checkpoint.mode", "selective")
 
