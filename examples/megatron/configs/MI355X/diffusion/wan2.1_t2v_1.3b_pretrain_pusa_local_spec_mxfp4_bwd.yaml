@@ -146,7 +146,6 @@ modules:
       save: output/checkpoints/wan2.1_t2v_1.3b_pusa_local_spec_mxfp4_bwd
       load: null
       finetune: false
-      auto_continue_train: false
       ckpt_format: fsdp_dtensor  # required by Megatron-FSDP
 
       # ----------------------------------------------------------------------

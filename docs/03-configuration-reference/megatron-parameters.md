@@ -322,7 +322,6 @@ models:
 | `dist_ckpt_strictness` | `assume_ok_unexpected` | How to handle unexpected keys in distributed ckpt. |
 | `dist_ckpt_save_pre_mcore_014` | `null` | Compatibility flag for older Megatron-Core checkpoints. |
 | `dist_ckpt_optim_fully_reshardable` | `null` | Optimizer state fully reshardable layout. |
-| `auto_continue_train` | `false` | *Primus:* resume from latest checkpoint in the save directory when enabled. |
 | `disable_last_saving` | `false` | *Primus:* skip writing the final checkpoint at shutdown. |
 
 ---

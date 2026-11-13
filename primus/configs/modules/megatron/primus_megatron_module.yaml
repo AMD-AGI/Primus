@@ -52,7 +52,6 @@ torch_profiler_with_stack: true
 torch_profiler_use_gzip: true
 
 # continue/finetune
-auto_continue_train: false
 disable_last_saving: false
 
 # fp8

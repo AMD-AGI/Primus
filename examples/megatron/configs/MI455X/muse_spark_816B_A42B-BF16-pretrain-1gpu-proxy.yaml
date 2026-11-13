@@ -118,7 +118,6 @@ modules:
 
       # ckpt: none (proxy)
       finetune: false
-      auto_continue_train: false
       load: null
       moe_router_bias_update_rate: 1.0e-3
       save: null
