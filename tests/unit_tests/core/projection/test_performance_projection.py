@@ -44,15 +44,15 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _estimate_ep_communication_overhead,
     _estimate_pp_communication_overhead,
     _extract_layer_type_timings,
+    _fsdp_insitu_ms,
     _get_deepep_overlap_efficiency,
     _get_parameter_memory,
     _has_dense_layers,
     _layer_needs_recompute_fwd_in_bwd,
     _limit_layers_for_projection,
     _load_artifact,
-    _megatron_ddp_overlap_contention_ms,
-    _megatron_fsdp_insitu_ms,
     _load_profiling_results,
+    _megatron_ddp_overlap_contention_ms,
     _normalized_recompute_layer_ids,
     _recompute_layer_count,
     _reduction_info_from_artifact_metadata,
@@ -786,7 +786,7 @@ def _fsdp_message_info():
 
 def test_megatron_fsdp_insitu_scales_with_layers_comm_and_compute():
     msg = _fsdp_message_info()
-    got = _megatron_fsdp_insitu_ms(SimpleNamespace(framework="megatron"), msg, 80 * 264.0)
+    got = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), msg, 80 * 264.0)
     per_layer = 0.47 * (2 * 6.8 + 7.0) + 0.09 * 264.0
     assert got == pytest.approx(80 * per_layer)
     assert msg["fsdp_insitu_per_layer_ms"] == pytest.approx(per_layer)
@@ -830,7 +830,16 @@ def test_megatron_ddp_contention_gated(config, dp):
     assert _megatron_ddp_overlap_contention_ms(config, msg, dp, _DDP_PROFILE) == 0.0
 
 
-def test_megatron_fsdp_insitu_only_for_megatron_fsdp():
-    assert _megatron_fsdp_insitu_ms(SimpleNamespace(framework="torchtitan"), _fsdp_message_info(), 1000.0) == 0.0
+def test_torchtitan_fsdp_insitu_is_a_share_of_compute_only():
+    got = _fsdp_insitu_ms(SimpleNamespace(framework="torchtitan"), _fsdp_message_info(), 80 * 264.0)
+    assert got == pytest.approx(80 * 0.06 * 264.0)
+
+
+@pytest.mark.parametrize("framework", ["megatron", "torchtitan"])
+def test_fsdp_insitu_needs_fsdp(framework):
     no_fsdp = dict(_fsdp_message_info(), fsdp_enabled=False)
-    assert _megatron_fsdp_insitu_ms(SimpleNamespace(framework="megatron"), no_fsdp, 1000.0) == 0.0
+    assert _fsdp_insitu_ms(SimpleNamespace(framework=framework), no_fsdp, 1000.0) == 0.0
+
+
+def test_fsdp_insitu_unknown_framework_is_zero():
+    assert _fsdp_insitu_ms(SimpleNamespace(framework="maxtext"), _fsdp_message_info(), 1000.0) == 0.0
