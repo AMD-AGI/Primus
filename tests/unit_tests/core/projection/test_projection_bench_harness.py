@@ -178,6 +178,26 @@ def test_megatron_embedding_takes_token_ids():
     assert list(inputs.args) == [((BATCH, SEQ), torch.int64)]
 
 
+def test_megatron_tied_head_gets_the_embedding_weight():
+    """With tied embeddings the head owns no weight; GPTModel passes the embedding's."""
+    shared = nn.Parameter(torch.empty(8, HIDDEN))
+    model = SimpleNamespace(
+        decoder=SimpleNamespace(layers=[_megatron_layer()]),
+        output_layer=SimpleNamespace(weight=None),
+        shared_embedding_or_output_weight=lambda: shared,
+    )
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(model)
+    inputs = adapter.inputs(OUTPUT, parts.output_layer, _ctx())
+    assert inputs.kwargs["weight"] is shared
+
+
+def test_megatron_untied_head_gets_no_weight():
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(_megatron_model())
+    assert "weight" not in adapter.inputs(OUTPUT, parts.output_layer, _ctx()).kwargs
+
+
 class _MegatronRopeLayer(nn.Module):
     def forward(self, hidden_states, attention_mask=None, rotary_pos_emb=None):
         return hidden_states
