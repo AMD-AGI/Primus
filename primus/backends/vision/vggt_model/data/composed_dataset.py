@@ -1,8 +1,6 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+# Adapted from VGGT, https://github.com/facebookresearch/vggt (commit a288dd0).
+# Paper: https://arxiv.org/abs/2503.11651
+# Upstream: https://github.com/facebookresearch/vggt/tree/a288dd0
 
 from abc import ABC
 
