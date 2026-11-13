@@ -778,6 +778,15 @@ def test_collective_comm_fsdp_breakdown(_single_node_env):
     )
     assert breakdown["fsdp_allgather_fwd"] > 0
     assert msg["fsdp_enabled"] is True
+    assert msg["fsdp_node_ag_per_layer_ms"] == msg["fsdp_ag_per_layer_ms"]
+
+
+def test_collective_comm_fsdp_keeps_the_in_node_time_across_nodes(_single_node_env):
+    tc = _full_config(use_torch_fsdp2=True)
+    _, _, one, _ = calculate_collective_communication_time(tc, num_nodes=1, gpus_per_node=8, tp=1, pp=1, ep=1, cp=1, dp=8)
+    _, _, two, _ = calculate_collective_communication_time(tc, num_nodes=2, gpus_per_node=8, tp=1, pp=1, ep=1, cp=1, dp=16)
+    assert two["fsdp_node_ag_per_layer_ms"] == pytest.approx(one["fsdp_ag_per_layer_ms"])
+    assert two["fsdp_node_rs_per_layer_ms"] == pytest.approx(one["fsdp_rs_per_layer_ms"])
 
 
 def _fsdp_message_info():
@@ -790,6 +799,13 @@ def test_megatron_fsdp_insitu_scales_with_layers_comm_and_compute():
     per_layer = 0.7 * (2 * 6.8 + 7.0) + 0.06 * 264.0 + 1.0 * (2 * 6.8 + 7.0)
     assert got == pytest.approx(80 * per_layer)
     assert msg["fsdp_insitu_per_layer_ms"] == pytest.approx(per_layer)
+
+
+def test_megatron_fsdp_insitu_prices_the_in_node_collectives():
+    multi_node = dict(_fsdp_message_info(), fsdp_ag_per_layer_ms=20.0, fsdp_rs_per_layer_ms=21.0)
+    multi_node.update(fsdp_node_ag_per_layer_ms=6.8, fsdp_node_rs_per_layer_ms=7.0)
+    got = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), multi_node, 80 * 264.0)
+    assert got == pytest.approx(_fsdp_insitu_ms(SimpleNamespace(framework="megatron"), _fsdp_message_info(), 80 * 264.0))
 
 
 def test_megatron_fsdp_insitu_spreads_the_per_iteration_share_over_microbatches():

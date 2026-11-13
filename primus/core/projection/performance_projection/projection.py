@@ -788,6 +788,18 @@ def calculate_collective_communication_time(
         message_info["fsdp_weight_size_per_layer_mb"] = weight_size_per_layer / (1024 * 1024)
         message_info["fsdp_ag_per_layer_ms"] = ag_time_per_layer_us / 1000
         message_info["fsdp_rs_per_layer_ms"] = rs_time_per_layer_us / 1000
+        # The same collectives within one node, which the in-situ term scales with.
+        node_dp = min(dp, max(1, gpus_per_node // max(1, tp * pp * cp)))
+        if num_nodes > 1 and node_dp > 1:
+            node_args = get_default_args(
+                num_nodes=1, gpus_per_node=gpus_per_node, tp=tp, pp=pp, ep=ep, cp=cp, hardware_config=hw if hw else None
+            )
+            node_ag_us = cm.allgather(node_args, weight_size_per_layer, node_dp, groups=["dp"])
+            node_rs_us = cm.reduce_scatter(node_args, grad_size_per_layer, node_dp, groups=["dp"])
+        else:
+            node_ag_us, node_rs_us = ag_time_per_layer_us, rs_time_per_layer_us
+        message_info["fsdp_node_ag_per_layer_ms"] = node_ag_us / 1000
+        message_info["fsdp_node_rs_per_layer_ms"] = node_rs_us / 1000
         message_info["fsdp_ag_multiplier"] = ag_multiplier
         message_info["fsdp_enabled"] = True
     else:
@@ -4219,8 +4231,12 @@ def _fsdp_insitu_ms(training_config, message_info, microbatch_time_ms, num_micro
     if num_layers <= 0 or microbatch_time_ms <= 0:
         return 0.0
     # Two all-gathers (forward, and backward including any recompute) and one
-    # reduce-scatter per layer and microbatch, as traced.
-    comm_ms = 2 * message_info.get("fsdp_ag_per_layer_ms", 0.0) + message_info.get("fsdp_rs_per_layer_ms", 0.0)
+    # reduce-scatter per layer and microbatch, as traced. Priced within one node: the
+    # copies and contention follow the bytes each GPU moves, and per-GPU throughput
+    # of the FSDP configs is flat from 1 to 4 nodes.
+    ag_ms = message_info.get("fsdp_node_ag_per_layer_ms", message_info.get("fsdp_ag_per_layer_ms", 0.0))
+    rs_ms = message_info.get("fsdp_node_rs_per_layer_ms", message_info.get("fsdp_rs_per_layer_ms", 0.0))
+    comm_ms = 2 * ag_ms + rs_ms
     comm_factor, compute_factor, per_iteration_factor = factors
     per_layer = (
         comm_factor * comm_ms
