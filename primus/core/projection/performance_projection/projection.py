@@ -1015,6 +1015,14 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
             # dense profile is implicitly discarded below because
             # num_dense_layers=0.
             observed_type = layer_data.get("type")
+            if "hybrid_kinds" in layer_data:
+                # A hybrid stack's per-layer average already weights every layer
+                # kind, so it stands for every layer, dense or MoE.
+                profiled_dense_times.append(layer_time)
+                profiled_dense_fwd_times.append(fwd_time)
+                profiled_moe_times.append(layer_time)
+                profiled_moe_fwd_times.append(fwd_time)
+                continue
             if observed_type == "dense":
                 is_dense = True
             elif observed_type == "moe":

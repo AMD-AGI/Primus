@@ -666,6 +666,15 @@ def test_extract_single_node_time_dense_and_moe_buckets():
     assert extract_single_node_time_from_profiling(pr, tc) == pytest.approx(14.0)
 
 
+def test_extract_single_node_time_hybrid_average_covers_every_layer():
+    # ZAYA1: the full model's moe_pattern is all MoE, but the benchmark model's
+    # layers were built (and labelled) dense; the hybrid average covers all 4.
+    tc = _profiling_tc([1, 1, 1, 1])
+    layer = {"forward_time_ms": 2, "backward_time_ms": 3, "type": "dense", "hybrid_kinds": {}}
+    pr = {0: layer, 1: dict(layer)}
+    assert extract_single_node_time_from_profiling(pr, tc) == pytest.approx(20.0)
+
+
 def test_extract_single_node_time_adds_full_recompute_overhead():
     tc = _profiling_tc([0, 0, 0, 0], recompute_granularity="full", recompute_num_layers=4)
     pr = {0: {"forward_time_ms": 2, "backward_time_ms": 3, "type": "dense"}}
