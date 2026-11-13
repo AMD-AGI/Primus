@@ -88,8 +88,15 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
 - Training: `TRAIN_ITERS` (default 10; at least 3, because the yaml warms the learning rate up over
   2), `MBS` (default 1), `GBS`, `PRIMUS_SEQ_LENGTH` (default 4096), `PRIMUS_MAX_POSITION_EMBEDDINGS`
   (default `PRIMUS_SEQ_LENGTH`; the preset would otherwise build the RoPE cache at 1,048,576),
-  `PRIMUS_RECOMPUTE_NUM_LAYERS` (default 1). The yaml's `recompute_method: block` recomputes the
-  first that many layers, so the default recomputes dense layer 1, not an MSA/MoE layer.
+  `PRIMUS_RECOMPUTE_NUM_LAYERS` (default 0, no recomputation; it was 1). The yaml's
+  `recompute_method: block` recomputes the first that many layers: dense layer 1 on M3, an MSA layer
+  on M3.1-Flash, whose recomputation cost 2.7 ms a step on one GPU, where memory is not the limit.
+- Gradients with one micro-batch on one rank (`DP == 1` and `GBS == MBS`):
+  `PRIMUS_BF16_GRAD_SINGLE_MICROBATCH` (default 1) passes `--grad_reduce_in_bf16 True` and sets
+  `PRIMUS_FUSED_ADAM_BF16_GRAD=1` and `PRIMUS_FUSED_ADAM_DIRECT_GRAD=1`: the HIP Adam reads each
+  parameter's BF16 `.grad` directly, and the DDP buffer is neither zeroed nor accumulated into. With
+  nothing to accumulate or reduce, the FP32 buffer only ever held `0 + grad`, so this is bit-identical;
+  on M3.1-Flash 1 GPU it removed ~13 ms of gradient passes. Other shapes keep FP32 gradients.
 - MSA: `PRIMUS_MSA_BACKEND`, `flydsl` (default) or `eager`.
 - Experts: `USE_TURBO_GROUPED_GEMM` (default `True`; `False` is TE's grouped GEMM, one hipBLASLt GEMM
   per expert) and `TURBO_GROUPED_GEMM_BACKEND` (default `bf16:flydsl`; `default` is Triton here, and

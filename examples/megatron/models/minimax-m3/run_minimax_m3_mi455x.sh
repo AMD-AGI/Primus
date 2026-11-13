@@ -46,7 +46,10 @@ export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 # flydsl or eager (the PyTorch reference)
 export PRIMUS_MSA_BACKEND=${PRIMUS_MSA_BACKEND:-flydsl}
-export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-1}
+# 0: no recomputation. Every proxy shape the launcher allows fits without it (one GPU: 234 of 432 GB),
+# and on M3.1-Flash the recomputed first layer is an MSA layer, so recomputing it repeats its
+# whole forward (projections, indexer, MSA kernels) inside the backward.
+export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-0}
 # Primus-Turbo attention for the three dense layers. Empty: on with the flydsl backend when the
 # Primus-Turbo in use has the gfx1250 head-dim-128 kernels (see README.md), off otherwise; decided in
 # the container, below. The default backend fails in fmha_bwd here.
@@ -80,6 +83,28 @@ fi
 export PRIMUS_FUSED_ADAM_CLIP=${PRIMUS_FUSED_ADAM_CLIP:-1}
 export PRIMUS_FUSED_ADAM_BF16_WRITEBACK=${PRIMUS_FUSED_ADAM_BF16_WRITEBACK:-${PRIMUS_FUSED_ADAM_CLIP}}
 export PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=${PRIMUS_STATIC_BF16_LOSS_SCALE_CPU:-${PRIMUS_FUSED_ADAM_CLIP}}
+# With one micro-batch per step on one data-parallel rank the gradient buffer is never accumulated
+# into nor reduced: its FP32 value is exactly the BF16 weight gradient. Keep it in BF16 there
+# (--grad_reduce_in_bf16) and let the HIP Adam read it directly (PRIMUS_FUSED_ADAM_BF16_GRAD):
+# bit-identical, and it halves the gradient zeroing, accumulation, norm and Adam gradient
+# traffic. With PRIMUS_FUSED_ADAM_DIRECT_GRAD (also on) Adam reads each parameter's autograd
+# gradient and the buffer is neither zeroed nor accumulated into. Decided below, once the
+# data-parallel size is known. 0 keeps FP32 gradients.
+export PRIMUS_BF16_GRAD_SINGLE_MICROBATCH=${PRIMUS_BF16_GRAD_SINGLE_MICROBATCH:-1}
+# The forward is host-bound on the Python main thread (instruction-fetch bound, ~70% frontend
+# stalls). From the second step on, pin that thread to its own core on the GPU's NUMA node and keep
+# the other threads off it (primus/backends/megatron/patches/host_step_overhead_patches.py). Host
+# scheduling only. Empty disables it.
+export PRIMUS_MAIN_THREAD_CPU=${PRIMUS_MAIN_THREAD_CPU-auto}
+# Turbo's RMSNorm backward Triton kernels are autotuned by timing in step 1 over num_warps 4/8 ×
+# num_stages 1/2, and num_warps changes the bits of dx (the row reduction). Which config wins the
+# timing race decided the gradient bits of the whole run. Pin the config the reference run picks
+# (primus/backends/megatron/patches/turbo_rmsnorm_bwd_pin_patches.py). Empty restores autotuning.
+export PRIMUS_TURBO_RMSNORM_BWD_CONFIG=${PRIMUS_TURBO_RMSNORM_BWD_CONFIG-4,2}
+# Run training_log(N) after step N+1's forward is enqueued, so the host launches the next forward
+# while the GPU still runs step N's optimizer (primus/backends/megatron/patches/deferred_step_log_patches.py).
+# Same kernels in the same order; the interval timer still reads step N's GPU end. 0 disables it.
+export PRIMUS_DEFERRED_STEP_LOG=${PRIMUS_DEFERRED_STEP_LOG:-1}
 
 case "${PRIMUS_MSA_BACKEND}" in
     flydsl | eager) ;;
@@ -126,6 +151,18 @@ export GBS=${GBS:-$((MBS * DP))}
 if (( GBS % (MBS * DP) != 0 )); then
     echo "GBS=${GBS} must be divisible by MBS*DP=$((MBS * DP))" >&2
     exit 2
+fi
+BF16_GRAD_ARGS=()
+if [[ "${PRIMUS_BF16_GRAD_SINGLE_MICROBATCH}" == 1 && "${DP}" == 1 && "${GBS}" == "${MBS}" ]]; then
+    BF16_GRAD_ARGS=(--grad_reduce_in_bf16 True)
+    if [[ "${PRIMUS_FUSED_ADAM_CLIP}" == 1 ]]; then
+        export PRIMUS_FUSED_ADAM_BF16_GRAD=${PRIMUS_FUSED_ADAM_BF16_GRAD:-1}
+        # and Adam reads each param.grad itself: no buffer zeroing, no main_grad.add_
+        export PRIMUS_FUSED_ADAM_DIRECT_GRAD=${PRIMUS_FUSED_ADAM_DIRECT_GRAD:-1}
+        # and keeps each FP32 master as its BF16 parameter + a 16-bit remainder (lossless;
+        # Adam moves 26 instead of 28 B/param, bit-identical)
+        export PRIMUS_FUSED_ADAM_SPLIT_MASTER=${PRIMUS_FUSED_ADAM_SPLIT_MASTER:-1}
+    fi
 fi
 # the yaml's moe_layer_freq, sparse_attention_freq and sparse_disable_index_value
 export PRIMUS_LAYER_FREQ="([0]*3+[1]*$((PRIMUS_TOTAL_LAYERS - 3)))"
@@ -251,4 +288,5 @@ mkdir -p "${LOG_DIR}"
     --use_pytorch_profiler "${PROFILE}" \
     --profile_step_start 6 \
     --profile_step_end 8 \
+    "${BF16_GRAD_ARGS[@]}" \
     "$@" 2>&1 | tee "${LOG_DIR}/train.log"
