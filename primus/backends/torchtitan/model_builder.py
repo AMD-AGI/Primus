@@ -137,8 +137,10 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     # on their parent blocks. Initialize the root (comm streams are set up lazily on
     # its first forward) and keep every parameter group unsharded so submodules see
     # full weights; FSDP communication is modeled analytically, not measured here.
+    # That includes the gradient reduce-scatter: left on, every benchmarked backward
+    # waits for it, while training overlaps it with the next block's backward.
     from torch.distributed.fsdp import FSDPModule
-    no_grad_sync = os.environ.get("PRIMUS_BENCH_FSDP_NO_GRAD_SYNC", "0") == "1"
+    no_grad_sync = os.environ.get("PRIMUS_BENCH_FSDP_GRAD_SYNC", "0") != "1"
     for part in model_parts:
         if isinstance(part, FSDPModule):
             part._get_fsdp_state()._lazy_init()
