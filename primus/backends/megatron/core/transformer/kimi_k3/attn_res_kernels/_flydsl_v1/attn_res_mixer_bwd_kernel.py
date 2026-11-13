@@ -167,7 +167,7 @@ def build_attn_res_mixer_bwd(
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(BWD_INJECTIONS)}")
 
     allowed, wpe = vector_kernel_knobs() if knobs is None else knobs
-    vec_path = use_vector_kernel(H, elem_dtype, arch, allowed and not inject)
+    vec_path = use_vector_kernel(H, elem_dtype, arch, allowed)
     BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK
     EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
@@ -386,7 +386,7 @@ def build_attn_res_mixer_bwd(
 
     @flyc.kernel(
         known_block_size=[BLOCK, 1, 1],
-        name=f"attn_res_mixer_bwd_vec_{elem_dtype}_H{H}_C{C}_w{waves_per_eu}",
+        name=f"attn_res_mixer_bwd_vec_{elem_dtype}_H{H}_C{C}_w{waves_per_eu}{_tag}",
     )
     def attn_res_mixer_bwd_vec_kernel(
         BR: fx.Tensor,
@@ -509,20 +509,32 @@ def build_attn_res_mixer_bwd(
         for c in range_constexpr(C - 1):
             dot_p = math_dialect.fma(probs[c + 1], dps_red[c + 1], dot_p)
 
+        # the test-only defects, selected as in the scalar kernel
+        ds_of = {
+            False: lambda c: arith.MulFOp(
+                probs[c], arith.SubFOp(dps_red[c], dot_p, fastmath=fm).result, fastmath=fm
+            ).result,
+            True: lambda c: arith.MulFOp(probs[c], dps_red[c], fastmath=fm).result,
+        }[inject == "no_softmax_jacobian"]
+        r_pow_of = {
+            False: lambda r, r2: arith.MulFOp(r2, r, fastmath=fm).result,
+            True: lambda r, r2: r2,
+        }[inject == "wrong_r_power"]
+
         d_dot = []
         two_d_ss = []
         for c in range_constexpr(C):
-            ds = arith.MulFOp(
-                probs[c], arith.SubFOp(dps_red[c], dot_p, fastmath=fm).result, fastmath=fm
-            ).result
+            ds = ds_of(c)
             d_dot.append(arith.MulFOp(ds, rs[c], fastmath=fm).result)
             d_r = arith.MulFOp(ds, dots[c], fastmath=fm).result
             r2 = arith.MulFOp(rs[c], rs[c], fastmath=fm).result
-            r3 = arith.MulFOp(r2, rs[c], fastmath=fm).result
+            r3 = r_pow_of(rs[c], r2)
             d_ss = arith.MulFOp(
                 arith.MulFOp(d_r, r3, fastmath=fm).result, c_neg_half_inv_h, fastmath=fm
             ).result
             two_d_ss.append(arith.MulFOp(c_two, d_ss, fastmath=fm).result)
+        rms_w = {False: two_d_ss, True: [c_zero for _ in range(C)]}[inject == "drop_rms_term"]
+        score_w = {False: d_dot, True: [c_zero for _ in range(C)]}[inject == "drop_score_term"]
 
         save_c = tid % I_C
         sel = d_dot[0]
@@ -541,9 +553,11 @@ def build_attn_res_mixer_bwd(
                 for e in range_constexpr(VEC):
                     x = lane_f32(xs[c][j], e)
                     dv = math_dialect.fma(
-                        probs[c], lane_f32(dgs[j], e), arith.MulFOp(d_dot[c], lane(w8, e), fastmath=fm).result
+                        probs[c],
+                        lane_f32(dgs[j], e),
+                        arith.MulFOp(score_w[c], lane(w8, e), fastmath=fm).result,
                     )
-                    dv = math_dialect.fma(two_d_ss[c], x, dv)
+                    dv = math_dialect.fma(rms_w[c], x, dv)
                     outs.append(arith.trunc_f(bf16, dv))
                     dw[e] = math_dialect.fma(d_dot[c], x, dw[e])
                 store_vec(outs, v_bf16, cand[c][2], cand[c][3] + d0, bf16)
