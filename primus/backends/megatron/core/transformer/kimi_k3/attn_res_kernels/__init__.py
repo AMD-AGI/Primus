@@ -58,6 +58,9 @@ from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._eager i
 
 ATTN_RES_BACKENDS = ("eager", "eager_bcast", "flydsl")
 
+#: The architectures the FlyDSL backend builds for (its scalar kernels; the vector kernels are gfx1250 only).
+FLYDSL_ATTN_RES_ARCHS = ("gfx950", "gfx1250")
+
 
 def _require_flydsl_arch() -> None:
     """Raise :class:`ImportError` unless a gfx950 (CDNA4) or gfx1250 device is visible.
@@ -75,7 +78,7 @@ def _require_flydsl_arch() -> None:
     if not torch.cuda.is_available():
         raise ImportError("no ROCm/CUDA device is visible")
     arch = str(getattr(torch.cuda.get_device_properties(0), "gcnArchName", ""))
-    if not arch.startswith(("gfx950", "gfx1250")):
+    if not arch.startswith(FLYDSL_ATTN_RES_ARCHS):
         raise ImportError(f"device arch is {arch!r}, not gfx950 (CDNA4) or gfx1250")
 
 
@@ -136,5 +139,6 @@ __all__ = [
     "accum_dtype",
     "load_flydsl_attn_res_backend",
     "ATTN_RES_BACKENDS",
+    "FLYDSL_ATTN_RES_ARCHS",
     "resolve_attn_res_backend",
 ]

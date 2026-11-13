@@ -89,6 +89,9 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
+from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels import (
+    FLYDSL_ATTN_RES_ARCHS,
+)
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1._lld_shim import (
     ensure_usable_lld,
 )
@@ -114,7 +117,7 @@ WAVE = 32
 def block_sums(vals, tid, block, lds_get, lds_put, fm):
     """Sum each value in ``vals`` over the workgroup; every lane gets the totals.
 
-    Butterfly over the wave's 32 lanes, then every lane of a wave writes the (same)
+    Butterfly over the wave's ``WAVE`` lanes, then every lane of a wave writes the (same)
     wave partial to its LDS slot -- duplicate stores of one value, so no branch -- and
     each lane adds the ``block // WAVE`` partials back.
     """
@@ -123,7 +126,7 @@ def block_sums(vals, tid, block, lds_get, lds_put, fm):
     def raw(x):
         return x.ir_value() if hasattr(x, "ir_value") else x
 
-    for dist in (1, 2, 4, 8, 16):
+    for dist in (1 << i for i in range(WAVE.bit_length() - 1)):
         vals = [arith.AddFOp(v, raw(gpu.shuffle_xor(v, dist, WAVE)), fastmath=fm).result for v in vals]
     wave = tid // arith.index(WAVE)
     for r in range_constexpr(len(vals)):
@@ -308,8 +311,8 @@ def build_attn_res_mixer_fwd(
     arch = get_rocm_arch()
     # The scalar kernels use no MFMA or wave intrinsics (every reduction goes through LDS), so they run on
     # gfx950 and gfx1250 alike; the vector kernels assume 32-lane waves and are built on gfx1250 only.
-    if not arch.startswith(("gfx950", "gfx1250")):
-        raise RuntimeError(f"attn_res_mixer targets gfx950 (CDNA4) and gfx1250; got {arch!r}")
+    if not arch.startswith(FLYDSL_ATTN_RES_ARCHS):
+        raise RuntimeError(f"attn_res_mixer targets {' and '.join(FLYDSL_ATTN_RES_ARCHS)}; got {arch!r}")
 
     H = int(hidden)
     NB = int(num_blocks)

@@ -71,6 +71,9 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
+from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels import (
+    FLYDSL_ATTN_RES_ARCHS,
+)
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1._lld_shim import (
     ensure_usable_lld,
 )
@@ -144,8 +147,8 @@ def build_attn_res_mixer_bwd(
     """
     ensure_usable_lld()
     arch = get_rocm_arch()
-    if not arch.startswith(("gfx950", "gfx1250")):
-        raise RuntimeError(f"attn_res_mixer_bwd targets gfx950 (CDNA4) and gfx1250; got {arch!r}")
+    if not arch.startswith(FLYDSL_ATTN_RES_ARCHS):
+        raise RuntimeError(f"attn_res_mixer_bwd targets {' and '.join(FLYDSL_ATTN_RES_ARCHS)}; got {arch!r}")
 
     H = int(hidden)
     NB = int(num_blocks)
