@@ -40,3 +40,12 @@ pp_simulation_result
 .cursor/
 # hipify output of the fused Adam clip extension, written next to its .cu at build time
 primus/backends/megatron/patches/te_patches/fused_adam_clip_kernel.hip
+
+# EAT local run state and the uploaded gpu-lock archive
+.work/
+eat/log/.supervisor_*
+gpu-lock.tar.gz
+
+# EAT per-run scratch and logs (kept locally, not versioned)
+work_*/
+eat/log/

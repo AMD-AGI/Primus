@@ -1,0 +1,14 @@
+#!/bin/bash
+# The EAT harness unsets ANTHROPIC_API_KEY before every claude process.
+# Restore the AMD gateway settings, then exec the real Claude Code binary.
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    export ANTHROPIC_API_KEY=dummy
+fi
+if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+    export ANTHROPIC_BASE_URL="https://llm-api.amd.com/Unified"
+fi
+if [ -z "${ANTHROPIC_CUSTOM_HEADERS:-}" ] && [ -f "${HOME}/llm_api" ]; then
+    key="$(tr -d '[:space:]' < "${HOME}/llm_api")"
+    export ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${key}"
+fi
+exec "${HOME}/.local/bin/claude" "$@"
