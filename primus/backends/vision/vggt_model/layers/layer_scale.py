@@ -1,7 +1,6 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This source code is licensed under the Apache License, Version 2.0
-# found in the LICENSE file in the root directory of this source tree.
+# Adapted from VGGT, https://github.com/facebookresearch/vggt (commit a288dd0).
+# Paper: https://arxiv.org/abs/2503.11651
+# Upstream: https://github.com/facebookresearch/vggt/tree/a288dd0
 
 # Modified from: https://github.com/huggingface/pytorch-image-models/blob/main/timm/models/vision_transformer.py#L103-L110
 
