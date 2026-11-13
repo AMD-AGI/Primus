@@ -3315,6 +3315,26 @@ def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
         return None
 
 
+def _preheat_gpu(seconds: float, rank: int) -> None:
+    """Run dense GEMMs for *seconds* so the layer benchmark starts at the
+    package temperature sustained training reaches under the same power cap
+    (clocks drop a few percent over the first minutes of a run)."""
+    if seconds <= 0:
+        return
+    import torch
+
+    a = torch.randn(8192, 8192, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(8192, 8192, device="cuda", dtype=torch.bfloat16)
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        for _ in range(20):
+            torch.matmul(a, b)
+        torch.cuda.synchronize()
+    del a, b
+    if rank == 0:
+        print(f"[Primus:Performance Projection] Pre-heated GPUs for {seconds:.0f} s before the layer benchmark")
+
+
 def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, args=None):
     module_config = primus_config.get_module_config("pre_trainer")
     _limit_layers_for_projection(module_config)
@@ -3478,6 +3498,8 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
         if rank == 0:
             print("[Primus:Performance Projection] Benchmarking TP-AllReduce (pre-layer)...")
         tp_ar_results = _benchmark_tp_allreduce_on_gpu(training_config, rank, world_size)
+
+    _preheat_gpu(float(os.environ.get("PRIMUS_BENCH_PREHEAT_S", "0") or 0), rank)
 
     print("" + "=" * 100)
     print("[Primus:Performance Projection] Starting layer benchmarking...")
