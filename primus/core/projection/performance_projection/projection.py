@@ -2792,6 +2792,37 @@ def _exposed_overlapped_grad_sync_ms(
     return exposed
 
 
+# Compute kernels overlapping an RCCL collective run ~20% slower than the same
+# kernels alone (Llama 3.1 8B BF16: +22%, Qwen 2.5 7B FP8: +21%, MI325X traces).
+# Under Megatron's overlap_grad_reduce the bucketed reduce-scatter, itself slowed
+# by the compute, stays in flight for 64-100% of the last microbatch's backward.
+_MEGATRON_DDP_OVERLAP_SLOWDOWN = 0.2
+
+
+def _megatron_ddp_overlap_contention_ms(training_config, message_info: Dict[str, Any], dp: int, profiling_results) -> float:
+    """Per-iteration slowdown of the backward that overlaps Megatron's DDP gradient reduce.
+
+    Scaled by the share of gradients the data-parallel group reduces: experts
+    sharded across the whole DP group (EP == DP) have nothing to reduce.
+    """
+    mp_config = training_config.model_parallel_config
+    if getattr(training_config, "framework", None) != "megatron" or dp <= 1:
+        return 0.0
+    if getattr(mp_config, "use_torch_fsdp2", False):
+        return 0.0
+    dense = message_info.get("dense_params_per_layer", 0.0)
+    expert = message_info.get("expert_params_per_layer", 0.0)
+    if dense + expert <= 0:
+        return 0.0
+    cp = getattr(mp_config, "context_model_parallel_size", 1) or 1
+    ep = getattr(mp_config, "expert_model_parallel_size", 1) or 1
+    reduced = dense + (expert if dp * cp // ep > 1 else 0.0)
+    pp = mp_config.pipeline_model_parallel_size or 1
+    times = _microbatch_component_times(training_config, profiling_results)
+    stage_bwd = training_config.model_config.num_layers / pp * times["layer_bwd"]
+    return _MEGATRON_DDP_OVERLAP_SLOWDOWN * stage_bwd * reduced / (dense + expert)
+
+
 def _first_forward_per_chunk(rank_result: Dict[str, Any]) -> List[Tuple[float, float]]:
     """(start, end) of each model chunk's first forward on one pipeline rank."""
     first: Dict[int, Tuple[float, float]] = {}
@@ -4296,6 +4327,7 @@ def _run_multinode_projection(
     # portion separately and add it as a per-iteration overhead.
     grad_ar_per_iteration_ms = 0.0  # Non-overlapped allreduce time (added once)
     param_ag_per_iteration_ms = 0.0  # Non-overlapped parameter all-gather (distributed optimizer)
+    ddp_contention_ms = 0.0
     if dp_target > 1:
         # Calculate gradient all-reduce for target
         _, target_breakdown, target_message_info, _ = calculate_collective_communication_time(
@@ -4320,6 +4352,11 @@ def _run_multinode_projection(
                 projected_compute_time_ms,
                 time_includes_all_microbatches,
             )
+            ddp_contention_ms = _megatron_ddp_overlap_contention_ms(
+                training_config, target_message_info, dp_target, profiling_results
+            )
+            if ddp_contention_ms > 0 and is_rank_0:
+                print(f"  [Grad sync] backward slowed by the overlapped reduce: +{ddp_contention_ms:.1f} ms")
         else:
             # Not overlapped: all-reduce runs sequentially after backward
             grad_ar_per_iteration_ms = target_grad_ar
@@ -4597,27 +4634,37 @@ def _run_multinode_projection(
             "dp_param_gather", "step", param_ag_per_iteration_ms, kind="comm", scope_name="iteration"
         )
     grad_ar_per_iteration_ms += param_ag_per_iteration_ms
+    if ddp_contention_ms > 0:
+        ddp_contention_ms = kernel_report.term(
+            "dp_reduce_contention", "step", ddp_contention_ms, kind="compute", scope_name="iteration"
+        )
     engine_step_ms = kernel_report.extras("iteration", "step")
 
     # Build full iteration time:
     #   compute (per-microbatch) × num_microbatches + gradient allreduce + optimizer step
     if time_includes_all_microbatches:
         full_iteration_time_ms = (
-            projected_time_ms + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms
+            projected_time_ms + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms + ddp_contention_ms
         )
         time_breakdown_str = f"{full_iteration_time_ms:.3f} ms (from pipeline simulation"
         if grad_ar_per_iteration_ms > 0:
             time_breakdown_str += f" + {grad_ar_per_iteration_ms:.1f} ms grad AR"
+        if ddp_contention_ms > 0:
+            time_breakdown_str += f" + {ddp_contention_ms:.1f} ms reduce contention"
         time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer"
         if engine_step_ms > 0:
             time_breakdown_str += f" + {engine_step_ms:.1f} ms calibrated per-step engine work"
         time_breakdown_str += ")"
     else:
         compute_total = projected_time_ms * target_microbatches_per_gpu
-        full_iteration_time_ms = compute_total + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms
+        full_iteration_time_ms = (
+            compute_total + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms + ddp_contention_ms
+        )
         time_breakdown_str = f"{full_iteration_time_ms:.3f} ms ({target_microbatches_per_gpu} microbatches × {projected_time_ms:.3f} ms"
         if grad_ar_per_iteration_ms > 0:
             time_breakdown_str += f" + {grad_ar_per_iteration_ms:.1f} ms grad AR"
+        if ddp_contention_ms > 0:
+            time_breakdown_str += f" + {ddp_contention_ms:.1f} ms reduce contention"
         time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer"
         if engine_step_ms > 0:
             time_breakdown_str += f" + {engine_step_ms:.1f} ms calibrated per-step engine work"

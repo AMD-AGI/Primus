@@ -50,6 +50,7 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _layer_needs_recompute_fwd_in_bwd,
     _limit_layers_for_projection,
     _load_artifact,
+    _megatron_ddp_overlap_contention_ms,
     _megatron_fsdp_insitu_ms,
     _load_profiling_results,
     _normalized_recompute_layer_ids,
@@ -789,6 +790,44 @@ def test_megatron_fsdp_insitu_scales_with_layers_comm_and_compute():
     per_layer = 0.47 * (2 * 6.8 + 7.0) + 0.09 * 264.0
     assert got == pytest.approx(80 * per_layer)
     assert msg["fsdp_insitu_per_layer_ms"] == pytest.approx(per_layer)
+
+
+def _ddp_config(framework="megatron", ep=1, use_torch_fsdp2=False, num_layers=32):
+    return SimpleNamespace(
+        framework=framework,
+        model_config=SimpleNamespace(num_layers=num_layers, moe_pattern=None),
+        model_parallel_config=SimpleNamespace(
+            pipeline_model_parallel_size=1,
+            context_model_parallel_size=1,
+            expert_model_parallel_size=ep,
+            use_torch_fsdp2=use_torch_fsdp2,
+        ),
+    )
+
+
+_DDP_PROFILE = {0: {"type": "dense", "forward_time_ms": 25.0, "backward_time_ms": 50.0}}
+
+
+def test_megatron_ddp_contention_is_a_fifth_of_one_microbatch_backward():
+    msg = {"dense_params_per_layer": 2e8, "expert_params_per_layer": 0.0}
+    got = _megatron_ddp_overlap_contention_ms(_ddp_config(), msg, 8, _DDP_PROFILE)
+    assert got == pytest.approx(0.2 * 32 * 50.0)
+
+
+def test_megatron_ddp_contention_skips_experts_sharded_over_the_dp_group():
+    msg = {"dense_params_per_layer": 1e8, "expert_params_per_layer": 3e8}
+    got = _megatron_ddp_overlap_contention_ms(_ddp_config(ep=8), msg, 8, _DDP_PROFILE)
+    assert got == pytest.approx(0.2 * 32 * 50.0 * 0.25)
+
+
+@pytest.mark.parametrize(
+    "config, dp",
+    [(_ddp_config(use_torch_fsdp2=True), 8), (_ddp_config(framework="torchtitan"), 8), (_ddp_config(), 1)],
+    ids=["fsdp2", "torchtitan", "no-dp"],
+)
+def test_megatron_ddp_contention_gated(config, dp):
+    msg = {"dense_params_per_layer": 2e8, "expert_params_per_layer": 0.0}
+    assert _megatron_ddp_overlap_contention_ms(config, msg, dp, _DDP_PROFILE) == 0.0
 
 
 def test_megatron_fsdp_insitu_only_for_megatron_fsdp():
