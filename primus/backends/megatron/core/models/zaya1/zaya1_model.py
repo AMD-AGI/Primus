@@ -110,14 +110,14 @@ class Zaya1Model(LanguageModule):
         log_rank_0(f"ZAYA1: {switch_summary(self.config)}; loss: {self._loss_summary()}")
 
     def _chunked_ce_blocker(self) -> Optional[str]:
-        """Why the loss can't use chunked CE (``zaya_chunked_ce``, default on), or None when it can."""
-        if not self.config.zaya_chunked_ce:
-            return "zaya_chunked_ce is off"
+        """Why the loss can't use chunked CE (``zaya_chunked_ce``, default off), or None when it can."""
         if getattr(self.config, "cross_entropy_loss_fusion", False):
             # A fused cross-entropy was asked for: Megatron's native or TE
             # kernel, or Turbo's, which only runs with this flag set.
             impl = getattr(self.config, "cross_entropy_fusion_impl", "native")
             return f"cross_entropy_loss_fusion is set ({impl})"
+        if not self.config.zaya_chunked_ce:
+            return "zaya_chunked_ce is off"
         tp = getattr(self.pg_collection, "tp", None) if self.pg_collection is not None else None
         tp_size = tp.size() if tp is not None and hasattr(tp, "size") else 1
         if tp_size != 1 or getattr(self.config, "sequence_parallel", False):

@@ -40,16 +40,17 @@ class Zaya1TransformerConfig(TransformerConfig):
     zaya_balance_wd: float = 0.0
     # Optional explicit stage list. ``None`` alternates CCA, MoE, CCA, MoE, ...
     zaya_layers: Optional[Sequence] = None
-    # Kernel paths; zaya1_modules.py and zaya1_chunked_ce.py describe each one.
-    zaya_attn_flash: bool = True
-    zaya_fuse_norm: bool = True
-    zaya_fuse_cca: bool = True
-    zaya_conv_gemm: bool = True
-    zaya_fuse_moe: bool = True
+    # Kernel paths, all off by default; zaya1_modules.py and zaya1_chunked_ce.py
+    # describe each one.
+    zaya_attn_flash: bool = False
+    zaya_fuse_norm: bool = False
+    zaya_fuse_cca: bool = False
+    zaya_conv_gemm: bool = False
+    zaya_fuse_moe: bool = False
     zaya_router_defer_ar: bool = False
-    zaya_chunked_ce: bool = True
+    zaya_chunked_ce: bool = False
     zaya_chunked_ce_tokens: int = 4096
-    zaya_chunked_ce_compile: bool = True
+    zaya_chunked_ce_compile: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()

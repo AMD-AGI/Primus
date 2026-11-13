@@ -70,9 +70,18 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
-      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, defaults in
-      # zaya1_base.yaml) stay at their defaults, all on but
-      # zaya_router_defer_ar, which gained under 1% here.
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
+      # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
+      # elementwise chains, CCA's convolutions as GEMMs, and the chunked
+      # cross-entropy with its per-chunk math compiled. zaya_router_defer_ar
+      # stays off: it gained under 1% here.
+      zaya_attn_flash: true
+      zaya_fuse_norm: true
+      zaya_fuse_cca: true
+      zaya_conv_gemm: true
+      zaya_fuse_moe: true
+      zaya_chunked_ce: true
+      zaya_chunked_ce_compile: true
 
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.

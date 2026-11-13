@@ -387,6 +387,11 @@ def test_chunked_ce_steps_aside_for_any_fused_cross_entropy():
         assert blocker == f"cross_entropy_loss_fusion is set ({impl})"
     assert "sequence parallel" in Zaya1Model._chunked_ce_blocker(_loss_settings(sequence_parallel=True))
     assert Zaya1Model._chunked_ce_blocker(_loss_settings(zaya_chunked_ce=False)) == "zaya_chunked_ce is off"
+    # The build log names the fused cross-entropy that runs, whatever zaya_chunked_ce says.
+    blocker = Zaya1Model._chunked_ce_blocker(
+        _loss_settings(zaya_chunked_ce=False, cross_entropy_loss_fusion=True, cross_entropy_fusion_impl="te")
+    )
+    assert blocker == "cross_entropy_loss_fusion is set (te)"
 
 
 def test_chunked_ce_tokens_must_be_positive():

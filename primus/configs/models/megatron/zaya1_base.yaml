@@ -90,14 +90,14 @@ zaya_balance_beta2: 0.999
 zaya_balance_wd: 0.0
 
 # ---------- ZAYA1 kernel paths ----------
-# Zaya1TransformerConfig fields; zaya1_modules.py and zaya1_chunked_ce.py
-# describe each one.
-zaya_attn_flash: true
-zaya_fuse_norm: true
-zaya_fuse_cca: true
-zaya_conv_gemm: true
-zaya_fuse_moe: true
+# Zaya1TransformerConfig fields, all off by default; zaya1_modules.py and
+# zaya1_chunked_ce.py describe each one. The MI355X recipes turn them on.
+zaya_attn_flash: false
+zaya_fuse_norm: false
+zaya_fuse_cca: false
+zaya_conv_gemm: false
+zaya_fuse_moe: false
 zaya_router_defer_ar: false
-zaya_chunked_ce: true
+zaya_chunked_ce: false
 zaya_chunked_ce_tokens: 4096
-zaya_chunked_ce_compile: true
+zaya_chunked_ce_compile: false

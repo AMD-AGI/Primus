@@ -26,9 +26,9 @@ from torch import nn
 
 from primus.backends.megatron.core.utils import maybe_compile
 
-# zaya_attn_flash (default on): drop a purely causal dense mask once per forward
+# zaya_attn_flash (default off): drop a purely causal dense mask once per forward
 # and run CCA attention through flash_attn_func with native GQA, or through
-# SDPA enable_gqa when flash_attn is unavailable. Off restores the dense-mask +
+# SDPA enable_gqa when flash_attn is unavailable. Off runs the dense-mask +
 # repeat_interleave path.
 try:
     from flash_attn import flash_attn_func as _flash_attn_func
@@ -36,10 +36,10 @@ except Exception:  # pragma: no cover - depends on the image
     _flash_attn_func = None
 
 
-# zaya_fuse_norm (default on): run each stage's fp32 elementwise chain
+# zaya_fuse_norm (default off): run each stage's fp32 elementwise chain
 # (ResidualScaling affine, residual merge, RMSNorm) as one torch.compile'd
 # region instead of ~12 eager kernels over [tokens, hidden] fp32 tensors, fwd
-# and bwd, in all 80 stages. zaya_fuse_cca (default on) does the same for the
+# and bwd, in all 80 stages. zaya_fuse_cca (default off) does the same for the
 # CCA query/key post-processing (grouped means, qk-norm, temperature, partial
 # RoPE). Both are free functions with tensor arguments, so every layer shares
 # one graph (no per-module recompiles). Off runs the same functions uncompiled.
@@ -99,19 +99,9 @@ def _publish_turbo_grouped_gemm_backend() -> None:
     _apply_turbo_grouped_gemm_backend_env()
 
 
-_PATH_DEFAULTS = {
-    "zaya_attn_flash": True,
-    "zaya_fuse_norm": True,
-    "zaya_fuse_cca": True,
-    "zaya_conv_gemm": True,
-    "zaya_fuse_moe": True,
-    "zaya_router_defer_ar": False,
-}
-
-
 def _path_on(config, name: str) -> bool:
-    """A kernel-path field of ``config``; configs without it, like the unit tests' stand-ins, get its default."""
-    return bool(getattr(config, name, _PATH_DEFAULTS[name]))
+    """A kernel-path field of ``config``, off when the config lacks it, as in the unit tests' stand-ins."""
+    return bool(getattr(config, name, False))
 
 
 def switch_summary(config) -> str:
@@ -403,13 +393,13 @@ def _cca_qk_post(
 
 _fused_cca_qk = maybe_compile(_cca_qk_post)
 
-# zaya_conv_gemm (default on): run CCA's two causal Conv1d layers without MIOpen.
+# zaya_conv_gemm (default off): run CCA's two causal Conv1d layers without MIOpen.
 # The depthwise kernel-2 conv and the per-head grouped kernel-2 conv otherwise
 # hit naive_conv_ab_nonpacked fwd/bwd kernels (double accumulation) plus NCL
 # transposes in all 40 CCA stages. Here the depthwise conv is a fused
 # elementwise two-tap filter emitted directly in the [groups, tokens, 2*cg]
 # layout, and the grouped conv is one baddbmm per stage. Same parameters, same
-# math (fp32 accumulation, bf16 output). Set it off for nn.Conv1d.
+# math (fp32 accumulation, bf16 output). Off runs nn.Conv1d.
 
 
 def _cca_conv_taps(qk, w0, b0, groups: int):
@@ -625,7 +615,7 @@ def attention(query, key, value, attention_mask: Optional[torch.Tensor], flash: 
     return out.permute(2, 0, 1, 3)
 
 
-# zaya_fuse_moe (default on): compile the MoE-stage elementwise chains that
+# zaya_fuse_moe (default off): compile the MoE-stage elementwise chains that
 # zaya_fuse_norm/zaya_fuse_cca do not cover: the expert SwiGLU (silu * up, one
 # kernel fwd and bwd, dynamic token count), the router EDA add + RMSNorm and
 # the fp32 softmax/bias/top-k/gather/cast, and the gate multiply + unpermute

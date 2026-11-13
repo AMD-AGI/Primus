@@ -4,7 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""The kernel-path config fields: their defaults, the modules that read them, and the build-log line."""
+"""The kernel-path config fields: their defaults, the recipes that set them, the modules that read them,
+and the build-log line."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,13 +30,30 @@ _PATHS = (
 _CHUNKED_CE = ("zaya_chunked_ce", "zaya_chunked_ce_tokens", "zaya_chunked_ce_compile")
 
 
-def test_base_yaml_and_modules_default_like_the_config():
+def test_every_path_is_off_by_default():
     base = Path(primus.__file__).parent / "configs" / "models" / "megatron" / "zaya1_base.yaml"
     values = yaml.safe_load(base.read_text())
     for name in _PATHS + _CHUNKED_CE:
         assert values[name] == getattr(Zaya1TransformerConfig, name), name
-    for name in _PATHS:
-        assert zm._PATH_DEFAULTS[name] == getattr(Zaya1TransformerConfig, name), name
+    for name in _PATHS + ("zaya_chunked_ce", "zaya_chunked_ce_compile"):
+        assert getattr(Zaya1TransformerConfig, name) is False, name
+    # The unit tests' stand-in configs have none of the fields.
+    assert not any(zm._path_on(SimpleNamespace(), name) for name in _PATHS)
+
+
+def test_only_the_mi355x_recipes_turn_paths_on():
+    compute = {"zaya_attn_flash", "zaya_fuse_norm", "zaya_fuse_cca", "zaya_conv_gemm", "zaya_fuse_moe"}
+    expected = {
+        "MI355X/zaya1_8B-BF16-pretrain.yaml": compute | {"zaya_router_defer_ar"},
+        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute | {"zaya_chunked_ce", "zaya_chunked_ce_compile"},
+    }
+    configs = Path(primus.__file__).parents[1] / "examples" / "megatron" / "configs"
+    recipes = sorted(configs.glob("*/zaya1_8B-*-pretrain.yaml"))
+    assert len(recipes) == 6
+    for path in recipes:
+        overrides = yaml.safe_load(path.read_text())["modules"]["pre_trainer"]["overrides"]
+        on = {name for name in _PATHS + _CHUNKED_CE if overrides.get(name) is True}
+        assert on == expected.get(path.relative_to(configs).as_posix(), set()), path
 
 
 def test_modules_read_the_fields_when_built():

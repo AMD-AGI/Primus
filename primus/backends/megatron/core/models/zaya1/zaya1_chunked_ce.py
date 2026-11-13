@@ -26,9 +26,9 @@ out-of-range labels (their max-shifted predicted logit is 0, so the loss is
 ``lse - max``, exactly as the stock kernel computes it).
 Returns per-token loss ``[b, s]``. The caller applies ``loss_mask``.
 
-Config fields: ``zaya_chunked_ce`` (default on) turns it on,
+Config fields: ``zaya_chunked_ce`` (default off) turns it on,
 ``zaya_chunked_ce_tokens`` (default 4096) is the tokens per chunk, and
-``zaya_chunked_ce_compile`` (default on) fuses each chunk's CE math with
+``zaya_chunked_ce_compile`` (default off) fuses each chunk's CE math with
 torch.compile.
 """
 
@@ -165,7 +165,7 @@ def chunked_linear_cross_entropy(
     labels: Tensor,
     chunk_tokens: int = 4096,
     logit_scale: Optional[float] = None,
-    compiled: bool = True,
+    compiled: bool = False,
 ) -> Tensor:
     """hidden_states [s, b, h], weight [V, h], labels [b, s] -> loss [b, s] (fp32).
 
