@@ -60,6 +60,7 @@ def _island_kwargs(fsdp_kwargs: dict, dtype: torch.dtype) -> dict:
 
 
 _ISLAND_WARNED_ATTR = "_primus_fsdp2_island_warned"  # set once its "no group" warning is logged
+WRAPPED_ATTR = "_primus_dtype_islands"  # set on the fully_shard wrapper (patch idempotence)
 
 
 def shard_dtype_islands(module: torch.nn.Module, fsdp_kwargs: dict, fully_shard) -> list:
@@ -187,5 +188,5 @@ def with_dtype_islands(fully_shard):
             )
         return fully_shard(module, **kwargs)
 
-    fully_shard_with_islands._primus_dtype_islands = True
+    setattr(fully_shard_with_islands, WRAPPED_ATTR, True)
     return fully_shard_with_islands

@@ -280,7 +280,7 @@ def test_patch_skip_arg_false_runs_the_check(monkeypatch, value):
     setattr(args, "muse_spark_skip_memory_check", value)
     mod, calls = _patch_env(monkeypatch, total=1, args=args)
     with pytest.raises(ValueError, match="muse_spark_skip_memory_check: true skips this check"):
-        mod.patch_muse_spark_memory_check(None)
+        mod.patch_muse_spark_memory_check.__wrapped__(None)
 
 
 @pytest.mark.parametrize("value", ["maybe", "2", "ture"])
@@ -289,7 +289,7 @@ def test_patch_skip_arg_typo_stops_the_run(monkeypatch, value):
     setattr(args, "muse_spark_skip_memory_check", value)
     mod, calls = _patch_env(monkeypatch, total=1, args=args)
     with pytest.raises(ValueError, match="muse_spark_skip_memory_check=.* is not a boolean"):
-        mod.patch_muse_spark_memory_check(None)
+        mod.patch_muse_spark_memory_check.__wrapped__(None)
     assert calls["props"] == 0  # refused before any check
 
 
@@ -328,7 +328,7 @@ def test_patch_reads_world_size_from_the_env(monkeypatch):
     assert len(calls["logs"]) == 1
     monkeypatch.setenv("WORLD_SIZE", "1")
     with pytest.raises(ValueError, match="world=1"):
-        mod.patch_muse_spark_memory_check(None)
+        mod.patch_muse_spark_memory_check.__wrapped__(None)
     # args.world_size wins over WORLD_SIZE
     args.world_size = 2
     mod.patch_muse_spark_memory_check(None)
@@ -352,7 +352,7 @@ def test_patch_uses_gpus_per_node_for_the_hint(monkeypatch):
     mod, _ = _patch_env(monkeypatch, total=288 * 10**9, args=_a(world_size=8), gpus=8)
     monkeypatch.setenv("GPUS_PER_NODE", "4")
     with pytest.raises(ValueError, match="node\\(s\\) of 4 such GPUs"):
-        mod.patch_muse_spark_memory_check(None)
+        mod.patch_muse_spark_memory_check.__wrapped__(None)
 
 
 @pytest.mark.parametrize("raw", ["abc", "0", "-2", "4.5"])
@@ -360,13 +360,13 @@ def test_patch_raises_for_a_bad_gpus_per_node(monkeypatch, raw):
     mod, _ = _patch_env(monkeypatch, total=288 * 10**9, args=_a(world_size=8), gpus=2)
     monkeypatch.setenv("GPUS_PER_NODE", raw)
     with pytest.raises(ValueError, match="GPUS_PER_NODE="):
-        mod.patch_muse_spark_memory_check(None)
+        mod.patch_muse_spark_memory_check.__wrapped__(None)
 
 
 def test_patch_uses_the_device_count_without_the_env(monkeypatch):
     mod, _ = _patch_env(monkeypatch, total=288 * 10**9, args=_a(world_size=8), gpus=2)
     with pytest.raises(ValueError, match="node\\(s\\) of 2 such GPUs"):
-        mod.patch_muse_spark_memory_check(None)
+        mod.patch_muse_spark_memory_check.__wrapped__(None)
 
 
 def test_embedding_and_output_layer_are_not_spread_over_stages():
@@ -677,3 +677,20 @@ def test_kv_groups_follow_the_gqa_flag():
     assert off == mha
     gqa = param_parts(_a(group_query_attention=True))["layer_dense"]
     assert gqa == param_parts(_a())["layer_dense"] < off
+
+
+def test_string_flags_are_parsed_not_truthy():
+    # env-substituted yaml gives strings: "false" must act as False (bool("false") is True)
+    from primus.backends.megatron.core.models.muse_spark import memory_check as mc
+
+    base = dict(num_layers=4, pipeline_model_parallel_size=2)
+    for key in ("account_for_embedding_in_pipeline_split", "account_for_loss_in_pipeline_split"):
+        assert mc.stage_layers(SimpleNamespace(**base, **{key: "false"})) == mc.stage_layers(
+            SimpleNamespace(**base, **{key: False})
+        )
+    pa = dict(exp_avg_dtype="bf16", exp_avg_sq_dtype="bf16", main_params_dtype="bf16")
+    assert mc._bytes_per_param(SimpleNamespace(use_precision_aware_optimizer="false", **pa)) == (
+        mc._bytes_per_param(SimpleNamespace(use_precision_aware_optimizer=False, **pa))
+    )
+    with pytest.raises(ValueError, match="use_precision_aware_optimizer"):
+        mc._bytes_per_param(SimpleNamespace(use_precision_aware_optimizer="ture", **pa))

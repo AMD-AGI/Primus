@@ -194,7 +194,8 @@ def test_only_a_known_interpreter_limit_skips(stderr, limit):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 @pytest.mark.parametrize("dtype, tol", [(torch.float32, 1e-5), (torch.bfloat16, 2e-2)])
 @pytest.mark.parametrize("t, h", [(128, 1000), (2048, 4096), (1, 4096), (37, 1000), (0, 1000)])
-def test_fused_kernel_matches_eager_on_the_gpu(dtype, tol, t, h):
+@pytest.mark.parametrize("probs_2d", [False, True], ids=["probs_T", "probs_T1"])
+def test_fused_kernel_matches_eager_on_the_gpu(dtype, tol, t, h, probs_2d):
     # the compiled kernels, forward and backward (H = 1000: not a power of two, the column
     # mask; 4096: the released width; T = 0: an expert with no routed token)
     m = _load()
@@ -204,7 +205,8 @@ def test_fused_kernel_matches_eager_on_the_gpu(dtype, tol, t, h):
     scale = 10.0 ** (torch.rand(t, 1, generator=g, device="cuda") * 4 - 2)  # row RMS 1e-2..1e2
     y = (torch.randn(t, h, generator=g, device="cuda") * scale).to(dtype).requires_grad_()
     w = (torch.randn(h, generator=g, device="cuda") * 0.3).to(dtype).requires_grad_()
-    p = torch.rand(t, generator=g, device="cuda").requires_grad_()
+    p_shape = (t, 1) if probs_2d else (t,)  # the [T] and [T, 1] probs contract
+    p = torch.rand(p_shape, generator=g, device="cuda").requires_grad_()
     go = torch.randn(t, h, generator=g, device="cuda").to(dtype)
     assert m.fused_rms_norm_available(y)
     ref = m.post_expert_norm_probs_reference(y, w, p, 1e-8)
@@ -213,9 +215,10 @@ def test_fused_kernel_matches_eager_on_the_gpu(dtype, tol, t, h):
     assert out.dtype == dtype and out.shape == (t, h)
     grads = torch.autograd.grad(out, (y, w, p), go)
     if t == 0:
-        assert grads[0].shape == (0, h) and grads[2].shape == (0,)
+        assert grads[0].shape == (0, h) and grads[2].shape == p_shape
         assert grads[1].shape == (h,) and torch.isfinite(grads[1]).all() and not grads[1].any()
         return
+    assert grads[2].shape == p_shape  # dp keeps the probs' own shape
     for name, a, b in zip(("out", "dy", "dw", "dp"), (out, *grads), (ref, *ref_grads)):
         assert a.dtype == b.dtype, name
         err = float((a.float() - b.float()).abs().max() / b.float().abs().max().clamp_min(1e-30))

@@ -67,18 +67,27 @@ def _gated_residual(kind="attn", init=0.0):
     return MuseSparkGatedResidual(cfg, kind=kind)
 
 
-def test_fp32_islands_are_marked_as_muse_spark_params():
+def test_fp32_islands_are_marked_as_muse_spark_params(monkeypatch):
     # the optimizer checkpoint patches take their Muse Spark path only for an optimizer that
     # holds a marked param (muse_spark_optimizer_ckpt_patches.holds_muse_spark_params)
-    import inspect
-
     from primus.backends.megatron.core.models.muse_spark.model_types import (
         MUSE_SPARK_PARAM_ATTR,
     )
 
     assert getattr(_gated_residual().gate, MUSE_SPARK_PARAM_ATTR) is True
-    # the router marks its weight in __init__ (a real build needs the parallel state)
-    assert "mark_muse_spark_param(self.weight)" in inspect.getsource(MuseSparkTopKRouter.__init__)
+    # the router marks its weight in __init__: run it on a stubbed base (a real build needs
+    # the parallel state); the base creates the weight as TopKRouter does
+    from primus.backends.megatron.core.transformer.muse_spark import moe as moe_mod
+
+    def base_init(self, config, *args, **kwargs):
+        torch.nn.Module.__init__(self)
+        self.weight = torch.nn.Parameter(torch.zeros(4, 8))
+
+    monkeypatch.setattr(moe_mod._RouterBase, "__init__", base_init)
+    router = MuseSparkTopKRouter.__new__(MuseSparkTopKRouter)
+    MuseSparkTopKRouter.__init__(router, SimpleNamespace(moe_router_output_multiplier=0.5))
+    assert getattr(router.weight, MUSE_SPARK_PARAM_ATTR) is True
+    assert router.output_multiplier == 0.5
 
 
 def test_gate_init_value_starts_near_identity_residual():
@@ -176,7 +185,7 @@ def _ctx(**args):
 
 def test_missing_backend_args_raises():
     with pytest.raises(RuntimeError, match="backend_args"):
-        rc.patch_muse_spark_cp_comm(SimpleNamespace(extra={}))
+        rc.patch_muse_spark_cp_comm.__wrapped__(SimpleNamespace(extra={}))
 
 
 @pytest.mark.parametrize(
@@ -232,7 +241,7 @@ def test_cp_comm_patch_only_with_window_and_cp(monkeypatch):
     )
     assert "spelled 'all_gather'" in msgs[1] and "p2p" not in msgs[1]
     with pytest.raises(ValueError):
-        rc.patch_muse_spark_cp_comm(
+        rc.patch_muse_spark_cp_comm.__wrapped__(
             _ctx(context_parallel_size=2, window_size=(2048, 0), cp_comm_type="a2a+p2p")
         )
 
@@ -352,7 +361,7 @@ def test_fused_router_is_rejected(params, backend, found):
     ctx = _ctx(**backend)
     ctx.extra["module_config"] = SimpleNamespace(params=SimpleNamespace(**params))
     with pytest.raises(ValueError, match="e_score_correction_bias") as err:
-        rc.patch_muse_spark_no_fused_router(ctx)
+        rc.patch_muse_spark_no_fused_router.__wrapped__(ctx)
     for f in found:
         assert f in str(err.value)
 
@@ -538,7 +547,7 @@ def test_deepep_is_turned_off_only_at_tp_ep_1(monkeypatch):
             enable_primus_turbo=turbo,
         )
 
-    # local_gpus=8: an EP 8 group fits one node whatever LOCAL_WORLD_SIZE / GPUS_PER_NODE say
+    # local_ranks=8: an EP 8 group fits one node whatever LOCAL_WORLD_SIZE / GPUS_PER_NODE say
     assert _deepep_off(a(1, 1), 8)
     # the dispatcher's TP is the expert TP (Muse Spark: 1), so TP 2 with EP 1 is still 1
     assert _deepep_off(a(2, 1), 8)
@@ -561,21 +570,23 @@ def test_deepep_is_turned_off_when_the_expert_group_spans_nodes(monkeypatch):
             enable_primus_turbo=True,
         )
 
-    assert _deepep_on(a(8), local_gpus=8)
-    assert "num_rdma_ranks" in deepep_disable_reason(a(64), local_gpus=8)
-    assert "muse_spark_turbo_deepep_internode: true" in deepep_disable_reason(a(64), local_gpus=8)
+    assert _deepep_on(a(8), local_ranks=8)
+    assert "num_rdma_ranks" in deepep_disable_reason(a(64), local_ranks=8)
+    assert "muse_spark_turbo_deepep_internode: true" in deepep_disable_reason(a(64), local_ranks=8)
     # a Primus-Turbo build with rocSHMEM: internode dispatch, keep DeepEP across nodes
-    assert _deepep_on(a(64, internode=True), local_gpus=8)
-    assert _deepep_off(a(1, internode=True), local_gpus=8)  # the group-1 rule still holds
-    assert _deepep_off(a(8, etp=2), local_gpus=8)
+    assert _deepep_on(a(64, internode=True), local_ranks=8)
+    assert _deepep_off(a(1, internode=True), local_ranks=8)  # the group-1 rule still holds
+    assert _deepep_off(a(8, etp=2), local_ranks=8)
     # a group that does not divide the node: consecutive ranks straddle a node boundary
     # (EP 3: ranks 6-8; EP 6: ranks 6-11), though the group is no larger than a node
     for ep in (3, 6, 5, 7):
-        assert "spans nodes" in deepep_disable_reason(a(ep), local_gpus=8)
-        assert _deepep_on(a(ep, internode=True), local_gpus=8)
+        assert "spans nodes" in deepep_disable_reason(a(ep), local_ranks=8)
+        assert _deepep_on(a(ep, internode=True), local_ranks=8)
     for ep in (2, 4, 8):
-        assert _deepep_on(a(ep), local_gpus=8)
+        assert _deepep_on(a(ep), local_ranks=8)
     monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("NNODES", raising=False)
     monkeypatch.setenv("GPUS_PER_NODE", "4")
     assert _deepep_off(a(8)) and _deepep_on(a(4))
     # one process on an 8-GPU node (--nproc_per_node=1): the node still has 8 GPUs
@@ -644,16 +655,16 @@ def test_final_logit_softcapping_must_be_null_zero_or_positive():
             normalize_softcap(bad)
 
 
-def _deepep_off(args, local_gpus=None):
+def _deepep_off(args, local_ranks=None):
     from primus.backends.megatron.patches.args.muse_spark_arg_compat_patches import (
         deepep_disable_reason,
     )
 
-    return deepep_disable_reason(args, local_gpus) is not None
+    return deepep_disable_reason(args, local_ranks) is not None
 
 
-def _deepep_on(args, local_gpus=None):
-    return not _deepep_off(args, local_gpus)
+def _deepep_on(args, local_ranks=None):
+    return not _deepep_off(args, local_ranks)
 
 
 def test_stacked_expert_factory_names_the_unsupported_optimizer_format():
@@ -959,3 +970,105 @@ def test_built_module_summary_reports_the_core_attention_window():
 
     assert built_module_summary(model([511, 0])).endswith("window=(511, 0)")
     assert built_module_summary(model(None)).endswith("window=None")
+
+
+@pytest.mark.parametrize(
+    "world, nnodes, ep, kept",
+    [
+        ("3", None, 3, True),  # single node, 3 of 8 GPUs used: the EP 3 group is in the node
+        ("6", "1", 6, True),
+        ("8", "1", 8, True),
+        ("24", "3", 6, False),  # 8 ranks per node: EP 6 groups straddle nodes
+        ("24", "3", 8, True),
+        ("16", "2", 16, False),  # larger than a node
+        ("12", "2", 6, True),  # 6 ranks per node: EP 6 groups stay in a node
+        ("16", None, 6, False),  # no NNODES, world > GPUs: the GPUs-per-node rule
+    ],
+)
+def test_deepep_node_span_reads_the_ranks_placed_per_node(monkeypatch, world, nnodes, ep, kept):
+    from primus.backends.megatron.patches.args.muse_spark_arg_compat_patches import (
+        deepep_disable_reason,
+        ranks_per_node,
+    )
+
+    monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("WORLD_SIZE", world)
+    if nnodes is None:
+        monkeypatch.delenv("NNODES", raising=False)
+    else:
+        monkeypatch.setenv("NNODES", nnodes)
+    args = SimpleNamespace(
+        muse_spark_turbo_deepep_internode=False,
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=ep,
+        expert_tensor_parallel_size=1,
+        use_turbo_deepep=True,
+        enable_primus_turbo=True,
+    )
+    assert (deepep_disable_reason(args) is None) is kept
+    if not kept:
+        assert f"{ranks_per_node()} ranks per node" in deepep_disable_reason(args)
+
+
+@pytest.mark.parametrize("name", ["WORLD_SIZE", "NNODES"])
+@pytest.mark.parametrize("bad", ["abc", "0", "-2", "1.5"])
+def test_ranks_per_node_rejects_a_malformed_launcher_variable(monkeypatch, name, bad):
+    # the same rule as the converter's NNODES check: a set but bad value names the variable
+    from primus.backends.megatron.patches.args.muse_spark_arg_compat_patches import (
+        ranks_per_node,
+    )
+
+    monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("WORLD_SIZE", "16")
+    monkeypatch.setenv("NNODES", "2")
+    monkeypatch.setenv(name, bad)
+    with pytest.raises(ValueError, match=f"{name} must be a positive integer"):
+        ranks_per_node()
+
+
+def test_a_rejected_setting_stops_the_run_through_the_patch_runner():
+    # the training runtime calls run_patches without stop_on_error, which logs an Exception
+    # and continues: the Muse Spark checks raise SystemExit (fail_fast) so the run stops
+    from primus.core.patches import PatchContext
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    patch = PatchRegistry.get("megatron.args.muse_spark_no_fused_router")
+    params = SimpleNamespace(model_type="muse_spark", turbo_sync_free_moe_stage=1)
+    ctx = PatchContext(
+        backend="megatron",
+        phase="build_args",
+        extra={"backend_args": SimpleNamespace(), "module_config": SimpleNamespace(params=params)},
+    )
+    with pytest.raises(SystemExit, match="e_score_correction_bias") as err:
+        patch.apply(ctx)
+    assert isinstance(err.value.__cause__, ValueError)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "megatron.args.muse_spark_deepep_group_size",
+        "megatron.args.muse_spark_mfsdp_turbo_grouped_gemm",
+        "megatron.args.muse_spark_cp_comm",
+        "megatron.args.muse_spark_no_fused_router",
+        "megatron.muse_spark.memory_check",
+        "megatron.muse_spark.te_gemm_workspace",
+        "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt",
+        "megatron.muse_spark.chained_optimizer_relayout_load",
+        "megatron.muse_spark.fsdp2_dtype_islands",
+        "megatron.muse_spark.fsdp2_fp32_param_grads",
+    ],
+)
+def test_muse_spark_patches_fail_fast(name):
+    import primus.backends.megatron.patches.muse_spark_fsdp2_patches  # noqa: F401
+    import primus.backends.megatron.patches.muse_spark_memory_check_patches  # noqa: F401
+    import primus.backends.megatron.patches.muse_spark_optimizer_ckpt_patches  # noqa: F401
+    import primus.backends.megatron.patches.muse_spark_te_gemm_workspace_patches  # noqa: F401
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    patch = PatchRegistry.get(name)
+    assert patch is not None
+    # the registered handler is the fail_fast wrapper around the patch body
+    assert hasattr(patch.handler, "__wrapped__")

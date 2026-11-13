@@ -253,6 +253,17 @@ def test_fully_frozen_island_one_dtype_keeps_its_dtype(sharded):
     assert sharded[0][1]["mp_policy"].reduce_dtype == torch.float32
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float64])
+@pytest.mark.parametrize("frozen", [False, True])
+def test_island_reduce_dtype_is_the_islands_own_dtype(sharded, dtype, frozen):
+    # a non-fp32 island: its policy follows its params' dtype, not a hardcoded fp32
+    root = nn.Module()
+    root.router = _Router(4, 4, bias=False).to(dtype)
+    root.router.requires_grad_(not frozen)
+    assert _islands(sharded, root, {"mp_policy": BF16_POLICY}) == [root.router]
+    assert sharded[0][1]["mp_policy"].reduce_dtype == dtype
+
+
 # --- PrimusTorchFullyShardedDataParallel with the Muse Spark patch (real constructor, distributed calls stubbed) ---
 
 

@@ -10,6 +10,10 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # post-train entrypoint, which converts the checkpoint first
 # (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py):
 #   ./runner/primus-cli direct -- train posttrain --config <this file>
+# One node (the 4-layer cut; MUSE_SPARK_HF_PATH is required: the default below is a
+# placeholder):
+#   MUSE_SPARK_HF_PATH=/data/Muse-Spark-Open-816B-A42B ./runner/primus-cli direct -- \
+#     train posttrain --config <this file> --num_layers 4
 # The convert hook reads the HF source from hf_path, else tokenizer_model (below,
 # MUSE_SPARK_HF_PATH).
 # It must be a LOCAL HF directory: the convert hook does not download a Hub id (a Hub id
@@ -30,6 +34,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # 14, the other stages 12 each; an even split needs PP in 1, 2, 31 or 62) and, best, an
 # already converted checkpoint as pretrained_checkpoint (the hook then skips the
 # conversion); the memory check stops a layout that cannot fit before the model build.
+# Raise GBS with such a layout (see global_batch_size below): GBS 8 is for one node.
+# Loading the converted checkpoint at TP > 1 (e.g. this TP 8) is not yet tested; the
+# fine-tune gate loads it at TP 1 / EP 8. TP must divide the 202048 vocab rows (1, 2, 4, 8).
 # In a multi-node job the other nodes wait for node 0's conversion while its heartbeat
 # moves (docs section 11.6); converting first and setting pretrained_checkpoint skips it.
 # See docs/03-configuration-reference/megatron-parameters.md, section 11.6.
@@ -55,6 +62,10 @@ modules:
       # hyper parameters
       train_iters: ${TRAIN_ITERS:10}
       micro_batch_size: ${MBS:1}
+      # GBS 8 fits the one-node 4-layer cut (DP 8 at EP 8, PP 1). For a multi-node layout,
+      # raise GBS: GBS = MBS x DP x micro-batches, and the pipeline needs micro-batches >= PP
+      # (best >= 4 x PP to keep the bubble small). Example: TP 8 PP 5 EP 16 on 20 nodes gives
+      # DP = 160 / (8 x 5) = 4, so set GBS >= 4 x 4 x 5 = 80 (GBS=80 or more, a multiple of 4).
       global_batch_size: ${GBS:8}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
@@ -65,8 +76,6 @@ modules:
       weight_decay: 0.1
       adam_beta1: 0.9
       adam_beta2: 0.95
-      hidden_dropout: 0.0
-      attention_dropout: 0.0
 
       # parallel (expert_tensor_parallel_size stays 1: post_expert_norm needs full rows)
       tensor_model_parallel_size: ${PRIMUS_TP:1}
@@ -121,7 +130,6 @@ modules:
       use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}
       turbo_deepep_num_cu: 32
       turbo_deepep_use_comm_stream: false
-      moe_token_dispatcher_type: alltoall
       moe_permute_fusion: true
       cross_entropy_loss_fusion: true
       cross_entropy_fusion_impl: te

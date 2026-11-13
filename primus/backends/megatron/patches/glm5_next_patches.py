@@ -187,5 +187,6 @@ def patch_glm5_next_te_gemm_workspace(ctx: PatchContext):
         enlarge_te_gemm_workspace,
     )
 
-    # strict=False: GLM-5.3's original int() reading of PRIMUS_TE_GEMM_WORKSPACE_MB
+    # strict=False: plain int() of PRIMUS_TE_GEMM_WORKSPACE_MB, no range check (0 or a
+    # negative value changes nothing)
     enlarge_te_gemm_workspace("megatron.glm5_next.te_gemm_workspace", strict=False)

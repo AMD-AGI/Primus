@@ -25,7 +25,10 @@ import copy
 import math
 import os
 
-from primus.backends.megatron.core.models.muse_spark.model_types import bool_flag
+from primus.backends.megatron.core.models.muse_spark.model_types import (
+    bool_flag,
+    config_flag,
+)
 from primus.backends.megatron.core.models.muse_spark.number_utils import (
     parse_positive_int,
 )
@@ -210,8 +213,8 @@ def stage_layers(a):
         if last is not None:
             out[-1] = int(last)
         return out
-    emb = int(bool(getattr(a, "account_for_embedding_in_pipeline_split", False)))
-    loss = int(bool(getattr(a, "account_for_loss_in_pipeline_split", False)))
+    emb = int(config_flag(a, "account_for_embedding_in_pipeline_split", False))
+    loss = int(config_flag(a, "account_for_loss_in_pipeline_split", False))
     each = math.ceil((L + emb + loss) / pp)
     out = [each] * pp
     out[0] -= emb
@@ -287,7 +290,7 @@ def _bytes_per_param(a):
     fp32 params keep no separate master copy: (4 + 4, 8).
     """
     weight, grad = _weight_and_grad_bytes(a)
-    pa = bool(getattr(a, "use_precision_aware_optimizer", False))
+    pa = config_flag(a, "use_precision_aware_optimizer", False)
 
     def state_bytes(key):  # fp32 (unset) unless the precision-aware optimizer sets a dtype
         return _dtype_bytes(getattr(a, key, None) if pa else None)
@@ -325,8 +328,8 @@ def state_bytes_per_gpu(a, world_size, vocab_size=None, parts=None, per_param=No
     # context parallel (get_data_parallel_group(with_context_parallel=True)): DP x CP.
     dp = max(1, world_size // (tp * pp))
     edp = max(1, world_size // (ep * etp * pp))
-    fsdp = bool(getattr(a, "use_torch_fsdp2", False) or getattr(a, "use_megatron_fsdp", False))
-    dist_opt = fsdp or bool(getattr(a, "use_distributed_optimizer", False))
+    fsdp = config_flag(a, "use_torch_fsdp2", False) or config_flag(a, "use_megatron_fsdp", False)
+    dist_opt = fsdp or config_flag(a, "use_distributed_optimizer", False)
     wg, opt = per_param if per_param is not None else _bytes_per_param(a)  # FSDP shards weights + grads too
     per_dense = (wg / dp if fsdp else wg) + (opt / dp if dist_opt else opt)
     per_expert = (wg / edp if fsdp else wg) + (opt / edp if dist_opt else opt)
@@ -426,9 +429,10 @@ def skip_requested(args) -> bool:
 
 def required_state_bytes_or_raise(args, world_size, total_bytes, n_gpus_per_node=DEFAULT_GPUS_PER_NODE):
     """The estimated weights + grads + optimizer states per GPU (bytes); raise ValueError when
-    they exceed ``RAISE_FRACTION`` of ``total_bytes``. The rest is a fixed headroom for the
-    TE GEMM workspaces, RCCL buffers and activations, which are not estimated, so only
-    layouts that cannot fit raise.
+    they exceed ``RAISE_FRACTION`` of ``total_bytes``. The rest is headroom for the TE GEMM
+    workspaces, RCCL buffers and activations, which are not estimated; layouts whose
+    estimate exceeds ``RAISE_FRACTION`` are very unlikely to fit and raise (an estimate,
+    not a strict bound: see the module docstring).
 
     Uses ``args.padded_vocab_size`` (the allocated embedding / head rows). The layout in
     the error is computed for this GPU's memory (MI300X and MI355X differ).

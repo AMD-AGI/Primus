@@ -480,6 +480,21 @@ def test_build_margs_requires_the_checkpoint_vocab(hf_cfg, hf_dir, match):
         conv.build_margs({}, args, hf_cfg)
 
 
+def test_build_margs_refuses_an_hf_dir_config_without_vocab(tmp_path):
+    # hf_dir set and no config passed: the disk config is read, and its missing vocab_size
+    # is an error (not a fallback to the tokenizer's vocab)
+    (tmp_path / "config.json").write_text(json.dumps({"text_config": {"hidden_size": 8}}))
+    args = SimpleNamespace(
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        expert_parallel_size=1,
+        dtype="bf16",
+        hf_dir=str(tmp_path),
+    )
+    with pytest.raises(ValueError, match="the HF config has no vocab_size"):
+        conv.build_margs({}, args)
+
+
 # ---------------------------------------------------------------- depth cut
 def test_cut_to_layers_cuts_every_per_layer_list():
     cfg = {"text_config": dict(TEXT), "architectures": ["MuseSparkForConditionalGeneration"]}
@@ -924,6 +939,43 @@ def test_host_memory_available_reads_meminfo_and_the_cgroup(monkeypatch):
     assert conv.host_memory_available() is None
 
 
+def test_host_memory_available_reads_the_job_cgroup_path(monkeypatch):
+    # a Slurm / systemd job cgroup without a cgroup namespace: the limit is on the process's
+    # own path (and the v2 root has no memory.max); the smallest free limit up the path wins
+    monkeypatch.undo()
+    g = "/sys/fs/cgroup"
+    files = {
+        "/proc/meminfo": "MemAvailable: 1048576 kB\n",  # 1 GiB node-wide
+        "/proc/self/cgroup": "0::/system.slice/slurmstepd.scope/job_7/step_0\n",
+        f"{g}/system.slice/slurmstepd.scope/job_7/memory.max": "4000",
+        f"{g}/system.slice/slurmstepd.scope/job_7/memory.current": "1000",
+        f"{g}/system.slice/slurmstepd.scope/job_7/step_0/memory.max": "max",
+        f"{g}/system.slice/slurmstepd.scope/job_7/step_0/memory.current": "900",
+    }
+    monkeypatch.setattr(conv, "_read_text", lambda path, default="": files.get(path, default))
+    assert conv.host_memory_available() == 3000
+    # cgroup v1: the memory controller's own path under <root>/memory
+    files.clear()
+    files.update(
+        {
+            "/proc/meminfo": "MemAvailable: 1048576 kB\n",
+            "/proc/self/cgroup": "12:cpu,cpuacct:/slurm/uid_1/job_7\n4:memory:/slurm/uid_1/job_7\n",
+            f"{g}/memory/slurm/uid_1/job_7/memory.limit_in_bytes": "8000",
+            f"{g}/memory/slurm/uid_1/job_7/memory.usage_in_bytes": "500",
+            f"{g}/memory/slurm/uid_1/job_7/memory.stat": "total_inactive_file 50\n",
+            f"{g}/memory/memory.limit_in_bytes": str(1 << 62),  # root: unlimited
+            f"{g}/memory/memory.usage_in_bytes": "1",
+        }
+    )
+    assert conv.host_memory_available() == 8000 - 500 + 50
+
+
+def test_cgroup_dirs_walk_up_to_the_root():
+    dirs = conv._cgroup_dirs("0::/a/b\n", "/cg")
+    assert dirs[:3] == ["/cg/a/b", "/cg/a", "/cg"] and "/cg/memory" in dirs
+    assert conv._cgroup_dirs("0::/\n", "/cg")[0] == "/cg"  # a cgroup namespace
+
+
 def test_fp32_tensor_check_on_the_mapped_state_dict():
     def sd(layers=2, gate_dtype=torch.float32):
         out = {}
@@ -1073,6 +1125,8 @@ def test_deepep_spanning_nodes_needs_the_internode_opt_in(monkeypatch, gpus, ep,
     from primus.backends.megatron.patches.args import muse_spark_arg_compat_patches as m
 
     monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("NNODES", raising=False)
     monkeypatch.setenv("GPUS_PER_NODE", gpus)
     args = SimpleNamespace(
         muse_spark_turbo_deepep_internode=opt_in,
@@ -1086,9 +1140,9 @@ def test_deepep_spanning_nodes_needs_the_internode_opt_in(monkeypatch, gpus, ep,
     if kept:
         assert reason is None
     else:
-        assert "spans nodes" in reason and f"{gpus} GPUs per node" in reason and m.INTERNODE_ARG in reason
-    # an explicit local_gpus wins over the environment
-    assert m.deepep_disable_reason(args, local_gpus=ep) is None
+        assert "spans nodes" in reason and f"{gpus} ranks per node" in reason and m.INTERNODE_ARG in reason
+    # an explicit local_ranks wins over the environment
+    assert m.deepep_disable_reason(args, local_ranks=ep) is None
 
 
 @pytest.mark.parametrize("raw", [0, -1, True, 1.5])
@@ -2066,6 +2120,26 @@ def test_dispatch_uses_model_type(monkeypatch):
     assert branches.get(MODEL_TYPE, "").endswith("muse_spark.muse_spark_builders")
 
 
+@pytest.mark.parametrize(
+    "kw, match",
+    [
+        ({"spec": ["my.module", "spec"]}, "spec="),
+        ({"use_rope_scaling": True}, "use_rope_scaling"),
+        ({"rotary_seq_len_interpolation_factor": 4.0}, "rotary_seq_len_interpolation_factor"),
+    ],
+)
+def test_the_builder_refuses_unsupported_gpt_options(kw, match):
+    pytest.importorskip("megatron.core")
+    from primus.backends.megatron.core.models.muse_spark.muse_spark_builders import (
+        check_builder_args,
+    )
+
+    base = dict(spec=None, use_rope_scaling=False, rotary_seq_len_interpolation_factor=None)
+    check_builder_args(SimpleNamespace(**base))  # the defaults pass
+    with pytest.raises(ValueError, match=match):
+        check_builder_args(SimpleNamespace(**{**base, **kw}))
+
+
 def test_convert_rejects_a_zero_cap_before_reading_weights(tmp_path):
     import json as _json
 
@@ -2248,11 +2322,11 @@ def test_layer_patterns_patch_normalizes_backend_args_and_checks_them():
 
     dense = SimpleNamespace(num_layers=4, no_rope_freq=full, moe_layer_freq="[1, 0, 1, 1]")
     with pytest.raises(ValueError):
-        patch_muse_spark_layer_patterns(_patch_ctx(SimpleNamespace(), dense))
+        patch_muse_spark_layer_patterns.__wrapped__(_patch_ctx(SimpleNamespace(), dense))
 
     capped = SimpleNamespace(num_layers=4, moe_layer_freq=1, final_logit_softcapping=-20.0)
     with pytest.raises(ValueError, match="final_logit_softcapping"):
-        patch_muse_spark_layer_patterns(_patch_ctx(SimpleNamespace(), capped))
+        patch_muse_spark_layer_patterns.__wrapped__(_patch_ctx(SimpleNamespace(), capped))
 
 
 def test_the_converter_saves_torch_dist_through_mains_mapping_check(tmp_path, monkeypatch):
@@ -2590,6 +2664,47 @@ def test_parallel_reader_matches_safe_open(tmp_path):
                 assert torch.equal(got, want)
     finally:
         reader.close()
+
+
+def test_parallel_reader_closes_the_file_only_after_every_chunk(tmp_path, monkeypatch):
+    # one chunk fails at once while the others are still reading: the fd must stay open until
+    # they finish (no EBADF / reused fd), then the first error is raised
+    import threading
+    import time
+
+    pytest.importorskip("safetensors")
+    from safetensors.torch import save_file
+
+    path = tmp_path / "model.safetensors"
+    save_file({"w": torch.zeros(4096, dtype=torch.uint8)}, str(path))
+    events, lock = [], threading.Lock()
+    real_preadv, real_close = os.preadv, os.close
+
+    def preadv(fd, bufs, offset):
+        if offset == conv.ParallelSafetensorsReader(threads=1)._header(str(path))[0]:
+            with lock:
+                events.append("fail")
+            return 0  # short read: the first chunk raises
+        time.sleep(0.2)
+        got = real_preadv(fd, bufs, offset)
+        with lock:
+            events.append("read")
+        return got
+
+    def close(fd):
+        with lock:
+            events.append("close")
+        real_close(fd)
+
+    monkeypatch.setattr(conv.os, "preadv", preadv)
+    monkeypatch.setattr(conv.os, "close", close)
+    reader = conv.ParallelSafetensorsReader(threads=4, chunk=1024)
+    try:
+        with pytest.raises(OSError, match="short read"):
+            reader.read(str(path), "w")
+    finally:
+        reader.close()
+    assert events.count("read") == 3 and events[-1] == "close", events
 
 
 def test_mapped_store_reads_through_the_parallel_reader(tmp_path):

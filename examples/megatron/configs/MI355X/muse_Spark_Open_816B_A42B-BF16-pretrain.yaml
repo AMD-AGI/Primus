@@ -26,9 +26,10 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Other layouts: set PRIMUS_TP / PRIMUS_PP / PRIMUS_EP and GBS (GBS must be a multiple of
 # MBS * DP, DP = GPUs / (TP * PP)). EP must divide 256 and GPUs / PP. PP must divide the 62
 # layers (1, 2, 31 or 62), else set decoder_first/last_pipeline_num_layers. TP 8 (with SP)
-# cuts the dense states to ~114 GiB per GPU on 16 nodes. The native converter builds at
-# TP=PP=EP=1 and saves torch_dist (Megatron reshards it on load, so any TP / PP / EP loads
-# it). It copies the weights in one layer at a time: the full model (822B parameters)
+# cuts the dense states to ~114 GiB per GPU on 16 nodes (a converted checkpoint is not yet
+# tested at TP > 1, see next). The native converter builds at
+# TP=PP=EP=1 and saves torch_dist (Megatron reshards it on load; loading is tested at
+# TP 1 / EP 8, not yet at TP > 1). It copies the weights in one layer at a time: the full model (822B parameters)
 # needs ~1.5 TiB (1.64 TB) of host RAM in bf16, plus the converter's 5 % margin (it
 # checks the host's available memory first); or pass an already converted checkpoint.
 # Embedding / output rows: vocab_size rounded up to 64 (the muse_spark_vocab patch, the
@@ -40,8 +41,8 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Single node: set PRIMUS_PP=1 PRIMUS_EP=8 (this file defaults to PP 2, and EP 8 must divide
 # the 8 GPUs / PP) and cut the model on the command line (--num_layers 4 keeps the first 4
 # released layers and all 256 experts). The trainer test
-# (test_muse_Spark_Open_816B_A42B, a weekly test) runs THIS file on one node with
-# command-line cuts (--num_layers 4 --num_experts 16 --moe_router_topk 4,
+# (test_muse_Spark_Open_816B_A42B, a weekly test) starts from this file on one node and
+# overrides on the command line (--num_layers 4 --num_experts 16 --moe_router_topk 4,
 # --expert_model_parallel_size 8, PRIMUS_EP=8 PRIMUS_PP=1, seq 1024, GBS 8): the alltoall
 # dispatcher with Turbo grouped GEMM (DeepEP stays off, as in this file).
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
@@ -137,7 +138,6 @@ modules:
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
       use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}
-      moe_token_dispatcher_type: alltoall
       turbo_deepep_num_cu: 32
       turbo_deepep_use_comm_stream: false
       # Fused token permute / unpermute with TE kernels (as deepseek_v3).

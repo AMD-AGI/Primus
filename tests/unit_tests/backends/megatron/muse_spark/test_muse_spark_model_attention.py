@@ -146,7 +146,10 @@ def test_normed_embedding_forward_is_a_weightless_fp32_rms_norm(monkeypatch, dty
     assert len(calls) == 1 and "position_ids" in calls[0][1]  # arguments passed through
     assert out.dtype == dtype and out.shape == raw.shape
     torch.testing.assert_close(out, _ref_rms(raw, eps).to(dtype), rtol=0, atol=0)
-    assert not list(emb.parameters())  # weightless
+    # weightless: the subclass only overrides forward (no __init__, no parameter or buffer of
+    # its own), so the built embedding has exactly LanguageModelEmbedding's parameters
+    own = {k for k, v in vars(msm.MuseSparkNormedEmbedding).items() if not k.startswith("__")}
+    assert own == {"forward"} and "__init__" not in vars(msm.MuseSparkNormedEmbedding)
     # unit RMS per token (up to eps and the output dtype)
     rms = out.float().pow(2).mean(-1).sqrt()
     torch.testing.assert_close(

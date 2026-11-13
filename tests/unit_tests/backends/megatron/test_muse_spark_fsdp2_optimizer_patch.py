@@ -117,7 +117,8 @@ def test_a_non_muse_optimizer_takes_upstreams_path(mesh, patched):
 def test_the_muse_check_runs_once_per_optimizer(mesh, patched, monkeypatch):
     calls = []
     real = patch_ckpt.holds_muse_spark_params
-    monkeypatch.setattr(patch_ckpt, "holds_muse_spark_params", lambda o: calls.append(o) or real(o))
+    # the name the fsdp2 patch imported (module-level import)
+    monkeypatch.setattr(patch, "holds_muse_spark_params", lambda o: calls.append(o) or real(o))
     p = mark_muse_spark_param(_dparam(mesh, 1.0))
     p.grad = distribute_tensor(torch.full((4,), 3.0), mesh, [Shard(0)])
     groups = [[p]]

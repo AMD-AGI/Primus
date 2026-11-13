@@ -99,10 +99,10 @@ def weightless_rms(x: torch.Tensor, eps: float, fused: bool = True) -> torch.Ten
 class MuseSparkRMSNorm(nn.RMSNorm):
     """RMSNorm in fp32; ``with_scale=False`` gives the weightless norm.
 
-    Built on ``torch.nn.RMSNorm`` (the norm behind Megatron's ``WrappedTorchNorm``); the
-    forward is Primus's shared RMSNorm (``fused_rms_norm``) with the HF fp32 math: normalize
-    and scale in fp32, round once to the input dtype. The weightless norm runs the eager fp32
-    reference instead when ``muse_spark_fused_attn_norm`` is false.
+    Built on ``torch.nn.RMSNorm`` (the norm behind Megatron's ``WrappedTorchNorm``), with the
+    HF fp32 math. The weightless norm runs Primus's shared RMSNorm (``fused_rms_norm``), or
+    the eager fp32 reference when ``muse_spark_fused_attn_norm`` is false; the weighted norm
+    runs ``weighted_rms_norm`` (fp32 norm * fp32 weight, rounded once to the input dtype).
     """
 
     def __init__(

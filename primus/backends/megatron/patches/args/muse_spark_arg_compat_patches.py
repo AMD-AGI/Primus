@@ -27,7 +27,8 @@ CP check reads ``backend_args`` only (the Megatron args it fixes up).
   the ``allgather`` spelling (respelled to ``all_gather``).
 * Primus-Turbo DeepEP (``use_turbo_deepep``, opt-in in every Muse Spark example) with expert
   TP x EP == 1 (the dispatcher requires > 1) or an expert group that spans nodes (larger
-  than a node, or the GPUs per node not a multiple of it, e.g. EP 3 or 6 on 8-GPU nodes;
+  than the ranks per node, or the ranks per node not a multiple of it, see
+  ``ranks_per_node``; e.g. EP 3 or 6 with 8 ranks per node;
   a Primus-Turbo build without rocSHMEM, as in the Primus image, asserts
   ``num_rdma_ranks == 1``): it is turned
   off with a warning and the alltoall dispatcher runs. ``muse_spark_turbo_deepep_internode: true``
@@ -44,16 +45,28 @@ CP check reads ``backend_args`` only (the Megatron args it fixes up).
   selection and the routing differs from HF. Both settings are rejected.
 """
 
+import os
+
 from primus.backends.megatron.core.models.muse_spark.memory_check import gpus_per_node
 from primus.backends.megatron.core.models.muse_spark.model_types import (
     backend_args_of,
     bool_flag,
     config_flag,
+    fail_fast,
     is_muse_spark_model_type,
     merged_args_of,
 )
+from primus.backends.megatron.core.models.muse_spark.number_utils import (
+    require_positive_int,
+)
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import warning_rank_0
+
+# the patch ids (registration, fail_fast label and log prefix)
+CP_COMM_PATCH = "megatron.args.muse_spark_cp_comm"
+DEEPEP_GROUP_SIZE_PATCH = "megatron.args.muse_spark_deepep_group_size"
+MFSDP_TURBO_GROUPED_GEMM_PATCH = "megatron.args.muse_spark_mfsdp_turbo_grouped_gemm"
+NO_FUSED_ROUTER_PATCH = "megatron.args.muse_spark_no_fused_router"
 
 INTERNODE_ARG = "muse_spark_turbo_deepep_internode"  # config / args key (muse_spark_base.yaml: false)
 
@@ -68,13 +81,39 @@ def internode_deepep_opted_in(args) -> bool:
     return bool_flag(value, INTERNODE_ARG)
 
 
-def deepep_disable_reason(args, local_gpus=None):
+def _env_positive_int(name):
+    """``$name`` as a positive int, or None when unset / blank (:func:`ranks_per_node` then
+    uses its next rule). A set value is parsed by the shared ``require_positive_int`` (the
+    rule the converter's memory check reads ``NNODES`` with): a bad one raises ``ValueError``
+    naming the variable."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    return require_positive_int(raw, f"{name} must be a positive integer, got {raw!r}")
+
+
+def ranks_per_node():
+    """Ranks placed on each node: ``WORLD_SIZE / NNODES`` when the launcher sets both (and
+    NNODES divides the world); else ``WORLD_SIZE`` when it is no more than the node's GPUs
+    (a single-node job with fewer ranks than GPUs: every rank is in this node); else the
+    node's GPU count (:func:`gpus_per_node`)."""
+    gpus = gpus_per_node()
+    world = _env_positive_int("WORLD_SIZE")
+    if world is None:
+        return gpus
+    nnodes = _env_positive_int("NNODES")
+    if nnodes is not None and world % nnodes == 0:
+        return world // nnodes
+    return min(world, gpus)
+
+
+def deepep_disable_reason(args, local_ranks=None):
     """Why Turbo DeepEP must be turned off for these args, or None to keep it.
 
     * expert TP x EP == 1: the DeepEP dispatcher raises at build (its tp_size is the
       expert TP, which Muse Spark keeps at 1);
-    * expert TP x EP > GPUs per node, or GPUs per node not a multiple of it: some expert
-      group (consecutive ranks) spans nodes. A Primus-Turbo build
+    * expert TP x EP > ranks per node (:func:`ranks_per_node`), or ranks per node not a
+      multiple of it: some expert group (consecutive ranks) spans nodes. A Primus-Turbo build
       without rocSHMEM (the Primus image's: its ``_C`` library holds the "rocSHMEM is
       disabled during compilation" assert) asserts ``num_rdma_ranks == 1`` there. Whether
       a build has internode dispatch is known only from a live ``deep_ep.Buffer``
@@ -89,14 +128,16 @@ def deepep_disable_reason(args, local_gpus=None):
     group = int(etp or 1) * int(getattr(args, "expert_model_parallel_size", 1) or 1)
     if group == 1:
         return "it needs expert_tensor_parallel_size x expert_model_parallel_size > 1; it is 1"
-    local = gpus_per_node() if local_gpus is None else int(local_gpus)
+    local = ranks_per_node() if local_ranks is None else int(local_ranks)
     # expert groups are runs of consecutive ranks: one stays inside a node only when it is no
-    # larger than a node and the node size is a multiple of it (EP 3 or 6 on 8-GPU nodes:
-    # ranks 6-8 or 6-11 straddle two nodes)
-    spans_nodes = group > local or local % group != 0
+    # larger than the ranks of a node and that count is a multiple of it (EP 3 or 6 with 8
+    # ranks per node: ranks 6-8 or 6-11 straddle two nodes; a single-node world of 3 or 6
+    # ranks keeps them in the node)
+    # (a group larger than the node also leaves a remainder: local % group == local != 0)
+    spans_nodes = local % group != 0
     if spans_nodes and not internode_deepep_opted_in(args):
         return (
-            f"the expert group (expert TP x EP = {group}) spans nodes ({local} GPUs per node, "
+            f"the expert group (expert TP x EP = {group}) spans nodes ({local} ranks per node, "
             "not a multiple of the group) and "
             "a Primus-Turbo build without rocSHMEM is intranode only (it asserts num_rdma_ranks == 1); "
             f"with a rocSHMEM build set {INTERNODE_ARG}: true to keep DeepEP"
@@ -105,16 +146,17 @@ def deepep_disable_reason(args, local_gpus=None):
 
 
 @register_patch(
-    "megatron.args.muse_spark_deepep_group_size",
+    DEEPEP_GROUP_SIZE_PATCH,
     backend="megatron",
     phase="build_args",
     condition=is_muse_spark_model_type,
     description=(
         "Muse Spark: Turbo DeepEP needs expert TP x EP > 1 and, unless "
-        "muse_spark_turbo_deepep_internode, an expert group inside one node (<= GPUs per node "
-        "and dividing it); else turn it off (alltoall)"
+        "muse_spark_turbo_deepep_internode, an expert group inside one node (<= ranks per node, "
+        "see ranks_per_node(), and dividing it); else turn it off (alltoall)"
     ),
 )
+@fail_fast(DEEPEP_GROUP_SIZE_PATCH)
 def patch_muse_spark_deepep_group_size(ctx: PatchContext):
     # The Turbo flags live in module_config.params (what the Turbo dispatcher patch reads
     # through get_args); the parallel sizes may be overridden in backend_args: read both.
@@ -129,7 +171,7 @@ def patch_muse_spark_deepep_group_size(ctx: PatchContext):
         args.moe_enable_deepep = False
         dispatcher = "alltoall (was flex)"
     warning_rank_0(
-        f"[Patch:megatron.args.muse_spark_deepep_group_size] use_turbo_deepep: {reason}; "
+        f"[Patch:{DEEPEP_GROUP_SIZE_PATCH}] use_turbo_deepep: {reason}; "
         f"DeepEP is off; moe_token_dispatcher_type: {dispatcher}"
     )
 
@@ -149,19 +191,20 @@ def turbo_grouped_gemm_needs_disabling(args) -> bool:
 
 
 @register_patch(
-    "megatron.args.muse_spark_mfsdp_turbo_grouped_gemm",
+    MFSDP_TURBO_GROUPED_GEMM_PATCH,
     backend="megatron",
     phase="build_args",
     condition=is_muse_spark_model_type,
     description="Muse Spark: Megatron FSDP cannot shard Turbo grouped-GEMM experts; use TE grouped GEMM",
 )
+@fail_fast(MFSDP_TURBO_GROUPED_GEMM_PATCH)
 def patch_muse_spark_mfsdp_turbo_grouped_gemm(ctx: PatchContext):
     args = merged_args_of(ctx)
     if not turbo_grouped_gemm_needs_disabling(args):
         return
     args.use_turbo_grouped_gemm = False
     warning_rank_0(
-        "[Patch:megatron.args.muse_spark_mfsdp_turbo_grouped_gemm] use_megatron_fsdp with "
+        f"[Patch:{MFSDP_TURBO_GROUPED_GEMM_PATCH}] use_megatron_fsdp with "
         "use_turbo_grouped_gemm: Turbo's grouped linear registers its per-expert weight views "
         "after FSDP wrapping, which Megatron FSDP cannot track; using the TE grouped GEMM"
     )
@@ -199,12 +242,13 @@ def resolve_cp_comm_type(comm):
 
 
 @register_patch(
-    "megatron.args.muse_spark_cp_comm",
+    CP_COMM_PATCH,
     backend="megatron",
     phase="build_args",
     condition=is_muse_spark_model_type,
     description="Muse Spark: sliding-window attention with CP needs TE's all_gather CP (p2p has no SWA backend)",
 )
+@fail_fast(CP_COMM_PATCH)
 def patch_muse_spark_cp_comm(ctx: PatchContext):
     args = backend_args_of(ctx)
     cp = getattr(args, "context_parallel_size", 1) or 1
@@ -222,10 +266,7 @@ def patch_muse_spark_cp_comm(ctx: PatchContext):
             )
         if "allgather" in entries:
             reasons.append("'allgather' is spelled 'all_gather' in TE")
-        warning_rank_0(
-            f"[Patch:megatron.args.muse_spark_cp_comm] cp_comm_type {comm!r} -> {new!r}: "
-            + "; ".join(reasons)
-        )
+        warning_rank_0(f"[Patch:{CP_COMM_PATCH}] cp_comm_type {comm!r} -> {new!r}: " + "; ".join(reasons))
 
 
 def fused_router_conflicts(args) -> list:
@@ -248,12 +289,13 @@ def fused_router_conflicts(args) -> list:
 
 
 @register_patch(
-    "megatron.args.muse_spark_no_fused_router",
+    NO_FUSED_ROUTER_PATCH,
     backend="megatron",
     phase="build_args",
     condition=is_muse_spark_model_type,
     description="Muse Spark: the fused Turbo router drops e_score_correction_bias; reject sync-free MoE stages >= 1",
 )
+@fail_fast(NO_FUSED_ROUTER_PATCH)
 def patch_muse_spark_no_fused_router(ctx: PatchContext):
     # the Turbo keys live in module_config.params (Primus-only); backend_args has the rest.
     # A rejection checks each namespace and the merged view (a conflict in any one counts).

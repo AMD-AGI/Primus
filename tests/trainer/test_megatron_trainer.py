@@ -770,7 +770,9 @@ class TestMegatronTrainer(PrimusUT):
                 "(512,0)",
             ],
             ep=8,
-            markers=("window=(511, 0)",),
+            # the example enables Primus-Turbo grouped GEMM: the experts must be the Turbo
+            # class (the generic marker above only proves a Muse Spark experts class)
+            markers=("window=(511, 0)", "experts=MuseSparkTurboGroupedMLP"),
         )
 
     def test_zaya1_8B_bf16(self):

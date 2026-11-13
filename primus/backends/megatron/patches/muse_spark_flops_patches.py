@@ -37,6 +37,7 @@ from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
     parse_window_size,
 )
 from primus.backends.megatron.core.models.muse_spark.model_types import (
+    MODEL_TYPE,
     bool_flag,
     is_muse_spark_model_type,
 )
@@ -49,7 +50,8 @@ from primus.backends.megatron.patches.deepseek_v4_flops_patches import (
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-_TAG = "[Patch:megatron.muse_spark.flops_reporting]"
+PATCH_NAME = "megatron.muse_spark.flops_reporting"
+_TAG = f"[Patch:{PATCH_NAME}]"
 
 
 # 2 FLOPs per multiply-add x 3 (forward, plus the two backward GEMMs): Megatron's factor
@@ -190,6 +192,16 @@ def muse_spark_flops_delta(
     return t.sliding_attention_delta(sq, doc_length) + t.router_per_token * tokens
 
 
+# set on the run's args object by the patch: the per-call Muse Spark check of the wrapper
+MUSE_SPARK_ARGS_ATTR = "_primus_muse_spark_flops"
+
+
+def is_muse_spark_args(args) -> bool:
+    """``args`` belong to a Muse Spark run: marked by the patch, or ``model_type`` is still
+    the Muse Spark string."""
+    return bool(getattr(args, MUSE_SPARK_ARGS_ATTR, False)) or getattr(args, "model_type", None) == MODEL_TYPE
+
+
 def make_muse_spark_num_floating_point_operations(original_fn):
     """Wrap ``original_fn`` so every call adds :func:`muse_spark_flops_delta`.
 
@@ -197,12 +209,13 @@ def make_muse_spark_num_floating_point_operations(original_fn):
     an ``args`` object and reused; ``batch_size`` and Megatron-core 0.19's packed-batch sums
     (``seqlen_squared_sum_in_batch`` / ``total_real_tokens_in_batch``) are the per-call inputs.
 
-    No ``args.model_type`` check per call: Megatron's ``get_model`` replaces
-    ``args.model_type`` with the ``ModelType`` enum before ``train()`` counts FLOPs,
-    so a per-call string check would never match. The decision is made once, at
-    install time, by the patch condition (``is_muse_spark_model_type``, evaluated in
-    ``before_train`` while ``model_type`` is still the yaml string), like
-    ``deepseek_v4_flops_patches``. Install this wrapper only for Muse Spark runs.
+    Each call checks that ``args`` is a Muse Spark run's (:func:`is_muse_spark_args`); any other
+    args get ``original_fn``'s count unchanged, so a later non-Muse model in the same process
+    is not corrected. The string ``args.model_type`` alone is not enough: Megatron's
+    ``get_model`` replaces it with the ``ModelType`` enum before ``train()`` counts FLOPs. The
+    patch therefore marks the run's args object (:data:`MUSE_SPARK_ARGS_ATTR`) at install time
+    (``before_train``, while ``model_type`` is still the yaml string), and the check accepts
+    either the mark or the string.
     """
 
     cached_args, cached_per_sample, cached_terms = None, None, None  # the fixed args, read once per run
@@ -211,15 +224,17 @@ def make_muse_spark_num_floating_point_operations(original_fn):
         args, batch_size, seqlen_squared_sum_in_batch=None, total_real_tokens_in_batch=None, **kwargs
     ):
         nonlocal cached_args, cached_per_sample, cached_terms
-        if cached_args is not args:
-            cached_terms = MuseSparkFlopsTerms(args)
-            cached_args, cached_per_sample = args, muse_spark_flops_delta_per_sample(args, cached_terms)
         packed = {}
         if seqlen_squared_sum_in_batch is not None:
             packed["seqlen_squared_sum_in_batch"] = seqlen_squared_sum_in_batch
         if total_real_tokens_in_batch is not None:
             packed["total_real_tokens_in_batch"] = total_real_tokens_in_batch
         base = original_fn(args, batch_size, **packed, **kwargs)
+        if not is_muse_spark_args(args):  # another model in the same process: upstream's count
+            return base
+        if cached_args is not args:
+            cached_terms = MuseSparkFlopsTerms(args)
+            cached_args, cached_per_sample = args, muse_spark_flops_delta_per_sample(args, cached_terms)
         return base + muse_spark_flops_delta(
             args, batch_size, per_sample=cached_per_sample, terms=cached_terms, **packed
         )
@@ -230,7 +245,7 @@ def make_muse_spark_num_floating_point_operations(original_fn):
 
 
 @register_patch(
-    "megatron.muse_spark.flops_reporting",
+    PATCH_NAME,
     backend="megatron",
     phase="before_train",
     condition=is_muse_spark_model_type,
@@ -239,6 +254,10 @@ def make_muse_spark_num_floating_point_operations(original_fn):
 def patch_muse_spark_flops_reporting(ctx: PatchContext):
     import megatron.training.training as training_module
 
+    # mark this run's args (the object Megatron's get_args returns) for the per-call check
+    for args in (ctx.extra.get("backend_args"), getattr(ctx.extra.get("module_config"), "params", None)):
+        if args is not None:
+            setattr(args, MUSE_SPARK_ARGS_ATTR, True)
     original_fn = training_module.num_floating_point_operations
     if getattr(original_fn, "_muse_spark_flops_patched", False):
         return

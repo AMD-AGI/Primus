@@ -201,15 +201,15 @@ class _PostExpertNormMixin:
         if output_bias is not None:
             raise RuntimeError("Muse Spark experts have no bias (add_bias_linear must be False)")
         norm = self._muse_post_expert_norm
-        if norm is not None and config_flag(self.config, "muse_spark_fused_post_expert_norm", True):
-            # The kernel reads norm.weight without norm.forward, so run the norm's
-            # forward-pre-hooks first: with overlap_param_gather the DDP hook waits there
-            # for the weight's all-gather (as PrimusGroupedMLP does for fc1 / fc2).
-            _run_forward_pre_hooks(norm, output)
-            # one Triton kernel per pass, same roundings as below (eager on CPU)
-            output = post_expert_norm_probs(output, norm.weight, permuted_probs, norm.eps)
-            return output, output_bias
         if norm is not None:
+            if config_flag(self.config, "muse_spark_fused_post_expert_norm", True):
+                # The kernel reads norm.weight without norm.forward, so run the norm's
+                # forward-pre-hooks first: with overlap_param_gather the DDP hook waits there
+                # for the weight's all-gather (as PrimusGroupedMLP does for fc1 / fc2).
+                _run_forward_pre_hooks(norm, output)
+                # one Triton kernel per pass, same roundings as below (eager on CPU)
+                output = post_expert_norm_probs(output, norm.weight, permuted_probs, norm.eps)
+                return output, output_bias
             output = norm(output)
         # HF rounding order (MuseSparkTextExperts): the norm output is rounded to the model
         # dtype, then multiplied by the fp32 routing weight and rounded again. Fusing the

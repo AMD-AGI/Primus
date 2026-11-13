@@ -20,15 +20,18 @@ from primus.backends.megatron.core.models.muse_spark.memory_check import (
     skip_requested,
 )
 from primus.backends.megatron.core.models.muse_spark.model_types import (
+    fail_fast,
     is_muse_spark_model_type,
 )
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.env import get_torchrun_env
 from primus.core.utils.module_utils import log_rank_0
 
+PATCH_NAME = "megatron.muse_spark.memory_check"
+
 
 @register_patch(
-    "megatron.muse_spark.memory_check",
+    PATCH_NAME,
     backend="megatron",
     phase="before_train",
     condition=is_muse_spark_model_type,
@@ -37,6 +40,7 @@ from primus.core.utils.module_utils import log_rank_0
         f"({RAISE_FRACTION:.0%}) of GPU memory"
     ),
 )
+@fail_fast(PATCH_NAME)
 def patch_muse_spark_memory_check(ctx: PatchContext):
     args = get_args(ctx)
     if skip_requested(args):
@@ -56,6 +60,6 @@ def patch_muse_spark_memory_check(ctx: PatchContext):
             "(enable recompute or add GPUs)"
         )
     log_rank_0(
-        f"[Patch:megatron.muse_spark.memory_check] model states ~{need / GiB:.0f} GiB of "
+        f"[Patch:{PATCH_NAME}] model states ~{need / GiB:.0f} GiB of "
         f"{total / GiB:.0f} GiB per GPU (activations not counted){note}"
     )

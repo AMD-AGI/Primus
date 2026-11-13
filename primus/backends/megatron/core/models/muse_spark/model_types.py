@@ -7,10 +7,12 @@
 """Helpers shared by the Muse Spark patches: the model-type condition, flag parsing
 (``bool_flag`` / ``config_flag``) and merged-args access."""
 
+import functools
 import numbers
 
 from primus.backends.megatron.core.models.muse_spark.layer_patterns import MODEL_TYPE
 from primus.core.patches import get_args
+from primus.core.utils.module_utils import error_rank_0
 
 __all__ = [
     "MODEL_TYPE",
@@ -18,6 +20,7 @@ __all__ = [
     "backend_args_of",
     "bool_flag",
     "config_flag",
+    "fail_fast",
     "has_muse_spark_param",
     "is_muse_spark_model_type",
     "mark_muse_spark_param",
@@ -40,6 +43,29 @@ def mark_muse_spark_param(param):
 def has_muse_spark_param(params) -> bool:
     """True when any of ``params`` is marked by :func:`mark_muse_spark_param`."""
     return any(getattr(p, MUSE_SPARK_PARAM_ATTR, False) for p in params)
+
+
+def fail_fast(patch_id):
+    """Decorator for a Muse Spark patch whose error must stop the run.
+
+    ``run_patches`` (called by the training runtime without ``stop_on_error``) logs an
+    ``Exception`` from a patch and continues, so a rejected setting would train anyway.
+    Like ``mla_rope_qk_norm_patches`` / ``qk_clip_hybrid_patches``, the wrapper turns any
+    exception into ``SystemExit`` (a ``BaseException``, not caught there) with the same
+    message; the original error is its ``__cause__``. Put it below ``@register_patch``."""
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(ctx):
+            try:
+                return func(ctx)
+            except Exception as exc:
+                error_rank_0(f"[Patch:{patch_id}] FATAL: {exc}")
+                raise SystemExit(f"[{patch_id}] {exc}") from exc
+
+        return wrapper
+
+    return decorator
 
 
 TRUE_TEXT = ("1", "true", "yes", "on")

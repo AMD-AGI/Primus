@@ -8,7 +8,6 @@
 
 from typing import Optional
 
-from megatron.core.transformer.spec_utils import import_module
 from megatron.training import get_args, print_rank_0
 from megatron.training.arguments import core_transformer_config_from_args
 
@@ -21,6 +20,29 @@ from primus.backends.megatron.core.models.muse_spark.muse_spark_model import (
 from primus.backends.megatron.core.models.muse_spark.muse_spark_transformer_config import (
     MuseSparkTransformerConfig,
 )
+
+
+def check_builder_args(args):
+    """Refuse the GPT builder options Muse Spark does not support, instead of ignoring them.
+
+    * ``spec``: the Muse Spark layer spec is the model (gated residuals, sandwich norms,
+      latent MoE with the per-expert norm); a custom spec would build stock layers with a
+      Muse Spark config.
+    * ``use_rope_scaling`` / ``rotary_seq_len_interpolation_factor``: the released model has
+      no RoPE scaling (``rope_type`` default) and the Muse Spark rotary embedding applies
+      none, so a set value would train with unscaled RoPE."""
+    problems = []
+    if getattr(args, "spec", None) is not None:
+        problems.append(f"spec={args.spec!r} (the Muse Spark layer spec is always used)")
+    if getattr(args, "use_rope_scaling", False):
+        problems.append("use_rope_scaling=True (Muse Spark has no RoPE scaling)")
+    if getattr(args, "rotary_seq_len_interpolation_factor", None) not in (None, 1, 1.0):
+        problems.append(
+            f"rotary_seq_len_interpolation_factor={args.rotary_seq_len_interpolation_factor!r} "
+            "(Muse Spark has no RoPE scaling)"
+        )
+    if problems:
+        raise ValueError("Muse Spark does not support: " + "; ".join(problems))
 
 
 def muse_spark_builder(
@@ -39,10 +61,8 @@ def muse_spark_builder(
         args, "use_legacy_models", False
     ), "Muse Spark requires use_legacy_models=False (Mcore-only)."
 
-    if args.spec is not None:
-        decoder_spec = import_module(args.spec)
-    else:
-        decoder_spec = get_muse_spark_decoder_block_spec(config=config, vp_stage=vp_stage)
+    check_builder_args(args)
+    decoder_spec = get_muse_spark_decoder_block_spec(config=config, vp_stage=vp_stage)
 
     return MuseSparkModel(
         config=config,

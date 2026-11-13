@@ -29,11 +29,16 @@ other model it calls upstream's method unchanged.
 """
 
 from primus.backends.megatron.core.models.muse_spark.model_types import (
+    fail_fast,
     has_muse_spark_param,
     is_muse_spark_model_type,
 )
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+# the patch ids (registration, fail_fast label and log prefix)
+CHAINED_OPTIMIZER_RELAYOUT_LOAD_PATCH = "megatron.muse_spark.chained_optimizer_relayout_load"
+FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH = "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt"
 
 _MODEL_PARAM_GROUPS = ("float16_groups", "fp32_from_fp32_groups", "model_float16_groups", "model_fp32_groups")
 
@@ -121,7 +126,7 @@ def fp16_optimizer_sharded_state_dict(self, model_sharded_state_dict, is_loading
 
 
 @register_patch(
-    "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt",
+    FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH,
     backend="megatron",
     phase="before_train",
     description=(
@@ -130,6 +135,7 @@ def fp16_optimizer_sharded_state_dict(self, model_sharded_state_dict, is_loading
     ),
     condition=is_muse_spark_model_type,
 )
+@fail_fast(FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH)
 def patch_muse_spark_fp16_optimizer_ckpt(ctx: PatchContext):
     from megatron.core.optimizer import optimizer as opt_module
 
@@ -150,7 +156,7 @@ def patch_muse_spark_fp16_optimizer_ckpt(ctx: PatchContext):
     sharded_state_dict._primus_muse_spark = True
     cls.sharded_state_dict = sharded_state_dict
     log_rank_0(
-        "[Patch:megatron.muse_spark.fp16_optimizer_fp32_param_ckpt] optimizer checkpoint ids follow the optimizer's param order"
+        f"[Patch:{FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH}] optimizer checkpoint ids follow the optimizer's param order"
     )
 
 
@@ -210,7 +216,15 @@ def relayout_chained_optimizer_state(chained, state_dict):
             for i, opt in enumerate(chained.chained_optimizers)
         ]
     if n == 1 and ints and "param_groups" not in (state_dict.get("optimizer") or {}):
-        # saved by a chain: the common parts sit under 0, 1, ...
+        # saved by a chain: the common parts sit under 0, 1, ... and the per-param tensors
+        # (the Adam moments) in the top-level "optimizer" part. Without that part a load
+        # would restart the optimizer state silently: refuse it.
+        if not isinstance(state_dict.get("optimizer"), dict):
+            raise ValueError(
+                f"optimizer checkpoint of a chain of {len(ints)} optimizer(s) has no top-level "
+                "'optimizer' part with the per-parameter state (keys: "
+                f"{sorted(map(str, state_dict))}); loading it would drop the optimizer moments"
+            )
         step = next((s for s in (_common_step(state_dict[i]) for i in ints) if s is not None), None)
         scalers = (
             state_dict[i].get("grad_scaler") if isinstance(state_dict[i], dict) else None for i in ints
@@ -222,7 +236,7 @@ def relayout_chained_optimizer_state(chained, state_dict):
 
 
 @register_patch(
-    "megatron.muse_spark.chained_optimizer_relayout_load",
+    CHAINED_OPTIMIZER_RELAYOUT_LOAD_PATCH,
     backend="megatron",
     phase="before_train",
     description=(
@@ -231,6 +245,7 @@ def relayout_chained_optimizer_state(chained, state_dict):
     ),
     condition=is_muse_spark_model_type,
 )
+@fail_fast(CHAINED_OPTIMIZER_RELAYOUT_LOAD_PATCH)
 def patch_muse_spark_chained_optimizer_load(ctx: PatchContext):
     from megatron.core.optimizer.optimizer import ChainedOptimizer
 
@@ -243,13 +258,14 @@ def patch_muse_spark_chained_optimizer_load(ctx: PatchContext):
         if parts is None:
             return orig(self, state_dict)
         log_rank_0(
-            f"[Patch:megatron.muse_spark.chained_optimizer_relayout_load] optimizer checkpoint of another "
+            f"[Patch:{CHAINED_OPTIMIZER_RELAYOUT_LOAD_PATCH}] optimizer checkpoint of another "
             f"layout: {len(parts)} optimizer(s) take their own param groups and the saved step"
         )
         for optimizer, part in zip(self.chained_optimizers, parts, strict=True):
             optimizer.load_state_dict(part)
         if len(self.chained_optimizers) > 1:
             self._synchronize_steps()
+        return None
 
     load_state_dict._primus_muse_spark = True
     ChainedOptimizer.load_state_dict = load_state_dict

@@ -176,6 +176,14 @@ def test_fp16_patch_takes_upstream_without_fp32_params(monkeypatch):
     assert patched is not upstream and patched._primus_muse_spark
     plain = SimpleNamespace(fp32_from_fp32_groups=[[]])
     assert patched(plain, {}) == "upstream" and seen == [plain]
+    # a Muse Spark optimizer (marked param in float16_groups) without fp32 params: only the
+    # "no fp32 params" check sends it upstream
+    no_fp32 = SimpleNamespace(
+        float16_groups=[[mark_muse_spark_param(torch.nn.Parameter(torch.ones(2, dtype=torch.bfloat16)))]],
+        fp32_from_fp32_groups=[[]],
+    )
+    assert patch.holds_muse_spark_params(no_fp32)
+    assert patched(no_fp32, {}) == "upstream" and seen[-1] is no_fp32
     # a stub holding a marked Muse Spark fp32 param: only the is_stub_optimizer check sends
     # it upstream (the patched mapping would fail on this bare namespace)
     marked = mark_muse_spark_param(torch.nn.Parameter(torch.ones(2)))
@@ -270,6 +278,22 @@ def test_relayout_keeps_the_fp16_grad_scaler():
         SimpleNamespace(chained_optimizers=[dense, experts]), saved
     )
     assert len(parts) == 2 and all("grad_scaler" not in p for p in parts)
+
+
+@pytest.mark.parametrize(
+    "saved",
+    [
+        {0: {"optimizer": {"state": {"common_step": 5}}}},
+        {0: {"optimizer": {"state": {}}}, 1: {"optimizer": {"state": {}}}},
+        {0: {}, "grad_scaler": {"scale": 1.0}},
+    ],
+)
+def test_a_chain_checkpoint_without_its_tensor_part_is_refused(saved):
+    # one optimizer, a chain's checkpoint with only the int-keyed common parts: the moments
+    # are missing, so the load must fail instead of restarting the optimizer state
+    one = SimpleNamespace(chained_optimizers=[_opt(2)])
+    with pytest.raises(ValueError, match="drop the optimizer moments"):
+        patch.relayout_chained_optimizer_state(one, saved)
 
 
 def test_relayout_same_layout_is_upstream():
@@ -396,3 +420,24 @@ def test_the_copy_runs_the_gtp_backfill_with_the_optimizer_order(monkeypatch):
     patch.fp16_optimizer_sharded_state_dict(opt, model_sd)
     params, _ = patch.optimizer_order_model_params(opt)
     assert seen == [[params]]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt",
+        "megatron.muse_spark.chained_optimizer_relayout_load",
+    ],
+)
+@pytest.mark.parametrize("model_type, expected", [("muse_spark", True), ("glm5_next", False), ("gpt", False)])
+def test_the_patches_are_registered_for_muse_spark_only(name, model_type, expected):
+    from primus.core.patches import PatchContext, PatchRegistry
+
+    registered = PatchRegistry.get(name)
+    assert registered is not None and registered.phase == "before_train" and registered.backend == "megatron"
+    ctx = PatchContext(
+        backend="megatron",
+        phase="before_train",
+        extra={"module_config": SimpleNamespace(params=SimpleNamespace(model_type=model_type))},
+    )
+    assert bool(registered.condition(ctx)) is expected

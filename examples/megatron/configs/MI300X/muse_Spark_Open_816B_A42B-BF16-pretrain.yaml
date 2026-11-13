@@ -22,7 +22,8 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Model states are ~112 GiB per GPU (the memory-check estimate), so ~80 GiB are left for
 # activations. 16 nodes with TP1 / PP2 / EP64 leaves too little: its states alone are
 # ~165 GiB of ~192 GiB (over the check's warning level, little room for activations). On
-# 16 nodes use PRIMUS_TP=8 PRIMUS_PP=2 PRIMUS_EP=64 GBS=128 (~114 GiB of states).
+# 16 nodes use PRIMUS_TP=8 PRIMUS_PP=2 PRIMUS_EP=64 GBS=128 (~114 GiB of states; loading
+# a converted checkpoint at TP > 1 is not yet tested, see below).
 # Before training, the megatron.muse_spark.memory_check patch compares the model states
 # per GPU with the GPU memory; when they cannot fit it stops with a ValueError that names
 # a layout computed for this GPU.
@@ -30,7 +31,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # MBS * DP, DP = GPUs / (TP * PP)). EP must divide 256 and GPUs / PP. PP must divide the 62
 # layers (1, 2, 31 or 62), else set decoder_first/last_pipeline_num_layers. TP > 1 (with SP)
 # cuts the dense states and activations. The native converter builds at TP=PP=EP=1 and
-# saves torch_dist (Megatron reshards it on load, so any TP / PP / EP loads it). It copies
+# saves torch_dist (Megatron reshards it on load; tested at TP 1 / EP 8, not yet at TP > 1). It copies
 # the weights in one layer at a time: the full model (822B parameters) needs ~1.5 TiB
 # (1.64 TB) of host RAM in bf16, plus the converter's 5 % margin (it checks the host's
 # available memory first); or pass an already converted checkpoint.
@@ -43,8 +44,8 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Single node: set PRIMUS_PP=1 PRIMUS_EP=8 (this file defaults to PP 2, and EP 8 must divide
 # the 8 GPUs / PP) and cut the model on the command line (--num_layers 4 keeps the first 4
 # released layers and all 256 experts). The trainer test
-# (test_muse_Spark_Open_816B_A42B, a weekly test) runs THIS file on one node with
-# command-line cuts (--num_layers 4 --num_experts 16 --moe_router_topk 4,
+# (test_muse_Spark_Open_816B_A42B, a weekly test) starts from this file on one node and
+# overrides on the command line (--num_layers 4 --num_experts 16 --moe_router_topk 4,
 # --expert_model_parallel_size 8, PRIMUS_EP=8 PRIMUS_PP=1, seq 1024, GBS 8): the alltoall
 # dispatcher with Turbo grouped GEMM (DeepEP stays off, as in this file).
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
@@ -143,7 +144,6 @@ modules:
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
       use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPEP:false}
-      moe_token_dispatcher_type: alltoall
       turbo_deepep_num_cu: 32
       turbo_deepep_use_comm_stream: false
       # Fused token permute / unpermute with TE kernels (as deepseek_v3).

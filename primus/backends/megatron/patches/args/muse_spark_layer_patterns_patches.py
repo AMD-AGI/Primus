@@ -33,6 +33,7 @@ from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
 )
 from primus.backends.megatron.core.models.muse_spark.model_types import (
     backend_args_of,
+    fail_fast,
     is_muse_spark_model_type,
 )
 from primus.backends.megatron.core.models.muse_spark.number_utils import parse_softcap
@@ -101,6 +102,7 @@ def ignored_vocab_multiple(args):
         "require an all-MoE moe_layer_freq; check final_logit_softcapping"
     ),
 )
+@fail_fast(_LAYER_PATTERNS_PATCH)
 def patch_muse_spark_layer_patterns(ctx: PatchContext):
     args = backend_args_of(ctx)
     num_layers = getattr(args, "num_layers", None)
@@ -137,6 +139,7 @@ def normalize_softcap(cap):
     priority=60,  # after megatron.args.mock_data (50), which may switch to the NullTokenizer
     description="Muse Spark: embedding / head rows from the preset vocab_size (the checkpoint's 202048)",
 )
+@fail_fast(_VOCAB_PATCH)
 def patch_muse_spark_vocab(ctx: PatchContext):
     """The presets set ``vocab_size: 202048`` (the HF text_config). Megatron sizes the
     embedding and head from the tokenizer instead (``len(tokenizer)`` for the HF tokenizer,

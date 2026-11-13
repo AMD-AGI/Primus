@@ -48,7 +48,9 @@ def test_sliding_layers_are_charged_less_and_router_added():
     per_layer = 12 * 8192 * 2048 * (1536.25 / 2048.5 - 1)
     attn = 3 * per_layer
     router = 6 * 7168 * 256 * 4
-    assert d == pytest.approx(2 * 4096 * (attn + router), rel=1e-12) and attn < 0
+    assert d == pytest.approx(2 * 4096 * (attn + router), rel=1e-12)
+    # sliding layers are charged less: the delta is below the router-only delta
+    assert muse_spark_flops_delta(a, 1) < muse_spark_flops_delta(_args(window_attn_skip_freq=[0, 0, 0, 0]), 1)
     # no sliding layer -> router only
     assert muse_spark_flops_delta(_args(window_attn_skip_freq=[0, 0, 0, 0]), 1) == 4096 * router
 
@@ -65,14 +67,33 @@ def test_wrapper_applies_after_get_model_sets_the_model_type_enum():
     assert expected != 1.0e15
     # Megatron's order: the enum is set before the FIRST FLOPs call (an empty cache), so
     # nothing on the cache-miss path may depend on the string model_type
+    from primus.backends.megatron.patches.muse_spark_flops_patches import (
+        MUSE_SPARK_ARGS_ATTR,
+    )
+
     wrapped = make_muse_spark_num_floating_point_operations(lambda a, b: 1.0e15)
     a = _args()
+    setattr(a, MUSE_SPARK_ARGS_ATTR, True)  # the patch marks the run's args at install time
     a.model_type = ModelType.encoder_or_decoder
     assert wrapped(a, 1) == expected
-    # and a fresh args object with the enum (a new cache miss) is corrected too
+    # and a fresh marked args object with the enum (a new cache miss) is corrected too
     b = _args()
+    setattr(b, MUSE_SPARK_ARGS_ATTR, True)
     b.model_type = ModelType.encoder_or_decoder
     assert wrapped(b, 1) == expected
+    # an unmarked args object with the enum is another model's: upstream's count
+    c = _args()
+    c.model_type = ModelType.encoder_or_decoder
+    assert wrapped(c, 1) == 1.0e15
+
+
+def test_the_wrapper_leaves_a_non_muse_model_alone():
+    # a later non-Muse run in the same process keeps upstream's count (window and experts
+    # set, so a Muse delta would be non-zero)
+    wrapped = make_muse_spark_num_floating_point_operations(lambda a, b, **kw: 1.0e12)
+    other = _args(model_type="gpt", window_size=(1024, 0), num_experts=8)
+    assert wrapped(other, 1) == 1.0e12
+    assert wrapped(other, 2, seqlen_squared_sum_in_batch=7, total_real_tokens_in_batch=9) == 1.0e12
 
 
 @pytest.mark.parametrize(
@@ -81,7 +102,6 @@ def test_wrapper_applies_after_get_model_sets_the_model_type_enum():
 def test_patch_condition_is_muse_spark_only(model_type, expected):
     """The condition registered for the patch (not a re-import of the predicate); the HF
     text_config model_type ``muse_spark_text`` is not a Primus model type."""
-    import primus.backends.megatron.patches.muse_spark_flops_patches  # noqa: F401
     from primus.core.patches import PatchContext
     from primus.core.patches.patch_registry import PatchRegistry
 
@@ -118,6 +138,7 @@ def test_patch_wraps_megatron_flops_once(monkeypatch):
 
     ctx = SimpleNamespace(extra={"backend_args": SimpleNamespace(model_type="muse_spark")})
     mod.patch_muse_spark_flops_reporting(ctx)
+    assert getattr(ctx.extra["backend_args"], mod.MUSE_SPARK_ARGS_ATTR) is True  # run's args marked
     first = training.num_floating_point_operations
     assert first is not megatron_flops and first.__wrapped__ is megatron_flops
     mod.patch_muse_spark_flops_reporting(ctx)

@@ -63,10 +63,11 @@ import os
 import re
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from types import SimpleNamespace
 
 import torch
@@ -119,6 +120,10 @@ _CFG_DEFAULTS = {
 # check_fp32_tensors on the built model's state dict: stream_into_model copies (copy_) the
 # HF weights into the model's own tensors and keeps their dtype, so that is the saved dtype.
 FP32_SUFFIXES = ("_bda.gate", "mlp.router.weight", "mlp.router.expert_bias")
+
+
+# the converter's log prefix (MuseSparkConverter.family = "muse-spark")
+LOG_TAG = "[muse-spark-convert]"
 
 
 def check_fp32_tensors(sd, num_layers):
@@ -365,40 +370,83 @@ def conversion_memory_plan(fields, vocab_size=DEFAULT_VOCAB_SIZE, dtype="bf16"):
     The save adds no copy: :func:`unsplit_expert_fc1_save` keeps the torch_dist writer from
     cloning the expert weights."""
     width = _DTYPE_BYTES[dtype]  # an unsupported dtype is refused by check_convert_args
-    a = _param_args(fields)  # one args namespace for the total and the per-layer count
-    n = sum(param_split(a, vocab_size))  # = estimate_num_params(fields, vocab_size)
-    parts = param_parts(a, vocab_size)
+    n = estimate_num_params(fields, vocab_size)  # the same count as the converter cap
+    parts = param_parts(_param_args(fields), vocab_size)
     per_layer = parts["layer_dense"] + parts["layer_expert"]
     plan = {"params": n, "model": n * width, "layer": per_layer * width}
     plan["total"] = int((plan["model"] + plan["layer"]) * MEMORY_MARGIN)
     return plan
 
 
-def host_memory_available():
-    """Bytes this process can still allocate on the host: ``MemAvailable`` from
-    /proc/meminfo, lowered to the cgroup's free memory (``memory.max`` - ``memory.current``,
-    cgroup v2; v1's ``limit_in_bytes`` - ``usage_in_bytes``) when one is set. None when
-    neither can be read (not Linux)."""
-    found = []
-    meminfo = _read_text("/proc/meminfo", "")
-    for line in meminfo.splitlines():
-        if line.startswith("MemAvailable:"):
-            found.append(int(line.split()[1]) * 1024)
-    for limit_path, usage_path in (
-        ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
-        ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+def _cgroup_dirs(proc_cgroup, root):
+    """Directories to check for a memory limit, from this process's own cgroup up to the
+    root, read from ``/proc/self/cgroup``: the v2 entry (``0::<path>``) under ``root``, and
+    the v1 ``memory`` controller's path under ``<root>/memory``. A cgroup namespace gives
+    ``/``; a job cgroup without one (Slurm / systemd) gives its full path."""
+    dirs = []
+    for line in proc_cgroup.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        hier, controllers, path = parts
+        if hier == "0" and controllers == "":
+            base = root
+        elif "memory" in controllers.split(","):
+            base = os.path.join(root, "memory")
+        else:
+            continue
+        path = path.strip().strip("/")
+        while True:
+            d = os.path.join(base, path) if path else base
+            if d not in dirs:
+                dirs.append(d)
+            if not path:
+                break
+            path = os.path.dirname(path)
+    for d in (root, os.path.join(root, "memory")):  # no /proc/self/cgroup: the roots
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _cgroup_free(d):
+    """Free bytes under the memory limit set in cgroup directory ``d`` (limit - usage + its
+    inactive page cache), or None when ``d`` sets no limit (v2 ``memory.max``, v1
+    ``memory.limit_in_bytes``)."""
+    for limit_name, usage_name in (
+        ("memory.max", "memory.current"),
+        ("memory.limit_in_bytes", "memory.usage_in_bytes"),
     ):
-        limit, usage = _read_text(limit_path, ""), _read_text(usage_path, "")
+        limit = _read_text(os.path.join(d, limit_name), "")
+        usage = _read_text(os.path.join(d, usage_name), "")
         if limit.isdigit() and usage.isdigit() and int(limit) < _CGROUP_V1_UNLIMITED:
             # the cgroup's usage counts the page cache; its inactive part is reclaimable
-            stat = _read_text(os.path.join(os.path.dirname(limit_path), "memory.stat"), "")
+            stat = _read_text(os.path.join(d, "memory.stat"), "")
             cache = 0
             for line in stat.splitlines():
                 key, _, value = line.partition(" ")
                 if key in ("inactive_file", "total_inactive_file") and value.strip().isdigit():
                     cache = int(value)
-            found.append(max(0, int(limit) - int(usage) + cache))
-            break
+            return max(0, int(limit) - int(usage) + cache)
+    return None
+
+
+def host_memory_available(root="/sys/fs/cgroup", proc="/proc"):
+    """Bytes this process can still allocate on the host: ``MemAvailable`` from
+    ``/proc/meminfo``, lowered to the smallest free memory under a cgroup memory limit on
+    this process's cgroup path (from ``/proc/self/cgroup``, its own cgroup up to the root;
+    v2 ``memory.max`` - ``memory.current``, v1 ``limit_in_bytes`` - ``usage_in_bytes``).
+    A Slurm / systemd job cgroup sets its limit on that path, not on the root. None when
+    nothing can be read (not Linux)."""
+    found = []
+    meminfo = _read_text(os.path.join(proc, "meminfo"), "")
+    for line in meminfo.splitlines():
+        if line.startswith("MemAvailable:"):
+            found.append(int(line.split()[1]) * 1024)
+    for d in _cgroup_dirs(_read_text(os.path.join(proc, "self", "cgroup"), ""), root):
+        free = _cgroup_free(d)
+        if free is not None:
+            found.append(free)
     return min(found) if found else None
 
 
@@ -469,7 +517,8 @@ def check_convert_args(args, hf_cfg):
         for k in ("tensor_parallel_size", "pipeline_parallel_size", "expert_parallel_size")
     )
     if (tp, pp, ep) != (1, 1, 1):
-        # build_mcore_state_dict maps full (unsharded) tensors; it does not split them.
+        # iter_mcore_state_dict (used by stream_into_model) maps full (unsharded) tensors;
+        # it does not split them.
         raise ValueError(
             f"Muse Spark native converter builds with TP=PP=EP=1 only (got {tp}/{pp}/{ep}). Its "
             "torch_dist checkpoint loads into any TP / PP / EP (Megatron reshards on load), so "
@@ -591,7 +640,7 @@ def build_margs(cfg_fields, args, hf_cfg=None):
     m.expert_tensor_parallel_size = 1
     m.context_parallel_size = 1
     m.sequence_parallel = False
-    m.world_size = tp * pp * ep
+    m.world_size = 1  # one rank: TP = PP = EP = 1
     m.rank = 0
     if args.dtype == "bf16":
         m.bf16 = True
@@ -820,9 +869,8 @@ class ParallelSafetensorsReader:
     ``READ_CHUNK_BYTES`` each, straight into the tensor's buffer.
 
     ``safe_open(...).get_tensor`` reads through an mmap, one page fault at a time from one
-    thread; on a parallel file system (the cluster's Lustre) that reads a 4-layer cut of the
-    released checkpoint (~104 GiB) at ~100 MB/s, most of the fine-tune's time limit. Many
-    large concurrent reads use the file system's bandwidth. The bytes are the file's, so the
+    thread, which is slow on a parallel file system; many large concurrent reads use its
+    bandwidth. The bytes are the file's, so the
     tensor is the same as ``get_tensor``'s (``test_parallel_reader_matches_safe_open``)."""
 
     def __init__(self, threads=READ_THREADS, chunk=READ_CHUNK_BYTES):
@@ -869,7 +917,12 @@ class ParallelSafetensorsReader:
                 else:
                     if self._pool is None:
                         self._pool = ThreadPoolExecutor(self.threads, thread_name_prefix="muse-spark-read")
-                    list(self._pool.map(read_part, parts))
+                    # wait for every chunk before the fd closes (a failed chunk must not
+                    # close it under reads still in flight); then raise the first error
+                    futures = [self._pool.submit(read_part, off) for off in parts]
+                    wait(futures)
+                    for fut in futures:
+                        fut.result()
             finally:
                 os.close(fd)
         return buf.view(dtype).reshape(meta["shape"])
@@ -1323,8 +1376,12 @@ def write_failure_record(save_dir, error):
         os.makedirs(os.path.dirname(os.path.abspath(failed)), exist_ok=True)
         with open(failed, "w") as f:
             f.write(format_failure_record(error))
-    except OSError:
-        pass
+    except OSError as exc:
+        print(
+            f"{LOG_TAG} warning: could not write failure record {failed}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def start_record_path(save_dir):
@@ -1519,7 +1576,7 @@ class MuseSparkConverter:
     master_port = 29571
 
     def __init__(self, log=None, num_layers=None):
-        self.log = log or (lambda *a: print(f"[{self.family}-convert]", *a, flush=True))
+        self.log = log or (lambda *a: print(LOG_TAG, *a, flush=True))
         self.num_layers = num_layers  # a depth cut (cut_to_layers); None: every layer
 
     def open_store(self, hf_dir):
@@ -1865,7 +1922,7 @@ def check_training_fits(ctx, gpu_bytes=None, world_size=None, log=print):
         need = required_state_bytes_or_raise(a, world_size, gpu_bytes, n_gpus_per_node=n_gpus)
     except ValueError as e:
         raise registry.NativeConvertRefused(f"{e} (checked before the conversion)") from e
-    log(f"[muse-spark-convert] the fine-tune fits: ~{need / GiB:.0f} GiB of model states per GPU")
+    log(f"{LOG_TAG} the fine-tune fits: ~{need / GiB:.0f} GiB of model states per GPU")
     return cut
 
 
