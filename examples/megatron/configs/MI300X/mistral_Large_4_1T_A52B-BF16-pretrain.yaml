@@ -1,0 +1,103 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mistral_Large_4_1T_A52B-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Mistral Large 4 1T-A52B (text decoder) BF16 pretraining on MI300X.
+#   model: primus/configs/models/megatron/mistral_Large_4_1T_A52B.yaml
+#   Defaults are the full-scale layout for the MI300X's 192 GB: TP8 x PP6 x EP32 (ETP1,
+#   sequence parallel on, CP1) = 192 GPUs, 24 nodes x 8 GPUs (data parallel 4, expert data
+#   parallel 1). Per GPU, with the distributed optimizer: routed experts 1018B / (PP6 x EP32 =
+#   192) = 5.3B and the rest 35B / (TP8 x PP6) = 0.7B -> bf16 weights 12 GB + fp32 grads 24 GB +
+#   fp32 master and Adam state 65 GB = ~101 GB of 192 GB before activations (TP8 PP3 on 12
+#   nodes, the MI355X default, needs ~202 GB). PP6 puts 12 layers on each stage (starts 0, 12,
+#   24, 36, 48, 60): every stage starts on a full-indexer layer (indexer_types), as index sharing
+#   requires; layer 35's shared KV latent crosses from stage 2 to stages 3-5.
+#   EP4 (with TP8 PP3) would hold 1018B / (PP3 x EP4) = ~85B expert parameters per GPU (~650 GB)
+#   and does not fit; EP <= 8
+#   fits only with expert-TP > 1, which Primus-Turbo's grouped GEMM does not take. EP32 keeps
+#   Primus-Turbo grouped GEMM and DeepEP (across nodes). MoE with TP > 1 needs sequence_parallel
+#   (Megatron), so keep PRIMUS_SP true whenever PRIMUS_TP > 1. Another PP size must start every
+#   stage on a full-indexer layer.
+#   Depth-reduced runs on one node override the layout (see tests/trainer/test_megatron_trainer.py).
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: mistral_Large_4_1T_A52B.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Mistral_Large_4_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters
+      train_iters: ${PRIMUS_TRAIN_ITERS:50}
+      micro_batch_size: ${PRIMUS_MBS:1}
+      # GBS / (MBS x DP) micro-batches per pipeline; keep it well above PP (the 1F1B bubble is
+      # (PP - 1) / micro-batches). TP8 x PP6 on 192 GPUs: DP 4, so 96 = 24 micro-batches of MBS 1
+      # per pipeline for 6 stages.
+      global_batch_size: ${PRIMUS_GBS:96}
+      # <= index_topk (2048): every causal key is selected, so attention is the dense causal
+      # kernel (Primus-Turbo's here; TE's when CP > 1), exact. Longer sequences (> index_topk) run the eager (unfused) DSA path.
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:8}
+      pipeline_model_parallel_size: ${PRIMUS_PP:6}
+      expert_model_parallel_size: ${PRIMUS_EP:32}
+      expert_tensor_parallel_size: ${PRIMUS_ETP:1}
+      sequence_parallel: ${PRIMUS_SP:true}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: true
+      create_attention_mask_in_dataloader: false
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # optimizer
+      use_distributed_optimizer: true
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Primus-Turbo: grouped GEMM experts; DeepEP dispatch when expert-TP x EP > 1 (expert-TP is 1 here)
+      enable_primus_turbo: true
+      # Primus-Turbo attention (dense path, CP1). With context parallelism > 1 the model patch
+      # mistral_large4.turbo_attention_cp switches it off: the Turbo kernel's CP is Ulysses with a
+      # one-rank ring, which does not match MLA's p2p ring; TE's attention runs the p2p ring there
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: true
+      use_turbo_rms_norm: true
+      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:true}
+      # rocm_arg_validation: <= 32 CUs for inter-node DeepEP (ep_size >= 16, the default EP32)
+      turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:32}
+      # not set: use_turbo_fused_act_with_probs (this image's Primus-Turbo swiglu_with_probs takes no
+      # clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
+      # release renormalises a softmax over all 128 experts on the top-4, which that op does not take).
+      # moe_router_dtype fp32, moe_permute_fusion and moe_shared_expert_overlap come from mistral_base.yaml
+
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

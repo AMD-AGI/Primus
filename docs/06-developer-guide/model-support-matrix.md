@@ -22,6 +22,8 @@ The following aligns with the backend overview and the configs present in this t
 | **AutoModel** | Flux.1 (`dev` / `schnell`) text-to-image, Wan 2.2 T2V A14B text-to-video, and Ideogram-4 text-to-image, trained through [AutoModel](https://github.com/NVIDIA-NeMo/Automodel)'s diffusion recipe. Presets under `primus/configs/models/automodel/`, MI355X examples under `examples/automodel/configs/MI355X/diffusion/`. See [AutoModel examples](../../examples/automodel/README.md). |
 | **HummingbirdXT** | Registered backend with a post-training trainer and one checked-in example; user-facing support level still needs maintainer confirmation. |
 
+**Megatron-LM, Mistral Large 4:** the 1T-A52B text decoder (`model_type: mistral_large4`: MLA with NoPE layers, DSA indexer with index sharing, cross-layer KV sharing), with pretrain and SFT examples for MI300X, MI325X and MI355X (the SFT file runs the full model on several nodes; `-BF16-sft-reduced.yaml` is a one-node 16-layer cut) and fine-tuning from the released FP8 checkpoint through the native converter.
+
 **Interpretation:** “Supported” in upstream code can exceed what this repository ships as YAML. Rows below reference representative files that exist under `primus/configs/models/` and `examples/`; they should not be treated as a complete generated inventory.
 
 ---
@@ -30,7 +32,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 82 example configs and MI325X 70: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 124, adding models such as `glm5`, `glm5_3_flash`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5`, and `minimax_m3`. **gfx1250** has seven single-GPU LoRA-SFT configs: the BF16 recipes, plus FP8 hybrid proxies for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B added in v26.9. Each row's SKU list in the following table reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 85 example configs and MI325X 73: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 130, adding models such as `glm5`, `glm5_3_flash`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5`, and `minimax_m3`. **gfx1250** has seven single-GPU LoRA-SFT configs: the BF16 recipes, plus FP8 hybrid proxies for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B added in v26.9. Each row's SKU list in the following table reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -84,6 +86,8 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `mixtral_8x7B_v0.1.yaml` | `primus/configs/models/megatron/mixtral_8x7B_v0.1.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `mixtral_8x22B_v0.1.yaml` | `primus/configs/models/megatron/mixtral_8x22B_v0.1.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `mixtral_base.yaml` | `primus/configs/models/megatron/mixtral_base.yaml` | Base fragment | — | — |
+| `mistral_Large_4_1T_A52B.yaml` | `primus/configs/models/megatron/mistral_Large_4_1T_A52B.yaml` | MoE model preset (text decoder) | MI300X, MI325X, MI355X (pretrain, SFT, one-node SFT cut) | BF16 |
+| `mistral_base.yaml` | `primus/configs/models/megatron/mistral_base.yaml` | Base fragment | — | — |
 | `moe_515B.yaml` | `primus/configs/models/megatron/moe_515B.yaml` | Large MoE template | No curated example in this repo | — |
 | `moe_1T.yaml` | `primus/configs/models/megatron/moe_1T.yaml` | Large MoE template | No curated example in this repo | — |
 | `moe_2T.yaml` | `primus/configs/models/megatron/moe_2T.yaml` | Large MoE template | No curated example in this repo | — |

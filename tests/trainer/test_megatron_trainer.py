@@ -5,6 +5,7 @@
 ###############################################################################
 
 
+import math
 import os
 import re
 import subprocess
@@ -898,6 +899,84 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
         self.assertIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
+
+    @pytest.mark.weekly
+    def test_mistral_Large_4_1T_A52B(self):
+        # 4 layers with every per-layer kind of the release: layer 1 reuses layer 0's DSA top-k
+        # ("shared"), layer 3 (NoPE) reuses layer 1's latent KV, layers 1 and 3 are NoPE; seq 4096 >
+        # index_topk 2048 takes the sparse DSA path. TP2 + SP and EP4 with Primus-Turbo DeepEP on one
+        # node (at the released width a PP stage holding the 204800-row head does not fit next to
+        # it; the PP latent carrier is covered by the unit tests).
+        # Full recompute (block) runs the backward recompute of the shared-indexer chunks on the
+        # sparse path. Weekly (the burn-in tier of new
+        # trainer cases, tests/README.md).
+        stdout, _ = run_script(
+            self.__class__.__name__,
+            "mistral_Large_4_1T_A52B",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mistral_Large_4_1T_A52B-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--seq_length",
+                "4096",
+                "--tensor_model_parallel_size",
+                "2",
+                "--sequence_parallel",
+                "true",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--expert_model_parallel_size",
+                "4",
+                "--no_rope_layers",
+                "[1,0,1,0]",
+                "--indexer_types",
+                "['full','shared','full','full']",
+                "--kv_source_layers",
+                "[0,1,2,1]",
+                "--index_topk",
+                "2048",
+                "--enable_primus_turbo",
+                "true",
+                "--use_turbo_deepep",
+                "true",
+                "--recompute_granularity",
+                "full",
+                "--recompute_method",
+                "block",
+                "--recompute_num_layers",
+                "4",
+                # mock data, no checkpoint: the frozen indexer is random (code-path test)
+                "--allow_untrained_indexer",
+                "true",
+                # one log line per iteration: the loss check below sees every iteration
+                "--log_interval",
+                "1",
+            ],
+        )
+        # every iteration trained with a finite loss
+        # any token after "lm loss:" (NAN / INF included, which float() parses), not only numbers
+        losses = [float(x) for x in re.findall(r"lm loss: ([0-9A-Za-z.+-]+)", stdout)]
+        self.assertGreaterEqual(len(losses), 3, losses)
+        self.assertTrue(all(math.isfinite(x) for x in losses), losses)
+        # the per-layer kinds the model was built with (each list on its own)
+        self.assertIn("[Patch:megatron.mistral_large4.moe_layer_freq] -moe_layer_freq:[0, 1, 1, 1]", stdout)
+        for part in (
+            "no_rope_layers=[1, 0, 1, 0]",
+            "indexer_types=['full', 'shared', 'full', 'full']",
+            "kv_source_layers=[0, 1, 2, 1]",
+        ):
+            self.assertIn(part, stdout)
+        # the sparse DSA path ran (logged by the decoder block at its first sparse forward)
+        self.assertIn("[Mistral-Large-4] DSA sparse attention: sequence 4096 > index_topk 2048", stdout)
+        # Primus-Turbo DeepEP was the token dispatcher the MoE layers used
+        self.assertIn("PrimusTurboDeepEPTokenDispatcher", stdout)
 
 
 @pytest.mark.weekly
