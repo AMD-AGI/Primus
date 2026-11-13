@@ -289,12 +289,30 @@ def test_torchtitan_finds_rope_under_either_name():
     assert isinstance(inputs.args[1], torch.Tensor)
 
 
+class _TitanBlock(nn.Module):
+    def forward(self, x, rope_cache, attention_masks, positions=None):
+        return x
+
+
+class _GptOssBlock(nn.Module):
+    def forward(self, x, rope_cache, attention_masks):
+        return x
+
+
 def test_torchtitan_layer_forward_gets_mask_and_positions():
     adapter = TorchTitanBenchAdapter()
     adapter.discover(_TitanModel())
-    inputs = adapter.inputs(LAYER, nn.Linear(HIDDEN, HIDDEN), _ctx())
+    inputs = adapter.inputs(LAYER, _TitanBlock(), _ctx())
     # None selects the dense causal path the projection models.
     assert inputs.kwargs == {"attention_masks": None, "positions": None}
+
+
+def test_torchtitan_layer_forward_drops_kwargs_the_block_does_not_take():
+    """GPT-OSS blocks have no ``positions`` argument."""
+    adapter = TorchTitanBenchAdapter()
+    adapter.discover(_TitanModel())
+    inputs = adapter.inputs(LAYER, _GptOssBlock(), _ctx())
+    assert inputs.kwargs == {"attention_masks": None}
 
 
 def test_torchtitan_input_dtype_follows_the_module_parameters():
@@ -423,7 +441,8 @@ def test_writeback_translates_an_all_moe_stack():
 
 @pytest.mark.parametrize(
     "granularity,expected",
-    [("full", "full"), ("selective", "selective")],
+    # Full recompute is priced analytically, so the bench runs without checkpointing.
+    [("full", "none"), ("selective", "selective")],
 )
 def test_writeback_translates_recompute_granularity(granularity, expected):
     args = _bench_shaped_args(recompute_granularity=granularity)
@@ -442,7 +461,7 @@ def test_writeback_creates_missing_namespaces():
     )
     torchtitan_apply_bench_overrides(args)
 
-    assert args.activation_checkpoint.mode == "full"
+    assert args.activation_checkpoint.mode == "none"
     assert args.parallelism.tensor_parallel_degree == 1
     assert args.training.seq_len == 1024
 
