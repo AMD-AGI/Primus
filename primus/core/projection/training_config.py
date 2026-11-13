@@ -102,6 +102,8 @@ class ModelConfig:
     num_experts: int = 0
     moe_ffn_hidden_size: int = 0
     moe_pattern: list = None
+    # Hybrid (Mamba/GDN/KDA + attention) stacks: the full model's layer symbols.
+    hybrid_layer_types: list = None
     moe_router_topk: int = 0
     moe_shared_expert_intermediate_size: int = 0
     # Optimizer (Muon adds Newton-Schulz orthogonalization compute on 2D weights)
@@ -380,6 +382,41 @@ def megatron_backend_derive_default_args(args):
     return megatron_derive_default_args(args)
 
 
+def hybrid_layer_pattern(args) -> Optional[str]:
+    """The decoder part of a hybrid stack's explicit layer pattern, if it has one."""
+    pattern = getattr(args, "hybrid_layer_pattern", None) or getattr(args, "hybrid_override_pattern", None)
+    if not pattern:
+        return None
+    return str(pattern).split("/")[0].replace("|", "")
+
+
+def allocate_hybrid_layers(num_layers: int, attention_ratio: float) -> list:
+    """Layer symbols Primus's HybridStack.allocate_layers builds from a ratio.
+
+    Every mixer (``*`` attention or ``M`` Mamba/GDN/KDA) is followed by an MLP
+    (``-``), so the stack holds ``num_layers // 2`` mixer/MLP pairs.
+    """
+    pairs = num_layers // 2
+    num_attention = int(pairs * attention_ratio)
+    num_mamba = pairs - num_attention
+    if num_attention == 0:
+        return ["M", "-"] * pairs
+    if attention_ratio <= 0.5:
+        block = ["*", "-"] + ["M", "-"] * (num_mamba // num_attention)
+        return block * num_attention + ["M", "-"] * (num_mamba % num_attention)
+    return ["*", "-"] * (num_attention - num_mamba) + ["*", "-", "M", "-"] * num_mamba
+
+
+def hybrid_layer_types(args) -> Optional[list]:
+    """Symbols of every decoder layer of a hybrid model, or None for a plain transformer."""
+    pattern = hybrid_layer_pattern(args)
+    if pattern is not None:
+        return list(pattern)
+    if not getattr(args, "is_hybrid_model", False):
+        return None
+    return allocate_hybrid_layers(args.num_layers, getattr(args, "hybrid_attention_ratio", 0.0) or 0.0)
+
+
 def megatron_derive_default_args(args):
     world_size = int(os.getenv("NNODES", "1")) * int(os.getenv("GPUS_PER_NODE", "8"))
     if args.kv_channels is None:
@@ -406,6 +443,7 @@ def megatron_derive_default_args(args):
         )
 
     args.share_embeddings_and_output_weights = not args.untie_embeddings_and_output_weights
+    args.hybrid_layer_types = hybrid_layer_types(args)
 
     if args.num_experts is None:
         args.moe_pattern = [0] * args.num_layers

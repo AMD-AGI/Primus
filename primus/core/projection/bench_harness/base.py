@@ -87,6 +87,9 @@ class ModelParts:
     output_layer: Optional[Any] = None
     #: Module whose ``compute_language_model_loss(labels, logits)`` training calls.
     loss_owner: Optional[Any] = None
+    #: Per-layer kind symbols of a hybrid stack (``*`` attention, ``M`` Mamba/GDN/KDA,
+    #: ``-`` MLP, ``E`` MoE), parallel to ``layers``; empty for a uniform stack.
+    layer_types: List[str] = field(default_factory=list)
 
 
 @dataclass

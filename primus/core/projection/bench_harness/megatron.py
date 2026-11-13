@@ -92,6 +92,7 @@ class MegatronBenchAdapter(BenchModelAdapter):
 
             if hasattr(unwrapped, "decoder") and hasattr(unwrapped.decoder, "layers"):
                 parts.layers.extend(unwrapped.decoder.layers)
+                parts.layer_types.extend(getattr(unwrapped.decoder, "layer_type_list", None) or [])
             elif hasattr(unwrapped, "layers"):
                 parts.layers.extend(unwrapped.layers)
             else:

@@ -369,6 +369,41 @@ def test_limit_layers_moe_all_moe_single_layer():
     assert cfg.moe_layer_freq == [1]
 
 
+def test_hybrid_allocation_matches_primus_hybrid_stack():
+    from primus.core.projection.training_config import allocate_hybrid_layers
+
+    assert allocate_hybrid_layers(32, 0.25) == ["*", "-", "M", "-", "M", "-", "M", "-"] * 4
+    assert allocate_hybrid_layers(32, 0.0) == ["M", "-"] * 16
+    # The default 1-layer cap builds no mixer/MLP pair at all.
+    assert allocate_hybrid_layers(1, 0.25) == []
+
+
+def _hybrid_cfg(**kw):
+    return SimpleNamespace(
+        num_experts=None, num_layers=32, moe_layer_freq=None, pipeline_model_parallel_size=1, **kw
+    )
+
+
+def test_limit_layers_hybrid_ratio_keeps_one_block_of_every_kind():
+    cfg = _hybrid_cfg(is_hybrid_model=True, hybrid_attention_ratio=0.25)
+    _limit_layers_for_projection(cfg)
+    assert cfg.num_layers == 8
+    assert cfg.moe_layer_freq == [0] * 8
+
+
+def test_limit_layers_pure_mamba_keeps_one_pair():
+    cfg = _hybrid_cfg(is_hybrid_model=True, hybrid_attention_ratio=0.0)
+    _limit_layers_for_projection(cfg)
+    assert cfg.num_layers == 2
+
+
+def test_limit_layers_hybrid_pattern_is_trimmed_to_every_kind():
+    cfg = _hybrid_cfg(is_hybrid_model=True, hybrid_override_pattern="M-M-*-M-M-*-", hybrid_layer_pattern=None)
+    _limit_layers_for_projection(cfg)
+    assert cfg.hybrid_override_pattern == "M-M-*"
+    assert cfg.num_layers == 5
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # _calculate_single_node_config
 # ─────────────────────────────────────────────────────────────────────────────

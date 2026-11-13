@@ -1165,6 +1165,44 @@ def _flatten_pipeline_for_single_node(module_config):
             setattr(module_config, attr, None)
 
 
+def _limit_hybrid_layers_for_projection(module_config) -> bool:
+    """Shrink a hybrid stack to the shortest stretch that still has every layer kind.
+
+    A hybrid stack is built in mixer/MLP pairs, so the default 1-layer cap builds
+    no layers at all. Returns False for non-hybrid models.
+    """
+    from primus.core.projection.training_config import (
+        allocate_hybrid_layers,
+        hybrid_layer_pattern,
+        hybrid_layer_types,
+    )
+
+    full = hybrid_layer_types(module_config)
+    if full is None:
+        return False
+    kinds = set(full)
+    if os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is not None:
+        cap = int(os.environ["PRIMUS_PROJ_MAX_LAYERS"])
+    else:
+        cap = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
+    pattern = hybrid_layer_pattern(module_config)
+    if pattern is not None:
+        trimmed = pattern[:cap]
+        for name in ("hybrid_layer_pattern", "hybrid_override_pattern"):
+            if getattr(module_config, name, None):
+                setattr(module_config, name, trimmed)
+        module_config.num_layers = len(trimmed)
+    else:
+        ratio = getattr(module_config, "hybrid_attention_ratio", 0.0) or 0.0
+        layers = next(
+            (n for n in range(2, len(full) + 1, 2) if set(allocate_hybrid_layers(n, ratio)) == kinds and n >= cap),
+            len(full),
+        )
+        module_config.num_layers = layers
+    module_config.moe_layer_freq = [0] * module_config.num_layers
+    return True
+
+
 def _limit_layers_for_projection(module_config):
     """
     Restrict the transformer stack to a small number of layers for profiling.
@@ -1193,6 +1231,9 @@ def _limit_layers_for_projection(module_config):
         and len(_distinct_crs) > 1
         and os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is None
     ):
+        _flatten_pipeline_for_single_node(module_config)
+        return
+    if _limit_hybrid_layers_for_projection(module_config):
         _flatten_pipeline_for_single_node(module_config)
         return
     # Use 1 layer for fast profiling - results are extrapolated to full model.

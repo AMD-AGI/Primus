@@ -608,6 +608,64 @@ class LanguageModelProfiler(BaseModuleProfiler):
         total_act *= gs_saving * interleaved_schedule_memory_penalty
         return int(total_act)
 
+    def _run_hybrid_layer_benchmark(self, layers, layer_types, full_types, batch_size, seq_len) -> dict:
+        """Time one layer of each kind in a hybrid stack and weight by the full model's mix.
+
+        Hybrid layers are single-purpose (a mixer, or an MLP), so each is timed as
+        a whole layer. Every full-model layer index is given the per-layer
+        average, which the extrapolation multiplies back up to the full count.
+        """
+        from collections import Counter
+
+        from primus.core.projection.bench_harness import LAYER
+
+        from .utils import benchmark_layer
+
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        profiler = self.sub_profilers["dense_transformer_layer"]
+        per_kind = {}
+        for module, kind in zip(layers, layer_types):
+            kind = str(kind)
+            if kind in per_kind:
+                continue
+            if is_rank_0:
+                print(f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})...")
+            shapes, kwargs = profiler.require_bench_inputs(LAYER, module, batch_size, seq_len)
+            with kernel_report.scope(kernel_report.layer_scope("dense", None)):
+                fwd, bwd, mem = benchmark_layer(
+                    module, shapes, transformer_config=getattr(module, "config", None), forward_kwargs=kwargs
+                )
+            per_kind[kind] = (fwd, bwd, mem)
+            if is_rank_0:
+                print(f"  Forward time:  {fwd:.2f} ms (measured)")
+                print(f"  Backward time: {bwd:.2f} ms (measured)")
+
+        counts = Counter(str(k) for k in full_types)
+        missing = set(counts) - set(per_kind)
+        if missing:
+            raise RuntimeError(f"Hybrid benchmark model has no layer of kind(s) {sorted(missing)}")
+        total = len(full_types)
+        avg = [sum(counts[k] * per_kind[k][i] for k in counts) / total for i in range(3)]
+        if is_rank_0:
+            mix = ", ".join(f"{counts[k]}x'{k}'" for k in sorted(counts))
+            print(f"  Hybrid mix ({mix}): {avg[0]:.2f} ms fwd, {avg[1]:.2f} ms bwd per layer on average")
+
+        zero = {"forward_time_ms": 0.0, "backward_time_ms": 0.0, "activation_memory_bytes": 0}
+        layer_stats = {
+            "type": "dense",
+            "compress_ratio": None,
+            "forward_time_ms": avg[0],
+            "backward_time_ms": avg[1],
+            "activation_memory_bytes": int(avg[2]),
+            "attention": dict(zero, window_variants=None),
+            "mlp": dict(zero, a2a_forward_time_ms=0.0, a2a_backward_time_ms=0.0),
+            "hybrid_kinds": {
+                k: {"forward_time_ms": f, "backward_time_ms": b, "count": counts.get(k, 0)}
+                for k, (f, b, _m) in per_kind.items()
+            },
+        }
+        return {layer_idx: dict(layer_stats) for layer_idx in self.layers}
+
     def run_layer_benchmark(self, model, batch_size: int, seq_len: int) -> dict:
         """Benchmark or simulate transformer layers plus embedding/output layers on this rank.
 
@@ -766,6 +824,17 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     "backward_time_ms": out_backward + loss_bwd,
                     "activation_memory_bytes": out_mem + loss_mem,
                 }
+
+        full_hybrid_types = getattr(self.config.model_config, "hybrid_layer_types", None)
+        if model is not None and full_hybrid_types and parts.layer_types and not is_simulation_mode:
+            final_results = self._run_hybrid_layer_benchmark(
+                all_layers, parts.layer_types, full_hybrid_types, batch_size, seq_len
+            )
+            if embedding_stats is not None:
+                final_results["embedding"] = embedding_stats
+            if output_stats is not None:
+                final_results["output"] = output_stats
+            return final_results
 
         # ==============================================================================
         # BENCHMARK / SIMULATE LAYER TYPES (one of each type: dense, moe)
