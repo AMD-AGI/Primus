@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""CPU equivalence of the ZAYA_FUSE_NORM and ZAYA_FUSE_CCA paths against the
+"""CPU equivalence of the zaya_fuse_norm and zaya_fuse_cca paths against the
 eager path, forward and backward, fp32 and bf16."""
 
 import pytest
@@ -19,6 +19,18 @@ def _perturb(module):
     with torch.no_grad():
         for p in module.parameters():
             p.add_(0.1 * torch.randn_like(p))
+
+
+def _twins(build, field, dtype, init=None):
+    """``build(**{field: flag})`` for flag off and on, both holding the same perturbed weights."""
+    off = build(**{field: False}).to(dtype)
+    _perturb(off)
+    if init is not None:
+        with torch.no_grad():
+            init(off)
+    on = build(**{field: True}).to(dtype)
+    on.load_state_dict(off.state_dict())
+    return {False: off, True: on}
 
 
 def _forward_backward(module, fn, hidden):
@@ -58,13 +70,11 @@ def test_fused_norm_chain_matches_eager(monkeypatch, dtype):
     monkeypatch.setattr(zm, "_fused_smn_res", fused_res)
     monkeypatch.setattr(zm, "_fused_smn_first", fused_first)
     torch.manual_seed(0)
-    stack = zm.ZayaStack(_cfg(num_layers=4)).to(dtype)
-    _perturb(stack)
-    stack.eval()  # keep the balancing biases fixed between the two runs
+    stacks = _twins(lambda **f: zm.ZayaStack(_cfg(num_layers=4, **f)), "zaya_fuse_norm", dtype)
     hidden = torch.randn(6, 2, 32, dtype=dtype)
     runs = {}
-    for flag in (False, True):
-        monkeypatch.setattr(zm, "FUSE_NORM", flag)
+    for flag, stack in stacks.items():
+        stack.eval()  # keep the balancing biases fixed between the two runs
         runs[flag] = _forward_backward(
             stack, lambda h: stack(h, position_ids=None, attention_mask=None), hidden
         )
@@ -87,18 +97,20 @@ def test_fused_cca_qk_matches_eager(monkeypatch, dtype, clamp_temp, rotary_facto
     fused = zm._maybe_compile(zm._cca_qk_post, True)
     monkeypatch.setattr(zm, "_fused_cca_qk", fused)
     torch.manual_seed(1)
-    cca = zm.CCA(_cfg(clamp_temp=clamp_temp, partial_rotary_factor=rotary_factor)).to(dtype)
-    _perturb(cca)
-    with torch.no_grad():
-        cca.temp.uniform_(0.2, 1.5)
+
+    ccas = _twins(
+        lambda **f: zm.CCA(_cfg(clamp_temp=clamp_temp, partial_rotary_factor=rotary_factor, **f)),
+        "zaya_fuse_cca",
+        dtype,
+        init=lambda cca: cca.temp.uniform_(0.2, 1.5),
+    )
     seq, batch = 7, 3
     position_ids = None
     if positions == "per_row":
         position_ids = torch.stack([torch.arange(seq) + 3 * row for row in range(batch)])
     hidden = torch.randn(seq, batch, 32, dtype=dtype)
     runs = {}
-    for flag in (False, True):
-        monkeypatch.setattr(zm, "FUSE_CCA", flag)
+    for flag, cca in ccas.items():
         runs[flag] = _forward_backward(cca, lambda h: cca.project(h, position_ids), hidden)
     _compare(runs[False], runs[True], dtype)
     assert fused.compiled_ok()

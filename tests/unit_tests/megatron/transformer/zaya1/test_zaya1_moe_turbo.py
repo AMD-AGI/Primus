@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Primus Turbo grouped-GEMM experts and ZAYA_ROUTER_DEFER_AR=1 against the default paths.
+"""Primus Turbo grouped-GEMM experts and zaya_router_defer_ar against the default paths.
 
 The experts run as Turbo grouped GEMMs when Primus Turbo's enable_primus_turbo
 and use_turbo_grouped_gemm are set. The CPU tests swap primus_turbo's grouped
@@ -74,9 +74,8 @@ def _expert_grads(moe, fc):
 @pytest.mark.parametrize("fuse_moe", [True, False])
 @pytest.mark.parametrize("use_mod", [True, False])
 def test_turbo_matches_split_forward_and_backward(turbo_cpu, monkeypatch, use_mod, fuse_moe):
-    monkeypatch.setattr(zm, "FUSE_MOE", fuse_moe)
-    split = _build_moe("split", monkeypatch, zaya_use_mod=use_mod)
-    turbo = _build_moe("turbo", monkeypatch, zaya_use_mod=use_mod)
+    split = _build_moe("split", monkeypatch, zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe)
+    turbo = _build_moe("turbo", monkeypatch, zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe)
     assert split.local_experts is not None and turbo.use_turbo_gemm
     # Same init stream, same weights.
     for i, expert in enumerate(split.local_experts):
@@ -229,10 +228,9 @@ def test_turbo_publishes_the_grouped_gemm_backend(monkeypatch):
     assert calls == [("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", "triton")]
 
 
-def _build_stack(defer, monkeypatch):
-    monkeypatch.setattr(zm, "ROUTER_DEFER_AR", defer)
+def _build_stack(defer):
     torch.manual_seed(7)
-    stack = zm.ZayaStack(_cfg(num_layers=6))
+    stack = zm.ZayaStack(_cfg(num_layers=6, zaya_router_defer_ar=defer))
     stack.train()
     return stack
 
@@ -242,8 +240,8 @@ def _biases(stack):
 
 
 def test_deferred_router_updates_are_bit_exact(monkeypatch):
-    eager = _build_stack(False, monkeypatch)
-    deferred = _build_stack(True, monkeypatch)
+    eager = _build_stack(False)
+    deferred = _build_stack(True)
     assert all(r.defer_bias_update for r in deferred._routers())
     reduces = []
     monkeypatch.setattr(zm, "_allreduce_dp", lambda t: reduces.append(t.numel()))
@@ -269,9 +267,9 @@ def test_deferred_router_updates_are_bit_exact(monkeypatch):
     assert reduces.count(n_routers * eager._routers()[0].num_scored) == 3
 
 
-def test_deferred_router_flushes_on_next_forward_without_backward(monkeypatch):
-    eager = _build_stack(False, monkeypatch)
-    deferred = _build_stack(True, monkeypatch)
+def test_deferred_router_flushes_on_next_forward_without_backward():
+    eager = _build_stack(False)
+    deferred = _build_stack(True)
     hidden = torch.randn(8, 2, 32)
     with torch.no_grad():
         eager(hidden, None, None)
@@ -338,8 +336,13 @@ def _rel(a, b):
 def test_turbo_gpu_backward_matches_split(monkeypatch, fuse_moe):
     """primus_turbo's grouped GEMM backward, with an empty expert and MoD skip rows, against split."""
     pytest.importorskip("primus_turbo.pytorch.ops")
-    monkeypatch.setattr(zm, "FUSE_MOE", fuse_moe)
-    shape = dict(hidden_size=256, moe_ffn_hidden_size=128, ffn_hidden_size=128, num_moe_experts=16)
+    shape = dict(
+        hidden_size=256,
+        moe_ffn_hidden_size=128,
+        ffn_hidden_size=128,
+        num_moe_experts=16,
+        zaya_fuse_moe=fuse_moe,
+    )
     split = _build_moe("split", monkeypatch, **shape).cuda().bfloat16()
     turbo = _build_moe("turbo", monkeypatch, **shape).cuda().bfloat16()
     for moe in (split, turbo):
@@ -376,13 +379,12 @@ def test_turbo_gpu_backward_matches_split(monkeypatch, fuse_moe):
 @pytest.mark.parametrize("fuse_moe", [True, False])
 def test_turbo_every_param_gets_a_grad(turbo_cpu, monkeypatch, fuse_moe):
     """--overlap_grad_reduce needs a grad hook on every param every step."""
-    monkeypatch.setattr(zm, "FUSE_MOE", fuse_moe)
     _turbo_settings(monkeypatch, False)
     torch.manual_seed(11)
-    split = zm.ZayaStack(_cfg(num_layers=6))
+    split = zm.ZayaStack(_cfg(num_layers=6, zaya_fuse_moe=fuse_moe))
     _turbo_settings(monkeypatch, True)
     torch.manual_seed(11)
-    turbo = zm.ZayaStack(_cfg(num_layers=6))
+    turbo = zm.ZayaStack(_cfg(num_layers=6, zaya_fuse_moe=fuse_moe))
     turbo.load_state_dict(split.state_dict(), strict=True)
     for stack in (split, turbo):
         stack.eval()  # fixed balancing biases

@@ -25,48 +25,24 @@ Semantics match ``LanguageModule.compute_language_model_loss`` with
 out-of-range labels (their max-shifted predicted logit is 0, so the loss is
 ``lse - max``, exactly as the stock kernel computes it).
 Returns per-token loss ``[b, s]``. The caller applies ``loss_mask``.
+
+Config fields: ``zaya_chunked_ce`` (default on) turns it on,
+``zaya_chunked_ce_tokens`` (default 4096) is the tokens per chunk, and
+``zaya_chunked_ce_compile`` (default on) fuses each chunk's CE math with
+torch.compile.
 """
 
-import os
 from typing import Optional
 
 import torch
 from torch import Tensor
 
-from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
-    _env_on,
-    _maybe_compile,
-)
+from primus.backends.megatron.core.models.zaya1.zaya1_modules import _maybe_compile
 
 __all__ = [
     "ChunkedLinearCrossEntropy",
     "chunked_linear_cross_entropy",
-    "chunked_ce_enabled",
-    "chunked_ce_chunk_tokens",
-    "chunked_ce_compile_enabled",
 ]
-
-
-def chunked_ce_enabled() -> bool:
-    """``ZAYA_CHUNKED_CE`` (default 1). Set 0 to restore the stock logits + CE path."""
-    return _env_on("ZAYA_CHUNKED_CE")
-
-
-def chunked_ce_chunk_tokens() -> int:
-    """``ZAYA_CHUNKED_CE_TOKENS`` (default 4096): tokens per chunk, a positive integer."""
-    value = os.environ.get("ZAYA_CHUNKED_CE_TOKENS", "4096")
-    try:
-        n = int(value)
-    except ValueError:
-        n = 0
-    if n < 1:
-        raise ValueError(f"ZAYA_CHUNKED_CE_TOKENS={value!r}: expected a positive integer.")
-    return n
-
-
-def chunked_ce_compile_enabled() -> bool:
-    """``ZAYA_CHUNKED_CE_COMPILE`` (default 1): fuse each chunk's CE math with torch.compile."""
-    return _env_on("ZAYA_CHUNKED_CE_COMPILE")
 
 
 def _chunk_logits(x_c: Tensor, weight: Tensor, logit_scale: Optional[float]) -> Tensor:
@@ -117,7 +93,15 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
     """loss[t] = logsumexp(x[t] @ W^T) - (x[t] @ W^T)[label[t]] in fp32."""
 
     @staticmethod
-    def forward(ctx, x: Tensor, weight: Tensor, labels: Tensor, chunk: int, logit_scale: Optional[float]):
+    def forward(
+        ctx,
+        x: Tensor,
+        weight: Tensor,
+        labels: Tensor,
+        chunk: int,
+        logit_scale: Optional[float],
+        fused: bool,
+    ):
         # x: [N, H] activation dtype, weight: [V, H], labels: [N] int64.
         n_tok = x.shape[0]
         vocab = weight.shape[0]
@@ -126,7 +110,6 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
 
         loss = torch.empty(n_tok, dtype=torch.float32, device=x.device)
         lse = torch.empty(n_tok, dtype=torch.float32, device=x.device)
-        fused = chunked_ce_compile_enabled()
         ctx.fused = fused
         if fused:
             fwd_stats, _ = _fused_kernels()
@@ -207,24 +190,25 @@ class ChunkedLinearCrossEntropy(torch.autograd.Function):
             del d
 
         dw = dw_acc.to(weight.dtype) if need_dw else None
-        return dx, dw, None, None, None
+        return dx, dw, None, None, None, None
 
 
 def chunked_linear_cross_entropy(
     hidden_states: Tensor,
     weight: Tensor,
     labels: Tensor,
-    chunk_tokens: Optional[int] = None,
+    chunk_tokens: int = 4096,
     logit_scale: Optional[float] = None,
+    compiled: bool = True,
 ) -> Tensor:
     """hidden_states [s, b, h], weight [V, h], labels [b, s] -> loss [b, s] (fp32).
 
     Tokens are processed in ``[s, b]`` order so ``hidden_states`` is a free
-    view; only the small label / loss tensors are transposed.
+    view; only the small label / loss tensors are transposed. ``chunk_tokens``
+    and ``compiled`` are ``zaya_chunked_ce_tokens`` and ``zaya_chunked_ce_compile``.
     """
     s, b, h = hidden_states.shape
     x = hidden_states.reshape(s * b, h)
     labels_sb = labels.transpose(0, 1).reshape(s * b)
-    chunk = chunk_tokens if chunk_tokens is not None else chunked_ce_chunk_tokens()
-    loss = ChunkedLinearCrossEntropy.apply(x, weight, labels_sb, int(chunk), logit_scale)
+    loss = ChunkedLinearCrossEntropy.apply(x, weight, labels_sb, int(chunk_tokens), logit_scale, compiled)
     return loss.view(s, b).transpose(0, 1).contiguous()

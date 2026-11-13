@@ -18,8 +18,6 @@ import torch
 import torch.distributed as dist
 
 from primus.backends.megatron.core.models.zaya1.zaya1_chunked_ce import (
-    chunked_ce_chunk_tokens,
-    chunked_ce_enabled,
     chunked_linear_cross_entropy,
 )
 
@@ -70,11 +68,10 @@ def _rel(a, b):
     return ((a - b).norm() / b.norm().clamp_min(1e-12)).item()
 
 
-@pytest.mark.parametrize("compile_flag", ["0", "1"])
+@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("chunk", [7, 64, 1000])
 @pytest.mark.parametrize("logit_scale", [None, 0.5])
-def test_chunked_ce_matches_stock(tp_group, chunk, logit_scale, compile_flag, monkeypatch):
-    monkeypatch.setenv("ZAYA_CHUNKED_CE_COMPILE", compile_flag)
+def test_chunked_ce_matches_stock(tp_group, chunk, logit_scale, compiled):
     torch.manual_seed(0)
     s, b, h, vocab = 16, 6, 64, 1531
     hidden0 = (torch.randn(s, b, h) * 0.5).to(torch.bfloat16)
@@ -84,7 +81,9 @@ def test_chunked_ce_matches_stock(tp_group, chunk, logit_scale, compile_flag, mo
 
     ref = _run(lambda x, w, y: _stock(x, w, y, tp_group, logit_scale), hidden0, weight0, labels, mask)
     out = _run(
-        lambda x, w, y: chunked_linear_cross_entropy(x, w, y, chunk_tokens=chunk, logit_scale=logit_scale),
+        lambda x, w, y: chunked_linear_cross_entropy(
+            x, w, y, chunk_tokens=chunk, logit_scale=logit_scale, compiled=compiled
+        ),
         hidden0,
         weight0,
         labels,
@@ -102,9 +101,8 @@ def test_chunked_ce_matches_stock(tp_group, chunk, logit_scale, compile_flag, mo
     torch.testing.assert_close(out[2], ref[2], rtol=2e-2, atol=2e-4)
 
 
-@pytest.mark.parametrize("compile_flag", ["0", "1"])
-def test_chunked_ce_out_of_range_labels_match_stock(tp_group, compile_flag, monkeypatch):
-    monkeypatch.setenv("ZAYA_CHUNKED_CE_COMPILE", compile_flag)
+@pytest.mark.parametrize("compiled", [False, True])
+def test_chunked_ce_out_of_range_labels_match_stock(tp_group, compiled):
     torch.manual_seed(1)
     s, b, h, vocab = 8, 3, 32, 257
     hidden0 = torch.randn(s, b, h).to(torch.bfloat16)
@@ -115,7 +113,11 @@ def test_chunked_ce_out_of_range_labels_match_stock(tp_group, compile_flag, monk
     mask = torch.ones(b, s)
     ref = _run(lambda x, w, y: _stock(x, w, y, tp_group), hidden0, weight0, labels, mask)
     out = _run(
-        lambda x, w, y: chunked_linear_cross_entropy(x, w, y, chunk_tokens=5), hidden0, weight0, labels, mask
+        lambda x, w, y: chunked_linear_cross_entropy(x, w, y, chunk_tokens=5, compiled=compiled),
+        hidden0,
+        weight0,
+        labels,
+        mask,
     )
     torch.testing.assert_close(out[0], ref[0], rtol=1e-5, atol=1e-5)
     assert _rel(out[1], ref[1]) < 1e-2
@@ -145,27 +147,3 @@ def test_chunked_ce_fused_kernels_compile_and_match_eager():
     p = torch.softmax(lf, dim=-1)
     p[torch.arange(n)[valid], labels[valid]] -= 1
     torch.testing.assert_close(d.float(), (p * g[:, None]).to(torch.bfloat16).float(), rtol=1e-2, atol=1e-6)
-
-
-def test_chunked_ce_env_toggle(monkeypatch):
-    monkeypatch.delenv("ZAYA_CHUNKED_CE", raising=False)
-    assert chunked_ce_enabled()
-    for off in ("0", "off", "FALSE", " no "):
-        monkeypatch.setenv("ZAYA_CHUNKED_CE", off)
-        assert not chunked_ce_enabled()
-    monkeypatch.setenv("ZAYA_CHUNKED_CE", "1")
-    assert chunked_ce_enabled()
-    monkeypatch.setenv("ZAYA_CHUNKED_CE", "of")
-    with pytest.raises(ValueError, match="ZAYA_CHUNKED_CE"):
-        chunked_ce_enabled()
-
-
-def test_chunked_ce_chunk_tokens_must_be_a_positive_integer(monkeypatch):
-    monkeypatch.delenv("ZAYA_CHUNKED_CE_TOKENS", raising=False)
-    assert chunked_ce_chunk_tokens() == 4096
-    monkeypatch.setenv("ZAYA_CHUNKED_CE_TOKENS", " 2048 ")
-    assert chunked_ce_chunk_tokens() == 2048
-    for bad in ("4k", "0", "-8", ""):
-        monkeypatch.setenv("ZAYA_CHUNKED_CE_TOKENS", bad)
-        with pytest.raises(ValueError, match="ZAYA_CHUNKED_CE_TOKENS"):
-            chunked_ce_chunk_tokens()

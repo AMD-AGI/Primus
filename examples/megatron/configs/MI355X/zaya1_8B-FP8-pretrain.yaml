@@ -15,8 +15,6 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # autotunes once per new tensor shape. Expert token counts change every step,
 # so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
 # per-shape cost.
-# No ZAYA_* switches: ZAYA_ROUTER_DEFER_AR=1 gained under 1% here. The other
-# switches stay at their defaults (on), including the chunked cross-entropy.
 env:
   NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
 
@@ -71,6 +69,10 @@ modules:
       overlap_grad_reduce: false
       overlap_param_gather: false
       gradient_accumulation_fusion: false
+
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, defaults in
+      # zaya1_base.yaml) stay at their defaults, all on but
+      # zaya_router_defer_ar, which gained under 1% here.
 
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.

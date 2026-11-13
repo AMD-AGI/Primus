@@ -8,20 +8,6 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# Switches read by the ZAYA1 model code when it is imported. Primus sets each
-# entry in every training process before it builds the model, and logs it as
-# "[Primus:Runtime] env override".
-#   ZAYA_ROUTER_DEFER_AR: "1"  One data-parallel all-reduce per step for every
-#                              router's balancing-bias update, instead of one
-#                              per MoE layer. Default: 0.
-# The other switches stay at their defaults (on): ZAYA_ATTN_FLASH,
-# ZAYA_FUSE_NORM, ZAYA_FUSE_CCA, ZAYA_CONV_GEMM and ZAYA_FUSE_MOE.
-# ZAYA_CHUNKED_CE has no effect here: cross_entropy_loss_fusion below turns
-# the chunked cross-entropy off. The experts' grouped GEMM is a Primus Turbo
-# setting, at the end of this file.
-env:
-  ZAYA_ROUTER_DEFER_AR: "1"
-
 modules:
   pre_trainer:
     framework: megatron
@@ -72,6 +58,13 @@ modules:
       overlap_grad_reduce: false
       overlap_param_gather: false
       gradient_accumulation_fusion: false
+
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, defaults in
+      # zaya1_base.yaml). One data-parallel all-reduce per step for every
+      # router's balancing-bias update, instead of one per MoE layer. The other
+      # paths stay at their defaults (on). zaya_chunked_ce has no effect here:
+      # cross_entropy_loss_fusion below turns the chunked cross-entropy off.
+      zaya_router_defer_ar: true
 
       # Transformer Engine's fused cross-entropy on the output logits. It is
       # faster here than the ZAYA1 chunked cross-entropy, which it turns off,

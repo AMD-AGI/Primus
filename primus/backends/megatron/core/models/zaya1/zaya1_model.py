@@ -23,9 +23,6 @@ from megatron.core.transformer.enums import ModelType
 from torch import Tensor
 
 from primus.backends.megatron.core.models.zaya1.zaya1_chunked_ce import (
-    chunked_ce_chunk_tokens,
-    chunked_ce_compile_enabled,
-    chunked_ce_enabled,
     chunked_linear_cross_entropy,
 )
 from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
@@ -113,9 +110,9 @@ class Zaya1Model(LanguageModule):
         log_rank_0(f"ZAYA1: {switch_summary(self.config)}; loss: {self._loss_summary()}")
 
     def _chunked_ce_blocker(self) -> Optional[str]:
-        """Why the loss can't use chunked CE (``ZAYA_CHUNKED_CE``, default on), or None when it can."""
-        if not chunked_ce_enabled():
-            return "ZAYA_CHUNKED_CE is off"
+        """Why the loss can't use chunked CE (``zaya_chunked_ce``, default on), or None when it can."""
+        if not self.config.zaya_chunked_ce:
+            return "zaya_chunked_ce is off"
         if getattr(self.config, "cross_entropy_loss_fusion", False):
             # A fused cross-entropy was asked for: Megatron's native or TE
             # kernel, or Turbo's, which only runs with this flag set.
@@ -134,8 +131,8 @@ class Zaya1Model(LanguageModule):
         blocker = self._chunked_ce_blocker()
         if blocker is not None:
             return f"Megatron's cross-entropy, as {blocker}"
-        mode = "compiled" if chunked_ce_compile_enabled() else "eager"
-        return f"chunked cross-entropy ({chunked_ce_chunk_tokens()} tokens per chunk, {mode})"
+        mode = "compiled" if self.config.zaya_chunked_ce_compile else "eager"
+        return f"chunked cross-entropy ({self.config.zaya_chunked_ce_tokens} tokens per chunk, {mode})"
 
     def set_input_tensor(self, input_tensor: Tensor) -> None:
         """Pipeline hook. This port only runs with pipeline size 1."""
@@ -200,7 +197,14 @@ class Zaya1Model(LanguageModule):
             logit_scale = None
             if getattr(self.config, "use_mup", False) and self.config.mup_output_mult != 1.0:
                 logit_scale = float(self.config.mup_output_mult)
-            return chunked_linear_cross_entropy(hidden_states, weight, labels, logit_scale=logit_scale)
+            return chunked_linear_cross_entropy(
+                hidden_states,
+                weight,
+                labels,
+                chunk_tokens=self.config.zaya_chunked_ce_tokens,
+                logit_scale=logit_scale,
+                compiled=self.config.zaya_chunked_ce_compile,
+            )
 
         logits, _ = self.output_layer(
             hidden_states,

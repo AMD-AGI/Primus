@@ -326,7 +326,7 @@ def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch)
 
 
 def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
-    """``ZAYA_CHUNKED_CE=1`` (chunked output projection + CE) vs ``=0`` (stock)."""
+    """``zaya_chunked_ce`` on (chunked output projection + CE) vs off (stock)."""
     del parallel_state
     for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
         monkeypatch.delenv(name, raising=False)
@@ -348,17 +348,17 @@ def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
     labels = torch.randint(0, vocab, (batch, seq), device=device)
     mask = (torch.rand(batch, seq, device=device) > 0.25).float()
 
-    def run(flag):
-        monkeypatch.setenv("ZAYA_CHUNKED_CE", flag)
-        monkeypatch.setenv("ZAYA_CHUNKED_CE_TOKENS", "5")
+    def run(chunked):
+        config.zaya_chunked_ce = chunked
+        config.zaya_chunked_ce_tokens = 5
         model.zero_grad(set_to_none=True)
         loss = model(input_ids, position_ids, attention_mask=None, labels=labels)
         ((loss * mask).sum() / mask.sum()).backward()
         grads = {n: p.grad.detach().clone() for n, p in model.named_parameters() if p.grad is not None}
         return loss.detach(), grads
 
-    ref_loss, ref_grads = run("0")
-    out_loss, out_grads = run("1")
+    ref_loss, ref_grads = run(False)
+    out_loss, out_grads = run(True)
     assert out_loss.shape == ref_loss.shape == (batch, seq)
     torch.testing.assert_close(out_loss, ref_loss, rtol=1e-4, atol=1e-4)
     assert ref_grads.keys() == out_grads.keys()
@@ -368,14 +368,16 @@ def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
 
 def _loss_settings(**config):
     defaults = dict(
-        cross_entropy_loss_fusion=False, cross_entropy_fusion_impl="native", sequence_parallel=False
+        zaya_chunked_ce=True,
+        cross_entropy_loss_fusion=False,
+        cross_entropy_fusion_impl="native",
+        sequence_parallel=False,
     )
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), pg_collection=None)
 
 
-def test_chunked_ce_steps_aside_for_any_fused_cross_entropy(monkeypatch):
-    monkeypatch.delenv("ZAYA_CHUNKED_CE", raising=False)
+def test_chunked_ce_steps_aside_for_any_fused_cross_entropy():
     assert Zaya1Model._chunked_ce_blocker(_loss_settings()) is None
     for impl in ("native", "te"):
         # Turbo cross-entropy also runs only with cross_entropy_loss_fusion.
@@ -384,5 +386,10 @@ def test_chunked_ce_steps_aside_for_any_fused_cross_entropy(monkeypatch):
         )
         assert blocker == f"cross_entropy_loss_fusion is set ({impl})"
     assert "sequence parallel" in Zaya1Model._chunked_ce_blocker(_loss_settings(sequence_parallel=True))
-    monkeypatch.setenv("ZAYA_CHUNKED_CE", "0")
-    assert Zaya1Model._chunked_ce_blocker(_loss_settings()) == "ZAYA_CHUNKED_CE is off"
+    assert Zaya1Model._chunked_ce_blocker(_loss_settings(zaya_chunked_ce=False)) == "zaya_chunked_ce is off"
+
+
+def test_chunked_ce_tokens_must_be_positive():
+    assert _tiny_config(zaya_chunked_ce_tokens=1).zaya_chunked_ce_tokens == 1
+    with pytest.raises(ValueError, match="zaya_chunked_ce_tokens"):
+        _tiny_config(zaya_chunked_ce_tokens=0)

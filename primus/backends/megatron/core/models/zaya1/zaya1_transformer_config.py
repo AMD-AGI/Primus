@@ -40,11 +40,23 @@ class Zaya1TransformerConfig(TransformerConfig):
     zaya_balance_wd: float = 0.0
     # Optional explicit stage list. ``None`` alternates CCA, MoE, CCA, MoE, ...
     zaya_layers: Optional[Sequence] = None
+    # Kernel paths; zaya1_modules.py and zaya1_chunked_ce.py describe each one.
+    zaya_attn_flash: bool = True
+    zaya_fuse_norm: bool = True
+    zaya_fuse_cca: bool = True
+    zaya_conv_gemm: bool = True
+    zaya_fuse_moe: bool = True
+    zaya_router_defer_ar: bool = False
+    zaya_chunked_ce: bool = True
+    zaya_chunked_ce_tokens: int = 4096
+    zaya_chunked_ce_compile: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.partial_rotary_factor <= 0 or self.partial_rotary_factor > 1:
             raise ValueError(f"partial_rotary_factor must be in (0, 1], got {self.partial_rotary_factor}.")
+        if self.zaya_chunked_ce_tokens < 1:
+            raise ValueError(f"zaya_chunked_ce_tokens must be at least 1, got {self.zaya_chunked_ce_tokens}.")
         if self.num_moe_experts is None:
             raise ValueError("ZAYA1 requires num_experts (num_moe_experts) to be set.")
         if self.moe_router_topk != 1:

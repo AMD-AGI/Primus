@@ -18,7 +18,6 @@ convolutions, RMSNorm, and attention stay in BF16 or FP32.
 from __future__ import annotations
 
 import math
-import os
 from typing import List, Optional, Sequence, Tuple
 
 import torch
@@ -27,46 +26,31 @@ from torch import nn
 
 from primus.core.utils.module_utils import warning_rank_0
 
-_SWITCH_ON = ("1", "true", "on", "yes")
-_SWITCH_OFF = ("0", "false", "off", "no", "")
-
-
-def _env_on(name: str, default: str = "1") -> bool:
-    """Read an on/off switch: 1, true, on or yes; 0, false, off, no or empty; any case."""
-    value = os.environ.get(name, default).strip().lower()
-    if value not in _SWITCH_ON + _SWITCH_OFF:
-        raise ValueError(f"{name}={os.environ[name]!r}: expected one of 1, true, on, yes, 0, false, off, no.")
-    return value in _SWITCH_ON
-
-
-# ZAYA_ATTN_FLASH=1 (default): drop a purely causal dense mask once per forward
+# zaya_attn_flash (default on): drop a purely causal dense mask once per forward
 # and run CCA attention through flash_attn_func with native GQA, or through
-# SDPA enable_gqa when flash_attn is unavailable. ZAYA_ATTN_FLASH=0 restores
-# the dense-mask + repeat_interleave path.
-ATTN_FLASH = _env_on("ZAYA_ATTN_FLASH")
+# SDPA enable_gqa when flash_attn is unavailable. Off restores the dense-mask +
+# repeat_interleave path.
 try:
     from flash_attn import flash_attn_func as _flash_attn_func
 except Exception:  # pragma: no cover - depends on the image
     _flash_attn_func = None
 
 
-# ZAYA_FUSE_NORM=1 (default): run each stage's fp32 elementwise chain
+# zaya_fuse_norm (default on): run each stage's fp32 elementwise chain
 # (ResidualScaling affine, residual merge, RMSNorm) as one torch.compile'd
 # region instead of ~12 eager kernels over [tokens, hidden] fp32 tensors, fwd
-# and bwd, in all 80 stages. ZAYA_FUSE_CCA=1 (default) does the same for the
+# and bwd, in all 80 stages. zaya_fuse_cca (default on) does the same for the
 # CCA query/key post-processing (grouped means, qk-norm, temperature, partial
 # RoPE). Both are free functions with tensor arguments, so every layer shares
-# one graph (no per-module recompiles). Set either to 0 for the eager path.
-FUSE_NORM = _env_on("ZAYA_FUSE_NORM")
-FUSE_CCA = _env_on("ZAYA_FUSE_CCA")
+# one graph (no per-module recompiles). Set either off for the eager path.
 
-# ZAYA_ROUTER_DEFER_AR=1: accumulate each router's token counts during the
-# forward and apply all balancing-bias updates after the decoder's backward
-# (or, failing that, at the start of the next forward) with one all-reduce for
-# all MoE layers instead of one per layer. The bias only feeds topk before its
-# own update, so with one microbatch per step (or non-pipelined microbatches)
-# the bias each forward sees is bit-identical to the per-layer path.
-ROUTER_DEFER_AR = _env_on("ZAYA_ROUTER_DEFER_AR", "0")
+# zaya_router_defer_ar (default off): accumulate each router's token counts
+# during the forward and apply all balancing-bias updates after the decoder's
+# backward (or, failing that, at the start of the next forward) with one
+# all-reduce for all MoE layers instead of one per layer. The bias only feeds
+# topk before its own update, so with one microbatch per step (or
+# non-pipelined microbatches) the bias each forward sees is bit-identical to
+# the per-layer path.
 
 
 # By default the experts run split: per-expert nn.Linear GEMMs over host-sized
@@ -115,20 +99,36 @@ def _publish_turbo_grouped_gemm_backend() -> None:
     _apply_turbo_grouped_gemm_backend_env()
 
 
+_PATH_DEFAULTS = {
+    "zaya_attn_flash": True,
+    "zaya_fuse_norm": True,
+    "zaya_fuse_cca": True,
+    "zaya_conv_gemm": True,
+    "zaya_fuse_moe": True,
+    "zaya_router_defer_ar": False,
+}
+
+
+def _path_on(config, name: str) -> bool:
+    """A kernel-path field of ``config``; configs without it, like the unit tests' stand-ins, get its default."""
+    return bool(getattr(config, name, _PATH_DEFAULTS[name]))
+
+
 def switch_summary(config) -> str:
-    """The ZAYA_* switches and the experts' path in effect for ``config``, as one line for the build log."""
+    """The kernel-path fields and the experts' path in effect for ``config``, as one line for the build log."""
 
-    def on(flag: bool) -> str:
-        return "on" if flag else "off"
+    def on(name: str) -> str:
+        return "on" if _path_on(config, name) else "off"
 
-    if not ATTN_FLASH:
+    if not _path_on(config, "zaya_attn_flash"):
         attention = "dense mask"
     else:
         attention = "flash_attn" if _flash_attn_func is not None else "SDPA, flash_attn not importable"
     return (
-        f"ZAYA_ATTN_FLASH={on(ATTN_FLASH)} ({attention}), ZAYA_FUSE_NORM={on(FUSE_NORM)}, "
-        f"ZAYA_FUSE_CCA={on(FUSE_CCA)}, ZAYA_CONV_GEMM={on(CONV_GEMM)}, ZAYA_FUSE_MOE={on(FUSE_MOE)}, "
-        f"ZAYA_ROUTER_DEFER_AR={on(ROUTER_DEFER_AR)}; experts: {_turbo_experts(config)[1]}"
+        f"zaya_attn_flash={on('zaya_attn_flash')} ({attention}), zaya_fuse_norm={on('zaya_fuse_norm')}, "
+        f"zaya_fuse_cca={on('zaya_fuse_cca')}, zaya_conv_gemm={on('zaya_conv_gemm')}, "
+        f"zaya_fuse_moe={on('zaya_fuse_moe')}, zaya_router_defer_ar={on('zaya_router_defer_ar')}; "
+        f"experts: {_turbo_experts(config)[1]}"
     )
 
 
@@ -212,8 +212,8 @@ def _scale_merge_norm_first(hidden, h_bias, h_scale, norm_w, eps: float):
     return merged, _rms(merged.to(dtype=target_dtype), norm_w, eps)
 
 
-_fused_smn_res = _maybe_compile(_scale_merge_norm_res, FUSE_NORM)
-_fused_smn_first = _maybe_compile(_scale_merge_norm_first, FUSE_NORM)
+_fused_smn_res = _maybe_compile(_scale_merge_norm_res, True)
+_fused_smn_first = _maybe_compile(_scale_merge_norm_first, True)
 
 
 def layer_kinds(num_layers: int, zaya_layers: Optional[Sequence] = None) -> List[str]:
@@ -442,16 +442,15 @@ def _cca_qk_post(
     return _apply(query), _apply(key)
 
 
-_fused_cca_qk = _maybe_compile(_cca_qk_post, FUSE_CCA)
+_fused_cca_qk = _maybe_compile(_cca_qk_post, True)
 
-# ZAYA_CONV_GEMM=1 (default): run CCA's two causal Conv1d layers without MIOpen.
+# zaya_conv_gemm (default on): run CCA's two causal Conv1d layers without MIOpen.
 # The depthwise kernel-2 conv and the per-head grouped kernel-2 conv otherwise
 # hit naive_conv_ab_nonpacked fwd/bwd kernels (double accumulation) plus NCL
 # transposes in all 40 CCA stages. Here the depthwise conv is a fused
 # elementwise two-tap filter emitted directly in the [groups, tokens, 2*cg]
 # layout, and the grouped conv is one baddbmm per stage. Same parameters, same
-# math (fp32 accumulation, bf16 output). Set to 0 for nn.Conv1d.
-CONV_GEMM = _env_on("ZAYA_CONV_GEMM")
+# math (fp32 accumulation, bf16 output). Set it off for nn.Conv1d.
 
 
 def _cca_conv_taps(qk, w0, b0, groups: int):
@@ -480,7 +479,7 @@ def _cca_conv_taps(qk, w0, b0, groups: int):
     return taps.transpose(0, 1).contiguous()
 
 
-_fused_conv_taps = _maybe_compile(_cca_conv_taps, CONV_GEMM)
+_fused_conv_taps = _maybe_compile(_cca_conv_taps, True)
 
 
 def cca_causal_conv(qk: torch.Tensor, conv0: nn.Conv1d, conv1: nn.Conv1d) -> torch.Tensor:
@@ -544,11 +543,13 @@ class CCA(nn.Module):
         # The GEMM conv path covers the released shape: kernel 2 for both convs
         # (left pad 2) and conv1 groups that split channels evenly.
         self._conv_gemm_ok = (
-            CONV_GEMM
+            _path_on(config, "zaya_conv_gemm")
             and self.cca_time0 == 2
             and self.cca_time1 == 2
             and in_ch % (self.num_q_heads + self.num_k_heads) == 0
         )
+        self.fuse_cca = _path_on(config, "zaya_fuse_cca")
+        self.attn_flash = _path_on(config, "zaya_attn_flash")
         # Ones, not zeros: a zero default is the pre-checkpoint initialization, and a
         # raw temperature of zero would wipe the keys at step 0.
         self.temp = nn.Parameter(torch.ones(self.num_k_heads))
@@ -625,7 +626,7 @@ class CCA(nn.Module):
         query_conv = qk_out[..., : self.latent_q].view(seq, batch, self.num_q_heads, self.head_dim)
         key_conv = qk_out[..., self.latent_q :].view(seq, batch, self.num_k_heads, self.head_dim)
         dtype = hidden_states.dtype
-        if FUSE_CCA:
+        if self.fuse_cca:
             query, key = _fused_cca_qk(
                 query_conv,
                 key_conv,
@@ -654,7 +655,7 @@ class CCA(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor], attention_mask):
         query, key, value = self.project(hidden_states, position_ids)
-        attn = attention(query, key, value, attention_mask)
+        attn = attention(query, key, value, attention_mask, flash=self.attn_flash)
         seq, batch = hidden_states.shape[:2]
         return self.o_proj(attn.reshape(seq, batch, self.latent_q))
 
@@ -697,9 +698,12 @@ def _attention_causal_gqa(query, key, value) -> torch.Tensor:
     return out.permute(2, 0, 1, 3)
 
 
-def attention(query, key, value, attention_mask: Optional[torch.Tensor]) -> torch.Tensor:
-    """Causal GQA. ``attention_mask`` uses Megatron's convention: True blocks a key."""
-    if ATTN_FLASH and attention_mask is None:
+def attention(query, key, value, attention_mask: Optional[torch.Tensor], flash: bool = False) -> torch.Tensor:
+    """Causal GQA. ``attention_mask`` uses Megatron's convention: True blocks a key.
+
+    ``flash`` is zaya_attn_flash: with no mask, run the causal kernel instead of a dense causal mask.
+    """
+    if flash and attention_mask is None:
         return _attention_causal_gqa(query, key, value)
     # [s, b, h, d] -> [b, h, s, d]
     q = query.permute(1, 2, 0, 3)
@@ -722,14 +726,13 @@ def attention(query, key, value, attention_mask: Optional[torch.Tensor]) -> torc
     return out.permute(2, 0, 1, 3)
 
 
-# ZAYA_FUSE_MOE=1 (default): fuse the MoE-stage elementwise chains that
-# ZAYA_FUSE_NORM/ZAYA_FUSE_CCA do not cover: the expert SwiGLU (silu * up, one
+# zaya_fuse_moe (default on): fuse the MoE-stage elementwise chains that
+# zaya_fuse_norm/zaya_fuse_cca do not cover: the expert SwiGLU (silu * up, one
 # kernel fwd and bwd, dynamic token count), the router EDA add + RMSNorm and
 # the fp32 softmax/bias/top-k/gather/cast, and the gate multiply + unpermute
 # (one gather*prob kernel replacing the per-expert multiplies, the zero fill
 # and index_copy). Dispatch/unpermute backwards are gathers by the inverse
-# permutation instead of zero fill + atomic index_add. =0 restores eager.
-FUSE_MOE = _env_on("ZAYA_FUSE_MOE")
+# permutation instead of zero fill + atomic index_add. Off restores eager.
 
 
 def _swiglu(fc1_out: torch.Tensor) -> torch.Tensor:
@@ -771,12 +774,12 @@ def _unpermute_scale_bwd_noprob(grad, perm, prob):
 
 # Expert token counts change every layer and step: compile SwiGLU with dynamic
 # shapes so it is one graph instead of a recompile per count.
-_fused_swiglu = _maybe_compile(_swiglu, FUSE_MOE, dynamic=True)
-_fused_eda_norm = _maybe_compile(_eda_norm, FUSE_MOE)
-_fused_route_select = _maybe_compile(_route_select, FUSE_MOE)
-_fused_unpermute_fwd = _maybe_compile(_unpermute_scale_fwd, FUSE_MOE)
-_fused_unpermute_bwd = _maybe_compile(_unpermute_scale_bwd, FUSE_MOE)
-_fused_unpermute_bwd_noprob = _maybe_compile(_unpermute_scale_bwd_noprob, FUSE_MOE)
+_fused_swiglu = _maybe_compile(_swiglu, True, dynamic=True)
+_fused_eda_norm = _maybe_compile(_eda_norm, True)
+_fused_route_select = _maybe_compile(_route_select, True)
+_fused_unpermute_fwd = _maybe_compile(_unpermute_scale_fwd, True)
+_fused_unpermute_bwd = _maybe_compile(_unpermute_scale_bwd, True)
+_fused_unpermute_bwd_noprob = _maybe_compile(_unpermute_scale_bwd_noprob, True)
 
 
 class _PermuteRows(torch.autograd.Function):
@@ -821,9 +824,10 @@ class SwiGLUExpert(nn.Module):
         super().__init__()
         self.linear_fc1 = _linear(hidden_size, 2 * intermediate_size, False, config)
         self.linear_fc2 = _linear(intermediate_size, hidden_size, False, config)
+        self.fuse_moe = _path_on(config, "zaya_fuse_moe")
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        if FUSE_MOE:
+        if self.fuse_moe:
             return self.linear_fc2(_fused_swiglu(self.linear_fc1(hidden)))
         gate, up = self.linear_fc1(hidden).chunk(2, dim=-1)
         return self.linear_fc2(F.silu(gate) * up)
@@ -866,9 +870,10 @@ class ZayaRouter(nn.Module):
         if self.use_mod:
             with torch.no_grad():
                 self.balancing_biases[-1] = -1.0
-        # Deferred-update state (ZAYA_ROUTER_DEFER_AR). Not a buffer: it is
+        self.fuse_moe = _path_on(config, "zaya_fuse_moe")
+        # Deferred-update state (zaya_router_defer_ar). Not a buffer: it is
         # always flushed before the next forward reads balancing_biases.
-        self.defer_bias_update = ROUTER_DEFER_AR
+        self.defer_bias_update = _path_on(config, "zaya_router_defer_ar")
         self._pending_counts: Optional[torch.Tensor] = None
 
     def _apply(self, fn, recurse=True):
@@ -885,7 +890,7 @@ class ZayaRouter(nn.Module):
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         seq, batch, _ = hidden_states.shape
         routed = self.down_proj(hidden_states.reshape(seq * batch, self.hidden_size))
-        if FUSE_MOE:
+        if self.fuse_moe:
             return self._forward_fused(routed, hidden_states, prev_router)
         if self.use_eda and prev_router is not None:
             routed = routed + prev_router.reshape(seq * batch, self.width) * self.router_states_scale
@@ -1033,6 +1038,7 @@ class ZayaMoE(nn.Module):
         super().__init__()
         self.num_real_experts = int(config.num_moe_experts)
         intermediate = int(getattr(config, "moe_ffn_hidden_size", None) or config.ffn_hidden_size)
+        self.fuse_moe = _path_on(config, "zaya_fuse_moe")
         self.router = ZayaRouter(config)
         experts = [
             SwiGLUExpert(int(config.hidden_size), intermediate, config) for _ in range(self.num_real_experts)
@@ -1098,7 +1104,7 @@ class ZayaMoE(nn.Module):
         counts.scatter_add_(0, sorted_idx, torch.ones_like(sorted_idx, dtype=torch.int64))
         group_lens = counts[:E].contiguous()
         group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
-        if FUSE_MOE:
+        if self.fuse_moe:
             # Same permute / fused SwiGLU / fused gather*prob unpermute as
             # _dispatch_fused, with the per-expert loop replaced by two
             # grouped GEMMs.
@@ -1161,7 +1167,7 @@ class ZayaMoE(nn.Module):
         num_groups = self.router.num_scored
         sorted_idx, perm = torch.sort(flat_idx, stable=True)
         counts = torch.bincount(sorted_idx, minlength=num_groups).tolist()
-        if FUSE_MOE:
+        if self.fuse_moe:
             return self._dispatch_fused(hidden_states, flat, flat_prob, perm, counts), next_router
         x_sorted = flat.index_select(0, perm)
         p_sorted = flat_prob.index_select(0, perm)
@@ -1214,6 +1220,7 @@ class ZayaStage(nn.Module):
         self.input_norm = RMSNorm(int(config.hidden_size), eps)
         use_scale = bool(getattr(config, "scale_residual_merge", True))
         self.res_scale = ResidualScaling(int(config.hidden_size), layer_number != 0) if use_scale else None
+        self.fuse_norm = _path_on(config, "zaya_fuse_norm")
         if kind == "a":
             self.self_attn = CCA(config)
             self.zaya_block = None
@@ -1224,7 +1231,7 @@ class ZayaStage(nn.Module):
     def forward(self, hidden_states, residual, prev_router, position_ids, attention_mask):
         target_dtype = hidden_states.dtype
         rs = self.res_scale
-        if FUSE_NORM and rs is not None and (residual is None or rs.has_residual):
+        if self.fuse_norm and rs is not None and (residual is None or rs.has_residual):
             if residual is None:
                 residual, normed = _fused_smn_first(
                     hidden_states,
@@ -1266,6 +1273,8 @@ class ZayaStack(nn.Module):
         self.final_norm = RMSNorm(int(config.hidden_size), eps)
         use_scale = bool(getattr(config, "scale_residual_merge", True))
         self.res_scale = ResidualScaling(int(config.hidden_size), True) if use_scale else None
+        self.fuse_norm = _path_on(config, "zaya_fuse_norm")
+        self.attn_flash = _path_on(config, "zaya_attn_flash")
 
     def _fp8_context(self):
         """One FP8 autocast for the whole stack.
@@ -1310,7 +1319,7 @@ class ZayaStack(nn.Module):
                 return None
 
             hidden_states.register_hook(_flush_after_backward)
-        if ATTN_FLASH and attention_mask is not None and is_causal_mask(attention_mask):
+        if self.attn_flash and attention_mask is not None and is_causal_mask(attention_mask):
             # The dataloader's tril mask (reset_attention_mask=false) is plain
             # causal: check it once here instead of materializing an additive
             # [b, h, s, s] mask in each of the 40 CCA stages.
@@ -1324,7 +1333,7 @@ class ZayaStack(nn.Module):
                 )
             target_dtype = hidden_states.dtype
             rs = self.res_scale
-            if FUSE_NORM and rs is not None and residual is not None:
+            if self.fuse_norm and rs is not None and residual is not None:
                 _, normed = _fused_smn_res(
                     hidden_states,
                     residual,

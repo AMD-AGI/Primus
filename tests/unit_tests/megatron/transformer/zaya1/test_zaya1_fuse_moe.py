@@ -4,10 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""CPU equivalence of the ZAYA_FUSE_MOE path (SwiGLU, router, gate/unpermute)
+"""CPU equivalence of the zaya_fuse_moe path (SwiGLU, router, gate/unpermute)
 against the eager path, forward and backward, fp32 and bf16."""
-
-import copy
 
 import pytest
 import torch
@@ -62,8 +60,7 @@ _FUSED = (
 
 @pytest.fixture
 def compiled(monkeypatch):
-    """Force the compiled helpers on regardless of the import-time env, and
-    fail if any of them silently fell back to eager."""
+    """Fresh compiled helpers for this test, failing it if any of them silently fell back to eager."""
     mc = zm._maybe_compile
     monkeypatch.setattr(zm, "_fused_swiglu", mc(zm._swiglu, True, dynamic=True))
     monkeypatch.setattr(zm, "_fused_eda_norm", mc(zm._eda_norm, True))
@@ -78,8 +75,14 @@ def compiled(monkeypatch):
             assert fn.compiled_ok(), f"{name} fell back to eager"
 
 
-def _run(module, flag, monkeypatch, *inputs):
-    monkeypatch.setattr(zm, "FUSE_MOE", flag)
+def _eager_twin(module, build):
+    """``build(cfg)`` with zaya_fuse_moe off, holding ``module``'s weights and buffers."""
+    twin = build(_cfg(zaya_fuse_moe=False)).to(next(module.parameters()).dtype)
+    twin.load_state_dict(module.state_dict())
+    return twin
+
+
+def _run(module, *inputs):
     inputs = [x.detach().clone().requires_grad_(x.is_floating_point()) for x in inputs]
     out = module(*inputs)
     outs = out if isinstance(out, tuple) else (out,)
@@ -101,13 +104,17 @@ def _tol(dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_swiglu_expert_matches_eager(compiled, dtype):
     torch.manual_seed(0)
-    cfg = _cfg()
-    expert = zm.SwiGLUExpert(cfg.hidden_size, cfg.moe_ffn_hidden_size, cfg).to(dtype)
-    ref = copy.deepcopy(expert)
+    cfg = _cfg(zaya_fuse_moe=True)
+
+    def build(c):
+        return zm.SwiGLUExpert(c.hidden_size, c.moe_ffn_hidden_size, c)
+
+    expert = build(cfg).to(dtype)
+    ref = _eager_twin(expert, build)
     for n in (1, 5, 13):  # varying token counts share one dynamic graph
         x = torch.randn(n, cfg.hidden_size, dtype=dtype)
-        o_e, g_e, p_e = _run(ref, False, compiled, x)
-        o_f, g_f, p_f = _run(expert, True, compiled, x)
+        o_e, g_e, p_e = _run(ref, x)
+        o_f, g_f, p_f = _run(expert, x)
         torch.testing.assert_close(o_f, o_e, **_tol(dtype))
         torch.testing.assert_close(g_f, g_e, **_tol(dtype))
         for k in p_e:
@@ -120,14 +127,14 @@ def test_swiglu_expert_matches_eager(compiled, dtype):
 @pytest.mark.parametrize("with_prev", [False, True])
 def test_moe_layer_matches_eager(compiled, dtype, with_prev):
     torch.manual_seed(1)
-    cfg = _cfg()
+    cfg = _cfg(zaya_fuse_moe=True)
     moe = zm.ZayaMoE(cfg).to(dtype)
     with torch.no_grad():
         moe.router.router_states_scale.uniform_(0.2, 1.8)
         for m in moe.router.router_mlp:
             if hasattr(m, "weight"):
                 m.weight.mul_(20.0)  # spread the routing over all experts and MoD
-    ref = copy.deepcopy(moe)
+    ref = _eager_twin(moe, zm.ZayaMoE)
     seq, batch = 7, 3
     hidden = torch.randn(seq, batch, cfg.hidden_size, dtype=dtype)
     prev = torch.randn(seq, batch, cfg.zaya_mlp_expansion, dtype=dtype) if with_prev else None
@@ -136,17 +143,15 @@ def test_moe_layer_matches_eager(compiled, dtype, with_prev):
         return lambda h, *p: mod(h, p[0] if p else None)
 
     args = (hidden, prev) if with_prev else (hidden,)
-    o_e, g_e, p_e = _run(call(ref), False, compiled, *args)
-    o_f, g_f, p_f = _run(call(moe), True, compiled, *args)
+    o_e, g_e, p_e = _run(call(ref), *args)
+    o_f, g_f, p_f = _run(call(moe), *args)
     # PID buffers moved identically (same counts).
     torch.testing.assert_close(moe.router.balancing_biases, ref.router.balancing_biases)
     # Same routing decisions (eval: no further bias update), spread over experts.
     moe.eval()
     ref.eval()
     with torch.no_grad():
-        compiled.setattr(zm, "FUSE_MOE", False)
         _, idx_e, _ = ref.router(hidden, prev)
-        compiled.setattr(zm, "FUSE_MOE", True)
         _, idx_f, _ = moe.router(hidden, prev)
     assert torch.equal(idx_e, idx_f)
     assert len(torch.unique(idx_e)) >= 3
