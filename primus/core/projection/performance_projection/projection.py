@@ -3205,12 +3205,17 @@ def _optimizer_per_element_ms(optimizer, numel: int = 1 << 28) -> Optional[float
             _step()
         torch.cuda.synchronize()
         start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(5):
-            _step()
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) / 5 / numel
+        # The result is multiplied by the full model's shard size (billions of elements), so
+        # one disturbed window would dominate the projected step: keep the fastest of 3 rounds.
+        rounds = []
+        for _ in range(3):
+            start.record()
+            for _ in range(5):
+                _step()
+            end.record()
+            torch.cuda.synchronize()
+            rounds.append(start.elapsed_time(end) / 5 / numel)
+        return min(rounds)
     except Exception:  # noqa: BLE001
         return None
 
