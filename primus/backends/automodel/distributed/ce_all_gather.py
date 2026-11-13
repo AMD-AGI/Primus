@@ -23,7 +23,10 @@ REQUIRES:
   and ``NCCL_CTA_POLICY=2`` and ``NCCL_CUMEM_ENABLE=1`` in every rank's environment before NCCL
   initializes (Primus's runner exports them with ``FSDP_ALL_GATHER_BACKEND=rccl_sdma``); without
   them the patch is not applied. RCCL's copy-engine path segfaults when it is called on the
-  default stream; FSDP2 issues its all-gathers on its own stream.
+  default stream; FSDP2 issues its all-gathers on its own stream. It also needs a torch whose
+  NCCL symmetric memory can rendezvous on ROCm, which torch 2.14's cannot (its ProcessGroupNCCL
+  publishes no communicator for it there); one rendezvous at the first forward checks, and the
+  patch is not applied when it fails.
 
 NUMERICS:
   An all-gather copies bytes, so results are unchanged bit for bit.
@@ -51,6 +54,8 @@ _ATTACHED_ATTR = "_primus_ce_all_gather"
 # Read once at install; set by the runner before NCCL initializes, not settings.
 REQUIRED_ENV = {"NCCL_CTA_POLICY": "2", "NCCL_CUMEM_ENABLE": "1"}
 _installed = False
+# The checks' buffers stay allocated: the pool would otherwise hand their blocks out again.
+_probes: list = []
 
 
 def is_enabled() -> bool:
@@ -76,6 +81,26 @@ def pin_symm_mem_pools() -> None:
         ctypes.pythonapi.Py_IncRef(ctypes.py_object(pool))
 
 
+def rendezvous_error(group) -> str | None:
+    """Why a buffer from the NCCL symmetric-memory pool cannot be rendezvoused on ``group``, or None.
+
+    Call after ``symm_mem.set_backend("NCCL")`` and a collective on ``group``, on every rank: torch
+    2.14 on ROCm fails the communicator lookup on every rank alike, before exchanging anything.
+    """
+    import torch
+    from torch.distributed import _symmetric_memory as symm_mem
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    with torch.cuda.use_mem_pool(symm_mem.get_mem_pool(device)):
+        probe = torch.empty(group.size(), dtype=torch.uint8, device=device)
+    try:
+        symm_mem.rendezvous(probe, group=group.group_name)
+    except RuntimeError as exc:
+        return str(exc).strip().splitlines()[0]
+    _probes.append(probe)
+    return None
+
+
 def module_prefixes(value: str) -> list[str]:
     """The module-path prefixes of a comma-separated ``*_modules`` setting."""
     return [p.strip() for p in value.split(",") if p.strip()]
@@ -86,7 +111,7 @@ def _attach(root_state, prefixes: list[str]) -> None:
 
     root_module = root_state._modules[0]
     names = {module: name for name, module in root_module.named_modules()}
-    comms, attached, skipped = {}, [], []
+    comms, units, skipped = {}, [], []
     for state in root_state._state_ctx.all_states:
         if state is root_state:
             continue
@@ -101,8 +126,20 @@ def _attach(root_state, prefixes: list[str]) -> None:
         group = groups[0]._all_gather_process_group
         if group not in comms:
             comms[group] = SymmMemAllGather(group, "NCCL")
+        units.append((name, module, group))
+    for group in comms:
+        error = rendezvous_error(group)
+        if error:
+            logger.warning(
+                "[PrimusCEAllGather] NCCL symmetric memory cannot rendezvous on group %s with this torch (%s); "
+                "not applied.",
+                group.group_name,
+                error,
+            )
+            return
+    for _, module, group in units:
         module.set_custom_all_gather(comms[group])
-        attached.append(name)
+    attached = [name for name, _, _ in units]
     logger.info(
         "[PrimusCEAllGather] copy-engine all-gather for %d FSDP2 units (%s ... %s)%s.",
         len(attached),

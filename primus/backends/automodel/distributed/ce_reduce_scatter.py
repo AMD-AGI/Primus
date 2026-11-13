@@ -34,7 +34,8 @@ WHAT:
 REQUIRES:
   The same as ``distributed/ce_all_gather.py``: Linux >= 6.8, an RCCL with copy-engine collectives and
   ``NCCL_CTA_POLICY=2`` and ``NCCL_CUMEM_ENABLE=1`` in every rank's environment before NCCL
-  initializes; without them the patch is not applied. RCCL's copy-engine path segfaults when it
+  initializes, and a torch whose NCCL symmetric memory can rendezvous on ROCm (checked at the
+  first forward); without them the patch is not applied. RCCL's copy-engine path segfaults when it
   is called on the default stream; FSDP2 issues its reduce-scatters on its own stream. Memory:
   the staging buffer, the size of the largest unit's gradients.
 
@@ -134,7 +135,7 @@ def _attach(root_state, prefixes: list[str]) -> None:
     comm_cls = _comm_class(options.integer(f"{_SECTION}.fsdp_ce_reduce_scatter_debug_check", 0))
     root_module = root_state._modules[0]
     names = {module: name for name, module in root_module.named_modules()}
-    comms, attached, skipped = {}, [], []
+    comms, units, skipped = {}, [], []
     for state in root_state._state_ctx.all_states:
         if state is root_state:
             continue
@@ -149,8 +150,20 @@ def _attach(root_state, prefixes: list[str]) -> None:
         group = groups[0]._reduce_scatter_process_group
         if group not in comms:
             comms[group] = comm_cls(group)
+        units.append((name, module, group))
+    for group in comms:
+        error = ce_all_gather.rendezvous_error(group)
+        if error:
+            logger.warning(
+                "[PrimusCEReduceScatter] NCCL symmetric memory cannot rendezvous on group %s with this torch "
+                "(%s); not applied.",
+                group.group_name,
+                error,
+            )
+            return
+    for _, module, group in units:
         module.set_custom_reduce_scatter(comms[group])
-        attached.append(name)
+    attached = [name for name, _, _ in units]
     logger.info(
         "[PrimusCEReduceScatter] copy-engine reduce-scatter for %d FSDP2 units (%s ... %s)%s.",
         len(attached),
