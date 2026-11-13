@@ -40,6 +40,9 @@ class ModelParallelConfig:
     recompute_method: str = None  # "uniform" (recompute every layer) or "block" (first N)
     # Megatron selective block recompute: global transformer layer indices (0..num_layers-1)
     recompute_layer_ids: Optional[List[int]] = None
+    # The layer benchmark ran the blocks checkpointed, so its backward already
+    # re-runs the forward the way training does (TorchTitan's compiled full AC).
+    recompute_measured_in_backward: bool = False
     # Precision-aware optimizer (Megatron `--use-precision-aware-optimizer`).
     # When enabled the optimizer state dtypes follow the *_dtype fields below;
     # the projection's bytes-per-param formula uses these to size the static

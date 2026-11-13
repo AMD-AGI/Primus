@@ -483,8 +483,8 @@ def test_writeback_translates_an_all_moe_stack():
 
 @pytest.mark.parametrize(
     "granularity,expected",
-    # Full recompute is priced analytically, so the bench runs without checkpointing.
-    [("full", "none"), ("selective", "selective")],
+    # Recompute is measured in the checkpointed backward, as training runs it.
+    [("full", "full"), ("selective", "selective")],
 )
 def test_writeback_translates_recompute_granularity(granularity, expected):
     args = _bench_shaped_args(recompute_granularity=granularity)
@@ -503,7 +503,7 @@ def test_writeback_creates_missing_namespaces():
     )
     torchtitan_apply_bench_overrides(args)
 
-    assert args.activation_checkpoint.mode == "none"
+    assert args.activation_checkpoint.mode == "full"
     assert args.parallelism.tensor_parallel_degree == 1
     assert args.training.seq_len == 1024
 

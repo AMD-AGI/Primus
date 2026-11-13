@@ -950,6 +950,8 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
 
     # Get recomputation settings
     recompute_granularity = getattr(mp_config, "recompute_granularity", None)
+    if getattr(mp_config, "recompute_measured_in_backward", False):
+        recompute_granularity = None
     recompute_layer_ids = _normalized_recompute_layer_ids(mp_config)
     recompute_num_layers = _recompute_layer_count(mp_config, num_total_layers)
 
@@ -2185,6 +2187,8 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
 
         # Get recomputation settings to account for extra forward pass during backward
         recompute_granularity = getattr(mp_cfg, "recompute_granularity", None)
+        if getattr(mp_cfg, "recompute_measured_in_backward", False):
+            recompute_granularity = None
         recompute_layer_ids = _normalized_recompute_layer_ids(mp_cfg)
         recompute_num_layers = getattr(mp_cfg, "recompute_num_layers", 0) or 0
         recompute_method = getattr(mp_cfg, "recompute_method", None)
