@@ -30,12 +30,14 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # the faster steps make up for the first one after about 1,420 steps. The
 # fullest stage, stage 10, peaked at 285 of 288 GiB.
 #
-# Environment: TORCHINDUCTOR_COMPILE_THREADS=1 on every node, so each rank
-# runs its Inductor compiles in its own process. With a compile-worker pool, a
-# 16-node Turbo run of Inkling hung in its first step, waiting for a compile
-# the pool never returned. Also Primus's usual multi-node variables (NNODES,
-# NODE_RANK, MASTER_ADDR, MASTER_PORT) and the cluster's RCCL network
-# settings.
+# Environment: the env block below sets TORCHINDUCTOR_COMPILE_THREADS=1, so
+# each rank runs its Inductor compiles in its own process. With a
+# compile-worker pool, a 16-node Turbo run of Inkling hung in its first step,
+# waiting for a compile the pool never returned. Each node also needs Primus's
+# usual multi-node variables (NNODES, NODE_RANK, MASTER_ADDR, MASTER_PORT) and
+# the cluster's RCCL network settings.
+env:
+  TORCHINDUCTOR_COMPILE_THREADS: "1"
 
 modules:
   pre_trainer:
