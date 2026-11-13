@@ -5,7 +5,7 @@
 #
 # Purpose:
 #   Run a batch of Primus training benchmarks (Megatron, Megatron Bridge,
-#   TorchTitan, MaxText, MaxDiffusion), and optionally the diffusion and DLRM
+#   TorchTitan, MaxText, MaxDiffusion, diffusion), and optionally the DLRM
 #   benchmarks of diffusion_bench/, and collect the results in a single
 #   directory with enough metadata that a reviewer can reproduce or audit each
 #   run from the logs alone.
@@ -39,17 +39,29 @@
 #
 #   Missing paths and duplicate entries are reported before anything launches.
 #
+# Diffusion (BACKEND=...,diffusion, single node only):
+#   The AMDiffusionBenchmark workloads (FLUX.1-dev, SDXL, Mochi 1,
+#   HunyuanVideo, Wan 2.1 I2V) on Primus' diffusion backend, from the
+#   catalog's examples/diffusion/configs/<GPU>/benchmark_*-posttrain.yaml.
+#   TRAIN_STEPS is not applied. Their prepare hook downloads each model into
+#   PRIMUS_HF_HOME, which the runner sets for them:
+#   DIFFUSION_HF_CACHE=<dir>       where the diffusion configs keep their model
+#                                  downloads (default: $PRIMUS_HF_HOME, else
+#                                  <DATA_PATH or checkout/data>/huggingface_diffusion)
+#
 # Diffusion and DLRM (BACKEND=...,diffusion_dlrm, catalog mode only):
 #   Not a catalog backend. Adding it to BACKEND runs diffusion_bench/
 #   run_benchmarks.sh once per repetition (NUM_REPS), after the catalog
-#   configs, for every diffusion and DLRM model its config enables (batch
+#   configs, for every DLRM precision and diffusion model its config enables
+#   (the shipped config runs DLRM only, as the diffusion models run as the
+#   `diffusion` backend above; batch
 #   sizes, models and step_timeout come from that config; the runner sets no
 #   time limit on this run). It uses
 #   DOCKER_IMAGE, which must contain /workspace/AMDiffusionBenchmark and
 #   /workspace/DLRMBenchmark (rocm/primus images do), and writes its results
 #   folder under $RESULT_DIR/diffusion_dlrm. For example, everything the
 #   PyTorch image runs:
-#     BACKEND=megatron,torchtitan,megatron_bridge,diffusion_dlrm
+#     BACKEND=megatron,torchtitan,megatron_bridge,diffusion,diffusion_dlrm
 #   DIFFUSION_DLRM_CONFIG=<file>   diffusion_bench config to use instead of
 #                                  diffusion_bench/config.yaml
 #   DIFFUSION_DLRM_HF_CACHE=<dir>  Hugging Face cache for the diffusion models
@@ -90,12 +102,17 @@
 #                    container as explicit `--env` flags, e.g.
 #                    EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0". A plain export is
 #                    NOT enough: primus-cli only forwards names listed in
-#                    runner/.primus.yaml's container.options.env plus the
+#                    its config's (PRIMUS_CLI_CONFIG) container.options.env plus the
 #                    PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/HIPBLASLT_ prefixes, and
 #                    drops everything else without warning.
 #   DATA_PATH=...    where Primus keeps its Hugging Face downloads (models,
 #                    datasets); <checkout>/data when unset. The runner
 #                    creates it, mounts it and passes it into the container.
+#   PRIMUS_CLI_CONFIG  primus-cli's configuration (`primus-cli --config`);
+#                    default tools/perf/primus-cli.yaml, runner/.primus.yaml
+#                    without docker's --privileged and CAP_SYS_ADMIN, which
+#                    some clusters refuse. Empty: primus-cli's own choice
+#                    (~/.primus.yaml, else runner/.primus.yaml).
 #   PRIMUS_MODE      launcher mode, "container" (default) or "direct" when the
 #                    runner itself already runs inside a container.
 #
@@ -118,6 +135,7 @@
 # TRAIN_STEPS CLI flags (Primus deep-merges unknown tokens after the train verb):
 #   megatron                   : --train_iters N
 #   megatron_bridge            : none; TRAIN_STEPS is not applied
+#   diffusion                  : none; TRAIN_STEPS is not applied
 #   torchtitan                 : --training.steps N   (NOT --steps)
 #   maxtext                    : --steps N
 #   maxdiffusion               : --max_train_steps N  (NOT --steps; ignored if used)
@@ -177,7 +195,7 @@ set +m
 # Every knob below is overridable from the environment, so a run never needs
 # this file edited. HF_TOKEN is validated in the sanity-check block; it is
 # deliberately not defaulted here.
-# These three are in runner/.primus.yaml's container.options.env, so exporting
+# These three are in container.options.env of primus-cli's config, so exporting
 # them here does reach the container. Do not add arbitrary variables alongside
 # them: anything outside that list and the PRIMUS_/NCCL_/RCCL_/GLOO_/IONIC_/
 # HIPBLASLT_ prefixes is dropped without warning. Use EXTRA_ENV instead, e.g.
@@ -236,6 +254,8 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 # the script lives in tools/perf/ rather than at the repo root.
 PRIMUS_PATH=${PRIMUS_PATH:-"$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/../.." && pwd))"}
 PRIMUS_CLI=${PRIMUS_CLI:-"./primus-cli"}
+# primus-cli's configuration; empty leaves it to primus-cli (lib/run.sh).
+PRIMUS_CLI_CONFIG="${PRIMUS_CLI_CONFIG-$SCRIPT_DIR/primus-cli.yaml}"
 
 # Sourced at runtime from the script's own directory; shellcheck cannot
 # resolve the paths statically.
@@ -300,7 +320,8 @@ shopt -s nullglob
 # Select the configs to run: catalog (default, filtered by GPU/BACKEND) or a
 # directory of YAMLs (CONFIG_DIR). EXTRA_ENV, missing paths and duplicates are
 # all reported here, before anything launches.
-if ! check_batch_inputs || ! perf_check_run_limits || ! perf_prepare_data_path || ! perf_dd_prepare; then
+if ! check_batch_inputs || ! perf_check_run_limits || ! perf_prepare_data_path || ! perf_prepare_diffusion_cache ||
+    ! perf_dd_prepare; then
     exit "$PERF_EXIT_REFUSED"
 fi
 
@@ -312,7 +333,7 @@ build_launch_argv() {
     local config_file="$1"
     local framework="$2"
     local suite="$3"
-    local label_args=()
+    local label_args=() framework_args=()
 
     if [ -z "$suite" ]; then
         echo "[ERROR] no modules.pre_trainer or modules.post_trainer found in: $config_file" >&2
@@ -324,13 +345,17 @@ build_launch_argv() {
     if perf_uses_containers; then
         label_args=( --label "${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}" )
     fi
+    # Where diffusion configs keep their model downloads (lib/control.sh).
+    if [ "$framework" = diffusion ]; then
+        framework_args=( ${PERF_DIFFUSION_ARGS[@]+"${PERF_DIFFUSION_ARGS[@]}"} )
+    fi
 
     # $PRIMUS_MODE is intentionally unquoted so a value like "container" or
     # "direct" (or a short extra mode flag string) still splits as intended.
     # EXTRA_ENV becomes explicit `--env KEY=VALUE` flags before the `--`, which
     # is the only way to be sure a variable reaches the container.
     # shellcheck disable=SC2206
-    LAUNCH_ARGV=( "$PRIMUS_CLI" $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
+    LAUNCH_ARGV=( "$PRIMUS_CLI" ${PERF_CLI_CONFIG_ARGS[@]+"${PERF_CLI_CONFIG_ARGS[@]}"} $PRIMUS_MODE ${label_args[@]+"${label_args[@]}"} ${PERF_DATA_ARGS[@]+"${PERF_DATA_ARGS[@]}"} ${framework_args[@]+"${framework_args[@]}"} ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"} -- train "$suite" --config "$config_file" )
 
     append_train_steps_override "$config_file" "$framework"
 }
@@ -385,7 +410,8 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# RESULT_DIR   : $RESULT_DIR"
     echo "# Config source: $CONFIG_SOURCE"
     echo "# PRIMUS_MODE  : $PRIMUS_MODE"
-    echo "# Docker image : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
+    echo "# CLI config   : $(perf_cli_config_text)"
+    echo "# Docker image : ${DOCKER_IMAGE:-<unset; container mode uses the image in ${PERF_CLI_CONFIG:-the primus-cli default config}>}"
     echo "# Image digest : $(perf_image_digest "${DOCKER_IMAGE:-}")"
     echo "# Image ID     : $(perf_image_id "${DOCKER_IMAGE:-}")"
     echo "# ROCm (host)  : $(perf_rocm_version)"
@@ -397,6 +423,9 @@ perf_write_batch_snapshots "$RESULT_DIR" "$BATCH_TS" "${DOCKER_IMAGE:-}"
     echo "# GPU check    : $PERF_GPU_CHECK"
     echo "# NCCL iface   : $PERF_NIC_CHECK"
     echo "# DATA_PATH    : $PERF_DATA_CHECK"
+    if [ -n "$PERF_DIFFUSION_CACHE" ]; then
+        echo "# Diffusion HF : $PERF_DIFFUSION_CACHE_CHECK"
+    fi
     if perf_uses_containers; then
         echo "# Label        : ${PERF_LABEL_KEY}=${PERF_LABEL_VALUE}"
     fi
