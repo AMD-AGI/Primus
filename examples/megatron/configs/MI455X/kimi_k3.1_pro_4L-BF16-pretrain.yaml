@@ -26,7 +26,9 @@ env:
 #   - recompute off (MI355X: full), manual_gc_interval 1 -> 50,
 #     gradient_accumulation_fusion on, moe_router_bwd_bf16 on;
 #   - Turbo FlyDSL MLA attention (create_attention_mask_in_dataloader: false),
-#     DeepEP on at 64 CUs, and a hipBLASLt tuning table (env block above).
+#     DeepEP on at 64 CUs, and a hipBLASLt tuning table (env block above);
+#   - the attention-residual mixer on FlyDSL (attn_res_backend: flydsl, MI355X:
+#     the model default eager; PRIMUS_ATTN_RES_BACKEND overrides it).
 # At world 4 / EP 4 the expert-DP size is 1, so the memory recipe below
 # (distributed + precision-aware optimizer, bf16 grads/moments) is required.
 # Synthetic data (mock_data: true).
@@ -118,6 +120,8 @@ modules:
       kda_backend: ${PRIMUS_KDA_BACKEND:fla}
       # Unified KDA backend selector (supersedes kda_backend + K3P_KDA_CONV).
       use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:fla}
+      # Attention-residual mixer: eager | eager_bcast | flydsl (FlyDSL kernels: gfx950 / gfx1250).
+      attn_res_backend: ${PRIMUS_ATTN_RES_BACKEND:flydsl}
       moe_router_dtype: fp32
       moe_router_bwd_bf16: true
       optimizer: adam

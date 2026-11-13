@@ -236,8 +236,10 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # HF: attn_res_block_size (12). None / 0 disables the mechanism.
     attn_res_block_size: Optional[int] = None
     # Which mixer kernel AttentionResidualMixer resolves at construction:
-    # "eager"  -- pure PyTorch, the numerical oracle, runs anywhere
-    # "flydsl" -- one fused FlyDSL kernel per direction, gfx950 / CDNA4 only
+    # "eager"       -- pure PyTorch, the numerical oracle, runs anywhere
+    # "eager_bcast" -- eager with the final mix as a broadcast multiply-sum, not
+    #                  a tiny-tile fp32 batched GEMM (slow on gfx1250)
+    # "flydsl"      -- one fused FlyDSL kernel per direction, gfx950 / gfx1250 only
     # Measured at the scaled shape the mixers are 16.8 % of a forward+backward
     # step, and the eager path moves ~1.07 GB for a 67 MB input because it
     # materialises six full-size intermediates; see
