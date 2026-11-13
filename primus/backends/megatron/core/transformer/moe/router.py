@@ -74,7 +74,9 @@ class PrimusTopKRouter(TopKRouter):
         # Prevent extra local tokens accumulation on evaluation or activation recomputation
         if self.enable_expert_bias and torch.is_grad_enabled():
             with torch.no_grad():
-                self.local_tokens_per_expert += routing_map.sum(dim=0)
+                from primus.backends.megatron.core.fusions.routing_counts import tokens_per_expert
+
+                self.local_tokens_per_expert += tokens_per_expert(routing_map)
         return probs, routing_map
 
     def routing(self, logits: torch.Tensor, **kwargs):
@@ -143,6 +145,11 @@ class PrimusTopKRouter(TopKRouter):
         expert positions (per-slot), keeping ``scores`` and ``routing_map``
         mutually consistent so the MoE combine weights stay correct.
         """
+        from primus.backends.megatron.core.fusions import even_routing
+
+        if even_routing.eligible(scores, routing_map, self.topk) and self.config.num_moe_experts == scores.shape[1]:
+            return even_routing.force_even_routing(scores, self.topk)
+
         num_tokens = routing_map.shape[0]
         num_experts = self.config.num_moe_experts
         topk = self.topk

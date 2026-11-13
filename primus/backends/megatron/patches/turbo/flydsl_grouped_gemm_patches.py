@@ -74,3 +74,51 @@ def patch_flydsl_grouped_gemm_max_groups(ctx: PatchContext):
         return
     backend.MAX_G = new_cap
     log_rank_0(f"{tag} GroupedGEMMVariableKFlyDSLBackend.MAX_G {cap} -> {new_cap}")
+
+
+# Primus-Turbo keys its tuned FlyDSL grouped-GEMM argument sets (`_KWARGS_KEYS`) by
+# (OUT_M, OUT_N, avg_m) and ships them for MiniMax-M3 at EP4 only (32 local experts,
+# avg_m = 16384 / 32 = 512). On one GPU all 128 experts are local and avg_m is 128, so the
+# weight-gradient GEMM falls back to the untuned launch. Turbo documents every value of
+# these sets as moving a schedule, a dealing or a store granularity, never an address,
+# an extent or an accumulation order; the output was checked bit for bit against the
+# untuned launch at this shape (work_kernel_engineer/NOTES.md).
+#
+# key -> the EP4 key whose set is reused (with overrides)
+_ONE_GPU_VK_KEYS = {
+    (6144, 6144, 128): ((6144, 6144, 512), {}),
+    (6144, 3072, 128): ((6144, 6144, 512), {}),
+}
+
+
+@register_patch(
+    "megatron.turbo.flydsl_grouped_gemm_one_gpu_keys",
+    backend="megatron",
+    phase="before_train",
+    description="Tuned FlyDSL wgrad grouped-GEMM argument sets for MiniMax-M3 at avg_m 128",
+    condition=_is_flydsl_grouped_gemm,
+)
+def patch_flydsl_grouped_gemm_one_gpu_keys(ctx: PatchContext):
+    import os
+
+    from primus_turbo.pytorch.core.utils import is_gfx1250
+
+    tag = "[Patch:megatron.turbo.flydsl_grouped_gemm_one_gpu_keys]"
+    if os.environ.get("PRIMUS_FLYDSL_GG_ONE_GPU_KEYS", "1") != "1" or not is_gfx1250():
+        return
+    try:
+        from primus_turbo.flydsl.grouped_gemm import grouped_gemm_bf16_kernel_gfx1250 as gk
+    except Exception as e:  # pragma: no cover - other Turbo builds
+        log_rank_0(f"{tag} no gfx1250 FlyDSL grouped GEMM ({e}), skipped")
+        return
+    table = getattr(gk, "_KWARGS_KEYS", {}).get("vk")
+    if table is None:
+        log_rank_0(f"{tag} this Primus-Turbo has no keyed argument sets, skipped")
+        return
+    added = []
+    for key, (src, override) in _ONE_GPU_VK_KEYS.items():
+        if key in table or src not in table:
+            continue
+        table[key] = {**table[src], **override}
+        added.append(key)
+    log_rank_0(f"{tag} added variable-K keys {added}")

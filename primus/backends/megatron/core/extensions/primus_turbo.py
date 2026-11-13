@@ -2907,6 +2907,12 @@ class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
     def forward(self, x):
         from primus_turbo.pytorch.ops.normalization import rmsnorm
 
+        from primus.backends.megatron.core.extensions import residual_add_norm as _ran
+
+        if _ran.PENDING:
+            y = _ran.take_pending(self, x)
+            if y is not None:
+                return y
         weight = self.weight
         if self.zero_centered_gamma:
             # TE stores gamma centered on zero and applies (1 + w) itself; the
@@ -2915,5 +2921,9 @@ class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
             # zero, which silently freezes the whole model (loss pinned at the
             # uniform value, gradients ~0). The fused-residual path does the
             # same thing -- see fused_residual_rmsnorm.py.
-            weight = weight + 1
+            from primus.backends.megatron.core.extensions.step_weight_cache import (
+                plus_one,
+            )
+
+            weight = plus_one(weight)
         return rmsnorm(x, weight, self.eps)

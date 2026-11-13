@@ -32,6 +32,23 @@ from primus.core.utils.module_utils import warning_rank_0
 _TURBO_FUSED_GROUPED_GEMM_FALLBACK_WARNED = False
 
 
+def _use_exact_clamped_geglu(mlp, x: torch.Tensor) -> bool:
+    """Eager clamped quick-GEGLU (MiniMax-M3 ``swigluoai``) as one bit-exact fused kernel;
+    see primus/backends/megatron/core/fusions/exact_clamped_quick_geglu.py."""
+    import os
+
+    if os.environ.get("PRIMUS_EXACT_CLAMPED_GEGLU", "1") == "0":
+        return False
+    cfg = mlp.config
+    return (
+        mlp.activation_func is quick_gelu
+        and getattr(cfg, "activation_func_clamp_value", None) is not None
+        and getattr(cfg, "moe_mlp_glu_interleave_size", None) is None
+        and x.dtype == torch.bfloat16
+        and x.is_cuda
+    )
+
+
 def is_turbo_fused_grouped_mlp_supported() -> Tuple[bool, Optional[str]]:
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboLowPrecisionGlobalStateManager,
@@ -161,7 +178,26 @@ class PrimusGroupedMLP(TEGroupedMLP):
             assert bias_parallel is None, "Bias is not supported with fused weighted squared relu."
             intermediate_parallel = weighted_squared_relu_impl(intermediate_parallel, permuted_probs)
         else:
-            if self.config.gated_linear_unit:
+            if self.config.gated_linear_unit and _use_exact_clamped_geglu(self, intermediate_parallel):
+                from primus.backends.megatron.core.fusions.exact_clamped_quick_geglu import (
+                    exact_clamped_quick_geglu,
+                    exact_clamped_quick_geglu_probs,
+                )
+
+                fused = exact_clamped_quick_geglu_probs(
+                    intermediate_parallel,
+                    permuted_probs,
+                    self.config.activation_func_clamp_value,
+                    self.config.glu_linear_offset,
+                )
+                if fused is not None:
+                    return fused
+                intermediate_parallel = exact_clamped_quick_geglu(
+                    intermediate_parallel,
+                    self.config.activation_func_clamp_value,
+                    self.config.glu_linear_offset,
+                )
+            elif self.config.gated_linear_unit:
 
                 def glu(x):
                     x_glu, x_linear = torch.chunk(x, 2, dim=-1)
@@ -173,9 +209,10 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 intermediate_parallel = glu(intermediate_parallel)
             else:
                 intermediate_parallel = self.activation_func(intermediate_parallel)
-            original_dtype = intermediate_parallel.dtype
-            intermediate_parallel = intermediate_parallel * permuted_probs
-            intermediate_parallel = intermediate_parallel.to(original_dtype)
+            from primus.backends.megatron.core.fusions.probs_mul import probs_mul
+
+            # (act * probs).to(act.dtype), one pass each way, bitwise (probs_mul.py)
+            intermediate_parallel = probs_mul(intermediate_parallel, permuted_probs)
         return intermediate_parallel
 
     def bias_act_func_with_mask(
