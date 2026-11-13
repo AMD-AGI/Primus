@@ -606,3 +606,11 @@ def test_a_backend_that_cannot_build_inputs_fails_loudly(monkeypatch, recorded_b
     model = _TitanModel(num_layers=2, rope_attr=None)
     with pytest.raises(RuntimeError, match="cannot build benchmark inputs"):
         profiler.run_layer_benchmark(model=model, batch_size=BATCH, seq_len=SEQ)
+
+
+def test_compiled_block_is_detected_for_whole_layer_timing():
+    from primus.core.projection.module_profilers.transformer_layer import _is_compiled_module
+
+    block = _TitanBlock()
+    assert not _is_compiled_module(block)
+    assert _is_compiled_module(torch.compile(block))

@@ -210,6 +210,15 @@ def _deepep_overlap_efficiency(config) -> float:
     return _get_deepep_overlap_efficiency(model_config)
 
 
+def _is_compiled_module(module) -> bool:
+    """True when *module* is a ``torch.compile`` wrapper (FSDP2 keeps the subclass)."""
+    try:
+        from torch._dynamo.eval_frame import OptimizedModule
+    except ImportError:
+        return False
+    return isinstance(module, OptimizedModule)
+
+
 def _record_layer_terms(tp_ar_ms: float, ln_res_fwd_ms: float, ln_res_bwd_ms: float) -> tuple:
     """A layer's TP all-reduces (two per direction) and norm/residual passes, as recorded."""
     position = kernel_report.mark()
@@ -569,11 +578,13 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             if self._gemm_backend is not None or self._sdpa_backend is not None:
                 # Use simulation mode
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
-            elif os.environ.get("PRIMUS_BENCH_MOE_LAYER_WHOLE", "0").strip().lower() in (
-                "1",
-                "true",
-                "yes",
-            ):
+            elif _is_compiled_module(self.layer_module) or os.environ.get(
+                "PRIMUS_BENCH_MOE_LAYER_WHOLE", "0"
+            ).strip().lower() in ("1", "true", "yes"):
+                # A compiled block (TorchTitan compile.components: model) fuses
+                # across its submodules and wraps their activation checkpointing;
+                # calling the submodules directly would time them eager and
+                # without the recompute, so time the block as training runs it.
                 # Legacy whole-layer timing (often ~1.5-1.7x pessimistic on backward).
                 transformer_config = getattr(self.layer_module, "config", None)
                 ishapes, fkwargs = self.require_bench_inputs(LAYER, self.layer_module, batch_size, seq_len)
