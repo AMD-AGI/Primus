@@ -138,6 +138,7 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     # its first forward) and keep every parameter group unsharded so submodules see
     # full weights; FSDP communication is modeled analytically, not measured here.
     from torch.distributed.fsdp import FSDPModule
+    no_grad_sync = os.environ.get("PRIMUS_BENCH_FSDP_NO_GRAD_SYNC", "0") == "1"
     for part in model_parts:
         if isinstance(part, FSDPModule):
             part._get_fsdp_state()._lazy_init()
@@ -148,6 +149,8 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
                         setter(False, recurse=False)
                     except TypeError:
                         setter(False)
+                if no_grad_sync:
+                    m.set_requires_gradient_sync(False, recurse=False)
                 m.unshard()
     return model_parts, optimizers, parallel_dims
 
