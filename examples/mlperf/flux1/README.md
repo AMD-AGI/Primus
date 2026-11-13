@@ -26,8 +26,28 @@ and pass it as `DOCKER_IMAGE`; loading an archive may not retain RepoDigest
 metadata. The launcher mounts this Primus checkout at
 `/workspace/Primus`, replacing only the packaged Primus source. Linux 6.8+
 is required for RCCL-SDMA. `LAUNCH_MODE=primus` (default) enables the CLI's
-cuMem, allocator and interposer prerequisites; `native` is available for direct
-`torchrun` development but does not execute those hooks.
+cuMem, allocator and interposer prerequisites; `native` uses direct `torchrun`
+and applies the SDMA hook explicitly.
+
+For v26.9, build the pinned source-only Turbo layer and select a `_v26_9` profile:
+
+```bash
+docker build --network=host -f examples/mlperf/flux1/Dockerfile.v26.9 \
+  -t primus-flux:v26.9 .
+DOCKER_IMAGE=primus-flux:v26.9 FLUX_CONFIG=config_1n_gbs1024_a6w4_v26_9.sh \
+DOCKER_PRIVILEGED=0 MLPERF_CLEAR_CACHES=false FLUX_CLUSTER=crusoe \
+PRIMUS_SKIP_PIP=1 PRIMUS_AUTO_INSTALL=0 PRIMUS_AUTO_DEPS_SYNC=0 \
+DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/unique-output \
+bash examples/mlperf/flux1/run_with_docker.sh
+```
+
+Host build networking is only needed where Docker's default DNS cannot reach
+GitHub. This FLUX-specific layer updates Turbo Python/FlyDSL to the pinned main
+revision while preserving v26.9's native libraries; it is not a full-main native
+Turbo build. `/opt/flux-turbo-source-manifest.json` records both provenances and
+file hashes. Runtime JIT and the small SDMA interposer compilation remain needed.
+The host launcher forwards `TORCH_DIST_USE_NCCL2=1`; direct `docker exec` must
+override the image's `0` explicitly. No package reinstall is needed at launch.
 
 ## Data
 
@@ -51,6 +71,11 @@ Each node launches one process, which creates eight workers with `torchrun`.
 | `FLUX_CONFIG` | Nodes | MBS | GA | GBS | Path |
 |---|---:|---:|---:|---:|---|
 | `config_1n_gbs256_a6w4.sh` (default) | 1 | 32 | 1 | 256 | AMD single-node A6W4 schedule |
+| `config_1n_gbs256_a6w4_v26_9.sh` | 1 | 32 | 1 | 256 | v26.9 communication settings |
+| `config_1n_gbs1024_a6w4_v26_9.sh` | 1 | 32 | 4 | 1024 | v26.9, no precision switch |
+| `config_2n_gbs512_a6w4.sh` | 2 | 32 | 1 | 512 | Same kernels scaled to DP16 |
+| `config_2n_gbs512_a6w4_v26_9.sh` | 2 | 32 | 1 | 512 | v26.9 communication settings |
+| `config_2n_gbs1024_a6w4_v26_9.sh` | 2 | 32 | 2 | 1024 | v26.9, no precision switch |
 | `config_2n_gbs1024_a6w4.sh` | 2 | 32 | 2 | 1024 | Four-node schedule adapted to two nodes |
 | `config_4n_gbs1024.sh` | 4 | 32 | 1 | 1024 | A6W4 with FP8-forward switch |
 | `config_1n_gbs512.sh` | 1 | 64 | 1 | 512 | Legacy TorchAO/Inductor FP8 |
@@ -74,9 +99,11 @@ DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/unique-output \
 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
 
-The two-/four-node adaptations keep LR `0.00025`, 1600 warmup updates and
-precompile the FP8-forward switch after update 7325. They are not an official
-AMD two-node submission schedule. The single-node profile leaves the four-node
+The original `config_2n_gbs1024_a6w4.sh` and `config_4n_gbs1024.sh` keep
+LR `0.00025`, 1600 warmup updates and precompile the FP8-forward switch after
+update 7325. They are not an official AMD two-node submission schedule.
+The `_v26_9` profiles keep that switch off; their GBS1024 variants use 1600 warmup
+updates, while GBS256/512 variants retain 800. The single-node profile leaves the four-node
 C++ wrapper and additional pack/FC1-GELU extensions off to match AMD's baseline;
 those knobs and the existing four-node defaults remain available.
 

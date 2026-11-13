@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+# FLUX-only source update: retain the v26.9 native stack, do not compile it.
+FROM rocm/primus@sha256:921604bee3a7289e95f37db5a4d990dc530f64bdbcabd80efd952aef98647d27
+
+ARG TURBO_REVISION=25fb2df6b2ee8bd14e9a93522c54dbc60b1903ef
+RUN git -C /workspace/Primus-Turbo fetch origin "${TURBO_REVISION}" && \
+    git -C /workspace/Primus-Turbo checkout --detach "${TURBO_REVISION}"
+RUN python -m pip freeze > /opt/flux-base-packages.txt
+RUN python - <<'PY'
+import hashlib
+import importlib.metadata
+import json
+from pathlib import Path
+import shutil
+import subprocess
+
+source = Path('/workspace/Primus-Turbo')
+revision = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+assert not subprocess.check_output(
+    ['git', '-C', str(source), 'status', '--porcelain', '--untracked-files=no', '--', 'primus_turbo'], text=True
+).strip()
+dist = importlib.metadata.distribution('primus-turbo')
+dest = Path(dist.locate_file('primus_turbo'))
+native = {str(p.relative_to(dest)): hashlib.sha256(p.read_bytes()).hexdigest()
+          for p in dest.rglob('*.so*') if p.is_file()}
+assert native, 'Expected image-provided Turbo native libraries'
+manifest = {'source_sha': revision, 'image_distribution_version': dist.version,
+            'native_build_info': (dest / '_build_info.py').read_text(),
+            'native_sha256': native, 'source_sha256': {}}
+files = subprocess.check_output(['git', '-C', str(source), 'ls-files', 'primus_turbo'], text=True).splitlines()
+for name in files:
+    src = source / name
+    rel = src.relative_to(source / 'primus_turbo')
+    target = dest / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, target)
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == digest
+    manifest['source_sha256'][str(rel)] = digest
+for rel, digest in native.items():
+    assert hashlib.sha256((dest / rel).read_bytes()).hexdigest() == digest
+Path('/opt/flux-turbo-source-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+print(f'Installed {len(files)} tracked source files; preserved {len(native)} native libraries')
+PY
+RUN cd /tmp && FLUX_FP4_DISPATCH=fusion FLUX_ATTN_FLYDSL=1 \
+    python /workspace/Primus-Turbo/tools/check_flux_install.py "${TURBO_REVISION}"
+
+LABEL org.primus.flux.turbo-python-revision="${TURBO_REVISION}" \
+      org.primus.flux.native-runtime="rocm/primus:v26.9; Turbo de8fa6ca7f4986334070d5ee62beee07552f8ad8" \
+      org.primus.flux.scope="FLUX-only; not a full-main Turbo native build"
+WORKDIR /workspace/Primus

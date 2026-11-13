@@ -97,7 +97,8 @@ mapfile -t current_flux_env < <(compgen -e | grep '^FLUX_' || true)
 env_names+=("${current_flux_env[@]}")
 env_names+=(
     FLUX_CONFIG LAUNCH_MODE NODE_RANK MASTER_ADDR MASTER_PORT CONFIG
-    PRIMUS_WORKSPACE DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR
+    PRIMUS_WORKSPACE PRIMUS_SKIP_PIP PRIMUS_AUTO_INSTALL PRIMUS_AUTO_DEPS_SYNC
+    DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR
     MLLOG_OUTPUT_FILE EVAL_BATCH_SIZE PROFILE_OUTPUT_DIR TORCHINDUCTOR_CACHE_DIR
     TORCHINDUCTOR_CACHE_SEED TORCHINDUCTOR_CACHE_EXPORT NCCL_IB_DISABLE NCCL_IB_TC
     NCCL_IB_FIFO_TC NCCL_IB_ROCE_VERSION_NUM NCCL_IB_USE_INLINE NCCL_IB_QPS_PER_CONNECTION
@@ -119,10 +120,15 @@ done
 rdma_args=()
 libionic_args=()
 [[ -e /dev/infiniband ]] && rdma_args=(--device=/dev/infiniband)
-[[ -n "${LIBIONIC_ABI4_PATH:-}" ]] && libionic_args=(-v "$LIBIONIC_ABI4_PATH:/usr/lib/x86_64-linux-gnu/libionic.so.1.1.54.0-187:ro")
+[[ -n "${LIBIONIC_ABI4_PATH:-}" ]] && libionic_args=(-v "$LIBIONIC_ABI4_PATH:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
 mkdir -p "$OUTPUT_ROOT"
+case "${DOCKER_PRIVILEGED:-1}" in
+    1) privileged_args=(--privileged) ;;
+    0) privileged_args=() ;;
+    *) echo "DOCKER_PRIVILEGED must be 0 or 1" >&2; exit 2 ;;
+esac
 
-exec docker run --rm --init --privileged \
+exec docker run --rm --init "${privileged_args[@]}" \
     --name "$CONTAINER_NAME" \
     --ulimit nofile=1048576:1048576 --ulimit memlock=-1:-1 \
     --device=/dev/kfd --device=/dev/dri "${rdma_args[@]}" --group-add video \

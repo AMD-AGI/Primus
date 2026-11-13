@@ -17,6 +17,8 @@ case "$FLUX_CLUSTER" in
         # instead of the IB-CAST path used by NCCL_NET_PLUGIN=none.
         export NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN:-librccl-anp.so}
         export NCCL_RMA_DISABLE=${NCCL_RMA_DISABLE:-1}
+        # Keep channels on matching rails; cross-rail RoCE pairs may be unroutable.
+        export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
         export NCCL_IB_HCA=${NCCL_IB_HCA:-ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}
         ;;
     "") ;;
@@ -109,6 +111,9 @@ export NCCL_NCHANNELS_PER_NET_PEER=${NCCL_NCHANNELS_PER_NET_PEER:-32}
 export FSDP_ALL_GATHER_BACKEND=${FSDP_ALL_GATHER_BACKEND:-rccl_sdma}
 
 if [[ "${FSDP_ALL_GATHER_BACKEND:-}" == "rccl_sdma" ]]; then
+    # The alternate PyTorch NCCL backend lacks SDMA's symmetric-memory host group.
+    # Older PyTorch ignores this selector; explicit diagnostic overrides still win.
+    export TORCH_DIST_USE_NCCL2=${TORCH_DIST_USE_NCCL2:-1}
     export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-2}
     export NCCL_SYM_GIN_KERNELS_ENABLE=${NCCL_SYM_GIN_KERNELS_ENABLE:-0}
     export NCCL_DMABUF_ENABLE=${NCCL_DMABUF_ENABLE:-1}
