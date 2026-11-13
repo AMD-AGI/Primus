@@ -127,6 +127,14 @@ class MinimaxM3Indexer(MegatronModule):
 
             self.fused_select = fused_select_blocks
 
+    def _linear_out(self, hidden_states: torch.Tensor, linear, num_heads: int) -> torch.Tensor:
+        """``[sq, b, h]`` -> un-normalised ``[sq, b, num_heads, index_head_dim]``."""
+        out = linear(hidden_states)
+        if isinstance(out, tuple):  # Megatron linears return (output, bias)
+            out = out[0]
+        sq, b = out.shape[0], out.shape[1]
+        return out.view(sq, b, num_heads, self.index_head_dim)
+
     def _project(self, hidden_states: torch.Tensor, linear, norm, num_heads: int) -> torch.Tensor:
         """``[sq, b, h]`` -> normalised ``[sq, b, num_heads, index_head_dim]``."""
         out = linear(hidden_states)
@@ -154,10 +162,22 @@ class MinimaxM3Indexer(MegatronModule):
             loss consumes, and the flydsl backend's ``BlockPlan`` of the
             selection for the attention backward to reuse (None otherwise).
         """
-        index_q = self._project(
-            hidden_states, self.linear_index_q, self.index_q_layernorm, self.index_n_heads
-        )
-        index_k = self._project(hidden_states, self.linear_index_k, self.index_k_layernorm, 1)
+        from primus.backends.megatron.core.transformer.minimax_m3 import qk_norm_rope as _qknr
+
+        rope = None
+        if rotary_pos_emb is not None:
+            rope = rotary_pos_emb if isinstance(rotary_pos_emb, RopeTables) else RopeTables(rotary_pos_emb)
+        q_raw = self._linear_out(hidden_states, self.linear_index_q, self.index_n_heads)
+        k_raw = self._linear_out(hidden_states, self.linear_index_k, 1)
+        if _qknr.norm_rope_ok(q_raw, self.index_q_layernorm, rope, self.config.rotary_interleaved) and \
+                _qknr.norm_rope_ok(k_raw, self.index_k_layernorm, rope, self.config.rotary_interleaved):
+            # norm + rope in one pass each way, bitwise (qk_norm_rope.py)
+            index_q = _qknr.norm_rope(q_raw, self.index_q_layernorm, rope)
+            index_k = _qknr.norm_rope(k_raw, self.index_k_layernorm, rope)
+            rotary_pos_emb = None
+        else:
+            index_q = self.index_q_layernorm(q_raw)
+            index_k = self.index_k_layernorm(k_raw)
 
         if rotary_pos_emb is not None:
             # Partial rope: freqs cover the first rotary_dim of index_head_dim and

@@ -92,6 +92,10 @@ class MSAIndexerLossAutoScaler(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor):
         (indexer_loss,) = ctx.saved_tensors
         scale = MSAIndexerLossAutoScaler.current_loss_scale(indexer_loss)
+        if scale.numel() == indexer_loss.numel():
+            # ones * scale == scale exactly; skips a fill, a mul and autograd's sum back to the
+            # loss's shape (three launches per MSA layer)
+            return grad_output, scale.reshape(indexer_loss.shape)
         return grad_output, torch.ones_like(indexer_loss) * scale
 
     @staticmethod

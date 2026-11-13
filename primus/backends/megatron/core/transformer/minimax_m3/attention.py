@@ -35,6 +35,8 @@ Mirrors ``MiniMaxM3VLAttention`` in transformers'
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
+import os
+
 import torch
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
@@ -74,6 +76,28 @@ class MinimaxSparseAttentionSubmodules(SelfAttentionSubmodules):
     linear_index_k: Union[ModuleSpec, type] = None
     index_q_layernorm: Union[ModuleSpec, type] = None
     index_k_layernorm: Union[ModuleSpec, type] = None
+
+
+
+_SPARSE_INDEXER_LOSS_FN = None
+
+
+def _sparse_indexer_loss_fn():
+    """The flydsl sparse indexer loss: the bit-exact fused form unless PRIMUS_FUSED_INDEXER_LOSS=0."""
+    global _SPARSE_INDEXER_LOSS_FN
+    if _SPARSE_INDEXER_LOSS_FN is None:
+        fn = compute_sparse_indexer_loss
+        if os.environ.get("PRIMUS_FUSED_INDEXER_LOSS", "1") == "1" and torch.cuda.is_available():
+            try:
+                from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
+                    fused_sparse_indexer_loss,
+                )
+
+                fn = fused_sparse_indexer_loss
+            except Exception:  # Triton unavailable: eager
+                pass
+        _SPARSE_INDEXER_LOSS_FN = fn
+    return _SPARSE_INDEXER_LOSS_FN
 
 
 class MinimaxSparseAttention(SelfAttention):
@@ -166,13 +190,20 @@ class MinimaxSparseAttention(SelfAttention):
         norm_weight = self._fused_input_norm_weight()
         if norm_weight is None:
             return x
-        weight = norm_weight.detach().float()
         if self.config.layernorm_zero_centered_gamma:
-            weight = weight + 1.0
-        normed = torch.nn.functional.rms_norm(
-            x.float(), (x.shape[-1],), weight, self.config.layernorm_epsilon
+            from primus.backends.megatron.core.extensions.step_weight_cache import (
+                float_plus_one,
+            )
+
+            weight = float_plus_one(norm_weight)
+        else:
+            weight = norm_weight.detach().float()
+        from primus.backends.megatron.core.transformer.minimax_m3.indexer_input_norm import (
+            indexer_input_norm,
         )
-        return normed.to(x.dtype)
+
+        # rms_norm(x.float(), weight).to(x.dtype) in one launch, bitwise (indexer_input_norm.py)
+        return indexer_input_norm(x, weight, self.config.layernorm_epsilon)
 
     def forward(
         self,
@@ -208,7 +239,31 @@ class MinimaxSparseAttention(SelfAttention):
         # composed mask is what decides the final weights.
 
         # [sq, b, np, hn] / [sq, b, ng, hn] -- upstream's projections and q/k norms.
-        query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+        from primus.backends.megatron.core.transformer.minimax_m3 import qk_norm_rope as _qknr
+
+        fused_qk = (
+            rotary_pos_emb is not None
+            and _qknr.ENABLED
+            and not self.config.rotary_interleaved
+            and not getattr(self.config, "test_mode", False)
+            and self.config.num_query_groups >= self.world_size
+            and (not isinstance(rotary_pos_emb, tuple) or rotary_pos_emb[0] is rotary_pos_emb[1])
+        )
+        if fused_qk:
+            mixed_qkv, _ = self.get_query_key_value_tensors(hidden_states, key_value_states, split_qkv=False)
+            fused_qk = _qknr.eligible(self, mixed_qkv, self.config.rotary_interleaved)
+            if not fused_qk:
+                # same split as upstream's get_query_key_value_tensors
+                hpg = self.num_attention_heads_per_partition // self.num_query_groups_per_partition
+                hn = self.hidden_size_per_attention_head
+                query, key, value = torch.split(mixed_qkv, [hpg * hn, hn, hn], dim=3)
+                query = query.reshape(query.size(0), query.size(1), -1, hn)
+                if self.q_layernorm is not None:
+                    query = self.q_layernorm(query)
+                if self.k_layernorm is not None:
+                    key = self.k_layernorm(key)
+        else:
+            query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
 
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = (
@@ -217,8 +272,12 @@ class MinimaxSparseAttention(SelfAttention):
             # Unfused on purpose; see the note in indexer.py. The indexer reuses q_rope's tables.
             q_rope = RopeTables(q_pos_emb)
             k_rope = q_rope if k_pos_emb is q_pos_emb else RopeTables(k_pos_emb)
-            query = q_rope.apply(query, self.config.rotary_interleaved)
-            key = k_rope.apply(key, self.config.rotary_interleaved)
+            if fused_qk:
+                # split + q/k norm + rope in place on mixed_qkv; bitwise (qk_norm_rope.py)
+                query, key, value = _qknr.qk_norm_rope(self, mixed_qkv, q_rope, k_rope)
+            else:
+                query = q_rope.apply(query, self.config.rotary_interleaved)
+                key = k_rope.apply(key, self.config.rotary_interleaved)
             index_pos_emb = q_rope
         else:
             index_pos_emb = None
@@ -258,7 +317,7 @@ class MinimaxSparseAttention(SelfAttention):
             core_attn_out = outs[0]
             if want_loss:
                 slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
-                indexer_loss = compute_sparse_indexer_loss(
+                indexer_loss = _sparse_indexer_loss_fn()(
                     slot_mass, block_scores, block_indices, self.indexer_loss_coeff
                 )
         else:
