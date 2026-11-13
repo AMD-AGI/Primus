@@ -13,12 +13,7 @@ from primus.backends.automodel import options
 from primus.backends.automodel.patches._conditions import transformer_is
 from primus.core.patches import PatchContext, register_patch
 
-options.declare(
-    "primus_perf",
-    "flux_fused_qk_norm_rope",
-    "flux_fused_qk_norm_rope_bias_grad",
-    "flux_fused_qk_norm_rope_flydsl_bwd",
-)
+options.declare("primus_perf", "flux_fused_qk_norm_rope")
 
 _is_flux = transformer_is("FluxTransformer2DModel")
 

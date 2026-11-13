@@ -13,7 +13,7 @@ from primus.backends.automodel import options
 from primus.backends.automodel.patches._conditions import transformer_is
 from primus.core.patches import PatchContext, register_patch
 
-options.declare("primus_perf", "flux_fused_gelu", "flux_fused_gelu_bias_grad")
+options.declare("primus_perf", "flux_fused_gelu")
 
 _is_flux = transformer_is("FluxTransformer2DModel")
 

@@ -16,8 +16,8 @@ WHY:
 WHAT:
   At the model's first forward, marks the last block of ``single_transformer_blocks``. That
   block keeps the shared AdaLN norm and the attention over all tokens (its keys and values
-  need the text tokens), then runs the MLP (``mlp_gelu.py``'s fused op when it is
-  installed), ``proj_out``, the gate and the residual on the image tokens only. It returns the
+  need the text tokens), then runs the MLP (Primus-Turbo's ``flux_gelu_linear`` when ``mlp_gelu.py``
+  is installed), ``proj_out``, the gate and the residual on the image tokens only. It returns the
   incoming text tokens, detached, in place of the text output: nothing reads them, and a
   detached tensor gets no FSDP2 backward hook. Every other block runs the forward installed
   before (diffusers', ``mlp_gelu.py``'s, wrapped by ``block_outputs.py``).
@@ -30,8 +30,8 @@ NUMERICS:
   were zero).
 
 REQUIRES:
-  diffusers 0.40.0's ``FluxTransformer2DModel.forward`` (checked by source hash; otherwise the
-  patch is not applied). Installs after ``mlp_gelu.py`` and ``block_outputs.py``.
+  diffusers 0.40.0's ``FluxTransformer2DModel.forward`` (checked by source hash, 0.43.0's differing only
+  in the return annotation; otherwise the patch is not applied). Installs after ``mlp_gelu.py`` and ``block_outputs.py``.
 
 Settings (module config, ``primus_perf:`` section):
     flux_last_block_image_only: false     apply this patch
@@ -52,9 +52,12 @@ logger = logging.getLogger(__name__)
 _SECTION = "primus_perf"
 _PATCHED_ATTR = "_primus_last_block_image_only"
 _IMAGE_ONLY_ATTR = "_primus_image_only"
-# sha256 of diffusers 0.40.0's FluxTransformer2DModel.forward, which drops the last
-# single-stream block's encoder_hidden_states output.
-_MODEL_FORWARD_SHA256 = "c99bfbbf7bf8622f7ed42c0135fbf36b2ec055f495971a74ea18871dd2a11d2c"
+# sha256 of FluxTransformer2DModel.forward in diffusers 0.40.0 (also 0.41 and 0.42) and 0.43.0, which
+# differ only in the return annotation; it drops the last single-stream block's encoder_hidden_states output.
+_MODEL_FORWARD_SHA256 = (
+    "c99bfbbf7bf8622f7ed42c0135fbf36b2ec055f495971a74ea18871dd2a11d2c",
+    "a7e54efe527e7ec2ee53d7c046294f3ce00077180eec7c64f37ad53503807b0d",
+)
 
 
 def is_enabled() -> bool:
@@ -83,9 +86,9 @@ def _image_only_forward(
     batch, seq, dim = norm_image.shape
     mlp_input = norm_image.reshape(batch * seq, dim)
     if _fused_mlp(self, mlp_input):
-        from primus.backends.automodel.models.flux.mlp_gelu import gelu_linear
+        from primus_turbo.pytorch.ops import flux
 
-        concat, _ = gelu_linear(
+        concat = flux.flux_gelu_linear(
             mlp_input, self.proj_mlp.weight, self.proj_mlp.bias, attn_image.reshape(batch * seq, -1)
         )
         concat = concat.view(batch, seq, -1)
@@ -106,9 +109,10 @@ def install() -> bool:
     if getattr(FluxSingleTransformerBlock, _PATCHED_ATTR, False):
         return True
     digest = hashlib.sha256(inspect.getsource(FluxTransformer2DModel.forward).encode()).hexdigest()
-    if digest != _MODEL_FORWARD_SHA256:
+    if digest not in _MODEL_FORWARD_SHA256:
         logger.warning(
-            "[PrimusFluxLastBlock] FluxTransformer2DModel.forward is not diffusers 0.40.0's; not applied."
+            "[PrimusFluxLastBlock] FluxTransformer2DModel.forward is not diffusers 0.40.0's or 0.43.0's; "
+            "not applied."
         )
         return False
 
