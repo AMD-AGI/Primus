@@ -353,7 +353,7 @@ def build_attn_res_mixer_fwd(
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(_ALL_FWD_VARIANTS)}")
 
     allowed, wpe = vector_kernel_knobs() if knobs is None else knobs
-    vec_path = use_vector_kernel(H, elem_dtype, arch, allowed and not inject)
+    vec_path = use_vector_kernel(H, elem_dtype, arch, allowed)
     BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK  # hidden elements per thread
     EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
@@ -568,7 +568,7 @@ def build_attn_res_mixer_fwd(
 
     @flyc.kernel(
         known_block_size=[BLOCK, 1, 1],
-        name=f"attn_res_mixer_fwd_vec_{elem_dtype}_H{H}_C{C}_w{waves_per_eu}",
+        name=f"attn_res_mixer_fwd_vec_{elem_dtype}_H{H}_C{C}_w{waves_per_eu}{_tag}",
     )
     def attn_res_mixer_fwd_vec_kernel(
         BR: fx.Tensor,
@@ -639,7 +639,10 @@ def build_attn_res_mixer_fwd(
 
         row_br = tok * arith.index(NB * H)
         row_ps = tok * I_H
-        cand = [(br_ptr, row_br + arith.index(c * H)) for c in range(NB)] + [(ps_ptr, row_ps)]
+        # the test-only variants are selected as in the scalar kernel, by indexing at trace time
+        blocks = [(br_ptr, row_br + arith.index(c * H)) for c in range(NB)]
+        stream = [(ps_ptr, row_ps)]
+        cand = {False: blocks + stream, True: stream + blocks}[inject == "stream_first"]
 
         # phase 1: one pass over v, both reductions; the vectors stay in registers
         xs = [[None for _ in range(EPV)] for _ in range(C)]
@@ -659,6 +662,14 @@ def build_attn_res_mixer_fwd(
         totals = block_sums(acc_ss + acc_dot, tid, BLOCK, lds_get, lds_put, fm)
 
         # phase 2: scores and softmax, as the scalar kernel computes them
+        rsqrt_of = {
+            False: lambda x: _rsqrt_refined(x, c_three, c_half, fm),
+            True: lambda x: rocdl.rsq(f32, x),
+        }[inject == "no_newton"]
+        score_of = {
+            False: lambda dt, r: arith.MulFOp(dt, r, fastmath=fm).result,
+            True: lambda dt, r: dt,
+        }[inject == "score_unnormalised"]
         rs = []
         dots = []
         scores = []
@@ -666,13 +677,14 @@ def build_attn_res_mixer_fwd(
             ss = totals[c]
             dt = totals[C + c]
             mean_sq = arith.MulFOp(ss, c_inv_h, fastmath=fm).result
-            r = _rsqrt_refined(arith.AddFOp(mean_sq, c_eps, fastmath=fm).result, c_three, c_half, fm)
+            r = rsqrt_of(arith.AddFOp(mean_sq, c_eps, fastmath=fm).result)
             rs.append(r)
             dots.append(dt)
-            scores.append(arith.MulFOp(dt, r, fastmath=fm).result)
-        smax = scores[0]
+            scores.append(score_of(dt, r))
+        smax_real = scores[0]
         for c in range_constexpr(C - 1):
-            smax = arith.MaxNumFOp(smax, scores[c + 1]).result
+            smax_real = arith.MaxNumFOp(smax_real, scores[c + 1]).result
+        smax = {False: smax_real, True: c_zero}[inject == "no_softmax_max"]
         exps = [_nat_exp(arith.SubFOp(scores[c], smax, fastmath=fm).result, c_log2e, fm) for c in range(C)]
         zsum = exps[0]
         for c in range_constexpr(C - 1):
@@ -691,13 +703,17 @@ def build_attn_res_mixer_fwd(
         store_f32(sel_d, dsav_ptr, tok * I_C + save_c)
 
         # phase 3: the convex combination from the registers, 16-byte stores
+        mix_w = {
+            False: probs,
+            True: [arith.MulFOp(probs[c], rs[c], fastmath=fm).result for c in range(C)],
+        }[inject == "mix_normalised"]
         for j in range_constexpr(EPV):
             d0 = (tid + arith.index(j * BLOCK)) * I_VEC
             outs = []
             for e in range_constexpr(VEC):
                 acc = c_zero
                 for c in range_constexpr(C):
-                    acc = math_dialect.fma(probs[c], lane_f32(xs[c][j], e), acc)
+                    acc = math_dialect.fma(mix_w[c], lane_f32(xs[c][j], e), acc)
                 outs.append(arith.trunc_f(bf16, acc))
             _llvm.StoreOp(vector.from_elements(v_bf16, outs), gep(out_ptr, row_ps + d0, bf16), alignment=16)
 
