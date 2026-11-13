@@ -772,6 +772,9 @@ class ZayaRouter(nn.Module):
         # always flushed before the next forward reads balancing_biases.
         self.defer_bias_update = _path_on(config, "zaya_router_defer_ar")
         self._pending_counts: Optional[torch.Tensor] = None
+        # balance_step on the host. None until the first bias update after the
+        # module is built or loaded reads the buffer.
+        self._host_step: Optional[int] = None
 
     def _apply(self, fn, recurse=True):
         # Float16Module casts the whole module to bf16. The PID moments are
@@ -783,6 +786,10 @@ class ZayaRouter(nn.Module):
             if buf.is_floating_point():
                 setattr(self, name, buf.float())
         return self
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        self._host_step = None
 
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         seq, batch, _ = hidden_states.shape
@@ -836,14 +843,20 @@ class ZayaRouter(nn.Module):
             total = counts.sum().clamp_min(1.0)
             grad = counts / total - (1.0 / self.num_scored)
             self.balance_step += 1
-            # Bias corrections stay on device (fp64 pow, then cast to fp32) so
-            # this per-MoE-layer update does not force a host sync via .item().
-            step = self.balance_step.double()
+            # The bias corrections divide by Python numbers: on the GPU, dividing
+            # by a tensor rounds differently. The host copy of the step supplies
+            # them, so only the first update after the module is built or loaded
+            # waits on the host for balance_step, not every MoE layer's update.
+            if self._host_step is None:
+                self._host_step = int(self.balance_step.item())
+            else:
+                self._host_step += 1
+            step = self._host_step
             b1, b2 = self.balance_beta1, self.balance_beta2
             self.balance_m.mul_(b1).add_(grad, alpha=1.0 - b1)
             self.balance_v.mul_(b2).addcmul_(grad, grad, value=1.0 - b2)
-            mhat = self.balance_m / (1.0 - torch.pow(b1, step)).float()
-            vhat = self.balance_v / (1.0 - torch.pow(b2, step)).float()
+            mhat = self.balance_m / (1.0 - b1**step)
+            vhat = self.balance_v / (1.0 - b2**step)
             if self.balance_wd != 0.0:
                 self.balancing_biases.mul_(1.0 - self.balance_lr * self.balance_wd)
             self.balancing_biases.addcdiv_(mhat, vhat.sqrt().add_(1e-8), value=-self.balance_lr)
