@@ -787,9 +787,16 @@ def _fsdp_message_info():
 def test_megatron_fsdp_insitu_scales_with_layers_comm_and_compute():
     msg = _fsdp_message_info()
     got = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), msg, 80 * 264.0)
-    per_layer = 0.47 * (2 * 6.8 + 7.0) + 0.09 * 264.0
+    per_layer = 0.7 * (2 * 6.8 + 7.0) + 0.06 * 264.0 + 1.0 * (2 * 6.8 + 7.0)
     assert got == pytest.approx(80 * per_layer)
     assert msg["fsdp_insitu_per_layer_ms"] == pytest.approx(per_layer)
+
+
+def test_megatron_fsdp_insitu_spreads_the_per_iteration_share_over_microbatches():
+    comm = 2 * 6.8 + 7.0
+    one = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), _fsdp_message_info(), 80 * 264.0, 1)
+    four = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), _fsdp_message_info(), 80 * 264.0, 4)
+    assert one - four == pytest.approx(80 * comm * (1 - 1 / 4))
 
 
 def _ddp_config(framework="megatron", ep=1, use_torch_fsdp2=False, num_layers=32):
@@ -831,7 +838,7 @@ def test_megatron_ddp_contention_gated(config, dp):
 
 
 def test_torchtitan_fsdp_insitu_is_a_share_of_compute_only():
-    got = _fsdp_insitu_ms(SimpleNamespace(framework="torchtitan"), _fsdp_message_info(), 80 * 264.0)
+    got = _fsdp_insitu_ms(SimpleNamespace(framework="torchtitan"), _fsdp_message_info(), 80 * 264.0, 1)
     assert got == pytest.approx(80 * 0.06 * 264.0)
 
 

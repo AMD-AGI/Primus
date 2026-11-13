@@ -4186,27 +4186,32 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
 
 
 # FSDP2 runs every layer slower in training than in the isolated layer benchmark,
-# which runs without overlapping collectives. Per layer and microbatch, as
-# (x FSDP traffic time, x layer compute):
+# which runs without overlapping collectives. Per layer, as
+# (x FSDP traffic time per microbatch, x layer compute per microbatch,
+#  x FSDP traffic time once per iteration):
 #
-# Megatron, measured on Llama 3.1 70B, MI325X (8- and 16-layer training sweeps with
-# and without FSDP2, plus kernel traces):
-#   - compute overlapping the all-gathers / reduce-scatters runs 16-25% slower than
-#     the same kernels alone (mostly the recompute forward and backward GEMMs under
-#     the reduce-scatter), which grows with the layer's compute;
+# Megatron, MI325X (8- and 16-layer training sweeps with and without FSDP2, kernel
+# traces, and the full-depth runs):
+#   - compute overlapping the all-gathers / reduce-scatters runs slower than the same
+#     kernels alone, which grows with the layer's compute;
 #   - all-gather copy-out, reduce-scatter copy-in and fp32 gradient foreach kernels,
-#     which grow with the layer's FSDP traffic.
-#   Fitted on Llama 3.1 70B BF16 and FP8 only; Llama 2/3.3 70B, Qwen 2.5 72B and
-#   Qwen 3 32B (BF16 and FP8) are held out.
+#     and the FP8 GEMMs slowed by them, which grow with the layer's FSDP traffic;
+#   - a per-iteration share that grows with the traffic: with one microbatch per
+#     iteration the traffic-bound cost per layer is twice that at four microbatches.
+#   Fitted on Llama 3.1 70B and Qwen 3 32B (BF16 and FP8); Llama 2 70B, Llama 3.3 70B
+#   and Qwen 2.5 72B (BF16 and FP8) are held out.
 #
 # TorchTitan: overlapped compute runs 19-23% slower and 2-2.4% of the step is exposed
 # collective time (Llama 3.1 8B / 70B, GPT-OSS 20B traces), 6-8% of the step in all;
 # its FSDP copies are already in the benchmarked block.
-_FSDP_INSITU_FACTORS = {"megatron": (0.47, 0.09), "torchtitan": (0.0, 0.06)}
+_FSDP_INSITU_FACTORS = {"megatron": (0.7, 0.06, 1.0), "torchtitan": (0.0, 0.06, 0.0)}
 
 
-def _fsdp_insitu_ms(training_config, message_info, microbatch_time_ms) -> float:
-    """Per-microbatch FSDP2 cost the layer benchmark misses (0 without FSDP2)."""
+def _fsdp_insitu_ms(training_config, message_info, microbatch_time_ms, num_microbatches: int = 1) -> float:
+    """Per-microbatch FSDP2 cost the layer benchmark misses (0 without FSDP2).
+
+    The per-iteration share is spread over the iteration's ``num_microbatches``.
+    """
     factors = _FSDP_INSITU_FACTORS.get(getattr(training_config, "framework", None))
     if factors is None or not message_info.get("fsdp_enabled"):
         return 0.0
@@ -4216,8 +4221,12 @@ def _fsdp_insitu_ms(training_config, message_info, microbatch_time_ms) -> float:
     # Two all-gathers (forward, and backward including any recompute) and one
     # reduce-scatter per layer and microbatch, as traced.
     comm_ms = 2 * message_info.get("fsdp_ag_per_layer_ms", 0.0) + message_info.get("fsdp_rs_per_layer_ms", 0.0)
-    comm_factor, compute_factor = factors
-    per_layer = comm_factor * comm_ms + compute_factor * microbatch_time_ms / num_layers
+    comm_factor, compute_factor, per_iteration_factor = factors
+    per_layer = (
+        comm_factor * comm_ms
+        + compute_factor * microbatch_time_ms / num_layers
+        + per_iteration_factor * comm_ms / max(1, num_microbatches)
+    )
     message_info["fsdp_insitu_per_layer_ms"] = per_layer
     return per_layer * num_layers
 
@@ -4515,7 +4524,13 @@ def _run_multinode_projection(
         projected_time_ms += fsdp_exposed
 
     if not time_includes_all_microbatches:
-        fsdp_insitu = _fsdp_insitu_ms(training_config, message_info, single_node_time_ms)
+        rc = training_config.runtime_config
+        insitu_dp = target_nodes * gpus_per_node // max(1, tp * pp * cp)
+        insitu_microbatches = max(
+            1,
+            getattr(rc, "global_batch_size", 1) // max(1, getattr(rc, "micro_batch_size", 1) * insitu_dp),
+        )
+        fsdp_insitu = _fsdp_insitu_ms(training_config, message_info, single_node_time_ms, insitu_microbatches)
         if fsdp_insitu > 0:
             projected_time_ms += fsdp_insitu
             if is_rank_0:
