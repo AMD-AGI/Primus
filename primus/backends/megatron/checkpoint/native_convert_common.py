@@ -38,6 +38,11 @@ import time
 
 import torch
 
+# q / k / v -> linear_qkv: the shared row layout (re-exported for the converters)
+from primus.backends.megatron.core.models.common.qkv_layout import (  # noqa: F401
+    fuse_qkv,
+)
+
 
 # ---------------------------------------------------------------------------
 # Megatron-LM source tree location

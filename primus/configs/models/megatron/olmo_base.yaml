@@ -1,0 +1,36 @@
+extends:
+  - language_model.yaml
+
+# OLMo-3 family base (HF model_type: olmo3): the architecture every OLMo-3 release shares.
+# Dispatched to primus/backends/megatron/core/models/olmo3. Sizes and release values are in the
+# per-model presets (olmo_3_1025_7B.yaml).
+model_type: olmo3
+
+# post-norm decoder (post_attention / post_feedforward RMSNorm), full-width QK-norm,
+# SwiGLU, no biases, untied embeddings
+normalization: RMSNorm
+layernorm_epsilon: 1.0e-06   # the RMSNorm eps the OLMo-3 model reads
+# norm_epsilon is not read by the olmo3 model. It overrides language_model.yaml's 1e-5 so the two
+# keys agree; the OLMo-3 checks (check_olmo3_norm_epsilon) refuse a run where they differ, so an
+# override of only one of them is an error, not a silent no-op.
+norm_epsilon: 1.0e-06
+swiglu: true
+add_bias_linear: false
+add_qkv_bias: false
+untie_embeddings_and_output_weights: true
+# the q/k norms are full-width (owned by Olmo3SelfAttention), not upstream per-head ones
+qk_layernorm: false
+multi_latent_attention: false
+hidden_dropout: 0.0
+attention_dropout: 0.0
+attention_softmax_in_fp32: true
+init_method_std: 0.02
+
+# RoPE: plain RoPE on sliding-window layers, YaRN on full-attention layers. The RoPE base, the YaRN
+# numbers and the sliding window are release values, set by the per-model preset.
+position_embedding_type: rope
+apply_rope_fusion: false
+# per_type = plain RoPE on sliding layers (as trained, matches OLMo-core); yarn_all = YaRN on every
+# layer. auto (parity tools only) picks the layout for a known installed transformers version and
+# errors otherwise; training refuses auto.
+olmo3_rope_layout: per_type

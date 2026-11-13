@@ -45,7 +45,7 @@ def get_model_provider(model_type="gpt"):
 
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
-            'kimi_k3', 'glm5_next', 'zaya1' or 'inkling'. Defaults to 'gpt'.
+            'kimi_k3', 'glm5_next', 'zaya1', 'inkling' or 'olmo3'. Defaults to 'gpt'.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -74,6 +74,14 @@ def get_model_provider(model_type="gpt"):
             f"[Primus][MegatronCompat] Loaded Inkling model_provider + builder from {inkling_module.__name__}"
         )
         return partial(inkling_module.model_provider, inkling_module.inkling_builder)
+
+    # Primus-owned: OLMo-3 (post-norm, full-width QK-norm, sliding window + YaRN)
+    if model_type == "olmo3":
+        olmo3_module = importlib.import_module("primus.backends.megatron.core.models.olmo3.olmo3_builders")
+        log_rank_0(
+            f"[Primus][MegatronCompat] Loaded OLMo-3 model_provider + builder from {olmo3_module.__name__}"
+        )
+        return partial(olmo3_module.model_provider, olmo3_module.olmo3_builder)
 
     # Primus-owned: GLM-5.3 (KDA + DSA hybrid with mHC)
     if model_type == "glm5_next":
