@@ -8,7 +8,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # inside each node. Stages hold 5 layers each (3, 5, 5 and 5 MoE layers), so each
 # GPU holds 1/8 of the experts of up to 5 MoE layers, about what the single-node
 # 6L proxy holds. Same recipe as inkling_small-BF16-pretrain.yaml except the
-# model and the stage split.
+# model, the stage split and defer_embedding_wgrad_compute, false here.
 #
 # Stage split 5/5/5/5: a Large MoE layer is ~33 GB of weights, gradients and
 # AdamW state per GPU at EP=8, so moving a layer onto stage 0 or 1 (4 and 3
