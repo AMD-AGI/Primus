@@ -4,54 +4,32 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""DeepSeek-V4 model builder + model_provider entry points.
+"""DeepSeek-V4 hooks for the shared builder (``MODEL_FAMILIES["deepseek_v4"]`` in ``registry.py``).
 
-In the upstream Megatron-LM convention there are two pieces:
-
-* ``model_provider``: a thin wrapper that handles ``args.record_memory_history``,
-  ModelOpt etc. and delegates to a ``model_builder`` callable. Defined once
-  in ``Megatron-LM/model_provider.py``.
-* ``<modeltype>_builders.py``: contains ``<modeltype>_builder(args, ...)`` --
-  the actual model-class instantiation logic.
-
-For DeepSeek-V4 we keep both in a single primus-owned module so the dispatch
-in ``primus/core/utils/import_utils.py`` doesn't have to chase symbols across
-``third_party/Megatron-LM``.
-
-Phase 8 contract:
-- Resolve V4 runtime decoder spec externally in builder.
-- Pass runtime spec as ``transformer_layer_spec`` into ``DeepseekV4Model``.
-- DeepseekV4Model is rooted at ``LanguageModule`` and has no GPT placeholder
-  spec dependency.
+The shared builder resolves the V4 runtime decoder spec and passes it as
+``transformer_layer_spec`` into ``DeepseekV4Model``, which is rooted at
+``LanguageModule``. V4 adds the Turbo args plumbing that must run before the
+config is built, and the RoPE arguments of its model constructor.
 """
 
-from typing import Optional
+from functools import partial
 
-from megatron.core.transformer.spec_utils import import_module
-from megatron.training import get_args, print_rank_0
-from megatron.training.arguments import core_transformer_config_from_args
+from megatron.training import print_rank_0
 
+from primus.backends.megatron.core.models.builder import (
+    build_model,
+    family_model_provider,
+)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
-    get_deepseek_v4_runtime_decoder_spec,
     is_v4_turbo_deepep_active,
 )
-from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_model import (
-    DeepseekV4Model,
-)
-from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
-    DeepSeekV4TransformerConfig,
-)
 
-
-def _resolve_runtime_decoder_spec(
-    args,
-    config: DeepSeekV4TransformerConfig,
-    vp_stage,
-):
-    """Resolve effective runtime decoder spec for DeepSeek-V4 decoder path."""
-    if args.spec is not None:
-        return import_module(args.spec)
-    return get_deepseek_v4_runtime_decoder_spec(config=config, vp_stage=vp_stage)
+__all__ = [
+    "deepseek_v4_builder",
+    "model_provider",
+    "prepare_deepseek_v4_args",
+    "deepseek_v4_model_kwargs",
+]
 
 
 def _maybe_plumb_v4_sink_attention_args(args) -> None:
@@ -102,7 +80,7 @@ def _maybe_plumb_v4_sink_attention_args(args) -> None:
     if getattr(args, "use_sink_attention", None) in (None, False):
         args.use_sink_attention = True
         print_rank_0(
-            "[Primus:DeepSeek-V4][P22] derived args.use_sink_attention=True "
+            "[Primus:deepseek_v4][P22] derived args.use_sink_attention=True "
             "from args.attn_sink=True (Turbo flash-attn sink path)."
         )
 
@@ -117,14 +95,14 @@ def _maybe_plumb_v4_sink_attention_args(args) -> None:
             # window_size (avoids the aiter Triton SWA gap).
             args.sink_sliding_window = 0
             print_rank_0(
-                f"[Primus:DeepSeek-V4][P22] attn_sliding_window={attn_sw} "
+                f"[Primus:deepseek_v4][P22] attn_sliding_window={attn_sw} "
                 f">= seq_length={seq_len}; dropping window for Turbo "
                 "(mathematically equivalent to full causal attention)."
             )
         else:
             args.sink_sliding_window = 0
             print_rank_0(
-                f"[Primus:DeepSeek-V4][P22] WARNING: "
+                f"[Primus:deepseek_v4][P22] WARNING: "
                 f"attn_sliding_window={attn_sw} < seq_length={seq_len} "
                 "but aiter Triton flash-attn does not support sliding "
                 "window yet (raises ValueError).  Setting "
@@ -181,7 +159,7 @@ def _maybe_plumb_v4_turbo_deepep_args(args) -> None:
     if not bool(getattr(args, "moe_enable_deepep", False)):
         args.moe_enable_deepep = True
         print_rank_0(
-            "[Primus:DeepSeek-V4][P23] derived args.moe_enable_deepep=True "
+            "[Primus:deepseek_v4][P23] derived args.moe_enable_deepep=True "
             "from args.use_turbo_deepep=True (Turbo DeepEP dispatcher path)."
         )
 
@@ -194,13 +172,13 @@ def _maybe_plumb_v4_turbo_deepep_args(args) -> None:
         if current != "flex":
             args.moe_token_dispatcher_type = "flex"
             print_rank_0(
-                f"[Primus:DeepSeek-V4][P23] override "
+                f"[Primus:deepseek_v4][P23] override "
                 f"args.moe_token_dispatcher_type='{current or 'unset'}' -> "
                 f"'flex' (Turbo DeepEP dispatcher path)."
             )
     else:
         print_rank_0(
-            "[Primus:DeepSeek-V4][P23] WARNING: "
+            "[Primus:deepseek_v4][P23] WARNING: "
             f"args.use_turbo_deepep=True but moe_token_dispatcher_type="
             f"'{current}' (not 'flex' / 'alltoall').  Keeping the user's "
             "dispatcher type; the Turbo DeepEP path will not engage for V4 "
@@ -208,94 +186,22 @@ def _maybe_plumb_v4_turbo_deepep_args(args) -> None:
         )
 
 
-def deepseek_v4_builder(
-    args,
-    pre_process,
-    post_process,
-    vp_stage=None,
-    config: Optional[DeepSeekV4TransformerConfig] = None,
-    pg_collection=None,
-):
-    """Build a DeepSeek-V4 model.
-
-    Phase 8: build from a DeepSeek runtime spec tree only.
-    """
-    print_rank_0("[Primus:DeepSeek-V4] building DeepseekV4Model...")
-
-    # Plan-3 P22: plumb V4 attn_sink + attn_sliding_window into the
-    # Turbo flash-attn sink-attention args before any V4 attention
-    # module is constructed (PrimusTurboAttention reads these in
-    # ``__init__`` from get_args()).
+def prepare_deepseek_v4_args(args) -> None:
+    # Both must run before config construction: PrimusTurboAttention reads the
+    # sink args from get_args() in __init__, and the config must already carry
+    # the dispatcher type _pick_v4_dispatcher_cls keys off.
     _maybe_plumb_v4_sink_attention_args(args)
-    # Plan-3 P23: plumb args.moe_enable_deepep + moe_token_dispatcher_type
-    # for the Turbo DeepEP MoE dispatcher path BEFORE config construction
-    # so the resulting ``config`` carries the right dispatcher type into
-    # ``_pick_v4_dispatcher_cls``.
     _maybe_plumb_v4_turbo_deepep_args(args)
 
-    if config is None:
-        config = core_transformer_config_from_args(
-            args,
-            config_class=DeepSeekV4TransformerConfig,
-        )
 
-    assert not args.use_legacy_models, "DeepSeek-V4 requires use_legacy_models=False (Mcore-only)."
-
-    runtime_decoder_spec = _resolve_runtime_decoder_spec(args, config, vp_stage)
-
-    model = DeepseekV4Model(
-        config=config,
-        transformer_layer_spec=runtime_decoder_spec,
-        vocab_size=args.padded_vocab_size,
-        max_sequence_length=args.max_position_embeddings,
-        pre_process=pre_process,
-        post_process=post_process,
-        fp16_lm_cross_entropy=args.fp16_lm_cross_entropy,
-        parallel_output=True,
-        share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
-        position_embedding_type=args.position_embedding_type,
-        rotary_percent=args.rotary_percent,
-        rotary_base=args.rotary_base,
-        rope_scaling=args.use_rope_scaling,
-        pg_collection=pg_collection,
-        vp_stage=vp_stage,
-    )
-    return model
+def deepseek_v4_model_kwargs(args) -> dict:
+    return {
+        "position_embedding_type": args.position_embedding_type,
+        "rotary_percent": args.rotary_percent,
+        "rotary_base": args.rotary_base,
+        "rope_scaling": args.use_rope_scaling,
+    }
 
 
-def model_provider(
-    model_builder=None,
-    pre_process: bool = True,
-    post_process: bool = True,
-    vp_stage: Optional[int] = None,
-    config: Optional[DeepSeekV4TransformerConfig] = None,
-    pg_collection=None,
-):
-    """``model_provider`` entry point used by Megatron's ``pretrain()``.
-
-    ``MegatronPretrainTrainer`` will pass ``deepseek_v4_builder`` as the
-    first arg via ``functools.partial`` so the upstream ``pretrain()`` can
-    call this with the standard ``(pre_process, post_process, vp_stage)``
-    signature.
-    """
-    if model_builder is None:
-        model_builder = deepseek_v4_builder
-
-    args = get_args()
-    if args.record_memory_history:
-        import torch
-
-        torch.cuda.memory._record_memory_history(
-            True,
-            trace_alloc_max_entries=100000,
-            trace_alloc_record_context=True,
-        )
-
-    return model_builder(
-        args,
-        pre_process,
-        post_process,
-        vp_stage,
-        config=config,
-        pg_collection=pg_collection,
-    )
+deepseek_v4_builder = partial(build_model, "deepseek_v4")
+model_provider = family_model_provider(deepseek_v4_builder)
