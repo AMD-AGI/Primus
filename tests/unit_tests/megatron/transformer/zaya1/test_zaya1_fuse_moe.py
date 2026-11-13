@@ -11,6 +11,7 @@ import pytest
 import torch
 
 import primus.backends.megatron.core.models.zaya1.zaya1_modules as zm
+from primus.backends.megatron.core.utils import maybe_compile
 
 
 def _cfg(**overrides):
@@ -61,13 +62,12 @@ _FUSED = (
 @pytest.fixture
 def compiled(monkeypatch):
     """Fresh compiled helpers for this test, failing it if any of them silently fell back to eager."""
-    mc = zm._maybe_compile
-    monkeypatch.setattr(zm, "_fused_swiglu", mc(zm._swiglu, True, dynamic=True))
-    monkeypatch.setattr(zm, "_fused_eda_norm", mc(zm._eda_norm, True))
-    monkeypatch.setattr(zm, "_fused_route_select", mc(zm._route_select, True))
-    monkeypatch.setattr(zm, "_fused_unpermute_fwd", mc(zm._unpermute_scale_fwd, True))
-    monkeypatch.setattr(zm, "_fused_unpermute_bwd", mc(zm._unpermute_scale_bwd, True))
-    monkeypatch.setattr(zm, "_fused_unpermute_bwd_noprob", mc(zm._unpermute_scale_bwd_noprob, True))
+    monkeypatch.setattr(zm, "_fused_swiglu", maybe_compile(zm._swiglu, dynamic=True))
+    monkeypatch.setattr(zm, "_fused_eda_norm", maybe_compile(zm._eda_norm))
+    monkeypatch.setattr(zm, "_fused_route_select", maybe_compile(zm._route_select))
+    monkeypatch.setattr(zm, "_fused_unpermute_fwd", maybe_compile(zm._unpermute_scale_fwd))
+    monkeypatch.setattr(zm, "_fused_unpermute_bwd", maybe_compile(zm._unpermute_scale_bwd))
+    monkeypatch.setattr(zm, "_fused_unpermute_bwd_noprob", maybe_compile(zm._unpermute_scale_bwd_noprob))
     yield monkeypatch
     for name in _FUSED:
         fn = getattr(zm, name)

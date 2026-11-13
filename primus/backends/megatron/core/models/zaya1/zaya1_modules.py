@@ -24,7 +24,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from primus.core.utils.module_utils import warning_rank_0
+from primus.backends.megatron.core.utils import maybe_compile
 
 # zaya_attn_flash (default on): drop a purely causal dense mask once per forward
 # and run CCA attention through flash_attn_func with native GQA, or through
@@ -132,64 +132,6 @@ def switch_summary(config) -> str:
     )
 
 
-def _compile_errors() -> tuple:
-    """Exception types meaning torch.compile could not compile ``fn``, as opposed to ``fn`` failing.
-
-    TorchDynamoException covers Inductor's errors. Hitting the recompile limit
-    under fullgraph=True raises a plain Exception, named by torch version.
-    """
-    import torch._dynamo.exc as dynamo_exc
-
-    names = ("TorchDynamoException", "FailOnRecompileLimitHit", "FailOnCacheLimitHit")
-    return tuple(cls for cls in (getattr(dynamo_exc, name, None) for name in names) if cls is not None)
-
-
-def _first_line(exc: BaseException) -> str:
-    text = str(exc).strip()
-    return f"{type(exc).__name__}: {text.splitlines()[0][:500] if text else ''}"
-
-
-def _maybe_compile(fn, enabled: bool, dynamic: bool = False):
-    """torch.compile ``fn`` when ``enabled``.
-
-    When a compiled call fails to compile (a Dynamo or Inductor error, including
-    hitting the recompile limit), log it and run ``fn`` eagerly from then on.
-    Any other error, such as running out of memory, propagates.
-    """
-    if not enabled or not hasattr(torch, "compile"):
-        return fn
-    try:
-        # emulate_precision_casts keeps the eager code's explicit bf16 rounding
-        # points (merged.to(bf16) before RMSNorm, q/k .to(bf16) before RoPE).
-        # Inductor can still reorder reductions, so results match eager to
-        # rounding error, not bit for bit.
-        compiled = torch.compile(
-            fn, dynamic=dynamic, fullgraph=True, options={"emulate_precision_casts": True}
-        )
-        compile_errors = _compile_errors()
-    except Exception as exc:  # pragma: no cover - depends on the image
-        warning_rank_0(
-            f"ZAYA1: torch.compile is unavailable for {fn.__name__}, running it eagerly: {_first_line(exc)}"
-        )
-        return fn
-    state = {"ok": True}
-
-    def wrapper(*args, **kwargs):
-        if state["ok"]:
-            try:
-                return compiled(*args, **kwargs)
-            except compile_errors as exc:
-                state["ok"] = False
-                warning_rank_0(
-                    f"ZAYA1: torch.compile of {fn.__name__} failed, running it eagerly from now on: "
-                    f"{_first_line(exc)}"
-                )
-        return fn(*args, **kwargs)
-
-    wrapper.compiled_ok = lambda: state["ok"]
-    return wrapper
-
-
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     xf = x.float()
     inv = torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
@@ -212,8 +154,8 @@ def _scale_merge_norm_first(hidden, h_bias, h_scale, norm_w, eps: float):
     return merged, _rms(merged.to(dtype=target_dtype), norm_w, eps)
 
 
-_fused_smn_res = _maybe_compile(_scale_merge_norm_res, True)
-_fused_smn_first = _maybe_compile(_scale_merge_norm_first, True)
+_fused_smn_res = maybe_compile(_scale_merge_norm_res)
+_fused_smn_first = maybe_compile(_scale_merge_norm_first)
 
 
 def layer_kinds(num_layers: int, zaya_layers: Optional[Sequence] = None) -> List[str]:
@@ -459,7 +401,7 @@ def _cca_qk_post(
     return _apply(query), _apply(key)
 
 
-_fused_cca_qk = _maybe_compile(_cca_qk_post, True)
+_fused_cca_qk = maybe_compile(_cca_qk_post)
 
 # zaya_conv_gemm (default on): run CCA's two causal Conv1d layers without MIOpen.
 # The depthwise kernel-2 conv and the per-head grouped kernel-2 conv otherwise
@@ -496,7 +438,7 @@ def _cca_conv_taps(qk, w0, b0, groups: int):
     return taps.transpose(0, 1).contiguous()
 
 
-_fused_conv_taps = _maybe_compile(_cca_conv_taps, True)
+_fused_conv_taps = maybe_compile(_cca_conv_taps)
 
 
 def cca_causal_conv(qk: torch.Tensor, conv0: nn.Conv1d, conv1: nn.Conv1d) -> torch.Tensor:
@@ -730,12 +672,12 @@ def _unpermute_scale_bwd_noprob(grad, perm, prob):
 
 # Expert token counts change every layer and step: compile SwiGLU with dynamic
 # shapes so it is one graph instead of a recompile per count.
-_fused_swiglu = _maybe_compile(_swiglu, True, dynamic=True)
-_fused_eda_norm = _maybe_compile(_eda_norm, True)
-_fused_route_select = _maybe_compile(_route_select, True)
-_fused_unpermute_fwd = _maybe_compile(_unpermute_scale_fwd, True)
-_fused_unpermute_bwd = _maybe_compile(_unpermute_scale_bwd, True)
-_fused_unpermute_bwd_noprob = _maybe_compile(_unpermute_scale_bwd_noprob, True)
+_fused_swiglu = maybe_compile(_swiglu, dynamic=True)
+_fused_eda_norm = maybe_compile(_eda_norm)
+_fused_route_select = maybe_compile(_route_select)
+_fused_unpermute_fwd = maybe_compile(_unpermute_scale_fwd)
+_fused_unpermute_bwd = maybe_compile(_unpermute_scale_bwd)
+_fused_unpermute_bwd_noprob = maybe_compile(_unpermute_scale_bwd_noprob)
 
 
 class _PermuteRows(torch.autograd.Function):

@@ -12,6 +12,7 @@ import torch
 from test_zaya1_math import _cfg  # noqa: E402  (pytest puts this dir on sys.path)
 
 from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
+from primus.backends.megatron.core.utils import maybe_compile
 
 
 def _perturb(module):
@@ -65,8 +66,8 @@ def _compare(eager, fused, dtype):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_fused_norm_chain_matches_eager(monkeypatch, dtype):
     """Stage 0's scale + RMSNorm, every later stage's scale + merge + RMSNorm, and the final norm."""
-    fused_res = zm._maybe_compile(zm._scale_merge_norm_res, True)
-    fused_first = zm._maybe_compile(zm._scale_merge_norm_first, True)
+    fused_res = maybe_compile(zm._scale_merge_norm_res)
+    fused_first = maybe_compile(zm._scale_merge_norm_first)
     monkeypatch.setattr(zm, "_fused_smn_res", fused_res)
     monkeypatch.setattr(zm, "_fused_smn_first", fused_first)
     torch.manual_seed(0)
@@ -94,7 +95,7 @@ def test_fused_norm_chain_matches_eager(monkeypatch, dtype):
 )
 def test_fused_cca_qk_matches_eager(monkeypatch, dtype, clamp_temp, rotary_factor, positions):
     """Grouped means, qk-norm, temperature and partial RoPE (1-D and per-row positions, or none)."""
-    fused = zm._maybe_compile(zm._cca_qk_post, True)
+    fused = maybe_compile(zm._cca_qk_post)
     monkeypatch.setattr(zm, "_fused_cca_qk", fused)
     torch.manual_seed(1)
 

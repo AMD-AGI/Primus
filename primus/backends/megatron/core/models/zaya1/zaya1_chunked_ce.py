@@ -37,7 +37,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from primus.backends.megatron.core.models.zaya1.zaya1_modules import _maybe_compile
+from primus.backends.megatron.core.utils import maybe_compile
 
 __all__ = [
     "ChunkedLinearCrossEntropy",
@@ -84,7 +84,7 @@ _FUSED = {}
 def _fused_kernels():
     """(fwd_stats, bwd_dlogits) compiled once per process; eager fallback inside."""
     if "fns" not in _FUSED:
-        _FUSED["fns"] = (_maybe_compile(_ce_fwd_stats, True), _maybe_compile(_ce_bwd_dlogits, True))
+        _FUSED["fns"] = (maybe_compile(_ce_fwd_stats), maybe_compile(_ce_bwd_dlogits))
     return _FUSED["fns"]
 
 
