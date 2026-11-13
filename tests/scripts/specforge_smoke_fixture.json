@@ -7,20 +7,14 @@
     "source_sha256": "dd5828821b7e707ca3dc4d0de07e2502c3ce278fcf1a74b81a3464f26006371e",
     "license_on_dataset_card": "apache-2.0",
     "rows": 800,
-    "selection": "Canonical IDs in selected_ids_path, in listed order; unchanged conversation text; common contact, credential and infrastructure patterns excluded before freezing",
+    "selection": "Source IDs and row order are embedded in the checked-in JSONL; unchanged conversation text; common contact, credential and infrastructure patterns excluded before freezing",
     "fixture_sha256": "f4a71e44e0d71b0c9471a69fc5095264975f58f74b2ef655b0878975425447c7",
-    "fixture_path": "tests/trainer/fixtures/specforge/sharegpt_800.jsonl",
-    "selected_ids_path": "tests/trainer/fixtures/specforge/sharegpt_800_ids.json"
+    "fixture_path": "tests/trainer/fixtures/specforge/sharegpt_800.jsonl"
   },
   "model": {
     "repository": "Qwen/Qwen3.5-4B",
     "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
     "tokenizer_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
-  },
-  "runtime": {
-    "image": "tasimage/primus-specforge@sha256:2fcef9af3d29d53132b2e548fbda31ca8844e6c043f236249050a3398288ed2d",
-    "primus_revision": "f0a95952e4f42e4595a0eba13e789d60061364e9",
-    "specforge_revision": "af1c3f3868e0ad1d1bc4a3bc4c577f2c9d3fa7b5"
   },
   "training": {
     "steps": 100,

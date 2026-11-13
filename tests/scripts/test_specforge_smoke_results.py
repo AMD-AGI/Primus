@@ -76,8 +76,7 @@ class SmokeResultsTest(unittest.TestCase):
         payload = (repo / spec["fixture_path"]).read_bytes()
         self.assertEqual(hashlib.sha256(payload).hexdigest(), spec["fixture_sha256"])
         rows = [json.loads(line) for line in payload.decode("utf-8").split("\n") if line]
-        ids = json.loads((repo / spec["selected_ids_path"]).read_text(encoding="utf-8"))
-        self.assertEqual([row["id"] for row in rows], ids)
+        ids = [row["id"] for row in rows]
         self.assertEqual(len(set(ids)), 800)
         self.assertEqual(
             manifest["training"]["steps"]
@@ -199,7 +198,7 @@ class SmokeResultsTest(unittest.TestCase):
         changed["runtime_primus_revision"] = "new-main"
         changed["runtime_image"] = "new-image"
         changed["runtime_specforge_revision"] = "new-specforge"
-        changed["manifest"]["runtime"]["specforge_revision"] = "new-specforge"
+        changed["manifest"]["runtime"] = {"specforge_revision": "new-specforge"}
         self.assertEqual(workload_identity(changed), original)
         for section, key, value in (
             ("dataset", "fixture_sha256", "changed"),
@@ -222,8 +221,14 @@ class SmokeResultsTest(unittest.TestCase):
         history = json.loads(
             (scripts / "specforge_smoke_qualification_mi355x.json").read_text(encoding="utf-8")
         )
+        observations = history["observations_shared_by_all_runs"]
+        self.assertEqual([row["step"] for row in observations], list(range(5, 101, 5)))
         for run in history["runs"]:
             row = dict(run["summary"], workload_identity=workload_identity(history["reference_inputs"]))
+            payload = (json.dumps(run["summary"], indent=2) + "\n").encode()
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), run["summary_sha256"])
+            for metric, mean in row["final_window_mean"].items():
+                self.assertEqual(sum(item[metric] for item in observations[-10:]) / 10, mean)
             compare(row, baseline)
 
 

@@ -15,11 +15,10 @@ The conversation text is unchanged. The only transformation is the structural
 conversion from `from`/`value` to `role`/`content`, with human mapped to user and
 gpt mapped to assistant. Empty/malformed/nonalternating conversations were excluded.
 
-`sharegpt_800_ids.json` defines the exact selected source IDs and fixture row order.
+Each JSONL row includes its source `id`; the file itself defines the row order.
 The source revision, source SHA-256, and output SHA-256 are recorded in
-`../../../scripts/specforge_smoke_fixture.json`. Recreate the fixture with
-`tests/scripts/prepare_specforge_smoke.py --source SOURCE.json --output NEW.jsonl`;
-it selects those IDs from the pinned source and verifies both checksums.
+`../../../scripts/specforge_smoke_fixture.json`. Use the checked-in fixture
+directly; no preparation script or separate ID list is needed.
 
 The fixture is 4,243,587 bytes. It is stored as plain JSONL for review, with LF
 line endings enforced by `.gitattributes`. The large-file pre-commit exception

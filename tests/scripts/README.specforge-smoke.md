@@ -1,4 +1,4 @@
-# Qwen3.5-4B / DFlash single-node reference (draft)
+# Qwen3.5-4B / DFlash single-node training reference
 
 This PR is a data, recipe, commands, and reference-results handoff; it is not an
 integration-ready test framework. The 100-step MI355X reference passed three
@@ -6,10 +6,8 @@ calibration runs and two independent validation runs on 2026-11-12.
 The old 200-step measurements do not apply to this fixture/schedule.
 
 Use the existing `examples/specforge/configs/qwen3.5-4b-dflash-online.yaml` from a
-separate checkout of `AMD-AGI/Primus` main. #1421 merged as
-`aa454b0233346b9cecaa01685d0d217595ac2b4a`; use that commit or a later main
-revision for new runs. Do not use this handoff branch as the runtime checkout:
-it does not include the merged feature code.
+separate checkout of `AMD-AGI/Primus` main. This handoff branch supplies the
+fixture and result-checking helpers; main supplies the runtime source.
 `primus-cli container` mounts and runs its host checkout, so its revision matters
 in addition to the image digest. No generated training YAML or Python launcher
 is needed. The Python tools below only check completed runs and collect bounds.
@@ -20,9 +18,8 @@ is needed. The Python tools below only check completed runs and collect bounds.
   4,243,587 bytes. Source IDs, provenance, and declared license are alongside it.
 - Workload pins: `specforge_smoke_fixture.json` records data checksums,
   model/tokenizer revisions, training settings, and the MI355X reference target.
-  Its `runtime` section is historical calibration provenance, not a requirement
-  for nightly/weekly candidates. Test new Primus/SpecForge versions and record
-  their actual commits and resolved image digest on every run.
+  Test new Primus/SpecForge versions and record their actual commits and resolved
+  image digest on every run.
 - Shape: one capture GPU, one trainer GPU, batch size 2, accumulation 4,
   100 optimizer steps = 800 consumed samples. The runtime shuffles with seed 42.
 - Pre-download the Qwen model/tokenizer snapshot below into the Hugging Face
@@ -39,11 +36,12 @@ export PRIMUS_CHECKOUT=/path/to/Primus
 export SMOKE_CHECKOUT=/path/to/Primus-smoke
 export HF_HOME=/path/to/hf-cache
 export RESULTS=/path/to/results
-export IMAGE="tasimage/primus-specforge:<mi35x-tag-under-test>"
+export IMAGE=tasimage/primus-specforge:v26.9-sglang0.5.23-specforge-af1c3f3868e0-mi35x
 export MODEL_REVISION=851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
 ```
 
-For container/Slurm runs, select a published candidate tag, resolve it once, and
+The tag above is the main-branch image. For nightly/weekly runs, substitute the
+candidate tag under test. For container/Slurm runs, resolve the tag once and
 record the SpecForge commit from that image (these metadata commands need no GPU):
 
 ```bash
@@ -104,7 +102,6 @@ from pathlib import Path
 manifest = json.loads((Path(os.environ["SMOKE_CHECKOUT"]) / "tests/scripts/specforge_smoke_fixture.json").read_text())
 assert hashlib.sha256(Path(os.environ["TRAIN_DATA_PATH"]).read_bytes()).hexdigest() == manifest["dataset"]["fixture_sha256"]
 revision = subprocess.check_output(["git", "-C", os.environ["PRIMUS_CHECKOUT"], "rev-parse", "HEAD"], text=True).strip()
-manifest.pop("runtime", None)  # Historical software pins are not candidate provenance.
 inputs = {"manifest": manifest, "runtime_primus_revision": revision,
           "runtime_specforge_revision": os.environ["RUNTIME_SPECFORGE_REVISION"],
           "runtime_image": os.environ["IMAGE"]}
@@ -228,17 +225,11 @@ The means of the ten logged observations at steps 55–100 are:
 - Training accuracy reference: **0.05101585015654564**; fail below **0.04101585015654564** (one percentage point lower).
 - Gradient norm: **0.21905557662248612**, recorded for inspection; only finiteness is asserted.
 
-The original validations passed tighter two-sided bounds frozen after the third
-calibration run, without retuning. The current one-sided policy was adopted
-after those runs for evolving software versions. Replaying all five recorded
-summaries passes the new policy; no new GPU runs or cross-version calibration
-were performed for this policy change. The historical qualification record and
-its original baseline hash are unchanged. The runtime checkout was
-`55fec472fda464449ebc417c3e0e1037f0bb912d` (the pre-merge #1421 head), with the
-manifest's pinned image, SpecForge, model/tokenizer, and data. PyTorch was
-`2.9.1+rocm7.2.0.git7e1940d4`; HIP was `7.2.26015-fc0010cf6a`.
-The manifest's image Primus revision describes the image contents; the mounted
-runtime checkout revision above is the source actually executed.
+The original validations passed tighter two-sided bounds. All five recorded
+summaries also pass the current one-sided policy, adopted afterward for evolving
+software versions. This policy replay did not launch new GPU runs or calibrate
+cross-version variation. Exact historical software versions and original hashes
+remain in the qualification record; identical observations are stored once.
 
 The gate compares `workload_identity`: fixture checksum/row count, model/tokenizer,
 training settings, and GPU type. Primus/SpecForge commits and the image digest
@@ -301,5 +292,4 @@ not held-out evaluation. Future Python test cases can
 parameterize models, draft architectures, and GPUs after this reference is useful.
 
 CPU checks: `uv run --no-project python -m unittest discover -s tests/scripts -p test_specforge_smoke_results.py`.
-To regenerate data for provenance verification, use `prepare_specforge_smoke.py`
-with the pinned source and a new output path; ordinary training uses checked-in data.
+The checked-in JSONL is ready to use; each row includes its source ID.
