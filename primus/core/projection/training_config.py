@@ -46,6 +46,10 @@ class ModelParallelConfig:
     main_grads_dtype: str = "fp32"  # fp32 | bf16 | fp16
     exp_avg_dtype: str = "fp32"  # 1st moment dtype (fp32 | bf16 | fp16)
     exp_avg_sq_dtype: str = "fp32"  # 2nd moment dtype (fp32 | bf16 | fp16)
+    # DDP gradient-sync layout (Megatron DistributedDataParallelConfig inputs).
+    grad_reduce_in_bf16: bool = False
+    ddp_num_buckets: Optional[int] = None
+    ddp_bucket_size: Optional[int] = None
 
 
 @dataclass
@@ -321,6 +325,55 @@ def update_config_from_args(config, args):
     return config
 
 
+def _megatron_effective_vpp(args) -> int:
+    """Virtual pipeline size Megatron actually runs with (``validate_args``).
+
+    Megatron derives VPP from ``pipeline_model_parallel_layout``,
+    ``num_layers_per_virtual_pipeline_stage`` or
+    ``num_virtual_stages_per_pipeline_rank`` and otherwise resets
+    ``virtual_pipeline_model_parallel_size`` to None, i.e. a bare
+    ``virtual_pipeline_model_parallel_size`` runs the non-interleaved schedule.
+    """
+    pp = args.pipeline_model_parallel_size
+    requested = getattr(args, "virtual_pipeline_model_parallel_size", None)
+    layout = getattr(args, "pipeline_model_parallel_layout", None)
+    layers_per_vstage = getattr(args, "num_layers_per_virtual_pipeline_stage", None)
+    vstages = getattr(args, "num_virtual_stages_per_pipeline_rank", None)
+    if layout:
+        try:
+            from megatron.core.transformer.pipeline_parallel_layer_layout import (
+                PipelineParallelLayerLayout,
+            )
+
+            return max(1, PipelineParallelLayerLayout.get_num_stages_from_str(layout) // pp)
+        except ImportError:
+            return requested or 1
+    if vstages is not None:
+        return vstages
+    if layers_per_vstage is not None:
+        num_layers = args.num_layers
+        num_layers += bool(getattr(args, "account_for_embedding_in_pipeline_split", False))
+        num_layers += bool(getattr(args, "account_for_loss_in_pipeline_split", False))
+        return num_layers // pp // layers_per_vstage
+    if getattr(args, "hybrid_layer_pattern", None) is not None:
+        return requested or 1
+    if (requested or 1) > 1 and int(os.getenv("RANK", "0")) == 0:
+        print(
+            f"[Primus:Projection] virtual_pipeline_model_parallel_size={requested} is ignored by "
+            "Megatron without num_virtual_stages_per_pipeline_rank, "
+            "num_layers_per_virtual_pipeline_stage or pipeline_model_parallel_layout; "
+            "projecting the non-interleaved schedule."
+        )
+    return 1
+
+
+def megatron_backend_derive_default_args(args):
+    """Defaults for Megatron-LM configs, with Megatron's own VPP resolution."""
+    args.virtual_pipeline_model_parallel_size = _megatron_effective_vpp(args)
+    args.num_layers_per_virtual_pipeline_stage = None
+    return megatron_derive_default_args(args)
+
+
 def megatron_derive_default_args(args):
     world_size = int(os.getenv("NNODES", "1")) * int(os.getenv("GPUS_PER_NODE", "8"))
     if args.kv_channels is None:
@@ -393,9 +446,17 @@ def megatron_derive_default_args(args):
     args.sequence_length = args.seq_length
     args.context_model_parallel_size = args.context_parallel_size
 
-    # Use model's vocab size if set, otherwise default to 100352
+    # Pad the model's vocab the way Megatron does (_vocab_size_with_padding); the
+    # fixed default only applies when the config carries no vocab_size at all.
     if not hasattr(args, "padded_vocab_size") or args.padded_vocab_size is None:
-        args.padded_vocab_size = 100352
+        vocab_size = getattr(args, "vocab_size", None)
+        if vocab_size:
+            multiple = (getattr(args, "make_vocab_size_divisible_by", None) or 128) * (
+                getattr(args, "tensor_model_parallel_size", None) or 1
+            )
+            args.padded_vocab_size = -(-int(vocab_size) // multiple) * multiple
+        else:
+            args.padded_vocab_size = 100352
 
     return args
 
