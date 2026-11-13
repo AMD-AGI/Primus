@@ -103,6 +103,12 @@ class MegatronBenchAdapter(BenchModelAdapter):
                 parts.output_layer = unwrapped.output_layer
                 if hasattr(unwrapped, "compute_language_model_loss"):
                     parts.loss_owner = unwrapped
+                # With tied embeddings the head allocates no weight; the model passes
+                # the embedding's to every forward call.
+                if getattr(unwrapped.output_layer, "weight", None) is None and hasattr(
+                    unwrapped, "shared_embedding_or_output_weight"
+                ):
+                    self._output_weight = unwrapped.shared_embedding_or_output_weight()
 
             rotary = _model_rotary(unwrapped)
             if rotary is not None:
@@ -165,6 +171,9 @@ class MegatronBenchAdapter(BenchModelAdapter):
             return BenchInputs(args=[((ctx.batch_size, ctx.seq_len_per_cp), torch.int64)])
 
         if kind == OUTPUT:
-            return BenchInputs(args=[(ctx.seq_len_per_cp, ctx.batch_size, ctx.hidden_size)])
+            kwargs = {}
+            if getattr(module, "weight", None) is None and getattr(self, "_output_weight", None) is not None:
+                kwargs["weight"] = self._output_weight
+            return BenchInputs(args=[(ctx.seq_len_per_cp, ctx.batch_size, ctx.hidden_size)], kwargs=kwargs)
 
         return None
