@@ -465,7 +465,7 @@ models:
 | `use_legacy_models` | `false` | Use legacy Megatron model code paths. |
 | `deprecated_use_mcore_models` | `false` | Deprecated flag for Megatron-Core models; prefer current `transformer_impl` + stack. |
 | `model_type` | `gpt` | `gpt` or `mamba` family. |
-| `model_type` (Primus values) | — | *Primus:* `get_model_provider` also builds model-specific values (e.g. `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1`, `inkling`); `muse_spark` is the Muse Spark text decoder (set by `muse_spark_base.yaml`; §11.5). |
+| `model_type` (Primus values) | `gpt` | *Primus:* the same key also accepts model-specific values that `get_model_provider` builds (e.g. `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1`, `inkling`); `muse_spark` is the Muse Spark text decoder (set by `muse_spark_base.yaml`; §11.5). The row above lists the Megatron values. |
 | `num_layers` | `24` | Transformer layers (decoder or unified stack). |
 | `encoder_num_layers` | `null` | Encoder depth (encoder–decoder). |
 | `decoder_num_layers` | `null` | Decoder depth. |
@@ -694,7 +694,7 @@ models:
 
 These settings (YAML keys in `muse_spark_base.yaml`) apply only to a Muse Spark model (`model_type: muse_spark`). `muse_spark` is one of the Primus values of `model_type` (row `model_type (Primus values)`, next to `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1` and `inkling`), beside the `gpt` / `mamba` of §10.1; `muse_spark_base.yaml` sets it, so a Muse Spark preset gets it by `extends`.
 
-Vocabulary padding: a Muse Spark model does not read `make_vocab_size_divisible_by` (§2). Its embedding and output layers have `vocab_size` rounded up to a multiple of 64 rows at every TP (202048 for the released model), the same rule as the native converter. The `muse_spark_vocab` patch sets Megatron's padded vocabulary size that way, so the converted checkpoint has the same embedding shape at every TP. The vocabulary-parallel layers also need the rows to divide by TP: 202048 = 2^6 x 7 x 11 x 41 divides by TP 1, 2, 4 and 8 (the TPs that 16 query groups allow, besides 16), and another TP (e.g. 3, 6 or 12) is refused with a `ValueError`. Loading a converted checkpoint at TP > 1 is not yet tested (§11.6).
+Vocabulary padding: a Muse Spark model does not read `make_vocab_size_divisible_by` (§2). Its embedding and output layers have `vocab_size` rounded up to a multiple of 64 rows at every TP (202048 for the released model), the same rule as the native converter. The `muse_spark_vocab` patch sets Megatron's padded vocabulary size that way, so the converted checkpoint has the same embedding shape at every TP. The vocabulary-parallel layers also need the rows to divide by TP (202048 = 2^6 x 7 x 11 x 41). TP must also divide the 16 query groups, so the usable TPs are 1, 2, 4, 8 and 16 (both checks pass); Megatron's query-group check refuses another TP (e.g. 3, 6 or 12) before the vocabulary is sized. A refusal from a Muse Spark patch stops the run with `SystemExit` (the `ValueError` is its cause). Training at TP 2 is tested; loading a converted checkpoint at TP > 1 is not yet tested (§11.6).
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -706,7 +706,9 @@ Vocabulary padding: a Muse Spark model does not read `make_vocab_size_divisible_
 
 `muse_spark_skip_memory_check`, `muse_spark_turbo_deepep_internode`, `muse_spark_fused_post_expert_norm`, `muse_spark_fused_attn_norm` and `muse_spark_fused_centered_norm` are booleans. A string is true for `1` / `true` / `yes` / `on` and false for `0` / `false` / `no` / `off` (any case, surrounding whitespace ignored); an empty or unset value means the key's default (so the fused-kernel keys stay on). Any other value (e.g. a `ture` typo, `2`) stops the run with a `ValueError`.
 
-A Muse Spark patch that rejects a setting (the fused Turbo router, the memory check, a bad `PRIMUS_TE_GEMM_WORKSPACE_MB`, an a2a+p2p CP layout, ...) stops the run with `SystemExit` and the reason; the patch runner does not log it and continue.
+The Muse Spark example configs set `PRIMUS_TE_GEMM_WORKSPACE_MIB: "512"` in their `env:` block. The base patch `megatron.te.hipblaslt_gemm_workspace` (`te_patches/hipblaslt_workspace_patches.py`) reads it and enlarges TE's hipBLASLt GEMM workspace, which the large-K / small-N GEMMs of the latent MoE need on gfx950 ("HIPBLASLT Error: 6"). Muse Spark adds no workspace code of its own.
+
+A Muse Spark patch that rejects a setting (the fused Turbo router, the memory check, an a2a+p2p CP layout, ...) stops the run with `SystemExit` and the reason; the patch runner does not log it and continue.
 
 ### 11.6 Muse Spark checkpoint conversion (`sft_trainer` / `post_trainer`)
 

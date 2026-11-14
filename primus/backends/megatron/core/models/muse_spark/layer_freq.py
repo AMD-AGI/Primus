@@ -14,13 +14,16 @@ all-MoE, list entries are coerced with ``int()``); moving it here would change K
 results, so the two parsers stay separate.
 
 Strings are parsed without ``eval``: only int literals (with unary minus), int arithmetic
-(``+ - *``, e.g. a repeat count ``(60+2)``), flat int list / tuple literals, ``list * int``,
+(``+ - *``, e.g. a repeat count ``(60+2)``), flat int list literals, ``list * int``,
 ``int * list`` and ``list + list`` are accepted (e.g. ``"([0]*1+[1]*7)"``,
 ``"([1]*3+[0])*6"`` or ``"[1]*(60+2)"``). This is a subset of what Megatron's ``eval``
 accepts: a list comprehension or a name is refused with a clear error (write the list out),
-never evaluated. A tuple string is accepted as the same list. A list may hold at most ``MAX_PATTERN_LEN``
+never evaluated. A tuple literal is refused: Megatron's ``eval`` raises TypeError on
+``list + tuple``. A list may hold at most ``MAX_PATTERN_LEN``
 entries (checked before a repetition is built), a string at most ``MAX_SOURCE_LEN``
 characters. Any other input (a name, a call, bad syntax, deep nesting) raises ValueError.
+As in Megatron's ``moe_freq_type``, a string without ``[`` must be a plain int (``"2"``);
+``"1+1"`` or ``"(1,0)"`` are refused.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ MAX_PATTERN_LEN = 4096
 MAX_SOURCE_LEN = 4 * MAX_PATTERN_LEN
 _SHOWN_PATTERN_CHARS = 80  # how much of a bad pattern string an error shows
 _SHOWN_BAD_ENTRIES = 5  # how many bad entries of a pattern list an error shows
+_TOO_LONG = f"layer pattern longer than {MAX_PATTERN_LEN}"
 
 
 def _repeat(lst, n):
@@ -60,12 +64,12 @@ def _eval_node(node):
         if not isinstance(operand, int):
             raise ValueError("unary minus applies to an int only")
         return -operand
-    if isinstance(node, (ast.List, ast.Tuple)):
+    if isinstance(node, ast.List):
         out = [_eval_node(e) for e in node.elts]
         if any(isinstance(v, list) for v in out):
             raise ValueError("nested lists are not a layer pattern")
         if len(out) > MAX_PATTERN_LEN:
-            raise ValueError(f"layer pattern longer than {MAX_PATTERN_LEN}")
+            raise ValueError(_TOO_LONG)
         return out
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Mult, ast.Add, ast.Sub)):
         left, right = _eval_node(node.left), _eval_node(node.right)
@@ -81,7 +85,7 @@ def _eval_node(node):
             return value
         if isinstance(node.op, ast.Add) and isinstance(left, list) and isinstance(right, list):
             if len(left) + len(right) > MAX_PATTERN_LEN:
-                raise ValueError(f"layer pattern longer than {MAX_PATTERN_LEN}")
+                raise ValueError(_TOO_LONG)
             return left + right
         if isinstance(node.op, ast.Mult) and isinstance(left, list) and isinstance(right, int):
             return _repeat(left, right)
@@ -108,6 +112,16 @@ def parse_layer_pattern(value):
         src = value.strip()
         if len(src) > MAX_SOURCE_LEN:
             raise ValueError(f"layer-pattern string longer than {MAX_SOURCE_LEN} characters")
+        if "[" not in src:
+            # Megatron's moe_freq_type reads a string without "[" as int(x): no arithmetic
+            # or tuple there, so a pattern Megatron reads differently is refused here too.
+            try:
+                return int(src)
+            except ValueError:
+                raise ValueError(
+                    f"layer pattern {value[:_SHOWN_PATTERN_CHARS]!r}: a string without a list must be "
+                    "an int (as Megatron reads it); for a pattern, write the list out with [...]"
+                ) from None
         try:
             return _eval_node(ast.parse(src, mode="eval"))
         except SyntaxError as e:
@@ -118,7 +132,7 @@ def parse_layer_pattern(value):
             raise ValueError(f"layer pattern {value[:_SHOWN_PATTERN_CHARS]!r} is nested too deeply") from e
     if isinstance(value, (list, tuple)):
         if len(value) > MAX_PATTERN_LEN:
-            raise ValueError(f"layer pattern longer than {MAX_PATTERN_LEN}")
+            raise ValueError(_TOO_LONG)
         out = []
         for v in value:
             if isinstance(v, bool) or not isinstance(v, int):
@@ -131,7 +145,7 @@ def parse_layer_pattern(value):
 def moe_layer_pattern(raw: Any, num_layers: int) -> List[int]:
     """``1`` = MoE MLP, ``0`` = dense MLP, per layer.
 
-    The pattern is the one Megatron builds, or a ValueError:
+    The pattern is the one Megatron builds, or a ValueError (a TypeError for an unsupported type):
 
     * ``None`` (unset) is upstream's default ``moe_layer_freq=1``: every layer is MoE.
     * An int ``N >= 1`` means MoE every ``N``-th layer starting at 0 (upstream's

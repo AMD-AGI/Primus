@@ -39,6 +39,8 @@ FSDP2_FP32_PARAM_GRADS_PATCH = "megatron.muse_spark.fsdp2_fp32_param_grads"
 # per optimizer: (its fp32_from_fp32_groups, the groups without FSDP2 no-main_grad params, or
 # None when it holds no Muse Spark param)
 _CACHE_ATTR = "_primus_muse_spark_fsdp2_groups"
+# set on the wrapped _copy_model_grads_to_main_grads: the double-patch guard
+PATCHED_ATTR = "_primus_fsdp2_fp32"
 
 
 def _is_muse_spark_fsdp2(ctx: PatchContext) -> bool:
@@ -102,7 +104,7 @@ def patch_muse_spark_fsdp2_fp32_param_grads(ctx: PatchContext):
     from megatron.core.optimizer import optimizer as opt_module
 
     cls = opt_module.Float16OptimizerWithFloat16Params
-    if getattr(cls._copy_model_grads_to_main_grads, "_primus_fsdp2_fp32", False):
+    if getattr(cls._copy_model_grads_to_main_grads, PATCHED_ATTR, False):
         return
     from torch.distributed.tensor import DTensor
 
@@ -135,7 +137,7 @@ def patch_muse_spark_fsdp2_fp32_param_grads(ctx: PatchContext):
         finally:
             self.fp32_from_fp32_groups = saved
 
-    _copy_model_grads_to_main_grads._primus_fsdp2_fp32 = True
+    setattr(_copy_model_grads_to_main_grads, PATCHED_ATTR, True)
     cls._copy_model_grads_to_main_grads = _copy_model_grads_to_main_grads
     log_rank_0(
         f"[Patch:{FSDP2_FP32_PARAM_GRADS_PATCH}] FSDP2 (DTensor) fp32 params without main_grad keep their .grad"

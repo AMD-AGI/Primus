@@ -48,6 +48,13 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
 #   HF -> Megatron weights: primus/backends/megatron/checkpoint/native_loader_muse_spark.py.
 
+env:
+  # Muse Spark's large-K / small-N GEMMs (expert fc2 into the 4096 latent, post_expert_proj,
+  # router wgrad) need more hipBLASLt split-K workspace than TE's default on gfx950
+  # ("HIPBLASLT Error: 6"). Read by the base patch megatron.te.hipblaslt_gemm_workspace
+  # (te_patches/hipblaslt_workspace_patches.py); it only enlarges.
+  PRIMUS_TE_GEMM_WORKSPACE_MIB: "512"
+
 modules:
   pre_trainer:
     framework: megatron

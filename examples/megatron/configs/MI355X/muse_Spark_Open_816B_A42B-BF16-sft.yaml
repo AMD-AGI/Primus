@@ -36,7 +36,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # conversion); the memory check stops a layout that cannot fit before the model build.
 # Raise GBS with such a layout (see global_batch_size below): GBS 8 is for one node.
 # Loading the converted checkpoint at TP > 1 (e.g. this TP 8) is not yet tested; the
-# fine-tune gate loads it at TP 1 / EP 8. TP must divide the 202048 vocab rows (1, 2, 4, 8).
+# fine-tune gate loads it at TP 1 / EP 8. TP must divide the 202048 vocab rows (1, 2, 4, 8, 16).
 # In a multi-node job the other nodes wait for node 0's conversion while its heartbeat
 # moves (docs section 11.6); converting first and setting pretrained_checkpoint skips it.
 # See docs/03-configuration-reference/megatron-parameters.md, section 11.6.
@@ -46,6 +46,13 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # TP=PP=EP=1 and saves a torch_dist checkpoint, which Megatron reshards on load, so this
 # file trains at EP 8 (32 experts per GPU).
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
+
+env:
+  # Muse Spark's large-K / small-N GEMMs (expert fc2 into the 4096 latent, post_expert_proj,
+  # router wgrad) need more hipBLASLt split-K workspace than TE's default on gfx950
+  # ("HIPBLASLT Error: 6"). Read by the base patch megatron.te.hipblaslt_gemm_workspace
+  # (te_patches/hipblaslt_workspace_patches.py); it only enlarges.
+  PRIMUS_TE_GEMM_WORKSPACE_MIB: "512"
 
 modules:
   post_trainer:

@@ -125,3 +125,16 @@ def test_a_comprehension_or_name_is_refused_with_a_short_message(src):
         m.parse_layer_pattern(src)
     msg = str(e.value)
     assert "write the list out" in msg and "Name(" not in msg  # no ast.dump in the message
+
+
+@pytest.mark.parametrize("src", ["1+1", "2*2", "(1,0)", "(1,0)*2"])
+def test_a_string_without_a_list_must_be_a_plain_int_like_megatron(src):
+    with pytest.raises(ValueError, match="must be an int"):
+        _mod().parse_layer_pattern(src)
+
+
+@pytest.mark.parametrize("src", ["[1]+(1,0)", "(1,0)+[1]", "[1]+(0,1)", "([1],)"])
+def test_a_tuple_inside_a_list_expression_is_refused_like_megatron(src):
+    # Megatron's eval raises TypeError on list + tuple; the parser refuses tuples outright
+    with pytest.raises(ValueError, match="unsupported layer-pattern expression"):
+        _mod().parse_layer_pattern(src)

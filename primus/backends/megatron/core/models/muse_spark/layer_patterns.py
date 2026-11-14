@@ -197,8 +197,11 @@ def hf_sliding_window(value):
     HF convention: the parsed ``left``, or None for no window (None / ``left == -1``).
     ``left == 0`` raises (an HF window counts the query, so it is >= 1)."""
     ws = parse_window_size(value)
-    if ws is None or ws[0] == -1:
+    if ws is None:
         return None
-    if ws[0] < 1:
-        raise ValueError(f"window_size[0] is an HF sliding_window and must be >= 1 (or -1), got {ws[0]}")
-    return ws[0]
+    left, _ = ws
+    if left == -1:
+        return None
+    if left < 1:
+        raise ValueError(f"window_size[0] is an HF sliding_window and must be >= 1 (or -1), got {left}")
+    return left

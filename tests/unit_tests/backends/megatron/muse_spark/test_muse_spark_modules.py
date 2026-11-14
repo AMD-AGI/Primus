@@ -1054,7 +1054,6 @@ def test_a_rejected_setting_stops_the_run_through_the_patch_runner():
         "megatron.args.muse_spark_cp_comm",
         "megatron.args.muse_spark_no_fused_router",
         "megatron.muse_spark.memory_check",
-        "megatron.muse_spark.te_gemm_workspace",
         "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt",
         "megatron.muse_spark.chained_optimizer_relayout_load",
         "megatron.muse_spark.fsdp2_dtype_islands",
@@ -1065,7 +1064,6 @@ def test_muse_spark_patches_fail_fast(name):
     import primus.backends.megatron.patches.muse_spark_fsdp2_patches  # noqa: F401
     import primus.backends.megatron.patches.muse_spark_memory_check_patches  # noqa: F401
     import primus.backends.megatron.patches.muse_spark_optimizer_ckpt_patches  # noqa: F401
-    import primus.backends.megatron.patches.muse_spark_te_gemm_workspace_patches  # noqa: F401
     from primus.core.patches.patch_registry import PatchRegistry
 
     patch = PatchRegistry.get(name)

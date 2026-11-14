@@ -468,7 +468,7 @@ def test_build_margs_reads_the_checkpoint_vocab_without_a_passed_config(tmp_path
     [
         ({"text_config": {"hidden_size": 8}}, None, "the HF config has no vocab_size"),
         ({}, None, "the HF config has no vocab_size"),
-        (None, None, r"no HF config \(args.hf_dir is unset\) has no vocab_size"),
+        (None, None, r"no HF config was loaded \(args.hf_dir is unset\)"),
     ],
 )
 def test_build_margs_requires_the_checkpoint_vocab(hf_cfg, hf_dir, match):
@@ -512,6 +512,18 @@ def test_cut_to_layers_cuts_every_per_layer_list():
     for bad in (0, 63):
         with pytest.raises(ValueError, match="the checkpoint has 62 layers"):
             conv.cut_to_layers(cfg, bad)
+
+
+def test_cut_to_layers_keeps_lists_that_are_not_per_layer():
+    small = {
+        "num_hidden_layers": 4,
+        "layer_types": LAYER_TYPES[:4],
+        "eos_token_id": [1, 2, 3, 4],
+        "bad": [9] * 4,
+    }
+    t = conv.cut_to_layers({"text_config": small}, 2)["text_config"]
+    assert t["layer_types"] == LAYER_TYPES[:2]
+    assert t["eos_token_id"] == [1, 2, 3, 4] and t["bad"] == [9] * 4
 
 
 def test_the_depth_cut_maps_only_the_first_layers():
@@ -1619,7 +1631,7 @@ def test_the_hook_wait_takes_this_launchs_failure_written_before_it_began(tmp_pa
     # the record carries this launch's id, so the wait stops at once (not after 1800 s)
     monkeypatch.setenv("PRIMUS_CONVERT_RUN_ID", "launch-7")
     failed = tmp_path / "out.failed"
-    failed.write_text(f"run: {conv.conversion_run_id()}\nValueError: too big\n")
+    failed.write_text(f"run: {conv.conversion_run_tag()}\nValueError: too big\n")
     clock = _WaitClock()
     with pytest.raises(RuntimeError, match="failed: ValueError: too big"):
         _wait(tmp_path, clock)
@@ -1632,7 +1644,7 @@ def test_the_hook_wait_ignores_an_old_record_with_a_reused_launch_id(tmp_path, m
     monkeypatch.setenv("PRIMUS_CONVERT_RUN_ID", "constant")
     out, lock, done = tmp_path / "out", tmp_path / "out.converting.lock", tmp_path / "out.done"
     failed = tmp_path / "out.failed"
-    failed.write_text(f"run: {conv.conversion_run_id()}\nValueError: old failure\n")
+    failed.write_text(f"run: {conv.conversion_run_tag()}\nValueError: old failure\n")
     old = os.path.getmtime(failed) - conv.WAIT_START_S - 60
     os.utime(failed, (old, old))
 
@@ -1697,7 +1709,7 @@ def test_a_fresh_record_with_a_reused_id_names_the_reuse(tmp_path, monkeypatch):
     # a constant user id makes a fresh earlier record look like this
     # launch's (documented): the error says so, so the user can tell it from a new failure
     monkeypatch.setenv("PRIMUS_CONVERT_RUN_ID", "fixed")
-    (tmp_path / "out.failed").write_text(f"run: {conv.conversion_run_id()}\nValueError: old failure\n")
+    (tmp_path / "out.failed").write_text(f"run: {conv.conversion_run_tag()}\nValueError: old failure\n")
     with pytest.raises(RuntimeError, match="written before this wait began.*set a new value per launch"):
         _wait(tmp_path, _WaitClock())
 
@@ -1744,7 +1756,7 @@ def test_the_hook_wait_ignores_a_previous_launchs_failure_record(tmp_path, monke
         ({}, None),
     ],
 )
-def test_conversion_run_id(monkeypatch, env, want):
+def test_conversion_run_tag(monkeypatch, env, want):
     for k in (
         "PRIMUS_CONVERT_RUN_ID",
         "SLURM_JOB_ID",
@@ -1755,7 +1767,7 @@ def test_conversion_run_id(monkeypatch, env, want):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    assert conv.conversion_run_id() == want
+    assert conv.conversion_run_tag() == want
 
 
 def test_a_refused_duplicate_conversion_leaves_the_running_ones_record(tmp_path, monkeypatch):

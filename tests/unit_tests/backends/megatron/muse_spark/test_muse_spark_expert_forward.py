@@ -183,6 +183,25 @@ def test_the_norm_forward_pre_hooks_run_on_both_paths(fused):
     assert calls == [e._muse_post_expert_norm, {}]
 
 
+@pytest.mark.parametrize("fused", [True, False])
+def test_a_pre_hook_that_rewrites_the_input_is_honoured(fused):
+    # as in nn.Module._call_impl: the hook's returned args replace the norm input
+    # (a shift, not a scale: the norm is scale-invariant)
+    out, probs = _inputs()
+    e = _Experts(out, fused)
+    e._muse_post_expert_norm.register_forward_pre_hook(lambda mod, args: (args[0] + 1,))
+    hooked, _ = _run(e, probs)
+    ref = _Experts(out + 1, fused)
+    ref._muse_post_expert_norm.load_state_dict(e._muse_post_expert_norm.state_dict())
+    expected, _ = _run(ref, probs)
+    assert torch.equal(hooked, expected)
+    # control: the same weights without the hook give another output
+    plain_experts = _Experts(out, fused)
+    plain_experts._muse_post_expert_norm.load_state_dict(e._muse_post_expert_norm.state_dict())
+    plain, _ = _run(plain_experts, probs)
+    assert not torch.equal(hooked, plain)
+
+
 @pytest.mark.parametrize("text, fused", [("false", False), ("0", False), ("true", True), ("on", True)])
 def test_the_fused_flag_is_parsed_strictly(monkeypatch, text, fused):
     out, probs = _inputs()

@@ -145,6 +145,12 @@ def test_patch_wraps_megatron_flops_once(monkeypatch):
     assert training.num_floating_point_operations is first  # not wrapped twice
     a = _args()
     assert first(a, 1) == 1.0e15 + muse_spark_flops_delta(a, 1)
+    # without backend_args, the module config's params are the run's args: they are marked too
+    params = SimpleNamespace(model_type="muse_spark")
+    mod.patch_muse_spark_flops_reporting(
+        SimpleNamespace(extra={"module_config": SimpleNamespace(params=params)})
+    )
+    assert getattr(params, mod.MUSE_SPARK_ARGS_ATTR) is True
 
 
 def test_window_not_shorter_than_seq_is_no_correction():

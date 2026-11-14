@@ -4,7 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Muse Spark norms and the learned residual gate (eager torch; fp32 math).
+"""Muse Spark norms and the learned residual gate (fp32 math; fused Triton kernels on GPU,
+eager torch on CPU or when a ``muse_spark_fused_*`` flag is off).
 
 The three norm kinds of ``modeling_muse_spark`` (transformers), plus the residual gate:
 
@@ -125,8 +126,8 @@ class MuseSparkRMSNorm(nn.RMSNorm):
 class _ZeroInitRMSNorm(nn.RMSNorm):
     """The shared part of the Muse Spark ``(1 + w)`` norms: a zero-initialised weight of the
     config's width, marked sequence-parallel when the config is, and ``self.fused`` from the
-    subclass's ``FUSED_FLAG`` (default on). A subclass sets ``FUSED_FLAG``, its default eps
-    and ``forward``."""
+    subclass's ``FUSED_FLAG`` (default on). A subclass sets ``FUSED_FLAG`` and ``forward``
+    (and may override the default eps of 1e-5)."""
 
     FUSED_FLAG: str = None
 

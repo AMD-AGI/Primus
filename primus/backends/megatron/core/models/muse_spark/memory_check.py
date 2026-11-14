@@ -306,14 +306,13 @@ def _bytes_per_param(a):
     return weight + grad, float(opt)
 
 
-def state_bytes_per_gpu(a, world_size, vocab_size=None, parts=None, per_param=None, stage_params=None):
+def state_bytes_per_gpu(a, world_size, vocab_size=None, per_param=None, stage_params=None):
     """Bytes of weights + grads + optimizer states on the most loaded GPU (approximate).
 
     Takes the most loaded pipeline stage: the word embedding sits on the first stage,
     the output layer and the MTP blocks on the last (not spread over the stages).
 
-    ``parts``: a precomputed :func:`param_parts` result (it does not depend on the
-    layout unless the vocab padding does). ``per_param``: a precomputed
+    ``per_param``: a precomputed
     :func:`_bytes_per_param` result (it does not depend on the layout).
     ``stage_params``: a precomputed :func:`_stage_params` result for ``a``'s pipeline
     layout (it depends on PP, not on TP / EP / the world size).
@@ -323,7 +322,7 @@ def state_bytes_per_gpu(a, world_size, vocab_size=None, parts=None, per_param=No
     ep = int(getattr(a, "expert_model_parallel_size", 1) or 1)
     etp = int(getattr(a, "expert_tensor_parallel_size", 1) or 1)
     if stage_params is None:
-        stage_params = _stage_params(a, parts if parts is not None else param_parts(a, vocab_size))
+        stage_params = _stage_params(a, param_parts(a, vocab_size))
     # Megatron shards dense optimizer state / FSDP over the data-parallel group *with*
     # context parallel (get_data_parallel_group(with_context_parallel=True)): DP x CP.
     dp = max(1, world_size // (tp * pp))

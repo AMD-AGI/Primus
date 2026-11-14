@@ -38,6 +38,8 @@ from primus.core.utils.module_utils import log_rank_0
 
 # the patch ids (registration, fail_fast label and log prefix)
 CHAINED_OPTIMIZER_RELAYOUT_LOAD_PATCH = "megatron.muse_spark.chained_optimizer_relayout_load"
+# set on a wrapped method: the double-patch guard
+PATCHED_ATTR = "_primus_muse_spark"
 FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH = "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt"
 
 _MODEL_PARAM_GROUPS = ("float16_groups", "fp32_from_fp32_groups", "model_float16_groups", "model_fp32_groups")
@@ -141,7 +143,7 @@ def patch_muse_spark_fp16_optimizer_ckpt(ctx: PatchContext):
 
     cls = opt_module.Float16OptimizerWithFloat16Params
     orig = cls.sharded_state_dict
-    if getattr(orig, "_primus_muse_spark", False):
+    if getattr(orig, PATCHED_ATTR, False):
         return
 
     def sharded_state_dict(self, model_sharded_state_dict, is_loading=False, metadata=None):
@@ -153,7 +155,7 @@ def patch_muse_spark_fp16_optimizer_ckpt(ctx: PatchContext):
             return orig(self, model_sharded_state_dict, is_loading, metadata)
         return fp16_optimizer_sharded_state_dict(self, model_sharded_state_dict, is_loading, metadata)
 
-    sharded_state_dict._primus_muse_spark = True
+    setattr(sharded_state_dict, PATCHED_ATTR, True)
     cls.sharded_state_dict = sharded_state_dict
     log_rank_0(
         f"[Patch:{FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH}] optimizer checkpoint ids follow the optimizer's param order"
@@ -250,7 +252,7 @@ def patch_muse_spark_chained_optimizer_load(ctx: PatchContext):
     from megatron.core.optimizer.optimizer import ChainedOptimizer
 
     orig = ChainedOptimizer.load_state_dict
-    if getattr(orig, "_primus_muse_spark", False):
+    if getattr(orig, PATCHED_ATTR, False):
         return
 
     def load_state_dict(self, state_dict):
@@ -267,5 +269,5 @@ def patch_muse_spark_chained_optimizer_load(ctx: PatchContext):
             self._synchronize_steps()
         return None
 
-    load_state_dict._primus_muse_spark = True
+    setattr(load_state_dict, PATCHED_ATTR, True)
     ChainedOptimizer.load_state_dict = load_state_dict

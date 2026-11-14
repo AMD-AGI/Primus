@@ -122,7 +122,7 @@ _CFG_DEFAULTS = {
 FP32_SUFFIXES = ("_bda.gate", "mlp.router.weight", "mlp.router.expert_bias")
 
 
-# the converter's log prefix (MuseSparkConverter.family = "muse-spark")
+# the converter's log prefix
 LOG_TAG = "[muse-spark-convert]"
 
 
@@ -149,14 +149,19 @@ def text_config(cfg: dict) -> dict:
     return cfg.get("text_config", cfg)
 
 
+# text_config lists with one entry per decoder layer (cut by cut_to_layers)
+PER_LAYER_KEYS = ("layer_types", "layer_rope_theta", "mlp_layer_types")
+
+
 def cut_to_layers(cfg, num_layers):
     """``cfg`` (an HF config dict) cut to its first ``num_layers`` decoder layers; ``cfg``
     itself when ``num_layers`` is None or the full depth.
 
     Layer i of the cut is the released layer i, so its weights are the released tensors
     (a fine-tune with ``--num_layers 4`` trains such a cut). ``num_hidden_layers`` and
-    every per-layer list of the text config (``layer_types``, ``layer_rope_theta``,
-    ``mlp_layer_types``, ...: a list with one entry per layer) are cut; nothing else changes.
+    the per-layer lists of the text config named in ``PER_LAYER_KEYS`` (``layer_types``,
+    ``layer_rope_theta``, ``mlp_layer_types``) are cut; nothing else changes (other lists,
+    e.g. a multi-id ``eos_token_id``, are kept as they are).
     """
     if num_layers is None:
         return cfg
@@ -167,7 +172,7 @@ def cut_to_layers(cfg, num_layers):
         raise ValueError(f"num_layers={num_layers!r}: the checkpoint has {total} layers (use 1..{total})")
     if n == total:
         return cfg
-    cut = {k: (v[:n] if isinstance(v, list) and len(v) == total else v) for k, v in t.items()}
+    cut = {k: (v[:n] if k in PER_LAYER_KEYS and isinstance(v, list) else v) for k, v in t.items()}
     cut["num_hidden_layers"] = n
     return dict(cfg, text_config=cut) if "text_config" in cfg else cut
 
@@ -353,9 +358,10 @@ MAX_PARAMS_KEY = "native_ckpt_max_params"
 # headroom over the plan: Python / TE objects, the safetensors reader, allocator slack
 MEMORY_MARGIN = 1.05
 _DTYPE_BYTES = {"bf16": 2, "fp16": 2, "fp32": 4}
-# cgroup v1 reports "no limit" as a huge page-aligned value (~2**63): a limit at or above this
-# is not a limit
-_CGROUP_V1_UNLIMITED = 1 << 60
+# cgroup "no limit" threshold (v1 memory.limit_in_bytes reports a huge page-aligned value,
+# ~2**63; v2 memory.max reads "max", which isdigit() already skips): a limit at or above
+# this is not a limit
+_CGROUP_NO_LIMIT_THRESHOLD = 1 << 60
 
 
 def conversion_memory_plan(fields, vocab_size=DEFAULT_VOCAB_SIZE, dtype="bf16"):
@@ -419,7 +425,7 @@ def _cgroup_free(d):
     ):
         limit = _read_text(os.path.join(d, limit_name), "")
         usage = _read_text(os.path.join(d, usage_name), "")
-        if limit.isdigit() and usage.isdigit() and int(limit) < _CGROUP_V1_UNLIMITED:
+        if limit.isdigit() and usage.isdigit() and int(limit) < _CGROUP_NO_LIMIT_THRESHOLD:
             # the cgroup's usage counts the page cache; its inactive part is reclaimable
             stat = _read_text(os.path.join(d, "memory.stat"), "")
             cache = 0
@@ -537,9 +543,13 @@ def check_convert_args(args, hf_cfg):
     if not vocab_size:
         # Without it Megatron would size the head from the tokenizer (and its own 128*TP
         # padding): a checkpoint whose rows differ from training's, with no error.
-        src = "the HF config" if hf_cfg is not None else "no HF config (args.hf_dir is unset)"
+        if hf_cfg is None:
+            raise ValueError(
+                "Muse Spark native conversion: no HF config was loaded (args.hf_dir is unset); the "
+                "checkpoint vocab_size sizes the embedding and output layer, so the HF config is required"
+            )
         raise ValueError(
-            f"Muse Spark native conversion: {src} has no vocab_size (text_config.vocab_size or the "
+            "Muse Spark native conversion: the HF config has no vocab_size (text_config.vocab_size or the "
             "top level); the checkpoint's vocab sizes the embedding and output layer, so it is required"
         )
     return vocab_size
@@ -1002,7 +1012,7 @@ def unsplit_expert_fc1_save(model):
     such view before it writes (for the released model, about the size of the experts on
     top of the model). One shard per expert has the same key, global
     shape and expert offset, so the global tensor on disk is the same and a training run
-    (which reads it in halves, at any TP / EP) loads it as before. Only the experts' config
+    (which reads it in halves, at any TP / EP) loads it unchanged. Only the experts' config
     is replaced (a copy with ``gated_linear_unit`` False, read by their
     ``sharded_state_dict`` only; no forward runs in the block), then restored."""
     from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
@@ -1327,7 +1337,7 @@ RUN_ID_PREFIX = "run: "  # the first line of a failure or start record: the laun
 
 def format_run_line():
     """The first line of a failure or start record: this launch's id (``-``: none)."""
-    return f"{RUN_ID_PREFIX}{conversion_run_id() or '-'}\n"
+    return f"{RUN_ID_PREFIX}{conversion_run_tag() or '-'}\n"
 
 
 def format_failure_record(error):
@@ -1345,10 +1355,10 @@ def parse_run_record(text):
     return (None if value in ("", "-") else value), rest.strip()
 
 
-def conversion_run_id():
-    """An id every node of this launch shares and no other launch has, or None: the
-    optional ``PRIMUS_CONVERT_RUN_ID`` environment variable, returned as
-    ``PRIMUS_CONVERT_RUN_ID=<value>`` (None when unset or blank). The user sets one
+def conversion_run_tag():
+    """A tag every node of this launch shares and no other launch has, or None: the
+    optional ``PRIMUS_CONVERT_RUN_ID`` environment variable, returned as the tag
+    ``PRIMUS_CONVERT_RUN_ID=<value>`` that the records store (None when unset or blank). The user sets one
     new value per launch on every node (for example the Slurm job and step ids); the
     launchers do not set it. Without it, a failure of node 0 before the other nodes start
     waiting is seen after ``WAIT_START_S``; one while they wait is seen at once."""
@@ -1392,7 +1402,7 @@ def start_record_path(save_dir):
 
 def hook_before_convert(save_dir):
     """The posttrain hook's step on node 0 just before the conversion: record that this
-    launch's node 0 started (its id, :func:`conversion_run_id`), and remove a previous
+    launch's node 0 started (its id, :func:`conversion_run_tag`), and remove a previous
     launch's failure record. A failure of node 0 after this point, also one before the
     converter runs (convert-phase patches, its import), ends with the hook's lock removed;
     a waiting node that never saw the lock still knows from this record that node 0 started,
@@ -1463,7 +1473,7 @@ def wait_for_hook_conversion(
     It raises at once when node 0's conversion writes its failure record
     (:func:`failure_record_path`, also for a refusal before the lock is ever seen, e.g. the size
     cap). A record that was there before the wait began counts at once when it carries this
-    launch's :func:`conversion_run_id` and was written less than ``WAIT_START_S`` ago (node 0
+    launch's :func:`conversion_run_tag` and was written less than ``WAIT_START_S`` ago (node 0
     failed before this node started waiting), and otherwise only once it is rewritten (a
     previous run's record, also one with a reused id).
     It raises when the hook's ``lock_file`` is gone for ``WAIT_LOCK_GONE_S`` without a
@@ -1482,7 +1492,7 @@ def wait_for_hook_conversion(
     lock_seen = gone_since = None
 
     failed = failure_record_path(save_dir)
-    run_id = conversion_run_id()
+    run_id = conversion_run_tag()
     # a record already there when this wait begins: this run's (node 0 failed before this node
     # started waiting) when it carries this launch's run id; else a previous run's, which
     # counts only once node 0 rewrites it
@@ -1570,7 +1580,6 @@ class MuseSparkConverter:
     reshards on load).
     """
 
-    family = "muse-spark"
     # the rendezvous port of the single-process build; distinct from the llama / qwen3
     # (29563) and deepseek (29561) loaders
     master_port = 29571
@@ -1866,15 +1875,15 @@ def cut_record_path(save_dir):
 def _cut_record_check(layers):
     """``ConvertPlan.check_existing``: refuse to reuse a checkpoint converted at another
     depth (its ``<checkpoint>.muse_spark_layers`` record; ``all`` for every layer). A
-    checkpoint without the record (converted elsewhere) is reused as before."""
+    checkpoint without the record (converted elsewhere) is reused without a depth check."""
     want = _cut_record_value(layers)
 
     def check(path):
         got = _read_text(cut_record_path(path), None)
-        if got is None or got.strip() == want:
+        if got is None or got == want:
             return None
         return (
-            f"{path} was converted with {got.strip()} decoder layer(s), but this fine-tune needs "
+            f"{path} was converted with {got} decoder layer(s), but this fine-tune needs "
             f"{want}: remove it, or set native_ckpt_out to another directory"
         )
 

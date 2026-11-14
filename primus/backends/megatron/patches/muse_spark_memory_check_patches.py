@@ -49,8 +49,12 @@ def patch_muse_spark_memory_check(ctx: PatchContext):
         return
     total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
     world = int(getattr(args, "world_size", None) or get_torchrun_env()["world_size"])
-    # the shared reader (GPUS_PER_NODE, then LOCAL_WORLD_SIZE), as the DeepEP check; a
-    # malformed value raises there; with neither set, this node's device count
+    # total (not free) memory: the check runs before the model is built, so it compares the
+    # model states with the GPU's capacity; Megatron's initialize has set this rank's device.
+    # GPUs per node: the shared reader (GPUS_PER_NODE, then LOCAL_WORLD_SIZE, which torchrun
+    # always sets), as the DeepEP check; a malformed value raises there. Only a launch
+    # without either (no torchrun) falls back to the visible device count, which is 1 under
+    # per-rank GPU visibility: set GPUS_PER_NODE there.
     n_gpus = gpus_per_node(torch.cuda.device_count())  # >= 1: CUDA is available here
     need = required_state_bytes_or_raise(args, world, total, n_gpus_per_node=n_gpus)
     note = ""

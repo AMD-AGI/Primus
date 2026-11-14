@@ -196,10 +196,8 @@ def test_optimizer_args_change_the_bytes():
 def test_counts_param_keeps_the_result():
     a = _a(expert_model_parallel_size=64, pipeline_model_parallel_size=2)
     base = state_bytes_per_gpu(a, 128)
-    assert state_bytes_per_gpu(a, 128, parts=param_parts(a)) == base
     # each precomputed argument is used, not recomputed: doubled counts double the bytes
     parts = param_parts(a)
-    assert state_bytes_per_gpu(a, 128, parts={k: 2 * v for k, v in parts.items()}) == pytest.approx(2 * base)
     wg, opt = _bytes_per_param(a)
     assert state_bytes_per_gpu(a, 128, per_param=(2 * wg, 2 * opt)) == pytest.approx(2 * base)
     stages = [(2 * d, 2 * e) for d, e in _stage_params(a, parts)]

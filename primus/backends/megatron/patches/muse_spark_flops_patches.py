@@ -194,6 +194,8 @@ def muse_spark_flops_delta(
 
 # set on the run's args object by the patch: the per-call Muse Spark check of the wrapper
 MUSE_SPARK_ARGS_ATTR = "_primus_muse_spark_flops"
+# marks the wrapped num_floating_point_operations, so the patch never wraps it twice
+_PATCHED_ATTR = "_muse_spark_flops_patched"
 
 
 def is_muse_spark_args(args) -> bool:
@@ -240,7 +242,7 @@ def make_muse_spark_num_floating_point_operations(original_fn):
         )
 
     wrapped.__wrapped__ = original_fn
-    wrapped._muse_spark_flops_patched = True
+    setattr(wrapped, _PATCHED_ATTR, True)
     return wrapped
 
 
@@ -259,7 +261,7 @@ def patch_muse_spark_flops_reporting(ctx: PatchContext):
         if args is not None:
             setattr(args, MUSE_SPARK_ARGS_ATTR, True)
     original_fn = training_module.num_floating_point_operations
-    if getattr(original_fn, "_muse_spark_flops_patched", False):
+    if getattr(original_fn, _PATCHED_ATTR, False):
         return
     training_module.num_floating_point_operations = make_muse_spark_num_floating_point_operations(original_fn)
     log_rank_0(f"{_TAG} wrapped num_floating_point_operations (sliding-window keys, router GEMM)")

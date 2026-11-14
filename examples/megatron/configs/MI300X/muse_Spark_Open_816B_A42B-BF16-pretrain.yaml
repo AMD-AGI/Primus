@@ -51,6 +51,16 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
 #   HF -> Megatron weights: primus/backends/megatron/checkpoint/native_loader_muse_spark.py.
 
+env:
+  # Muse Spark's large-K / small-N GEMMs (expert fc2 into the 4096 latent, post_expert_proj,
+  # router wgrad) failed with "HIPBLASLT Error: 6" at TE's default workspace on gfx950
+  # (MI355X). It was not measured on MI300X (gfx942, TE default 32 MiB): the same value is
+  # kept here as a precaution for the same GEMM shapes. It costs 512 MiB per TE workspace
+  # (one plus one per grouped-GEMM stream) of the activation budget; remove it if your runs
+  # do not hit the error. Read by the base patch megatron.te.hipblaslt_gemm_workspace
+  # (te_patches/hipblaslt_workspace_patches.py); it only enlarges.
+  PRIMUS_TE_GEMM_WORKSPACE_MIB: "512"
+
 modules:
   pre_trainer:
     framework: megatron
