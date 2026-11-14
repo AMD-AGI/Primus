@@ -94,6 +94,9 @@ modules:
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
+      # The causal / sliding-window attention kernels do not read a mask; building one
+      # costs a 16 MB [1, 1, s, s] host-to-device copy at the start of every micro-batch.
+      create_attention_mask_in_dataloader: false
 
       # Off for this benchmark proxy: Megatron's NaN / Inf check reads every DDP grad
       # bucket's norm on the host inside the backward pass (one hipStreamSynchronize per
