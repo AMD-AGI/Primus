@@ -77,9 +77,14 @@ class MuseSparkTransformerConfig(TransformerConfig):
     muse_spark_compile_norms: bool = False
     """Run each norm region as one ``torch.compile`` graph (``compiled_norms.py``): the gated
     residuals (post-norm + gate coefficients + combine), the per-head ``o_norm`` with the
-    sigmoid output gate, the Q / K norms and the centered norms. Takes precedence over the
-    ``muse_spark_fused_*`` flags for those regions (not the per-expert ``post_expert_norm``).
-    Parsed strictly (``bool_flag``)."""
+    sigmoid output gate, the Q / K norms, the centered norms and the expert SwiGLU. Takes
+    precedence over the ``muse_spark_fused_*`` flags for those regions (not the per-expert
+    ``post_expert_norm``). Parsed strictly (``bool_flag``)."""
+    muse_spark_compile_fuse_next_norm: bool = False
+    """With ``muse_spark_compile_norms``: compute each centered norm in the graph of the gated
+    residual before it (attention residual -> ``pre_mlp_layernorm``; MoE residual -> the next
+    layer's ``input_layernorm``), handing the output to the norm. Off by default: no faster
+    than the separate graphs on the 4-layer proxy (MI455X). Parsed strictly (``bool_flag``)."""
     residual_gate_init_value: float = -0.9
     """Initial value of every residual gate ``g`` for a run from random weights (a checkpoint
     load overwrites it). HF initialises ``g ~ N(0, 0.02)`` (beta = 0.5, alpha = 0.87): the
@@ -124,6 +129,7 @@ class MuseSparkTransformerConfig(TransformerConfig):
             "muse_spark_fused_attn_norm",
             "muse_spark_fused_centered_norm",
             "muse_spark_compile_norms",
+            "muse_spark_compile_fuse_next_norm",
             "embedding_norm",
             "window_size_is_hf_sliding_window",
         ):

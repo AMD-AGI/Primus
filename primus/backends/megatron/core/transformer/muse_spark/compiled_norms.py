@@ -12,9 +12,14 @@ branch``, the sigmoid output gate, the ``1 + w`` of the centered norms. Each fun
 is the eager formula of one whole region; compiled, Inductor emits one reduction + pointwise
 kernel per region forward and one per backward. The math and the roundings are those of the
 eager modules in ``norms.py`` / ``attention.py`` (fp32 math, rounded once where they round).
+
+``gated_residual_norm_math`` also folds the next sublayer's centered norm into the gated
+residual (``MuseSparkGatedResidual.gated`` hands the norm output to the next norm, see
+``link_next_norm`` in ``norms.py``); ``swiglu_math`` is the expert activation.
 """
 
 import torch
+import torch.nn.functional as F
 
 __all__ = [
     "compiled",
@@ -22,7 +27,9 @@ __all__ = [
     "centered_norm_math",
     "input_scaled_norm_math",
     "gated_residual_math",
+    "gated_residual_norm_math",
     "o_norm_gate_math",
+    "swiglu_math",
 ]
 
 
@@ -66,6 +73,29 @@ def gated_residual_math(
     return (alpha * residual + beta * post).to(residual.dtype)
 
 
+def gated_residual_norm_math(
+    branch: torch.Tensor,
+    residual: torch.Tensor,
+    gate: torch.Tensor,
+    post_weight,
+    temperature: float,
+    eps: float,
+    norm_weight: torch.Tensor,
+    norm_eps: float,
+) -> tuple:
+    """The gated residual and the next sublayer's centered norm in one graph: returns the
+    new residual ``h`` and ``centered_norm(h)``."""
+    h = gated_residual_math(branch, residual, gate, post_weight, temperature, eps)
+    return h, centered_norm_math(h, norm_weight, norm_eps)
+
+
+def swiglu_math(x: torch.Tensor) -> torch.Tensor:
+    """``silu(a) * b`` on the halves of ``x`` in its dtype, rounding after the silu and the
+    product as the eager glu in ``PrimusGroupedMLP.bias_act_func`` does."""
+    a, b = torch.chunk(x, 2, dim=-1)
+    return F.silu(a) * b
+
+
 def o_norm_gate_math(x: torch.Tensor, gate: torch.Tensor, head_dim: int, eps: float) -> torch.Tensor:
     """Per-head weightless ``o_norm`` then Megatron's ``x * sigmoid(gate.float())``."""
     shape = x.shape
@@ -77,7 +107,10 @@ _COMPILED = {}
 
 
 def compiled(fn):
-    """``fn`` compiled once per process (static shapes, no graph breaks)."""
+    """``fn`` compiled once per process (static shapes, no graph breaks). Inductor may keep
+    an intermediate bf16 value in fp32 inside a fused kernel, so results can differ from
+    the eager modules by one bf16 rounding step (``emulate_precision_casts`` would round
+    there too, at ~1-2 % of the step on the 4-layer proxy)."""
     c = _COMPILED.get(fn)
     if c is None:
         c = _COMPILED[fn] = torch.compile(fn, dynamic=False, fullgraph=True)
