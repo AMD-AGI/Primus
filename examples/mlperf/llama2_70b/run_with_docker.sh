@@ -265,7 +265,8 @@ for _experiment_index in $(seq 1 "${NEXP}"); do
         fi
     fi
 
-    _run_env=("${_base_exec_env[@]}" --env="SEED=${RANDOM}")
+    # SEED=<n> from the host: the same seed for every trial (default: random per trial).
+    _run_env=("${_base_exec_env[@]}" --env="SEED=${SEED:-${RANDOM}}")
 
     set +e
     docker exec "${_run_env[@]}" "${_cont_name}" bash -lc "${_run_cmd}" \

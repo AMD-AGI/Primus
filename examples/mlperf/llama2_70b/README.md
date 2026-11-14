@@ -24,6 +24,7 @@ Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 - Hugging Face access to `meta-llama/Llama-2-70b-hf` (`HF_TOKEN`)
 - ~300 GB disk for packed data + Megatron checkpoint
 - Docker with ROCm (`/dev/kfd`, `/dev/dri`)
+- Primus checkout with submodules (`git submodule update --init --recursive`); training needs `third_party/Megatron-Bridge`
 
 ---
 
@@ -132,7 +133,7 @@ INTERACTIVE=1 bash examples/mlperf/llama2_70b/run_with_docker.sh
 4. For each trial **`1..NEXP`**:
    - Runs **`runtime_tunables.sh`** on the **host** (unless disabled).
    - Optionally drops host page cache if **`CLEAR_CACHES=1`**.
-   - **`docker exec`** → **`bash /workspace/code/run_and_time.sh`** with a new **`SEED=$RANDOM`** and env from **`config_MI355X_1x8x1.sh`** (+ MLLOG paths under **`/results`**).
+   - **`docker exec`** → **`bash /workspace/code/run_and_time.sh`** with **`SEED`** (the host's `SEED` if set, else a new `$RANDOM`) and env from **`config_MI355X_1x8x1.sh`** (+ MLLOG paths under **`/results`**).
    - Streams container stdout to **`${LOGDIR}/${DATESTAMP}_<trial>.log`** on the host.
    - Copies **`mlperf_logging.out`** and **`train.mlperfposttrain.exp.log`** into **`${LOGDIR}/artifacts/`** after each successful trial.
 5. **Removes** the container on exit (success or failure).
@@ -177,6 +178,7 @@ Variables you set most often:
 | **`CONT`** | `rocm/primus:v26.5` | Docker image |
 | **`DGXSYSTEM`** | `MI355X_1x8x1` | Suffix for `config_${DGXSYSTEM}.sh` |
 | **`NEXP`** | `1` | Number of timed trials (submission often uses **10**) |
+| **`SEED`** | random per trial | Same seed for every trial |
 | **`SUBMISSION_QUIET`** | `0` | `1` → sets `PRIMUS_LOG_SUPPRESSION=1`, `MLPERF_VERBOSE_LOGS=0`, `PRIMUS_LOG_GPU_MEM=0`, `VERBOSE_TRAINING_LOG=0` |
 | **`INTERACTIVE`** | `0` | `1` → prompt for missing settings |
 | **`PRIMUS_HOST`** | auto (repo root) | Host path to Primus checkout |
@@ -207,7 +209,7 @@ export SUBMISSION_QUIET=1
 bash examples/mlperf/llama2_70b/run_with_docker.sh
 ```
 
-Each trial gets a random **`SEED`**. Collect **`${LOGDIR}/${DATESTAMP}_*.log`** and **`${LOGDIR}/artifacts/`** for your submission bundle.
+Each trial gets a random **`SEED`** unless **`SEED`** is set. Collect **`${LOGDIR}/${DATESTAMP}_*.log`** and **`${LOGDIR}/artifacts/`** for your submission bundle.
 
 ### 3.7 Host runtime tunables
 
