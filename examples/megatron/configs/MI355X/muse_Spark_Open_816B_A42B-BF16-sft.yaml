@@ -8,8 +8,10 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # (one node, 8 GPUs, EP 8, PP 1) fit only a 4-layer cut: on one node, run it with
 # --num_layers 4. Launch with the
 # post-train entrypoint, which converts the checkpoint first
-# (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py):
-#   ./runner/primus-cli direct -- train posttrain --config <this file>
+# (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py). Do not run it
+# with the defaults alone: at full depth the one-node layout cannot fit, and node 0 would
+# first convert the whole 822B checkpoint. Pass --num_layers 4 on one node (below), or a
+# multi-node layout for the full model (see "# Model:" below).
 # One node (the 4-layer cut; MUSE_SPARK_HF_PATH is required: the default below is a
 # placeholder):
 #   MUSE_SPARK_HF_PATH=/data/Muse-Spark-Open-816B-A42B ./runner/primus-cli direct -- \
@@ -20,7 +22,8 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # falls back to Megatron-Bridge, which has no Muse Spark model).
 #
 # Model: the full preset (muse_Spark_Open_816B_A42B, 62 layers), kept as the default
-# because multi-node fine-tunes of the released model run this file at full depth. A
+# because multi-node fine-tunes of the released model run this file at full depth (set
+# --save to keep their weights: the file saves nothing by default, see save below). A
 # shallower fine-tune (--num_layers 4)
 # against the released 62-layer checkpoint makes the hook convert only its first 4
 # layers (the converter's depth cut), into <hf dir name>_native_torch_dist_layers4; a
@@ -35,8 +38,8 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # already converted checkpoint as pretrained_checkpoint (the hook then skips the
 # conversion); the memory check stops a layout that cannot fit before the model build.
 # Raise GBS with such a layout (see global_batch_size below): GBS 8 is for one node.
-# Loading the converted checkpoint at TP > 1 (e.g. this TP 8) is not yet tested; the
-# fine-tune gate loads it at TP 1 / EP 8. TP must divide the 202048 vocab rows (1, 2, 4, 8, 16).
+# The layouts a converted checkpoint is tested to load at are in docs section 11.6.
+# TP must divide the 202048 vocab rows (1, 2, 4, 8, 16).
 # In a multi-node job the other nodes wait for node 0's conversion while its heartbeat
 # moves (docs section 11.6); converting first and setting pretrained_checkpoint skips it.
 # See docs/03-configuration-reference/megatron-parameters.md, section 11.6.
@@ -121,6 +124,9 @@ modules:
       auto_detect_ckpt_format: true
       auto_continue_train: false
       load: null
+      # As shipped this file keeps NO weights (save: null, no final save): it is a smoke
+      # run of the convert + fine-tune flow. To keep the fine-tuned model, pass
+      #   --save <dir> --disable_last_saving false   (and --no_save_optim false to resume)
       save: null
       disable_last_saving: true
       no_save_optim: true

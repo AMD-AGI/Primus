@@ -688,8 +688,10 @@ class TestMegatronTrainer(PrimusUT):
 
     # Muse Spark (muse_spark): one case, the full preset cut to 4 layers and 16 experts on the
     # command line. It checks that the Muse Spark model code was built
-    # (the markers below). The layout is pinned on the command line, so a change of the
-    # example's parallel defaults does not change what a case runs. CPU coverage of the model
+    # (the markers below). The parallel layout (TP / PP / EP, batch sizes) is pinned on the
+    # command line, so a change of the example's parallel defaults does not change what a
+    # case runs; recompute is switched off (--recompute_granularity null), so the example's
+    # recompute_method / recompute_num_layers have no effect. CPU coverage of the model
     # code, patches and converter: tests/unit_tests/backends/megatron/muse_spark/.
     _MUSE_SPARK_MARKERS = (
         "Loaded Muse-Spark model_provider",

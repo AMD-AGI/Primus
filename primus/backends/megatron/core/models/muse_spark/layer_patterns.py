@@ -42,6 +42,10 @@ __all__ = [
     "hf_sliding_window",
     "MAKE_VOCAB_SIZE_DIVISIBLE_BY",
     "HF_OUTPUT_MULTIPLIER",
+    "HF_QK_SCALE_FACTOR",
+    "HF_FINAL_LOGIT_SOFTCAPPING",
+    "HF_POST_NORM_EPS",
+    "HF_RESIDUAL_GATE_TEMPERATURE",
     "vocab_size_with_padding",
 ]
 
@@ -57,6 +61,13 @@ MAKE_VOCAB_SIZE_DIVISIBLE_BY = 64
 # HF ``output_multiplier`` (1/sqrt(32)): HF applies the one value to the router logits and to
 # the lm-head logits. The config field defaults and the converter's defaults both use it.
 HF_OUTPUT_MULTIPLIER = 1 / math.sqrt(32)
+
+# The released model's values of four more HF config keys: the MuseSparkTransformerConfig
+# field defaults and the converter's defaults for a key absent from config.json (one copy).
+HF_QK_SCALE_FACTOR = 5.4730064863875
+HF_FINAL_LOGIT_SOFTCAPPING = 20.0
+HF_POST_NORM_EPS = 1e-8
+HF_RESIDUAL_GATE_TEMPERATURE = 0.3
 
 
 def _vocab_padding_int(value, name, default=None):

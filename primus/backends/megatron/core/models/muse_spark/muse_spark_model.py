@@ -11,7 +11,8 @@
   ``MuseSparkTextNormedEmbedding`` does. Megatron's embedding applies dropout
   before it returns, so the norm runs *after* embedding dropout (HF: norm, no
   dropout). This matches HF only with ``hidden_dropout == 0`` (the presets' value);
-  a non-zero ``hidden_dropout`` is rejected at build time when ``embedding_norm`` is set.
+  a non-zero ``hidden_dropout`` is rejected by ``MuseSparkTransformerConfig`` (on every
+  rank, before the build) when ``embedding_norm`` is set.
 * The untied output logits become
   ``final_logit_softcapping * tanh(logits * output_logit_multiplier / final_logit_softcapping)``
   (only the multiplier when ``final_logit_softcapping`` is 0 / unset).
@@ -105,11 +106,7 @@ class MuseSparkModel(GPTModel):
         kwargs.setdefault("position_embedding_type", "rope")
         super().__init__(config, *args, **kwargs)
         if self.pre_process and config.embedding_norm:
-            if config.hidden_dropout:
-                raise ValueError(
-                    "Muse Spark: hidden_dropout must be 0 (the embedding norm runs after Megatron's "
-                    f"embedding dropout, which HF does not have); got {config.hidden_dropout}"
-                )
+            # hidden_dropout == 0 is checked by MuseSparkTransformerConfig.__post_init__ (every rank)
             self.embedding.__class__ = MuseSparkNormedEmbedding
             self.embedding.muse_embed_norm_eps = float(config.layernorm_epsilon)
         log_rank_0(f"[Primus:MuseSpark] built modules: {built_module_summary(self)}")

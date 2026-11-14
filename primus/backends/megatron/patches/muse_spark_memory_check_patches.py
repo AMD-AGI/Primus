@@ -55,8 +55,8 @@ def patch_muse_spark_memory_check(ctx: PatchContext):
     # always sets), as the DeepEP check; a malformed value raises there. Only a launch
     # without either (no torchrun) falls back to the visible device count, which is 1 under
     # per-rank GPU visibility: set GPUS_PER_NODE there.
-    n_gpus = gpus_per_node(torch.cuda.device_count())  # >= 1: CUDA is available here
-    need = required_state_bytes_or_raise(args, world, total, n_gpus_per_node=n_gpus)
+    n_gpus_per_node = gpus_per_node(torch.cuda.device_count())  # >= 1: CUDA is available here
+    need = required_state_bytes_or_raise(args, world, total, n_gpus_per_node=n_gpus_per_node)
     note = ""
     if need > WARN_FRACTION * total:
         note = (

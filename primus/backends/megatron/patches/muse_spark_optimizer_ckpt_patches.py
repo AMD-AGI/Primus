@@ -38,9 +38,9 @@ from primus.core.utils.module_utils import log_rank_0
 
 # the patch ids (registration, fail_fast label and log prefix)
 CHAINED_OPTIMIZER_RELAYOUT_LOAD_PATCH = "megatron.muse_spark.chained_optimizer_relayout_load"
+FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH = "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt"
 # set on a wrapped method: the double-patch guard
 PATCHED_ATTR = "_primus_muse_spark"
-FP16_OPTIMIZER_FP32_PARAM_CKPT_PATCH = "megatron.muse_spark.fp16_optimizer_fp32_param_ckpt"
 
 _MODEL_PARAM_GROUPS = ("float16_groups", "fp32_from_fp32_groups", "model_float16_groups", "model_fp32_groups")
 

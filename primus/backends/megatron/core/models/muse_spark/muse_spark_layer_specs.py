@@ -43,6 +43,7 @@ from megatron.core.transformer.transformer_layer import (
     TransformerLayerSubmodules,
 )
 
+from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
 from primus.backends.megatron.core.transformer.muse_spark.attention import (
     MuseSparkQKNorm,
     MuseSparkSelfAttention,
@@ -135,7 +136,7 @@ def get_muse_spark_layer_spec(config) -> ModuleSpec:
                 module=MuseSparkGatedResidual, params={"config": config, "kind": "attn"}
             ),
             pre_mlp_layernorm=MuseSparkCenteredRMSNorm,
-            mlp=get_muse_spark_moe_spec(backend, grouped_gemm=bool(config.moe_grouped_gemm)),
+            mlp=get_muse_spark_moe_spec(backend, grouped_gemm=config_flag(config, "moe_grouped_gemm", False)),
             mlp_bda=ModuleSpec(module=MuseSparkGatedResidual, params={"config": config, "kind": "mlp"}),
         ),
     )

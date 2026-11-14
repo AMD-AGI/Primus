@@ -246,6 +246,42 @@ def test_cp_comm_patch_only_with_window_and_cp(monkeypatch):
         )
 
 
+def test_cp_comm_patch_parses_a_string_cp_size(monkeypatch):
+    # an env-substituted yaml value or a CLI override can be the string "2"
+    monkeypatch.setattr(rc, "warning_rank_0", lambda m: None)
+    ctx = _ctx(context_parallel_size="2", window_size=(2047, 0), cp_comm_type=["p2p"])
+    rc.patch_muse_spark_cp_comm(ctx)
+    assert ctx.extra["backend_args"].cp_comm_type == ["all_gather"]
+    with pytest.raises(ValueError, match="context_parallel_size"):
+        rc.patch_muse_spark_cp_comm.__wrapped__(
+            _ctx(context_parallel_size="two", window_size=(2047, 0), cp_comm_type=["p2p"])
+        )
+
+
+def test_ranks_per_node_reads_local_world_size_first(monkeypatch):
+    from primus.backends.megatron.patches.args.muse_spark_arg_compat_patches import (
+        deepep_disable_reason,
+        ranks_per_node,
+    )
+
+    # 2 nodes x 4 ranks on 8-GPU hosts, launched without NNODES: torchrun's LOCAL_WORLD_SIZE
+    # is the real count, so an EP 8 group spans the nodes and DeepEP is turned off
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.delenv("NNODES", raising=False)
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "4")
+    assert ranks_per_node() == 4
+    args = SimpleNamespace(
+        muse_spark_turbo_deepep_internode=False,
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=8,
+        expert_tensor_parallel_size=1,
+        use_turbo_deepep=True,
+        enable_primus_turbo=True,
+    )
+    assert deepep_disable_reason(args) is not None
+
+
 def test_merged_args_reads_backend_args_first_then_params():
     from primus.backends.megatron.core.models.muse_spark.model_types import (
         merged_args_of,
@@ -378,6 +414,19 @@ def test_fused_router_is_rejected(params, backend, found):
     ],
 )
 def test_stage_0_and_the_unfused_router_pass(params):
+    _check_unfused_router_passes(params)
+
+
+@pytest.mark.parametrize("stage", ["abc", "1.5", -1, "-1", 1.5, True])
+def test_a_malformed_sync_free_stage_is_rejected(stage):
+    # a stage that does not parse must not pass as "no fused router"
+    ctx = _ctx()
+    ctx.extra["module_config"] = SimpleNamespace(params=SimpleNamespace(turbo_sync_free_moe_stage=stage))
+    with pytest.raises(ValueError, match="turbo_sync_free_moe_stage must be an integer"):
+        rc.patch_muse_spark_no_fused_router.__wrapped__(ctx)
+
+
+def _check_unfused_router_passes(params):
     ctx = _ctx()
     ctx.extra["module_config"] = SimpleNamespace(params=SimpleNamespace(**params))
     rc.patch_muse_spark_no_fused_router(ctx)
@@ -390,7 +439,8 @@ def test_backend_args_helper_is_public_in_model_types():
         muse_spark_layer_patterns_patches as lpp,
     )
 
-    assert rc.backend_args_of is model_types.backend_args_of is lpp.backend_args_of
+    assert lpp.backend_args_of is model_types.backend_args_of
+    assert rc.merged_args_of is model_types.merged_args_of
     assert not hasattr(lpp, "_backend_args")
 
 
@@ -589,9 +639,12 @@ def test_deepep_is_turned_off_when_the_expert_group_spans_nodes(monkeypatch):
     monkeypatch.delenv("NNODES", raising=False)
     monkeypatch.setenv("GPUS_PER_NODE", "4")
     assert _deepep_off(a(8)) and _deepep_on(a(4))
-    # one process on an 8-GPU node (--nproc_per_node=1): the node still has 8 GPUs
+    # torchrun's LOCAL_WORLD_SIZE is the ranks placed per node: with one process per 8-GPU
+    # node (--nproc_per_node=1) an EP 8 group spans 8 nodes; with 8 it fits one node
     monkeypatch.setenv("GPUS_PER_NODE", "8")
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "1")
+    assert _deepep_off(a(8))
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
     assert _deepep_on(a(8))
     # a malformed GPUS_PER_NODE raises; it does not fall back to the process count (1)
     monkeypatch.setenv("GPUS_PER_NODE", "8x")
@@ -1068,5 +1121,19 @@ def test_muse_spark_patches_fail_fast(name):
 
     patch = PatchRegistry.get(name)
     assert patch is not None
-    # the registered handler is the fail_fast wrapper around the patch body
-    assert hasattr(patch.handler, "__wrapped__")
+    # the registered handler is the fail_fast wrapper around the patch body: make the body
+    # raise and check that the handler turns the error into SystemExit (it stops the run)
+    body = patch.handler.__wrapped__
+    cells = [c for c in (patch.handler.__closure__ or ()) if c.cell_contents is body]
+    assert len(cells) == 1, "the handler is not a wrapper that calls the patch body"
+
+    def broken(ctx):
+        raise ValueError("broken body")
+
+    cells[0].cell_contents = broken
+    try:
+        with pytest.raises(SystemExit, match="broken body") as err:
+            patch.handler(SimpleNamespace())
+    finally:
+        cells[0].cell_contents = body
+    assert isinstance(err.value.__cause__, ValueError)

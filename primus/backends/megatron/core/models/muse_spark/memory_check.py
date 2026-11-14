@@ -175,9 +175,10 @@ def param_parts(a, vocab_size=None):
     }
 
 
-def param_split(a, vocab_size=None):
-    """(dense, expert) parameter counts of the whole model (one copy of each weight)."""
-    p = param_parts(a, vocab_size)
+def param_split(a, vocab_size=None, parts=None):
+    """(dense, expert) parameter counts of the whole model (one copy of each weight).
+    ``parts``: :func:`param_parts` of ``a`` when the caller has it already (not rebuilt)."""
+    p = parts if parts is not None else param_parts(a, vocab_size)
     L = int(a.num_layers)
     dense = L * p["layer_dense"] + p["embedding"] + p["output"] + p["mtp"]
     return dense, L * p["layer_expert"] + p["mtp_expert"]

@@ -82,6 +82,10 @@ def test_pattern_parser_matches_released_layers():
 def test_pattern_parser_has_no_eval():
     with pytest.raises(ValueError):
         parse_layer_pattern("__import__('os').getcwd()")
+    for probe in ("[__import__('os').getcwd()]", "[len('ab')]", "[x]", "[1]*len('ab')"):
+        # bracketed: the AST evaluator sees these and must refuse calls and names
+        with pytest.raises(ValueError):
+            parse_layer_pattern(probe)
     with pytest.raises(ValueError):
         parse_layer_pattern("[1]*'a'")
 
@@ -206,6 +210,35 @@ def test_derive_fields_defaults_match_transformer_config():
         assert f[name] == defaults[name], name
 
 
+def test_derive_fields_read_a_null_key_as_absent():
+    # a key present with value null in config.json gets the default, not None
+    nulled = (
+        "qk_scale_factor",
+        "output_multiplier",
+        "post_norm_eps",
+        "residual_gate_temperature",
+        "head_dim",
+        "max_position_embeddings",
+        "routed_scaling_factor",
+    )
+    f = conv.derive_megatron_fields({**TEXT, **{k: None for k in nulled}})
+    g = conv.derive_megatron_fields({k: v for k, v in TEXT.items() if k not in nulled})
+    for name in (
+        "qk_scale_factor",
+        "moe_router_output_multiplier",
+        "output_logit_multiplier",
+        "post_norm_eps",
+        "residual_gate_temperature",
+        "kv_channels",
+        "max_position_embeddings",
+        "moe_router_topk_scaling_factor",
+    ):
+        assert f[name] is not None and f[name] == g[name], name
+    # final_logit_softcapping: null is HF's "no cap" (MuseSpark applies the cap only when set)
+    f = conv.derive_megatron_fields({**TEXT, "final_logit_softcapping": None})
+    assert f["final_logit_softcapping"] is None
+
+
 @pytest.mark.parametrize("window", [None, 0, -1, True, "2048", "missing"])
 def test_derive_fields_reject_sliding_layers_without_a_window(window):
     # sliding_attention layers with no positive window would silently run full attention
@@ -234,6 +267,8 @@ def test_derive_fields_fallbacks():
     [
         ({"rope_parameters": {"rope_type": "yarn", "rope_theta": 500000.0, "factor": 4.0}}, "default RoPE"),
         ({"rope_scaling": {"type": "linear", "factor": 2.0}}, "default RoPE"),
+        ({"rope_scaling": {"factor": 2.0}}, "default RoPE"),
+        ({"rope_scaling": "linear"}, "default RoPE"),
         ({"layer_rope_theta": [0.0, 1e6] * 31}, "other than 0"),
         ({"layer_rope_theta": [0.0, 500000.0]}, "entries for 62 layers"),
     ],
@@ -241,6 +276,20 @@ def test_derive_fields_fallbacks():
 def test_derive_fields_rejects_unsupported_rope(change, match):
     with pytest.raises(ValueError, match=match):
         conv.derive_megatron_fields({**TEXT, **change})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"rope_parameters": {"rope_type": None, "rope_theta": 500000.0}},
+        {"rope_parameters": {"type": None, "rope_theta": 500000.0}},
+        # newer transformers: rope_scaling as an alias of rope_parameters
+        {"rope_scaling": {"rope_type": "default", "rope_theta": 500000.0}},
+        {"rope_scaling": None},
+    ],
+)
+def test_derive_fields_accepts_default_rope_spellings(change):
+    assert conv.derive_megatron_fields({**TEXT, **change})["rotary_base"] == 500000.0
 
 
 def _transformer_config(**kw):

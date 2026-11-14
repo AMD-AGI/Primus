@@ -228,6 +228,10 @@ class MuseSparkSequentialMLP(_PostExpertNormMixin, SequentialMLP):
         self._init_post_expert_norm()
 
 
+# the expert linears with a stacked ``weights`` Parameter: saved through it
+# (``sharded_state_dict``) and synced from / to it on load (:func:`_sync_stacked_expert_weights`)
+_STACKED_EXPERT_LINEARS = ("linear_fc1", "linear_fc2")
+
 _TURBO_GROUPED_MLP = None
 
 
@@ -258,7 +262,7 @@ def muse_spark_turbo_grouped_mlp_cls():
 
             def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
                 sd = super().sharded_state_dict(prefix, sharded_offsets, metadata)
-                for name in ("linear_fc1", "linear_fc2"):
+                for name in _STACKED_EXPERT_LINEARS:
                     linear = getattr(self, name)
                     if hasattr(linear, "weights"):
                         stack_expert_sharded_state_dict(sd, f"{prefix}{name}.", linear)
@@ -329,7 +333,7 @@ def stack_expert_sharded_state_dict(sharded_sd, key_prefix, linear):
 def _sync_stacked_expert_weights(module, state_dict, prefix, *args, **kwargs):
     """Load pre-hook: fill ``weights`` from ``weight{i}`` (TE / legacy checkpoints) or
     ``weight{i}`` from ``weights`` (torch_dist checkpoints), so both forms load strictly."""
-    for name in ("linear_fc1", "linear_fc2"):
+    for name in _STACKED_EXPERT_LINEARS:
         linear = getattr(module, name, None)
         if linear is None or not hasattr(linear, "weights"):
             continue

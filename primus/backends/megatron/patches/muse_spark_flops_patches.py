@@ -95,11 +95,16 @@ def _window_layer_fn():
     return is_layer_window_attention
 
 
-def num_sliding_layers(args) -> int:
+def num_sliding_layers(args, window=None) -> int:
+    """Layers with sliding-window attention. ``window``: the run's window in keys as
+    :func:`sliding_window_keys` resolves it (resolved here from ``args`` when not given), so
+    the window size is parsed in one place; no window means no sliding layers."""
+    if window is None:
+        window = sliding_window_keys(args)
+    if window is None:
+        return 0
     n_layers = int(args.num_layers)
-    ws = getattr(args, "window_size", None)
-    if isinstance(ws, str):
-        ws = parse_window_size(ws)
+    ws = (window, 0)  # Megatron's helper only tests the window for truthiness
     pattern = getattr(args, "window_attn_skip_freq", None)
     if pattern is not None:
         pattern = normalize_layer_pattern(pattern, n_layers, "window_attn_skip_freq")
@@ -135,7 +140,7 @@ class MuseSparkFlopsTerms:
         self.seq_length = int(args.seq_length)
         self.q = int(args.kv_channels) * int(args.num_attention_heads)
         self.window = sliding_window_keys(args)
-        self.n_sliding = num_sliding_layers(args) if self.window is not None else 0
+        self.n_sliding = num_sliding_layers(args, self.window) if self.window is not None else 0
         self.router_per_token = (
             FWD_BWD_FLOPS_PER_MAC * int(args.hidden_size) * int(args.num_experts or 0) * num_moe_layers(args)
         )

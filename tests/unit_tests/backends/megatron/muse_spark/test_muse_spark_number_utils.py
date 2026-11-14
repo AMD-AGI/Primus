@@ -71,7 +71,7 @@ def test_accepted(value, expected):
         "512_",
         "_5_1_2_",
         "5__12",
-        "1e3_0",
+        "1e1_0",  # "_" in the exponent (1e10 is in range: only the pattern refuses it)
         "0x200",
         "512 MiB",
         b"512",

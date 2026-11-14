@@ -90,7 +90,19 @@ def test_a_pattern_string_is_parsed_once(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "bad", ["abc", "[1,2", "__import__('os').getpid()", "[1]*'a'", "[1]*10**9", "[1.0, 0]"]
+    "bad",
+    [
+        "abc",
+        "[1,2",
+        "__import__('os').getpid()",
+        # bracketed: these reach the AST evaluator, which must refuse calls and names
+        "[__import__('os').getpid()]",
+        "[len('ab')]",
+        "[x]",
+        "[1]*'a'",
+        "[1]*10**9",
+        "[1.0, 0]",
+    ],
 )
 def test_a_pattern_string_runs_no_code_and_names_the_field(bad):
     # only pattern expressions parse (no eval); anything else is a ValueError naming the field

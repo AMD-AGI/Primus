@@ -12,25 +12,19 @@
 
 extends:
   - ../llama_base.yaml
+# Inherited unchanged from llama_base / language_model: RMSNorm, SwiGLU, no linear or QKV
+# bias, untied embeddings, RoPE (rotary_percent 1.0, rotate-half), no dropout.
 
 model_type: muse_spark
 
 tokenizer_type: HuggingFaceTokenizer
-normalization: RMSNorm
 layernorm_epsilon: 1.0e-05  # pre norms, QK-norm, pre_expert_norm; post norms and post_expert_norm use post_norm_eps
-swiglu: true
-add_bias_linear: false
-add_qkv_bias: false
-untie_embeddings_and_output_weights: true
 bias_swiglu_fusion: false
 
 # ---- attention ----
 group_query_attention: true
 qk_layernorm: true                 # weightless per-head RMSNorm (MuseSparkQKNorm)
 attention_output_gate: true
-position_embedding_type: rope
-rotary_percent: 1.0
-rotary_interleaved: false
 apply_rope_fusion: false
 qk_scale_factor: 5.4730064863875   # softmax_scale = qk_scale_factor / sqrt(kv_channels)
 window_size: [2048, 0]             # HF sliding_window (keys incl. the query); the config passes 2047 to TE
@@ -48,8 +42,7 @@ residual_gate_temperature: 0.3
 # backward grow ~2x per layer: at 62 layers the grad norm is Inf at iteration 1.
 residual_gate_init_value: -0.9
 embedding_norm: true
-hidden_dropout: 0.0                # HF has no dropout; the embedding norm runs after Megatron's dropout
-attention_dropout: 0.0
+# hidden / attention dropout stay 0.0 (llama_base): HF has none; the embedding norm runs after Megatron's dropout
 
 # ---- head ----
 output_logit_multiplier: 0.17677669529663687  # 1/sqrt(32): HF output_multiplier on the LM-head logits (the router uses moe_router_output_multiplier)
@@ -59,7 +52,6 @@ final_logit_softcapping: 20.0
 moe_layer_freq: 1
 moe_latent_size: null              # HF moe_hidden_size; required (set by the size preset)
 moe_router_score_function: sigmoid
-moe_router_pre_softmax: false
 moe_router_enable_expert_bias: true
 # Selection-bias update rate: 0 (bias frozen) by default. The released checkpoint carries
 # its trained selection bias (e_score_correction_bias), and fine-tuning should keep that
@@ -74,7 +66,7 @@ moe_router_dtype: fp32
 moe_token_dispatcher_type: alltoall
 moe_grouped_gemm: true
 moe_use_legacy_grouped_gemm: false
-moe_permute_fusion: false          # Megatron default here; the experiment configs set true
+# moe_permute_fusion: false (inherited); the experiment configs set true
 moe_shared_expert_overlap: false
 moe_shared_expert_intermediate_size: null
 # per-expert post_expert_norm + routing prob (and the post-MoE norm) as one Triton kernel

@@ -103,7 +103,7 @@ def config_flag(config, key, default) -> bool:
     the config has no such attribute or it is unset (None / a blank string, e.g. YAML ``~`` or
     an unset env value), so a default-on kernel is not turned off by an empty value;
     ``"false"`` / ``"0"`` are False and a typo raises ValueError."""
-    return bool_flag(getattr(config, key, default), key, default)
+    return bool_flag(getattr(config, key, None), key, default)
 
 
 def backend_args_of(ctx):

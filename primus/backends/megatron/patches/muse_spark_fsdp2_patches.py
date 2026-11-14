@@ -22,7 +22,7 @@ Spark parameter (``holds_muse_spark_params``, as the optimizer-checkpoint patche
 """
 
 from primus.backends.megatron.core.models.muse_spark.model_types import (
-    bool_flag,
+    config_flag,
     fail_fast,
     is_muse_spark_model_type,
 )
@@ -44,10 +44,8 @@ PATCHED_ATTR = "_primus_fsdp2_fp32"
 
 
 def _is_muse_spark_fsdp2(ctx: PatchContext) -> bool:
-    # bool_flag: an env-substituted "false" / "0" is off (bool("false") would be True)
-    return is_muse_spark_model_type(ctx) and bool_flag(
-        getattr(get_args(ctx), "use_torch_fsdp2", False), "use_torch_fsdp2"
-    )
+    # config_flag: an env-substituted "false" / "0" is off (bool("false") would be True)
+    return is_muse_spark_model_type(ctx) and config_flag(get_args(ctx), "use_torch_fsdp2", False)
 
 
 @register_patch(
