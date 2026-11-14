@@ -23,7 +23,9 @@ per-bucket check.
 Differences from Megatron's path:
 
 - A NaN / Inf raises immediately; the rerun state machine (re-running the step to tell a
-  transient fault from a persistent one) is not used for these checks.
+  transient fault from a persistent one) is not used for these checks. So the patch only
+  applies with ``rerun_mode: disabled`` (the default); with ``validate_results`` or
+  ``report_stats`` it is skipped and Megatron's per-bucket check runs.
 - ``check_for_large_grads`` keeps Megatron's path, since it needs the host-side history.
 """
 
@@ -62,6 +64,14 @@ def _check_pending():
     description="Check DDP gradient buckets for NaN / Inf once per step (no per-bucket host sync)",
 )
 def patch_deferred_grad_nan_check(ctx: PatchContext) -> None:
+    rerun_mode = getattr(get_args(ctx), "rerun_mode", "disabled")
+    if rerun_mode != "disabled":
+        log_rank_0(
+            f"[Patch:{PATCH_NAME}] skipped: rerun_mode is '{rerun_mode}', which needs Megatron's "
+            "per-bucket grad NaN / Inf check"
+        )
+        return
+
     from megatron.core.distributed import distributed_data_parallel as ddp_module
     from megatron.core.distributed import param_and_grad_buffer as pgb
 
