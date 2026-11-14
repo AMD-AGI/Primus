@@ -95,6 +95,22 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 
 Browse `examples/maxtext/configs/` for the authoritative list — it tracks whatever configs ship in your checkout.
 
+### Dropless MoE recipes (Primus-Turbo grouped GEMM)
+
+For Qwen3 30B-A3B, DeepSeek-V2-lite (16B) and Gemma4 26B, the default `bf16` recipes (and the `fp8` recipes on MI355X) are dropless: every token reaches every expert it is routed to (`capacity_factor: -1`), and the expert matmuls run as one grouped GEMM on Primus-Turbo (`sparse_matmul: true`, `megablox: false`, `use_turbo_grouped_gemm: true`) with FSDP 8 instead of expert parallelism. The grouped GEMM backend is `hipblaslt` on MI300X/MI325X and `flydsl` on MI355X; the MI355X `fp8` recipes add `turbo_grouped_gemm_quant: fp8`. They need an image with Primus-Turbo built for JAX and MaxText with the Turbo grouped GEMM (`release/v26.10` or later).
+
+| Model | MI300X `bf16` | MI325X `bf16` | MI355X `bf16` | MI355X `fp8` |
+| ----- | ------------- | ------------- | ------------- | ------------ |
+| Qwen3 30B-A3B | 9,484 (5,656) | 11,221 (7,455) | 20,232 (10,038) | 21,059 (12,606) |
+| DeepSeek-V2-lite (16B) | 15,384 (10,056) | 18,558 (12,416) | 36,158 (20,633) | 38,943 (25,921) |
+| Gemma4 26B | 8,268 (5,510) | 10,112 (6,478) | 16,770 (11,445) | 17,505 (13,750) |
+
+Tokens/s/device on 8 GPUs, synthetic data; in brackets, the previous token-dropping recipe. On MI300X the recipes use smaller per-device batches than on MI325X, for 192 GB HBM.
+
+The previous token-dropping recipes (expert parallelism, dense dispatch, a capacity factor of 1 or 1.25) are kept as `<model>-bf16-token_dropping-pretrain.yaml` (and `<model>-fp8-token_dropping-pretrain.yaml` on MI355X). The `nanoo_fp8` recipes on MI300X/MI325X and the Mixtral recipes are unchanged: for Mixtral the token-dropping recipes are as fast as the dropless ones.
+
+All dropless recipes set `--xla_gpu_first_collective_call_terminate_timeout_seconds=900` in `XLA_FLAGS_APPEND`: the first collective of a run can start more than 40 s late on one GPU, and XLA's default 40 s limit for it would abort the run.
+
 > **Note:** Some models, such as Llama 3, require an external license agreement through a third party (for example, Meta). The only models supported in this workflow are those listed above.
 
 ---

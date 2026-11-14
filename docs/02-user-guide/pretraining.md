@@ -214,7 +214,8 @@ pip install -r requirements-jax.txt
 
 | File | Key parallelism (`ici_*` intra-node, `dcn_*` inter-node) |
 | --- | --- |
-| `deepseek_v2_16B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `deepseek_v2_16B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_expert_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` (dropless MoE, Primus-Turbo grouped GEMM) |
+| `deepseek_v2_16B-bf16-token_dropping-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` (token-dropping MoE, previous default) |
 | `grok1-nanoo_fp8-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
 | `llama2_70B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
 | `llama2_7B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
@@ -223,7 +224,8 @@ pip install -r requirements-jax.txt
 | `llama3_8B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
 | `mixtral_8x7B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
 | `qwen3_14B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
-| `qwen3_30B_A3B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` |
+| `qwen3_30B_A3B-bf16-pretrain.yaml` | `ici_fsdp_parallelism: 8`, `ici_expert_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` (dropless MoE, Primus-Turbo grouped GEMM) |
+| `qwen3_30B_A3B-bf16-token_dropping-pretrain.yaml` | `ici_fsdp_parallelism: 1`, `ici_data_parallelism: 1`, `dcn_fsdp_parallelism: 1`, `dcn_data_parallelism: -1` (token-dropping MoE, previous default) |
 
 The `llama2_7B-bf16-pretrain.yaml` example also sets `dataset_type: "synthetic"` and `hf_access_token: ${HF_TOKEN:""}` for gated Hugging Face assets when you switch to real data.
 
