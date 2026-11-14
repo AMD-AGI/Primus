@@ -53,6 +53,21 @@ from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_pg_size
+
+try:
+    from megatron.core.transformer.utils import (
+        is_layer_window_attention as _is_layer_window_attention,
+    )
+except ImportError:  # Megatron-core without per-layer window patterns
+
+    def _is_layer_window_attention(window_size, window_attn_skip_freq, layer_number):
+        if not window_size:
+            return False
+        if window_attn_skip_freq is None:
+            return True
+        if isinstance(window_attn_skip_freq, int):
+            return layer_number % window_attn_skip_freq != 0
+        return bool(window_attn_skip_freq[layer_number - 1])
 from megatron.training.global_vars import get_args
 
 # QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
@@ -1067,7 +1082,18 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             # enable ring attention
             self.attn_kwargs["ring_group"] = dist.new_group(ranks=[dist.get_rank()])
 
-        assert config.window_size is None, "primus_turbo does not support sliding window attention"
+        # Sliding window from the config (e.g. Muse Spark: window_size + per-layer
+        # window_attn_skip_freq), with Megatron's rule for which layers take it, as
+        # TEDotProductAttention does. Turbo takes a causal window (left, 0).
+        self.layer_window_size = None
+        if config.window_size is not None and _is_layer_window_attention(
+            config.window_size, config.window_attn_skip_freq, layer_number
+        ):
+            assert (
+                tuple(config.window_size)[1] == 0
+            ), f"primus_turbo supports a causal sliding window (left, 0), got {config.window_size}"
+            assert config.context_parallel_size == 1, "primus_turbo sliding window needs CP 1"
+            self.layer_window_size = tuple(int(w) for w in config.window_size)
         # Check version
 
         kv_channels = (
@@ -1145,7 +1171,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
         sink_tensor = None
-        window_size = (-1, -1)
+        window_size = self.layer_window_size or (-1, -1)
 
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
