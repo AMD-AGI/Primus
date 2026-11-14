@@ -117,6 +117,29 @@ class TestFluxPretrainTrainer:
         scheduler2 = trainer.scheduler
         assert scheduler2 is scheduler1
 
+    def test_resumed_forward_step_does_not_replay_step0_draws(self, monkeypatch: pytest.MonkeyPatch):
+        import megatron.core.parallel_state as parallel_state
+        import megatron.training
+        import torch
+
+        from primus.backends.megatron.diffusion_trainer import DiffusionPretrainTrainer
+
+        monkeypatch.setattr(parallel_state, "get_data_parallel_rank", lambda *a, **k: 1)
+        monkeypatch.setattr(
+            DiffusionPretrainTrainer,
+            "forward_step",
+            lambda self, *a, **k: torch.rand(8),
+        )
+
+        def first_step_draws(iteration):
+            monkeypatch.setattr(
+                megatron.training, "get_args", lambda: SimpleNamespace(seed=1234, iteration=iteration)
+            )
+            return _build_flux_trainer(monkeypatch).forward_step(None, None)
+
+        assert torch.equal(first_step_draws(0), first_step_draws(0))
+        assert not torch.equal(first_step_draws(0), first_step_draws(500))
+
 
 def _create_encoding_files(directory):
     """Create minimal t5_empty.npy and clip_empty.npy in a directory."""
