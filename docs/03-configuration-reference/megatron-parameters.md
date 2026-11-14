@@ -61,6 +61,7 @@ models:
 | `rampup_batch_size` | `null` | Optional batch-size ramp schedule string / config. |
 | `decrease_batch_size_if_needed` | `false` | Allow shrinking batch if memory is insufficient. |
 | `check_for_nan_in_loss_and_grad` | `true` | Abort on NaNs in loss or gradients. |
+| `deferred_grad_nan_check` | `true` | Primus: check the DDP gradient buckets for NaN / Inf with one host sync per step instead of one per bucket in the backward pass. The error is raised after the data-parallel collective (Megatron's check raises before it) and without the rerun state machine. Megatron's check is used instead when `rerun_mode` is not `disabled` or `check_for_large_grads` is on. `false` restores Megatron's per-bucket check. |
 | `check_for_spiky_loss` | `false` | Detect abnormal loss spikes. |
 | `check_for_large_grads` | `false` | Detect abnormally large gradients. |
 | `make_vocab_size_divisible_by` | `128` | Pads vocabulary size for efficient kernels / partitioning. |

@@ -10,9 +10,9 @@ With ``check_for_nan_in_loss_and_grad`` (on by default), Megatron DDP's
 ``_ParamAndGradBucketGroup.check_grads`` runs when a bucket's gradients are ready, inside
 the backward pass (from the AccumulateGrad hook). For every bucket it validates the
 bucket's grad norm through the rerun state machine, which reads the norm on the host:
-one ``hipStreamSynchronize`` per bucket. Each one stalls the CPU until the GPU queue
-drains, leaving the GPU idle while the next kernels are launched. On the Muse Spark
-1-GPU proxy that is 23 syncs and ~58 ms of host wait per step.
+one device synchronization per bucket. Each one stalls the CPU until the GPU queue
+drains, leaving the GPU idle while the next kernels are launched, so the cost grows with
+the number of buckets.
 
 With ``deferred_grad_nan_check: true`` (the Primus default), ``check_grads`` keeps each bucket's non-finite
 flag on the device, and ``DistributedDataParallel.finish_grad_sync`` (after the
@@ -22,6 +22,11 @@ per-bucket check.
 
 Differences from Megatron's path:
 
+- The error is raised after the bucket's data-parallel collective, not before it, so a
+  local NaN / Inf has already been reduced into the other data-parallel ranks' grads.
+  It is still raised before the optimizer step on the rank that produced it; the other
+  ranks fail at their next collective, as with Megatron's path, where they wait in the
+  bucket's collective.
 - A NaN / Inf raises immediately; the rerun state machine (re-running the step to tell a
   transient fault from a persistent one) is not used for these checks. So the patch only
   applies with ``rerun_mode: disabled`` (the default); with ``validate_results`` or
@@ -51,8 +56,8 @@ def _check_pending():
     if bool(flags.any()):  # the one host sync per step
         bad = [i for (_, i, _), f in zip(pending, flags.tolist()) if f]
         raise RuntimeError(
-            f"found NaN or Inf in the local grad norm of bucket(s) {bad} in the backward pass, "
-            "before the data-parallel collective (deferred_grad_nan_check)"
+            f"found NaN or Inf in the local grad norm of bucket(s) {bad} in the backward pass "
+            "(checked after the data-parallel collective, deferred_grad_nan_check)"
         )
 
 
@@ -98,4 +103,10 @@ def patch_deferred_grad_nan_check(ctx: PatchContext) -> None:
     group_cls.check_grads = check_grads
     ddp_cls.finish_grad_sync = finish_grad_sync
     mark_patched(group_cls, PATCH_NAME)
-    log_rank_0(f"[Patch:{PATCH_NAME}] DDP grad NaN / Inf check deferred to one host sync per step")
+    if getattr(get_args(ctx), "check_for_large_grads", False):
+        log_rank_0(
+            f"[Patch:{PATCH_NAME}] check_for_large_grads is on: DDP grad checks keep Megatron's "
+            "per-bucket host sync"
+        )
+    else:
+        log_rank_0(f"[Patch:{PATCH_NAME}] DDP grad NaN / Inf check deferred to one host sync per step")

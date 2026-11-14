@@ -61,6 +61,7 @@ Detecting corruption early prevents wasted compute and divergence (`trainer_base
 | Parameter | Default | Purpose |
 |-----------|---------|---------|
 | `check_for_nan_in_loss_and_grad` | `true` | Abort/handle on NaN/Inf in loss or gradients. |
+| `deferred_grad_nan_check` | `true` | Primus: check the DDP gradient buckets for NaN / Inf with one host sync per step instead of one per bucket in the backward pass. The error is raised after the data-parallel collective (Megatron's check raises before it) and without the rerun state machine. Megatron's check is used instead when `rerun_mode` is not `disabled` or `check_for_large_grads` is on. `false` restores Megatron's per-bucket check. |
 | `check_for_spiky_loss` | `false` | Detect anomalous loss spikes. |
 | `check_for_large_grads` | `false` | Detect abnormally large gradients. |
 | `decrease_batch_size_if_needed` | `false` | Reduce batch size when needed instead of failing. |
