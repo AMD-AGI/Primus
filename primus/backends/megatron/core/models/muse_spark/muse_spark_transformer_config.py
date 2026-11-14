@@ -74,6 +74,12 @@ class MuseSparkTransformerConfig(TransformerConfig):
     ``pre_expert_norm``) as one Triton forward and one backward kernel
     (``transformer/muse_spark/centered_norm.py``). False runs the eager fp32 formula.
     Parsed strictly (``bool_flag``)."""
+    muse_spark_compile_norms: bool = False
+    """Run each norm region as one ``torch.compile`` graph (``compiled_norms.py``): the gated
+    residuals (post-norm + gate coefficients + combine), the per-head ``o_norm`` with the
+    sigmoid output gate, the Q / K norms and the centered norms. Takes precedence over the
+    ``muse_spark_fused_*`` flags for those regions (not the per-expert ``post_expert_norm``).
+    Parsed strictly (``bool_flag``)."""
     residual_gate_init_value: float = -0.9
     """Initial value of every residual gate ``g`` for a run from random weights (a checkpoint
     load overwrites it). HF initialises ``g ~ N(0, 0.02)`` (beta = 0.5, alpha = 0.87): the
@@ -117,6 +123,7 @@ class MuseSparkTransformerConfig(TransformerConfig):
             "muse_spark_fused_post_expert_norm",
             "muse_spark_fused_attn_norm",
             "muse_spark_fused_centered_norm",
+            "muse_spark_compile_norms",
             "embedding_norm",
             "window_size_is_hf_sliding_window",
         ):

@@ -84,6 +84,9 @@ muse_spark_fused_post_expert_norm: true
 muse_spark_fused_attn_norm: true
 # the centered (1 + w) pre-norms and the MoE pre_expert_norm as one Triton kernel; false: eager
 muse_spark_fused_centered_norm: true
+# each norm region (gated residuals, o_norm + output gate, Q / K and centered norms) as one
+# torch.compile graph; overrides the fused_* flags for those regions
+muse_spark_compile_norms: false
 
 mtp_num_layers: null
 expert_model_parallel_size: 1

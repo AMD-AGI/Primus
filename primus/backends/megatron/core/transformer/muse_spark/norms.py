@@ -30,6 +30,12 @@ from primus.backends.megatron.core.transformer.muse_spark.centered_norm import (
     centered_rms_norm,
     weighted_rms_norm,
 )
+from primus.backends.megatron.core.transformer.muse_spark.compiled_norms import (
+    centered_norm_math,
+    compiled,
+    gated_residual_math,
+    weightless_rms_math,
+)
 from primus.backends.megatron.core.transformer.muse_spark.post_expert_norm import (
     fused_rms_norm_available,
     post_expert_norm_probs,
@@ -113,9 +119,12 @@ class MuseSparkRMSNorm(nn.RMSNorm):
             setattr(self.weight, "sequence_parallel", True)
         # the weightless norms (attention post_norm, Q / K norm) run fused on GPU
         self.fused = config_flag(config, "muse_spark_fused_attn_norm", True)
+        self.compile = config_flag(config, "muse_spark_compile_norms", False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.weight is None:
+            if self.compile and x.is_cuda:
+                return compiled(weightless_rms_math)(x, self.eps)
             return weightless_rms(x, self.eps, self.fused)
         # with_scale: fp32 norm * fp32 weight, rounded once to x.dtype (deterministic in
         # deterministic mode, see weighted_rms_norm)
@@ -137,6 +146,7 @@ class _ZeroInitRMSNorm(nn.RMSNorm):
             setattr(self.weight, "sequence_parallel", True)
         # the fused kernel on GPU; the flag set to false runs the eager formula
         self.fused = config_flag(config, self.FUSED_FLAG, True)
+        self.compile = config_flag(config, "muse_spark_compile_norms", False)
 
     def reset_parameters(self) -> None:
         # elementwise_affine=True: nn.RMSNorm sets self.weight before it calls this
@@ -154,6 +164,8 @@ class MuseSparkCenteredRMSNorm(_ZeroInitRMSNorm):
     FUSED_FLAG = "muse_spark_fused_centered_norm"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.compile and x.is_cuda:
+            return compiled(centered_norm_math)(x, self.weight, self.eps)
         return centered_rms_norm(x, self.weight, self.eps, self.fused)
 
 
@@ -217,6 +229,7 @@ class MuseSparkGatedResidual(nn.Module):
         if getattr(config, "sequence_parallel", False):
             setattr(self.gate, "sequence_parallel", True)
         self.temperature = float(config.residual_gate_temperature)
+        self.compile = config_flag(config, "muse_spark_compile_norms", False)
 
     def reset_parameters(self) -> None:
         with torch.no_grad():
@@ -228,6 +241,11 @@ class MuseSparkGatedResidual(nn.Module):
         return apply_keeping_fp32(self, "gate", fn, super()._apply, *args, **kwargs)
 
     def gated(self, branch: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        if self.compile and branch.is_cuda:
+            post_weight = getattr(self.post_norm, "weight", None)
+            return compiled(gated_residual_math)(
+                branch, residual, self.gate, post_weight, self.temperature, self.post_norm.eps
+            )
         branch = self.post_norm(branch)
         alpha, beta = residual_gate_coeffs(self.gate, self.temperature)
         return (alpha * residual + beta * branch).to(residual.dtype)
