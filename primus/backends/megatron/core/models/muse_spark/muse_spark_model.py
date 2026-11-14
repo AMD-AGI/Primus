@@ -26,8 +26,12 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
 )
 from megatron.core.models.gpt.gpt_model import GPTModel
 
+from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
 from primus.backends.megatron.core.models.muse_spark.number_utils import parse_softcap
-from primus.backends.megatron.core.transformer.muse_spark.norms import weightless_rms
+from primus.backends.megatron.core.transformer.muse_spark.norms import (
+    link_next_norm,
+    weightless_rms,
+)
 from primus.core.utils.module_utils import log_rank_0
 
 __all__ = ["MuseSparkModel", "MuseSparkNormedEmbedding", "softcap_logits", "softcap_value"]
@@ -111,6 +115,13 @@ class MuseSparkModel(GPTModel):
                 )
             self.embedding.__class__ = MuseSparkNormedEmbedding
             self.embedding.muse_embed_norm_eps = float(config.layernorm_epsilon)
+        if config_flag(config, "muse_spark_compile_norms", False) and config_flag(
+            config, "muse_spark_compile_fuse_next_norm", False
+        ):
+            # each layer's MoE residual also computes the next local layer's input norm
+            layers = getattr(getattr(self, "decoder", None), "layers", None) or []
+            for layer, nxt in zip(layers, layers[1:]):
+                link_next_norm(layer.mlp_bda, nxt.input_layernorm)
         log_rank_0(f"[Primus:MuseSpark] built modules: {built_module_summary(self)}")
 
     def _scale_logits(self, logits: torch.Tensor) -> torch.Tensor:

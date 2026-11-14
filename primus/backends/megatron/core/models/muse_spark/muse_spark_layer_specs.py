@@ -43,6 +43,7 @@ from megatron.core.transformer.transformer_layer import (
     TransformerLayerSubmodules,
 )
 
+from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
 from primus.backends.megatron.core.transformer.muse_spark.attention import (
     MuseSparkQKNorm,
     MuseSparkSelfAttention,
@@ -56,6 +57,7 @@ from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkCenteredRMSNorm,
     MuseSparkGatedResidual,
     MuseSparkRMSNorm,
+    link_next_norm,
 )
 
 __all__ = [
@@ -69,7 +71,15 @@ class MuseSparkTransformerLayer(TransformerLayer):
     """Megatron's ``TransformerLayer`` for the Muse Spark decoder (its own class, so the
     built-module log line names the Muse Spark layer). The pinned Megatron-core builds every
     mlp, a ``MoELayer`` subclass included, with ``pg_collection`` / ``is_mtp_layer``, so
-    nothing is overridden."""
+    nothing is overridden. With ``muse_spark_compile_fuse_next_norm`` the attention residual
+    also computes ``pre_mlp_layernorm`` (``link_next_norm``)."""
+
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+        if config_flag(config, "muse_spark_compile_norms", False) and config_flag(
+            config, "muse_spark_compile_fuse_next_norm", False
+        ):
+            link_next_norm(self.self_attn_bda, self.pre_mlp_layernorm)
 
 
 def _spec_provider():

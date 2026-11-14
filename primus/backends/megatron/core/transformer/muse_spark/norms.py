@@ -19,6 +19,8 @@ The module signatures follow Megatron's norm builders
 (``config, hidden_size, eps``) so they can be dropped into layer specs.
 """
 
+import warnings
+
 import torch
 from torch import nn
 
@@ -29,6 +31,13 @@ from primus.backends.megatron.core.models.muse_spark.model_types import (
 from primus.backends.megatron.core.transformer.muse_spark.centered_norm import (
     centered_rms_norm,
     weighted_rms_norm,
+)
+from primus.backends.megatron.core.transformer.muse_spark.compiled_norms import (
+    centered_norm_math,
+    compiled,
+    gated_residual_math,
+    gated_residual_norm_math,
+    weightless_rms_math,
 )
 from primus.backends.megatron.core.transformer.muse_spark.post_expert_norm import (
     fused_rms_norm_available,
@@ -113,9 +122,12 @@ class MuseSparkRMSNorm(nn.RMSNorm):
             setattr(self.weight, "sequence_parallel", True)
         # the weightless norms (attention post_norm, Q / K norm) run fused on GPU
         self.fused = config_flag(config, "muse_spark_fused_attn_norm", True)
+        self.compile = config_flag(config, "muse_spark_compile_norms", False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.weight is None:
+            if self.compile and x.is_cuda:
+                return compiled(weightless_rms_math)(x, self.eps)
             return weightless_rms(x, self.eps, self.fused)
         # with_scale: fp32 norm * fp32 weight, rounded once to x.dtype (deterministic in
         # deterministic mode, see weighted_rms_norm)
@@ -137,6 +149,7 @@ class _ZeroInitRMSNorm(nn.RMSNorm):
             setattr(self.weight, "sequence_parallel", True)
         # the fused kernel on GPU; the flag set to false runs the eager formula
         self.fused = config_flag(config, self.FUSED_FLAG, True)
+        self.compile = config_flag(config, "muse_spark_compile_norms", False)
 
     def reset_parameters(self) -> None:
         # elementwise_affine=True: nn.RMSNorm sets self.weight before it calls this
@@ -154,6 +167,19 @@ class MuseSparkCenteredRMSNorm(_ZeroInitRMSNorm):
     FUSED_FLAG = "muse_spark_fused_centered_norm"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        handed = self.__dict__.pop("_handed_output", None)
+        if handed is not None:
+            if handed[0] is x:
+                # computed with the residual that produced x (MuseSparkGatedResidual.gated)
+                return handed[1]
+            if not self.__dict__.get("_handoff_miss_warned"):
+                self.__dict__["_handoff_miss_warned"] = True
+                warnings.warn(
+                    "Muse Spark: the norm output computed with the residual was not used (the "
+                    "norm got another tensor); the norm runs on its own, the fusion is lost"
+                )
+        if self.compile and x.is_cuda:
+            return compiled(centered_norm_math)(x, self.weight, self.eps)
         return centered_rms_norm(x, self.weight, self.eps, self.fused)
 
 
@@ -179,6 +205,35 @@ class MuseSparkInputScaledRMSNorm(_ZeroInitRMSNorm):
                 return post_expert_norm_probs(rows, self.weight, None, self.eps).view(x.shape)
         out = (x.float() * (1.0 + self.weight.float())).type_as(x)
         return _rms(out, self.eps)  # out is in x.dtype; _rms normalizes in fp32 and rounds back
+
+
+def link_next_norm(residual_module, norm) -> None:
+    """Let ``residual_module`` (a gated residual) compute ``norm``'s output with the residual.
+
+    Under ``muse_spark_compile_norms`` the gated residual then runs as one graph with the
+    centered norm that consumes its output, and hands that output to ``norm``, which returns
+    it when it is called on the same tensor (any other input runs the norm itself). The
+    reference is kept off the module tree, so no parameter is registered twice."""
+    if isinstance(residual_module, MuseSparkGatedResidual) and isinstance(norm, MuseSparkCenteredRMSNorm):
+        residual_module.__dict__["_next_norm"] = norm
+
+
+def _next_norm_weight_ready(norm, x) -> bool:
+    """The next norm's weight can be read now: run its forward pre-hooks with ``x`` (a tensor
+    of its input's shape; DDP waits there for the weight's all-gather with
+    overlap_param_gather), and refuse a still-sharded FSDP2 weight (the next layer's
+    parameters may not be gathered yet)."""
+    try:
+        from torch.distributed.tensor import DTensor
+    except ImportError:  # older torch
+        DTensor = ()
+    if isinstance(norm.weight, DTensor):
+        return False
+    if norm._forward_pre_hooks:
+        from primus.backends.megatron.core.transformer.muse_spark.moe import _run_forward_pre_hooks
+
+        _run_forward_pre_hooks(norm, x)
+    return True
 
 
 def residual_gate_coeffs(gate: torch.Tensor, temperature: float, eps: float = 1e-3):
@@ -217,6 +272,7 @@ class MuseSparkGatedResidual(nn.Module):
         if getattr(config, "sequence_parallel", False):
             setattr(self.gate, "sequence_parallel", True)
         self.temperature = float(config.residual_gate_temperature)
+        self.compile = config_flag(config, "muse_spark_compile_norms", False)
 
     def reset_parameters(self) -> None:
         with torch.no_grad():
@@ -228,6 +284,19 @@ class MuseSparkGatedResidual(nn.Module):
         return apply_keeping_fp32(self, "gate", fn, super()._apply, *args, **kwargs)
 
     def gated(self, branch: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        if self.compile and branch.is_cuda:
+            post_weight = getattr(self.post_norm, "weight", None)
+            nxt = self.__dict__.get("_next_norm")
+            if nxt is not None and _next_norm_weight_ready(nxt, residual):
+                h, y = compiled(gated_residual_norm_math)(
+                    branch, residual, self.gate, post_weight, self.temperature, self.post_norm.eps,
+                    nxt.weight, nxt.eps,
+                )
+                nxt.__dict__["_handed_output"] = (h, y)
+                return h
+            return compiled(gated_residual_math)(
+                branch, residual, self.gate, post_weight, self.temperature, self.post_norm.eps
+            )
         branch = self.post_norm(branch)
         alpha, beta = residual_gate_coeffs(self.gate, self.temperature)
         return (alpha * residual + beta * branch).to(residual.dtype)

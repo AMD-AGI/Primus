@@ -18,6 +18,10 @@ the layer spec (:class:`MuseSparkQKNorm`); the query scale
 from megatron.core.transformer.attention import SelfAttention
 
 from primus.backends.megatron.core.models.muse_spark.model_types import config_flag
+from primus.backends.megatron.core.transformer.muse_spark.compiled_norms import (
+    compiled,
+    o_norm_gate_math,
+)
 from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkRMSNorm,
     weightless_rms,
@@ -46,10 +50,13 @@ class MuseSparkSelfAttention(SelfAttention):
         super().__init__(config, *args, **kwargs)
         self.o_norm_eps = float(config.layernorm_epsilon)
         self.o_norm_fused = config_flag(config, "muse_spark_fused_attn_norm", True)
+        self.o_norm_compile = config_flag(config, "muse_spark_compile_norms", False)
 
     def _apply_output_gate(self, x, gate):
         # x: [sq, b, np * hn] (or [t, 1, np * hn] for thd); normalize each head.
         hn = self.hidden_size_per_attention_head
+        if self.o_norm_compile and x.is_cuda:
+            return compiled(o_norm_gate_math)(x, gate, hn, self.o_norm_eps)
         shape = x.shape
         # fp32 per-head norm, rounded to x.dtype; the fused kernel on GPU (weightless_rms)
         x = weightless_rms(x.view(*shape[:-1], -1, hn), self.o_norm_eps, self.o_norm_fused).view(shape)

@@ -1,0 +1,149 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-1gpu-proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Muse-Spark-Open-816B-A42B BF16 pretraining proxy on ONE MI455X (gfx1250, 432 GB):
+# the first 4 released layers (sliding, full / NoPE, sliding, sliding) with 64 experts
+# top-8, i.e. the experts and routed rows one GPU holds at EP 4 of the full model
+# (256 / 4), without the all-to-all. EP 1, PP 1, TP 1, seq 4096, MBS 1, GBS 2.
+# Model states ~291 GiB of 432 GiB (the memory-check estimate; DP 1 shards nothing).
+#
+# The MI455X settings, each measured on this proxy (ms per step, steady state):
+#   - muse_spark_compile_norms: the norm / gate / residual regions and the expert SwiGLU
+#     as torch.compile graphs (359 -> 331 ms with TE attention).
+#   - use_turbo_attention: Primus-Turbo FlyDSL attention for head dim 64 with the causal
+#     sliding window (2047, 0) on the sliding layers (331 -> ~326 ms). Needs a
+#     Primus-Turbo with the gfx1250 head-dim-64 / sliding-window FlyDSL kernels
+#     (lhzhang333/Primus-Turbo dev/lhz/muse_spark_swa, d2c0dab); with an older
+#     Primus-Turbo the dispatcher falls back to AITER, which fails on gfx1250.
+#     Primus's launcher resets PYTHONPATH, so install that Primus-Turbo in the image's
+#     site-packages rather than putting a checkout on PYTHONPATH.
+#   - env PRIMUS_FUSED_ADAM_*: Primus's HIP Adam applies the gradient-clip coefficient
+#     in-kernel (no separate clip pass, no host sync) and writes the BF16 parameters
+#     (no separate copy): ~324 -> 294 ms. Keeps the FP32 master weights and FP32 Adam
+#     moments (the BF16 writeback needs separate FP32 masters, so no precision-aware
+#     optimizer here).
+#   - turbo_grouped_gemm_backend bf16:flydsl: the gfx1250 FlyDSL grouped GEMM for the expert
+#     forward, dgrad and wgrad instead of the Triton one: ~295 -> 262 ms. It takes at most 64
+#     local experts. Primus-Turbo documents a rare, nondeterministic wrong result from these
+#     kernels with no error or NaN (~1 call in 130,000 in steady state on the largest shape,
+#     more often in a process's first few hundred calls); "default" uses the Triton one.
+#   - check_for_nan_in_loss_and_grad: false (benchmark only): its per-bucket host sync in the
+#     backward pass idles the GPU: ~262 -> 250 ms. Keep it on for real training runs.
+#   - turbo_grouped_gemm_wgrad_accum_fusion: true: the expert wgrads add straight into the
+#     fp32 main_grad (FlyDSL beta = 1 epilogue; needs a Primus-Turbo build that has it):
+#     ~252 -> 247 ms. gradient_accumulation_fusion stays false, so the dense / head wgrads
+#     keep the separate add: hipBLASLt's bf16 -> fp32 wgrad on gfx1250 is ~3.5x slower than
+#     its bf16 -> bf16 one (+45 ms per step with it on).
+#
+# Run (one GPU, e.g. ROCR_VISIBLE_DEVICES=3 in the container):
+#   GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI455X/muse_Spark_Open_816B_A42B-BF16-pretrain-1gpu-proxy.yaml
+
+env:
+  PRIMUS_FUSED_ADAM_CLIP: "1"
+  PRIMUS_FUSED_ADAM_BF16_WRITEBACK: "1"
+  PRIMUS_STATIC_BF16_LOSS_SCALE_CPU: "1"
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:muse_Spark_Open_816B_A42B}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Muse_Spark"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # proxy shape: first 4 released layers, one EP-4 rank's 64 experts
+      num_layers: 4
+      num_experts: ${PRIMUS_NUM_EXPERTS:64}
+      moe_router_topk: 8
+
+      # hyper parameters
+      train_iters: ${TRAIN_ITERS:20}
+      micro_batch_size: ${MBS:1}
+      global_batch_size: ${GBS:2}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 3.0e-5
+      min_lr: 3.0e-6
+      lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:2}
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # parallel: one GPU
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      expert_tensor_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # off: FlyDSL's grouped wgrad cannot accumulate (see the header)
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: ${PRIMUS_MOCK_DATA:true}
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+      # The causal / sliding-window attention kernels do not read a mask; building one
+      # costs a 16 MB [1, 1, s, s] host-to-device copy at the start of every micro-batch.
+      create_attention_mask_in_dataloader: false
+
+      # Off for this benchmark proxy: Megatron's NaN / Inf check reads every DDP grad
+      # bucket's norm on the host inside the backward pass (one hipStreamSynchronize per
+      # bucket, ~10 ms of GPU idle per step here). This also turns off the loss NaN check,
+      # and with the fused-clip Adam the grad norm is not read on the host, so a NaN / Inf
+      # grad is not caught; keep the check (or a deferred one) for real training runs.
+      check_for_nan_in_loss_and_grad: false
+
+      # optimizer: FP32 master weights and moments (see the header for the fused Adam env)
+      use_distributed_optimizer: true
+      use_precision_aware_optimizer: false
+
+      # recompute: off
+      recompute_granularity: null
+      recompute_method: null
+      recompute_num_layers: null
+
+      # ckpt: none (proxy)
+      finetune: false
+      auto_continue_train: false
+      load: null
+      moe_router_bias_update_rate: 1.0e-3
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      eval_iters: 0
+
+      # Muse Spark on MI455X
+      muse_spark_compile_norms: true
+
+      # Primus-Turbo: grouped GEMM experts and FlyDSL sliding-window attention; DeepEP has
+      # nothing to dispatch at EP 1. turbo_sync_free_moe_stage stays 0 (the fused router
+      # drops Muse Spark's selection bias; megatron.args.muse_spark_no_fused_router).
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: true
+      # FlyDSL grouped GEMM (see the header for its limits and known issue)
+      turbo_grouped_gemm_backend: bf16:flydsl
+      # expert wgrads straight into the fp32 main_grad (dense ones keep the add; see the header)
+      turbo_grouped_gemm_wgrad_accum_fusion: true
+      use_turbo_deepep: false
+      moe_token_dispatcher_type: alltoall
+      moe_permute_fusion: true
+
+      # Fused CE (TE) on the soft-capped logits
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te

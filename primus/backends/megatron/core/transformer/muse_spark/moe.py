@@ -33,6 +33,7 @@ from dataclasses import replace
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
@@ -49,6 +50,10 @@ from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkCenteredRMSNorm,
     MuseSparkInputScaledRMSNorm,
     apply_keeping_fp32,
+)
+from primus.backends.megatron.core.transformer.muse_spark.compiled_norms import (
+    compiled,
+    swiglu_math,
 )
 from primus.backends.megatron.core.transformer.muse_spark.post_expert_norm import (
     post_expert_norm_probs,
@@ -191,6 +196,24 @@ class _PostExpertNormMixin:
     def _init_post_expert_norm(self):
         # Set by MuseSparkMoELayer (not registered here: the weight belongs to the MoE layer).
         object.__setattr__(self, "_muse_post_expert_norm", None)
+
+    def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
+        # forward() passes unit probs (the routing prob is applied after post_expert_norm), so
+        # the eager glu's "* probs" is the identity: compile silu(a) * b alone.
+        c = self.config
+        if (
+            config_flag(c, "muse_spark_compile_norms", False)
+            and intermediate_parallel.is_cuda
+            and bias_parallel is None
+            and c.gated_linear_unit
+            and self.activation_func is F.silu
+            and not c.use_te_activation_func
+            and not c.bias_activation_fusion
+            and c.activation_func_clamp_value is None
+            and not c.glu_linear_offset
+        ):
+            return compiled(swiglu_math)(intermediate_parallel)
+        return super().bias_act_func(intermediate_parallel, bias_parallel, permuted_probs)
 
     def forward(self, permuted_local_hidden_states, tokens_per_expert, permuted_probs):
         # Expert TP is rejected by MuseSparkTransformerConfig (ETP must be 1), so the
