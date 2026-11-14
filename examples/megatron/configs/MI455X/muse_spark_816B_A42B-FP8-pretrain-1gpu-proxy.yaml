@@ -1,0 +1,34 @@
+# Muse-Spark-Open-816B-A42B FP8 pretraining proxy on ONE MI455X (gfx1250): the precision
+# sibling of muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml (same shape and MI455X
+# settings; see its header), with FP8 tensorwise current scaling (E4M3 forward, E5M2
+# backward) on the linear GEMMs:
+#   - the dense linears through Transformer Engine;
+#   - the expert grouped GEMMs through Primus-Turbo's FP8 grouped GEMM. FlyDSL's FP8 grouped
+#     GEMMs are gfx950-only, so these take Turbo's default FP8 backend on gfx1250.
+# Master weights, attention, norms and the LM head stay BF16.
+#
+# Measured: ~301 ms per step against ~247 ms for the BF16 sibling, loss tracking it (10.769 vs
+# 10.758 at iteration 10). Not profiled yet; the expert GEMMs leave the tuned FlyDSL BF16
+# kernels for the generic gfx1250 FP8 backends, and the quantization kernels are added.
+#
+# Run (one GPU, e.g. ROCR_VISIBLE_DEVICES=3 in the container):
+#   GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI455X/muse_spark_816B_A42B-FP8-pretrain-1gpu-proxy.yaml
+
+extends:
+  - muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml
+
+exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-FP8-1gpu-proxy}
+
+modules:
+  pre_trainer:
+    overrides:
+      fp8: hybrid
+      fp8_recipe: tensorwise
+      # the FlyDSL fp32-accumulating expert wgrad is BF16-only
+      turbo_grouped_gemm_wgrad_accum_fusion: false
+      # Turbo's grouped GEMMs take the unaligned per-expert token counts as they are. With the
+      # default per-expert quantization padding the expert row count changes every micro-batch,
+      # which recompiles the fixed-shape compiled expert SwiGLU until it hits torch.compile's
+      # recompile limit, and the padding reads the counts on the host.
+      turbo_grouped_gemm_without_padding: true

@@ -39,7 +39,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #
 # Run (one GPU, e.g. ROCR_VISIBLE_DEVICES=3 in the container):
 #   GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
-#     --config examples/megatron/configs/MI455X/muse_Spark_Open_816B_A42B-BF16-pretrain-1gpu-proxy.yaml
+#     --config examples/megatron/configs/MI455X/muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml
 
 env:
   PRIMUS_FUSED_ADAM_CLIP: "1"
@@ -88,7 +88,7 @@ modules:
       sequence_parallel: false
       overlap_grad_reduce: true
       overlap_param_gather: true
-      # off: FlyDSL's grouped wgrad cannot accumulate (see the header)
+      # off: the dense / head wgrads keep the separate add (see the header)
       gradient_accumulation_fusion: false
 
       # data
