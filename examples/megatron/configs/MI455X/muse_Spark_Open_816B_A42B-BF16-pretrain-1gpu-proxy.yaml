@@ -31,9 +31,11 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #     more often in a process's first few hundred calls); "default" uses the Triton one.
 #   - check_for_nan_in_loss_and_grad: false (benchmark only): its per-bucket host sync in the
 #     backward pass idles the GPU: ~262 -> 250 ms. Keep it on for real training runs.
-#   - gradient_accumulation_fusion stays false: the FlyDSL grouped wgrad has no beta = 1
-#     epilogue, and the Triton one into the fp32 main_grad is slower than the overwrite
-#     wgrad plus the separate add (+64 ms per step with it on).
+#   - turbo_grouped_gemm_wgrad_accum_fusion: true: the expert wgrads add straight into the
+#     fp32 main_grad (FlyDSL beta = 1 epilogue; needs a Primus-Turbo build that has it):
+#     ~252 -> 247 ms. gradient_accumulation_fusion stays false, so the dense / head wgrads
+#     keep the separate add: hipBLASLt's bf16 -> fp32 wgrad on gfx1250 is ~3.5x slower than
+#     its bf16 -> bf16 one (+45 ms per step with it on).
 #
 # Run (one GPU, e.g. ROCR_VISIBLE_DEVICES=3 in the container):
 #   GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
@@ -136,6 +138,8 @@ modules:
       use_turbo_grouped_gemm: true
       # FlyDSL grouped GEMM (see the header for its limits and known issue)
       turbo_grouped_gemm_backend: bf16:flydsl
+      # expert wgrads straight into the fp32 main_grad (dense ones keep the add; see the header)
+      turbo_grouped_gemm_wgrad_accum_fusion: true
       use_turbo_deepep: false
       moe_token_dispatcher_type: alltoall
       moe_permute_fusion: true

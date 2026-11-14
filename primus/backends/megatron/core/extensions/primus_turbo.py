@@ -68,6 +68,8 @@ except ImportError:  # Megatron-core without per-layer window patterns
         if isinstance(window_attn_skip_freq, int):
             return layer_number % window_attn_skip_freq != 0
         return bool(window_attn_skip_freq[layer_number - 1])
+
+
 from megatron.training.global_vars import get_args
 
 # QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
@@ -289,11 +291,36 @@ def _is_gfx1250() -> bool:
     return is_gfx1250()
 
 
-# The BF16 variable-K (wgrad) backends with a beta = 1 epilogue; CK and FlyDSL have none.
+# The BF16 variable-K (wgrad) backends with a beta = 1 epilogue; CK has none, FlyDSL see below.
 _BF16_WGRAD_ACCUM_BACKENDS = ("TRITON", "HIPBLASLT")
 
 
-def _bf16_grouped_wgrad_can_accumulate() -> bool:
+def _flydsl_bf16_wgrad_can_accumulate(main_grad: Optional[torch.Tensor]) -> bool:
+    """FlyDSL's BF16 variable-K wgrad adds into ``main_grad`` on gfx1250 only, into an fp32 buffer of whole
+    256 x 256 output tiles, from the Primus-Turbo build that exports its accumulate gate."""
+    if not (_is_gfx1250() and isinstance(main_grad, torch.Tensor) and main_grad.dtype == torch.float32):
+        return False
+    if main_grad.dim() < 2 or main_grad.shape[-2] % 256 or main_grad.shape[-1] % 256:
+        return False
+    try:
+        from primus_turbo.flydsl.grouped_gemm.grouped_gemm_bf16_kernel_gfx1250 import (  # noqa: F401
+            grouped_gemm_bf16_variable_k_accum_supported,
+        )
+    except ImportError:
+        return False
+    return True
+
+
+def _grouped_wgrad_accum_fusion(config) -> bool:
+    """``turbo_grouped_gemm_wgrad_accum_fusion``, where null follows ``gradient_accumulation_fusion``."""
+    try:
+        flag = getattr(get_args(), "turbo_grouped_gemm_wgrad_accum_fusion", None)
+    except AssertionError:  # Megatron's args are not initialized (e.g. a unit test)
+        flag = None
+    return bool(getattr(config, "gradient_accumulation_fusion", False) if flag is None else flag)
+
+
+def _bf16_grouped_wgrad_can_accumulate(main_grad: Optional[torch.Tensor] = None) -> bool:
     """Whether Primus-Turbo's BF16 grouped-GEMM wgrad can add into ``main_grad``.
 
     Asks Turbo's backend manager, which reads ``turbo_grouped_gemm_backend`` from the env var it is
@@ -301,8 +328,9 @@ def _bf16_grouped_wgrad_can_accumulate() -> bool:
     can change after the model is built.
 
     - No backend set: the dispatcher picks one that can accumulate.
-    - A pinned backend: only those in ``_BF16_WGRAD_ACCUM_BACKENDS`` can; Turbo raises rather than
-      fall back from a pinned backend.
+    - A pinned backend: only those in ``_BF16_WGRAD_ACCUM_BACKENDS`` can, and FlyDSL where
+      :func:`_flydsl_bf16_wgrad_can_accumulate` admits ``main_grad``; Turbo raises rather than fall back
+      from a pinned backend.
     - Auto-tune, per op or global: older Primus-Turbo builds tune the accumulating wgrad on
       ``main_grad`` itself, or reuse a backend tuned for an overwriting wgrad of the same shapes,
       and Primus cannot tell the builds apart.
@@ -323,7 +351,10 @@ def _bf16_grouped_wgrad_can_accumulate() -> bool:
         return False
     # an older Primus-Turbo returns the BackendType itself
     backend = getattr(choice, "backend", choice)
-    return backend is None or getattr(backend, "name", None) in _BF16_WGRAD_ACCUM_BACKENDS
+    name = getattr(backend, "name", None)
+    if name == "FLYDSL":
+        return _flydsl_bf16_wgrad_can_accumulate(main_grad)
+    return backend is None or name in _BF16_WGRAD_ACCUM_BACKENDS
 
 
 def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -434,12 +465,13 @@ def _bridge_weight_grad(
     return x, PrimusTurboQuantizedTensorPair(data=quantized_weight, data_t=quantized_weight_trans)
 
 
-def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
+def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor, grouped: bool = False) -> Optional[str]:
     """Resolve the fused weight-gradient accumulation pattern for ``weight``.
 
     Fusion has the wgrad GEMM accumulate straight into ``weight.main_grad`` through a
     beta=1 epilogue, replacing the separate elementwise add the framework would run
-    over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``.
+    over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``, and for the
+    grouped-GEMM experts (``grouped``) by ``turbo_grouped_gemm_wgrad_accum_fusion``.
 
     Only the BF16/FP16 GEMMs, the FP8 current-scaling (tensorwise) ones, and
     non-preshuffled MXFP4 GEMMs (FlyDSL ``gemm_fp4_accum_impl``) carry that
@@ -451,7 +483,12 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     forwarded onto the buffer by :func:`_bridge_weight_grad`, which also stands its own
     accumulation down so the two never both write ``main_grad``.
     """
-    if not getattr(config, "gradient_accumulation_fusion", False):
+    enabled = (
+        _grouped_wgrad_accum_fusion(config)
+        if grouped
+        else getattr(config, "gradient_accumulation_fusion", False)
+    )
+    if not enabled:
         return None
 
     turbo_fp4_enabled = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
@@ -2447,7 +2484,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         weights = self.weights
         is_first_microbatch = self.is_first_microbatch
         self.is_first_microbatch = False
-        fuse_wgrad_accum_pattern = _fuse_wgrad_accum_pattern(self.config, weights)
+        fuse_wgrad_accum_pattern = _fuse_wgrad_accum_pattern(self.config, weights, grouped=True)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -2505,7 +2542,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             return x, quantized_weights, fuse_wgrad_accum_pattern
 
         # Where the BF16 wgrad backend cannot add into main_grad, these weights keep DDP's separate add.
-        if fuse_wgrad_accum_pattern is not None and not _bf16_grouped_wgrad_can_accumulate():
+        if fuse_wgrad_accum_pattern is not None and not _bf16_grouped_wgrad_can_accumulate(weights.main_grad):
             fuse_wgrad_accum_pattern = None
         return x, weights, fuse_wgrad_accum_pattern
 
