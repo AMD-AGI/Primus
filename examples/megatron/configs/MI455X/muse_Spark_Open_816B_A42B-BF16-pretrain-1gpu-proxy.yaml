@@ -29,6 +29,8 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #     local experts. Primus-Turbo documents a rare, nondeterministic wrong result from these
 #     kernels with no error or NaN (~1 call in 130,000 in steady state on the largest shape,
 #     more often in a process's first few hundred calls); "default" uses the Triton one.
+#   - check_for_nan_in_loss_and_grad: false (benchmark only): its per-bucket host sync in the
+#     backward pass idles the GPU: ~262 -> 250 ms. Keep it on for real training runs.
 #   - gradient_accumulation_fusion stays false: the FlyDSL grouped wgrad has no beta = 1
 #     epilogue, and the Triton one into the fp32 main_grad is slower than the overwrite
 #     wgrad plus the separate add (+64 ms per step with it on).
@@ -92,6 +94,13 @@ modules:
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
+
+      # Off for this benchmark proxy: Megatron's NaN / Inf check reads every DDP grad
+      # bucket's norm on the host inside the backward pass (one hipStreamSynchronize per
+      # bucket, ~10 ms of GPU idle per step here). This also turns off the loss NaN check,
+      # and with the fused-clip Adam the grad norm is not read on the host, so a NaN / Inf
+      # grad is not caught; keep the check (or a deferred one) for real training runs.
+      check_for_nan_in_loss_and_grad: false
 
       # optimizer: FP32 master weights and moments (see the header for the fused Adam env)
       use_distributed_optimizer: true
