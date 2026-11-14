@@ -21,8 +21,9 @@ rampup_batch_size: null
 decrease_batch_size_if_needed: false
 check_for_nan_in_loss_and_grad: true
 # Primus: check the DDP grad buckets for NaN / Inf with one host sync per step instead of
-# one per bucket in the backward pass (megatron.ddp.deferred_grad_nan_check)
-deferred_grad_nan_check: false
+# one per bucket in the backward pass (megatron.ddp.deferred_grad_nan_check).
+# Set false for Megatron's per-bucket check through the rerun state machine.
+deferred_grad_nan_check: true
 check_for_spiky_loss: false
 check_for_large_grads: false
 make_vocab_size_divisible_by: 128

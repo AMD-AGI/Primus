@@ -14,10 +14,11 @@ one ``hipStreamSynchronize`` per bucket. Each one stalls the CPU until the GPU q
 drains, leaving the GPU idle while the next kernels are launched. On the Muse Spark
 1-GPU proxy that is 23 syncs and ~58 ms of host wait per step.
 
-With ``deferred_grad_nan_check: true``, ``check_grads`` keeps each bucket's non-finite
+With ``deferred_grad_nan_check: true`` (the Primus default), ``check_grads`` keeps each bucket's non-finite
 flag on the device, and ``DistributedDataParallel.finish_grad_sync`` (after the
 backward pass, which waits for the gradients anyway) reads all of them with one host
-sync and raises when any is set.
+sync and raises when any is set. ``deferred_grad_nan_check: false`` restores Megatron's
+per-bucket check.
 
 Differences from Megatron's path:
 
