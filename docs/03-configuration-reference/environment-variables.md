@@ -51,6 +51,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_PREFLIGHT_MIN_TFLOPS` | `10.0` | User | `primus/tools/preflight/gpu/utils.py` | Minimum TFLOPS threshold for preflight GEMM checks. |
 | `PRIMUS_TURBO_AUTO_TUNE` | (unset) | User / tests | `tests/trainer/test_megatron_trainer.py` (integration) | Enables Turbo auto-tuning in supported Turbo/Megatron test flows; not referenced in core `primus/` Python outside tests. **Optional**. |
 | `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` | `TURBO` | User; hooks may set `DEEP_EP` | `primus/backends/megatron/patches/args/rocm_arg_validation.py`, `runner/helpers/hooks/05_using_uep.sh` | MoE dispatch/combine backend selector. |
+| `PRIMUS_CONVERT_RUN_ID` | (unset) | User | `primus/backends/megatron/checkpoint/native_loader_muse_spark.py` (`conversion_run_tag`) | Optional launch id for a multi-node Muse Spark checkpoint conversion. Set one new value per launch, the same on every node (for example `${SLURM_JOB_ID}.${SLURM_STEP_ID}`). With it, the waiting nodes see a failure of node 0 at once, also one that happened before they started waiting. Without it, such a failure is seen after 1800 s. The conversion's markers and records are in the checkpoint directory (`DATA_PATH`), which must be on storage that every node shares. Under `primus-cli container` it reaches the container without any setting: `runner/primus-cli-container.sh` passes every `PRIMUS_*` variable that is set on the host. See [Megatron parameters §11.6](megatron-parameters.md). |
 
 ---
 

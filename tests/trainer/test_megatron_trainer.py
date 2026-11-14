@@ -5,6 +5,7 @@
 ###############################################################################
 
 
+import math
 import os
 import re
 import subprocess
@@ -683,6 +684,95 @@ class TestMegatronTrainer(PrimusUT):
                 "--global_batch_size",
                 "16",
             ],
+        )
+
+    # Muse Spark (muse_spark): one case, the full preset cut to 4 layers and 16 experts on the
+    # command line. It checks that the Muse Spark model code was built
+    # (the markers below). The layout is pinned on the command line, so a change of the
+    # example's parallel defaults does not change what a case runs. CPU coverage of the model
+    # code, patches and converter: tests/unit_tests/backends/megatron/muse_spark/.
+    _MUSE_SPARK_MARKERS = (
+        "Loaded Muse-Spark model_provider",
+        "[Patch:megatron.args.muse_spark_layer_patterns]",
+        # logged by the built MuseSparkModel: the decoder layer, attention, gated residual,
+        # MoE layer, router and experts are the Muse Spark classes (not stock GPT layers)
+        "layer=MuseSparkTransformerLayer attention=MuseSparkSelfAttention "
+        "residual=MuseSparkGatedResidual mlp=MuseSparkMoELayer router=MuseSparkTopKRouter "
+        "experts=MuseSpark",
+    )
+
+    _MUSE_SPARK_TRAIN_ITERS = 3  # with --log_interval 1: one loss line each
+
+    def _muse_spark(self, tag, exp_path, extra=None, ep=1, markers=()):
+        out, _ = run_script(
+            self.__class__.__name__,
+            tag,
+            exp_path=exp_path,
+            env_override={"PRIMUS_EP": str(ep), "PRIMUS_PP": "1"},
+            extra_args=[
+                "--train_iters",
+                str(self._MUSE_SPARK_TRAIN_ITERS),
+                "--log_interval",
+                "1",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--tensor_model_parallel_size",
+                "1",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--num_virtual_stages_per_pipeline_rank",
+                "null",
+                "--expert_model_parallel_size",
+                str(ep),
+                "--recompute_granularity",
+                "null",
+                *(extra or []),
+            ],
+        )
+        for marker in (*self._MUSE_SPARK_MARKERS, *markers):
+            assert marker in out, f"[{tag}] Muse Spark marker {marker!r} not in the training log"
+        # \S+ also takes "nan" / "inf" (float() parses them), so a non-finite loss fails below
+        losses = [float(v) for v in re.findall(r"lm loss: (\S+?)(?=\s|\||$)", out)]
+        assert (
+            len(losses) == self._MUSE_SPARK_TRAIN_ITERS
+        ), f"[{tag}] expected one 'lm loss' per iteration: {losses}"
+        assert all(math.isfinite(v) and 0.0 < v < 30.0 for v in losses), f"[{tag}] bad lm loss {losses}"
+        norms = [float(v) for v in re.findall(r"grad norm: (\S+?)(?=\s|\||$)", out)]
+        assert len(norms) == self._MUSE_SPARK_TRAIN_ITERS and all(
+            math.isfinite(v) and v > 0.0 for v in norms
+        ), f"[{tag}] bad grad norm (non-finite, or 0: no gradient flows) {norms}"
+
+    @pytest.mark.weekly
+    def test_muse_Spark_Open_816B_A42B(self):
+        # Weekly burn-in (tests/README.md): promote to the per-PR tier by deleting the marker
+        # once a weekend run shows it green. The full-model example (62 layers, 256
+        # experts, >= 16 nodes) cut on the command line to 4 layers and 16 experts so EP 8
+        # fits one node; the full depth is covered by the multi-node run, not by CI.
+        self._muse_spark(
+            f"muse_Spark_Open_816B_A42B_{GPU_PLATFORM.lower()}",
+            f"examples/megatron/configs/{GPU_PLATFORM}/muse_Spark_Open_816B_A42B-BF16-pretrain.yaml",
+            [
+                "--num_layers",
+                "4",
+                "--seq_length",
+                "1024",
+                "--max_position_embeddings",
+                "1024",
+                "--num_experts",
+                "16",
+                "--moe_router_topk",
+                "4",
+                # a 512-key window (HF count) shorter than the 1024-token sequence, so the
+                # sliding-window mask takes effect; the config passes 511 to TE (checked below)
+                "--window_size",
+                "(512,0)",
+            ],
+            ep=8,
+            # the example enables Primus-Turbo grouped GEMM: the experts must be the Turbo
+            # class (the generic marker above only proves a Muse Spark experts class)
+            markers=("window=(511, 0)", "experts=MuseSparkTurboGroupedMLP"),
         )
 
     def test_zaya1_8B_bf16(self):
