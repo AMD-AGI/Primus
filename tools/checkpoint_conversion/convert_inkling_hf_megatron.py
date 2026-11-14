@@ -20,9 +20,16 @@ What it does:
    streaming one tensor at a time from the shards, and checks each against
    step 2. ``model.mtp.*`` (multi-token prediction), ``model.visual.*`` and
    ``model.audio.*`` are skipped.
-4. Writes a single-rank (TP=PP=EP=1) Megatron ``torch`` checkpoint under
-   ``<output>/release/mp_rank_00/model_optim_rng.pt``; load it with
-   ``--load <output> --ckpt-format torch --finetune --no-load-optim --no-load-rng``.
+4. Writes a Megatron checkpoint as ``<output>/release``:
+
+   - ``--ckpt-format torch_dist`` (default): a distributed checkpoint that
+     Megatron reshards on load, so any PP / VPP / EP / DP layout can load it
+     (TP must match ``--tensor-model-parallel-size``, which sets the vocabulary
+     padding below); load it with ``--load <output> --ckpt-format torch_dist --finetune
+     --no-load-optim --no-load-rng``.
+   - ``--ckpt-format torch``: a single-rank (TP=PP=EP=1) file,
+     ``release/mp_rank_00/model_optim_rng.pt``, that only a single-rank run
+     can load (``--ckpt-format torch``).
 
 The embedding and LM head are trimmed or zero-padded to the vocabulary size
 training builds: ``unpadded_vocab_size`` rounded up to a multiple of
@@ -31,10 +38,10 @@ by default, matching ``trainer_base.yaml``). Pass the training run's values,
 or ``--target-vocab-size``, if they differ.
 
 ``--dry-run`` stops after step 3 and reads only the safetensors headers, so the
-full mapping can be validated without loading any weights. Both modes need one
+full mapping can be validated without loading any weights. Every mode needs one
 visible GPU, because Transformer Engine layers will not build without one, but
-the meta-device build allocates no GPU memory. Writing a resharded
-``torch_dist`` checkpoint for multi-node runs is P3 work.
+the meta-device build allocates no GPU memory. The converted weights are held
+in host memory (2 bytes per parameter in bf16) until they are written.
 """
 
 from __future__ import annotations
@@ -110,6 +117,42 @@ def check_preset(config, text_config) -> None:
         raise SystemExit("Model preset does not match the checkpoint:\n  " + "\n  ".join(bad))
 
 
+def save_torch_dist(model, state: Dict[str, torch.Tensor], release_dir: Path) -> Path:
+    """Write ``state`` through the (meta-device, single-rank) model's ``sharded_state_dict``.
+
+    The sharded keys are the global ones training uses (global layer and expert
+    numbers), so Megatron can load the checkpoint under any parallel layout.
+    """
+    from megatron.core import dist_checkpointing
+    from megatron.core.dist_checkpointing.mapping import (
+        ShardedObject,
+        ShardedTensor,
+        ShardedTensorFactory,
+    )
+
+    metadata = {"singleton_local_shards": False, "chained_optim_avoid_prefix": True}
+    sharded = model.sharded_state_dict(metadata=dict(metadata))
+    for key, item in sharded.items():
+        if isinstance(item, (ShardedTensor, ShardedTensorFactory)):
+            want = tuple(item.data.shape)
+            if tuple(state[key].shape) != want:
+                raise SystemExit(f"{key}: converted {tuple(state[key].shape)} != model {want}")
+            item.data = state[key]
+            if isinstance(item, ShardedTensor):
+                item.dtype = state[key].dtype
+        elif isinstance(item, ShardedObject):
+            item.data = None
+        else:
+            raise SystemExit(f"{key}: unexpected sharded_state_dict entry {type(item).__name__}")
+    os.makedirs(release_dir, exist_ok=True)
+    dist_checkpointing.save(
+        {"model": sharded, "checkpoint_version": 3.0, "iteration": 0},
+        str(release_dir),
+        content_metadata=metadata,
+    )
+    return release_dir
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--hf-dir", required=True, type=Path)
@@ -124,10 +167,15 @@ def main(argv=None) -> int:
     p.add_argument("--make-vocab-size-divisible-by", type=int, default=128)
     p.add_argument("--tensor-model-parallel-size", type=int, default=1)
     p.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
+    p.add_argument("--ckpt-format", choices=["torch_dist", "torch"], default="torch_dist")
     p.add_argument("--dry-run", action="store_true", help="map shapes from the headers only; write nothing")
     args = p.parse_args(argv)
     if not args.dry_run and args.output is None:
         p.error("--output is required unless --dry-run")
+    release_dir = args.output / "release" if args.output is not None else None
+    if not args.dry_run and release_dir.is_dir():
+        if any(release_dir.iterdir()):
+            p.error(f"{release_dir} is not empty")
     if not torch.cuda.is_available():
         raise SystemExit(
             "convert_inkling_hf_megatron.py needs one visible GPU, also with --dry-run: "
@@ -168,7 +216,6 @@ def main(argv=None) -> int:
     model = build_inkling_model(config, vocab_size=target_vocab, max_sequence_length=4096, meta=True)
     expected = module_tensor_shapes(model)
     extra_state = [k for k in model.state_dict() if k.endswith("_extra_state")]
-    del model
 
     text_keys = release_text_keys(weight_map)
     used = set()
@@ -218,13 +265,17 @@ def main(argv=None) -> int:
         print("[inkling-convert] dry run OK: every text tensor maps one-to-one onto the Megatron model")
         return 0
 
-    for key in extra_state:
-        state[key] = None
-    ckpt_dir = args.output / "release" / "mp_rank_00"
-    os.makedirs(ckpt_dir, exist_ok=True)
-    torch.save({"model": state, "checkpoint_version": 3.0, "iteration": 0}, ckpt_dir / "model_optim_rng.pt")
+    if args.ckpt_format == "torch_dist":
+        written = save_torch_dist(model, state, args.output / "release")
+    else:
+        for key in extra_state:
+            state[key] = None
+        ckpt_dir = args.output / "release" / "mp_rank_00"
+        os.makedirs(ckpt_dir, exist_ok=True)
+        written = ckpt_dir / "model_optim_rng.pt"
+        torch.save({"model": state, "checkpoint_version": 3.0, "iteration": 0}, written)
     (args.output / "latest_checkpointed_iteration.txt").write_text("release")
-    print(f"[inkling-convert] wrote {ckpt_dir / 'model_optim_rng.pt'}")
+    print(f"[inkling-convert] wrote {written} ({args.ckpt_format})")
     return 0
 
 

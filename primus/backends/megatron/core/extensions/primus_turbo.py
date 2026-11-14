@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import os
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
@@ -15,6 +16,7 @@ import primus_turbo.pytorch as primus_turbo_torch
 import torch
 import torch.distributed as dist
 import transformer_engine as te
+from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 from megatron.core.enums import Fp4Recipe, Fp8Recipe
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
@@ -2407,6 +2409,58 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
     def state_dict(self, *args, **kwargs):
         self._ensure_weight_views()
         return super().state_dict(*args, **kwargs)
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """Accept the stacked ``weights`` alone (torch_dist) or the per-expert ``weight{i}`` alone
+        (TE grouped linears); ``weight{i}`` are views of ``weights``, so either fills both."""
+        self._ensure_weight_views()
+        stacked = f"{prefix}weights"
+        views = [f"{prefix}weight{i}" for i in range(self.num_gemms)]
+        has_stacked = stacked in state_dict
+        has_views = all(key in state_dict for key in views)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+        if has_views and not has_stacked and stacked in missing_keys:
+            missing_keys.remove(stacked)
+        if has_stacked and not has_views:
+            missing_keys[:] = [key for key in missing_keys if key not in views]
+
+    def _sharded_state_dict_grouped(self, tp_axis_map, prefix="", sharded_offsets=(), metadata=None):
+        """TE's per-expert checkpoint tensors, written from the stacked ``weights``.
+
+        The distributed optimizer looks up every trained parameter in the model's sharded
+        state dict, so ``weights`` replaces its ``weight{i}`` views there, as a factory that
+        builds TE's per-expert tensors (same keys and expert offsets) and stacks them on load.
+        """
+        # With singleton_local_shards, TE gives every expert its own key, which build() below would
+        # collapse onto one; Megatron's training saves always use False.
+        assert not (metadata or {}).get(
+            "singleton_local_shards"
+        ), "Turbo grouped weights support only singleton_local_shards=False"
+        sharded = super()._sharded_state_dict_grouped(tp_axis_map, prefix, sharded_offsets, metadata)
+        experts = [sharded.pop(f"{prefix}weight{i}") for i in range(self.num_gemms)]
+
+        def build(key, data, replica_id, flattened_range):
+            assert flattened_range is None, (
+                "Turbo grouped weights don't support the distributed optimizer's flattened "
+                "(fully_sharded_model_space) checkpoint format; use dist_ckpt_optim_fully_reshardable "
+                "or the default dp_reshardable format"
+            )
+            return {
+                i: replace(expert, key=key, data=data[i], dtype=data.dtype, replica_id=replica_id)
+                for i, expert in enumerate(experts)
+            }
+
+        def merge(loaded):
+            return torch.stack([loaded[i] for i in range(len(experts))])
+
+        sharded[f"{prefix}weights"] = ShardedTensorFactory(
+            experts[0].key, self.weights, build, merge, replica_id=experts[0].replica_id
+        )
+        return sharded
 
     def prepare_weights(self, x: torch.Tensor):
         """Resolve the weight operand for grouped GEMM / fused grouped MLP.

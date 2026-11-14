@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
-from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+from megatron.core.extensions import transformer_engine_spec_provider
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.mlp import MLPSubmodules
 from megatron.core.transformer.moe.experts import TEGroupedMLP
@@ -59,9 +59,17 @@ from primus.backends.megatron.core.transformer.inkling.moe import (
 )
 from primus.backends.megatron.core.transformer.inkling.router import InklingTopKRouter
 
+if TYPE_CHECKING:
+    from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["get_inkling_decoder_block_spec", "get_inkling_layer_spec"]
+
+
+def _spec_provider() -> TESpecProvider:
+    # Looked up per call: the Primus-Turbo patch swaps the class after this module is imported.
+    return transformer_engine_spec_provider.TESpecProvider()
 
 
 def _attention_spec(backend: TESpecProvider) -> ModuleSpec:
@@ -130,7 +138,7 @@ def _moe_spec(config: InklingTransformerConfig, backend: TESpecProvider) -> Modu
 
 def get_inkling_layer_spec(config: InklingTransformerConfig, *, is_moe: bool) -> ModuleSpec:
     """One decoder layer. Attention geometry is resolved per layer from ``layer_number``."""
-    backend = TESpecProvider()
+    backend = _spec_provider()
     norm = backend.layer_norm(rms_norm=True)
     return ModuleSpec(
         module=InklingTransformerLayer,
@@ -180,5 +188,5 @@ def get_inkling_decoder_block_spec(
     )
     return TransformerBlockSubmodules(
         layer_specs=layer_specs,
-        layer_norm=TESpecProvider().layer_norm(rms_norm=True),
+        layer_norm=_spec_provider().layer_norm(rms_norm=True),
     )

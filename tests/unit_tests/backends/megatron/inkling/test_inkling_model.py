@@ -14,6 +14,7 @@ parameter maps one-to-one onto the released checkpoint.
 from __future__ import annotations
 
 import copy
+import re
 from functools import partial
 from types import SimpleNamespace
 
@@ -326,13 +327,15 @@ def _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm):
         provider.cfg = turbo_cfg
         return provider
 
-    monkeypatch.setattr(inkling_layer_specs, "TESpecProvider", turbo_provider)
+    monkeypatch.setattr(
+        inkling_layer_specs.transformer_engine_spec_provider, "TESpecProvider", turbo_provider
+    )
 
 
 def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
     """With Turbo's spec provider and grouped GEMM the routed experts are ``PrimusGroupedMLP``,
-    load the TE build's per-expert ``weight{i}`` and give its loss and gradients. Turbo trains
-    one stacked ``weights`` per linear and exposes ``weight{i}`` as frozen views of it."""
+    load the TE build's per-expert ``weight{i}`` strictly and give its loss and gradients. Turbo
+    trains one stacked ``weights`` per linear and exposes ``weight{i}`` as frozen views of it."""
     from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
 
     config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
@@ -349,8 +352,11 @@ def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
         stacked = {k for k in model.state_dict() if k.endswith(".weights")}
         assert set(model.state_dict()) - stacked == set(state)
         assert len(stacked) == (2 if turbo else 0)
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        assert set(missing) == stacked and not unexpected
+        model.load_state_dict(state, strict=True)
+        for name in stacked:
+            weights = model.get_parameter(name)
+            for i in range(weights.shape[0]):
+                torch.testing.assert_close(weights[i], state[f"{name[:-1]}{i}"], rtol=0, atol=0)
         model.train()
         loss = model(ids, None, None, labels=torch.roll(ids, -1, dims=1)).float().mean()
         loss.backward()
@@ -383,6 +389,61 @@ def test_turbo_provider_without_grouped_gemm_keeps_inkling_experts(fp32_activati
     )
     model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096)
     assert type(model.decoder.layers[1].mlp.experts) is InklingGroupedMLP
+
+
+@pytest.mark.parametrize("turbo", [False, True], ids=["te", "turbo"])
+def test_sharded_state_dict_covers_every_tensor(turbo, turbo_args, monkeypatch):
+    """Every parameter and persistent buffer reaches a ``torch_dist`` checkpoint. Turbo's stacked
+    ``weights`` (the trained parameter, which the distributed optimizer looks up) stand in for
+    their per-expert ``weight{i}`` views."""
+    from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
+
+    if turbo:
+        _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=True)
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
+    model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096)
+    sharded = model.sharded_state_dict(metadata={"singleton_local_shards": False})
+    stacked = {k for k in model.state_dict() if k.endswith(".weights")}
+    assert len(stacked) == (2 if turbo else 0)
+    for key in stacked:
+        assert isinstance(sharded[key], ShardedTensorFactory)
+        assert sharded[key].data is model.get_parameter(key)
+    views = {k for k in model.state_dict() if re.sub(r"weight\d+$", "weights", k) in stacked}
+    tensors = {k for k in model.state_dict() if not k.endswith("_extra_state")} - views
+    assert tensors <= set(sharded), sorted(tensors - set(sharded))
+
+
+@pytest.mark.parametrize("save_turbo", [False, True], ids=["te_to_turbo", "turbo_to_te"])
+def test_torch_dist_moves_between_te_and_turbo(save_turbo, turbo_args, monkeypatch, tmp_path):
+    """A ``torch_dist`` checkpoint written by either expert implementation loads bit-exactly into
+    the other, so Turbo's factory builds TE's keys and offsets and merges them back in order."""
+    from megatron.core import dist_checkpointing
+    from megatron.core.extensions import transformer_engine_spec_provider
+
+    te_provider = transformer_engine_spec_provider.TESpecProvider
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
+    models = {}
+    for turbo, seed in ((save_turbo, 0), (not save_turbo, 1)):
+        if turbo:
+            _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=True)
+        else:
+            monkeypatch.setattr(transformer_engine_spec_provider, "TESpecProvider", te_provider)
+        torch.manual_seed(seed)
+        models[turbo] = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
+    source, target = models[save_turbo], models[not save_turbo]
+    metadata = {"singleton_local_shards": False}
+
+    dist_checkpointing.save(
+        {"model": source.sharded_state_dict(metadata=metadata)}, str(tmp_path), content_metadata=metadata
+    )
+    loaded = dist_checkpointing.load({"model": target.sharded_state_dict(metadata=metadata)}, str(tmp_path))
+    target.load_state_dict(loaded["model"], strict=True)
+
+    expected = {k: v for k, v in source.state_dict().items() if not k.endswith(("_extra_state", ".weights"))}
+    state = target.state_dict()
+    assert any(re.search(r"weight\d+$", k) and "experts" in k for k in expected)
+    for key, tensor in expected.items():
+        torch.testing.assert_close(state[key], tensor, rtol=0, atol=0, msg=key)
 
 
 @pytest.mark.parametrize("keep_fp32", ["0", "1"])

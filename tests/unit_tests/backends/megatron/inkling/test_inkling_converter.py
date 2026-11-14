@@ -58,17 +58,44 @@ def test_dry_run(tiny_checkpoint, capsys):
     assert "skipped 2 non-text tensors" in out and "dry run OK" in out
 
 
+def _convert(hf_dir, yaml, out_dir, *flags):
+    argv = ["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir), *flags]
+    assert load_converter().main(argv) == 0
+    assert (out_dir / "latest_checkpointed_iteration.txt").read_text() == "release"
+
+
 def test_convert_and_load(tiny_checkpoint):
     hf_dir, yaml, config = tiny_checkpoint
     out_dir = hf_dir / "megatron"
-    converter = load_converter()
-    assert converter.main(["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir)]) == 0
-    assert (out_dir / "latest_checkpointed_iteration.txt").read_text() == "release"
+    _convert(hf_dir, yaml, out_dir, "--ckpt-format", "torch")
 
     ckpt = torch.load(out_dir / "release" / "mp_rank_00" / "model_optim_rng.pt", weights_only=False)
     model = build_inkling_model(config, vocab_size=VOCAB, max_sequence_length=4096)
     model.load_state_dict(ckpt["model"], strict=True)
     assert ckpt["model"]["decoder.layers.1.mlp.router.expert_bias"].dtype == torch.float32
+
+
+def test_torch_dist_matches_torch(tiny_checkpoint):
+    """The default ``torch_dist`` output loads through ``dist_checkpointing`` to the same tensors."""
+    from megatron.core import dist_checkpointing
+
+    hf_dir, yaml, config = tiny_checkpoint
+    _convert(hf_dir, yaml, hf_dir / "torch", "--ckpt-format", "torch")
+    _convert(hf_dir, yaml, hf_dir / "dist")
+    expected = torch.load(
+        hf_dir / "torch" / "release" / "mp_rank_00" / "model_optim_rng.pt", weights_only=False
+    )
+    expected = {k: v for k, v in expected["model"].items() if not k.endswith("_extra_state")}
+
+    model = build_inkling_model(config, vocab_size=VOCAB, max_sequence_length=4096)
+    sharded = model.sharded_state_dict(metadata={"singleton_local_shards": False})
+    loaded = dist_checkpointing.load({"model": sharded}, str(hf_dir / "dist" / "release"))
+    model.load_state_dict(loaded["model"], strict=True)
+    state = model.state_dict()
+    assert set(expected) == {k for k in state if not k.endswith("_extra_state")}
+    for key, tensor in expected.items():
+        assert state[key].dtype == tensor.dtype, key
+        torch.testing.assert_close(state[key].cpu(), tensor, rtol=0, atol=0, msg=key)
 
 
 @pytest.mark.parametrize(
@@ -79,8 +106,7 @@ def test_convert_and_load(tiny_checkpoint):
 def test_vocab_follows_training_padding(tiny_checkpoint, flags, rows):
     hf_dir, yaml, _ = tiny_checkpoint
     out_dir = hf_dir / "megatron"
-    argv = ["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir), *flags]
-    assert load_converter().main(argv) == 0
+    _convert(hf_dir, yaml, out_dir, "--ckpt-format", "torch", *flags)
     ckpt = torch.load(out_dir / "release" / "mp_rank_00" / "model_optim_rng.pt", weights_only=False)
     for key in ("embedding.word_embeddings.weight", "output_layer.weight"):
         assert ckpt["model"][key].shape[0] == rows, key
@@ -93,3 +119,18 @@ def test_preset_mismatch_is_rejected(tiny_checkpoint):
     (hf_dir / "config.json").write_text(json.dumps(cfg))
     with pytest.raises(SystemExit, match="moe_router_topk_scaling_factor"):
         load_converter().main(["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--dry-run"])
+
+
+@pytest.mark.parametrize("ckpt_format", ["torch_dist", "torch"])
+def test_refuses_a_used_output(tiny_checkpoint, monkeypatch, ckpt_format):
+    """Rejected before any weight is read, in either format: loaders that detect the format would
+    otherwise pick up what was already in ``release/``."""
+    hf_dir, yaml, _ = tiny_checkpoint
+    out_dir = hf_dir / "out"
+    (out_dir / "release").mkdir(parents=True)
+    (out_dir / "release" / "stale").write_text("")
+    converter = load_converter()
+    monkeypatch.setattr(converter, "checkpoint_index", lambda *a: pytest.fail("read the checkpoint"))
+    argv = ["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--output", str(out_dir)]
+    with pytest.raises(SystemExit):
+        converter.main([*argv, "--ckpt-format", ckpt_format])
