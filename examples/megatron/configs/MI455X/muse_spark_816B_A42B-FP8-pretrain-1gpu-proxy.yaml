@@ -1,15 +1,21 @@
 # Muse-Spark-Open-816B-A42B FP8 pretraining proxy on ONE MI455X (gfx1250): the precision
 # sibling of muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml (same shape and MI455X
 # settings; see its header), with FP8 tensorwise current scaling (E4M3 forward, E5M2
-# backward) on the linear GEMMs:
-#   - the dense linears through Transformer Engine;
-#   - the expert grouped GEMMs through Primus-Turbo's FP8 grouped GEMM. FlyDSL's FP8 grouped
-#     GEMMs are gfx950-only, so these take Turbo's default FP8 backend on gfx1250.
-# Master weights, attention, norms and the LM head stay BF16.
+# backward) on the expert grouped GEMMs, through Primus-Turbo's FP8 grouped GEMM (Triton on
+# gfx1250: FlyDSL's FP8 grouped GEMMs are gfx950-only). Master weights, attention, norms, the
+# LM head and the dense linears stay BF16.
 #
-# Measured: ~301 ms per step against ~247 ms for the BF16 sibling, loss tracking it (10.769 vs
-# 10.758 at iteration 10). Not profiled yet; the expert GEMMs leave the tuned FlyDSL BF16
-# kernels for the generic gfx1250 FP8 backends, and the quantization kernels are added.
+# Measured on this proxy (ms per step, steady state; BF16 sibling ~247):
+#   - everything FP8, without the BF16 config's env (not inherited through `extends`):  ~301
+#   - with the env repeated below, so the fused HIP Adam runs:                           ~274
+#   - te_precision_config_file keeps the dense linears (attention QKV / output, MoE latent
+#     projections) in BF16: hipBLASLt's FP8 GEMMs for these shapes on gfx1250 (MT64x64x128
+#     tiles) are slower than its BF16 ones:                                            ~260
+#   - turbo_grouped_gemm_wgrad_accum_fusion stays false: Turbo's Triton FP8 wgrad
+#     accumulating into the fp32 main_grad costs more than the separate add (+18 ms).
+# The rest of the gap to BF16 is the experts: Triton's FP8 forward / dgrad beats FlyDSL's BF16
+# by ~5 ms, but the FP8 wgrad (+12 ms), the quantization kernels (~12 ms) and the separate
+# main_grad add (no fused FP8 accumulate) cost more.
 #
 # Run (one GPU, e.g. ROCR_VISIBLE_DEVICES=3 in the container):
 #   GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
@@ -18,6 +24,14 @@
 extends:
   - muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml
 
+# Repeated from the BF16 config: the runtime reads `env:` from the launched file alone, so it
+# is not inherited through `extends`. Without it the fused HIP Adam (clip + BF16 writeback) is
+# skipped and the step pays the separate Adam, clip-scale and parameter-copy passes.
+env:
+  PRIMUS_FUSED_ADAM_CLIP: "1"
+  PRIMUS_FUSED_ADAM_BF16_WRITEBACK: "1"
+  PRIMUS_STATIC_BF16_LOSS_SCALE_CPU: "1"
+
 exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-FP8-1gpu-proxy}
 
 modules:
@@ -25,7 +39,9 @@ modules:
     overrides:
       fp8: hybrid
       fp8_recipe: tensorwise
-      # the FlyDSL fp32-accumulating expert wgrad is BF16-only
+      # dense linears in BF16 (see the header)
+      te_precision_config_file: examples/megatron/configs/MI455X/muse_spark_816B_A42B-te-precision-dense-bf16.yaml
+      # off: the FP8 wgrad accumulating into the fp32 main_grad is slower than the add (see the header)
       turbo_grouped_gemm_wgrad_accum_fusion: false
       # Turbo's grouped GEMMs take the unaligned per-expert token counts as they are. With the
       # default per-expert quantization padding the expert row count changes every micro-batch,

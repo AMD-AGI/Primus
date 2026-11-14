@@ -19,6 +19,14 @@
 extends:
   - muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml
 
+# Repeated from the BF16 config: the runtime reads `env:` from the launched file alone, so it
+# is not inherited through `extends`. Without it the fused HIP Adam (clip + BF16 writeback) is
+# skipped and the step pays the separate Adam, clip-scale and parameter-copy passes.
+env:
+  PRIMUS_FUSED_ADAM_CLIP: "1"
+  PRIMUS_FUSED_ADAM_BF16_WRITEBACK: "1"
+  PRIMUS_STATIC_BF16_LOSS_SCALE_CPU: "1"
+
 exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-MXFP8-1gpu-proxy}
 
 modules:
