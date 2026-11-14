@@ -2,7 +2,13 @@
 # Build-time and post-build smoke checks (no GPU required).
 set -euo pipefail
 
-python -c "from sglang.srt.server_args import ServerArgs; assert hasattr(ServerArgs, 'enable_spec_capture')"
+python - <<'PY'
+from primus.backends.specforge.capture_plugin import capture_plugin_issues
+
+issues = capture_plugin_issues()
+if issues:
+    raise SystemExit("Capture plugin checks failed:\n" + "\n".join(issues))
+PY
 python -c "import specforge"
 python - <<'PY'
 import tempfile
@@ -22,6 +28,7 @@ PY
 
 primus-cli --help >/dev/null
 specforge --help >/dev/null
+python -m primus.backends.specforge.offline_capture --help >/dev/null
 
 python - <<'PY'
 import pathlib
