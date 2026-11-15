@@ -16,6 +16,7 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layer_sp
 )
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
     holds_megatron_checkpoint,
+    parse_flag,
 )
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_model import (
     MistralLarge4Model,
@@ -80,8 +81,8 @@ def mistral_large4_config_from_args(args) -> MistralLarge4TransformerConfig:
             f"core_transformer_config_from_args built {type(config).__name__}, not MistralLarge4TransformerConfig"
         )
     config.rope_type = "yarn"
-    seq_length = getattr(args, "seq_length", None)
-    config.pp_carrier_seq_length = int(seq_length) if seq_length else None
+    # its reader (the decoder block's _expected_local_seq) treats an unset or 0 length as unknown
+    config.pp_carrier_seq_length = getattr(args, "seq_length", None)
     return config
 
 
@@ -124,10 +125,17 @@ def mistral_large4_builder(args, pre_process, post_process, vp_stage=None, confi
     check_stage_starts(model, args)
     if _experts_on_expert_groups(args):
         mark_experts_expert_parallel(model)
-    if getattr(args, "freeze_routed_experts", False):
+    if _flag(getattr(args, "freeze_routed_experts", False), "freeze_routed_experts"):
         n = freeze_routed_experts(model)
         print_rank_0(f"[Primus:Mistral-Large-4] freeze_routed_experts: {n} routed-expert tensors frozen")
     return model
+
+
+def _flag(value, name: str) -> bool:
+    """A yes/no setting, read strictly (``mistral_large4_layout.parse_flag``): a bool, 0/1, or
+    true/false/yes/no/on/off/1/0 in any case; None and an empty or blank string read as False;
+    anything else raises ValueError."""
+    return parse_flag(value, name)
 
 
 # the parameter-name part of the routed experts (MoELayer.experts; the shared expert is
@@ -143,9 +151,8 @@ def freeze_routed_experts(model) -> int:
     """Freeze the routed experts (``.mlp.experts.``; the router, shared expert, attention, norms,
     embedding and head stay trainable); returns how many tensors were frozen.
 
-    For fine-tuning on fewer GPUs than full training needs: the routed experts are ~97% of the
-    parameters, so freezing them leaves no gradient or optimizer state for them (the 16-layer cut
-    fine-tunes on one 8-GPU node with EP8)."""
+    For fine-tuning on fewer GPUs than full training needs: the routed experts are most of the
+    parameters, so freezing them leaves no gradient or optimizer state for them."""
     n = 0
     for name, param in model.named_parameters():
         if _is_routed_expert(name):
@@ -154,21 +161,26 @@ def freeze_routed_experts(model) -> int:
     return n
 
 
+def _runs_sparse(args, cfg) -> bool:
+    """Whether ``args.seq_length`` can run the sparse DSA path (sequence > ``index_topk``; the
+    sequence length bounds every document, packed or not)."""
+    return int(getattr(args, "seq_length", 0) or 0) > int(cfg.index_topk)
+
+
 def check_stage_starts(model, args) -> None:
     """At build time: a pipeline stage (or virtual stage) whose first layer is a ``shared``
     indexer layer has no top-k to reuse, which the sparse path (sequence > index_topk) needs.
     Refuse that layout when ``seq_length`` can exceed ``index_topk`` (it bounds every document,
     packed or not), instead of failing on the first long batch."""
-    seq_length = int(getattr(args, "seq_length", 0) or 0)
     blocks = [m for m in model.modules() if getattr(m, "_stage_starts_on_shared", False)]
     if not blocks:
         return
     cfg = blocks[0].config
-    if seq_length > int(cfg.index_topk):
+    if _runs_sparse(args, cfg):
         first = blocks[0].layer_indices[0]
         raise ValueError(
             f"Mistral Large 4: this pipeline stage starts on layer {first}, a 'shared' indexer layer "
-            f"(indexer_types), and seq_length {seq_length} > index_topk {cfg.index_topk} runs sparse "
+            f"(indexer_types), and seq_length {args.seq_length} > index_topk {cfg.index_topk} runs sparse "
             "attention, which needs the top-k of the layer before it: choose a pipeline split "
             "(decoder_first/last_pipeline_num_layers, pipeline_model_parallel_layout) whose stages "
             "start on full-indexer layers"
@@ -187,8 +199,7 @@ def check_indexer_source(args, cfg) -> None:
     (``load`` / ``pretrained_checkpoint``) that selection would come from a random, never-trained
     indexer for the whole run. Refuse it. ``seq_length`` <= ``index_topk`` is dense causal
     attention (every key is selected), so from-scratch training is accepted there."""
-    seq_length = int(getattr(args, "seq_length", 0) or 0)
-    if seq_length <= int(cfg.index_topk):
+    if not _runs_sparse(args, cfg):
         return
     if holds_megatron_checkpoint(getattr(args, "load", None)) or holds_megatron_checkpoint(
         getattr(args, "pretrained_checkpoint", None)
@@ -204,7 +215,7 @@ def check_indexer_source(args, cfg) -> None:
             "sparse attention (checked at the first sparse forward)"
         )
         return
-    if getattr(args, "allow_untrained_indexer", False):
+    if _flag(getattr(args, "allow_untrained_indexer", False), "allow_untrained_indexer"):
         from megatron.training import print_rank_0
 
         print_rank_0(
@@ -213,7 +224,7 @@ def check_indexer_source(args, cfg) -> None:
         )
         return
     raise ValueError(
-        f"Mistral Large 4: seq_length {seq_length} > index_topk {cfg.index_topk} runs DSA sparse "
+        f"Mistral Large 4: seq_length {args.seq_length} > index_topk {cfg.index_topk} runs DSA sparse "
         "attention, whose top-k comes from the frozen indexer (not trained, as in the reference). "
         "Without a checkpoint (load / pretrained_checkpoint) the indexer is random and the "
         "selection never improves. Load the converted release, or train from scratch with "

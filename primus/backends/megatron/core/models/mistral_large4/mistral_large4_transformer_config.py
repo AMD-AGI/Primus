@@ -38,6 +38,7 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     kv_sharing_active,
     moe_layer_freq_list,
     normalize_layer_list,
+    parse_flag,
 )
 
 __all__ = [
@@ -69,6 +70,11 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
     # init values): code-path tests only, the selection is then random and does not train
     allow_untrained_indexer: bool = False
 
+    # rope through the fused LeRoPE kernel (transformer/mistral_large4/lerope_kernel.py): the angles
+    # are computed in the kernel from the positions and YaRN x exp(alpha) (alpha: a frozen buffer);
+    # False (or a CPU tensor): the eager path with the precomputed table
+    fused_lerope: bool = False
+
     # final logits: cap * tanh(logits / cap)
     final_logit_softcapping: Optional[float] = None
 
@@ -87,6 +93,9 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
         # kv_b, KV-sharing consumers without kv_a, shared-indexer layers without an indexer, dense
         # layer 0), so they cannot be stacked along a layer axis
         self.hetereogenous_dist_checkpoint = True
+        # a string from an env-substituted override ('no', 'off', '0') is read strictly, not by
+        # truthiness: the frozen-indexer check (MistralLarge4Attention) reads this bool
+        self.allow_untrained_indexer = parse_flag(self.allow_untrained_indexer, "allow_untrained_indexer")
         n = int(self.num_layers)
         self.no_rope_layers = normalize_layer_list(self.no_rope_layers, n, "no_rope_layers", int, 1)
         self.indexer_types = normalize_layer_list(self.indexer_types, n, "indexer_types", str, "full")
@@ -128,7 +137,9 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
         return int(self.kv_source_layers[layer_idx])
 
     def stores_kv(self, layer_idx: int) -> bool:
-        return self.kv_source(layer_idx) == layer_idx and layer_idx in self.kv_source_layers[layer_idx + 1 :]
+        """Whether layer ``layer_idx`` keeps its latent for later layers: it is the one KV source
+        layer (``kv_source_layer``, found and checked in ``__post_init__``)."""
+        return layer_idx == self._kv_source_layer
 
     @property
     def kv_source_layer(self) -> Optional[int]:

@@ -9,7 +9,7 @@
 With cross-layer KV sharing (``kv_source_layers``) the consumer layers of a source layer's
 latent may sit on later pipeline stages, so the decoder block sends ``[s + n, b, h]`` between
 stages: the hidden states, then the latent packed densely into ``n = kv_carrier_rows(s,
-kv_lora_rank, h)`` rows (171 rows for s 2048 at the release's 512 / 6144, +8% of the wire). This
+kv_lora_rank, h)`` rows (``ceil(s * kv_lora_rank / h)``). This
 patch adds those rows to the P2P shape of the 1F1B schedule (``get_tensor_shapes``, whose
 sequence dim is already the stage-local one) and of the interleaved (VPP) schedule (its
 ``seq_length``, which it divides by CP and, with sequence parallelism, TP). Only for this
@@ -27,16 +27,18 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-# set on the wrappers this patch installs (get_tensor_shapes and the interleaved schedule) to tell
-# them from another model's
-_OWNER_MARK = "_primus_mistral_large4_pp_carrier"
-# a model-neutral mark on these wrappers (its value names the model): a patch that also changes
-# the PP wire shape can set it on its wrappers so each refuses the other
+# a model-neutral mark on the wrappers this patch installs (get_tensor_shapes and the interleaved
+# schedule); its value names the model (MODEL_TYPE): it tells ours from another model's, and a patch
+# that also changes the PP wire shape can set it on its wrappers so each refuses the other
 WIRE_OWNER_ATTR = "_primus_pp_wire_owner"
 # attributes other models' PP shape patches set on their wrappers: Kimi K3's get_tensor_shapes
 # (kimi_k3_pp_shape_patches.py) and DeepSeek-V4's get_tensor_shapes / interleaved schedule
 # (deepseek_v4_pp_shape_patches.py). A wrapper with none of them and no WIRE_OWNER_ATTR (profiling,
 # NVTX, a functools.wraps decorator) does not change the shape
+# the values a wrapper of this patch was built with (and ``__wrapped__``, set by functools.wraps,
+# is the function it wraps): a second application with other values rebuilds the wrapper from
+# the unwrapped function instead of keeping the stale values
+WIRE_PARAMS_ATTR = "_primus_mistral_large4_wire_params"
 _FOREIGN_WIRE_ATTRS = ("_k3_pp_seq_mult", "_v4_pp_shape_patched", "_v4_pp_interleaved_patched")
 
 
@@ -71,9 +73,29 @@ def _wire_state(fn) -> str:
     chain = _wrapper_chain(fn)
     if any(_is_foreign_wire(f) for f in chain):
         return "foreign"
-    if any(getattr(f, _OWNER_MARK, False) for f in chain):
+    if any(getattr(f, WIRE_OWNER_ATTR, None) == MODEL_TYPE for f in chain):
         return "ours"
     return "free"
+
+
+def _mark_params(wrapper, params: dict) -> None:
+    """Record on ``wrapper`` the values it was built with, with the wrapper itself: functools.wraps
+    copies the attributes onto an outer wrapper, whose copy then names another function."""
+    setattr(wrapper, WIRE_PARAMS_ATTR, (wrapper, dict(params)))
+
+
+def _is_our_wrapper(f) -> bool:
+    """``f`` itself is a wrapper this patch built (not an outer wrapper carrying a copy of its marks)."""
+    mark = getattr(f, WIRE_PARAMS_ATTR, None)
+    return isinstance(mark, tuple) and mark[0] is f
+
+
+def _wire_params(fn):
+    """The values this patch's wrapper in ``fn``'s chain was built with, None without one."""
+    for f in _wrapper_chain(fn):
+        if _is_our_wrapper(f):
+            return getattr(f, WIRE_PARAMS_ATTR)[1]
+    return None
 
 
 def _wants_mistral_large4_pp_shape_patch(ctx: PatchContext) -> bool:
@@ -103,28 +125,58 @@ def make_get_tensor_shapes(original, kv_lora_rank: int):
             for shape in shapes
         ]
 
-    setattr(get_tensor_shapes, _OWNER_MARK, True)
     setattr(get_tensor_shapes, WIRE_OWNER_ATTR, MODEL_TYPE)
+    _mark_params(get_tensor_shapes, {"kv_lora_rank": kv_lora_rank})
     return get_tensor_shapes
 
 
 def make_interleaved_schedule(original, kv_lora_rank: int, hidden_size: int, sequence_parallel: bool):
     """The interleaved schedule builds its P2P shape as ``seq_length // cp (// tp with SP)``: it is
     given the ``seq_length`` whose division is the stage-local ``s + kv_carrier_rows(s)``.
-    ``_cp_tp(kwargs)`` gives ``(cp, tp)`` at call time."""
+    ``_cp_tp(kwargs)`` gives ``(cp, tp)`` at call time, and sequence parallelism and the hidden
+    size are read at call time from the model's config, as the schedule reads them (and as the
+    1F1B wrapper gets ``h`` from the schedule's shape); ``sequence_parallel`` and ``hidden_size``
+    are the fallbacks when the model has no config. Megatron's schedule takes its arguments by keyword only
+    (``seq_length`` included); a call without ``seq_length`` is refused rather than left at the
+    plain size the decoder block does not send."""
 
     @functools.wraps(original)
     def schedule(*args, **kwargs):
-        if kwargs.get("seq_length") is not None:
-            cp, tp = _cp_tp(kwargs)
-            div = cp * (tp if sequence_parallel else 1)
-            s = int(kwargs["seq_length"]) // div
-            kwargs["seq_length"] = (s + kv_carrier_rows(s, kv_lora_rank, hidden_size)) * div
+        if kwargs.get("seq_length") is None:
+            raise TypeError(
+                "Mistral Large 4 PP carrier: the interleaved schedule was called without seq_length as a "
+                "keyword; its P2P shape cannot be sized for the shared KV latent"
+            )
+        cp, tp = _cp_tp(kwargs)
+        model = kwargs.get("model")
+        sp = bool(_model_config_value(model, "sequence_parallel", sequence_parallel))
+        h = int(_model_config_value(model, "hidden_size", hidden_size))
+        div = cp * (tp if sp else 1)
+        s = int(kwargs["seq_length"]) // div
+        kwargs["seq_length"] = (s + kv_carrier_rows(s, kv_lora_rank, h)) * div
         return original(*args, **kwargs)
 
-    setattr(schedule, _OWNER_MARK, True)
     setattr(schedule, WIRE_OWNER_ATTR, MODEL_TYPE)
+    _mark_params(
+        schedule,
+        {"kv_lora_rank": kv_lora_rank, "hidden_size": hidden_size, "sequence_parallel": sequence_parallel},
+    )
     return schedule
+
+
+def _model_config_value(model, name: str, default):
+    """``config.<name>`` of the (first) model chunk, as the interleaved schedule reads its config
+    (``get_model_config``); ``default`` when the model has no config or the config lacks it."""
+    chunk = model[0] if isinstance(model, (list, tuple)) and model else model
+    if chunk is None:
+        return default
+    try:
+        from megatron.core.utils import get_model_config
+
+        value = getattr(get_model_config(chunk), name)
+    except (AttributeError, ImportError, RuntimeError):
+        return default
+    return default if value is None else value
 
 
 def _cp_tp(kwargs):
@@ -165,22 +217,41 @@ def patch_mistral_large4_pp_tensor_shape(ctx: PatchContext):
             f"Mistral Large 4 PP wire: {', '.join(foreign)} already wrapped by another patch that changes "
             "the PP wire shape in this process"
         )
-    if all(st == "ours" for st in states.values()):
+    kv_lora_rank = int(args.kv_lora_rank)
+    hidden_size = int(args.hidden_size)
+    wanted = {
+        "get_tensor_shapes": {"kv_lora_rank": kv_lora_rank},
+        "forward_backward_pipelining_with_interleaving": {
+            "kv_lora_rank": kv_lora_rank,
+            "hidden_size": hidden_size,
+            "sequence_parallel": bool(getattr(args, "sequence_parallel", False)),
+        },
+    }
+    makers = {
+        "get_tensor_shapes": lambda fn, p: make_get_tensor_shapes(fn, p["kv_lora_rank"]),
+        "forward_backward_pipelining_with_interleaving": lambda fn, p: make_interleaved_schedule(
+            fn, p["kv_lora_rank"], p["hidden_size"], p["sequence_parallel"]
+        ),
+    }
+    if all(
+        st == "ours" and _wire_params(getattr(schedules_module, n)) == wanted[n] for n, st in states.items()
+    ):
         log_rank_0("[Patch:megatron.mistral_large4.pp_tensor_shape] PP wire already sized; skipping")
         return
-    kv_lora_rank = int(args.kv_lora_rank)
-    if states["get_tensor_shapes"] == "free":
-        schedules_module.get_tensor_shapes = make_get_tensor_shapes(
-            schedules_module.get_tensor_shapes, kv_lora_rank
-        )
-    if states["forward_backward_pipelining_with_interleaving"] == "free":
-        schedules_module.forward_backward_pipelining_with_interleaving = make_interleaved_schedule(
-            schedules_module.forward_backward_pipelining_with_interleaving,
-            kv_lora_rank,
-            int(args.hidden_size),
-            bool(getattr(args, "sequence_parallel", False)),
-        )
+    for n in names:
+        fn = getattr(schedules_module, n)
+        if states[n] == "ours":
+            if _wire_params(fn) == wanted[n]:
+                continue
+            if not _is_our_wrapper(fn):
+                # ours is under another wrapper: it cannot be rebuilt without dropping that wrapper
+                raise RuntimeError(
+                    f"Mistral Large 4 PP wire: {n} was sized with {_wire_params(fn)} under another wrapper; "
+                    f"this run needs {wanted[n]}"
+                )
+            fn = fn.__wrapped__  # rebuild from the unwrapped function with this run's values
+        setattr(schedules_module, n, makers[n](fn, wanted[n]))
     log_rank_0(
         "[Patch:megatron.mistral_large4.pp_tensor_shape] PP wire seq_len + ceil(seq_len * "
-        f"{kv_lora_rank} / {int(args.hidden_size)}) rows (hidden + shared KV latent)"
+        f"{kv_lora_rank} / {hidden_size}) rows (hidden + shared KV latent)"
     )

@@ -105,14 +105,19 @@ def test_moe_layer_freq_patch(n, k_args, k_params, want):
 
 @pytest.fixture
 def megatron_moe_freq_type(monkeypatch):
-    """Megatron's ``moe_freq_type``. Importing ``megatron.training.arguments`` pulls in GPU-only
-    packages (fla, mamba_ssm), so unless it is already loaded a stand-in with Megatron's own code
-    (the character check and ``eval`` of ``_eval_pattern``) is installed for the patch to import."""
+    """Megatron's ``moe_freq_type``: the real ``megatron.training.arguments`` when it imports (a
+    job with Megatron's GPU-only dependencies: fla, mamba_ssm), so its parser is the one checked.
+    Only when that import fails, a stand-in with Megatron's own code (the character check and
+    ``eval`` of ``_eval_pattern``) is installed for the patch to import."""
     import sys
     import types
 
-    if "megatron.training.arguments" in sys.modules:
-        return  # the real one (a GPU job that has imported it)
+    try:
+        import megatron.training.arguments  # noqa: F401
+
+        return  # the real parser
+    except Exception:  # noqa: BLE001 - ImportError or a dependency failing at import on CPU
+        sys.modules.pop("megatron.training.arguments", None)
 
     def moe_freq_type(x):
         if isinstance(x, int):
@@ -216,6 +221,11 @@ def test_deepep_single_rank(tp, etp, ep, deepep, hit):
     if hit:
         mistral_large4_args_patches.patch_mistral_large4_deepep_single_rank(ctx)
         assert params.use_turbo_deepep is False and params.moe_token_dispatcher_type == "alltoall"
+        # any dispatcher other than flex (user-set allgather, unset) is left as it is
+        for kept in ("allgather", "alltoall", None):
+            params.use_turbo_deepep, params.moe_token_dispatcher_type = True, kept
+            mistral_large4_args_patches.patch_mistral_large4_deepep_single_rank(ctx)
+            assert params.use_turbo_deepep is False and params.moe_token_dispatcher_type == kept
 
 
 @pytest.mark.parametrize(
@@ -347,6 +357,66 @@ def test_pp_shape_interleaved_divides_by_tp_only_with_sp(monkeypatch, sequence_p
     mistral_large4_pp_shape_patches.patch_mistral_large4_pp_tensor_shape(_ctx("before_train", params=params))
     out = sched.forward_backward_pipelining_with_interleaving(seq_length=4100, pg_collection=pgs)
     assert out["seq_length"] == want
+    # the model chunks' config decides at call time, as the schedule reads it (not the args value):
+    # applied again with the opposite args value, the wrapper is rebuilt with that value as its
+    # fallback, and the chunk's config still decides
+    chunk = torch.nn.Module()
+    chunk.config = SimpleNamespace(sequence_parallel=sequence_parallel, hidden_size=64)
+    params.sequence_parallel = not sequence_parallel
+    mistral_large4_pp_shape_patches.patch_mistral_large4_pp_tensor_shape(_ctx("before_train", params=params))
+    wrapper = sched.forward_backward_pipelining_with_interleaving
+    assert mistral_large4_pp_shape_patches._wire_params(wrapper)["sequence_parallel"] is (
+        not sequence_parallel
+    )
+    out = wrapper(seq_length=4100, pg_collection=pgs, model=[chunk])
+    assert out["seq_length"] == want
+    # without a model config the rebuilt wrapper's fallback (the new args value) applies
+    other = 2563 * 2 if sequence_parallel else 1282 * 4
+    assert wrapper(seq_length=4100, pg_collection=pgs)["seq_length"] == other
+    # a call without seq_length cannot be sized: refused
+    with pytest.raises(TypeError, match="seq_length"):
+        sched.forward_backward_pipelining_with_interleaving(pg_collection=pgs)
+
+
+def test_pp_shape_patch_reapplied_with_other_values_resizes(monkeypatch):
+    """A second application in the same process with another kv_lora_rank / hidden_size rebuilds
+    both wrappers from the unwrapped functions (no stale closure values, no double sizing); the
+    interleaved wrapper takes h from the model chunks' config, as the 1F1B one takes it from the
+    schedule's shape."""
+    import megatron.core.pipeline_parallel.schedules as sched
+
+    m = mistral_large4_pp_shape_patches
+    monkeypatch.setattr(sched, "get_tensor_shapes", lambda *a, **k: [(1024, 1, 64)])
+    monkeypatch.setattr(sched, "forward_backward_pipelining_with_interleaving", lambda **k: k)
+    params = SimpleNamespace(
+        model_type="mistral_large4",
+        pipeline_model_parallel_size=2,
+        num_layers=4,
+        kv_source_layers=[0, 1, 2, 1],
+        kv_lora_rank=16,
+        hidden_size=64,
+        sequence_parallel=False,
+    )
+    pgs = SimpleNamespace(cp=SimpleNamespace(size=lambda: 1), tp=SimpleNamespace(size=lambda: 1))
+    m.patch_mistral_large4_pp_tensor_shape(_ctx("before_train", params=params))
+    assert sched.get_tensor_shapes() == [(1024 + 256, 1, 64)]
+    params.kv_lora_rank = 32
+    m.patch_mistral_large4_pp_tensor_shape(_ctx("before_train", params=params))
+    assert sched.get_tensor_shapes() == [(1024 + 512, 1, 64)]
+    assert sched.forward_backward_pipelining_with_interleaving(seq_length=1024, pg_collection=pgs)[
+        "seq_length"
+    ] == (1024 + 512)
+    # h from the model's config (128) over the args fallback (64): ceil(1024 * 32 / 128) = 256
+    chunk = torch.nn.Module()
+    chunk.config = SimpleNamespace(sequence_parallel=False, hidden_size=128)
+    assert sched.forward_backward_pipelining_with_interleaving(
+        seq_length=1024, pg_collection=pgs, model=[chunk]
+    )["seq_length"] == (1024 + 256)
+    # our wrapper under a benign one cannot be rebuilt with other values: refused, not left stale
+    monkeypatch.setattr(sched, "get_tensor_shapes", _benign_wraps(sched.get_tensor_shapes))
+    params.kv_lora_rank = 16
+    with pytest.raises(RuntimeError, match="under another wrapper"):
+        m.patch_mistral_large4_pp_tensor_shape(_ctx("before_train", params=params))
 
 
 def _benign_wraps(fn):
@@ -657,14 +727,24 @@ def test_model_type_other_than_mistral_large4_with_its_layout_is_refused(model_t
     from primus.core.patches.patch_registry import PatchRegistry
 
     patch = PatchRegistry.get("megatron.mistral_large4.model_type_check")
-    for k in ("no_rope_layers", "indexer_types", "kv_source_layers"):
-        params = SimpleNamespace(model_type=model_type, **{k: "[1, 1, 1, 0]"})
-        c = _ctx("build_args", SimpleNamespace(), params)
-        assert patch.condition(c)
-        with pytest.raises(ValueError, match="model_type 'mistral_large4'"):
-            patch.handler(c)
+    lists = {
+        "no_rope_layers": "[1, 1, 1, 0]",
+        "indexer_types": '["full"] * 4',
+        "kv_source_layers": "[0, 1, 2, 3]",
+    }
+    params = SimpleNamespace(model_type=model_type, **lists)
+    c = _ctx("build_args", SimpleNamespace(), params)
+    assert patch.condition(c)
+    with pytest.raises(ValueError, match="model_type 'mistral_large4'"):
+        patch.handler(c)
+    # one generic list alone (no_rope_layers is also an HF key of other families) is not this layout
+    for k, v in lists.items():
+        assert not patch.condition(
+            _ctx("build_args", SimpleNamespace(), SimpleNamespace(model_type=model_type, **{k: v}))
+        )
     assert not patch.condition(_ctx("build_args", SimpleNamespace(), SimpleNamespace(model_type=model_type)))
-    ok = SimpleNamespace(model_type="mistral_large4", kv_source_layers="[0, 1, 2, 1]")
+    # mistral_large4 itself, with all three lists (the layout the condition looks for), passes
+    ok = SimpleNamespace(model_type="mistral_large4", **lists)
     assert not patch.condition(_ctx("build_args", SimpleNamespace(), ok))
 
 
@@ -727,6 +807,43 @@ def test_freeze_routed_experts():
         assert p.requires_grad is (".mlp.experts." not in name), name
     assert any(p.requires_grad for n, p in model.named_parameters() if "shared_experts" in n)
     assert all(p.requires_grad for n, p in model.named_parameters() if ".router." in n)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, True),
+        (False, False),
+        (None, False),
+        (0, False),
+        (1, True),
+        ("true", True),
+        ("Yes", True),
+        ("on", True),
+        ("1", True),
+        ("false", False),
+        ("no", False),
+        ("OFF", False),
+        ("0", False),
+    ],
+)
+def test_freeze_routed_experts_flag(value, expected):
+    """An environment value such as 'no' or 'off' is read as false, not as a non-empty string."""
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_builders as b,
+    )
+
+    assert b._flag(value, "freeze_routed_experts") is expected
+
+
+@pytest.mark.parametrize("value", ["maybe", 2, 0.5])
+def test_freeze_routed_experts_flag_refuses_other_values(value):
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_builders as b,
+    )
+
+    with pytest.raises(ValueError, match="freeze_routed_experts"):
+        b._flag(value, "freeze_routed_experts")
 
 
 @pytest.mark.parametrize(
@@ -856,6 +973,7 @@ def _stage(layers, pre, post, kv=(0, 1, 2, 1)):
     blk = MistralLarge4TransformerBlock.__new__(MistralLarge4TransformerBlock)
     blk.config = SimpleNamespace(kv_lora_rank=4, num_layers=4, kv_source=lambda i: kv[i])
     blk.carrier, blk.kv_source, blk.layer_indices = True, 1, list(layers)
+    blk._set_source_position()  # as __init__ does
     blk.pre_process, blk.post_process = pre, post
     return blk
 
@@ -1032,8 +1150,9 @@ def test_hook_converts_a_tp4_ep2_experiment(tmp_path, monkeypatch):
 
 
 def test_converter_keeps_fp32_tensors_exact():
-    """lerope.alpha, the attention and indexer SSMax and the indexer weights_proj land in the
-    model's fp32 tensors with their exact fp32 values; bf16 tensors are rounded once."""
+    """lerope.alpha, the indexer SSMax and the indexer weights_proj land in the model's fp32
+    tensors with their exact fp32 values; bf16 tensors (the attention SSMax, the norms) are
+    rounded once."""
     from primus.backends.megatron.checkpoint import (
         native_loader_mistral_large4_text as conv,
     )
@@ -1074,9 +1193,9 @@ def test_converter_keeps_fp32_tensors_exact():
         "decoder.layers.0.self_attention.indexer.weights_proj",
         "decoder.layers.0.self_attention.indexer.ssmax_s",
         "decoder.layers.0.self_attention.indexer.ssmax_b",
-        "decoder.layers.0.self_attention.ssmax_s",
-        "decoder.layers.0.self_attention.ssmax_b",
     }
+    # the attention SSMax is created in params_dtype (attention.py): the converter rounds it once
+    attn_ssmax = ("decoder.layers.0.self_attention.ssmax_s", "decoder.layers.0.self_attention.ssmax_b")
     shapes = {
         "embedding.word_embeddings.weight": (8, 4),
         "decoder.final_layernorm.weight": (4,),
@@ -1128,11 +1247,26 @@ def test_converter_keeps_fp32_tensors_exact():
             return set(W)
 
     margs = SimpleNamespace(params_dtype=torch.bfloat16, num_layers=1, num_experts=0, moe_layer_freq=[0])
-    sd, consumed = conv.build_mcore_state_dict(_Model(), _Store(), margs, {}, lambda *a: None)
+    # release tensors outside the text decoder (vision, DSpark MTP) and a layer past num_layers (a
+    # depth-reduced conversion): consumed (recognised), never mapped into the model
+    skipped = {
+        "vision_encoder.transformer.layers.0.attention.wq.weight": torch.zeros(2, 2),
+        "patch_merger.merging_layer.weight": torch.zeros(2, 2),
+        "mtp_dspark.output.weight": torch.zeros(2, 2),
+        "layers.1.attention.wq.weight": torch.zeros(2, 2),
+    }
+    W.update(skipped)
+    logged = []
+    sd, consumed = conv.build_mcore_state_dict(_Model(), _Store(), margs, {}, logged.append)
     assert consumed == set(W)
+    assert not set(skipped) & set(sd) and not any(k.startswith(("vision", "mtp")) for k in sd)
+    assert any("not part of this text model" in str(x) and "4 tensors" in str(x) for x in logged), logged
     for k in fp32_keys:
         assert sd[k] is own[k] and sd[k].dtype == torch.float32
         assert torch.equal(sd[k].reshape(-1, 4)[0], exact), k
+    for k in attn_ssmax:
+        assert sd[k] is own[k] and sd[k].dtype == torch.bfloat16
+        assert torch.equal(sd[k], exact.to(torch.bfloat16)), k
     assert sd["decoder.final_layernorm.weight"].dtype == torch.bfloat16
     assert torch.equal(sd["decoder.final_layernorm.weight"], W["norm.weight"].to(torch.bfloat16))
 
@@ -1214,6 +1348,14 @@ def test_check_indexer_source_refuses_random_sparse_selection(tmp_path):
         b.check_indexer_source(SimpleNamespace(seq_length=4096, perform_initialization=False), cfg)
         assert logged and "perform_initialization" in logged[-1]
         b.check_indexer_source(SimpleNamespace(seq_length=4096, allow_untrained_indexer=True), cfg)
+        # read strictly, as freeze_routed_experts: an env-substituted string is not taken by
+        # truthiness ('no' / 'off' / '0' / 'false' refuse, 'yes' accepts, other text raises)
+        for off in ("no", "off", "0", "false", "False"):
+            with pytest.raises(ValueError, match="seq_length 4096"):
+                b.check_indexer_source(SimpleNamespace(seq_length=4096, allow_untrained_indexer=off), cfg)
+        b.check_indexer_source(SimpleNamespace(seq_length=4096, allow_untrained_indexer="yes"), cfg)
+        with pytest.raises(ValueError, match="allow_untrained_indexer must be true or false"):
+            b.check_indexer_source(SimpleNamespace(seq_length=4096, allow_untrained_indexer="maybe"), cfg)
     finally:
         if old is None:
             del sys.modules["megatron.training"]
@@ -1241,6 +1383,9 @@ def test_sparse_forward_refuses_an_indexer_at_init():
         idx.register_buffer(name, torch.full(shape, value))
     assert idx.at_init()
     att = SimpleNamespace(indexer=idx, layer_idx=3, config=SimpleNamespace(allow_untrained_indexer=False))
+    with pytest.raises(RuntimeError, match="initial weights"):
+        MistralLarge4Attention._check_indexer_loaded(att)
+    att.config.allow_untrained_indexer = "off"  # a string is read strictly, not by truthiness
     with pytest.raises(RuntimeError, match="initial weights"):
         MistralLarge4Attention._check_indexer_loaded(att)
     att.config.allow_untrained_indexer = True
@@ -1497,9 +1642,12 @@ def test_posttrain_without_checkpoint_is_refused(tmp_path):
     (resume / "latest_checkpointed_iteration.txt").write_text("release")
     assert not patch.condition(ctx(stage="sft", load=str(resume)))
     assert not patch.condition(ctx(finetune=True))  # pretraining: pre_trainer.yaml defaults finetune true
-    # an explicit pretrain stage is pretraining, not post-training
-    for stage in ("pretrain", "Pretrain", ""):
+    # only the post-training stages (sft, posttrain) are post-training: pretrain, MLPerf's
+    # mlperf_pretrain, a typo or another stage name is not
+    for stage in ("pretrain", "Pretrain", "", "mlperf_pretrain", "pretraining", "eval"):
         assert not patch.condition(ctx(stage=stage, load=None))
+    for stage in ("sft", "SFT", "posttrain"):
+        assert patch.condition(ctx(stage=stage, load=None))
     assert not patch.condition(
         _ctx("build_args", SimpleNamespace(), SimpleNamespace(model_type="deepseek_v3", stage="sft"))
     )
@@ -1751,6 +1899,33 @@ def test_converter_save_retries_only_write_failures(tmp_path, monkeypatch):
         with pytest.raises(type(err)):
             save()
         assert len(calls) == 1 and not iter_dir.exists()
+
+    # what load_validate_save really raises: RuntimeError(...) from the writer's error; the cause
+    # chain decides (an intermittent writer failure is retried, a full disk or quota is not)
+    def wrapped(inner):
+        try:
+            raise inner
+        except BaseException as e:  # noqa: BLE001 - as load_validate_save catches the writer's error
+            try:
+                raise RuntimeError(f"writing the torch_dist checkpoint failed ({e!r})") from e
+            except RuntimeError as outer:
+                return outer
+
+    cases = (
+        (CheckpointException("write", {0: (RuntimeError("unexpected pos"), None)}), True),
+        (RuntimeError("Worker failure"), True),
+        (OSError(28, "No space left on device"), False),
+        (OSError(122, "Disk quota exceeded"), False),
+        (CheckpointException("write", {0: (OSError(28, "No space left on device"), None)}), False),
+    )
+    for inner, retry in cases:
+        assert conv._retryable_write_failure(wrapped(inner)) is retry, inner
+    # common's no-space texts other than "unexpected pos" (retried here) reach this decision
+    assert set(conv._NO_SPACE_TEXT) == set(common._OUT_OF_SPACE_TEXT) - {"unexpected pos"}
+    assert all(
+        not conv._retryable_write_failure(wrapped(RuntimeError(f"Worker failure: {x}")))
+        for x in conv._NO_SPACE_TEXT
+    )
 
     # an interrupted release/ (no tracker file) is set aside before the first attempt (kept as
     # release.incomplete-*): a failing write is then retried and its partial release/ removed
@@ -2049,6 +2224,35 @@ def test_turbo_attention_off_with_cp(model, cp, turbo, hit):
         assert params.use_turbo_attention is False
 
 
+@pytest.mark.parametrize(
+    "model,det,attn,rms,hit",
+    [
+        ("mistral_large4", True, True, True, True),
+        ("mistral_large4", True, True, False, True),
+        ("mistral_large4", True, False, True, True),
+        ("mistral_large4", True, False, False, False),
+        ("mistral_large4", False, True, True, False),  # outside deterministic mode Turbo is kept
+        ("deepseek_v3", True, True, True, False),  # this model only
+    ],
+)
+def test_turbo_kernels_off_in_deterministic_mode(model, det, attn, rms, hit):
+    params = SimpleNamespace(
+        model_type=model,
+        deterministic_mode=det,
+        use_turbo_attention=attn,
+        use_turbo_rms_norm=rms,
+        use_turbo_grouped_gemm=True,
+        use_turbo_deepep=True,
+    )
+    ctx = _ctx("setup", params=params)
+    assert mistral_large4_args_patches._turbo_kernels_in_deterministic_mode(ctx) is hit
+    if hit:
+        mistral_large4_args_patches.patch_mistral_large4_turbo_deterministic(ctx)
+        assert params.use_turbo_attention is False and params.use_turbo_rms_norm is False
+        # grouped GEMM and DeepEP are deterministic: kept
+        assert params.use_turbo_grouped_gemm is True and params.use_turbo_deepep is True
+
+
 def test_layer_lists_from_preset_warns_for_a_hub_id(tmp_path, monkeypatch):
     from primus.core.patches.patch_registry import PatchRegistry
 
@@ -2116,7 +2320,10 @@ def test_sparse_core_attention_recompute_passes_only_tensors(monkeypatch):
     att.recompute_up_proj = False
     att.training = True
     q, k, v = (torch.randn(s, b, n, d, requires_grad=True) for _ in range(3))
-    keep = torch.ones(b, s, s, dtype=torch.bool).tril_()
+    # a sparse top-k keep (not the full causal mask), so a recompute that ignored it would differ
+    g = torch.Generator().manual_seed(0)
+    keep = (torch.rand(b, s, s, generator=g) < 0.5) | torch.eye(s, dtype=torch.bool)[None]
+    keep = keep & torch.ones(s, s, dtype=torch.bool).tril_()[None]
     att._ctx = {"sparse": True}
     monkeypatch.setattr(att, "_local_ctx", lambda ctx, device: ctx, raising=False)
     monkeypatch.setattr(att, "_qkv", lambda h, ctx: (q, k, v), raising=False)
@@ -2125,8 +2332,14 @@ def test_sparse_core_attention_recompute_passes_only_tensors(monkeypatch):
     out, _ = att.forward(torch.zeros(s, b, 8), None)
     assert all(torch.is_tensor(x) for x in calls[0])  # no float among the saved args
     out.sum().backward()
-    ref = attn_mod.sparse_topk_attention(q.detach(), k.detach(), v.detach(), keep, 0.5)
-    assert torch.allclose(out, ref) and q.grad is not None
+    # the gradients of the recompute equal those of a direct sparse attention (same scale, same keep)
+    qr, kr, vr = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
+    ref = attn_mod.sparse_topk_attention(qr, kr, vr, keep, 0.5)
+    ref.sum().backward()
+    torch.testing.assert_close(out, ref.detach())
+    for got, want in ((q.grad, qr.grad), (k.grad, kr.grad), (v.grad, vr.grad)):
+        assert got is not None
+        torch.testing.assert_close(got, want)
 
 
 def test_attention_ssmax_is_tp_sharded_in_dist_checkpoints(monkeypatch):
@@ -2471,6 +2684,18 @@ def test_converter_accepts_release_routing_values(topk_method):
     )
 
 
+def test_check_kv_sources_refuses_a_short_no_rope_list():
+    """A no_rope_layers shorter than kv_source_layers is a ValueError naming both lists."""
+    from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
+        check_kv_sources,
+    )
+
+    with pytest.raises(
+        ValueError, match="no_rope_layers has 1 entries, fewer than the 3 of kv_source_layers"
+    ):
+        check_kv_sources([0, 0, 0], [1])
+
+
 def test_kv_sharing_predicates_refuse_invalid_sources():
     """kv_sharing_active / kv_carrier_needed (which size the PP wire) refuse a kv_source_layers that
     points forward, out of range, or at a layer that does not own its KV."""
@@ -2481,9 +2706,15 @@ def test_kv_sharing_predicates_refuse_invalid_sources():
 
     assert kv_carrier_needed([0, 1, 2, 1], 4, 2) is True
     assert kv_sharing_active([0, 1, 2, 3], 4) is False
-    for bad in ([0, 1, 5, 1], [0, 2, 2, 3], [0, 0, 1, 3], [-1, 1, 2, 3]):
+    for bad in ([0, 1, 5, 1], [0, 2, 2, 3], [-1, 1, 2, 3]):
         with pytest.raises(ValueError, match="breaks the rule"):
             kv_carrier_needed(bad, 4, 2)
+    # layer 2 reuses layer 1, which itself reuses layer 0: the message names the non-owner
+    with pytest.raises(ValueError, match=r"layer 1 does not own its KV \(kv_source_layers\[1\] = 0\)"):
+        kv_carrier_needed([0, 0, 1, 3], 4, 2)
+    # no_rope_layers is checked as the model config checks it: 0 / 1 values only
+    with pytest.raises(ValueError, match="no_rope_layers"):
+        kv_sharing_active([0, 0], 2, [2, 2])
     # with no_rope_layers (as the decoder block and the PP shape patch pass it), the rope / NoPE
     # kind rule of the model config too: layer 3 (rope) cannot reuse layer 1's NoPE latent
     assert kv_carrier_needed([0, 1, 2, 1], 4, 2, [1, 0, 1, 0]) is True

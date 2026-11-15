@@ -9,14 +9,16 @@ Transformer Engine GEMM workspace size (ROCm).
 
 On ROCm, hipBLASLt can pick split-K algorithms for large-K / small-N GEMMs whose workspace
 exceeds Transformer Engine's 64 MiB default, and the GEMM fails with "HIPBLASLT Error: 6" (seen
-on gfx950). The helper applies on every ROCm arch: it costs up to the set size per device and
-stream, so only models that hit the error call it.
-``enlarge_te_gemm_workspace`` raises TE's workspace to ``PRIMUS_TE_GEMM_WORKSPACE_MB`` (default
-512). A helper module (no patch is registered here): a model whose GEMM shapes need it calls it from its
-own patch, so other models keep TE's default. A no-op on CUDA, without Transformer Engine, with
-``PRIMUS_TE_GEMM_WORKSPACE_MB`` <= 0, or when the workspace is already at least that large. It
-raises ``ValueError`` for a non-integer ``PRIMUS_TE_GEMM_WORKSPACE_MB`` and ``RuntimeError`` on
-ROCm when the installed TE has neither known workspace layout (set the variable to 0 to skip it).
+on gfx950). ``enlarge_te_gemm_workspace`` raises TE's workspace to
+``PRIMUS_TE_GEMM_WORKSPACE_MB`` (default 512). It costs up to that size per device and stream, so
+this is a helper module (no patch is registered here): a model whose GEMM shapes need it calls it
+from its own patch, and other models keep TE's default.
+
+The helper is a no-op on CUDA, without Transformer Engine, with ``PRIMUS_TE_GEMM_WORKSPACE_MB``
+<= 0, or when the workspace is already at least that large. On ROCm it raises ``ValueError`` for a
+non-integer ``PRIMUS_TE_GEMM_WORKSPACE_MB`` and ``RuntimeError`` when the installed TE has neither
+known workspace layout (set the variable to 0 or below to skip it); on CUDA the variable is not
+read.
 """
 
 import importlib
@@ -97,7 +99,9 @@ def enlarge_te_gemm_workspace(log_tag: str = "te_gemm_workspace") -> int:
     CUDA). Two TE layouts are handled: ``cpp_extensions.gemm`` (TE 2.17) and ``module.base``
     (TE 2.8); each one this TE has is enlarged (the smaller resulting size is returned). A TE with
     neither raises ``RuntimeError`` (the caller needs the larger workspace;
-    ``PRIMUS_TE_GEMM_WORKSPACE_MB=0`` opts out).
+    ``PRIMUS_TE_GEMM_WORKSPACE_MB`` 0 or below opts out). When the workspace was already allocated,
+    the new size is returned and a warning is printed on every rank: references taken before the
+    call keep the old buffer.
     ``PRIMUS_TE_GEMM_WORKSPACE_MB`` must be an integer (MiB); 0 or below leaves TE's default."""
     if torch.version.hip is None:
         return 0
@@ -118,9 +122,9 @@ def enlarge_te_gemm_workspace(log_tag: str = "te_gemm_workspace") -> int:
     te_gemm = _import_or_none("transformer_engine.pytorch.cpp_extensions.gemm")
     te_base = _import_or_none("transformer_engine.pytorch.module.base")
     sizes = []
-    if te_gemm is not None and te_cpp_extensions_gemm_layout_supported(te_gemm):
+    if te_cpp_extensions_gemm_layout_supported(te_gemm):  # False for None too
         sizes.append(_enlarge_cpp_extensions_gemm_workspace(te_gemm, size, log_tag))
-    if te_base is not None and te_module_base_layout_supported(te_base):
+    if te_module_base_layout_supported(te_base):  # False for None too
         sizes.append(_enlarge_module_base_workspace(te_base, size, log_tag))
     if sizes:
         return min(sizes)
@@ -137,10 +141,14 @@ def enlarge_te_gemm_workspace(log_tag: str = "te_gemm_workspace") -> int:
 
 def _warn_allocated(log_tag: str) -> None:
     # buffers already handed out (e.g. kept by comm-overlap code) keep their old size: the helper
-    # must run before the first GEMM (the before_train patches do)
-    log_rank_0(
-        f"[Patch:{log_tag}] WARNING: TE GEMM workspace already allocated; "
-        "references to it taken before this call keep the old size"
+    # must run before the first GEMM (the before_train patches do). Logged on every rank (the rank
+    # that holds such a reference may not be rank 0), with the rank in the message.
+    rank = os.environ.get("RANK", "?")
+    print(
+        f"[Patch:{log_tag}] WARNING (rank {rank}): TE GEMM workspace already allocated; references to it "
+        "taken before this call keep the old size, and the old buffer stays alive while they do",
+        file=sys.stderr,
+        flush=True,
     )
 
 

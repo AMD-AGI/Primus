@@ -625,6 +625,9 @@ models:
 | `first_k_dense_replace` | `1` | *Primus:* First layers with a dense MLP; the rest are MoE (`moe_layer_freq` is derived from it). |
 | `freeze_routed_experts` | `false` | *Primus:* Fine-tuning: freeze the routed experts (router, shared expert and the rest stay trainable). |
 | `allow_untrained_indexer` | `false` | *Primus:* Accept `seq_length` > `index_topk` without a checkpoint: the frozen DSA indexer stays random (code-path tests only). |
+| `fused_lerope` | `true` | *Primus:* Run the rotary embedding through the fused LeRoPE kernel (Triton): the angles are computed in the kernel from the positions and the YaRN inverse frequencies times `exp(lerope.alpha)`. `alpha` is a frozen buffer loaded from the checkpoint (not trained), so the kernel's gradient to the frequencies is not computed in training. `false`, or a CPU tensor: the eager path with a precomputed table. |
+
+In `deterministic_mode` the model runs Transformer Engine's attention and RMSNorm instead of Primus-Turbo's (`use_turbo_attention` / `use_turbo_rms_norm` are set to `false`): those two Turbo kernels gave different losses from run to run on this model even in that mode. Primus-Turbo grouped GEMM and DeepEP stay on.
 
 ---
 

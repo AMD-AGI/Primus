@@ -10,8 +10,8 @@ block-FP8 checkpoint -> Megatron-Core (Primus's ``MistralLarge4Model``).
 
 Same three entry points as ``native_loader_llama.py`` / ``native_loader_deepseek.py``
 (``derive_megatron_fields``, ``build_margs``, ``build_mcore_state_dict``) plus
-``build_model`` (the model is Primus's own, not ``GPTModel``; the l3 harness and ``convert``
-build it through it) and ``convert`` (the posttrain
+``build_model`` (the model is Primus's own ``MistralLarge4Model``, not ``GPTModel``; ``convert``
+and the parity tests build it with this function) and ``convert`` (the posttrain
 hook's in-process entry, through ``native_convert_common.load_validate_save``).
 
 Checkpoint specifics:
@@ -45,6 +45,7 @@ model is held on the host in params_dtype: the 16-layer cut needs ~420 GiB in bf
 
 import argparse
 import errno
+import faulthandler
 import json
 import logging
 import math
@@ -55,6 +56,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import torch
+from torch.distributed.checkpoint.api import CheckpointException
 
 from primus.backends.megatron.checkpoint import native_convert_common as common
 from primus.backends.megatron.checkpoint.native_registry import dtype_name
@@ -74,24 +76,41 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
 SAVE_ATTEMPTS = 3
 
 
-def _write_failure(e) -> bool:
-    """True for the intermittent writer failures a retry can fix: torch's ``CheckpointException``
-    or Megatron's async-writer ``RuntimeError('Worker failure ...')``, unless the error is a full
-    disk (ENOSPC), which a rewrite of the whole checkpoint would hit again."""
-    from torch.distributed.checkpoint.api import CheckpointException
-
-    text = repr(e)
-    if "No space left on device" in text or getattr(e, "errno", None) == errno.ENOSPC:
-        return False
-    return isinstance(e, CheckpointException) or (isinstance(e, RuntimeError) and "Worker failure" in str(e))
+# A full disk or quota (common's out-of-space texts, without torch's bare "unexpected pos": that one
+# is also the intermittent writer failure retried here, and check_free_space has already refused a
+# save that does not fit before the write started)
+_NO_SPACE_TEXT = tuple(t for t in common._OUT_OF_SPACE_TEXT if t != "unexpected pos")
 
 
-def _free_gib(path) -> str:
-    """Free space at ``path`` in GiB for the log, or ``?`` when it cannot be read."""
-    try:
-        return f"{shutil.disk_usage(path).free / 2**30:.1f}"
-    except OSError:
-        return "?"
+def _exception_chain(e):
+    """``e`` and the exceptions it was raised from (``__cause__`` / ``__context__``):
+    ``common.load_validate_save`` re-raises a failed write as ``RuntimeError(...) from e``."""
+    seen = set()
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        yield e
+        e = e.__cause__ or e.__context__
+
+
+def _retryable_write_failure(e) -> bool:
+    """True for the intermittent writer failures a retry can fix, anywhere in ``e``'s cause chain:
+    torch's ``CheckpointException`` or Megatron's async-writer ``RuntimeError('Worker failure
+    ...')``; False when any exception of the chain is a full disk or quota (ENOSPC / EDQUOT, or
+    its text), which a rewrite of the whole checkpoint would hit again.
+
+    This is ``common._ran_out_of_space`` without its "unexpected pos" text (retried here); the
+    shared helper takes no list of texts, and native_convert_common.py is core code this port
+    does not change."""
+    chain = list(_exception_chain(e))
+    for x in chain:
+        if isinstance(x, OSError) and x.errno in (errno.ENOSPC, errno.EDQUOT):
+            return False
+        if any(t in str(x) for t in _NO_SPACE_TEXT):
+            return False
+    return any(
+        isinstance(x, CheckpointException) or (isinstance(x, RuntimeError) and "Worker failure" in str(x))
+        for x in chain
+    )
 
 
 def _save_with_retry(model, sd, consumed, store, margs, save_dir, log):
@@ -111,9 +130,6 @@ def _save_with_retry(model, sd, consumed, store, margs, save_dir, log):
     ``release/`` without a tracker file is set aside first (``set_aside_interrupted_release``,
     as ``load_validate_save`` would), so every ``release/`` the attempts see is their own.
     """
-    # CheckpointException derives from BaseException, not Exception: caught by name
-    from torch.distributed.checkpoint.api import CheckpointException
-
     if margs.ckpt_format == "torch_dist":
         written = os.path.join(save_dir, "release")
     else:
@@ -131,22 +147,20 @@ def _save_with_retry(model, sd, consumed, store, margs, save_dir, log):
         try:
             common.load_validate_save(model, sd, consumed, store, margs, save_dir, log)
             return
+        # CheckpointException derives from BaseException, not Exception: caught by name
         except (Exception, CheckpointException) as e:  # noqa: BLE001 - only a started write is retried
             if existed or not os.path.exists(written):
                 raise  # the write never started (mapping error or refused target): nothing of ours
-            if not _write_failure(e):
-                # a deterministic error (no space, validation): another full write would fail too
-                shutil.rmtree(written, ignore_errors=True)
-                if os.path.isfile(tracker):
-                    os.remove(tracker)
-                raise
-            log(
-                f"{margs.ckpt_format} write failed (attempt {attempt} of {SAVE_ATTEMPTS}): {e!r}; "
-                f"{_free_gib(save_dir)} GiB free in {save_dir}"
-            )
+            # the write started: what it wrote is removed in every case
             shutil.rmtree(written, ignore_errors=True)
             if os.path.isfile(tracker):
                 os.remove(tracker)
+            if not _retryable_write_failure(e):
+                raise  # a deterministic error (no space, validation): another full write would fail too
+            log(
+                f"{margs.ckpt_format} write failed (attempt {attempt} of {SAVE_ATTEMPTS}): {e!r}; "
+                f"{save_dir}: {common._free_space_text(save_dir)}"
+            )
             if attempt == SAVE_ATTEMPTS:
                 raise
 
@@ -384,7 +398,10 @@ def derive_megatron_fields(hf_config):
         original_max_position_embeddings=int(rope["original_max_position_embeddings"]),
         beta_fast=float(rope.get("beta_fast", 32)),
         beta_slow=float(rope.get("beta_slow", 1)),
-        mscale=1.0,
+        # neutral: Megatron's YaRN scale get_mscale(f, mscale) / get_mscale(f, mscale_all_dim) is
+        # 1 / 1 with both 0, matching attention_factor 1.0 (_check_yarn_scaling); the model builds its
+        # own YaRN + LeRoPE table and reads neither
+        mscale=0.0,
         mscale_all_dim=0.0,
         num_experts=int(t["n_routed_experts"]),
         moe_ffn_hidden_size=int(t["moe_intermediate_size"]),
@@ -594,7 +611,14 @@ def build_margs(fields, args):
 def build_model(margs):
     """The Primus ``MistralLarge4Model``, built as training builds it (the family's model_type through
     ``native_convert_common.build_mcore_gpt_model``). ``convert()`` uses it, and so can any caller
-    that loads the released weights into the model for a parity check."""
+    that loads the released weights into the model for a parity check.
+
+    The build and the weight mapping of the full model hold ~2 TiB on the host and run native code
+    (safetensors reads, TE / HIP); ``faulthandler`` is enabled first, so that a crash in native code
+    (a fatal signal such as SIGSEGV) prints the Python stack of every thread on stderr instead of
+    leaving only an exit code."""
+    if not faulthandler.is_enabled():
+        faulthandler.enable(all_threads=True)
     return common.build_mcore_gpt_model(margs, family=MODEL_TYPE)
 
 
@@ -610,7 +634,10 @@ def build_mcore_state_dict(model, store, margs, fields, log):
     LeRoPE ``alpha`` and indexer ``weights_proj`` / SSMax (their values are never rounded through
     bf16; the attention SSMax ``s`` / ``b`` are trainable and stored in params_dtype). The returned
     ``sd`` holds the model's own tensors (no second copy of the weights); host memory is the model
-    plus the fp32 temporaries in flight: one tensor, or up to EXPERT_WORKERS experts of a MoE layer.
+    plus the fp32 temporaries in flight: the embedding / head read and its vocab-padded copy (two
+    ``[vocab, hidden]`` tensors); a dense or shared-expert MLP's ``w1``, ``w3`` and their ``fc1``
+    concatenation (three); or, in a MoE layer, up to EXPERT_WORKERS experts at once, each with its
+    ``w1``, ``w3``, ``fc1`` concatenation and ``w2`` (four).
     """
     own = model.state_dict()
     padded_vocab = own["embedding.word_embeddings.weight"].shape[0]

@@ -15,19 +15,21 @@ extends:
 
 model_type: mistral_large4
 
-# norms / embeddings
-norm_epsilon: 1.0e-05
-untie_embeddings_and_output_weights: true
+# norms / embeddings (norm_epsilon 1e-5, untied embeddings, no qk_layernorm and init_method_std
+# 0.02 come from llama3_base.yaml / llama_base.yaml)
 group_query_attention: false
-qk_layernorm: false
 
 # MLA (the decoder block owns the rope table: YaRN + LeRoPE)
 multi_latent_attention: true
 apply_rope_fusion: false
 rotary_base: 10000
 rope_type: yarn
-mscale: 1.0
+# neutral YaRN scale (attention_factor 1.0): Megatron's get_mscale(f, 0) / get_mscale(f, 0) = 1
+mscale: 0.0
 mscale_all_dim: 0.0
+# rope through the fused LeRoPE kernel (angles from YaRN x exp(alpha) computed in the kernel; alpha is
+# a frozen buffer loaded from lerope.alpha, not trained); false: the eager path with a precomputed table
+fused_lerope: true
 
 # DSA indexer (eager reference path)
 index_norm_eps: 1.0e-06
@@ -53,8 +55,7 @@ moe_shared_expert_overlap: false
 moe_shared_expert_gate: false
 mtp_num_layers: null
 
-init_method_std: 0.02
 
-# fine-tuning on few GPUs: freeze the routed experts (~97% of the parameters); router, shared
+# fine-tuning on few GPUs: freeze the routed experts (most of the parameters); router, shared
 # expert, attention, norms, embedding and head train (mistral_large4_builders.freeze_routed_experts)
 freeze_routed_experts: false

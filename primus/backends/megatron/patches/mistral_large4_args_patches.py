@@ -6,8 +6,8 @@
 
 """Mistral Large 4 (``model_type: mistral_large4``) argument patches: the model_type check, the
 per-layer lists from the checkpoint or the preset, the post-training checkpoint check, the
-``moe_layer_freq`` derivation, the DeepEP / Turbo attention / Turbo grouped-GEMM fallbacks and the
-TE GEMM workspace.
+``moe_layer_freq`` derivation, the DeepEP / Turbo attention (CP > 1) / Turbo grouped-GEMM fallbacks,
+TE attention and RMSNorm in deterministic mode, and the TE GEMM workspace.
 
 The MoE layout is "the first ``first_k_dense_replace`` layers dense, the rest MoE". Megatron
 takes it as a per-layer ``moe_layer_freq`` list whose length must equal ``num_layers``, so a
@@ -64,10 +64,17 @@ PRIORITY_LAYER_LISTS = 40
 PRIORITY_MOE_LAYER_FREQ = 45
 
 
+def _given_layer_lists(ctx: PatchContext) -> set:
+    """The names in ``LAYER_LISTS`` the config gives a value (not None, empty text or empty list)."""
+    return {k for k in LAYER_LISTS if _param(ctx, k) not in (None, "", [])}
+
+
 def _has_mistral_large4_layout(ctx: PatchContext) -> bool:
-    """The config carries this model's per-layer lists (``LAYER_LISTS``: no_rope_layers,
-    indexer_types, kv_source_layers), keys only its preset sets."""
-    return any(_param(ctx, k) not in (None, "", []) for k in LAYER_LISTS)
+    """The config carries all of this model's per-layer lists (``LAYER_LISTS``: no_rope_layers,
+    indexer_types, kv_source_layers). One list alone is not taken as this model's layout: the
+    names are generic (``no_rope_layers`` is also an HF key of other families), but the three
+    together, with the KV-source list, are this architecture's."""
+    return len(_given_layer_lists(ctx)) == len(LAYER_LISTS)
 
 
 @register_patch(
@@ -84,7 +91,7 @@ def patch_mistral_large4_model_type_check(ctx: PatchContext):
     ``mistral_large4_text``, an override) would get the plain GPT provider: no MLA, indexer or
     KV sharing, and a failure only at checkpoint load. Refused here, from what the config holds,
     whatever the wrong value is."""
-    given = {k for k in LAYER_LISTS if _param(ctx, k) not in (None, "", [])}
+    given = _given_layer_lists(ctx)
     raise ValueError(
         f"model_type {_param(ctx, 'model_type')!r} with Mistral Large 4's per-layer lists ({', '.join(sorted(given))}): "
         f"this model is built with model_type '{MODEL_TYPE}' (the preset mistral_Large_4_1T_A52B.yaml sets it); "
@@ -236,27 +243,30 @@ def patch_mistral_large4_layer_lists_from_preset(ctx: PatchContext):
     )
 
 
-# the stage Primus assumes when none is set (core/runtime/train_runtime.py)
-PRETRAIN_STAGE = "pretrain"
+# the post-training stages Primus's post-trainer configs set (megatron sft_trainer.yaml: sft; the
+# other backends' post_trainer.yaml: posttrain); any other stage (pretrain, mlperf_pretrain, ...)
+# is not post-training
+POSTTRAIN_STAGES = ("sft", "posttrain")
 
 
 def _is_posttrain(ctx: PatchContext) -> bool:
-    """A post-training run: ``stage`` set to a post-training stage (``sft_trainer.yaml``'s ``sft``).
-    No ``stage`` or ``stage: pretrain`` is pretraining."""
+    """A post-training run: ``stage`` is one of ``POSTTRAIN_STAGES`` (``sft_trainer.yaml``'s ``sft``,
+    or ``posttrain``). No ``stage``, ``pretrain``, ``mlperf_pretrain`` or any other value is not."""
     stage = _param(ctx, "stage")
-    return bool(stage) and str(stage).strip().lower() != PRETRAIN_STAGE
+    return bool(stage) and str(stage).strip().lower() in POSTTRAIN_STAGES
 
 
 def _posttrain_without_weights(ctx: PatchContext) -> bool:
-    """A post-training run (``stage`` set: ``sft_trainer.yaml``'s ``sft``) of this model whose
+    """A post-training run (``_is_posttrain``: ``stage`` in ``POSTTRAIN_STAGES``, i.e. ``sft`` or
+    ``posttrain``) of this model whose
     arguments name no checkpoint to start from (a ``pretrained_checkpoint`` or ``load`` directory
-    that holds a Megatron checkpoint: ``holds_megatron_checkpoint``). Pretraining has no ``stage`` or
-    ``stage: pretrain`` (``finetune`` is no signal: ``pre_trainer.yaml`` defaults it to true).
+    that holds a Megatron checkpoint: ``holds_megatron_checkpoint``). ``finetune`` is no signal:
+    ``pre_trainer.yaml`` defaults it to true.
 
     ``hf_path`` is deliberately not part of the condition: build_args runs after the posttrain
     hook (``runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py``), whose
     successful conversion of ``hf_path`` reaches the arguments as ``pretrained_checkpoint``
-    (its ``extra.pretrained_checkpoint=...`` line). So with ``stage`` set, no
+    (its ``extra.pretrained_checkpoint=...`` line). So in post-training, no
     ``pretrained_checkpoint`` / ``load`` means no conversion reached this run, whatever
     ``hf_path`` holds; the message says why for each kind of ``hf_path``
     (``_no_checkpoint_reason``)."""
@@ -409,14 +419,21 @@ def _deepep_unusable(ctx: PatchContext) -> bool:
 )
 def patch_mistral_large4_deepep_single_rank(ctx: PatchContext):
     """The experiment enables Primus-Turbo DeepEP for its expert-parallel layouts; a one-rank
-    expert layout (expert-TP x EP == 1, e.g. TP2 with ETP1 and EP1) cannot use it, so it gets
-    Megatron's alltoall dispatcher, which places tokens the same way."""
+    expert layout (expert-TP x EP == 1, e.g. TP2 with ETP1 and EP1) cannot use it. Only a
+    ``flex`` dispatcher (which needs DeepEP) becomes Megatron's ``alltoall``, which places tokens
+    the same way; any other value is left as it is (and to Megatron's own validation). Both changes
+    are logged."""
     args = get_args(ctx)
     args.use_turbo_deepep = False
-    args.moe_token_dispatcher_type = "alltoall"
     log_kv_rank_0(
         "[Patch:megatron.mistral_large4.deepep_single_rank] -use_turbo_deepep", "False (expert-TP x EP == 1)"
     )
+    if getattr(args, "moe_token_dispatcher_type", None) == "flex":
+        log_kv_rank_0(
+            "[Patch:megatron.mistral_large4.deepep_single_rank] -moe_token_dispatcher_type",
+            "alltoall (was 'flex', which needs DeepEP)",
+        )
+        args.moe_token_dispatcher_type = "alltoall"
 
 
 def _turbo_attention_with_cp(ctx: PatchContext) -> bool:
@@ -447,6 +464,38 @@ def patch_mistral_large4_turbo_attention_cp(ctx: PatchContext):
         "[Patch:megatron.mistral_large4.turbo_attention_cp] -use_turbo_attention",
         f"False (context_parallel_size {args.context_parallel_size} > 1: TE core attention)",
     )
+
+
+def _turbo_kernels_in_deterministic_mode(ctx: PatchContext) -> bool:
+    args = get_args(ctx)
+    # this model only: args.model_type (is_mistral_large4_args)
+    return (
+        is_mistral_large4_args(args)
+        and bool(getattr(args, "deterministic_mode", False))
+        and bool(getattr(args, "use_turbo_attention", False) or getattr(args, "use_turbo_rms_norm", False))
+    )
+
+
+@register_patch(
+    "megatron.mistral_large4.turbo_deterministic",
+    backend="megatron",
+    phase="setup",  # before the spec provider reads use_turbo_attention and megatron.turbo.rms_norm runs
+    description="Mistral Large 4: TE attention and RMSNorm instead of Primus-Turbo's in deterministic mode",
+    condition=_turbo_kernels_in_deterministic_mode,
+)
+def patch_mistral_large4_turbo_deterministic(ctx: PatchContext):
+    """In ``deterministic_mode``, Primus-Turbo attention and Turbo RMSNorm (in the MoE layers, with
+    TP > 1 and sequence parallelism) still give run-to-run loss differences on this model, so both
+    are switched to Transformer Engine (deterministic under ``NVTE_ALLOW_NONDETERMINISTIC_ALGO=0``).
+    Turbo grouped GEMM and DeepEP stay on; outside deterministic mode nothing changes."""
+    args = get_args(ctx)
+    for key in ("use_turbo_attention", "use_turbo_rms_norm"):
+        if getattr(args, key, False):
+            setattr(args, key, False)
+            log_kv_rank_0(
+                f"[Patch:megatron.mistral_large4.turbo_deterministic] -{key}",
+                "False (deterministic_mode: Transformer Engine's kernel, which is deterministic)",
+            )
 
 
 def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
@@ -543,7 +592,7 @@ def patch_mistral_large4_te_gemm_workspace(ctx: PatchContext):
             "(hipBLASLt error 6 with TE's default workspace); use_turbo_grouped_gemm, or moe_grouped_gemm "
             "false (SequentialMLP), are the tested paths"
         )
-    # deferred import, as in the GLM-5.3 patch: the helper imports torch at module level
+    # imported where it is used, as in the GLM-5.3 patch
     from primus.backends.megatron.patches.te_patches.gemm_workspace_size_patches import (
         enlarge_te_gemm_workspace,
     )

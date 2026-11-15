@@ -4,25 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Mistral Large 4 (``model_type: mistral_large4``): log the loss of each iteration, also
-right after a resume.
-
-Megatron logs the first iteration of every run without resetting its accumulators
-(``should_reset = not is_first_iteration``), so that the first *interval* stays complete when
-the first iteration is not a log step. When it is one (``iteration % log_interval == 0``:
-the first iteration run, e.g. ``log_interval`` 1, or a resume from iteration
-``k * log_interval - 1``) that loss stays in
-``total_loss_dict`` and the next log line prints the average of two iterations (for example,
-resuming at iteration 4 with ``log_interval`` 1, iteration 6 would print the average of
-iterations 5 and 6). This patch calls ``training_log`` unchanged (``is_first_iteration`` as
-Megatron passes it, so that call's timers-to-tensorboard skip and log decision are Megatron's
-own) and, only in that case, afterwards does what a normal log step does: clears the loss
-accumulators and iteration counters of ``total_loss_dict`` and resets the ``interval-time``
-timer, so the next line's time per iteration covers only its own iterations. Limited to this model (selected by
-``model_type``): the behaviour is Megatron's own and other models' logs and loss baselines
-depend on it, so changing it for every model would change shared behaviour that this port does
-not need; the checkpoint round trip of this model compares per-iteration losses and needs
-the reset.
+"""Mistral Large 4 (``model_type: mistral_large4``): when the first iteration of a run is also a
+log step (``log_interval`` 1, or a resume at ``k * log_interval - 1``), reset the loss accumulators
+and the ``interval-time`` timer after ``training_log``, as a normal log step does; otherwise the
+next log line averages two iterations. Limited to this model so that other models' loss baselines
+are unchanged.
 """
 
 import functools
@@ -121,7 +107,7 @@ def _is_this_model(ctx: PatchContext) -> bool:
 def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
     del ctx
     import megatron.training.training as megatron_training
-    from megatron.training.global_vars import get_args as megatron_args
+    from megatron.training.global_vars import get_args as get_megatron_args
 
     if getattr(megatron_training.training_log, _WRAPPED_MARK, False):
         return
@@ -147,6 +133,6 @@ def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
         get_timers()("interval-time").elapsed(barrier=True, reset=True)
 
     megatron_training.training_log = make_training_log(
-        megatron_training.training_log, lambda: megatron_args().log_interval, reset_interval_timer
+        megatron_training.training_log, lambda: get_megatron_args().log_interval, reset_interval_timer
     )
     log_rank_0("[Patch:megatron.mistral_large4.first_iteration_log] wrapped training_log")

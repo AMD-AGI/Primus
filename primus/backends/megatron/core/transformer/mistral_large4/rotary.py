@@ -29,7 +29,7 @@ from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
 )
 from torch import nn
 
-__all__ = ["MistralLarge4RotaryEmbedding", "ssmax_scale", "positions_for"]
+__all__ = ["MistralLarge4RotaryEmbedding", "apply_ssmax", "positions_for"]
 
 
 def yarn_inv_freq(
@@ -39,8 +39,9 @@ def yarn_inv_freq(
     if dim == 0:
         return torch.zeros(0, dtype=torch.float32)
     exps = torch.arange(0, dim, 2, dtype=torch.float32) / dim
-    extra = 1.0 / (base**exps)
-    inter = 1.0 / (factor * base**exps)
+    pos_freqs = base**exps
+    extra = 1.0 / pos_freqs
+    inter = 1.0 / (factor * pos_freqs)
     low, high = _yarn_find_correction_range(beta_fast, beta_slow, dim, base, original_max, True)
     mask = 1.0 - _yarn_linear_ramp_mask(low, high, dim // 2, device=torch.device("cpu"))
     return inter * (1 - mask) + extra * mask
@@ -79,9 +80,12 @@ class MistralLarge4RotaryEmbedding(nn.Module):
             self._inv_freq = self._inv_freq.to(self.alpha.device)
         return self._inv_freq * self.alpha.float().exp()
 
-    def freqs(self, positions: torch.Tensor) -> torch.Tensor:
-        """[n, 1, 1, dim] angles for integer ``positions`` [n] (fp32)."""
-        f = positions.float()[:, None] * self.scaled_inv_freq().to(positions.device)[None, :]
+    def freqs(self, positions: torch.Tensor, inv_freq: torch.Tensor = None) -> torch.Tensor:
+        """[n, 1, 1, dim] angles for integer ``positions`` [n] (fp32). ``inv_freq``: the caller's
+        ``scaled_inv_freq()`` when it has it already (computed here otherwise)."""
+        if inv_freq is None:
+            inv_freq = self.scaled_inv_freq()
+        f = positions.float()[:, None] * inv_freq.to(positions.device)[None, :]
         return torch.cat((f, f), dim=-1)[:, None, None, :]
 
 
@@ -106,14 +110,15 @@ def positions_for(sq: int, device, cp_group=None, packed_seq_params=None) -> tor
     return pos
 
 
-def ssmax_scale(
+def apply_ssmax(
     query: torch.Tensor,
     positions: torch.Tensor,
     s: torch.Tensor,
     b: torch.Tensor,
     log_pos: torch.Tensor = None,
 ) -> torch.Tensor:
-    """``query * (s_h * log(pos + 1) + b_h)``; query [sq, ..., heads, d], positions [sq].
+    """The query scaled by SSMax: returns ``query * (s_h * log(pos + 1) + b_h)``; query
+    [sq, ..., heads, d], positions [sq].
     ``log_pos`` (fp32 ``log(pos + 1)``, computed once per forward by the decoder block) is used
     when given.
 
@@ -125,6 +130,6 @@ def ssmax_scale(
     if log_pos is None:
         log_pos = (positions.float() + 1.0).log()
     log_pos = log_pos.to(device=query.device, dtype=dt)
-    scale = s.to(dt)[None, :] * log_pos[:, None] + b.to(dt)[None, :]  # [sq, heads]
-    shape = [scale.size(0)] + [1] * (query.dim() - 3) + [scale.size(1), 1]
-    return query * scale.view(shape)
+    factor = s.to(dt)[None, :] * log_pos[:, None] + b.to(dt)[None, :]  # [sq, heads]
+    shape = [factor.size(0)] + [1] * (query.dim() - 3) + [factor.size(1), 1]
+    return query * factor.view(shape)

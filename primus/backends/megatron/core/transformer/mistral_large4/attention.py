@@ -21,7 +21,9 @@ attention (selective recompute, CP and TP come from there). On top of MLA it add
   TE core attention: both apply ``config.attention_dropout`` in training; ``EagerCoreAttention``,
   the local-backend stand-in, applies no attention dropout).
 
-The rope table (YaRN + LeRoPE) is shared by every layer and owned by the decoder block.
+The rope table (YaRN + LeRoPE) is shared by every layer and owned by the decoder block. With
+``fused_lerope`` the rotation runs the fused LeRoPE kernel (``lerope_kernel``), which computes the
+angles from the positions and the LeRoPE inverse frequencies itself.
 """
 
 from __future__ import annotations
@@ -46,7 +48,14 @@ from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
 from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
 from torch import nn
 
-from primus.backends.megatron.core.transformer.mistral_large4.rotary import ssmax_scale
+from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
+    parse_flag,
+)
+from primus.backends.megatron.core.transformer.mistral_large4.lerope_kernel import (
+    fused_lerope_available,
+    lerope_rotary,
+)
+from primus.backends.megatron.core.transformer.mistral_large4.rotary import apply_ssmax
 
 __all__ = ["EagerCoreAttention", "MistralLarge4Attention", "MistralLarge4Indexer"]
 
@@ -82,8 +91,14 @@ def sparse_topk_attention(query, key, value, keep, softmax_scale, dropout_p: flo
     return out.permute(2, 0, 1, 3).reshape(sq, b, n * value.size(-1))
 
 
-def _rope(x: torch.Tensor, freqs: torch.Tensor, config) -> torch.Tensor:
-    """Interleaved (DeepSeek-layout) rope on the last dim of ``x`` [s, b, h, d]; output [evens|odds]."""
+def _rope(x: torch.Tensor, freqs: torch.Tensor, config, positions=None, inv_freq=None) -> torch.Tensor:
+    """Interleaved (DeepSeek-layout) rope on the last dim of ``x`` [s, b, h, d]; output [evens|odds].
+
+    With ``config.fused_lerope`` and a GPU tensor, the fused LeRoPE kernel computes the angles from
+    ``positions`` and ``inv_freq`` (YaRN x exp(alpha)) itself (``lerope_kernel``); otherwise the
+    eager path applies the precomputed ``freqs`` table."""
+    if inv_freq is not None and getattr(config, "fused_lerope", False) and fused_lerope_available(x):
+        return lerope_rotary(x, positions, inv_freq)
     return apply_rotary_pos_emb(x, freqs, config=config, mla_rotary_interleaved=True)
 
 
@@ -169,13 +184,14 @@ class MistralLarge4Indexer(MegatronModule):
         freqs: Optional[torch.Tensor],
         causal: Optional[torch.Tensor] = None,
         log_pos: Optional[torch.Tensor] = None,
+        inv_freq: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """x [s, b, h] (full sequence), positions [s], ``causal`` the [s, s] additive causal mask
         (built here when not given); returns top-k indices [b, s, k] (-1 = none)."""
         s, b, h = x.shape
         q = F.layer_norm(x, (h,), self.q_norm_weight.to(x.dtype), self.q_norm_bias.to(x.dtype), self.eps)
         q = F.linear(q, self.wq_b.to(x.dtype)).reshape(s, b, self.n_heads, self.head_dim)
-        q = ssmax_scale(q, positions, self.ssmax_s, self.ssmax_b, log_pos)
+        q = apply_ssmax(q, positions, self.ssmax_s, self.ssmax_b, log_pos)
         k = F.linear(x, self.wk.to(x.dtype))
         k = F.layer_norm(
             k, (self.head_dim,), self.k_norm_weight.to(k.dtype), self.k_norm_bias.to(k.dtype), self.eps
@@ -183,8 +199,8 @@ class MistralLarge4Indexer(MegatronModule):
         k = k.reshape(s, b, 1, self.head_dim)
         if self.use_rope:
             r = self.rope_dim
-            q = torch.cat([_rope(q[..., :r], freqs, self.config), q[..., r:]], dim=-1)
-            k = torch.cat([_rope(k[..., :r], freqs, self.config), k[..., r:]], dim=-1)
+            q = torch.cat([_rope(q[..., :r], freqs, self.config, positions, inv_freq), q[..., r:]], dim=-1)
+            k = torch.cat([_rope(k[..., :r], freqs, self.config, positions, inv_freq), k[..., r:]], dim=-1)
         k = k.reshape(s, b, self.head_dim)
         weights = F.linear(x.float(), self.weights_proj) * self.weight_scale
         _, topk = fused_qk_topk_naive(
@@ -282,7 +298,7 @@ class MistralLarge4Attention(MLASelfAttention):
         layer's device: a model split over GPUs by layer runs one block on several devices."""
         assert ctx is not None, "MistralLarge4Attention needs the decoder block's forward context"
         moved = {}
-        for k in ("positions", "log_pos", "freqs"):
+        for k in ("positions", "log_pos", "freqs", "inv_freq"):
             t = ctx.get(k)
             if torch.is_tensor(t) and t.device != device:
                 moved[k] = t.to(device)
@@ -332,12 +348,13 @@ class MistralLarge4Attention(MLASelfAttention):
                 freqs = ctx["freqs"]
                 k_pe = k_pe_opt[0].unsqueeze(2)  # [s, b, 1, r]
                 q_nope, q_pe = torch.split(q, [self.qk_nope_dim, self.qk_rope_dim], dim=-1)
-                query = torch.cat([q_nope, _rope(q_pe, freqs, self.config)], dim=-1)
-                k_pe = _rope(k_pe, freqs, self.config)
+                pos, inv = ctx["positions"], ctx.get("inv_freq")
+                query = torch.cat([q_nope, _rope(q_pe, freqs, self.config, pos, inv)], dim=-1)
+                k_pe = _rope(k_pe, freqs, self.config, pos, inv)
                 key = torch.cat([k_nope, k_pe.expand(-1, -1, nh, -1)], dim=-1)
             else:
                 query, key = q, k_nope
-            query = ssmax_scale(query, ctx["positions"], self.ssmax_s, self.ssmax_b, ctx.get("log_pos"))
+            query = apply_ssmax(query, ctx["positions"], self.ssmax_s, self.ssmax_b, ctx.get("log_pos"))
             return query.contiguous(), key.contiguous(), value.contiguous()
 
         args = (q, kv_c) + ((k_pe,) if k_pe is not None else ())
@@ -351,7 +368,10 @@ class MistralLarge4Attention(MLASelfAttention):
 
     @staticmethod
     def _cached(ctx, key, build):
-        """A per-forward tensor shared by every layer (built once by the first that needs it)."""
+        """A per-forward tensor stored in ``ctx`` (built once by the first layer that needs it).
+        ``ctx`` is the block's shared dict, except for a layer on another device than the block's
+        tensors: ``_local_ctx`` gives it a shallow copy, so there the tensor is built (or copied to
+        its device) again on each forward."""
         if key not in ctx:
             ctx[key] = build()
         return ctx[key]
@@ -371,7 +391,8 @@ class MistralLarge4Attention(MLASelfAttention):
         """First sparse forward: the frozen indexer must hold loaded weights, not its init values
         (a run from scratch, also one resumed from its own checkpoint, never trains it)."""
         self._indexer_checked = True
-        if self.indexer.at_init() and not getattr(self.config, "allow_untrained_indexer", False):
+        allow = parse_flag(getattr(self.config, "allow_untrained_indexer", False), "allow_untrained_indexer")
+        if self.indexer.at_init() and not allow:
             raise RuntimeError(
                 f"Mistral Large 4 layer {self.layer_idx}: sparse DSA attention (sequence > index_topk) with an "
                 "indexer that still has its initial weights. The indexer is frozen (as in the reference), so "
@@ -388,7 +409,9 @@ class MistralLarge4Attention(MLASelfAttention):
             causal = self._cached(ctx, "causal_add", lambda: _causal_mask(s, s, x.device)).to(x.device)
             if not getattr(self, "_indexer_checked", False):
                 self._check_indexer_loaded()
-            topk = self.indexer(x, ctx["positions"], ctx["freqs"], causal, ctx.get("log_pos"))
+            topk = self.indexer(
+                x, ctx["positions"], ctx["freqs"], causal, ctx.get("log_pos"), ctx.get("inv_freq")
+            )
             ctx["topk"].clear()  # shared layers reuse the nearest full layer only: keep one entry
             ctx["topk"][self.layer_idx] = topk
             return self._build_keep(ctx, topk, self.layer_idx)

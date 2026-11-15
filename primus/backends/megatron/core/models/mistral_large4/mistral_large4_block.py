@@ -20,8 +20,7 @@ stage's specs, ``vp_stage`` aware) with the state Mistral Large 4 shares across 
   the latent as an input only when one of its layers consumes it, and returns it only when one
   of its layers stores it, so it crosses chunk boundaries as a checkpointed tensor. Across pipeline stages it travels in the P2P tensor: ``[s + n, b, h]`` = hidden states,
   then each sample's latent ``[s, kv_lora_rank]`` packed densely into ``n = ceil(s * kv_lora_rank / h)``
-  rows (``kv_carrier_rows``; 171 rows for s 2048 at the release's 512 / 6144; see
-  ``mistral_large4_pp_shape_patches``).
+  rows (``kv_carrier_rows``; see ``mistral_large4_pp_shape_patches``).
 """
 
 from __future__ import annotations
@@ -102,6 +101,7 @@ class MistralLarge4TransformerBlock(TransformerBlock):
                 raise RuntimeError(
                     f"layer {attn.layer_idx} reuses layer {attn.kv_source_idx}, not {self.kv_source}"
                 )
+        self._set_source_position()
         first = self.layer_indices[0] if self.layer_indices else None
         self._stage_starts_on_shared = first is not None and config.indexer_types[first] == "shared"
 
@@ -126,20 +126,13 @@ class MistralLarge4TransformerBlock(TransformerBlock):
         return sharded
 
     # ---- pipeline carrier of the shared KV latent ------------------------------
-    def _source_position(self):
-        """Where this stage's layers sit around the KV source layer: ``(ran before the stage, ran by
-        its end)``, both False without sharing or layers (kv_source / layer_indices are fixed)."""
-        if self.kv_source is None or not self.layer_indices:
-            return False, False
-        return self.layer_indices[0] > self.kv_source, self.layer_indices[-1] >= self.kv_source
-
-    @property
-    def _source_ran_before_stage(self) -> bool:
-        return self._source_position()[0]
-
-    @property
-    def _source_ran_by_stage_end(self) -> bool:
-        return self._source_position()[1]
+    def _set_source_position(self) -> None:
+        """Where this stage's layers sit around the KV source layer, computed once at build
+        (``kv_source`` and ``layer_indices`` do not change): the source ran before the stage /
+        by its end; both False without sharing or layers."""
+        has_source = self.kv_source is not None and bool(self.layer_indices)
+        self._source_ran_before_stage = has_source and self.layer_indices[0] > self.kv_source
+        self._source_ran_by_stage_end = has_source and self.layer_indices[-1] >= self.kv_source
 
     def _pack_latent(self, latent, s, b, h):
         """``[s, b, r]`` latent -> ``[n, b, h]`` rows, each sample's ``s * r`` values dense, the
@@ -294,7 +287,12 @@ class MistralLarge4TransformerBlock(TransformerBlock):
             # one-time sanity check (see _assert): check_position_layout is the guarantee
             self._check_position_ids(position_ids, pos)
             self._checked_positions = True
-        freqs = self.rotary.freqs(pos) if self.rotary.dim else None
+        # YaRN x exp(alpha), computed once: the eager table and the fused LeRoPE kernel
+        # (config.fused_lerope, which computes the angles itself) use the same values
+        inv_freq = freqs = None
+        if self.rotary.dim:
+            inv_freq = self.rotary.scaled_inv_freq()
+            freqs = self.rotary.freqs(pos, inv_freq)
         total = full * cp.size()
         if packed_seq_params is not None and getattr(packed_seq_params, "max_seqlen_q", None):
             # THD: each document attends only to itself, so the longest document decides
@@ -329,6 +327,7 @@ class MistralLarge4TransformerBlock(TransformerBlock):
             "positions": pos,
             "log_pos": log_pos,
             "freqs": freqs,
+            "inv_freq": inv_freq,
             # created here so that every layer (also through _local_ctx's copy on another device,
             # transformer/mistral_large4/attention.py) writes into the same dicts
             "topk": {},

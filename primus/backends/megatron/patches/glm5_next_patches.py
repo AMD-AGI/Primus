@@ -184,7 +184,8 @@ def patch_glm5_next_te_gemm_workspace(ctx: PatchContext):
     # TE's 64 MiB default and fails with "HIPBLASLT Error: 6". The shared TE helper
     # (PRIMUS_TE_GEMM_WORKSPACE_MB, default 512; ROCm only; never lowers it) does it.
     del ctx
-    # deferred import: the helper imports torch, and registering the GLM patches must stay torch-free
+    # imported where it is used, as the inline torch / TE imports were (the helper module itself is
+    # also imported at registration by the *_patches auto-import, which imports torch anyway)
     from primus.backends.megatron.patches.te_patches.gemm_workspace_size_patches import (
         enlarge_te_gemm_workspace,
     )

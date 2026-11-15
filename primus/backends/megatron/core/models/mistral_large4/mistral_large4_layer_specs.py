@@ -145,10 +145,9 @@ def get_mistral_large4_decoder_block_spec(
     offset = get_transformer_layer_offset(config, vp_stage=vp_stage, pp_rank=pp_rank)
     count = get_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
     pattern = moe_layer_pattern(config)
-    specs = [
-        get_mistral_large4_layer_spec(config, is_moe=pattern[i] == 1, backend=backend)
-        for i in range(offset, offset + count)
-    ]
+    # the spec depends only on dense / MoE (per-layer attention variants come from the layer number)
+    by_kind = {k: get_mistral_large4_layer_spec(config, is_moe=k, backend=backend) for k in (False, True)}
+    specs = [by_kind[pattern[i] == 1] for i in range(offset, offset + count)]
     return TransformerBlockSubmodules(
         layer_specs=specs, layer_norm=backend.layer_norm(rms_norm=True, for_qk=False)
     )

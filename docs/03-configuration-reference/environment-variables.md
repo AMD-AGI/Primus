@@ -153,7 +153,13 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `NVTE_CK_USES_BWD_V3` | `1` | `base_env.sh`, container passthrough | TE / CK | Use CK backward v3 kernels. |
 | `NVTE_CK_IS_V3_ATOMIC_FP32` | (unset; examples print `0`) | User / container passthrough (`runner/.primus.yaml`) | TE / CK | Atomic FP32 mode for CK v3 backward. |
 | `PATCH_TE_FLASH_ATTN` | `0` | `base_env.sh`, container passthrough | `runner/helpers/hooks/01_patch_te_flash_attn_max_version.sh` | Trigger TE flash-attn patch hook when `1`. |
-| `PRIMUS_TE_GEMM_WORKSPACE_MB` | `512` | User | `primus/backends/megatron/patches/te_patches/gemm_workspace_size_patches.py` (used by the GLM-5.3 and Mistral Large 4 `te_gemm_workspace` patches) | TE's hipBLASLt GEMM workspace in MiB on ROCm (integer, else a `ValueError` naming it; 0 or below keeps TE's default). Raise it if a GEMM fails with `HIPBLASLT Error: 6`; the workspace is never lowered below TE's default. Handles TE 2.17 (`cpp_extensions.gemm`) and TE 2.8 (`module.base`); a TE with neither layout raises unless this is 0; without TE it logs a warning and does nothing. Not in the container allowlist (`runner/.primus.yaml`): under `primus-cli container`, pass it with `--env`; a host `export` is not forwarded. |
+| `PRIMUS_TE_GEMM_WORKSPACE_MB` | `512` (GLM-5.3 and Mistral Large 4 only) | User, container passthrough (`runner/.primus.yaml`) | `primus/backends/megatron/patches/te_patches/gemm_workspace_size_patches.py` | TE's hipBLASLt GEMM workspace in MiB on ROCm; raise it if a GEMM fails with `HIPBLASLT Error: 6`. See the notes below the table. |
+
+Notes on `PRIMUS_TE_GEMM_WORKSPACE_MB`:
+
+- It must be an integer, else startup raises a `ValueError` naming it. `0` or below keeps TE's default. It is never lowered below TE's default and is not read on CUDA.
+- Cost: every GEMM workspace buffer TE allocates (per device, and per stream where TE keeps one per stream) has this size, so the 512 MiB default uses about 512 MiB of HBM per buffer instead of TE's 32-64 MiB default.
+- It handles TE 2.17 (`cpp_extensions.gemm`) and TE 2.8 (`module.base`). A TE with neither layout makes startup fail with a `RuntimeError` unless the variable is `0` or below. Without TE it logs a warning and does nothing.
 
 ---
 
@@ -218,7 +224,7 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 
 Forwarded keys:
 
-`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `DATABRICKS_TOKEN`, `DATABRICKS_HOST`, `MLFLOW_TRACKING_URI`, `MLFLOW_REGISTRY_URI`, `MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `GPU_ARCHS`, `USING_UEP`, `REBUILD_UEP`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `GPU_MAX_HW_QUEUES`, `HSA_KERNARG_POOL_SIZE`, `PRIMUS_TURBO_DEEPEP_TIMEOUT`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`, `PATH_TO_BNXT_TAR_PACKAGE`, `ANP_HOME_DIR`, `RCCL_HOME_DIR`, `MPI_HOME_DIR`, `DUMP_HLO`, `DUMP_HLO_DIR`, `PRIMUS_DETERMINISTIC`, `PRIMUS_HIPBLASLT_TUNING`, `PRIMUS_HIPBLASLT_TUNING_STAGE`, `TE_HIPBLASLT_TUNING_RUN_COUNT`, `TE_HIPBLASLT_TUNING_ALGO_COUNT`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_TUNING_OVERRIDE_FILE`
+`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `DATABRICKS_TOKEN`, `DATABRICKS_HOST`, `MLFLOW_TRACKING_URI`, `MLFLOW_REGISTRY_URI`, `MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `GPU_ARCHS`, `USING_UEP`, `REBUILD_UEP`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `GPU_MAX_HW_QUEUES`, `HSA_KERNARG_POOL_SIZE`, `PRIMUS_TURBO_DEEPEP_TIMEOUT`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`, `PATH_TO_BNXT_TAR_PACKAGE`, `ANP_HOME_DIR`, `RCCL_HOME_DIR`, `MPI_HOME_DIR`, `DUMP_HLO`, `DUMP_HLO_DIR`, `PRIMUS_DETERMINISTIC`, `PRIMUS_HIPBLASLT_TUNING`, `PRIMUS_HIPBLASLT_TUNING_STAGE`, `TE_HIPBLASLT_TUNING_RUN_COUNT`, `TE_HIPBLASLT_TUNING_ALGO_COUNT`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_TUNING_OVERRIDE_FILE`, `PRIMUS_TE_GEMM_WORKSPACE_MB`
 
 ---
 

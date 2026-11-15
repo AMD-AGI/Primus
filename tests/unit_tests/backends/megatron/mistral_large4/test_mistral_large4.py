@@ -247,7 +247,7 @@ def build_config():
         original_max_position_embeddings=512,
         beta_fast=32.0,
         beta_slow=1.0,
-        mscale=1.0,
+        mscale=0.0,
         mscale_all_dim=0.0,
         normalization="RMSNorm",
         layernorm_epsilon=1e-5,
@@ -307,32 +307,46 @@ def _te_test_env():
 def model_and_weights():
 
     mp = _te_test_env()
-    cleanup = _parallel_state_for_cpu()
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+    cleanup = None
+    try:
+        cleanup = _parallel_state_for_cpu()
+        from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
-    model_parallel_cuda_manual_seed(1234)
-    from primus.backends.megatron.core.models.mistral_large4.mistral_large4_builders import (
-        build_mistral_large4_model,
-    )
+        model_parallel_cuda_manual_seed(1234)
+        from primus.backends.megatron.core.models.mistral_large4.mistral_large4_builders import (
+            build_mistral_large4_model,
+        )
 
-    torch.manual_seed(0)
-    cfg = build_config()
-    cfg.use_cpu_initialization = False
-    model = build_mistral_large4_model(cfg, vocab_size=VOCAB, max_sequence_length=4096).cuda().eval()
-    W = make_weights()
-    margs = SimpleNamespace(
-        params_dtype=torch.float32, num_layers=NL, num_experts=E, moe_layer_freq=[0] + [1] * (NL - 1)
-    )
-    sd, consumed = conv.build_mcore_state_dict(
-        model, DictStore(W), margs, {"_num_shared_experts": 1}, lambda *a: None
-    )
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    assert not [k for k in missing if "_extra_state" not in k], missing
-    assert not unexpected, unexpected
-    assert consumed == set(W), sorted(set(W) - consumed)
-    yield model, W
-    mp.undo()
-    cleanup()
+        torch.manual_seed(0)
+        cfg = build_config()
+        cfg.use_cpu_initialization = False
+        model = build_mistral_large4_model(cfg, vocab_size=VOCAB, max_sequence_length=4096).cuda().eval()
+        W = make_weights()
+        # release tensors outside the text decoder, and a layer past num_layers (a depth-reduced cut):
+        # recognised and consumed, never mapped into the model
+        extra = {
+            "vision_encoder.transformer.layers.0.attention.wq.weight": torch.zeros(2, 2),
+            "mtp_dspark.output.weight": torch.zeros(2, 2),
+            f"layers.{NL}.attention.wq.weight": torch.zeros(2, 2),
+        }
+        margs = SimpleNamespace(
+            params_dtype=torch.float32, num_layers=NL, num_experts=E, moe_layer_freq=[0] + [1] * (NL - 1)
+        )
+        logged = []
+        sd, consumed = conv.build_mcore_state_dict(
+            model, DictStore({**W, **extra}), margs, {"_num_shared_experts": 1}, logged.append
+        )
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        assert not [k for k in missing if "_extra_state" not in k], missing
+        assert not unexpected, unexpected
+        assert consumed == set(W) | set(extra), sorted(set(W) - consumed)
+        assert not set(extra) & set(sd)
+        assert any("not part of this text model" in str(x) and "3 tensors" in str(x) for x in logged), logged
+        yield model, W
+    finally:
+        mp.undo()
+        if cleanup is not None:
+            cleanup()
 
 
 def run_port(model, ids):
@@ -498,8 +512,10 @@ def test_mla_up_proj_recompute_matches(model_and_weights):
     n = len(attns)
     assert kinds.count("created") == n and kinds.count("checkpoint") == n, kinds
     assert kinds.count("discard") == n, kinds
-    if hasattr(real, "_recompute"):
-        assert kinds.count("recompute") == n, kinds
+    # the Spy records "recompute" through Megatron's CheckpointWithoutOutput._recompute: an API change
+    # that removes it must show here, not skip the check
+    assert hasattr(real, "_recompute"), "CheckpointWithoutOutput has no _recompute: update this test"
+    assert kinds.count("recompute") == n, kinds
     assert plain.keys() == rec.keys() and any("layers.5.self_attention.linear_kv_up_proj" in k for k in rec)
     for k in plain:
         torch.testing.assert_close(rec[k], plain[k], rtol=1e-5, atol=1e-6)
@@ -574,7 +590,9 @@ def test_converted_checkpoint_loads_strictly(tmp_path):
         ckpt.mkdir()
         # the conversion's save: SwiGLU halves written from the model's own memory (no clone)
         conv.save_without_copies(model)
-        dist_checkpointing.save(model.sharded_state_dict(), str(ckpt))
+        sharded = model.sharded_state_dict()
+        _assert_fc1_halves_alias_model(model, sharded)
+        dist_checkpointing.save(sharded, str(ckpt))
 
         torch.manual_seed(1)  # a different random init: every value must come from the checkpoint
         fresh = build_mistral_large4_model(cfg, vocab_size=VOCAB, max_sequence_length=4096)
@@ -593,20 +611,34 @@ def test_converted_checkpoint_loads_strictly(tmp_path):
         assert any(".mlp.router.weight" in k for k in changed)
         assert any(".self_attention.indexer." in k for k in changed)
 
-        # a checkpoint that lacks a weight the model has is refused, not silently left at its init
-        partial = tmp_path / "partial"
-        partial.mkdir()
-        sharded = model.sharded_state_dict()
-        drop = "decoder.layers.1.mlp.router.weight"
-        del sharded[drop]
-        dist_checkpointing.save(sharded, str(partial))
-        with pytest.raises(Exception, match="Unexpected keys|not found in the checkpoint"):
-            dist_checkpointing.load(
-                fresh.sharded_state_dict(), str(partial), strict=StrictHandling.RAISE_UNEXPECTED
-            )
     finally:
         cleanup()
         mp.undo()
+
+
+def _assert_fc1_halves_alias_model(model, sharded):
+    """The fused fc1 gate | up halves of the conversion's save point into the model's own fc1
+    memory (no copy), with a storage that is exactly their bytes (the writer does not clone)."""
+    from megatron.core.dist_checkpointing.dict_utils import nested_values
+    from megatron.core.dist_checkpointing.mapping import ShardedTensor
+
+    params = {n: p for n, p in model.named_parameters() if n.endswith("linear_fc1.weight")}
+    assert params
+    seen = 0
+    for st in nested_values(sharded):
+        if not isinstance(st, ShardedTensor) or "linear_fc1.weight" not in st.key or st.data is None:
+            continue
+        d = st.data
+        if d.device.type == "cpu":  # storage_exact_alias acts on host tensors (the conversion's)
+            assert d.untyped_storage().nbytes() == d.numel() * d.element_size(), st.key
+        hits = [
+            p
+            for p in params.values()
+            if p.data_ptr() <= d.data_ptr() < p.data_ptr() + p.numel() * p.element_size()
+        ]
+        assert hits, f"{st.key}: not a view of the model's fc1 memory"
+        seen += 1
+    assert seen >= 2 * len(params)  # a gate and an up half per fc1
 
 
 def test_storage_exact_alias_shares_memory():

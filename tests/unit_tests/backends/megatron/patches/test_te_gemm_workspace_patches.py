@@ -62,7 +62,7 @@ def _ctx(model_type):
     )
 
 
-def test_helper_rocm_only_and_never_lowers(te_gemm, monkeypatch):
+def test_helper_rocm_only_and_never_lowers(te_gemm, monkeypatch, capsys):
     from primus.backends.megatron.patches.te_patches import (
         gemm_workspace_size_patches as ws,
     )
@@ -76,7 +76,9 @@ def test_helper_rocm_only_and_never_lowers(te_gemm, monkeypatch):
     assert te_gemm.get_cublas_workspace_size_bytes() == 64 << 20  # the size function untouched
     assert allocated() == 64 << 20
     monkeypatch.setattr(torch.version, "hip", "6.4")
+    capsys.readouterr()
     assert ws.enlarge_te_gemm_workspace() == ws.DEFAULT_WORKSPACE_MB << 20
+    assert "already allocated" in capsys.readouterr().err  # the 64 MiB buffer was cached
     assert allocated() == 512 << 20  # the cached 64 MiB buffer was dropped and reallocated
     monkeypatch.setenv("PRIMUS_TE_GEMM_WORKSPACE_MB", "128")
     assert ws.enlarge_te_gemm_workspace() == 512 << 20  # never lowered: the current (effective) size
@@ -191,9 +193,9 @@ def test_patches_registered_for_their_model_only(patch_id, model_type):
 def test_helper_on_real_te(monkeypatch):
     """With the real Transformer Engine on a ROCm GPU: the workspace TE allocates for its GEMMs
     (``get_cublas_workspace``, the tensor ``general_gemm`` passes to hipBLASLt) has the enlarged
-    size after the helper ran. Skips without TE or a GPU. A TE whose ``cpp_extensions.gemm``
-    has no ``get_cublas_workspace_size_bytes`` / cached ``get_cublas_workspace`` (another layout)
-    is refused by the helper (RuntimeError) unless PRIMUS_TE_GEMM_WORKSPACE_MB=0."""
+    size after the helper ran. Skips without TE or a GPU. A TE without the TE 2.17 layout
+    (``cpp_extensions.gemm``) is checked on the TE 2.8 layout (``module.base.get_workspace``);
+    only a TE with neither layout is refused by the helper (RuntimeError)."""
     gemm = pytest.importorskip("transformer_engine.pytorch.cpp_extensions.gemm")
     if not torch.cuda.is_available() or torch.version.hip is None:
         pytest.skip("needs a ROCm GPU")
@@ -274,7 +276,7 @@ def test_mistral_warns_for_te_grouped_gemm(te_gemm, monkeypatch):
         assert te_gemm.get_cublas_workspace(0, False, False).numel() == 512 << 20
 
 
-def test_helper_on_te28_module_base_layout(monkeypatch):
+def test_helper_on_te28_module_base_layout(monkeypatch, capsys):
     """TE 2.8 (ROCm) keeps the workspace in ``transformer_engine.pytorch.module.base``
     (``get_cublas_workspace_size_bytes`` and the cached ``_cublas_workspace`` /
     ``_multi_stream_cublas_workspace``), and its ``cpp_extensions.gemm`` has neither function.
@@ -312,7 +314,9 @@ def test_helper_on_te28_module_base_layout(monkeypatch):
     assert not ws.te_cpp_extensions_gemm_layout_supported(gemm) and ws.te_module_base_layout_supported(base)
     assert get_workspace().numel() == 64 << 20
     base._multi_stream_cublas_workspace = ["old"]
+    capsys.readouterr()
     assert ws.enlarge_te_gemm_workspace() == 512 << 20
+    assert "already allocated" in capsys.readouterr().err  # _cublas_workspace was allocated
     assert base._multi_stream_cublas_workspace == []
     assert get_workspace().numel() == 512 << 20  # cached buffer dropped, reallocated larger
     monkeypatch.setenv("PRIMUS_TE_GEMM_WORKSPACE_MB", "128")
@@ -420,3 +424,28 @@ def test_helper_keeps_a_broken_te_import_error(monkeypatch):
     monkeypatch.setattr(ws.importlib, "import_module", missing_dep)
     with pytest.raises(ModuleNotFoundError, match="some_dep"):
         ws.enlarge_te_gemm_workspace()
+
+
+def test_already_allocated_warning_on_every_rank(monkeypatch, capsys):
+    """A workspace allocated before the helper runs is warned about on stderr, on any rank (not
+    only rank 0), with the rank in the message."""
+    from primus.backends.megatron.patches.te_patches import (
+        gemm_workspace_size_patches as ws,
+    )
+
+    monkeypatch.setenv("RANK", "5")
+    ws._warn_allocated("tag")
+    err = capsys.readouterr().err
+    assert "rank 5" in err and "already allocated" in err and "[Patch:tag]" in err
+
+
+def test_container_allowlist_forwards_the_variable():
+    """runner/.primus.yaml forwards PRIMUS_TE_GEMM_WORKSPACE_MB into the container, as the
+    environment-variable docs say; a host export would otherwise be dropped."""
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[5]
+    cfg = yaml.safe_load((root / "runner" / ".primus.yaml").read_text())
+    assert "PRIMUS_TE_GEMM_WORKSPACE_MB" in cfg["container"]["options"]["env"]

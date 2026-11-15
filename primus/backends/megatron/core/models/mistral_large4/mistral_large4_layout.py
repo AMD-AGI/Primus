@@ -125,13 +125,22 @@ def check_kv_sources(kv_source_layers: List[int], no_rope_layers: List[int] = No
     earlier layer ``s`` (``0 <= s <= i``) that owns its KV (``kv_source_layers[s] == s``), and, with
     ``no_rope_layers``, of a layer of the same rope / NoPE kind. Raises ValueError otherwise. One
     rule for the model config, the converter and the patches (the PP wire size depends on it)."""
+    if no_rope_layers is not None and len(no_rope_layers) < len(kv_source_layers):
+        raise ValueError(
+            f"no_rope_layers has {len(no_rope_layers)} entries, fewer than the {len(kv_source_layers)} of "
+            "kv_source_layers"
+        )
     for i, s in enumerate(kv_source_layers):
-        if s < 0 or s > i or kv_source_layers[s] != s:
-            owner = kv_source_layers[s] if 0 <= s <= i else "out of range"
+        if s < 0 or s > i:
             raise ValueError(
-                f"kv_source_layers[{i}] = {s} breaks the rule 0 <= s <= {i} and kv_source_layers[s] == s "
-                f"(a layer reuses only the KV of itself or of an earlier layer that owns its KV); "
-                f"kv_source_layers[{s}] = {owner}"
+                f"kv_source_layers[{i}] = {s} breaks the rule 0 <= s <= {i} (a layer reuses only the KV of "
+                "itself or of an earlier layer)"
+            )
+        if kv_source_layers[s] != s:
+            raise ValueError(
+                f"kv_source_layers[{i}] = {s}, but layer {s} does not own its KV "
+                f"(kv_source_layers[{s}] = {kv_source_layers[s]}): a layer reuses only the KV of a layer "
+                "that owns it"
             )
         if no_rope_layers is not None and s != i and no_rope_layers[s] != no_rope_layers[i]:
             raise ValueError(f"layer {i} reuses layer {s}'s KV but their rope/NoPE kinds differ")
@@ -166,7 +175,8 @@ def normalize_layer_list(value, num_layers: int, name: str, kind=int, default=No
     """A per-layer list from a list, a python-literal string, or None (``default`` per layer).
 
     A longer list is cut to ``num_layers`` (a depth-reduced run takes the release's first
-    layers); a shorter one, or anything that is not a list, raises ValueError naming ``name``."""
+    layers); a shorter one, or anything that is not a list or tuple, raises ValueError naming
+    ``name``."""
     if value is None:
         return [default(i) if callable(default) else default for i in range(num_layers)]
     if isinstance(value, str):
@@ -182,6 +192,29 @@ def normalize_layer_list(value, num_layers: int, name: str, kind=int, default=No
     if len(value) < num_layers:
         raise ValueError(f"{name} has {len(value)} entries, fewer than num_layers={num_layers}")
     return value[:num_layers]
+
+
+def parse_flag(value, name: str) -> bool:
+    """A yes/no setting: a bool, 0/1, or one of true/false/yes/no/on/off/1/0 (any case, surrounding
+    whitespace ignored). ``None`` and an empty (or blank) string read as False: an unset
+    environment substitution such as ``${VAR:}`` gives one.
+
+    The yaml loader turns only 'true' and 'false' from an environment variable into a bool;
+    another word stays a string, which plain truthiness would read as True. Any other value
+    raises ValueError naming ``name`` instead of being guessed."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "yes", "on", "1"):
+            return True
+        if text in ("false", "no", "off", "0", ""):
+            return False
+    raise ValueError(f"{name} must be true or false, got {value!r}")
 
 
 def moe_layer_freq_list(first_k_dense_replace, num_layers: int, num_experts) -> List[int]:
@@ -205,7 +238,12 @@ def kv_sharing_active(kv_source_layers, num_layers: int, no_rope_layers=None) ->
     if kv_source_layers is None:
         return False
     n = int(num_layers)
-    nope = None if no_rope_layers is None else normalize_layer_list(no_rope_layers, n, "no_rope_layers", int)
+    nope = None
+    if no_rope_layers is not None:
+        # the model config's check too: 0 / 1 values only
+        nope = check_layer_list(
+            "no_rope_layers", normalize_layer_list(no_rope_layers, n, "no_rope_layers", int)
+        )
     srcs = check_kv_sources(normalize_layer_list(kv_source_layers, n, "kv_source_layers", int), nope)
     return any(s != i for i, s in enumerate(srcs))
 
