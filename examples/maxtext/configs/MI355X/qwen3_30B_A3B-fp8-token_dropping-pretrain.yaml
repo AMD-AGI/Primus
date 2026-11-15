@@ -17,7 +17,7 @@ modules:
     # model to run
     model: qwen3_30B_A3B.yaml
     overrides:
-      run_name: "qwen3_30b_a3b_training"
+      run_name: "qwen3_30b_a3b_token_dropping_training"
       base_output_directory: "./output"
       steps: 50
       profiler: ""

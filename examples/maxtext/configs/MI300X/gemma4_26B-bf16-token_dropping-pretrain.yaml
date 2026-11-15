@@ -13,7 +13,7 @@ modules:
     # model to run
     model: gemma4_26B.yaml
     overrides:
-      run_name: "gemma4_26b_training"
+      run_name: "gemma4_26b_token_dropping_training"
       base_output_directory: "./output"
       steps: 50
       profiler: ""

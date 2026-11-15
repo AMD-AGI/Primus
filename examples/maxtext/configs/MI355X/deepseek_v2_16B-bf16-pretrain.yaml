@@ -5,13 +5,15 @@ workspace: ./output
 
 # DeepSeek-V2-16B, dropless MoE (no token is dropped): sparse expert matmuls on the Primus-Turbo FlyDSL grouped GEMM, FSDP 8.
 # Needs Primus-Turbo built for JAX and MaxText with the Turbo grouped GEMM (release/v26.10 or later).
-# 8x MI355X: 36340 tokens/s/device; the previous token-dropping recipe, kept as
+# 8x MI355X: 36158 tokens/s/device; the previous token-dropping recipe, kept as
 # deepseek_v2_16B-bf16-token_dropping-pretrain.yaml: 20633 tokens/s/device.
 env:
-  # XLA's GEMM autotuner at level >= 2 intermittently faults on this ROCm stack; level 1 still autotunes.
+  # Tuned and measured at XLA GEMM autotune level 1 (Primus's default is 3). Set here, this and XLA_FLAGS_APPEND
+  # below take precedence over values exported in the shell or passed with primus-cli --env.
   XLA_GPU_AUTOTUNE_LEVEL: "1"
-  # Smaller collective combine thresholds than Primus's 8 GB default, so FSDP gathers each weight separately
-  # and XLA can overlap them with compute. Set here, this replaces an XLA_FLAGS_APPEND from the shell.
+  # Collective combine thresholds of 1 GiB instead of Primus's 8 GB, and pipelined all-gather, reduce-scatter and
+  # all-reduce, so FSDP collectives overlap with compute (measured best on MI355X). The executable timeouts
+  # leave room for the first steps, which compile and tune the grouped GEMM kernels.
   # The first collective can start >40 s late on one GPU (per-device first-call setup); XLA's default 40 s limit for it then aborts the run.
   XLA_FLAGS_APPEND: "--xla_gpu_all_gather_combine_threshold_bytes=1073741824 --xla_gpu_reduce_scatter_combine_threshold_bytes=1073741824 --xla_gpu_enable_pipelined_all_gather=true --xla_gpu_enable_pipelined_reduce_scatter=true --xla_gpu_enable_pipelined_all_reduce=true --xla_gpu_first_collective_call_terminate_timeout_seconds=900 --xla_gpu_executable_terminate_timeout=900 --xla_gpu_executable_warn_stuck_timeout=120"
 
@@ -23,7 +25,7 @@ modules:
     # model to run
     model: deepseek_v2_16B.yaml
     overrides:
-      run_name: "deepseek_v2_16B_bf16_dropless_turbo_flydsl_training"
+      run_name: "deepseek_v2_16b_training"
       base_output_directory: "./output"
       steps: 50
       profiler: ""

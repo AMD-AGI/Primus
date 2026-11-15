@@ -13,7 +13,7 @@ modules:
     # model to run
     model: deepseek_v2_16B.yaml
     overrides:
-      run_name: "deepseek_v2_16b_training"
+      run_name: "deepseek_v2_16b_token_dropping_training"
       base_output_directory: "./output"
       steps: 50
       profiler: ""
