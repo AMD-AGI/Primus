@@ -1,8 +1,9 @@
 # Primus Perf Batch Runner
 
 Batch-runs Primus training benchmarks across Megatron, Megatron-Bridge,
-TorchTitan, MaxText and MaxDiffusion, plus the diffusion and DLRM benchmarks
-of [`diffusion_bench/`](./diffusion_bench/), and extracts the results into
+TorchTitan, MaxText, MaxDiffusion and the in-tree diffusion backend (the
+AMDiffusionBenchmark workloads), plus the DLRM benchmarks of
+[`diffusion_bench/`](./diffusion_bench/), and extracts the results into
 `results.csv` / `results.json`, which record not just the throughput but the
 settings that produced it and, for a run that failed, why.
 
@@ -225,16 +226,56 @@ partway, mark the ones that finished and re-run.
 Setting both `CONFIG_DIR` and `CONFIG_FILE` is an error. Missing paths and
 duplicate entries are reported before anything launches.
 
+### Diffusion (`diffusion`)
+
+The AMDiffusionBenchmark workloads — FLUX.1-dev, SDXL, Mochi 1,
+HunyuanVideo and Wan 2.1 I2V — run on Primus' own diffusion backend, from
+the catalog's `diffusion` entries
+(`examples/diffusion/configs/<GPU>/benchmark_*-posttrain.yaml`, launched
+with `train posttrain`), like any other catalog config:
+
+```bash
+GPU=MI355X BACKEND=diffusion DOCKER_IMAGE=rocm/primus:v26.9 \
+RESULT_DIR=~/primus-bench/mi355x-v26.9 bash tools/perf/run_batch.sh
+```
+
+- **Batch size and length** come from the config: `training.local_batch_size`
+  (the `MBS`, per GPU; 16 / 12 / 4 / 3 / 1 on MI355X, 10 / 20 / 1 / 1 / 1 on
+  MI300X and MI325X) and `training.steps` (100, SDXL 200). They are written
+  as `${LOCAL_BATCH_SIZE:16}` and `${MAX_STEPS:100}`; the runner shows the
+  value the run will use, which `EXTRA_ENV="LOCAL_BATCH_SIZE=8"` changes (a
+  plain export does not reach the container). `GBS` is `MBS` × the GPUs ÷
+  `parallelism.sp_size`.
+- **`TRAIN_STEPS` is not applied**: the step count is part of the benchmark,
+  and the throughput leaves out the first five steps, as AMDiffusionBenchmark
+  does (the first one includes MIOpen's solver search).
+- **Model downloads.** The backend's prepare hook downloads each model's
+  checkpoints, encoders and dataset before training (tens of GB per model;
+  FLUX.1-dev is a gated repository, so `HF_TOKEN` must have access to it).
+  It keeps them in `PRIMUS_HF_HOME`, which the runner sets to
+  `DIFFUSION_HF_CACHE` (default `$PRIMUS_HF_HOME` if set, else
+  `<DATA_PATH or checkout/data>/huggingface_diffusion`) and mounts into the
+  container when needed, so only the first run of a model downloads it.
+  The download counts against that run's `MAX_RUN_SECONDS` and its elapsed
+  time (not its throughput), and a large file can download for minutes
+  without a new log line: raise `MAX_IDLE_SECONDS` on a slow network.
+- Single node only: `run_batch_multinode.sh` refuses the diffusion configs.
+
 ### Diffusion and DLRM (`diffusion_dlrm`)
 
 `diffusion_dlrm` is a backend outside the catalog. Adding it to `BACKEND`
 runs [`diffusion_bench/run_benchmarks.sh`](./diffusion_bench/) once per
-repetition (`NUM_REPS`), after every other config of the batch, for the diffusion models (FLUX.1-dev, SDXL,
-Mochi, HunyuanVideo, Wan 2.1) and DLRM precisions its config enables. So
-everything a `rocm/primus` image can run is one command:
+repetition (`NUM_REPS`), after every other config of the batch, for the DLRM
+precisions its config enables, and the AMDiffusionBenchmark diffusion models
+when they are enabled there. Its default config runs DLRM only, as the
+diffusion models run through the `diffusion` backend above; set
+`diffusion.enabled: true` in a copy (`DIFFUSION_DLRM_CONFIG`) to run them
+with AMDiffusionBenchmark too, e.g. to compare the two (the runner warns when
+a batch runs them both ways). So everything a `rocm/primus` image can run is
+one command:
 
 ```bash
-GPU=MI355X BACKEND=megatron,torchtitan,megatron_bridge,diffusion_dlrm \
+GPU=MI355X BACKEND=megatron,torchtitan,megatron_bridge,diffusion,diffusion_dlrm \
 DOCKER_IMAGE=rocm/primus:v26.8 RESULT_DIR=~/primus-bench/mi355x-v26.8 \
 bash tools/perf/run_batch.sh
 ```
@@ -272,6 +313,8 @@ bash tools/perf/run_batch.sh
 - **Image.** `DOCKER_IMAGE` must contain `/workspace/AMDiffusionBenchmark`
   and `/workspace/DLRMBenchmark`, as `rocm/primus` images do; this is checked
   before the batch starts.
+  diffusion_bench starts its containers without docker's `--privileged`
+  (`privileged: true` in its config turns it back on).
 - Catalog mode, single node only. With `CONFIG_DIR`, `BACKEND` is ignored and
   so is `diffusion_dlrm` (the runner warns); `run_batch_multinode.sh` refuses
   it. It also needs `PRIMUS_MODE=container`, since diffusion_bench starts its
@@ -283,7 +326,7 @@ bash tools/perf/run_batch.sh
 |---|---|---|
 | `HF_TOKEN` | — | **Required.** Never defaulted, so it cannot be baked into a shared script. |
 | `DOCKER_IMAGE` | — | **Required.** Which build to benchmark; a stale default would silently measure the wrong one. |
-| `BACKEND` | — | **Required.** Comma-separated backends, e.g. `megatron,torchtitan`; `diffusion_dlrm` adds the diffusion and DLRM benchmarks. |
+| `BACKEND` | — | **Required.** Comma-separated backends, e.g. `megatron,torchtitan`; `diffusion_dlrm` adds diffusion_bench's DLRM (and, when enabled there, AMDiffusionBenchmark) benchmarks. |
 | `GPU` | auto-detected | Catalog top-level key, e.g. `MI325X`. Read from `amd-smi` or `rocm-smi` when unset. |
 | `DRY_RUN` | `0` | `1` prints the plan and exits. |
 | `MAX_RUN_SECONDS` | `3600` | Stop a run still going after this long. `0` = no limit. |
@@ -300,13 +343,15 @@ bash tools/perf/run_batch.sh
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
 | `NUM_REPS` | `1` | Repetitions per config. |
-| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. A Megatron config for which it is not longer than the warmup is not run (see "Before each run"). |
+| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion`, whose `training.steps` is part of the benchmark, nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. A Megatron config for which it is not longer than the warmup is not run (see "Before each run"). |
 | `CHECK_TRAIN_STEPS` | `1` | `0` runs a Megatron config even when `TRAIN_STEPS` is not longer than its warmup. |
 | `EXTRA_ENV` | — | Space-separated `KEY=VALUE` pairs forwarded into the container as `--env`. See below. |
 | `DATA_PATH` | `<checkout>/data` | Where Primus keeps its Hugging Face downloads (models, datasets). Set it to keep them out of the checkout; the runner creates it, mounts it and passes it into the container. See below. |
 | `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
+| `PRIMUS_CLI_CONFIG` | `tools/perf/primus-cli.yaml` | primus-cli's configuration; empty for primus-cli's own (`~/.primus.yaml`, else `runner/.primus.yaml`). See "primus-cli's configuration". |
 | `PRIMUS_MODE` | `container` / `slurm srun` | Launcher mode. |
+| `DIFFUSION_HF_CACHE` | `$PRIMUS_HF_HOME`, else `<DATA_PATH>/huggingface_diffusion` | Where `diffusion` configs keep their model downloads (see "Diffusion"). |
 | `DIFFUSION_DLRM_CONFIG` | `tools/perf/diffusion_bench/config.yaml` | diffusion_bench config for `diffusion_dlrm`. |
 | `DIFFUSION_DLRM_HF_CACHE` | `hf_cache_dir` of that config | Hugging Face cache for the diffusion models. |
 
@@ -322,7 +367,7 @@ Training runs on one of two images, and each carries only one framework stack:
 So `BACKEND=megatron,torchtitan` and `BACKEND=maxtext,maxdiffusion` are the
 two valid groupings. Mixing across the split — `BACKEND=megatron,maxtext` —
 cannot work whichever image you pick, because half the runs have no framework
-to execute. `megatron_bridge` and `diffusion_dlrm` go with the PyTorch side,
+to execute. `megatron_bridge`, `diffusion` and `diffusion_dlrm` go with the PyTorch side,
 on an image that carries them, such as `rocm/primus:v26.8`.
 
 This is why `BACKEND` is required rather than defaulting to every backend
@@ -353,8 +398,8 @@ EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0 GPU_MAX_HW_QUEUES=2" bash tools/perf/run_b
 does not necessarily reach the training container. primus-cli forwards only
 two categories:
 
-- names listed in [runner/.primus.yaml](../../runner/.primus.yaml) under
-  `container.options.env` (`HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_IS_V3_ATOMIC_FP32`,
+- names listed in its configuration ([`primus-cli.yaml`](./primus-cli.yaml), see
+  below) under `container.options.env` (`HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_IS_V3_ATOMIC_FP32`,
   `GPU_MAX_HW_QUEUES`, `REBUILD_BNXT`, and about 40 more), and
 - anything matching the prefixes `PRIMUS_`, `NCCL_`, `RCCL_`, `GLOO_`,
   `IONIC_`, `HIPBLASLT_`.
@@ -378,8 +423,25 @@ because these are guaranteed to have reached the container, while the others
 were merely present on the host.
 
 The alternative — adding a name to `container.options.env` in
-`runner/.primus.yaml` — is the right move when a variable should always be
-forwarded for everyone, rather than for one batch.
+`runner/.primus.yaml` and `primus-cli.yaml` — is the right move when a
+variable should always be forwarded for everyone, rather than for one batch.
+
+### primus-cli's configuration (`PRIMUS_CLI_CONFIG`)
+
+The runners launch `primus-cli --config tools/perf/primus-cli.yaml`. That file
+is [runner/.primus.yaml](../../runner/.primus.yaml) with these changes: the
+training container starts without docker's `--privileged` and
+`CAP_SYS_ADMIN`, which some clusters' docker refuses (Crusoe's authorization
+plugin rejects both), and with `IPC_LOCK`, the part of `--privileged` that RDMA
+memory registration uses on multi-node runs. The GPUs need only the
+`/dev/kfd`, `/dev/dri` and `/dev/infiniband` devices it already lists. It
+also forwards `DATA_PATH`, so an exported `DATA_PATH` reaches the container.
+
+`PRIMUS_CLI_CONFIG=<file>` uses another configuration, and
+`PRIMUS_CLI_CONFIG=` (empty) leaves the choice to primus-cli, as before:
+`~/.primus.yaml` if it exists, otherwise `runner/.primus.yaml`. The batch
+configuration records which one ran (`# CLI config : ...`), and the launch
+command in every run banner shows it.
 
 ### Where downloads go (`DATA_PATH`)
 
@@ -393,13 +455,15 @@ somewhere bigger:
 DATA_PATH=/tmp/primus-data bash tools/perf/run_batch.sh
 ```
 
-The container sees only the checkout, and primus-cli does not forward
-`DATA_PATH`, so the runner adds `--volume $DATA_PATH:$DATA_PATH` and
-`--env DATA_PATH=$DATA_PATH` to every training launch (`diffusion_dlrm` runs
-keep their own container and cache, `DIFFUSION_DLRM_HF_CACHE`). It leaves the
+The container sees only the checkout, and only `primus-cli.yaml` (not
+`runner/.primus.yaml`) forwards `DATA_PATH`, so the runner adds `--volume $DATA_PATH:$DATA_PATH` and
+`--env DATA_PATH=$DATA_PATH` to every training launch (`diffusion` configs
+keep their models in `DIFFUSION_HF_CACHE`, below `DATA_PATH` by default;
+`diffusion_dlrm` runs keep their own container and cache,
+`DIFFUSION_DLRM_HF_CACHE`). It leaves the
 mount out when the path is inside the checkout or already a volume of the
-config file primus-cli loads (`~/.primus.yaml` if it exists, otherwise
-`runner/.primus.yaml`), since docker refuses the same mount twice. Before the
+config file primus-cli loads (`PRIMUS_CLI_CONFIG`), since docker refuses the
+same mount twice. Before the
 first run it creates the directory on every node, so it belongs to you
 rather than to root, and the batch configuration records the free space:
 
@@ -521,6 +585,10 @@ batch and leaves the remaining runs unstarted.
   another job, its GPUs count too. When nothing is readable the check is
   recorded as "not checked" and does not block.
 - **NCCL interface usable.** See the socket interface section above.
+- **Diffusion model cache ready**, when a `diffusion` config is selected:
+  `DIFFUSION_HF_CACHE` is created (so it belongs to you rather than to root)
+  and the batch configuration records it with its free space
+  (`# Diffusion HF : <path> (<free> free; mounted by the runner)`).
 - **diffusion_dlrm ready**, when selected. Its config is validated before
   anything else (exit 2 on a bad key or model name), the image must carry
   the benchmark repos it needs, and the Hugging Face cache must be writable.
@@ -855,8 +923,15 @@ batch size and `seq_length`). LoRA's estimate also counts the weight gradients i
 frozen base weights never compute, so treat a packed LoRA run's TFLOP/s as
 an upper bound.
 
+A `diffusion` config run through primus-cli is a row like any other, with
+backend `diffusion`: samples/s and TFLOP/s per GPU are the harmonic means
+over the steps after the first five (AMDiffusionBenchmark's warmup, not the
+learning-rate schedule's `warmup_steps`), and the memory is the backend's
+peak in GB. `tps_per_gpu` and `seq_len` stay empty.
+
 A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
-precision, with backend `diffusion` or `dlrm`. Those numbers come from
+precision, with backend `diffusion` or `dlrm` (a diffusion row of this kind
+has a `step_log`). Those numbers come from
 diffusion_bench's own parser, so they match its `summary.md`: TFLOP/s and
 samples/s per GPU are AMDiffusionBenchmark's averages, not this tool's
 harmonic means, and `micro_batch_size` is the batch size per GPU (DLRM's

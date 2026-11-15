@@ -217,3 +217,86 @@ def test_router_gets_only_the_routing_inputs_it_is_given(mega_moe, args):
     assert set(router_kwargs) == {"input_ids", "packed_seq_params"}
     assert router_kwargs["input_ids"] is input_ids
     assert router_kwargs["packed_seq_params"] is packed_seq_params
+
+
+@pytest.mark.parametrize(
+    "flag, fusion, expected",
+    [(None, False, False), (None, True, True), (True, False, True), (False, True, False)],
+)
+def test_wgrad_accum_fusion_follows_gradient_accumulation_fusion(mega_moe, args, flag, fusion, expected):
+    args.turbo_mega_moe_wgrad_accum_fusion = flag
+    config = SimpleNamespace(gradient_accumulation_fusion=fusion)
+    assert mega_moe.mega_moe_wgrad_accum_fusion(config) is expected
+
+
+@pytest.mark.parametrize("fsdp_arg", ["use_megatron_fsdp", "use_custom_fsdp"])
+@pytest.mark.parametrize("flag", [None, True])
+def test_wgrad_accum_fusion_is_off_under_megatron_fsdp(mega_moe, args, fsdp_arg, flag):
+    """Megatron-FSDP clears ``grad_added_to_main_grad`` before every backward, so the stages, which
+    set it in forward, would have FSDP add their dummy gradient into ``main_grad``."""
+    args.turbo_mega_moe_wgrad_accum_fusion = flag
+    setattr(args, fsdp_arg, True)
+    config = SimpleNamespace(gradient_accumulation_fusion=True)
+    assert mega_moe.mega_moe_wgrad_accum_fusion(config) is False
+
+
+def _stub_stages(calls, takes_pattern):
+    """Staged ops that record the ``fuse_wgrad_accum_pattern`` they get; an older Primus-Turbo's take none."""
+    if takes_pattern:
+
+        def stage1(x, topk_idx, topk_weights, w1, group, fuse_wgrad_accum_pattern=None):
+            calls.append(("stage1", fuse_wgrad_accum_pattern))
+            return x, None, None
+
+        def stage2(*args, fc1_bias=None, fc2_bias=None, fuse_wgrad_accum_pattern=None):
+            calls.append(("stage2", fuse_wgrad_accum_pattern))
+            return args[0]
+
+    else:
+
+        def stage1(x, topk_idx, topk_weights, w1, group):
+            calls.append(("stage1", None))
+            return x, None, None
+
+        def stage2(*args, fc1_bias=None, fc2_bias=None):
+            calls.append(("stage2", None))
+            return args[0]
+
+    return stage1, stage2
+
+
+@pytest.mark.parametrize("takes_pattern", [True, False], ids=["turbo_takes_the_pattern", "older_turbo"])
+@pytest.mark.parametrize("fusion", [True, False])
+def test_experts_pass_the_wgrad_accum_pattern(mega_moe, args, monkeypatch, takes_pattern, fusion):
+    """With the fusion on, both staged ops get ``fuse_wgrad_accum_pattern="megatron"``; off, or with a
+    Primus-Turbo whose ops lack the argument, they are called without it and DDP adds the wgrads."""
+    calls = []
+    stage1, stage2 = _stub_stages(calls, takes_pattern)
+    monkeypatch.setattr(mega_moe, "fused_mega_moe_stage1", stage1)
+    monkeypatch.setattr(mega_moe, "fused_mega_moe_stage2", stage2)
+    args.turbo_mega_moe_wgrad_accum_fusion = fusion
+    mega_moe._turbo_stages_take_wgrad_accum.cache_clear()
+    try:
+        experts = mega_moe.MegaMoEExperts(_config(), 4, 32, 8, _EPGroup())
+        x = torch.zeros(3, 32, dtype=torch.bfloat16)
+        experts(x, torch.zeros(3, 2, dtype=torch.long), torch.zeros(3, 2))
+    finally:
+        mega_moe._turbo_stages_take_wgrad_accum.cache_clear()
+    pattern = "megatron" if fusion and takes_pattern else None
+    assert experts.wgrad_accum_pattern == pattern
+    assert calls == [("stage1", pattern), ("stage2", pattern)]
+
+
+def test_mxfp8_experts_keep_ddp_wgrad_add(mega_moe, args, monkeypatch):
+    """The mxfp8 stages take no accumulation pattern: the experts must not claim one."""
+    calls = []
+    stage1, stage2 = _stub_stages(calls, takes_pattern=True)
+    monkeypatch.setattr(mega_moe, "fused_mega_moe_stage1", stage1)
+    monkeypatch.setattr(mega_moe, "fused_mega_moe_stage2", stage2)
+    args.turbo_mega_moe_wgrad_accum_fusion = True
+    mega_moe._turbo_stages_take_wgrad_accum.cache_clear()
+    try:
+        experts = mega_moe.MegaMoEFP8Experts(_config(), 4, 32, 8, _EPGroup())
+    finally:
+        mega_moe._turbo_stages_take_wgrad_accum.cache_clear()
+    assert experts.wgrad_accum_pattern is None

@@ -245,19 +245,21 @@ def compute_sparse_indexer_loss(
         block_indices: ``[b, n_index, sq, topk]`` selected blocks, -1 padded.
         loss_coeff: scaling applied to the KL.
     """
-    valid = block_indices >= 0
-    scores = block_scores.gather(-1, block_indices.clamp_min(0)).masked_fill(~valid, -torch.inf)
+    # The masked fills are in place on tensors no backward saves: each out-of-place
+    # one is a copy and a fill, and this loss runs in every MSA layer's forward.
+    invalid = block_indices < 0
+    scores = block_scores.gather(-1, block_indices.clamp_min(0)).masked_fill_(invalid, -torch.inf)
 
     # As in the dense loss: clamp the always-visible +inf to the row's largest
     # finite score, and drop rows whose selection is all forced (no signal).
     finite = torch.isfinite(scores)
-    finite_max = torch.where(finite, scores, torch.full_like(scores, -torch.inf)).amax(dim=-1, keepdim=True)
-    has_free = finite.any(dim=-1, keepdim=True)
-    logits = torch.minimum(scores, finite_max).masked_fill(~has_free, 0.0)
+    finite_max = torch.where(finite, scores, -torch.inf).amax(dim=-1, keepdim=True)
+    no_free = ~finite.any(dim=-1, keepdim=True)
+    logits = torch.minimum(scores, finite_max).masked_fill_(no_free, 0.0)
     prediction = torch.softmax(logits, dim=-1)
 
     target = slot_mass.detach().float()
     target = target / target.sum(dim=-1, keepdim=True).clamp_min(1e-10)
     kl = target * (torch.log(target + 1e-10) - torch.log(prediction + 1e-10))
-    kl = kl.masked_fill(~(valid & has_free), 0.0)
+    kl = kl.masked_fill_(invalid | no_free, 0.0)
     return kl.sum(dim=-1).mean() * loss_coeff

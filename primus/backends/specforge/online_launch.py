@@ -30,6 +30,10 @@ from primus.backends.specforge.argument_builder import (
     flatten_overrides,
     resolve_specforge_root,
 )
+from primus.backends.specforge.capture_plugin import (
+    CAPTURE_BACKEND_KEY,
+    validate_capture_backend,
+)
 
 DEFAULT_MOONCAKE_RPC_PORT = 35551
 DEFAULT_MOONCAKE_HTTP_PORT = 35880
@@ -137,6 +141,10 @@ def _model_section(params: Any, env: Optional[Mapping[str, str]] = None) -> dict
         return {}
     if not isinstance(data, dict):
         raise ValueError(f"{path} must be a mapping")
+    overrides = flatten_overrides(getattr(params, "specforge_overrides", None))
+    validate_capture_backend(
+        overrides.get(CAPTURE_BACKEND_KEY, flatten_overrides(data).get(CAPTURE_BACKEND_KEY))
+    )
     if "defaults" in data and "model" not in data:
         raise ValueError(
             f"{path} uses Hydra defaults and has no model section; "
@@ -349,7 +357,12 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
 
     environ = os.environ if env is None else env
     raw = flatten_overrides(getattr(params, "specforge_online", None))
+    validate_capture_backend(environ.get("DISAGG_SERVER_CAPTURE"))
+    validate_capture_backend(
+        flatten_overrides(getattr(params, "specforge_overrides", None)).get(CAPTURE_BACKEND_KEY)
+    )
     model = _model_section(params, environ)
+    single_node = _as_bool(raw.get("single_node", environ.get("PRIMUS_SPECFORGE_SINGLE_NODE")), False)
     run_id = raw.get("run_id") or environ.get("RUN_ID") or environ.get("DISAGG_STORE_ID")
     run_root = raw.get("run_root") or environ.get("RUN_ROOT") or environ.get("DISAGG_RUN_ROOT")
     consumer_state = (
@@ -384,6 +397,7 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
     if not extra:
         extra = ["--attention-backend", "aiter", "--disable-radix-cache"]
     return {
+        "single_node": single_node,
         "run_id": str(run_id).strip() if run_id else "",
         "run_root": str(run_root).strip() if run_root else "",
         "consumer_state_dir": str(consumer_state).strip() if consumer_state else "",
@@ -421,6 +435,8 @@ def online_settings(params: Any, env: Optional[Mapping[str, str]] = None) -> dic
 
 
 def expected_nnodes(settings: Mapping[str, Any]) -> int:
+    if settings.get("single_node"):
+        return 1
     return int(settings["capture_nnodes"]) + int(settings["trainer_nnodes"])
 
 
@@ -440,10 +456,26 @@ def validate_online_identity(settings: Mapping[str, Any], *, rank: int, nodes: i
         issues.append("capture_nnodes must be >= 1")
     if trainer_nnodes < 1:
         issues.append("trainer_nnodes must be >= 1")
+    if settings.get("single_node"):
+        if capture_nnodes != 1 or trainer_nnodes != 1:
+            issues.append("single_node requires capture_nnodes=trainer_nnodes=1")
+
+        def canonical_devices(value):
+            tokens = [token.strip() for token in str(value).split(",")]
+            return [str(int(token)) if token.isdecimal() else token for token in tokens]
+
+        server_devices = canonical_devices(settings["server_gpus"])
+        trainer_devices = canonical_devices(settings["trainer_gpus"])
+        if set(server_devices) & set(trainer_devices):
+            issues.append("single_node requires disjoint server_gpus and trainer_gpus")
+        for name, devices in (("server_gpus", server_devices), ("trainer_gpus", trainer_devices)):
+            if len(set(devices)) != len(devices):
+                issues.append(f"single_node requires unique {name}")
     want = expected_nnodes(settings)
     if capture_nnodes >= 1 and trainer_nnodes >= 1 and nodes != want:
+        shape = "1 (single_node)" if settings.get("single_node") else f"capture_nnodes+trainer_nnodes={want}"
         issues.append(
-            f"online mode expects NNODES=capture_nnodes+trainer_nnodes={want} "
+            f"online mode expects NNODES={shape} "
             f"(capture_nnodes={capture_nnodes}, trainer_nnodes={trainer_nnodes}); got {nodes}"
         )
     if rank < 0 or (want > 0 and rank >= want):
@@ -640,6 +672,7 @@ def build_online_overrides(
         f"deployment.disaggregated.control_dir={run_root}/control",
         f"deployment.disaggregated.consumer_state_dir={settings['consumer_state_dir']}",
         f"deployment.disaggregated.store_id={settings['run_id']}",
+        f"{CAPTURE_BACKEND_KEY}=plugin",
         f"deployment.disaggregated.server_urls={hydra_quoted_list(urls)}",
         f"deployment.disaggregated.mooncake_metadata_server=http://{head_ip}:{http_port}/metadata",
         f"deployment.disaggregated.mooncake_master_server_addr={head_ip}:{rpc_port}",
@@ -662,7 +695,17 @@ def build_role_argv(
 ) -> list[str]:
     """``specforge train --config ... --role {{producer,consumer}}`` plus Hydra overrides."""
 
-    return build_specforge_argv(params, extra_overrides=list(extra_overrides), role=role, node_rank=node_rank)
+    argv = build_specforge_argv(params, extra_overrides=list(extra_overrides), role=role, node_rank=node_rank)
+    result = []
+    for item in argv:
+        key, _, value = item.partition("=")
+        if key.lstrip("+~") == CAPTURE_BACKEND_KEY:
+            if not key.startswith("~"):
+                validate_capture_backend(value)
+        else:
+            result.append(item)
+    # Remove user assignments/additions/deletions before setting the owned key.
+    return [*result, f"{CAPTURE_BACKEND_KEY}=plugin"]
 
 
 def mooncake_master_argv(settings: Mapping[str, Any]) -> list[str]:
@@ -704,15 +747,33 @@ def sglang_server_argv(index: int, settings: Mapping[str, Any]) -> list[str]:
         str(settings["server_mem_fraction"]),
         "--chunked-prefill-size",
         "-1",
-        "--enable-spec-capture",
-        "--spec-capture-method",
-        "dflash",
-        "--spec-capture-aux-layer-ids",
+        "--speculative-algorithm",
+        "DFLASH",
+        "--enable-return-aux-hidden-states",
+        "--return-aux-hidden-state-layer-ids",
         *[str(i) for i in settings["capture_layer_ids"]],
+        "--return-hidden-states-mode",
+        "full",
         "--port",
         str(port),
     ]
     extra = [arg for arg in list(settings["sglang_extra_args"]) if arg != "--skip-tokenizer-init"]
+    owned_flags = {
+        "--enable-spec-capture",
+        "--spec-capture-method",
+        "--spec-capture-aux-layer-ids",
+        "--speculative-algorithm",
+        "--enable-return-aux-hidden-states",
+        "--return-aux-hidden-state-layer-ids",
+        "--return-hidden-states-mode",
+        "--chunked-prefill-size",
+    }
+    for arg in extra:
+        if arg.split("=", 1)[0] in owned_flags:
+            raise ValueError(
+                f"[Primus:specforge] {arg} cannot be set in sglang_extra_args; "
+                "Primus owns the capture plugin flags and disables chunked prefill"
+            )
     if _as_bool(settings.get("skip_tokenizer_init", True), True):
         argv.insert(argv.index("--trust-remote-code") + 1, "--skip-tokenizer-init")
     argv.extend(extra)

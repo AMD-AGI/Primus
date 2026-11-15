@@ -459,12 +459,15 @@ jobs:
           else
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others-${ts}-${commit_id}" >> $GITHUB_ENV
           fi
-      - name: Run CLI Shell Tests
+      - name: Run CLI Shell and Runner Tests
         run: |
           docker exec -i -e GITHUB_WORKSPACE="${CWS}" -w "${CWS}" "${UT_CONTAINER}" bash -s <<'IN'
           set -e
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
+          echo "Running Primus runner pytest tests..."
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
+          pytest -q ./tests/runner/ --junitxml="${GITHUB_WORKSPACE}/test-reports/runner.xml"
           IN
       - name: Run Primus Core Tests
         run: |

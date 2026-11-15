@@ -11,6 +11,7 @@ primus/configs/data/megatron/diffusion/
 │   ├── dataset_preencoded.yaml  # Pre-encoded dataset configuration
 │   ├── dataset_preencoded_numpy.yaml # Pre-encoded NumPy/MLPerf dataset configuration
 │   ├── dataset_raw.yaml         # Raw dataset configuration
+│   ├── dataset_wan_preencoded.yaml # Pre-encoded WAN video dataset configuration
 │   └── metadataset.yaml         # Multi-dataset mixing configuration
 └── preprocessing/               # CLI preprocessing configuration examples
     ├── quickstart_pokemon.yaml  # Minimal quickstart (small HuggingFace dataset)
@@ -179,6 +180,20 @@ primus-cli direct -- data diffusion-raw \
 **Usage**: Applied automatically by `diffusion-ingest` finalization. For manual use:
 ```bash
 cp templates/dataset_preencoded_numpy.yaml <output>/.nv-meta/dataset.yaml
+energon prepare <output> --num-workers 8
+```
+
+### [`dataset_wan_preencoded.yaml`](templates/dataset_wan_preencoded.yaml)
+
+**Purpose**: Configure a pre-encoded WAN video dataset (WAN VAE latents plus UMT5 text features).
+
+**When to use**: Training WAN with `WanPretrainTrainer`. It installs `EncodedWanTaskEncoder`, which only cooks the `wan_preencoded` subflavor; a dataset marked `preencoded` fails with `No cooker found for subflavors`.
+
+**Sample keys**: `latents.pth`, `encoder_hidden_states.pth`, optional `caption.txt`
+
+**Usage**: Primus has no WAN encoding tool yet, so produce the shards offline, then:
+```bash
+cp templates/dataset_wan_preencoded.yaml <output>/.nv-meta/dataset.yaml
 energon prepare <output> --num-workers 8
 ```
 
@@ -545,6 +560,7 @@ subflavors:
 **Encoding types:**
 - `preencoded` -- Primus-encoded PyTorch `.pth` format (VAE latents + text embeddings)
 - `preencoded_numpy` -- MLPerf NumPy uint16 format (bfloat16 as `.bytes` entries)
+- `wan_preencoded` -- WAN video `.pth` format (VAE latents + UMT5 features); WAN trainer only
 - `raw` -- Original images and captions (encoded on-the-fly during training)
 
 ### Metadataset YAML

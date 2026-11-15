@@ -1093,7 +1093,15 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
     dq_key = (Hkv, topk, block_size, float(softmax_scale))
     fn = _DQ_CACHE.get(dq_key)
     if fn is None:
-        fn = build_dq(Hkv, topk, block_size, float(softmax_scale)).compile(*dq_args)
+        if "gfx1250" in get_hip_arch():
+            from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
+                build_dq_w32,
+            )
+
+            built = build_dq_w32(Hkv, topk, block_size, float(softmax_scale))
+        else:
+            built = build_dq(Hkv, topk, block_size, float(softmax_scale))
+        fn = built.compile(*dq_args)
         _DQ_CACHE[dq_key] = fn
     fn(*dq_args)
 
@@ -1117,7 +1125,15 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
     kv_key = (Hkv, block_size, float(softmax_scale), topk)
     fn = _DKDV_CACHE.get(kv_key)
     if fn is None:
-        fn = build_dkdv(Hkv, block_size, float(softmax_scale), topk).compile(*kv_args)
+        if "gfx1250" in get_hip_arch():
+            from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
+                build_dkdv_w32,
+            )
+
+            built = build_dkdv_w32(Hkv, block_size, float(softmax_scale), topk)
+        else:
+            built = build_dkdv(Hkv, block_size, float(softmax_scale), topk)
+        fn = built.compile(*kv_args)
         _DKDV_CACHE[kv_key] = fn
     fn(*kv_args)
 

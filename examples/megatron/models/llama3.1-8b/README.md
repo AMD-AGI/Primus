@@ -8,17 +8,30 @@ FlyDSL kernels and RMSNorm on Primus-Turbo. The config is
 `DOCKER_IMAGE` from the host and re-runs itself inside it; with `PRIMUS_LAUNCHER=direct` it runs inside
 the current container.
 
-The default image is `amdprimus/amdprimus:tas-20261019` (see the DeepSeek-V3 example's README). Its
-Primus-Turbo has no gfx1250 FlyDSL attention for head dim 128 (only the MLA one), so this example needs a
-Primus-Turbo checkout that has it (`primus_turbo/flydsl/attention/gfx1250/`, on `dev/mi455x_v2` since
-Primus-Turbo PR #574), passed as `TURBO_DIR`. The numbers below were measured with Primus-Turbo
-`dev/mi455x_v2` 85e85e70. With the backend left at `flydsl`, the launcher stops before training when the
-Primus-Turbo it would use lacks that directory.
+The default image is `amdprimus/amdprimus:tas-20261109` (see the DeepSeek-V3 example's README). Its
+Primus-Turbo has the gfx1250 FlyDSL attention for head dim 128 (`primus_turbo/flydsl/attention/gfx1250/`,
+Primus-Turbo PR #574, on `main` since PR #580). The default before it, `amdprimus/amdprimus:tas-20261019`,
+has only the MLA one, so with that image this example needs a Primus-Turbo checkout that has it, passed as
+`TURBO_DIR` (see Another Primus-Turbo checkout below); the Reference tables were measured that way, with
+Primus-Turbo `dev/mi455x_v2` 85e85e70. With the backend left at `flydsl`, the launcher stops before training
+when the Primus-Turbo it would use lacks that directory.
 
 ## Run
 
-Build the Primus-Turbo checkout in place for the image once (gfx1250 only, OpenMPI off the paths so
-rocSHMEM is not linked), then pass it as `TURBO_DIR`; the launcher puts it first on `PYTHONPATH`:
+```bash
+# On the host, 4 GPUs (the default: GPUS_PER_NODE=4, DP4, GBS 16)
+bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
+
+# On the host, 1 GPU (GBS 4)
+GPUS_PER_NODE=1 bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
+
+# Inside a container; GPUS_PER_NODE works the same way
+PRIMUS_LAUNCHER=direct bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
+```
+
+**Another Primus-Turbo checkout.** Build it in place for the image once (gfx1250 only, OpenMPI off the
+paths so rocSHMEM is not linked), then pass it as `TURBO_DIR`; the launcher puts it first on `PYTHONPATH`
+(inside a container, mount the checkout too). For the Reference tables, with tas-20261019:
 
 ```bash
 git clone https://github.com/AMD-AGI/Primus-Turbo.git /path/to/Primus-Turbo
@@ -26,15 +39,7 @@ git -C /path/to/Primus-Turbo checkout 85e85e70  # dev/mi455x_v2 with PR #574, th
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /path/to/Primus-Turbo:/path/to/Primus-Turbo \
     -w /path/to/Primus-Turbo amdprimus/amdprimus:tas-20261019 bash -c \
     'PATH=$(tr : "\n" <<< "$PATH" | grep -v openmpi | paste -sd:) GPU_ARCHS=gfx1250 python3 setup.py build_ext --inplace'
-
-# On the host, 4 GPUs (the default: GPUS_PER_NODE=4, DP4, GBS 16)
-TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
-
-# On the host, 1 GPU (GBS 4)
-GPUS_PER_NODE=1 TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
-
-# Inside a container (mount the Primus-Turbo checkout too); GPUS_PER_NODE works the same way
-PRIMUS_LAUNCHER=direct TURBO_DIR=/path/to/Primus-Turbo \
+DOCKER_IMAGE=amdprimus/amdprimus:tas-20261019 TURBO_DIR=/path/to/Primus-Turbo \
     bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
 ```
 
@@ -113,6 +118,14 @@ device's total minus free memory. Each row adds one step:
 | + FlyDSL | 1117 | 1.74x | 29,300 | 1509 | 276.08 GiB | 8.9683–8.9709 |
 | + hipBLASLt tuning (default) | 1023 | 1.90x | 32,000 | 1649 | 276.03 GiB | 8.9698–8.9745 |
 
+**On tas-20261109.** The launcher's defaults with the default image (no `TURBO_DIR`), on another MI455X
+node than the tables above, inside a container (`PRIMUS_LAUNCHER=direct`), one run at a time:
+
+| GPUs | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Peak memory/GPU | lm loss at iteration 10 |
+| --- | --- | --- | --- | --- | --- |
+| 1 (GBS 4) | 963.7 | 34,000 | 1750 | 344.96 GiB | 10.1914 |
+| 4 (DP4, GBS 16) | 985.7 (985.8, 985.5) | 33,200 | 1711 | 276.04 GiB | 8.9748–8.9779 |
+
 TE's unfused attention (`USE_TURBO_ATTENTION=False`) is not in the tables: without recompute it runs out of
 memory in the first iteration, and with `--recompute_granularity selective` it was about 4.5x slower than
 FlyDSL (both without the tuning file; see Attention backends below). With the defaults, an iteration on
@@ -143,7 +156,7 @@ Attention alone at this shape (b 4, seq 8192, 32/8 heads, causal; mean of 100 ca
   `flydsl`, any other call raises `ValueError`. The fused backward measured here needs causal attention,
   query lengths that are multiples of 64 and KV lengths that are multiples of 128; other calls use the
   deterministic two-kernel backward. With a
-  Primus-Turbo that lacks `primus_turbo/flydsl/attention/gfx1250/` (e.g. the image's own), every call
+  Primus-Turbo that lacks `primus_turbo/flydsl/attention/gfx1250/` (e.g. that of tas-20261019), every call
   raises that `ValueError`. Primus-Turbo's Triton attention (`PRIMUS_TURBO_ATTN_BACKEND=triton`) needs
   Triton's expert scheduling off (see Triton expert scheduling above): with it on, the Triton attention
   forward made illegal memory accesses or gave NaN at this shape. `USE_TURBO_ATTENTION=False` runs TE's

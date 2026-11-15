@@ -14,6 +14,12 @@ cd tools/perf/diffusion_bench       # from the Primus repo root
 ./run_benchmarks.sh                 # uses config.yaml in this folder
 ```
 
+The shipped `config.yaml` has `diffusion.enabled: false`: the perf runner benchmarks the five
+diffusion models with Primus' own diffusion backend through `primus-cli` instead
+(`BACKEND=diffusion`, see [`tools/perf/README.md`](../README.md#diffusion-diffusion)), so by default
+this tool runs DLRM only. Set `diffusion.enabled: true` (or pass `--models`) to run the models with
+AMDiffusionBenchmark, e.g. to compare the two.
+
 The perf batch runner can also run it as part of a batch, after the Primus models:
 `BACKEND=...,diffusion_dlrm bash tools/perf/run_batch.sh` (see
 [`tools/perf/README.md`](../README.md#diffusion-and-dlrm-diffusion_dlrm)). It uses this folder's
@@ -148,9 +154,10 @@ output_dir: ./results     # relative paths are relative to the config file
 step_timeout: 14400       # seconds per benchmark step, 0 = no timeout
 download_timeout: 0       # seconds for the download step, 0 = no timeout
 keep_container: false     # keep the container afterwards for debugging
+privileged: false         # docker run --privileged (some clusters refuse it)
 
 diffusion:
-  enabled: true
+  enabled: false          # the shipped config's value; true runs the models below
   train_args: {}          # train_args.<key>=<value> for every model
   hydra_overrides: []     # raw hydra overrides for every launcher.py call
   models:
@@ -274,6 +281,7 @@ list.
 | `--output-dir DIR` | `output_dir` |
 | `--timeout SEC` | `step_timeout` |
 | `--keep-container` | `keep_container: true` |
+| `--privileged` | `privileged: true` |
 | `--label KEY=VALUE` | adds a docker label to the containers; repeatable (the perf batch runner finds and stops its containers by label) |
 | `--env KEY[=VALUE]` | sets an environment variable in the containers; repeatable. A bare `KEY` passes this shell's value, which keeps a secret off the `docker run` command line. Only the names are saved in `resolved_config.yaml` |
 | `--dry-run` | starts the container and runs `launcher.py` with `launcher.dry_run=true`; skips downloads and DLRM; uses no GPU time |

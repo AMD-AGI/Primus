@@ -39,7 +39,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${CHECK_COMPLIANCE:=0}"
 : "${MLPERF_RULESET:=6.1.0}"
 : "${MLPERF_LOGGING_REF:=6.1.0-rc2}"
-: "${MLPERF_COMMON_REF:=7771aeabc8b91402e95cb7a33f447d9d9941361f}"
+: "${MLPERF_COMMON_REF:=b708a19e8bd8cb33305c72db2487c366d36ddd03}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
@@ -238,6 +238,7 @@ echo '[INFO] Installing pinned MLPerf Logging package.'
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/mlcommons/logging.git@${MLPERF_LOGGING_REF}'
 echo '[INFO] Installing pinned AMD MLPerf common package.'
+pip uninstall -q -y primus-mllog 2>/dev/null || true
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}'
 echo '[INFO] Container Primus editable install complete.'

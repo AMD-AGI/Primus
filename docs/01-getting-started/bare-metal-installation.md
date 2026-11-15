@@ -110,7 +110,7 @@ Use `primus-cli direct` (not `container`), since you are running on bare metal w
 - **System (`apt`) packages** ([Section 3](#3-system-packages-need-root-one-time)): skipped — they need root.
 - **Multi-node networking** ([Section 5](#5-multi-node-communication-stack-ucx-and-openmpi)): UCX, OpenMPI and AMD AINIC are not built. Single-node training works without them.
 - **FBGEMM / Flux / DLRM benchmarks**: not built (`torchrec` is an optional stage; FBGEMM additionally needs apt `libtbb-dev`).
-- **MLPerf `primus_mllog`**: the image installs `mlperf-common`; it is not part of the core training path and is not installed.
+- **MLPerf logging (AMD `mlperf-common`, formerly `primus_mllog`)**: not part of the core training path and not installed; the MLPerf `run_with_docker.sh` launchers install it.
 
 ### 1.6 Where the scripts deliberately differ from the Dockerfile
 
