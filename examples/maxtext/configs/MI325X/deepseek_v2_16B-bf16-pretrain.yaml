@@ -3,6 +3,19 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_16B-pretrain}
 workspace: ./output
 
+# DeepSeek-V2-16B, dropless MoE (no token is dropped): sparse expert matmuls on the Primus-Turbo hipBLASLt grouped GEMM, FSDP 8.
+# Needs Primus-Turbo built for JAX and MaxText with the Turbo grouped GEMM (release/v26.10 or later).
+# 8x MI325X: 18558 tokens/s/device; the previous token-dropping recipe, kept as
+# deepseek_v2_16B-bf16-token_dropping-pretrain.yaml: 12416 tokens/s/device.
+env:
+  # Tuned and measured at XLA GEMM autotune level 1 (Primus's default is 3). Set here, this and XLA_FLAGS_APPEND
+  # below take precedence over values exported in the shell or passed with primus-cli --env.
+  XLA_GPU_AUTOTUNE_LEVEL: "1"
+  # Collective combine thresholds of 256 MiB instead of Primus's 8 GB, so FSDP all-gathers and reduce-scatters
+  # are split into smaller groups that XLA can overlap with compute.
+  # The first collective can start >40 s late on one GPU (per-device first-call setup); XLA's default 40 s limit for it then aborts the run.
+  XLA_FLAGS_APPEND: "--xla_gpu_all_gather_combine_threshold_bytes=268435456 --xla_gpu_reduce_scatter_combine_threshold_bytes=268435456 --xla_gpu_first_collective_call_terminate_timeout_seconds=900"
+
 modules:
   pre_trainer:
     framework: maxtext
@@ -27,23 +40,21 @@ modules:
       # inter-node parallelism strategy
       dcn_data_parallelism: -1
       dcn_fsdp_parallelism: 1
-      dcn_pipeline_parallelism: 1
-      dcn_tensor_parallelism: 1
-      dcn_sequence_parallelism: 1
 
-      # intra-node parallelism strategy
-      ici_fsdp_parallelism: 1
+      # intra-node parallelism strategy: all 64 routed experts on every GPU (one grouped GEMM over 64 groups)
+      # and no ragged all-to-all, which dominates the dropless path under expert parallelism on ROCm.
+      ici_fsdp_parallelism: 8
       ici_data_parallelism: 1
-      ici_expert_parallelism: -1
-      ici_sequence_parallelism: 1
-      ici_tensor_parallelism: 1
-      ici_pipeline_parallelism: 1
+      ici_expert_parallelism: 1
 
+      # dropless MoE through the Primus-Turbo grouped GEMM
+      sparse_matmul: true
       megablox: false
-      capacity_factor: 1.25
-      sparse_matmul: false
+      capacity_factor: -1
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: "hipblaslt"
+
       sharding_tolerance: 0.05
       max_target_length: 4096
-      # MI325X (256GB HBM): largest 3-step run; peak 219.2/230.4 GB, pdbs 15 OOMs.
       per_device_batch_size: 14
       remat_policy: "minimal_flash"
