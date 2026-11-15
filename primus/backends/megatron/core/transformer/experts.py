@@ -125,6 +125,12 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Applies bias and activation function to the output of linear_fc1.
         """
         if self.config.use_te_activation_func:
+            if (
+                bias_parallel is None
+                and permuted_probs is not None
+                and getattr(self.activation_func, "fuses_probs", False)
+            ):
+                return self.activation_func.forward_with_probs(intermediate_parallel, permuted_probs)
             if bias_parallel is not None:
                 intermediate_parallel = intermediate_parallel + bias_parallel
             intermediate_parallel = self.activation_func(intermediate_parallel)
