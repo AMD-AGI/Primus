@@ -663,6 +663,20 @@ def _unpermute_scale_bwd(grad, out_sorted, perm, inv_perm, prob):
     return d_sorted, d_prob
 
 
+def _unpermute_scale_bwd_grouped(grad, out_sorted, perm, inv_perm, prob, counts):
+    # One row sum per group, over that group's rows only: the same reduction
+    # shapes as main's per-expert multiply, so fp32 d_prob matches it bit for
+    # bit. One sum over all tokens rounds differently on GPU.
+    d_sorted = (grad * prob).index_select(0, perm)
+    grad_sorted = grad.index_select(0, perm)
+    sums = [
+        (g * o).sum(dim=-1, keepdim=True)
+        for g, o in zip(grad_sorted.split(counts), out_sorted.split(counts))
+        if g.shape[0]
+    ]
+    return d_sorted, torch.cat(sums).index_select(0, inv_perm)
+
+
 def _unpermute_scale_bwd_noprob(grad, perm, prob):
     return (grad * prob).index_select(0, perm)
 
@@ -696,12 +710,17 @@ class _PermuteRows(torch.autograd.Function):
 
 
 class _UnpermuteScale(torch.autograd.Function):
-    """``out[t] = out_sorted[inv_perm[t]] * prob[t]`` as one gather*scale, compiled when ``compiled``."""
+    """``out[t] = out_sorted[inv_perm[t]] * prob[t]`` as one gather*scale, compiled when ``compiled``.
+
+    ``counts`` (host group sizes, in sorted order) makes the uncompiled backward
+    sum ``d_prob`` group by group; without it, one sum covers every token.
+    """
 
     @staticmethod
-    def forward(ctx, out_sorted, perm, inv_perm, prob, compiled: bool):
+    def forward(ctx, out_sorted, perm, inv_perm, prob, compiled: bool, counts: Optional[List[int]] = None):
         ctx.save_for_backward(out_sorted, perm, inv_perm, prob)
         ctx.compiled = compiled
+        ctx.counts = counts
         unpermute = _fused_unpermute_fwd if compiled else _unpermute_scale_fwd
         return unpermute(out_sorted, inv_perm, prob)
 
@@ -709,13 +728,16 @@ class _UnpermuteScale(torch.autograd.Function):
     def backward(ctx, grad):
         out_sorted, perm, inv_perm, prob = ctx.saved_tensors
         grad = grad.contiguous()
-        if ctx.needs_input_grad[3]:
-            unpermute_bwd = _fused_unpermute_bwd if ctx.compiled else _unpermute_scale_bwd
-            d_sorted, d_prob = unpermute_bwd(grad, out_sorted, perm, inv_perm, prob)
-        else:
+        if not ctx.needs_input_grad[3]:
             unpermute_bwd = _fused_unpermute_bwd_noprob if ctx.compiled else _unpermute_scale_bwd_noprob
             d_sorted, d_prob = unpermute_bwd(grad, perm, prob), None
-        return d_sorted, None, None, d_prob, None
+        elif ctx.compiled:
+            d_sorted, d_prob = _fused_unpermute_bwd(grad, out_sorted, perm, inv_perm, prob)
+        elif ctx.counts is not None:
+            d_sorted, d_prob = _unpermute_scale_bwd_grouped(grad, out_sorted, perm, inv_perm, prob, ctx.counts)
+        else:
+            d_sorted, d_prob = _unpermute_scale_bwd(grad, out_sorted, perm, inv_perm, prob)
+        return d_sorted, None, None, d_prob, None, None
 
 
 class SwiGLUExpert(nn.Module):
@@ -796,18 +818,23 @@ class ZayaRouter(nn.Module):
         routed = self.down_proj(hidden_states.reshape(seq * batch, self.hidden_size))
         # EDA state is the post-add, pre-norm router hidden. RMSNorm and the
         # 3-layer MLP both see that state.
-        if self.use_eda and prev_router is not None:
-            eda_norm = _fused_eda_norm if self.fuse_moe else _eda_norm
-            routed, logits = eda_norm(
+        eda = self.use_eda and prev_router is not None
+        if eda and self.fuse_moe:
+            routed, logits = _fused_eda_norm(
                 routed,
                 prev_router.reshape(seq * batch, self.width),
                 self.router_states_scale,
                 self.rmsnorm_eda.weight,
                 self.rmsnorm_eda.eps,
             )
+            next_router = routed.view(seq, batch, self.width)
         else:
+            if eda:
+                routed = routed + prev_router.reshape(seq * batch, self.width) * self.router_states_scale
+            # View before norm, as on main: autograd sums the gradients of
+            # routed in the order of its uses, and in fp32 that order shows.
+            next_router = routed.view(seq, batch, self.width)
             logits = self.rmsnorm_eda(routed)
-        next_router = routed.view(seq, batch, self.width)
         for stage in self.router_mlp:
             logits = stage(logits)
         # The bias is a buffer updated in place below; the top-k keeps it out of the graph.
@@ -1059,7 +1086,7 @@ class ZayaMoE(nn.Module):
         # the concatenation covers all rows in sorted order. The gate multiply
         # comes after the unpermute, as one gather*prob over all tokens.
         out_sorted = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
-        out = _UnpermuteScale.apply(out_sorted, perm, inv_perm, flat_prob, self.fuse_moe)
+        out = _UnpermuteScale.apply(out_sorted, perm, inv_perm, flat_prob, self.fuse_moe, counts)
         return out.view_as(hidden_states), next_router
 
 
