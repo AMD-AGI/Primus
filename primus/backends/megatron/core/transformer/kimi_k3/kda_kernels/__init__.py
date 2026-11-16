@@ -92,6 +92,29 @@ def load_fla_kda_backend():
     return fla_chunk_kda
 
 
+def load_fla_fused_ops():
+    """Lazily import ``fla``'s fused kernels for the ops around the chunk kernel (``kda_fla_fused_ops``).
+
+    Returns ``(l2norm, gate, rms_norm_gated)``, drop-in replacements for
+    :func:`kda_l2norm`, :func:`kda_gate` and ``KimiGatedRMSNorm.forward``
+    (``rms_norm_gated(x, gate, weight, eps)``). Same optional-dependency
+    rationale and inline import as :func:`load_fla_kda_backend`.
+    """
+    try:
+        from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels._fla import (
+            fla_kda_gate,
+            fla_l2norm,
+            fla_rms_norm_gated,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "kda_fla_fused_ops = true requires flash-linear-attention's fused l2norm, KDA gate and "
+            f"gated RMSNorm kernels, which failed to import: {exc}. Set kda_fla_fused_ops: false, "
+            "or `pip install -U fla-core`."
+        ) from exc
+    return fla_l2norm, fla_kda_gate, fla_rms_norm_gated
+
+
 def _require_gfx950() -> None:
     """Raise :class:`ImportError` unless a gfx950 (CDNA4) device is visible.
 
@@ -174,8 +197,9 @@ __all__ = [
     # shared input transforms the fused kernels fold in
     "kda_gate",
     "kda_l2norm",
-    # fla fused Triton chunk kernel — lazily loaded
+    # fla fused Triton chunk kernel and the ops around it — lazily loaded
     "load_fla_kda_backend",
+    "load_fla_fused_ops",
     # native FlyDSL kernel — lazily loaded
     "load_flydsl_kda_backend",
     # dispatch

@@ -160,6 +160,20 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     kda_use_full_rank_gate: bool = True
     kda_backend: str = "eager"
     kda_chunk_size: int = 64
+    # fla's fused Triton kernels for the elementwise ops around the chunk
+    # kernel: the q / k L2 norm (fla.modules.l2norm), the bounded decay gate
+    # (fla.ops.kda.gate.fused_kda_gate) and the sigmoid-gated output RMSNorm
+    # (fla.modules.fused_norm_gate.rms_norm_gated), in place of their eager
+    # fp32 transcriptions in kda_kernels/_eager. Works with any kda_backend;
+    # needs fla. Off by default so the eager reference stays the default.
+    kda_fla_fused_ops: bool = False
+    # Arguments of fla's chunk_kda, kda_backend "fla" only. safe_gate takes the
+    # sub-chunk matrix-core path for the diagonal blocks, valid only while every
+    # g lies in [kda_gate_lower_bound, 0) with a bound in [-5, 0) (the bounded
+    # gate guarantees it). disable_recompute keeps the forward chunk
+    # intermediates for the backward instead of recomputing them.
+    kda_fla_safe_gate: bool = False
+    kda_fla_disable_recompute: bool = False
 
     # ---- unified KDA backend selector (the yaml-facing knob) --------------
     # ``use_kimi_k3_attention_backend`` is the SINGLE yaml key for choosing the

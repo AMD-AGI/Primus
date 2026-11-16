@@ -91,6 +91,7 @@ from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels import (
     KDA_BACKENDS,
     kda_gate,
     kda_l2norm,
+    load_fla_fused_ops,
     resolve_kda_backend,
 )
 
@@ -143,6 +144,9 @@ class KimiGatedRMSNorm(nn.Module):
     the gate multiply has to happen *inside* the fp32 region to match
     ``fla`` bit-for-bit, and because the ``weight`` parameter name then
     lines up with the released checkpoint's ``o_norm.weight``.
+
+    With ``config.kda_fla_fused_ops`` the forward runs on ``fla``'s fused
+    ``rms_norm_gated`` kernel instead of the fp32 chain.
     """
 
     def __init__(
@@ -162,8 +166,13 @@ class KimiGatedRMSNorm(nn.Module):
         self.hidden_size = int(hidden_size)
         self.eps = float(eps)
         self.weight = nn.Parameter(torch.ones(self.hidden_size, dtype=params_dtype, device=device))
+        self._fused_forward = None
+        if config is not None and getattr(config, "kda_fla_fused_ops", False):
+            self._fused_forward = load_fla_fused_ops()[2]
 
     def forward(self, x: Tensor, gate: Tensor) -> Tensor:
+        if self._fused_forward is not None:
+            return self._fused_forward(x, gate, self.weight, self.eps)
         out_dtype = x.dtype
         x32 = x.float()
         y = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -199,6 +208,36 @@ class KimiDeltaAttentionSubmodules:
     g_b_proj: Union[ModuleSpec, type] = IdentityOp
     out_norm: Union[ModuleSpec, type] = KimiGatedRMSNorm
     o_proj: Union[ModuleSpec, type] = IdentityOp
+
+
+def _resolve_fla_options(config, backend_name: str, gate_lower_bound: Optional[float]):
+    """``(l2norm, gate, chunk_kwargs)`` for ``kda_fla_fused_ops`` / ``kda_fla_safe_gate`` / ``kda_fla_disable_recompute``.
+
+    ``l2norm`` and ``gate`` are :func:`kda_l2norm` / :func:`kda_gate` or
+    ``fla``'s fused kernels; ``chunk_kwargs`` are the extra ``chunk_kda``
+    arguments, which only the ``fla`` backend takes. ``safe_gate`` is valid
+    only while every ``g`` lies in ``[gate_lower_bound, 0)`` with the bound in
+    ``[-5, 0)``, which the bounded gate guarantees.
+    """
+    l2norm, gate = kda_l2norm, kda_gate
+    if getattr(config, "kda_fla_fused_ops", False):
+        l2norm, gate, _ = load_fla_fused_ops()
+    chunk_kwargs = {}
+    for field, arg in (
+        ("kda_fla_safe_gate", "safe_gate"),
+        ("kda_fla_disable_recompute", "disable_recompute"),
+    ):
+        if not getattr(config, field, False):
+            continue
+        if backend_name != "fla":
+            raise ValueError(f"{field} is an argument of fla's chunk_kda; kda_backend is {backend_name!r}.")
+        chunk_kwargs[arg] = True
+    if chunk_kwargs.get("safe_gate") and not (gate_lower_bound is not None and -5.0 <= gate_lower_bound < 0):
+        raise ValueError(
+            "kda_fla_safe_gate needs every g in [kda_gate_lower_bound, 0) with the bound in [-5, 0); "
+            f"kda_gate_lower_bound is {gate_lower_bound!r}."
+        )
+    return l2norm, gate, chunk_kwargs
 
 
 def _kda_cp_state():
@@ -369,6 +408,11 @@ class KimiDeltaAttention(MegatronModule):
         # surfaces while the model is being built rather than on the first
         # forward, and the per-step dispatch disappears from the hot path.
         self.kda_backend = resolve_kda_backend(self.backend_name)
+
+        # Resolved here for the same reason as the backend.
+        self.l2norm, self.gate_fn, self.chunk_kwargs = _resolve_fla_options(
+            config, self.backend_name, self.gate_lower_bound
+        )
 
         # Depthwise-conv1d impl, coordinated with the unified backend selector.
         # ``config.use_kimi_k3_attention_backend`` (when set) supersedes the
@@ -799,22 +843,22 @@ class KimiDeltaAttention(MegatronModule):
         q = q.reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
         k = k.reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
         v = v.reshape(batch, seq_len, self.num_heads_local_tp, self.value_head_dim)
-        q = kda_l2norm(q.contiguous())
-        k = kda_l2norm(k.contiguous())
+        q = self.l2norm(q.contiguous())
+        k = self.l2norm(k.contiguous())
 
         # --- gate and write strength ------------------------------------
         nvtx_range_push(suffix="kda_gate")
         z, _ = self.f_a_proj(hidden_states)
         z, _ = self.f_b_proj(z)
         z = z.transpose(0, 1).reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
-        g = kda_gate(z, self.A_log, self.dt_bias, self.gate_lower_bound)
+        g = self.gate_fn(z, self.A_log, self.dt_bias, self.gate_lower_bound)
         beta, _ = self.b_proj(hidden_states)
         beta = torch.sigmoid(beta.transpose(0, 1).float())
         nvtx_range_pop(suffix="kda_gate")
 
         # --- the delta-rule recurrence ----------------------------------
         nvtx_range_push(suffix="kda_delta_rule")
-        backend_packed = {}
+        backend_packed = dict(self.chunk_kwargs)
         if kda_cu is not None:
             backend_packed["cu_seqlens"] = kda_cu
         if cp_context is not None:

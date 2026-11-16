@@ -41,9 +41,12 @@ import logging
 from typing import Optional, Tuple
 
 import torch
+from fla.modules.fused_norm_gate import rms_norm_gated as _fla_rms_norm_gated
+from fla.modules.l2norm import l2norm as _fla_l2norm
 from fla.ops.kda import chunk_kda as _fla_chunk_kda
+from fla.ops.kda.gate import fused_kda_gate as _fla_fused_kda_gate
 
-__all__ = ["fla_chunk_kda"]
+__all__ = ["fla_chunk_kda", "fla_kda_gate", "fla_l2norm", "fla_rms_norm_gated"]
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +151,8 @@ def fla_chunk_kda(
     chunk_size: int = 64,
     cu_seqlens: Optional[torch.Tensor] = None,
     cp_context: Optional[object] = None,
+    safe_gate: bool = False,
+    disable_recompute: bool = False,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Run KDA through ``fla``'s fused Triton chunk kernel.
 
@@ -157,6 +162,12 @@ def fla_chunk_kda(
 
     ``chunk_size`` is accepted for signature parity and validated only:
     ``fla`` fixes its own chunk tiling internally.
+
+    ``safe_gate`` and ``disable_recompute`` go to ``chunk_kda`` unchanged
+    (``kda_fla_safe_gate`` / ``kda_fla_disable_recompute``). ``safe_gate`` is
+    valid only when every ``g`` lies in ``[lower_bound, 0)`` with
+    ``-5 <= lower_bound < 0``; the caller checks the bound, since the gate is
+    applied before this call.
     """
     if chunk_size != 64:
         raise ValueError(
@@ -180,6 +191,28 @@ def fla_chunk_kda(
         output_final_state=output_final_state,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         use_gate_in_kernel=False,
+        safe_gate=safe_gate,
+        disable_recompute=disable_recompute,
         **packed,
     )
     return o, final_state
+
+
+def fla_l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """``kda_l2norm`` on ``fla.modules.l2norm``: one fused kernel per direction, output in ``x.dtype``."""
+    return _fla_l2norm(x, eps=eps, output_dtype=x.dtype)
+
+
+def fla_kda_gate(
+    z: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: Optional[torch.Tensor] = None,
+    lower_bound: Optional[float] = None,
+) -> torch.Tensor:
+    """``kda_gate`` on ``fla.ops.kda.gate.fused_kda_gate`` (the same formula), fp32 output."""
+    return _fla_fused_kda_gate(z, A_log, dt_bias, lower_bound=lower_bound, output_dtype=torch.float32)
+
+
+def fla_rms_norm_gated(x: torch.Tensor, gate: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """``KimiGatedRMSNorm.forward`` on ``fla.modules.fused_norm_gate.rms_norm_gated`` (sigmoid gate, no bias)."""
+    return _fla_rms_norm_gated(x, gate, weight, None, activation="sigmoid", eps=eps)
