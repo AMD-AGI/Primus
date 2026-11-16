@@ -44,13 +44,19 @@ retry() {
 
 step_setup() {
     local tag=${1:-main}
-    cd "$DIFF_DIR" || exit 1
-    # The token login becomes a no-op: hf reads HF_TOKEN from the environment,
-    # and on a command line the token would show in the host's `ps`.
-    # shellcheck disable=SC2016  # $(HF_TOKEN) is the Makefile's literal text
-    sed -i 's/huggingface-cli login/hf auth login/g; s/huggingface-cli download/hf download/g;
-            s/hf auth login --token \$(HF_TOKEN)/true/g' Makefile
-    log "Makefile patched to use 'hf download', with HF_TOKEN from the environment"
+    # Newer images (e.g. the Primus CI image) no longer ship AMDiffusionBenchmark; DLRM-only
+    # runs must not depend on it. The diffusion and download steps still fail without it.
+    if [[ -d "$DIFF_DIR" ]]; then
+        cd "$DIFF_DIR" || exit 1
+        # The token login becomes a no-op: hf reads HF_TOKEN from the environment,
+        # and on a command line the token would show in the host's `ps`.
+        # shellcheck disable=SC2016  # $(HF_TOKEN) is the Makefile's literal text
+        sed -i 's/huggingface-cli login/hf auth login/g; s/huggingface-cli download/hf download/g;
+                s/hf auth login --token \$(HF_TOKEN)/true/g' Makefile
+        log "Makefile patched to use 'hf download', with HF_TOKEN from the environment"
+    else
+        log "$DIFF_DIR not in this image; skipping the Makefile patch (diffusion steps will fail)"
+    fi
 
     mkdir -p "$RESULTS/env"
     {
