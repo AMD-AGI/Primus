@@ -11,7 +11,7 @@ The eager ops in ``kda_kernels/_eager`` (``kda_l2norm``, ``kda_gate``) and the f
 and every input gradient. fla's ``chunk_kda`` with ``safe_gate`` / ``disable_recompute``
 must match its defaults on inputs shaped like Kimi K3's (bounded gate, L2-normalised q / k).
 A wrong gate bound and a negated output gate have to fail the same checks. Without a GPU,
-the option resolution (defaults, errors) is still checked.
+the option resolution (defaults, errors, the fields being ignored by other backends) is still checked.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels import (  # n
 )
 from primus.backends.megatron.core.transformer.kimi_k3.kimi_delta_attention import (  # noqa: E402
     KimiGatedRMSNorm,
-    _resolve_fla_options,
+    _resolve_kda_ops,
 )
 
 LOWER_BOUND = -5.0  # Kimi K3's kda_gate_lower_bound
@@ -65,23 +65,19 @@ def test_config_fields_default_off():
 
 
 def test_resolution_without_options_keeps_the_eager_ops():
-    l2norm, gate, chunk_kwargs = _resolve_fla_options(_opts(), "eager", LOWER_BOUND)
-    assert (l2norm, gate, chunk_kwargs) == (kda_l2norm, kda_gate, {})
-    assert _resolve_fla_options(SimpleNamespace(), "fla", LOWER_BOUND)[2] == {}
+    assert _resolve_kda_ops(_opts(), "eager", LOWER_BOUND) == (kda_l2norm, kda_gate, None, {})
+    assert _resolve_kda_ops(SimpleNamespace(), "fla", LOWER_BOUND) == (kda_l2norm, kda_gate, None, {})
 
 
 def test_resolution_chunk_options():
-    _, _, kw = _resolve_fla_options(
-        _opts(kda_fla_safe_gate=True, kda_fla_disable_recompute=True), "fla", LOWER_BOUND
-    )
-    assert kw == {"safe_gate": True, "disable_recompute": True}
-    for field in ("kda_fla_safe_gate", "kda_fla_disable_recompute"):
-        with pytest.raises(ValueError, match="argument of fla's chunk_kda"):
-            _resolve_fla_options(_opts(**{field: True}), "eager", LOWER_BOUND)
+    both = _opts(kda_fla_safe_gate=True, kda_fla_disable_recompute=True)
+    assert _resolve_kda_ops(both, "fla", LOWER_BOUND)[3] == {"safe_gate": True, "disable_recompute": True}
+    for backend in ("eager", "eager_recurrent"):  # fla-only arguments: the other backends ignore them
+        assert _resolve_kda_ops(both, backend, None)[3] == {}
     for bound in (None, -6.0, 0.0):
         with pytest.raises(ValueError, match="kda_fla_safe_gate needs"):
-            _resolve_fla_options(_opts(kda_fla_safe_gate=True), "fla", bound)
-    assert _resolve_fla_options(_opts(kda_fla_disable_recompute=True), "fla", None)[2] == {
+            _resolve_kda_ops(_opts(kda_fla_safe_gate=True), "fla", bound)
+    assert _resolve_kda_ops(_opts(kda_fla_disable_recompute=True), "fla", None)[3] == {
         "disable_recompute": True
     }
 
@@ -120,8 +116,7 @@ def _check(ref, got, tol=1e-2):
 
 def test_fused_resolution_returns_the_fla_kernels():
     l2norm, gate, _ = _fla_or_skip()
-    got = _resolve_fla_options(_opts(kda_fla_fused_ops=True), "eager", LOWER_BOUND)
-    assert got[:2] == (l2norm, gate) and got[2] == {}
+    assert _resolve_kda_ops(_opts(kda_fla_fused_ops=True), "eager", LOWER_BOUND) == (l2norm, gate, None, {})
 
 
 def test_fused_l2norm_matches_eager():
