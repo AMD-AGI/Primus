@@ -56,6 +56,8 @@ rules as the forward; see that module's docstring.
 """
 
 import math
+import threading
+from typing import Optional, Tuple
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
@@ -70,12 +72,20 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
+from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels import (
+    FLYDSL_ATTN_RES_ARCHS,
+)
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1._lld_shim import (
     ensure_usable_lld,
 )
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1.attn_res_mixer_kernel import (
+    VEC,
+    VEC_BLOCK,
     block_size_for,
+    block_sums,
     supports_mixer_geometry,
+    use_vector_kernel,
+    vector_kernel_knobs,
 )
 
 _LOG2E = math.log2(math.e)
@@ -123,6 +133,7 @@ def build_attn_res_mixer_bwd(
     elem_dtype: str,
     waves_per_eu: int = 2,
     inject: str = "",
+    knobs: Optional[Tuple[bool, Optional[int]]] = None,
 ):
     """Build the backward launcher for one ``(hidden, num_blocks, dtype)``.
 
@@ -133,14 +144,16 @@ def build_attn_res_mixer_bwd(
     Args:
         inject: **test only.** One of :data:`BWD_INJECTIONS`. Empty (the
             production value) emits the correct adjoint.
+        knobs: ``vector_kernel_knobs()`` as the caller keyed its cache on;
+            ``None`` reads the environment.
 
     Returns ``launch(BR, PS, W, DOUT, RSAV, DSAV, DBR, DPS, DW_TOK, DDOT,
     num_tokens)`` over flat tensors.
     """
     ensure_usable_lld()
     arch = get_rocm_arch()
-    if not arch.startswith("gfx950"):
-        raise RuntimeError(f"attn_res_mixer_bwd targets gfx950 (CDNA4); got {arch!r}")
+    if not arch.startswith(FLYDSL_ATTN_RES_ARCHS):
+        raise RuntimeError(f"attn_res_mixer_bwd targets {' and '.join(FLYDSL_ATTN_RES_ARCHS)}; got {arch!r}")
 
     H = int(hidden)
     NB = int(num_blocks)
@@ -153,8 +166,13 @@ def build_attn_res_mixer_bwd(
     if inject and inject not in BWD_INJECTIONS:
         raise ValueError(f"unknown injection {inject!r}; expected '' or one of {list(BWD_INJECTIONS)}")
 
-    BLOCK = block_size_for(H)
+    allowed, wpe = vector_kernel_knobs() if knobs is None else knobs
+    vec_path = use_vector_kernel(H, elem_dtype, arch, allowed)
+    BLOCK = VEC_BLOCK if vec_path else block_size_for(H)
     EPT = H // BLOCK
+    EPV = H // (BLOCK * VEC)  # 8-element vectors per thread (vector kernel)
+    if vec_path and wpe is not None:
+        waves_per_eu = wpe
 
     # One reduction row per candidate: dp[c] only. r and dot are read back from
     # the forward's saved tensors.
@@ -366,6 +384,187 @@ def build_attn_res_mixer_bwd(
                 dw_acc = math_dialect.fma(d_dot[c], x, dw_acc)
             store_f32(dw_acc, dwt_ptr, row_ps + d)
 
+    @flyc.kernel(
+        known_block_size=[BLOCK, 1, 1],
+        name=f"attn_res_mixer_bwd_vec_{elem_dtype}_H{H}_C{C}_w{waves_per_eu}{_tag}",
+    )
+    def attn_res_mixer_bwd_vec_kernel(
+        BR: fx.Tensor,
+        PS: fx.Tensor,
+        W: fx.Tensor,
+        DOUT: fx.Tensor,
+        RSAV: fx.Tensor,
+        DSAV: fx.Tensor,
+        DBR: fx.Tensor,
+        DPS: fx.Tensor,
+        DW_TOK: fx.Tensor,
+        DDOT: fx.Tensor,
+    ):
+        f32 = T.f32
+        bf16 = T.bf16
+        fm = arith.FastMathFlags.fast
+        vec1_f32 = T.vec(1, f32)
+        v_bf16 = T.vec(VEC, bf16)
+        v_f32 = T.vec(VEC, f32)
+
+        br_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), BR)
+        ps_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), PS)
+        w_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), W)
+        do_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), DOUT)
+        rsav_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), RSAV)
+        dsav_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), DSAV)
+        dbr_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), DBR)
+        dps_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), DPS)
+        dwt_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), DW_TOK)
+        ddot_ptr = _fly.extract_aligned_pointer_as_index(_llvm_ptr_ty(), DDOT)
+
+        base = allocator.get_base()
+        lds_red = SmemPtr(base, lds_red_off, f32, shape=(RED_ROWS * BLOCK,)).get()
+
+        def gep(bptr, elem_idx, elem_ty):
+            return _llvm.GEPOp(
+                _llvm_ptr_ty(),
+                bptr,
+                [arith.index_cast(T.i64, elem_idx)],
+                rawConstantIndices=[_LLVM_GEP_DYNAMIC],
+                elem_type=elem_ty,
+                noWrapFlags=0,
+            ).result
+
+        def load_f32(bptr, elem_idx):
+            return _llvm.LoadOp(f32, gep(bptr, elem_idx, f32)).result
+
+        def store_f32(val, bptr, elem_idx):
+            _llvm.StoreOp(val, gep(bptr, elem_idx, f32))
+
+        def load_vec(bptr, elem_idx, vty, ety):
+            return _llvm.LoadOp(vty, gep(bptr, elem_idx, ety), alignment=16).result
+
+        def store_vec(vals, vty, bptr, elem_idx, ety):
+            _llvm.StoreOp(vector.from_elements(vty, vals), gep(bptr, elem_idx, ety), alignment=16)
+
+        def lane(vv, e):
+            return vector.extract(vv, static_position=[e], dynamic_position=[])
+
+        def lane_f32(vv, e):
+            return arith.ExtFOp(f32, lane(vv, e)).result
+
+        def lds_get(elem_idx):
+            v = vector.load(vec1_f32, lds_red, [elem_idx])
+            return vector.extract(v, static_position=[0], dynamic_position=[])
+
+        def lds_put(elem_idx, val):
+            vector.store(vector.from_elements(vec1_f32, [val]), lds_red, [elem_idx])
+
+        c_zero = arith.constant(0.0, type=f32)
+        c_one = arith.constant(1.0, type=f32)
+        c_two = arith.constant(2.0, type=f32)
+        c_log2e = arith.constant(_LOG2E, type=f32)
+        c_neg_half_inv_h = arith.constant(-0.5 / float(H), type=f32)
+
+        tok = arith.index_cast(T.index, gpu.block_idx.x)
+        tid = arith.index_cast(T.index, gpu.thread_idx.x)
+        I_H = arith.index(H)
+        I_C = arith.index(C)
+        I_VEC = arith.index(VEC)
+
+        row_br = tok * arith.index(NB * H)
+        row_ps = tok * I_H
+        cand = [
+            (br_ptr, row_br + arith.index(c * H), dbr_ptr, row_br + arith.index(c * H)) for c in range(NB)
+        ]
+        cand = cand + [(ps_ptr, row_ps, dps_ptr, row_ps)]
+
+        # phase 1: dp[c] = <dout, v[c]>; dout and every candidate stay in registers
+        dgs = [None for _ in range(EPV)]
+        xs = [[None for _ in range(EPV)] for _ in range(C)]
+        acc_dp = [c_zero for _ in range(C)]
+        for j in range_constexpr(EPV):
+            d0 = (tid + arith.index(j * BLOCK)) * I_VEC
+            dg8 = load_vec(do_ptr, row_ps + d0, v_bf16, bf16)
+            dgs[j] = dg8
+            for c in range_constexpr(C):
+                x8 = load_vec(cand[c][0], cand[c][1] + d0, v_bf16, bf16)
+                xs[c][j] = x8
+                for e in range_constexpr(VEC):
+                    acc_dp[c] = math_dialect.fma(lane_f32(dg8, e), lane_f32(x8, e), acc_dp[c])
+
+        dps_red = block_sums(acc_dp, tid, BLOCK, lds_get, lds_put, fm)
+
+        # phase 2: the per-candidate adjoint, as the scalar kernel computes it
+        rs = [load_f32(rsav_ptr, tok * I_C + arith.index(c)) for c in range(C)]
+        dots = [load_f32(dsav_ptr, tok * I_C + arith.index(c)) for c in range(C)]
+        scores = [arith.MulFOp(dots[c], rs[c], fastmath=fm).result for c in range(C)]
+        smax = scores[0]
+        for c in range_constexpr(C - 1):
+            smax = arith.MaxNumFOp(smax, scores[c + 1]).result
+        exps = [_nat_exp(arith.SubFOp(scores[c], smax, fastmath=fm).result, c_log2e, fm) for c in range(C)]
+        zsum = exps[0]
+        for c in range_constexpr(C - 1):
+            zsum = arith.AddFOp(zsum, exps[c + 1], fastmath=fm).result
+        inv_z = arith.DivFOp(c_one, zsum, fastmath=fm).result
+        probs = [arith.MulFOp(exps[c], inv_z, fastmath=fm).result for c in range(C)]
+
+        dot_p = arith.MulFOp(probs[0], dps_red[0], fastmath=fm).result
+        for c in range_constexpr(C - 1):
+            dot_p = math_dialect.fma(probs[c + 1], dps_red[c + 1], dot_p)
+
+        # the test-only defects, selected as in the scalar kernel
+        ds_of = {
+            False: lambda c: arith.MulFOp(
+                probs[c], arith.SubFOp(dps_red[c], dot_p, fastmath=fm).result, fastmath=fm
+            ).result,
+            True: lambda c: arith.MulFOp(probs[c], dps_red[c], fastmath=fm).result,
+        }[inject == "no_softmax_jacobian"]
+        r_pow_of = {
+            False: lambda r, r2: arith.MulFOp(r2, r, fastmath=fm).result,
+            True: lambda r, r2: r2,
+        }[inject == "wrong_r_power"]
+
+        d_dot = []
+        two_d_ss = []
+        for c in range_constexpr(C):
+            ds = ds_of(c)
+            d_dot.append(arith.MulFOp(ds, rs[c], fastmath=fm).result)
+            d_r = arith.MulFOp(ds, dots[c], fastmath=fm).result
+            r2 = arith.MulFOp(rs[c], rs[c], fastmath=fm).result
+            r3 = r_pow_of(rs[c], r2)
+            d_ss = arith.MulFOp(
+                arith.MulFOp(d_r, r3, fastmath=fm).result, c_neg_half_inv_h, fastmath=fm
+            ).result
+            two_d_ss.append(arith.MulFOp(c_two, d_ss, fastmath=fm).result)
+        rms_w = {False: two_d_ss, True: [c_zero for _ in range(C)]}[inject == "drop_rms_term"]
+        score_w = {False: d_dot, True: [c_zero for _ in range(C)]}[inject == "drop_score_term"]
+
+        save_c = tid % I_C
+        sel = d_dot[0]
+        for c in range_constexpr(C - 1):
+            hit = arith.cmpi(arith.CmpIPredicate.eq, save_c, arith.index(c + 1))
+            sel = arith.select(hit, d_dot[c + 1], sel)
+        store_f32(sel, ddot_ptr, tok * I_C + save_c)
+
+        # phase 3: the input gradients and the per-token dW partial, 16-byte stores
+        for j in range_constexpr(EPV):
+            d0 = (tid + arith.index(j * BLOCK)) * I_VEC
+            w8 = load_vec(w_ptr, d0, v_f32, f32)
+            dw = [c_zero for _ in range(VEC)]
+            for c in range_constexpr(C):
+                outs = []
+                for e in range_constexpr(VEC):
+                    x = lane_f32(xs[c][j], e)
+                    dv = math_dialect.fma(
+                        probs[c],
+                        lane_f32(dgs[j], e),
+                        arith.MulFOp(score_w[c], lane(w8, e), fastmath=fm).result,
+                    )
+                    dv = math_dialect.fma(rms_w[c], x, dv)
+                    outs.append(arith.trunc_f(bf16, dv))
+                    dw[e] = math_dialect.fma(d_dot[c], x, dw[e])
+                store_vec(outs, v_bf16, cand[c][2], cand[c][3] + d0, bf16)
+            store_vec(dw, v_f32, dwt_ptr, row_ps + d0, f32)
+
+    kernel_fn = {False: attn_res_mixer_bwd_kernel, True: attn_res_mixer_bwd_vec_kernel}[vec_path]
+
     @flyc.jit
     def launch_attn_res_mixer_bwd(
         BR: fx.Tensor,
@@ -387,7 +586,7 @@ def build_attn_res_mixer_bwd(
             allocator.finalize()
 
         grid_x = arith.index_cast(T.index, num_tokens)
-        launcher = attn_res_mixer_bwd_kernel(BR, PS, W, DOUT, RSAV, DSAV, DBR, DPS, DW_TOK, DDOT)
+        launcher = kernel_fn(BR, PS, W, DOUT, RSAV, DSAV, DBR, DPS, DW_TOK, DDOT)
 
         for op in ctx.gpu_module_body.operations:
             if getattr(op, "OPERATION_NAME", None) == "gpu.func":
@@ -402,8 +601,20 @@ def build_attn_res_mixer_bwd(
         "llvm_options": {"enable-post-misched": False, "lsr-drop-solution": True},
     }
 
-    def _launch(*args, **kwargs):
-        with CompilationContext.compile_hints(_hints):
-            return launch_attn_res_mixer_bwd(*args, **kwargs)
+    compiled = []
+    compile_lock = threading.Lock()
+
+    def _launch(*args):
+        # see build_attn_res_mixer_fwd: the compiled function skips the per-call cache-key resolution, and
+        # flyc.compile launches the first call itself
+        if compiled:
+            return compiled[0](*args)
+        with compile_lock:
+            if compiled:
+                return compiled[0](*args)
+            with CompilationContext.compile_hints(_hints):
+                fn = flyc.compile(launch_attn_res_mixer_bwd, *args)
+            if fn is not None:
+                compiled.append(fn)
 
     return _launch
