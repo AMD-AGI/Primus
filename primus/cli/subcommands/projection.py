@@ -55,6 +55,16 @@ def _require_benchmarkable(framework: str, simulate_flag: str) -> None:
     )
 
 
+def _uses_compiled_step_bench(args, framework: str) -> bool:
+    """MaxText benchmarks its compiled step unless the per-layer harness is asked for."""
+    if framework not in ("maxtext", "jax"):
+        return False
+    if getattr(args, "profiling_mode", "benchmark") == "simulate":
+        return False
+    method = getattr(args, "bench_method", None) or os.getenv("PRIMUS_MAXTEXT_BENCH_METHOD", "step")
+    return method == "step"
+
+
 def run(args, overrides):
     """
     Entry point for the 'projection' subcommand.
@@ -80,6 +90,10 @@ def run(args, overrides):
         from primus.core.projection.memory_projection import launch_projection_from_cli
 
         launch_projection_from_cli(args, overrides)
+    elif args.suite in ("performance", "both") and _uses_compiled_step_bench(args, framework):
+        from primus.core.projection.performance_projection.compiled_step import launch
+
+        launch(args, overrides)
     elif args.suite == "performance":
         profiling_mode = getattr(args, "profiling_mode", "benchmark")
         # When running purely from a saved artifact (--load-benchmark), the
@@ -475,6 +489,59 @@ def _add_performance_args(parser):
         action="store_true",
         default=False,
         help=_argparse.SUPPRESS,
+    )
+    _add_compiled_step_args(parser)
+
+
+def _add_compiled_step_args(parser):
+    """Knobs of the MaxText compiled-step bench (see ``compiled_step.py``)."""
+    parser.add_argument(
+        "--bench-method",
+        type=str,
+        default=None,
+        choices=["step", "layer"],
+        help=(
+            "MaxText only. 'step' (default) times the real compiled training step on one node at "
+            "two reduced depths; 'layer' times one decoder layer with the per-layer harness."
+        ),
+    )
+    parser.add_argument(
+        "--bench-depths",
+        type=int,
+        nargs=2,
+        default=None,
+        help="Decoder depths for the compiled-step bench (default: auto).",
+    )
+    parser.add_argument("--bench-steps", type=int, default=None, help="Training steps per bench run (default 8).")
+    parser.add_argument("--bench-dir", type=str, default=None, help="Where bench logs are written.")
+    parser.add_argument(
+        "--target-nodes-list",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Project to several node counts from one bench.",
+    )
+    parser.add_argument(
+        "--dcn-overlap",
+        type=str,
+        default="allreduce",
+        choices=["allreduce", "none", "layer", "calibrated"],
+        help="How scale-out traffic overlaps compute: expose the data-parallel gradient all-reduces and hide the rest per layer ('allreduce'), hide everything per layer ('layer'), nothing ('none'), or "
+        "charge the exposed time measured by the overlap microbenchmark ('calibrated'; needs --fabric-calibration).",
+    )
+    parser.add_argument(
+        "--dcn-anchor",
+        type=str,
+        default=None,
+        metavar="NODES:STEP_S",
+        help="Measured step time (s) of one multi-node run of the same config, e.g. 2:5.43. Its excess over the "
+        "single-node projection is scaled to other node counts with the ring factor 2(N-1)/N.",
+    )
+    parser.add_argument(
+        "--fabric-calibration",
+        type=str,
+        default=None,
+        help="DCN collective microbenchmark log/JSON whose measured bus bandwidths price the scale-out traffic.",
     )
 
 
