@@ -63,8 +63,7 @@ modules:
       # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
       # elementwise chains, CCA's convolutions as GEMMs, and one data-parallel
       # all-reduce per micro batch for every router's balancing-bias update,
-      # instead of one per MoE layer. The ZAYA1 chunked cross-entropy (zaya_chunked_ce)
-      # stays off: cross_entropy_loss_fusion below takes its place.
+      # instead of one per MoE layer.
       zaya_attn_flash: true
       zaya_fuse_norm: true
       zaya_fuse_cca: true
@@ -72,16 +71,12 @@ modules:
       zaya_fuse_moe: true
       zaya_router_defer_ar: true
 
-      # Transformer Engine's fused cross-entropy on the output logits. It is
-      # faster here than the ZAYA1 chunked cross-entropy, which it turns off,
-      # but keeps the full bf16 logits (16.6 GB per GPU). A numerics choice:
-      # TE 2.17.1 (rocm/primus:v26.8) returns the logits gradient in bf16,
-      # which is why Megatron rejects this setting. Megatron-LM main accepts
-      # it from TE 2.19, which keeps the gradient in fp32 (TE PR #3193), as
-      # does ROCm TE IFU-release_v2.18. Primus removes the check and logs a
-      # warning.
-      cross_entropy_loss_fusion: true
-      cross_entropy_fusion_impl: te
+      # Cross-entropy stays on Megatron's own fp32 path. Two faster ones are
+      # left off because they round below it: Transformer Engine's fused
+      # cross-entropy (cross_entropy_loss_fusion with impl te) returns the
+      # logits gradient in bf16 in TE 2.17.1 (rocm/primus:v26.8), and the ZAYA1
+      # chunked cross-entropy (zaya_chunked_ce) rounds each chunk's output-layer
+      # weight gradient to bf16 before summing.
 
       # Average gradients inside the reduce-scatter, so Megatron skips its
       # separate pass that first scales the gradient buffer by 1/DP. At DP=8

@@ -72,16 +72,16 @@ modules:
 
       # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
       # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
-      # elementwise chains, CCA's convolutions as GEMMs, and the chunked
-      # cross-entropy with its per-chunk math compiled. zaya_router_defer_ar
-      # stays off: it gained under 1% here.
+      # elementwise chains, and CCA's convolutions as GEMMs.
+      # zaya_router_defer_ar stays off: it gained under 1% here. The ZAYA1
+      # chunked cross-entropy (zaya_chunked_ce) stays off too: it rounds each
+      # chunk's output-layer weight gradient to bf16 before summing, below
+      # Megatron's own fp32 cross-entropy.
       zaya_attn_flash: true
       zaya_fuse_norm: true
       zaya_fuse_cca: true
       zaya_conv_gemm: true
       zaya_fuse_moe: true
-      zaya_chunked_ce: true
-      zaya_chunked_ce_compile: true
 
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.

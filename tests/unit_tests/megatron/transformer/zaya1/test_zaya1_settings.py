@@ -45,7 +45,7 @@ def test_only_the_mi355x_recipes_turn_paths_on():
     compute = {"zaya_attn_flash", "zaya_fuse_norm", "zaya_fuse_cca", "zaya_conv_gemm", "zaya_fuse_moe"}
     expected = {
         "MI355X/zaya1_8B-BF16-pretrain.yaml": compute | {"zaya_router_defer_ar"},
-        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute | {"zaya_chunked_ce", "zaya_chunked_ce_compile"},
+        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute,
     }
     configs = Path(primus.__file__).parents[1] / "examples" / "megatron" / "configs"
     recipes = sorted(configs.glob("*/zaya1_8B-*-pretrain.yaml"))
