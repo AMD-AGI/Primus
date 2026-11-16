@@ -15,7 +15,8 @@ WHAT THESE ARE DEFENDING:
 
   ``last_block.py``'s forward drops the text tokens' MLP and ``proj_out``: its image tokens must
   match diffusers' block, and its text output must be the incoming text tokens, detached, since
-  nothing reads it.
+  nothing reads it. ``install`` must decline when diffusers' block forward is not the one that
+  forward restates, and must still find it under the patches that wrap it.
 
 A small block on the CPU in FP32: the patches change which tensors exist, not the arithmetic. The
 class-level patches are undone after each test.
@@ -39,6 +40,19 @@ def block_cls(monkeypatch):
     monkeypatch.setattr(cls, "forward", cls.forward)
     for attr in (block_outputs._PATCHED_ATTR, block_outputs.FRESH_OUTPUTS_ATTR):
         monkeypatch.setattr(cls, attr, False, raising=False)
+    return cls
+
+
+@pytest.fixture
+def model_cls(monkeypatch, block_cls):
+    """FluxTransformer2DModel, with its forward and ``last_block.py``'s attributes restored afterwards."""
+    from primus.backends.automodel.models.flux import last_block
+
+    cls = transformer_flux.FluxTransformer2DModel
+    monkeypatch.setattr(cls, "forward", cls.forward)
+    monkeypatch.setattr(block_cls, last_block._PATCHED_ATTR, False, raising=False)
+    if last_block._source_sha256(cls.forward) not in last_block._MODEL_FORWARD_SHA256:
+        pytest.skip("installed diffusers is not a version last_block.py supports")
     return cls
 
 
@@ -108,3 +122,20 @@ class TestImageOnlyLastBlock:
         _, img = last_block._image_only_forward(block, hidden, enc, temb, rope)
         img.sum().backward()
         torch.testing.assert_close(enc.grad, enc_ref.grad, rtol=1e-5, atol=1e-5)
+
+    def test_installs_over_a_wrapped_block_forward(self, block_cls, model_cls):
+        from primus.backends.automodel.models.flux import block_outputs, last_block
+
+        assert block_outputs.install()
+        assert last_block.install()
+
+    def test_declines_when_the_block_forward_differs(self, block_cls, model_cls, monkeypatch):
+        from primus.backends.automodel.models.flux import last_block
+
+        def forward(self, hidden_states, encoder_hidden_states, *args, **kwargs):
+            return encoder_hidden_states, hidden_states
+
+        monkeypatch.setattr(block_cls, "forward", forward)
+        model_forward = model_cls.forward
+        assert not last_block.install()
+        assert block_cls.forward is forward and model_cls.forward is model_forward

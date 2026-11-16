@@ -30,8 +30,10 @@ NUMERICS:
   were zero).
 
 REQUIRES:
-  diffusers 0.40.0's ``FluxTransformer2DModel.forward`` (checked by source hash, 0.43.0's differing only
-  in the return annotation; otherwise the patch is not applied). Installs after ``mlp_gelu.py`` and ``block_outputs.py``.
+  diffusers 0.40.0's or 0.43.0's ``FluxTransformer2DModel.forward`` (the two differ only in the return
+  annotation) and ``FluxSingleTransformerBlock.forward``, which ``_image_only_forward`` restates, both
+  checked by source hash, the block's through the patches that wrap it; otherwise the patch is not
+  applied. Installs after ``mlp_gelu.py`` and ``block_outputs.py``.
 
 Settings (module config, ``primus_perf:`` section):
     flux_last_block_image_only: false     apply this patch
@@ -58,6 +60,9 @@ _MODEL_FORWARD_SHA256 = (
     "c99bfbbf7bf8622f7ed42c0135fbf36b2ec055f495971a74ea18871dd2a11d2c",
     "a7e54efe527e7ec2ee53d7c046294f3ce00077180eec7c64f37ad53503807b0d",
 )
+# sha256 of FluxSingleTransformerBlock.forward in diffusers 0.40.0 and 0.43.0 (identical), which
+# _image_only_forward restates for the image tokens.
+_BLOCK_FORWARD_SHA256 = "57350a6dab842b40e0d677b9c42794c17e45907ad45991d36dba69d89096a37b"
 
 
 def is_enabled() -> bool:
@@ -100,6 +105,10 @@ def _image_only_forward(
     return encoder_hidden_states.detach(), hidden_states
 
 
+def _source_sha256(function) -> str:
+    return hashlib.sha256(inspect.getsource(function).encode()).hexdigest()
+
+
 def install() -> bool:
     from diffusers.models.transformers.transformer_flux import (
         FluxSingleTransformerBlock,
@@ -108,10 +117,16 @@ def install() -> bool:
 
     if getattr(FluxSingleTransformerBlock, _PATCHED_ATTR, False):
         return True
-    digest = hashlib.sha256(inspect.getsource(FluxTransformer2DModel.forward).encode()).hexdigest()
-    if digest not in _MODEL_FORWARD_SHA256:
+    if _source_sha256(FluxTransformer2DModel.forward) not in _MODEL_FORWARD_SHA256:
         logger.warning(
             "[PrimusFluxLastBlock] FluxTransformer2DModel.forward is not diffusers 0.40.0's or 0.43.0's; "
+            "not applied."
+        )
+        return False
+    # The patches installed before this one wrap diffusers' forward with functools.wraps.
+    if _source_sha256(inspect.unwrap(FluxSingleTransformerBlock.forward)) != _BLOCK_FORWARD_SHA256:
+        logger.warning(
+            "[PrimusFluxLastBlock] FluxSingleTransformerBlock.forward is not diffusers 0.40.0's or 0.43.0's; "
             "not applied."
         )
         return False
