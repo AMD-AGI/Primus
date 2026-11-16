@@ -41,6 +41,7 @@ def _gfx950() -> bool:
 def _turbo_flux_ops() -> bool:
     # Importing Primus-Turbo needs a GPU, so only after _gfx950().
     try:
+        import primus_turbo.pytorch.ops.dit_qk_norm_rope  # noqa: F401
         import primus_turbo.pytorch.ops.flux  # noqa: F401
     except ImportError:
         return False
@@ -61,7 +62,9 @@ def _known_diffusers() -> bool:
 
 pytestmark = [
     pytest.mark.skipif(not _gfx950(), reason="the ops' FlyDSL kernels are written for gfx950"),
-    pytest.mark.skipif(not (_gfx950() and _turbo_flux_ops()), reason="needs Primus-Turbo's FLUX ops"),
+    pytest.mark.skipif(
+        not (_gfx950() and _turbo_flux_ops()), reason="needs Primus-Turbo's FLUX ops and dit_qk_norm_rope"
+    ),
     pytest.mark.skipif(not _known_diffusers(), reason="the patches re-implement diffusers 0.40.0's forwards"),
 ]
 

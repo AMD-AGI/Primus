@@ -3,11 +3,12 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Primus-Turbo's fused FLUX ops (``primus_turbo.pytorch.ops.flux``), which the FLUX patches call."""
+"""The Primus-Turbo ops the FLUX patches call: the fused FLUX ops (``primus_turbo.pytorch.ops.flux``) and
+the DiT q/k norm + RoPE (``primus_turbo.pytorch.ops.dit_qk_norm_rope``)."""
 
 import logging
 from types import ModuleType
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -25,3 +26,14 @@ def flux_ops(tag: str, *, needs_gfx950: bool = False) -> Optional[ModuleType]:
         logger.warning("[%s] Primus-Turbo's FLUX adaLN ops need gfx950; not applied.", tag)
         return None
     return flux
+
+
+def dit_qk_norm_rope(tag: str) -> Optional[Callable]:
+    """Primus-Turbo's ``dit_qk_norm_rope``, or None after logging that this Primus-Turbo has none and the
+    ``tag`` patch is not applied."""
+    try:
+        from primus_turbo.pytorch.ops.dit_qk_norm_rope import dit_qk_norm_rope as op
+    except ImportError as exc:
+        logger.warning("[%s] Primus-Turbo has no dit_qk_norm_rope (%s); not applied.", tag, exc)
+        return None
+    return op

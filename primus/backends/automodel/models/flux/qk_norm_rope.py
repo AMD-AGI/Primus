@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""FLUX attention's q/k RMSNorm, RoPE and stream concat as one op, Primus-Turbo's ``flux_qk_norm_rope``.
+"""FLUX attention's q/k RMSNorm, RoPE and stream concat as one op, Primus-Turbo's ``dit_qk_norm_rope``.
 
 WHY:
   Between the fused QKV GEMM and flash attention, every FLUX block runs RMSNorm on q and k
@@ -15,20 +15,21 @@ WHY:
   backward.
 
 WHAT:
-  ``flux_qk_norm_rope(qkv, txt_qkv, w_q, w_k, w_txt_q, w_txt_k, cos, sin, eps, heads, bias, txt_bias)``
-  takes the QKV GEMM output(s) ``[B, S, 3 * H * D]`` and returns q, k, v as ``[B, S_txt + S, H, D]``
-  -- q and k normalized and rotated, v copied -- exactly as diffusers' ``FluxAttnProcessor``
-  computes them (RMSNorm in FP32 with one rounding to BF16, then RoPE in FP32), in one pass that
-  writes attention's layout directly. Its backward undoes the rotation, computes the RMSNorm input
-  gradient and writes the gradient of the QKV GEMM output (v's slice included), so autograd needs no
-  concat; it also sums that gradient over tokens, which is the QKV bias gradient, so the GEMMs here
-  add detached biases and autograd's separate column sum, which re-reads the whole gradient, goes.
-  The weight and bias gradients are reduced from per-program partial sums, so they are deterministic.
+  ``dit_qk_norm_rope(qkv, w_q, w_k, cos, sin, eps, layout="bshd", txt_qkv, w_txt_q, w_txt_k, bias,
+  txt_bias)`` takes the QKV GEMM output(s) ``[B, S, 3 * H * D]`` and returns q, k, v as
+  ``[B, S_txt + S, H, D]`` -- q and k normalized and rotated, v copied -- exactly as diffusers'
+  ``FluxAttnProcessor`` computes them (RMSNorm in FP32 with one rounding to BF16, then RoPE in FP32),
+  in one pass that writes attention's layout directly. Its backward undoes the rotation, computes the
+  RMSNorm input gradient and writes the gradient of the QKV GEMM output (v's slice included), so
+  autograd needs no concat; it also sums that gradient over tokens, which is the QKV bias gradient, so
+  the GEMMs here add detached biases and autograd's separate column sum, which re-reads the whole
+  gradient, goes. The weight and bias gradients are reduced from partial sums in a fixed order, so they
+  are deterministic.
 
   ``install()`` swaps ``FluxAttnProcessor.__call__`` for the same forward with the op in the
   middle, pinned to diffusers 0.40.0 by a source hash (0.43.0's differs only in the return
-  annotation). Calls the op cannot serve (unfused projections, no RoPE, other dtypes,
-  head_dim != 128, weightless norms) take diffusers' path; projections that are not stock
+  annotation). Other calls (unfused projections, no RoPE, other dtypes, head_dim != 128,
+  weightless norms) take diffusers' path; projections that are not stock
   ``nn.Linear`` modules keep their own forward and autograd sums their bias gradients.
 
 NUMERICS:
@@ -49,7 +50,7 @@ import torch.nn.functional as F
 
 from primus.backends.automodel import options
 from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
-from primus.backends.automodel.models.flux.turbo_ops import flux_ops
+from primus.backends.automodel.models.flux.turbo_ops import dit_qk_norm_rope
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ def _fusable(attn, hidden_states, encoder_hidden_states, image_rotary_emb) -> Op
     return _norm_eps(norms)
 
 
-def _install_processor(ops) -> bool:
+def _install_processor(op) -> bool:
     from diffusers.models.attention_dispatch import dispatch_attention_fn
     from diffusers.models.transformers.transformer_flux import FluxAttnProcessor
 
@@ -144,25 +145,20 @@ def _install_processor(ops) -> bool:
             qkv = attn.to_qkv(hidden_states)
             txt_qkv = attn.to_added_qkv(encoder_hidden_states) if dual else None
             biases = (None, None)
-        heads = qkv.shape[-1] // (3 * attn.head_dim)
-        if dual:
-            query, key, value = ops.flux_qk_norm_rope(
-                qkv,
-                txt_qkv,
-                attn.norm_q.weight,
-                attn.norm_k.weight,
-                attn.norm_added_q.weight,
-                attn.norm_added_k.weight,
-                cos,
-                sin,
-                eps,
-                heads,
-                *biases,
-            )
-        else:
-            query, key, value = ops.flux_qk_norm_rope(
-                qkv, None, attn.norm_q.weight, attn.norm_k.weight, None, None, cos, sin, eps, heads, *biases
-            )
+        query, key, value = op(
+            qkv,
+            attn.norm_q.weight,
+            attn.norm_k.weight,
+            cos,
+            sin,
+            eps,
+            layout="bshd",
+            txt_qkv=txt_qkv,
+            w_txt_q=attn.norm_added_q.weight if dual else None,
+            w_txt_k=attn.norm_added_k.weight if dual else None,
+            bias=biases[0],
+            txt_bias=biases[1],
+        )
 
         hidden_states = dispatch_attention_fn(
             query,
@@ -199,12 +195,12 @@ def install() -> bool:
 
     if getattr(FluxAttnProcessor, _PATCHED_ATTR, False):
         return True
-    ops = flux_ops("PrimusFluxQkNormRope")
-    if ops is None or not _install_processor(ops):
+    op = dit_qk_norm_rope("PrimusFluxQkNormRope")
+    if op is None or not _install_processor(op):
         return False
     setattr(FluxAttnProcessor, _PATCHED_ATTR, True)
     logger.info(
         "[PrimusFluxQkNormRope] FLUX attention's q/k RMSNorm, stream concat and RoPE run as Primus-Turbo's "
-        "flux_qk_norm_rope (fused QKV projections only; QKV bias gradients in its backward)."
+        "dit_qk_norm_rope (fused QKV projections only; QKV bias gradients in its backward)."
     )
     return True
