@@ -92,6 +92,7 @@ from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels import (
     kda_gate,
     kda_l2norm,
     load_fla_fused_ops,
+    load_flydsl_kda_ops,
     resolve_kda_backend,
 )
 
@@ -128,6 +129,13 @@ def _duplicated_linear_kwargs(spec: Union[ModuleSpec, type]) -> dict:
     return {"gather_output": True}
 
 
+def _flydsl_kda_ops(config):
+    """``load_flydsl_kda_ops()`` when ``config`` selects ``kda_backend: flydsl``, else None (also on gfx950)."""
+    if str(getattr(config, "kda_backend", "eager") or "eager") != "flydsl":
+        return None
+    return load_flydsl_kda_ops()
+
+
 class KimiGatedRMSNorm(nn.Module):
     """Head-wise RMSNorm with a sigmoid output gate.
 
@@ -145,8 +153,9 @@ class KimiGatedRMSNorm(nn.Module):
     ``fla`` bit-for-bit, and because the ``weight`` parameter name then
     lines up with the released checkpoint's ``o_norm.weight``.
 
-    With ``config.kda_fla_fused_ops`` the forward runs on ``fla``'s fused
-    ``rms_norm_gated`` kernel instead of the fp32 chain.
+    With ``kda_backend: flydsl`` on gfx1250 the forward runs on that backend's
+    FlyDSL kernel, otherwise with ``config.kda_fla_fused_ops`` on ``fla``'s
+    fused ``rms_norm_gated`` kernel, instead of the fp32 chain.
     """
 
     def __init__(
@@ -167,8 +176,12 @@ class KimiGatedRMSNorm(nn.Module):
         self.eps = float(eps)
         self.weight = nn.Parameter(torch.ones(self.hidden_size, dtype=params_dtype, device=device))
         self._fused_forward = None
-        if config is not None and getattr(config, "kda_fla_fused_ops", False):
-            self._fused_forward = load_fla_fused_ops()[2]
+        if config is not None:
+            flydsl_ops = _flydsl_kda_ops(config)
+            if flydsl_ops is not None:
+                self._fused_forward = flydsl_ops[2]
+            elif getattr(config, "kda_fla_fused_ops", False):
+                self._fused_forward = load_fla_fused_ops()[2]
 
     def forward(self, x: Tensor, gate: Tensor) -> Tensor:
         if self._fused_forward is not None:
@@ -210,34 +223,49 @@ class KimiDeltaAttentionSubmodules:
     o_proj: Union[ModuleSpec, type] = IdentityOp
 
 
-def _resolve_fla_options(config, backend_name: str, gate_lower_bound: Optional[float]):
-    """``(l2norm, gate, chunk_kwargs)`` for ``kda_fla_fused_ops`` / ``kda_fla_safe_gate`` / ``kda_fla_disable_recompute``.
+def _bounded_gate(gate_lower_bound: Optional[float]) -> bool:
+    """Every ``g`` in ``[gate_lower_bound, 0)`` with the bound in ``[-5, 0)``: fla's ``safe_gate`` condition."""
+    return gate_lower_bound is not None and -5.0 <= gate_lower_bound < 0
 
-    ``l2norm`` and ``gate`` are :func:`kda_l2norm` / :func:`kda_gate` or
-    ``fla``'s fused kernels; ``chunk_kwargs`` are the extra ``chunk_kda``
-    arguments, which only the ``fla`` backend takes. ``safe_gate`` is valid
-    only while every ``g`` lies in ``[gate_lower_bound, 0)`` with the bound in
-    ``[-5, 0)``, which the bounded gate guarantees.
+
+def _resolve_kda_ops(config, backend_name: str, gate_lower_bound: Optional[float]):
+    """``(l2norm, gate, conv, chunk_kwargs)`` of a KDA layer.
+
+    * ``kda_backend: flydsl`` on gfx1250: the backend's own FlyDSL kernels for
+      the L2 norm, the gate and the short convs (``conv(x [B, T, D], weight
+      [D, W])``); it needs the bounded gate. ``kda_fla_*`` do not apply.
+    * otherwise :func:`kda_l2norm` / :func:`kda_gate` (or ``fla``'s fused
+      kernels with ``kda_fla_fused_ops``), ``conv`` None (``_short_conv``
+      chooses), and ``chunk_kwargs`` the ``chunk_kda`` arguments that
+      ``kda_fla_safe_gate`` / ``kda_fla_disable_recompute`` turn on, which only
+      the ``fla`` backend takes (other backends ignore the two fields).
     """
+    ops = _flydsl_kda_ops(config) if backend_name == "flydsl" else None
+    if ops is not None:
+        if not _bounded_gate(gate_lower_bound):
+            raise ValueError(
+                "kda_backend 'flydsl' on gfx1250 runs fla's safe_gate algorithm, which needs every g in "
+                f"[kda_gate_lower_bound, 0) with the bound in [-5, 0); kda_gate_lower_bound is {gate_lower_bound!r}."
+            )
+        l2norm, gate, _, conv = ops
+        return l2norm, gate, conv, {}
     l2norm, gate = kda_l2norm, kda_gate
     if getattr(config, "kda_fla_fused_ops", False):
         l2norm, gate, _ = load_fla_fused_ops()
     chunk_kwargs = {}
-    for field, arg in (
-        ("kda_fla_safe_gate", "safe_gate"),
-        ("kda_fla_disable_recompute", "disable_recompute"),
-    ):
-        if not getattr(config, field, False):
-            continue
-        if backend_name != "fla":
-            raise ValueError(f"{field} is an argument of fla's chunk_kda; kda_backend is {backend_name!r}.")
-        chunk_kwargs[arg] = True
-    if chunk_kwargs.get("safe_gate") and not (gate_lower_bound is not None and -5.0 <= gate_lower_bound < 0):
+    if backend_name == "fla":
+        for field, arg in (
+            ("kda_fla_safe_gate", "safe_gate"),
+            ("kda_fla_disable_recompute", "disable_recompute"),
+        ):
+            if getattr(config, field, False):
+                chunk_kwargs[arg] = True
+    if chunk_kwargs.get("safe_gate") and not _bounded_gate(gate_lower_bound):
         raise ValueError(
             "kda_fla_safe_gate needs every g in [kda_gate_lower_bound, 0) with the bound in [-5, 0); "
             f"kda_gate_lower_bound is {gate_lower_bound!r}."
         )
-    return l2norm, gate, chunk_kwargs
+    return l2norm, gate, None, chunk_kwargs
 
 
 def _kda_cp_state():
@@ -410,9 +438,11 @@ class KimiDeltaAttention(MegatronModule):
         self.kda_backend = resolve_kda_backend(self.backend_name)
 
         # Resolved here for the same reason as the backend.
-        self.l2norm, self.gate_fn, self.chunk_kwargs = _resolve_fla_options(
+        self.l2norm, self.gate_fn, self._flydsl_conv, self.chunk_kwargs = _resolve_kda_ops(
             config, self.backend_name, self.gate_lower_bound
         )
+        if self._flydsl_conv is not None and self.conv_bias:
+            raise ValueError("kda_backend 'flydsl' on gfx1250 implements the short convs without a bias.")
 
         # Depthwise-conv1d impl, coordinated with the unified backend selector.
         # ``config.use_kimi_k3_attention_backend`` (when set) supersedes the
@@ -422,7 +452,8 @@ class KimiDeltaAttention(MegatronModule):
         # run_pretrain.sh sets it to "fla"), so the legacy behaviour is unchanged.
         # NOTE: the chunk kernel needs no handling here -- __post_init__ already
         # rewrote ``config.kda_backend`` to the unified selector, so
-        # ``self.backend_name`` above reflects it.
+        # ``self.backend_name`` above reflects it. ``flydsl`` on gfx1250 brings
+        # its own conv kernel (``self._flydsl_conv``), which takes precedence.
         _attn_backend = getattr(config, "use_kimi_k3_attention_backend", None)
         self._kda_conv_use_fla = None if _attn_backend is None else (str(_attn_backend) == "fla")
 
@@ -432,7 +463,10 @@ class KimiDeltaAttention(MegatronModule):
         if self.layer_number in (None, 1):
             import os as _os
 
-            if self._kda_conv_use_fla is None:
+            if self._flydsl_conv is not None:
+                _conv = "flydsl"
+                _src = f"kda_backend={self.backend_name!r} (gfx1250)"
+            elif self._kda_conv_use_fla is None:
                 _conv = "fla" if _os.environ.get("K3P_KDA_CONV", "default") == "fla" else "torch"
                 _src = "kda_backend + K3P_KDA_CONV (legacy)"
             else:
@@ -731,6 +765,12 @@ class KimiDeltaAttention(MegatronModule):
     ) -> Tensor:
         """Causal depthwise conv + SiLU on a ``[b, s, d]`` tensor."""
         import os
+
+        if self._flydsl_conv is not None:
+            # flydsl on gfx1250: packed sequences arrive one sample at a time
+            # (_kda_forward_segments) and context parallelism is refused in forward.
+            channels, kernel = conv.weight.shape[0], conv.weight.shape[-1]
+            return self._flydsl_conv(x, conv.weight.view(channels, kernel))[..., :seq_len, :]
 
         # Priority: the yaml-level use_kimi_k3_attention_backend (resolved to
         # self._kda_conv_use_fla in __init__) wins; when it is None the legacy

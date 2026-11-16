@@ -41,12 +41,12 @@ which asserts agreement with Megatron's own
 | `eager` | `_eager/` | `eager_chunk_kda` | **The reference.** Pure-PyTorch chunkwise-parallel form; always importable, differentiable, device-agnostic. What every other backend is validated against. |
 | `eager_recurrent` | `_eager/` | `eager_recurrent_kda` | Literal `O(T)` transcription of the recurrence. Correct by inspection; the oracle for the chunked form. Far too slow for training. |
 | `fla` | `_fla/` | `fla_chunk_kda` | `flash-linear-attention`'s fused Triton `chunk_kda`. Lazily imported — `fla` is an optional dependency. **The production backend today**, and the speed baseline. |
-| `flydsl` | `_flydsl_v1/` | `flydsl_chunk_kda` | Native FlyDSL kernel, **gfx950 / CDNA4 only**. Forward and backward both work; a `@flyc.kernel` computes the intra-chunk score matrices, the rest is batched torch GEMMs. Currently **slower than `fla`** — see "What the FlyDSL backend does and does not accelerate". |
+| `flydsl` | `_flydsl_v1/` (gfx950), `_flydsl_gfx1250/` (gfx1250) | `flydsl_chunk_kda` | Native FlyDSL kernels, one implementation per architecture. **gfx950 / CDNA4**: a `@flyc.kernel` computes the intra-chunk score matrices, the rest is batched torch GEMMs; currently **slower than `fla`** — see "What the FlyDSL backend does and does not accelerate". **gfx1250**: every step of fla's `chunk_kda` algorithm (with `safe_gate` and `disable_recompute`) is a FlyDSL kernel, and so are the q / k L2 norm, the bounded gate, the gated output RMSNorm and the short convs (`load_flydsl_kda_ops`); no `fla` import. Needs the bounded gate (`kda_gate_lower_bound` in `[-5, 0)`), head dim 128 and sequence lengths that are multiples of 64; no context parallelism. |
 
 `fla` and `flydsl` are loaded on demand (`load_fla_kda_backend`,
 `load_flydsl_kda_backend`) so that `import ...kda_kernels` never fails
 because of a dependency the caller did not select. `load_flydsl_kda_backend`
-additionally requires gfx950 via `_require_gfx950()`, so selecting it on the
+additionally requires gfx950 or gfx1250 via `_flydsl_arch()`, so selecting it on the
 wrong hardware fails while the model is being built rather than inside a
 kernel compile.
 

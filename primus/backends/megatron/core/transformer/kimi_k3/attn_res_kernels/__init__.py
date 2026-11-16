@@ -65,7 +65,7 @@ FLYDSL_ATTN_RES_ARCHS = ("gfx950", "gfx1250")
 def _require_flydsl_arch() -> None:
     """Raise :class:`ImportError` unless a gfx950 (CDNA4) or gfx1250 device is visible.
 
-    Same rationale as ``kda_kernels.__init__._require_gfx950``: the kernel
+    Same rationale as ``kda_kernels.__init__._flydsl_arch``: the kernel
     builder asserts the arch, but that assert fires at *build* time deep inside
     a compile, so checking here makes selecting the backend on the wrong
     hardware fail at model-construction time with a message that names the

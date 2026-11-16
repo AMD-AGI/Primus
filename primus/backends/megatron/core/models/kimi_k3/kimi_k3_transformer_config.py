@@ -164,10 +164,12 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # kernel: the q / k L2 norm (fla.modules.l2norm), the bounded decay gate
     # (fla.ops.kda.gate.fused_kda_gate) and the sigmoid-gated output RMSNorm
     # (fla.modules.fused_norm_gate.rms_norm_gated), in place of their eager
-    # fp32 transcriptions in kda_kernels/_eager. Works with any kda_backend;
-    # needs fla. Off by default so the eager reference stays the default.
+    # fp32 transcriptions in kda_kernels/_eager. Needs fla. Applies to every
+    # kda_backend except "flydsl" on gfx1250, which has FlyDSL kernels for these
+    # ops. Off by default so the eager reference stays the default.
     kda_fla_fused_ops: bool = False
-    # Arguments of fla's chunk_kda, kda_backend "fla" only. safe_gate takes the
+    # Arguments of fla's chunk_kda, kda_backend "fla" only (the other backends
+    # ignore them; "flydsl" on gfx1250 always runs this algorithm). safe_gate takes the
     # sub-chunk matrix-core path for the diagonal blocks, valid only while every
     # g lies in [kda_gate_lower_bound, 0) with a bound in [-5, 0) (the bounded
     # gate guarantees it). disable_recompute keeps the forward chunk
@@ -185,7 +187,8 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     #                                   eager_recurrent | fla | flydsl), and
     #   * the ``K3P_KDA_CONV`` env   -- the depthwise-conv1d impl (fla
     #                                   ``causal_conv1d`` vs torch ``nn.Conv1d``).
-    # "fla" -> fla chunk kernel + fla conv; any other value -> that chunk kernel
+    # "fla" -> fla chunk kernel + fla conv; "flydsl" on gfx1250 -> its FlyDSL
+    # chunk kernel, conv and ops (no fla); any other value -> that chunk kernel
     # + the torch conv.
     #
     # Priority (highest first), resolved in ``__post_init__`` (chunk kernel) and
