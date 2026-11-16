@@ -206,6 +206,10 @@ def test_dual_stream_block(s_txt, patches, gen):
 
 def test_folded_single_stream_block(patches, gen):
     """``linear1`` with q/k norm + RoPE, attention and GELU in one op, against the unfolded block."""
+    from primus.backends.automodel.models.flux.turbo_ops import flux_ops
+
+    if not hasattr(flux_ops("test"), "flux_single_core"):
+        pytest.skip("this Primus-Turbo has no flux_single_core")
     cls = transformer_flux.FluxSingleTransformerBlock
     block = _block(cls, compact=True)
     args = _inputs(256, gen)
@@ -215,8 +219,6 @@ def test_folded_single_stream_block(patches, gen):
         for p in ("weight", "bias"):
             grads[f"linear1.{p}"] = torch.cat([grads.pop(f"attn.to_qkv.{p}"), grads.pop(f"proj_mlp.{p}")])
     assert patches.mlp_gelu.install() and patches.qk_norm_rope.install() and patches.adaln.install()
-    from primus.backends.automodel.models.flux.turbo_ops import flux_ops
-
     cls.forward = patches.fold.make_forward(cls.forward, flux_ops("test"))
     assert patches.fold.fold_blocks(SimpleNamespace(single_transformer_blocks=[block])) == 1
     _compare(_run(block, BF16, *args), ref32, ref16)

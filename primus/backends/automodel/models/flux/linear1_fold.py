@@ -32,7 +32,7 @@ NUMERICS:
   where the folded GEMMs pick other kernels (BF16 rounding).
 
 REQUIRES:
-  Primus-Turbo with its FLUX ops. ``model.fuse_qkv_projections`` with
+  Primus-Turbo with its FLUX ops, ``flux_single_core`` among them. ``model.fuse_qkv_projections`` with
   ``model.compact_fused_qkv_projections``, and ``mlp_gelu.py``
   with ``qk_norm_rope.py``, on diffusers 0.40.0; uses ``adaln_flydsl.py``'s adaLN op when it is
   installed. Installs at priority 76, before ``block_outputs.py`` and ``last_block.py``. The three
@@ -260,6 +260,9 @@ def install(*, context_parallel: bool = False, linear_swap: bool = False) -> boo
         return False
     ops = flux_ops("PrimusFluxLinear1")
     if ops is None:
+        return False
+    if not hasattr(ops, "flux_single_core"):
+        logger.warning("[PrimusFluxLinear1] this Primus-Turbo has no flux_single_core; not applied.")
         return False
     _install_fold()
     FluxSingleTransformerBlock.forward = make_forward(FluxSingleTransformerBlock.forward, ops)
