@@ -9,6 +9,7 @@ Precision defaults are in `config_common.sh`: MXFP4 `dgrad,wgrad` with A6W4 forw
 - `flux.1_schnell_t2i-pretrain.yaml` — pretrain config (`EXP` inside the container)
 - `config_common.sh` — shared Flux flags
 - `config_MI355X_1x8x32.sh` — 1 node
+- `config_MI355X_2x8x32.sh` — 2 nodes (GA2, GBS1024)
 - `config_MI355X_4x8x32.sh` — 4 nodes
 - `config_MI355X_8x8x32.sh` — 8 nodes
 - `run_with_docker.sh` — single-node host launcher (N timed trials)
@@ -26,10 +27,11 @@ Precision defaults are in `config_common.sh`: MXFP4 `dgrad,wgrad` with A6W4 forw
 | Config | Nodes × GPUs | Local batch | Grad accum | Global batch | LR | Eval every |
 |--------|-------------:|------------:|-----------:|-------------:|----|-----------:|
 | `config_MI355X_1x8x32.sh` | 1 × 8 | 32 | 2 | 512 | 0.0002 | 512 steps |
+| `config_MI355X_2x8x32.sh` | 2 × 8 | 32 | 2 | 1024 | 0.00025 | 256 steps |
 | `config_MI355X_4x8x32.sh` | 4 × 8 | 32 | 1 | 1024 | 0.00025 | 256 steps |
 | `config_MI355X_8x8x32.sh` | 8 × 8 | 32 | 1 | 2048 | 0.00027 | 128 steps |
 
-Eval step count is `262144 / global batch`. The 4-node config switches the forward to FP8 at step 7325. The 8-node config switches at step 4150 and defaults `DP_REPLICATE=2`. FP8 gather scale refresh starts at the forward switch, avoiding its per-step overhead during A6W4 training. Setting `FLUX_FP8_ALL_GATHER=0` uses bf16 weight gather after the switch instead.
+Eval step count is `262144 / global batch`. The 2-node and 4-node configs switch the forward to FP8 at step 7325. The 8-node config switches at step 4150 and defaults `DP_REPLICATE=2`. FP8 gather scale refresh starts at the forward switch, avoiding its per-step overhead during A6W4 training. Setting `FLUX_FP8_ALL_GATHER=0` uses bf16 weight gather after the switch instead.
 
 ## Data
 
@@ -95,7 +97,7 @@ source config_MI355X_4x8x32.sh
 sbatch --nodes=$NNODES job.sh
 ```
 
-Eight nodes is the same command after `source config_MI355X_8x8x32.sh`.
+For two or eight nodes, use the same command after `source config_MI355X_2x8x32.sh` or `source config_MI355X_8x8x32.sh`, respectively.
 
 From inside an existing allocation, skip `sbatch` and run the per-node script directly:
 
@@ -106,6 +108,8 @@ export DATADIR=/path/to/flux1/data
 export LOGDIR=/path/to/results
 srun --ntasks-per-node=1 bash examples/mlperf/flux1/run_with_docker_slurm.sh
 ```
+
+For an existing two-node allocation, set `DGXSYSTEM=MI355X_2x8x32` instead.
 
 `run_with_docker_slurm.sh` starts one container per node. `torchrun` inside `primus-cli` creates the eight GPU workers. Rank 0 is the first host in the allocation. Set `FLUX_STAGE_LOCAL=0` to read `DATADIR` directly instead of the node-local copy.
 
