@@ -18,6 +18,14 @@ The fused ops shard the sequence contiguously (rank r holds tokens [r*s/cp, (r+1
 CP batch split is switched from Megatron's zigzag to contiguous chunks; with Ulysses every rank
 attends over the whole sequence, so the zigzag load balancing buys nothing.
 
+With MLA, ``MLASelfAttention`` runs the latent formulation instead: the q / kv down-projections
+and norms stay on the local tokens, k_pe is rotated at its own positions, and the latents
+[q_c | c_kv | k_pe] (2112 elements a token for DeepSeek-V3) are all-gathered into the local-head
+up-projections (``ulysses_mla_latent_up_proj``, AgGemm / GemmRS), q_pe is rotated over the full
+sequence, and the exit is ``ulysses_a2a_o_gemm``. For MLA the mode also takes ``-2``: Megatron's
+per-head Ulysses (every head up-projected on the local tokens, then one all-to-all of q, k, v), the
+same attention kernel, as the communication baseline.
+
 The split and the RoPE slicing are global, so no layer can fall back to the stock attention once
 the patch is in: every unsupported setting known from the arguments keeps the whole run on the stock
 path, and the ones only seen at call time (packed sequences, a non-causal mask, ...) raise.
@@ -36,14 +44,15 @@ _METADATA_KEYS = ("cu_seqlens", "cu_seqlens_padded", "max_seqlen", "local_cp_siz
 
 def _mode(args) -> int:
     mode = int(getattr(args, "turbo_ulysses_fused_a2a", 0) or 0)
-    valid = (-1, 0, 1)
-    assert mode in valid, f"turbo_ulysses_fused_a2a must be -1 (serial), 0 (off) or 1 (fused), got {mode}"
+    valid = (-2, -1, 0, 1) if getattr(args, "multi_latent_attention", False) else (-1, 0, 1)
+    assert mode in valid, (
+        f"turbo_ulysses_fused_a2a must be -1 (serial), 0 (off), 1 (fused) or, with MLA, -2 (per-head "
+        f"all-to-all), got {mode}"
+    )
     return mode
 
 
 _UNSUPPORTED_ARGS = (
-    # MLA keeps its own forward and YaRN RoPE slicing, which would disagree with the contiguous split
-    ("multi_latent_attention", "MLA"),
     ("experimental_attention_variant", "experimental attention variants"),
     ("add_qkv_bias", "a QKV bias"),
     ("add_bias_linear", "linear biases"),
@@ -68,6 +77,13 @@ def _unsupported(args):
     normalization = getattr(args, "normalization", "LayerNorm")
     if normalization not in ("RMSNorm", "LayerNorm"):
         return f"normalization={normalization} is not supported"
+    if getattr(args, "multi_latent_attention", False):
+        if getattr(args, "q_lora_rank", None) is None:
+            return "MLA without a q LoRA (q_lora_rank=None) is not supported"
+        if getattr(args, "cache_mla_latents", False):
+            return "cache_mla_latents is not supported"
+        if "mla_up_proj" in (getattr(args, "recompute_modules", None) or []):
+            return "recomputing the MLA up-projection (recompute_modules: mla_up_proj) is not supported"
     return None
 
 
@@ -253,6 +269,118 @@ def _make_fused_forward(args):
     return forward
 
 
+def _seq_to_heads(tensors, group):
+    """``[s/n, b, h, d_i]`` tensors of this rank's tokens -> ``[s, b, h/n, d_i]`` of its heads, in one
+    all-to-all (Megatron's per-head Ulysses)."""
+    n = group.size()
+    parts = [
+        t.view(t.shape[0], t.shape[1], n, t.shape[2] // n, t.shape[3]).movedim(2, 0).reshape(n, -1)
+        for t in tensors
+    ]
+    flat = _a2a(torch.cat(parts, dim=1), group)
+    outs = flat.split([p.shape[1] for p in parts], dim=1)
+    return [
+        o.reshape(t.shape[0] * n, t.shape[1], t.shape[2] // n, t.shape[3]) for o, t in zip(outs, tensors)
+    ]
+
+
+def _make_mla_forward(args):
+    from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
+    from megatron.core.transformer.enums import AttnMaskType
+    from primus_turbo.pytorch.ops import flash_attn_func
+    from primus_turbo.pytorch.ops.attention.ulysses_fused_a2a import ulysses_a2a_o_gemm
+    from primus_turbo.pytorch.ops.attention.ulysses_mla_latent import (
+        ulysses_mla_latent_up_proj,
+    )
+
+    mode = _mode(args)
+    no_cp = _NoCPGroup()
+    o_op = ulysses_a2a_o_gemm if mode == 1 else _serial_a2a_o_gemm
+
+    def rope(t, emb, cfg, mscale):
+        return apply_rotary_pos_emb(t, emb, config=cfg, mscale=mscale, cp_group=no_cp, mla_rotary_interleaved=True)
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        key_value_states=None,
+        inference_context=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        rotary_pos_cos_sin=None,
+        attention_bias=None,
+        packed_seq_params=None,
+        position_ids=None,
+        sequence_len_offset=None,
+        *,
+        inference_params=None,
+    ):
+        cfg = self.config
+        cp_group = self.pg_collection.cp
+        unsupported = {
+            "cross attention": key_value_states is not None,
+            "inference": inference_context is not None or inference_params is not None,
+            "packed sequences": packed_seq_params is not None,
+            "an attention bias": attention_bias is not None,
+            f"attn_mask_type={self.attn_mask_type.name}": self.attn_mask_type != AttnMaskType.causal,
+            "projection biases": any(
+                _has_bias(m) for m in (self.linear_q_up_proj, self.linear_kv_up_proj, self.linear_proj)
+            ),
+        }
+        reasons = [what for what, hit in unsupported.items() if hit]
+        if reasons:
+            raise NotImplementedError(
+                f"[Patch:megatron.ulysses_fused_a2a] {', '.join(reasons)} not supported with MLA; the batch is "
+                "already split contiguously for the fused path. Set turbo_ulysses_fused_a2a: 0"
+            )
+
+        n, rank = cp_group.size(), cp_group.rank()
+        s_local, b = hidden_states.shape[:2]
+        heads, dn, dr, dv = cfg.num_attention_heads, cfg.qk_head_dim, cfg.qk_pos_emb_head_dim, cfg.v_head_dim
+
+        q_c, kv_combined = self._qkv_down_projection(hidden_states)
+        c_kv, k_pe = torch.split(kv_combined, [cfg.kv_lora_rank, dr], dim=-1)
+        _run_forward_pre_hooks(self.linear_q_up_proj)
+        _run_forward_pre_hooks(self.linear_kv_up_proj)
+        q_c = _input_norm(self.linear_q_up_proj, self.q_layernorm(q_c))
+        c_kv = _input_norm(self.linear_kv_up_proj, self.kv_layernorm(c_kv))
+        w_q, w_kv = self.linear_q_up_proj.weight, self.linear_kv_up_proj.weight
+
+        # full-sequence frequencies: a size-1 group keeps YaRN from slicing them zigzag
+        emb = self.rotary_pos_emb(s_local * n, cp_group=no_cp)
+        emb, mscale = emb if isinstance(emb, tuple) else (emb, 1.0)
+        k_pe = rope(k_pe.unsqueeze(-2), emb[rank * s_local : (rank + 1) * s_local], cfg, mscale).squeeze(-2)
+
+        if mode == -2:
+            q = F.linear(q_c, w_q).view(s_local, b, heads, dn + dr)
+            k_nope, v = F.linear(c_kv, w_kv).view(s_local, b, heads, dn + dv).split([dn, dv], dim=-1)
+            k = torch.cat((k_nope, k_pe.unsqueeze(-2).expand(s_local, b, heads, dr)), dim=-1)
+            q, k, v = _seq_to_heads([q, k, v], cp_group)
+        else:
+            kv_latent = torch.cat((c_kv, k_pe), dim=-1)
+            q, k, v = ulysses_mla_latent_up_proj(
+                q_c, kv_latent, w_q, w_kv, heads, cp_group, dn, dr, dv, "sbhd", fused=mode == 1
+            )
+        q_nope, q_pe = q.split([dn, dr], dim=-1)
+        q = torch.cat((q_nope, rope(q_pe, emb, cfg, mscale)), dim=-1)
+
+        o = flash_attn_func(
+            q.permute(1, 0, 2, 3),
+            k.permute(1, 0, 2, 3),
+            v.permute(1, 0, 2, 3),
+            dropout_p=0.0,
+            softmax_scale=self.softmax_scale,
+            causal=True,
+        )
+        o = o.permute(1, 0, 2, 3).contiguous()
+        _run_forward_pre_hooks(self.linear_proj)
+        return o_op(o, self.linear_proj.weight, None, cp_group, "sbhd"), None
+
+    return forward
+
+
 @register_patch(
     "megatron.ulysses_fused_a2a",
     backend="megatron",
@@ -266,11 +394,23 @@ def patch_ulysses_fused_a2a(ctx: PatchContext):
     from megatron.core.transformer.attention import SelfAttention
 
     args = get_args(ctx)
+    mla = bool(getattr(args, "multi_latent_attention", False))
     # imports the Turbo ops first: a missing op must fail before anything global is switched
-    fused_forward = _make_fused_forward(args)
+    fused_forward = _make_mla_forward(args) if mla else _make_fused_forward(args)
     mcore_utils._get_batch_on_this_cp_rank_per_sequence_balancing = _contiguous_cp_split
     # RoPE runs after the all-to-all over the full sequence, so keep the full-length freqs
     rope_mod.get_pos_emb_on_this_cp_rank = lambda emb, seq_dim, cp_group: emb
+    if mla:
+        from megatron.core.transformer.multi_latent_attention import MLASelfAttention
+
+        MLASelfAttention.forward = fused_forward
+        impl = {
+            1: "latent AgGemm / GemmRS + A2AGemm / GemmA2A",
+            -1: "latent RCCL all-gather + GEMM, serial o all-to-all + GEMM",
+            -2: "per-head q/k/v all-to-all (Megatron Ulysses), serial o all-to-all + GEMM",
+        }[_mode(args)]
+        log_rank_0(f"[Patch:megatron.ulysses_fused_a2a] MLASelfAttention -> {impl}, contiguous CP split")
+        return
     SelfAttention.forward = fused_forward
     impl = "serial GEMM + all-to-all" if _mode(args) == -1 else "GemmA2A / A2AGemm"
     log_rank_0(f"[Patch:megatron.ulysses_fused_a2a] SelfAttention -> {impl}, contiguous CP split")
