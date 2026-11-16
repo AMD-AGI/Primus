@@ -310,9 +310,10 @@ bash tools/perf/run_batch.sh
   summary lists each step's outcome, and `results.csv` gets a row per model
   (see "Extracting results"). The run counts as failed when any step did,
   the setup and download steps included, even if every model then ran.
-- **Image.** `DOCKER_IMAGE` must contain `/workspace/AMDiffusionBenchmark`
-  and `/workspace/DLRMBenchmark`, as `rocm/primus` images do; this is checked
-  before the batch starts.
+- **Image.** `DOCKER_IMAGE` must contain `/workspace/DLRMBenchmark`, and
+  `/workspace/AMDiffusionBenchmark` too when diffusion models are enabled in
+  the config; this is checked before the batch starts. `rocm/primus` images
+  ship both; the Primus CI image ships DLRMBenchmark only.
   diffusion_bench starts its containers without docker's `--privileged`
   (`privileged: true` in its config turns it back on).
 - Catalog mode, single node only. With `CONFIG_DIR`, `BACKEND` is ignored and
