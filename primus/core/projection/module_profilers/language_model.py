@@ -629,7 +629,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
             if kind in per_kind:
                 continue
             if is_rank_0:
-                print(f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})...")
+                print(
+                    f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})..."
+                )
             shapes, kwargs = profiler.require_bench_inputs(LAYER, module, batch_size, seq_len)
             with kernel_report.scope(kernel_report.layer_scope("dense", None)):
                 fwd, bwd, mem = benchmark_layer(

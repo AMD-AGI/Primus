@@ -64,8 +64,13 @@ def _report_peak_memory() -> None:
         if peaks:
             limit = int((jax.local_devices()[0].memory_stats() or {}).get("bytes_limit", 0))
             # Live bytes after the last step are the persistent train state (weights + optimizer state).
-            os.write(2, (f"[peak-mem] max_peak_bytes={max(peaks)} min_peak_bytes={min(peaks)} bytes_limit={limit} "
-                         f"max_live_bytes={max(live)}\n").encode())
+            os.write(
+                2,
+                (
+                    f"[peak-mem] max_peak_bytes={max(peaks)} min_peak_bytes={min(peaks)} bytes_limit={limit} "
+                    f"max_live_bytes={max(live)}\n"
+                ).encode(),
+            )
     except Exception as exc:  # noqa: BLE001
         os.write(2, f"[peak-mem] unavailable: {exc}\n".encode())
 

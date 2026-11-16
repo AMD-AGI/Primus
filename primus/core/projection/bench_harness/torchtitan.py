@@ -55,10 +55,10 @@ from primus.core.projection.bench_harness.base import (
 _ROPE_ATTRS = ("freqs_cis", "rope_cache")
 
 
-
 def _accepted_kwargs(module, kwargs):
     """Drop kwargs this family's forward doesn't take (GPT-OSS has no ``positions``)."""
     import inspect
+
     try:
         params = inspect.signature(_unwrap(module).forward).parameters
     except (TypeError, ValueError):
@@ -66,6 +66,7 @@ def _accepted_kwargs(module, kwargs):
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return kwargs
     return {k: v for k, v in kwargs.items() if k in params}
+
 
 def _unwrap(module):
     """Strip DDP / activation-checkpoint / compile wrappers off a model part."""

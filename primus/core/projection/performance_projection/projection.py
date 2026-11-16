@@ -586,27 +586,22 @@ def calculate_collective_communication_time(
     expert_mlp_params = 3 * hidden_size * moe_ffn  # per expert
     moe_replicated_params = hidden_size * num_experts
     # Shared experts are replicated (synced over the full DP group like attention).
-    moe_replicated_params += 3 * hidden_size * (getattr(model_config, "moe_shared_expert_intermediate_size", 0) or 0)
+    moe_replicated_params += (
+        3 * hidden_size * (getattr(model_config, "moe_shared_expert_intermediate_size", 0) or 0)
+    )
 
     # Non-expert params are replicated across EP; expert params are partitioned by EP
     non_expert_params = (
-        num_layers * attn_params + num_dense_layers * dense_mlp_params + num_moe_layers * moe_replicated_params
+        num_layers * attn_params
+        + num_dense_layers * dense_mlp_params
+        + num_moe_layers * moe_replicated_params
     )
     expert_total_params = num_moe_layers * num_experts * expert_mlp_params
-    # Per-GPU: non-expert (full copy) + expert (sharded by EP)
-    params_per_gpu = non_expert_params + (expert_total_params // max(ep, 1))
-    # The first stage holds the input embedding and the last the output layer
-    # (both on one stage at PP=1, untied); size the heaviest stage.
     vocab_params = (getattr(model_config, "padded_vocab_size", 0) or 0) * hidden_size // tp
     untied = not getattr(model_config, "share_embeddings_and_output_weights", False)
-    stage_vocab_params = vocab_params * (2 if pp == 1 and untied else 1)
-    non_expert_params_per_rank = non_expert_params // (tp * pp) + stage_vocab_params
-    num_params_per_rank = params_per_gpu // (tp * pp) + stage_vocab_params
     # Parameters on the most loaded stage, split by the data-parallel group that replicates them.
     local = param_counts.local_params(training_config)
-    grad_bytes = param_counts.grad_bytes_per_param(training_config)
     edp = param_counts.expert_dp_size(training_config, dp)
-    # Per-rank counts follow the DP-group split above.
     non_expert_params_per_rank = local.dense
     num_params_per_rank = local.total
 
@@ -680,7 +675,9 @@ def calculate_collective_communication_time(
             ar_time_dp = cm.allreduce(coll_args, grad_size, dp, groups=["dp"])
             breakdown["gradient_allreduce"] = ar_time_dp / 1000  # Convert to ms
             message_info["non_expert_ar_ms_per_param"] = ar_time_dp / 1000 / max(1, grad_size // grad_bytes)
-            message_info["expert_ar_ms_per_param"] = 0.0 if moe_sharded else message_info["non_expert_ar_ms_per_param"]
+            message_info["expert_ar_ms_per_param"] = (
+                0.0 if moe_sharded else message_info["non_expert_ar_ms_per_param"]
+            )
             message_info["gradient_allreduce_size"] = grad_size
             message_info["gradient_allreduce_size_mb"] = grad_size / (1024 * 1024)
             message_info["moe_ar_no_overlap"] = False
@@ -792,7 +789,13 @@ def calculate_collective_communication_time(
         node_dp = min(dp, max(1, gpus_per_node // max(1, tp * pp * cp)))
         if num_nodes > 1 and node_dp > 1:
             node_args = get_default_args(
-                num_nodes=1, gpus_per_node=gpus_per_node, tp=tp, pp=pp, ep=ep, cp=cp, hardware_config=hw if hw else None
+                num_nodes=1,
+                gpus_per_node=gpus_per_node,
+                tp=tp,
+                pp=pp,
+                ep=ep,
+                cp=cp,
+                hardware_config=hw if hw else None,
             )
             node_ag_us = cm.allgather(node_args, weight_size_per_layer, node_dp, groups=["dp"])
             node_rs_us = cm.reduce_scatter(node_args, grad_size_per_layer, node_dp, groups=["dp"])
@@ -1207,7 +1210,11 @@ def _limit_hybrid_layers_for_projection(module_config) -> bool:
     else:
         ratio = getattr(module_config, "hybrid_attention_ratio", 0.0) or 0.0
         layers = next(
-            (n for n in range(2, len(full) + 1, 2) if set(allocate_hybrid_layers(n, ratio)) == kinds and n >= cap),
+            (
+                n
+                for n in range(2, len(full) + 1, 2)
+                if set(allocate_hybrid_layers(n, ratio)) == kinds and n >= cap
+            ),
             len(full),
         )
         module_config.num_layers = layers
@@ -2707,7 +2714,9 @@ def _chunk_grad_buckets(
         b += times["output_bwd"]
         f -= times["output_fwd"]
     for _ in range(layers):
-        tensors.append((b, b + times["layer_bwd"], f - times["layer_fwd"], f, sizes["dense"], sizes["expert"]))
+        tensors.append(
+            (b, b + times["layer_bwd"], f - times["layer_fwd"], f, sizes["dense"], sizes["expert"])
+        )
         b += times["layer_bwd"]
         f -= times["layer_fwd"]
     if has_embedding:
@@ -2723,11 +2732,20 @@ def _chunk_grad_buckets(
             acc += t[idx]
             fwd_use = t[2] if fwd_use is None else min(fwd_use, t[2])
             if bucket_size and acc >= bucket_size:
-                buckets.append((t[1] / bwd_total, fwd_use / fwd_total, acc if idx == 4 else 0.0, acc if idx == 5 else 0.0))
+                buckets.append(
+                    (
+                        t[1] / bwd_total,
+                        fwd_use / fwd_total,
+                        acc if idx == 4 else 0.0,
+                        acc if idx == 5 else 0.0,
+                    )
+                )
                 acc, fwd_use = 0.0, None
         if acc > 0:
             last = [t for t in tensors if t[idx] > 0][-1]
-            buckets.append((last[1] / bwd_total, fwd_use / fwd_total, acc if idx == 4 else 0.0, acc if idx == 5 else 0.0))
+            buckets.append(
+                (last[1] / bwd_total, fwd_use / fwd_total, acc if idx == 4 else 0.0, acc if idx == 5 else 0.0)
+            )
     return buckets
 
 
@@ -2774,7 +2792,9 @@ def _exposed_overlapped_grad_sync_ms(
     # groups inside one node use the bandwidths measured on the benchmark node.
     reduce_share = 0.5 if use_dist_opt else 1.0
     cost = {}
-    measured = profiling_results.get("_dp_reduce_scatter_benchmark") if isinstance(profiling_results, dict) else None
+    measured = (
+        profiling_results.get("_dp_reduce_scatter_benchmark") if isinstance(profiling_results, dict) else None
+    )
     expert_dp = max(1, dp * cp // ep)
     for kind, group, span, ar_per_param in (
         ("dense", dp, tp * cp * dp, message_info.get("non_expert_ar_ms_per_param", 0.0)),
@@ -2868,7 +2888,9 @@ def _exposed_overlapped_grad_sync_ms(
 _MEGATRON_DDP_OVERLAP_SLOWDOWN = 0.2
 
 
-def _megatron_ddp_overlap_contention_ms(training_config, message_info: Dict[str, Any], dp: int, profiling_results) -> float:
+def _megatron_ddp_overlap_contention_ms(
+    training_config, message_info: Dict[str, Any], dp: int, profiling_results
+) -> float:
     """Per-iteration slowdown of the backward that overlaps Megatron's DDP gradient reduce.
 
     Scaled by the share of gradients the data-parallel group reduces: experts
@@ -2926,9 +2948,13 @@ def _mix_attention_window_variants(profiling_results, training_config) -> None:
             data[phase] += mixed - attn[phase]
             attn[phase] = mixed
         attn["window_mix"] = windowed
-    if seen and int(os.getenv("RANK", "0")) == 0 and any(
-        isinstance(d, dict) and (d.get("attention") or {}).get("window_mix") is not None
-        for d in profiling_results.values()
+    if (
+        seen
+        and int(os.getenv("RANK", "0")) == 0
+        and any(
+            isinstance(d, dict) and (d.get("attention") or {}).get("window_mix") is not None
+            for d in profiling_results.values()
+        )
     ):
         print(
             f"[Primus:Performance Projection] Attention: windowed/full variants weighted "
@@ -4740,7 +4766,11 @@ def _run_multinode_projection(
     #   compute (per-microbatch) × num_microbatches + gradient allreduce + optimizer step
     if time_includes_all_microbatches:
         full_iteration_time_ms = (
-            projected_time_ms + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms + ddp_contention_ms
+            projected_time_ms
+            + grad_ar_per_iteration_ms
+            + optimizer_step_ms
+            + engine_step_ms
+            + ddp_contention_ms
         )
         time_breakdown_str = f"{full_iteration_time_ms:.3f} ms (from pipeline simulation"
         if grad_ar_per_iteration_ms > 0:
@@ -5700,7 +5730,9 @@ def launch_projection_from_cli(args, overrides):
             gpu_arch=getattr(args, "gpu_arch", None),
         )
         if is_rank_0:
-            print(f"[Primus:Performance Projection] PP stage-to-stage transfer: {p2p_time_ms:.3f} ms per send")
+            print(
+                f"[Primus:Performance Projection] PP stage-to-stage transfer: {p2p_time_ms:.3f} ms per send"
+            )
         pipeline_simulation_time_ms = _run_pipeline_simulation(
             training_config,
             profiling_results,

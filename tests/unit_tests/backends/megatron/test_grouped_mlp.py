@@ -61,7 +61,7 @@ class _FakeGroupedLinear(torch.nn.Module):
         self.events = events
         self.register_forward_pre_hook(lambda module, _inputs: events.append(f"{module.name}.pre_hook"))
 
-    def prepare_weights(self, x):
+    def prepare_weights(self, x, fp8_pad_align_last=0, fp8_pad_align_penultimate=0):
         self.events.append(f"{self.name}.prepare_weights")
         return x, f"{self.name}.weight", "pattern"
 

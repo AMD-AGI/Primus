@@ -512,7 +512,9 @@ def _add_compiled_step_args(parser):
         default=None,
         help="Decoder depths for the compiled-step bench (default: auto).",
     )
-    parser.add_argument("--bench-steps", type=int, default=None, help="Training steps per bench run (default 8).")
+    parser.add_argument(
+        "--bench-steps", type=int, default=None, help="Training steps per bench run (default 8)."
+    )
     parser.add_argument("--bench-dir", type=str, default=None, help="Where bench logs are written.")
     parser.add_argument(
         "--target-nodes-list",

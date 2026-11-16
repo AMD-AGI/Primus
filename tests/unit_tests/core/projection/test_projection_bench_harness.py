@@ -210,7 +210,9 @@ def test_megatron_zaya1_stages_are_typed_and_get_the_router_state():
 
 
 def test_megatron_hybrid_stack_reports_its_layer_types():
-    model = SimpleNamespace(decoder=SimpleNamespace(layers=[_megatron_layer(), _megatron_layer()], layer_type_list=["M", "-"]))
+    model = SimpleNamespace(
+        decoder=SimpleNamespace(layers=[_megatron_layer(), _megatron_layer()], layer_type_list=["M", "-"])
+    )
     assert MegatronBenchAdapter().discover(model).layer_types == ["M", "-"]
 
 
@@ -693,7 +695,9 @@ def test_a_backend_that_cannot_build_inputs_fails_loudly(monkeypatch, recorded_b
 
 
 def test_compiled_block_is_detected_for_whole_layer_timing():
-    from primus.core.projection.module_profilers.transformer_layer import _is_compiled_module
+    from primus.core.projection.module_profilers.transformer_layer import (
+        _is_compiled_module,
+    )
 
     block = _TitanForwardBlock()
     assert not _is_compiled_module(block)
@@ -701,9 +705,13 @@ def test_compiled_block_is_detected_for_whole_layer_timing():
 
 
 def test_checkpointed_block_is_detected_for_whole_layer_timing():
-    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        checkpoint_wrapper,
+    )
 
-    from primus.core.projection.module_profilers.transformer_layer import _is_checkpointed_module
+    from primus.core.projection.module_profilers.transformer_layer import (
+        _is_checkpointed_module,
+    )
 
     block = nn.Linear(HIDDEN, HIDDEN)
     assert not _is_checkpointed_module(block)

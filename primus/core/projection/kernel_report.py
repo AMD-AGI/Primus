@@ -441,11 +441,7 @@ def _layer_scopes(training_config) -> List[str]:
 
 def build_report(ledger: Ledger, training_config, num_gpus: int, provenance: Optional[dict] = None) -> dict:
     """Every recorded term with its calls per iteration on each pipeline stage, one rank of the stage."""
-    mc, mp, rt = (
-        training_config.model_config,
-        training_config.model_parallel_config,
-        training_config.runtime_config,
-    )
+    mp, rt = training_config.model_parallel_config, training_config.runtime_config
     tp = getattr(mp, "tensor_model_parallel_size", 1) or 1
     pp = getattr(mp, "pipeline_model_parallel_size", 1) or 1
     cp = getattr(mp, "context_model_parallel_size", 1) or 1

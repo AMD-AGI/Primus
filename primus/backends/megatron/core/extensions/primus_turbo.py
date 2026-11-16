@@ -2434,7 +2434,9 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         self._ensure_weight_views()
         return super().state_dict(*args, **kwargs)
 
-    def prepare_weights(self, x: torch.Tensor, fp8_pad_align_last: int = 0, fp8_pad_align_penultimate: int = 0):
+    def prepare_weights(
+        self, x: torch.Tensor, fp8_pad_align_last: int = 0, fp8_pad_align_penultimate: int = 0
+    ):
         """Resolve the weight operand for grouped GEMM / fused grouped MLP.
 
         Owns ``is_first_microbatch``: first-microbatch quantized-weight cache,

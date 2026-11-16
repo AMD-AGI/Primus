@@ -222,7 +222,9 @@ def _is_compiled_module(module) -> bool:
 def _is_checkpointed_module(module) -> bool:
     """True when *module* is wrapped for activation checkpointing (TorchTitan's AC, FSDP2 keeps the subclass)."""
     try:
-        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointWrapper
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            CheckpointWrapper,
+        )
     except ImportError:
         return False
     return isinstance(module, CheckpointWrapper)

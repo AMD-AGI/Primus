@@ -61,6 +61,7 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     # TorchTitan's Trainer binds each rank to its GPU before init; without it every
     # rank allocates on GPU 0.
     import os
+
     if torch.cuda.is_available():
         torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", "0")))
     world_size = dist_utils.init_distributed(
@@ -71,10 +72,15 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     # The bench override pins dp_shard = dp_replicate = 1, but the projection still
     # launches a full node; ParallelDims needs the degrees to multiply to world_size.
     # Give the remainder to FSDP, as the shipped configs do (dp_shard = -1).
-    fixed = (parallelism.tensor_parallel_degree * parallelism.context_parallel_degree
-             * parallelism.pipeline_parallel_degree)
-    if (parallelism.data_parallel_shard_degree * parallelism.data_parallel_replicate_degree
-            * fixed != world_size):
+    fixed = (
+        parallelism.tensor_parallel_degree
+        * parallelism.context_parallel_degree
+        * parallelism.pipeline_parallel_degree
+    )
+    if (
+        parallelism.data_parallel_shard_degree * parallelism.data_parallel_replicate_degree * fixed
+        != world_size
+    ):
         parallelism.data_parallel_shard_degree = world_size // fixed
         parallelism.data_parallel_replicate_degree = 1
     parallel_dims = ParallelDims(
@@ -124,6 +130,7 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     # clobbering TorchTitan's nested optimizer section; rebuild a default one.
     if isinstance(job_config.optimizer, str):
         import dataclasses
+
         field = {f.name: f for f in dataclasses.fields(job_config)}["optimizer"]
         opt_cfg = field.default_factory()
         opt_cfg.name = {"adam": "Adam", "adamw": "AdamW"}.get(job_config.optimizer.lower(), opt_cfg.name)
@@ -140,6 +147,7 @@ def build_model_only(job_config: Any) -> Tuple[List[Any], Any, Any]:
     # That includes the gradient reduce-scatter: left on, every benchmarked backward
     # waits for it, while training overlaps it with the next block's backward.
     from torch.distributed.fsdp import FSDPModule
+
     no_grad_sync = os.environ.get("PRIMUS_BENCH_FSDP_GRAD_SYNC", "0") != "1"
     for part in model_parts:
         if isinstance(part, FSDPModule):

@@ -860,7 +860,9 @@ class AttentionProfiler(BaseModuleProfiler):
                 tcfg = getattr(self.module, "config", None)
                 ishapes, fkwargs = self.require_bench_inputs(ATTENTION, self.module, batch_size, seq_len)
                 self._cached_results = self._benchmark_window_variants(
-                    lambda: benchmark_layer(self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs)
+                    lambda: benchmark_layer(
+                        self.module, ishapes, transformer_config=tcfg, forward_kwargs=fkwargs
+                    )
                 )
             self._cache_key = cache_key
         return self._cached_results

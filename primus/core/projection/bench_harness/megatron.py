@@ -93,7 +93,9 @@ class MegatronBenchAdapter(BenchModelAdapter):
             if hasattr(unwrapped, "decoder") and hasattr(unwrapped.decoder, "layers"):
                 parts.layers.extend(unwrapped.decoder.layers)
                 types = getattr(unwrapped.decoder, "layer_type_list", None)
-                if not types and all(type(layer).__name__ == "ZayaStage" for layer in unwrapped.decoder.layers):
+                if not types and all(
+                    type(layer).__name__ == "ZayaStage" for layer in unwrapped.decoder.layers
+                ):
                     # ZAYA1 stages: "a" is CCA attention, "m" is MoE.
                     types = ["*" if layer.kind == "a" else "E" for layer in unwrapped.decoder.layers]
                     for layer in unwrapped.decoder.layers:
