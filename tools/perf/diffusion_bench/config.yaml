@@ -15,7 +15,8 @@
 #   auto reads gfx_target_version from sysfs: gfx942 (MI300X/MI325X) -> mi300, gfx950 (MI350X/MI355X) -> mi355
 gpu: auto
 
-# Container image with /workspace/AMDiffusionBenchmark and /workspace/DLRMBenchmark
+# Container image with /workspace/DLRMBenchmark (and /workspace/AMDiffusionBenchmark when
+# diffusion.enabled)
 image: rocm/primus:v26.8
 
 # Hugging Face cache on the host, mounted into the container.
