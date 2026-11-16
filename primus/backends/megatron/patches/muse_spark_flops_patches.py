@@ -95,11 +95,16 @@ def _window_layer_fn():
     return is_layer_window_attention
 
 
-def num_sliding_layers(args) -> int:
+def num_sliding_layers(args, window=None) -> int:
+    """Layers with sliding-window attention. ``window``: the run's window in keys as
+    :func:`sliding_window_keys` resolves it (resolved here from ``args`` when not given), so
+    the window size is parsed in one place; no window means no sliding layers."""
+    if window is None:
+        window = sliding_window_keys(args)
+    if window is None:
+        return 0
     n_layers = int(args.num_layers)
-    ws = getattr(args, "window_size", None)
-    if isinstance(ws, str):
-        ws = parse_window_size(ws)
+    ws = (window, 0)  # Megatron's helper only tests the window for truthiness
     pattern = getattr(args, "window_attn_skip_freq", None)
     if pattern is not None:
         pattern = normalize_layer_pattern(pattern, n_layers, "window_attn_skip_freq")
@@ -135,7 +140,7 @@ class MuseSparkFlopsTerms:
         self.seq_length = int(args.seq_length)
         self.q = int(args.kv_channels) * int(args.num_attention_heads)
         self.window = sliding_window_keys(args)
-        self.n_sliding = num_sliding_layers(args) if self.window is not None else 0
+        self.n_sliding = num_sliding_layers(args, self.window) if self.window is not None else 0
         self.router_per_token = (
             FWD_BWD_FLOPS_PER_MAC * int(args.hidden_size) * int(args.num_experts or 0) * num_moe_layers(args)
         )
@@ -194,6 +199,8 @@ def muse_spark_flops_delta(
 
 # set on the run's args object by the patch: the per-call Muse Spark check of the wrapper
 MUSE_SPARK_ARGS_ATTR = "_primus_muse_spark_flops"
+# marks the wrapped num_floating_point_operations, so the patch never wraps it twice
+_PATCHED_ATTR = "_muse_spark_flops_patched"
 
 
 def is_muse_spark_args(args) -> bool:
@@ -240,7 +247,7 @@ def make_muse_spark_num_floating_point_operations(original_fn):
         )
 
     wrapped.__wrapped__ = original_fn
-    wrapped._muse_spark_flops_patched = True
+    setattr(wrapped, _PATCHED_ATTR, True)
     return wrapped
 
 
@@ -259,7 +266,7 @@ def patch_muse_spark_flops_reporting(ctx: PatchContext):
         if args is not None:
             setattr(args, MUSE_SPARK_ARGS_ATTR, True)
     original_fn = training_module.num_floating_point_operations
-    if getattr(original_fn, "_muse_spark_flops_patched", False):
+    if getattr(original_fn, _PATCHED_ATTR, False):
         return
     training_module.num_floating_point_operations = make_muse_spark_num_floating_point_operations(original_fn)
     log_rank_0(f"{_TAG} wrapped num_floating_point_operations (sliding-window keys, router GEMM)")

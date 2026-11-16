@@ -38,7 +38,11 @@ from typing import Optional
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
+    HF_FINAL_LOGIT_SOFTCAPPING,
     HF_OUTPUT_MULTIPLIER,
+    HF_POST_NORM_EPS,
+    HF_QK_SCALE_FACTOR,
+    HF_RESIDUAL_GATE_TEMPERATURE,
     check_all_moe_layers,
     hf_sliding_window,
     normalize_layer_pattern,
@@ -54,11 +58,15 @@ __all__ = ["MuseSparkTransformerConfig"]
 class MuseSparkTransformerConfig(TransformerConfig):
     """Config for the Muse Spark text backbone."""
 
+    # HF has no dropout, and the embedding norm runs after Megatron's embedding dropout:
+    # 0.0 here (Megatron's default is 0.1); a non-zero value with embedding_norm is rejected
+    hidden_dropout: float = 0.0
+
     # eps of the weightless post-attention norm, the input-scaled post-MoE norm
     # and the per-expert post norm.
-    post_norm_eps: float = 1e-8
+    post_norm_eps: float = HF_POST_NORM_EPS
     # residual gate: beta = sigmoid(g / T), alpha = sqrt(clamp(sigmoid(-g / T) * (1 + beta), 1e-3)).
-    residual_gate_temperature: float = 0.3
+    residual_gate_temperature: float = HF_RESIDUAL_GATE_TEMPERATURE
     muse_spark_fused_post_expert_norm: bool = True
     """Run the per-expert ``post_expert_norm`` and the routing-prob multiply, and the
     input-scaled post-MoE norm, as one Triton kernel per pass
@@ -95,13 +103,13 @@ class MuseSparkTransformerConfig(TransformerConfig):
     # Defaults below are the released HF config values; they must match the checkpoint
     # (the native converter copies them from config.json when present).
     # queries are multiplied by this after the weightless QK-norm (HF ``qk_scale_factor``).
-    qk_scale_factor: float = 5.4730064863875
+    qk_scale_factor: float = HF_QK_SCALE_FACTOR
     # router logits are computed in fp32 and multiplied by this before the sigmoid.
     moe_router_output_multiplier: float = HF_OUTPUT_MULTIPLIER
     # lm-head logits: cap * tanh(logits * output_logit_multiplier / cap), with
     # cap = final_logit_softcapping (HF ``output_multiplier`` and ``final_logit_softcapping``).
     output_logit_multiplier: float = HF_OUTPUT_MULTIPLIER
-    final_logit_softcapping: Optional[float] = 20.0
+    final_logit_softcapping: Optional[float] = HF_FINAL_LOGIT_SOFTCAPPING
     # weightless RMSNorm after the embedding lookup (eps = layernorm_epsilon).
     embedding_norm: bool = True
 
@@ -169,6 +177,14 @@ class MuseSparkTransformerConfig(TransformerConfig):
             raise ValueError(f"residual_gate_temperature must be a finite number > 0, got {t!r}")
         if self.num_moe_experts and self.moe_latent_size is None:
             raise ValueError("Muse Spark MoE needs moe_latent_size (HF moe_hidden_size)")
+        if self.embedding_norm and self.hidden_dropout:
+            # checked on every rank (every pipeline stage builds this config), before any model
+            # build: a check in the first stage's model alone would leave the other stages
+            # waiting in collectives
+            raise ValueError(
+                "Muse Spark: hidden_dropout must be 0 (the embedding norm runs after Megatron's "
+                f"embedding dropout, which HF does not have); got {self.hidden_dropout}"
+            )
         if (self.expert_tensor_parallel_size or 1) > 1:
             # post_expert_norm is an RMSNorm over the full expert output row; expert TP
             # would give each rank a partial row (and 1/tp of the norm-weight gradient).

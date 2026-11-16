@@ -145,7 +145,7 @@ def get_muse_spark_layer_spec(config) -> ModuleSpec:
                 module=MuseSparkGatedResidual, params={"config": config, "kind": "attn"}
             ),
             pre_mlp_layernorm=MuseSparkCenteredRMSNorm,
-            mlp=get_muse_spark_moe_spec(backend, grouped_gemm=bool(config.moe_grouped_gemm)),
+            mlp=get_muse_spark_moe_spec(backend, grouped_gemm=config_flag(config, "moe_grouped_gemm", False)),
             mlp_bda=ModuleSpec(module=MuseSparkGatedResidual, params={"config": config, "kind": "mlp"}),
         ),
     )

@@ -179,14 +179,19 @@ def patch_glm5_next_hf_load(ctx: PatchContext):
     condition=_is_glm5_next,
 )
 def patch_glm5_next_te_gemm_workspace(ctx: PatchContext):
-    # Seen on gfx950: hipBLASLt picks split-K algorithms for large-K / small-N GEMMs
+    # On gfx950, hipBLASLt picks split-K algorithms for large-K / small-N GEMMs
     # (e.g. KDA o_proj 8192->4096 at 960..1280 tokens) whose workspace exceeds
     # TE's 64 MiB default and fails with "HIPBLASLT Error: 6".
     del ctx
-    from primus.backends.megatron.core.extensions.te_gemm_workspace import (
-        enlarge_te_gemm_workspace,
-    )
+    import torch
 
-    # strict=False: plain int() of PRIMUS_TE_GEMM_WORKSPACE_MB, no range check (0 or a
-    # negative value changes nothing)
-    enlarge_te_gemm_workspace("megatron.glm5_next.te_gemm_workspace", strict=False)
+    if torch.version.hip is None:
+        return
+    import transformer_engine.pytorch.cpp_extensions.gemm as te_gemm
+
+    size = int(os.environ.get("PRIMUS_TE_GEMM_WORKSPACE_MB", "512")) * 1024 * 1024
+    if te_gemm.get_cublas_workspace_size_bytes() >= size:
+        return
+    te_gemm.get_cublas_workspace_size_bytes = lambda: size
+    te_gemm.get_cublas_workspace.cache_clear()
+    log_rank_0(f"[Patch:megatron.glm5_next.te_gemm_workspace] TE GEMM workspace -> {size >> 20} MiB")

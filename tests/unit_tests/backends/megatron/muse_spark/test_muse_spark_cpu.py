@@ -82,6 +82,10 @@ def test_pattern_parser_matches_released_layers():
 def test_pattern_parser_has_no_eval():
     with pytest.raises(ValueError):
         parse_layer_pattern("__import__('os').getcwd()")
+    for probe in ("[__import__('os').getcwd()]", "[len('ab')]", "[x]", "[1]*len('ab')"):
+        # bracketed: the AST evaluator sees these and must refuse calls and names
+        with pytest.raises(ValueError):
+            parse_layer_pattern(probe)
     with pytest.raises(ValueError):
         parse_layer_pattern("[1]*'a'")
 
@@ -206,6 +210,35 @@ def test_derive_fields_defaults_match_transformer_config():
         assert f[name] == defaults[name], name
 
 
+def test_derive_fields_read_a_null_key_as_absent():
+    # a key present with value null in config.json gets the default, not None
+    nulled = (
+        "qk_scale_factor",
+        "output_multiplier",
+        "post_norm_eps",
+        "residual_gate_temperature",
+        "head_dim",
+        "max_position_embeddings",
+        "routed_scaling_factor",
+    )
+    f = conv.derive_megatron_fields({**TEXT, **{k: None for k in nulled}})
+    g = conv.derive_megatron_fields({k: v for k, v in TEXT.items() if k not in nulled})
+    for name in (
+        "qk_scale_factor",
+        "moe_router_output_multiplier",
+        "output_logit_multiplier",
+        "post_norm_eps",
+        "residual_gate_temperature",
+        "kv_channels",
+        "max_position_embeddings",
+        "moe_router_topk_scaling_factor",
+    ):
+        assert f[name] is not None and f[name] == g[name], name
+    # final_logit_softcapping: null is HF's "no cap" (MuseSpark applies the cap only when set)
+    f = conv.derive_megatron_fields({**TEXT, "final_logit_softcapping": None})
+    assert f["final_logit_softcapping"] is None
+
+
 @pytest.mark.parametrize("window", [None, 0, -1, True, "2048", "missing"])
 def test_derive_fields_reject_sliding_layers_without_a_window(window):
     # sliding_attention layers with no positive window would silently run full attention
@@ -234,6 +267,8 @@ def test_derive_fields_fallbacks():
     [
         ({"rope_parameters": {"rope_type": "yarn", "rope_theta": 500000.0, "factor": 4.0}}, "default RoPE"),
         ({"rope_scaling": {"type": "linear", "factor": 2.0}}, "default RoPE"),
+        ({"rope_scaling": {"factor": 2.0}}, "default RoPE"),
+        ({"rope_scaling": "linear"}, "default RoPE"),
         ({"layer_rope_theta": [0.0, 1e6] * 31}, "other than 0"),
         ({"layer_rope_theta": [0.0, 500000.0]}, "entries for 62 layers"),
     ],
@@ -241,6 +276,20 @@ def test_derive_fields_fallbacks():
 def test_derive_fields_rejects_unsupported_rope(change, match):
     with pytest.raises(ValueError, match=match):
         conv.derive_megatron_fields({**TEXT, **change})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"rope_parameters": {"rope_type": None, "rope_theta": 500000.0}},
+        {"rope_parameters": {"type": None, "rope_theta": 500000.0}},
+        # newer transformers: rope_scaling as an alias of rope_parameters
+        {"rope_scaling": {"rope_type": "default", "rope_theta": 500000.0}},
+        {"rope_scaling": None},
+    ],
+)
+def test_derive_fields_accepts_default_rope_spellings(change):
+    assert conv.derive_megatron_fields({**TEXT, **change})["rotary_base"] == 500000.0
 
 
 def _transformer_config(**kw):
@@ -468,7 +517,7 @@ def test_build_margs_reads_the_checkpoint_vocab_without_a_passed_config(tmp_path
     [
         ({"text_config": {"hidden_size": 8}}, None, "the HF config has no vocab_size"),
         ({}, None, "the HF config has no vocab_size"),
-        (None, None, r"no HF config \(args.hf_dir is unset\) has no vocab_size"),
+        (None, None, r"no HF config was loaded \(args.hf_dir is unset\)"),
     ],
 )
 def test_build_margs_requires_the_checkpoint_vocab(hf_cfg, hf_dir, match):
@@ -512,6 +561,18 @@ def test_cut_to_layers_cuts_every_per_layer_list():
     for bad in (0, 63):
         with pytest.raises(ValueError, match="the checkpoint has 62 layers"):
             conv.cut_to_layers(cfg, bad)
+
+
+def test_cut_to_layers_keeps_lists_that_are_not_per_layer():
+    small = {
+        "num_hidden_layers": 4,
+        "layer_types": LAYER_TYPES[:4],
+        "eos_token_id": [1, 2, 3, 4],
+        "bad": [9] * 4,
+    }
+    t = conv.cut_to_layers({"text_config": small}, 2)["text_config"]
+    assert t["layer_types"] == LAYER_TYPES[:2]
+    assert t["eos_token_id"] == [1, 2, 3, 4] and t["bad"] == [9] * 4
 
 
 def test_the_depth_cut_maps_only_the_first_layers():
@@ -1619,7 +1680,7 @@ def test_the_hook_wait_takes_this_launchs_failure_written_before_it_began(tmp_pa
     # the record carries this launch's id, so the wait stops at once (not after 1800 s)
     monkeypatch.setenv("PRIMUS_CONVERT_RUN_ID", "launch-7")
     failed = tmp_path / "out.failed"
-    failed.write_text(f"run: {conv.conversion_run_id()}\nValueError: too big\n")
+    failed.write_text(f"run: {conv.conversion_run_tag()}\nValueError: too big\n")
     clock = _WaitClock()
     with pytest.raises(RuntimeError, match="failed: ValueError: too big"):
         _wait(tmp_path, clock)
@@ -1632,7 +1693,7 @@ def test_the_hook_wait_ignores_an_old_record_with_a_reused_launch_id(tmp_path, m
     monkeypatch.setenv("PRIMUS_CONVERT_RUN_ID", "constant")
     out, lock, done = tmp_path / "out", tmp_path / "out.converting.lock", tmp_path / "out.done"
     failed = tmp_path / "out.failed"
-    failed.write_text(f"run: {conv.conversion_run_id()}\nValueError: old failure\n")
+    failed.write_text(f"run: {conv.conversion_run_tag()}\nValueError: old failure\n")
     old = os.path.getmtime(failed) - conv.WAIT_START_S - 60
     os.utime(failed, (old, old))
 
@@ -1697,7 +1758,7 @@ def test_a_fresh_record_with_a_reused_id_names_the_reuse(tmp_path, monkeypatch):
     # a constant user id makes a fresh earlier record look like this
     # launch's (documented): the error says so, so the user can tell it from a new failure
     monkeypatch.setenv("PRIMUS_CONVERT_RUN_ID", "fixed")
-    (tmp_path / "out.failed").write_text(f"run: {conv.conversion_run_id()}\nValueError: old failure\n")
+    (tmp_path / "out.failed").write_text(f"run: {conv.conversion_run_tag()}\nValueError: old failure\n")
     with pytest.raises(RuntimeError, match="written before this wait began.*set a new value per launch"):
         _wait(tmp_path, _WaitClock())
 
@@ -1744,7 +1805,7 @@ def test_the_hook_wait_ignores_a_previous_launchs_failure_record(tmp_path, monke
         ({}, None),
     ],
 )
-def test_conversion_run_id(monkeypatch, env, want):
+def test_conversion_run_tag(monkeypatch, env, want):
     for k in (
         "PRIMUS_CONVERT_RUN_ID",
         "SLURM_JOB_ID",
@@ -1755,7 +1816,7 @@ def test_conversion_run_id(monkeypatch, env, want):
         monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
-    assert conv.conversion_run_id() == want
+    assert conv.conversion_run_tag() == want
 
 
 def test_a_refused_duplicate_conversion_leaves_the_running_ones_record(tmp_path, monkeypatch):

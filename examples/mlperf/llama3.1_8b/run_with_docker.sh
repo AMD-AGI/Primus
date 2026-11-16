@@ -17,7 +17,7 @@
 #   export DATADIR=/data/mlperf_llama31_8b/data
 #   export MODELDIR=/data/mlperf_llama31_8b/model
 #   export LOGDIR=/data/mlperf_llama31_8b/results
-#   export CONT=rocm/primus:v26.5
+#   export CONT=rocm/primus:v26.9
 #   export DGXSYSTEM=MI355X_1x8x1
 #   export HF_TOKEN=<your_token>
 #   bash examples/mlperf/llama3.1_8b/run_with_docker.sh
@@ -38,7 +38,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
 # Defaults (override via env or INTERACTIVE prompts)
 : "${DGXSYSTEM:=MI355X_1x8x1}"
-: "${CONT:=rocm/primus:v26.5}"
+: "${CONT:=rocm/primus:v26.9}"
 : "${DATADIR:=${HOME}/data/mlperf_llama31_8b/data}"
 : "${MODELDIR:=$(dirname "${DATADIR}")/model}"
 : "${LOGDIR:=$(dirname "${DATADIR}")/results}"
@@ -48,7 +48,11 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${CHECK_COMPLIANCE:=0}"
 : "${MLPERF_RULESET:=6.1.0}"
 : "${MLPERF_LOGGING_REF:=6.1.0-rc2}"
-: "${MLPERF_COMMON_REF:=7771aeabc8b91402e95cb7a33f447d9d9941361f}"
+: "${MLPERF_COMMON_REF:=b708a19e8bd8cb33305c72db2487c366d36ddd03}"
+# Primus-Turbo built into the container; the one rocm/primus:v26.9 ships predates the gfx950
+# dense-GEMM race fixes (see README.md). Empty keeps the image's Primus-Turbo.
+: "${PRIMUS_TURBO_REF:=fda6df0b4264c94c4a7dccb645e02facc97c9fca}"
+: "${PRIMUS_TURBO_GPU_ARCHS:=gfx950}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
@@ -171,9 +175,15 @@ if [[ "${SUBMISSION_QUIET}" == "1" ]]; then
     )
 fi
 
+# Host values for the config's ${NAME:-default} switches; everything else stays isolated.
+_config_overrides=()
+while read -r _name; do
+    [[ -n "${!_name+set}" ]] && _config_overrides+=("${_name}=${!_name}")
+done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-' "${_config_file}" | sed -e 's/^\${//' -e 's/:-$//' | sort -u)
+
 # Export values from config_${DGXSYSTEM}.sh for docker exec.
 mapfile -t _config_env < <(
-    env -i HOME="${HOME}" PATH="${PATH}" bash -c "
+    env -i HOME="${HOME}" PATH="${PATH}" "${_config_overrides[@]}" bash -c "
         set -a
         source '${_config_file}'
         set +a
@@ -221,6 +231,7 @@ if [[ "${DGXSYSTEM}" == MI* ]]; then
         --shm-size=128g \
         --ulimit=memlock=-1 \
         --ulimit=stack=67108864 \
+        --ulimit=nofile=1048576:1048576 \
         --name="${_cont_name}" "${_cont_mounts[@]}" \
         -e IMAGE_NAME="${CONT}" \
         "${CONT}" sleep infinity
@@ -230,6 +241,7 @@ else
         --gpus=all \
         --ulimit=memlock=-1 \
         --ulimit=stack=67108864 \
+        --ulimit=nofile=1048576:1048576 \
         --security-opt=seccomp=unconfined \
         --name="${_cont_name}" "${_cont_mounts[@]}" \
         -e IMAGE_NAME="${CONT}" \
@@ -248,10 +260,30 @@ echo '[INFO] Installing pinned MLPerf Logging package.'
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/mlcommons/logging.git@${MLPERF_LOGGING_REF}'
 echo '[INFO] Installing pinned AMD MLPerf common package.'
+pip uninstall -q -y primus-mllog 2>/dev/null || true
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}'
 echo '[INFO] Container Primus editable install complete.'
 "
+
+if [[ -n "${PRIMUS_TURBO_REF}" ]]; then
+    docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
+set -e
+# The config's PYTHONPATH puts Primus's tools/ package ahead of Primus-Turbo's build helpers.
+unset PYTHONPATH
+echo '[INFO] Building Primus-Turbo ${PRIMUS_TURBO_REF} for ${PRIMUS_TURBO_GPU_ARCHS}.'
+_src=/tmp/primus_turbo_src
+rm -rf \"\${_src}\"
+git clone -q https://github.com/AMD-AGI/Primus-Turbo.git \"\${_src}\"
+git -C \"\${_src}\" checkout -q '${PRIMUS_TURBO_REF}'
+git -C \"\${_src}\" submodule update -q --init --recursive
+pip uninstall -q -y primus_turbo
+GPU_ARCHS='${PRIMUS_TURBO_GPU_ARCHS}' pip install -q --no-build-isolation --no-deps \"\${_src}\"
+# FlyDSL's cache key does not cover every kernel change, so drop binaries from the old Turbo.
+rm -rf \"\${FLYDSL_RUNTIME_CACHE_DIR:-\${HOME}/.flydsl/cache}\"
+echo \"[INFO] Primus-Turbo \$(git -C \"\${_src}\" rev-parse --short HEAD) installed.\"
+"
+fi
 
 _run_cmd="bash ${_example_dir}/run_and_time.sh"
 

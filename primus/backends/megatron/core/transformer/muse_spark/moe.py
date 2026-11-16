@@ -50,6 +50,9 @@ from primus.backends.megatron.core.transformer.muse_spark.compiled_norms import 
     compiled,
     swiglu_math,
 )
+from primus.backends.megatron.core.transformer.muse_spark.forward_pre_hooks import (
+    run_forward_pre_hooks,
+)
 from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkCenteredRMSNorm,
     MuseSparkInputScaledRMSNorm,
@@ -170,24 +173,15 @@ class MuseSparkTopKRouter(_FSDP2LayoutBase, _RouterBase):
 
 
 def _run_forward_pre_hooks(module, x):
-    """Run ``module``'s forward pre-hooks as ``nn.Module.__call__`` would, without forward.
-
-    The hooks' results are dropped (the kernel takes ``x`` and the weight as they are).
-    ``register_forward_pre_hook(..., with_kwargs=True)`` hooks (e.g. accelerate / harness
-    hooks) are called with the kwargs dict, as torch does: their ids are listed in
-    ``_forward_pre_hooks_with_kwargs``. The shared ``dense_mlp_fp4_patches`` helper calls
-    every hook without kwargs, so it is not reused here."""
-    args, kwargs = (x,), {}
-    with_kwargs = getattr(module, "_forward_pre_hooks_with_kwargs", {})
-    for hook_id, hook in module._forward_pre_hooks.items():
-        if hook_id in with_kwargs:
-            result = hook(module, args, kwargs)
-            if result is not None:
-                args, kwargs = result
-        else:
-            result = hook(module, args)
-            if result is not None:
-                args = result if isinstance(result, tuple) else (result,)
+    """Run ``module``'s forward pre-hooks (``forward_pre_hooks.run_forward_pre_hooks``) and return the
+    input after them; the fused post-expert norm takes one positional input only."""
+    args, kwargs = run_forward_pre_hooks(module, (x,))
+    if kwargs or len(args) != 1:
+        raise RuntimeError(
+            f"a forward pre-hook of {type(module).__name__} changed its call to {len(args)} args / "
+            f"kwargs {sorted(kwargs)}; the fused post-expert norm takes one input"
+        )
+    return args[0]
 
 
 class _PostExpertNormMixin:
@@ -229,7 +223,7 @@ class _PostExpertNormMixin:
                 # The kernel reads norm.weight without norm.forward, so run the norm's
                 # forward-pre-hooks first: with overlap_param_gather the DDP hook waits there
                 # for the weight's all-gather (as PrimusGroupedMLP does for fc1 / fc2).
-                _run_forward_pre_hooks(norm, output)
+                output = _run_forward_pre_hooks(norm, output)
                 # one Triton kernel per pass, same roundings as below (eager on CPU)
                 output = post_expert_norm_probs(output, norm.weight, permuted_probs, norm.eps)
                 return output, output_bias
@@ -256,6 +250,10 @@ class MuseSparkSequentialMLP(_PostExpertNormMixin, SequentialMLP):
         super().__init__(*args, **kwargs)
         self._init_post_expert_norm()
 
+
+# the expert linears with a stacked ``weights`` Parameter: saved through it
+# (``sharded_state_dict``) and synced from / to it on load (:func:`_sync_stacked_expert_weights`)
+_STACKED_EXPERT_LINEARS = ("linear_fc1", "linear_fc2")
 
 _TURBO_GROUPED_MLP = None
 
@@ -287,7 +285,7 @@ def muse_spark_turbo_grouped_mlp_cls():
 
             def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
                 sd = super().sharded_state_dict(prefix, sharded_offsets, metadata)
-                for name in ("linear_fc1", "linear_fc2"):
+                for name in _STACKED_EXPERT_LINEARS:
                     linear = getattr(self, name)
                     if hasattr(linear, "weights"):
                         stack_expert_sharded_state_dict(sd, f"{prefix}{name}.", linear)
@@ -358,7 +356,7 @@ def stack_expert_sharded_state_dict(sharded_sd, key_prefix, linear):
 def _sync_stacked_expert_weights(module, state_dict, prefix, *args, **kwargs):
     """Load pre-hook: fill ``weights`` from ``weight{i}`` (TE / legacy checkpoints) or
     ``weight{i}`` from ``weights`` (torch_dist checkpoints), so both forms load strictly."""
-    for name in ("linear_fc1", "linear_fc2"):
+    for name in _STACKED_EXPERT_LINEARS:
         linear = getattr(module, name, None)
         if linear is None or not hasattr(linear, "weights"):
             continue

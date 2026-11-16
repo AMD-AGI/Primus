@@ -145,6 +145,12 @@ def test_patch_wraps_megatron_flops_once(monkeypatch):
     assert training.num_floating_point_operations is first  # not wrapped twice
     a = _args()
     assert first(a, 1) == 1.0e15 + muse_spark_flops_delta(a, 1)
+    # without backend_args, the module config's params are the run's args: they are marked too
+    params = SimpleNamespace(model_type="muse_spark")
+    mod.patch_muse_spark_flops_reporting(
+        SimpleNamespace(extra={"module_config": SimpleNamespace(params=params)})
+    )
+    assert getattr(params, mod.MUSE_SPARK_ARGS_ATTR) is True
 
 
 def test_window_not_shorter_than_seq_is_no_correction():
@@ -234,7 +240,12 @@ def test_sliding_window_keys_accepts_every_window_size_form(ws, expected):
 
 
 def test_string_window_size_is_counted_like_a_list():
+    from primus.backends.megatron.patches.muse_spark_flops_patches import (
+        num_sliding_layers,
+    )
+
     assert muse_spark_flops_delta(_args(window_size="(2048,0)"), 2) == muse_spark_flops_delta(_args(), 2)
+    assert num_sliding_layers(_args(window_size="(2048,0)")) == num_sliding_layers(_args()) == 3
 
 
 @pytest.mark.parametrize("bad", ["(2048,0]", "2048,,0", "(abc)", "(2048, 5)"])
@@ -246,7 +257,6 @@ def test_the_sliding_layer_count_parses_a_string_window_size(bad):
         num_sliding_layers,
     )
 
-    assert num_sliding_layers(_args(window_size="(2048,0)")) == num_sliding_layers(_args()) == 3
     with pytest.raises(ValueError, match="window_size"):
         num_sliding_layers(_args(window_size=bad))
 
@@ -419,5 +429,8 @@ def test_sliding_window_keys_parses_the_convention_flag_strictly(flag, expected)
     # (2047, 0): TE's left window 2047 = 2048 keys; in the HF convention it is 2047 keys
     a = SimpleNamespace(window_size=(2047, 0), window_size_is_hf_sliding_window=flag)
     assert sliding_window_keys(a) == expected
+
+
+def test_sliding_window_keys_rejects_a_typo_in_the_convention_flag():
     with pytest.raises(ValueError, match="window_size_is_hf_sliding_window"):
         sliding_window_keys(SimpleNamespace(window_size=(2047, 0), window_size_is_hf_sliding_window="ture"))

@@ -150,6 +150,10 @@ perf_dd_prepare() {
     fi
     rm -f "$errors"
     PERF_DD_PLAN="$out"
+    if [ "$(perf_dd_plan '.diffusion_runs | length')" -gt 0 ] && perf_batch_has_diffusion; then
+        echo "[WARN] diffusion_dlrm runs diffusion models with AMDiffusionBenchmark too ($(perf_dd_summary | sed 's/;.*//'))," >&2
+        echo "       next to this batch's diffusion configs; set diffusion.enabled: false in $DIFFUSION_DLRM_CONFIG to run them once." >&2
+    fi
 }
 
 perf_dd_launch_argv() {

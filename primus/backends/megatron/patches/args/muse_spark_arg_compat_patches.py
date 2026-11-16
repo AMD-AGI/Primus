@@ -17,7 +17,8 @@ The DeepEP and Turbo grouped-GEMM checks read ``backend_args`` and
 key both carry; a Primus-only key such as a Turbo flag is read from ``params``). The
 fused-router check is stricter: it rejects a conflict in ``params``, in ``backend_args`` or
 in the merged view, so a fused-router key in either place stops the run. The
-CP check reads ``backend_args`` only (the Megatron args it fixes up).
+CP check also reads the merged view; its ``cp_comm_type`` rewrite goes to every namespace
+that has the key (``MergedArgs`` writes), so ``backend_args`` and ``params`` agree.
 
 * context parallel with sliding-window attention: TE's p2p CP has no SWA backend.
   Megatron's default (``['p2p']``, and ``p2p`` in Primus's language_model.yaml) is
@@ -49,7 +50,6 @@ import os
 
 from primus.backends.megatron.core.models.muse_spark.memory_check import gpus_per_node
 from primus.backends.megatron.core.models.muse_spark.model_types import (
-    backend_args_of,
     bool_flag,
     config_flag,
     fail_fast,
@@ -57,6 +57,8 @@ from primus.backends.megatron.core.models.muse_spark.model_types import (
     merged_args_of,
 )
 from primus.backends.megatron.core.models.muse_spark.number_utils import (
+    parse_int,
+    parse_positive_int,
     require_positive_int,
 )
 from primus.core.patches import PatchContext, register_patch
@@ -93,11 +95,16 @@ def _env_positive_int(name):
 
 
 def ranks_per_node():
-    """Ranks placed on each node: ``WORLD_SIZE / NNODES`` when the launcher sets both (and
-    NNODES divides the world); else ``WORLD_SIZE`` when it is no more than the node's GPUs
-    (a single-node job with fewer ranks than GPUs: every rank is in this node); else the
-    node's GPU count (:func:`gpus_per_node`)."""
-    gpus = gpus_per_node()
+    """Ranks placed on each node: ``LOCAL_WORLD_SIZE`` when the launcher sets it (torchrun
+    does: the real count, also for a multi-node job with fewer ranks per node than GPUs);
+    else ``WORLD_SIZE / NNODES`` when the launcher sets both (and NNODES divides the world);
+    else ``WORLD_SIZE`` when it is no more than the node's GPUs (a single-node job with fewer
+    ranks than GPUs: every rank is in this node); else the node's GPU count
+    (:func:`gpus_per_node`)."""
+    gpus = gpus_per_node()  # read first: a malformed GPUS_PER_NODE raises in every case
+    local = _env_positive_int("LOCAL_WORLD_SIZE")
+    if local is not None:
+        return local
     world = _env_positive_int("WORLD_SIZE")
     if world is None:
         return gpus
@@ -250,8 +257,9 @@ def resolve_cp_comm_type(comm):
 )
 @fail_fast(CP_COMM_PATCH)
 def patch_muse_spark_cp_comm(ctx: PatchContext):
-    args = backend_args_of(ctx)
-    cp = getattr(args, "context_parallel_size", 1) or 1
+    args = merged_args_of(ctx)
+    raw_cp = getattr(args, "context_parallel_size", None)
+    cp = parse_positive_int(raw_cp, 1, f"context_parallel_size must be a positive integer, got {raw_cp!r}")
     if getattr(args, "window_size", None) is None or cp <= 1:
         return
     comm = getattr(args, "cp_comm_type", None)
@@ -274,11 +282,14 @@ def fused_router_conflicts(args) -> list:
     ``turbo_sync_free_moe_stage`` >= 1 (every stage sets ``moe_use_fused_router_with_aux_score``)
     or that flag itself with Primus-Turbo on. An empty list means none."""
     found = []
-    stage = getattr(args, "turbo_sync_free_moe_stage", 0)
-    try:
-        stage = int(stage or 0)
-    except (TypeError, ValueError):
-        stage = 0  # rocm_arg_validation rejects a malformed stage
+    raw = getattr(args, "turbo_sync_free_moe_stage", None)
+    stage = 0
+    if raw is not None and not (isinstance(raw, str) and not raw.strip()):
+        # parsed strictly: a malformed or negative stage must not pass as "no fused router"
+        bad = f"turbo_sync_free_moe_stage must be an integer >= 0, got {raw!r}"
+        stage = parse_int(raw, bad)
+        if stage < 0:
+            raise ValueError(bad)
     if stage > 0:
         found.append(f"turbo_sync_free_moe_stage={stage}")
     if config_flag(args, "enable_primus_turbo", False) and config_flag(

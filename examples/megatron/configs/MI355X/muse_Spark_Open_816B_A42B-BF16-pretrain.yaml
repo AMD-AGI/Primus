@@ -26,10 +26,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Other layouts: set PRIMUS_TP / PRIMUS_PP / PRIMUS_EP and GBS (GBS must be a multiple of
 # MBS * DP, DP = GPUs / (TP * PP)). EP must divide 256 and GPUs / PP. PP must divide the 62
 # layers (1, 2, 31 or 62), else set decoder_first/last_pipeline_num_layers. TP 8 (with SP)
-# cuts the dense states to ~114 GiB per GPU on 16 nodes (a converted checkpoint is not yet
-# tested at TP > 1, see next). The native converter builds at
-# TP=PP=EP=1 and saves torch_dist (Megatron reshards it on load; loading is tested at
-# TP 1 / EP 8, not yet at TP > 1). It copies the weights in one layer at a time: the full model (822B parameters)
+# cuts the dense states to ~114 GiB per GPU on 16 nodes. The native converter builds at
+# TP=PP=EP=1 and saves torch_dist (Megatron reshards it on load; the tested load layouts
+# are in docs section 11.6). It copies the weights in one layer at a time: the full model (822B parameters)
 # needs ~1.5 TiB (1.64 TB) of host RAM in bf16, plus the converter's 5 % margin (it
 # checks the host's available memory first); or pass an already converted checkpoint.
 # Embedding / output rows: vocab_size rounded up to 64 (the muse_spark_vocab patch, the
@@ -47,6 +46,13 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # dispatcher with Turbo grouped GEMM (DeepEP stays off, as in this file).
 #   Model code: primus/backends/megatron/core/models/muse_spark/.
 #   HF -> Megatron weights: primus/backends/megatron/checkpoint/native_loader_muse_spark.py.
+
+env:
+  # Muse Spark's large-K / small-N GEMMs (expert fc2 into the 4096 latent, post_expert_proj,
+  # router wgrad) need more hipBLASLt split-K workspace than TE's default on gfx950
+  # ("HIPBLASLT Error: 6"). Read by the base patch megatron.te.hipblaslt_gemm_workspace
+  # (te_patches/hipblaslt_workspace_patches.py); it only enlarges.
+  PRIMUS_TE_GEMM_WORKSPACE_MIB: "512"
 
 modules:
   pre_trainer:
@@ -90,6 +96,8 @@ modules:
       gradient_accumulation_fusion: false
 
       # data
+      # mock data by default; for real data set BOTH PRIMUS_MOCK_DATA=false and
+      # PRIMUS_TOKENIZED_DATA_PATH (with mock_data true the path is ignored)
       mock_data: ${PRIMUS_MOCK_DATA:true}
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null

@@ -167,11 +167,17 @@ def _fake_gpt_init(self, config, *args, **kwargs):
 
 
 @pytest.mark.parametrize("dropout", [0.1, 1e-6])
-def test_model_rejects_hidden_dropout_with_the_embedding_norm(monkeypatch, dropout):
-    monkeypatch.setattr(GPTModel, "__init__", _fake_gpt_init)
-    cfg = SimpleNamespace(embedding_norm=True, hidden_dropout=dropout, layernorm_epsilon=1e-5)
+def test_config_rejects_hidden_dropout_with_the_embedding_norm(dropout):
+    # in the config (every rank, every pipeline stage), not in the first stage's model build
+    from primus.backends.megatron.core.models.muse_spark.muse_spark_transformer_config import (
+        MuseSparkTransformerConfig,
+    )
+
+    kw = dict(num_layers=4, hidden_size=64, num_attention_heads=4, window_size=None)
+    assert MuseSparkTransformerConfig(**kw).hidden_dropout == 0.0
+    MuseSparkTransformerConfig(**kw, hidden_dropout=dropout, embedding_norm=False)
     with pytest.raises(ValueError, match="hidden_dropout must be 0"):
-        msm.MuseSparkModel(cfg)
+        MuseSparkTransformerConfig(**kw, hidden_dropout=dropout)
 
 
 @pytest.mark.parametrize("dropout", [0.0, None])

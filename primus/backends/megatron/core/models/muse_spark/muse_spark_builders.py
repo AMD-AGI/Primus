@@ -36,7 +36,7 @@ def check_builder_args(args):
         problems.append(f"spec={args.spec!r} (the Muse Spark layer spec is always used)")
     if getattr(args, "use_rope_scaling", False):
         problems.append("use_rope_scaling=True (Muse Spark has no RoPE scaling)")
-    if getattr(args, "rotary_seq_len_interpolation_factor", None) not in (None, 1, 1.0):
+    if getattr(args, "rotary_seq_len_interpolation_factor", None) not in (None, 1):
         problems.append(
             f"rotary_seq_len_interpolation_factor={args.rotary_seq_len_interpolation_factor!r} "
             "(Muse Spark has no RoPE scaling)"

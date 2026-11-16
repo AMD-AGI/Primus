@@ -75,6 +75,25 @@ Training behaviour is set in the YAML: batch sizes, `fsdp.activation_checkpointi
 (`true` or `selective`), `fsdp.reshard_after_forward`, `fsdp.enable_compile`, and
 so on. The Primus repairs that make those keys take effect are always on.
 
+`fsdp.backend: megatron_fsdp` trains the diffusion transformer on Megatron-FSDP
+instead of FSDP2, with `fsdp.zero_dp_strategy` (1, 2 or 3) and the other
+`MegatronFSDPConfig` fields. It needs the `megatron-fsdp` package AutoModel pins
+(0.5.0), and `model.torch_dtype` and `model.compute_dtype` both `bfloat16`. As on
+FSDP2, gradients are reduced and the optimizer keeps its main weights in fp32,
+unless `fsdp.reduce_dtype` or `fsdp.preserve_fp32_weights: false` says otherwise.
+Context parallelism, LoRA, `fsdp.cpu_offload`, Dion-family optimizers and
+`fsdp.overlap_param_gather: false` below ZeRO-3 are refused. FSDP2-only keys such
+as `fsdp.reshard_after_forward` are dropped with a log line. Unlike FSDP2,
+activation checkpointing stays off unless `fsdp.activation_checkpointing: true`
+turns it on, and then covers FLUX.1 and Ideogram-4 only: Primus checkpoints
+their blocks itself, and AutoModel skips its own checkpointing on Megatron-FSDP,
+so any other model stops after wrapping. `selective` is refused. Checkpoint
+saving is untested on this path. Runs so far are on one MI355X node with
+synthetic data: FLUX.1-schnell and Ideogram-4 on ZeRO-1. ZeRO-1 keeps a full copy
+of the parameters and gradients on every rank, and a run that does not fit can
+fail on one rank with a hipBLAS allocation error while the others wait in a
+collective until the timeout, which looks like a hang.
+
 Primus features that AutoModel has no setting for are configured in top-level
 `primus_*` sections of the module config, either in the experiment's
 `overrides:` or on the launch line (`primus_profiler.enabled=true`). Primus
@@ -86,6 +105,7 @@ off by default, and the module that implements it documents its remaining keys.
 | `primus_profiler.enabled` | torch profiler traces of a few steady-state steps, one per rank, written under `diffusion_profile/` in the experiment directory |
 | `primus_turbo.fp8_linear`, `primus_turbo.mxfp4_linear`, `primus_te.mxfp4_linear` | FP8 / MXFP4 linear layers. At most one applies, and it turns on `model.transformer_engine_linear`, the AutoModel setting that performs the swap. MXFP4 is experimental. |
 | `primus_turbo.fp8_attention`, `primus_turbo.nondeterministic_attention` | Primus-Turbo kernels behind `model.attention_backend: flash` or `aiter`. No effect with another backend, or with Ideogram-4's variable-length attention. Under context parallelism (`fsdp.cp_size` above 1), `nondeterministic_attention` runs Turbo's sequence-parallel kernel on diffusers' ulysses and ring groups; causal attention, `ulysses_anything` / `ring_anything`, cross-attention and head counts that do not divide by the ulysses degree keep the backend's own path, with a warning, as does every context-parallel call with `fp8_attention`. With `fsdp.activation_checkpointing: selective`, the Turbo attention output is kept rather than recomputed in the backward. |
+| `primus_mfsdp.no_param_reshard` | With `fsdp.backend: megatron_fsdp` below ZeRO-3, gather the parameters once per step instead of releasing them after each block's forward and gathering them again for its backward. |
 | `primus_train.defer_host_sync` | Move the train loop's per-step loss and gradient-norm host syncs to logging steps, so the CPU can queue work ahead of the GPU. Logged values are unchanged; between logging steps the loss and gradient norm stay GPU tensors. If AutoModel's loop no longer matches the rewrite, the patch logs an error naming this setting and the loop runs unchanged. |
 | `primus_ideogram4.varlen_attention` | Ideogram-4 variable-length packed attention. Its backward is non-deterministic: the deterministic kernel needs far more memory at image-sized sequences. |
 | `primus_ideogram4.ac_every: n` | Ideogram-4: checkpoint every nth block instead of all |

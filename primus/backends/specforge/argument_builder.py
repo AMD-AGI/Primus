@@ -10,8 +10,8 @@ Translate Primus module params into a SpecForge command line.
 SpecForge is configured by its own Hydra-style YAML plus dotted ``key=value``
 overrides on the command line. Primus therefore does not rebuild SpecForge's
 config tree; it only points at a SpecForge config and forwards overrides.
-Offline capture is the same shape: Primus builds argv for SpecForge's
-``scripts/prepare_hidden_states.py`` and does not reimplement capture.
+Offline capture wraps SpecForge's preparation script with a temporary plugin
+transport; SpecForge still owns preprocessing and the persisted feature schema.
 
 Params consumed here:
 
@@ -37,7 +37,7 @@ from typing import Any, Mapping, Optional
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 
 DEFAULT_ENTRYPOINT = "specforge"
-DEFAULT_CAPTURE_SCRIPT = "scripts/prepare_hidden_states.py"
+DEFAULT_CAPTURE_MODULE = "primus.backends.specforge.offline_capture"
 DEFAULT_TORCHRUN_MASTER_PORT = "29500"
 CAPTURE_STORE_TRUE = frozenset(
     {
@@ -276,7 +276,7 @@ def build_capture_argv(
     master_addr: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> list[str]:
-    """Build ``torchrun … scripts/prepare_hidden_states.py`` for offline capture.
+    """Build ``torchrun --module …offline_capture`` for offline capture.
 
     ``nnodes=1`` (the default when the kwargs are omitted) uses ``--standalone``.
     Multi-node matches SpecForge train: ``--nnodes/--node_rank/--master_addr/--master_port``.
@@ -287,7 +287,7 @@ def build_capture_argv(
     capture = flatten_overrides(getattr(params, "specforge_capture", None))
     nproc = capture.get("nproc_per_node") or os.environ.get("NPROC_PER_NODE") or "1"
     torchrun = capture.get("torchrun") or "torchrun"
-    script = capture.get("script") or DEFAULT_CAPTURE_SCRIPT
+    script = capture.get("script")
     environ = os.environ if env is None else env
     nodes = int(nnodes) if nnodes is not None else 1
     rank = int(node_rank) if node_rank is not None else 0
@@ -315,7 +315,7 @@ def build_capture_argv(
 
     argv = [
         *launch,
-        str(script),
+        *([str(script)] if script else ["--module", DEFAULT_CAPTURE_MODULE]),
     ]
     if capture.get("sglang_attention_backend") in (None, "", "null"):
         capture["sglang_attention_backend"] = "aiter"

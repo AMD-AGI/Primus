@@ -6,6 +6,6 @@ Build and run instructions are in
 Build from the **Primus repository root**:
 
 ```bash
-docker build -f examples/specforge/docker/Dockerfile \
-  -t primus-specforge:v0.5.14-rocm700-mi35x .
+uv run --no-project python examples/specforge/docker/build.py mi35x --build \
+  --tag primus-specforge:local-mi35x
 ```

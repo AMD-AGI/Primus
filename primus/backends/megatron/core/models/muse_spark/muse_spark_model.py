@@ -11,7 +11,8 @@
   ``MuseSparkTextNormedEmbedding`` does. Megatron's embedding applies dropout
   before it returns, so the norm runs *after* embedding dropout (HF: norm, no
   dropout). This matches HF only with ``hidden_dropout == 0`` (the presets' value);
-  a non-zero ``hidden_dropout`` is rejected at build time when ``embedding_norm`` is set.
+  a non-zero ``hidden_dropout`` is rejected by ``MuseSparkTransformerConfig`` (on every
+  rank, before the build) when ``embedding_norm`` is set.
 * The untied output logits become
   ``final_logit_softcapping * tanh(logits * output_logit_multiplier / final_logit_softcapping)``
   (only the multiplier when ``final_logit_softcapping`` is 0 / unset).
@@ -83,9 +84,10 @@ def built_module_summary(model) -> str:
     if layers:
         layer = layers[0]
         mlp = getattr(layer, "mlp", None)
+        attention = getattr(layer, "self_attention", None)
         parts.update(
             layer=type(layer).__name__,
-            attention=type(getattr(layer, "self_attention", None)).__name__,
+            attention=type(attention).__name__,
             residual=type(getattr(layer, "mlp_bda", None)).__name__,
             mlp=type(mlp).__name__,
             router=type(getattr(mlp, "router", None)).__name__,
@@ -95,7 +97,7 @@ def built_module_summary(model) -> str:
         # sliding in every Muse Spark pattern; on later PP stages the first local layer may
         # be a full-attention layer): TE's (left, right); TE stores (-1, 0) for a causal
         # layer without a window, None if the core attention has no window_size attribute
-        core = getattr(getattr(layer, "self_attention", None), "core_attention", None)
+        core = getattr(attention, "core_attention", None)
         window = getattr(core, "window_size", None)
         parts["window"] = None if window is None else tuple(int(w) for w in window)
     return " ".join(f"{k}={v}" for k, v in parts.items())
@@ -108,11 +110,7 @@ class MuseSparkModel(GPTModel):
         kwargs.setdefault("position_embedding_type", "rope")
         super().__init__(config, *args, **kwargs)
         if self.pre_process and config.embedding_norm:
-            if config.hidden_dropout:
-                raise ValueError(
-                    "Muse Spark: hidden_dropout must be 0 (the embedding norm runs after Megatron's "
-                    f"embedding dropout, which HF does not have); got {config.hidden_dropout}"
-                )
+            # hidden_dropout == 0 is checked by MuseSparkTransformerConfig.__post_init__ (every rank)
             self.embedding.__class__ = MuseSparkNormedEmbedding
             self.embedding.muse_embed_norm_eps = float(config.layernorm_epsilon)
         if config_flag(config, "muse_spark_compile_norms", False) and config_flag(

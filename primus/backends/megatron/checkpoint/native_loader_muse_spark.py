@@ -78,8 +78,13 @@ from primus.backends.megatron.checkpoint.native_loader_qwen3 import (
     _detect_expert_key_style,
 )
 from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
+    HF_FINAL_LOGIT_SOFTCAPPING,
     HF_OUTPUT_MULTIPLIER,
+    HF_POST_NORM_EPS,
+    HF_QK_SCALE_FACTOR,
+    HF_RESIDUAL_GATE_TEMPERATURE,
     MAKE_VOCAB_SIZE_DIVISIBLE_BY,
+    MODEL_TYPE,
     normalize_layer_pattern,
     vocab_size_with_padding,
 )
@@ -92,6 +97,7 @@ from primus.backends.megatron.core.models.muse_spark.memory_check import (
     required_state_bytes_or_raise,
     skip_requested,
 )
+from primus.backends.megatron.core.models.muse_spark.model_types import bool_flag
 from primus.backends.megatron.core.models.muse_spark.number_utils import (
     require_positive_int,
 )
@@ -104,13 +110,14 @@ CONVERT_ITERATION = 1
 # HF text-decoder key prefixes, most specific first: the conditional-generation wrapper
 # (text decoder with vision / audio towers) and a text-only MuseSparkForCausalLM.
 HF_PREFIXES = ("model.language_model.", "model.")
-# Same values as the MuseSparkTransformerConfig field defaults (kept import-free here:
+# Defaults for keys absent from config.json. The Muse Spark ones are the constants that
+# MuseSparkTransformerConfig's field defaults also use (layer_patterns: pure Python, so
 # derive_megatron_fields runs on the CPU without Megatron on the path).
 _CFG_DEFAULTS = {
-    "qk_scale_factor": 5.4730064863875,
-    "final_logit_softcapping": 20.0,
-    "post_norm_eps": 1e-8,
-    "residual_gate_temperature": 0.3,
+    "qk_scale_factor": HF_QK_SCALE_FACTOR,
+    "final_logit_softcapping": HF_FINAL_LOGIT_SOFTCAPPING,
+    "post_norm_eps": HF_POST_NORM_EPS,
+    "residual_gate_temperature": HF_RESIDUAL_GATE_TEMPERATURE,
     # HF config defaults (Megatron args, not MuseSparkTransformerConfig fields)
     "rope_theta": 500000.0,
     "max_position_embeddings": 131072,
@@ -122,7 +129,7 @@ _CFG_DEFAULTS = {
 FP32_SUFFIXES = ("_bda.gate", "mlp.router.weight", "mlp.router.expert_bias")
 
 
-# the converter's log prefix (MuseSparkConverter.family = "muse-spark")
+# the converter's log prefix
 LOG_TAG = "[muse-spark-convert]"
 
 
@@ -149,14 +156,19 @@ def text_config(cfg: dict) -> dict:
     return cfg.get("text_config", cfg)
 
 
+# text_config lists with one entry per decoder layer (cut by cut_to_layers)
+PER_LAYER_KEYS = ("layer_types", "layer_rope_theta", "mlp_layer_types")
+
+
 def cut_to_layers(cfg, num_layers):
     """``cfg`` (an HF config dict) cut to its first ``num_layers`` decoder layers; ``cfg``
     itself when ``num_layers`` is None or the full depth.
 
     Layer i of the cut is the released layer i, so its weights are the released tensors
     (a fine-tune with ``--num_layers 4`` trains such a cut). ``num_hidden_layers`` and
-    every per-layer list of the text config (``layer_types``, ``layer_rope_theta``,
-    ``mlp_layer_types``, ...: a list with one entry per layer) are cut; nothing else changes.
+    the per-layer lists of the text config named in ``PER_LAYER_KEYS`` (``layer_types``,
+    ``layer_rope_theta``, ``mlp_layer_types``) are cut; nothing else changes (other lists,
+    e.g. a multi-id ``eos_token_id``, are kept as they are).
     """
     if num_layers is None:
         return cfg
@@ -167,7 +179,7 @@ def cut_to_layers(cfg, num_layers):
         raise ValueError(f"num_layers={num_layers!r}: the checkpoint has {total} layers (use 1..{total})")
     if n == total:
         return cfg
-    cut = {k: (v[:n] if isinstance(v, list) and len(v) == total else v) for k, v in t.items()}
+    cut = {k: (v[:n] if k in PER_LAYER_KEYS and isinstance(v, list) else v) for k, v in t.items()}
     cut["num_hidden_layers"] = n
     return dict(cfg, text_config=cut) if "text_config" in cfg else cut
 
@@ -191,15 +203,34 @@ def kept_by_depth_cut(name, prefix, num_layers):
 # ---------------------------------------------------------------------------
 # HF config.json -> Megatron args
 # ---------------------------------------------------------------------------
+def _get_or_default(t, key, default):
+    """``t[key]``, or ``default`` when the key is absent or null in config.json (``t.get(key,
+    default)`` would give None for a null and build a model that differs from HF)."""
+    value = t.get(key)
+    return default if value is None else value
+
+
 def derive_megatron_fields(cfg):
     """Translate a Muse Spark HF config dict (top level or ``text_config``) into Megatron arg values."""
     t = text_config(cfg)
     rope = t.get("rope_parameters") or {}
     n = t["num_hidden_layers"]
     layer_types = t.get("layer_types") or ["full_attention"] * n
-    rotary_base = rope.get("rope_theta", t.get("rope_theta", _CFG_DEFAULTS["rope_theta"]))
-    rope_type = rope.get("rope_type", rope.get("type", "default"))
-    if rope_type != "default" or t.get("rope_scaling"):
+    rotary_base = _get_or_default(
+        rope, "rope_theta", _get_or_default(t, "rope_theta", _CFG_DEFAULTS["rope_theta"])
+    )
+    # null rope_type / type is the default (as every other key here)
+    rope_type = _get_or_default(rope, "rope_type", _get_or_default(rope, "type", "default"))
+    # newer transformers may write rope_scaling as an alias of rope_parameters: a default-type
+    # one (no scaling) is accepted; any other type or scaling is refused
+    scaling = t.get("rope_scaling") or {}
+    scaling_type = (
+        _get_or_default(scaling, "rope_type", _get_or_default(scaling, "type", "default"))
+        if isinstance(scaling, dict)
+        else scaling
+    )
+    scaled = isinstance(scaling, dict) and _get_or_default(scaling, "factor", 1.0) != 1.0
+    if rope_type != "default" or scaling_type != "default" or scaled:
         raise ValueError(
             f"Muse Spark: only default RoPE is supported, got rope_type={rope_type!r} "
             f"rope_scaling={t.get('rope_scaling')!r}"
@@ -241,40 +272,43 @@ def derive_megatron_fields(cfg):
             f"model has no linear biases); got attention_bias={t.get('attention_bias')!r} "
             f"mlp_bias={t.get('mlp_bias')!r}"
         )
-    output_multiplier = t.get("output_multiplier", HF_OUTPUT_MULTIPLIER)
+    output_multiplier = _get_or_default(t, "output_multiplier", HF_OUTPUT_MULTIPLIER)
     return dict(
         hidden_size=t["hidden_size"],
         num_attention_heads=t["num_attention_heads"],
         num_layers=n,
-        max_position_embeddings=t.get("max_position_embeddings", _CFG_DEFAULTS["max_position_embeddings"]),
+        max_position_embeddings=_get_or_default(
+            t, "max_position_embeddings", _CFG_DEFAULTS["max_position_embeddings"]
+        ),
         norm_epsilon=t["rms_norm_eps"],
         rotary_base=rotary_base,
         untie_embeddings_and_output_weights=not tied_word_embeddings(cfg),
-        ffn_hidden_size=t.get("intermediate_size", t["moe_intermediate_size"]),
+        ffn_hidden_size=_get_or_default(t, "intermediate_size", t["moe_intermediate_size"]),
         num_query_groups=t["num_key_value_heads"],
-        kv_channels=t.get("head_dim", t["hidden_size"] // t["num_attention_heads"]),
+        kv_channels=_get_or_default(t, "head_dim", t["hidden_size"] // t["num_attention_heads"]),
         add_qkv_bias=False,  # attention_bias is rejected above
         qk_layernorm=True,
         num_experts=t["num_local_experts"],
         moe_router_topk=t["num_experts_per_tok"],
         moe_ffn_hidden_size=t["moe_intermediate_size"],
         moe_latent_size=t["moe_hidden_size"],
-        moe_router_topk_scaling_factor=t.get("routed_scaling_factor", 1.0),
+        moe_router_topk_scaling_factor=_get_or_default(t, "routed_scaling_factor", 1.0),
         # per-layer patterns (1-indexed in Megatron, listed here 0-indexed by layer)
         window_size=((int(sliding_window), 0) if sliding_window else None),  # HF count; config -> TE
         window_attn_skip_freq=[1 if x == "sliding_attention" else 0 for x in layer_types],
         no_rope_freq=[1 if not th else 0 for th in rope_theta],
         # Muse Spark fields (MuseSparkTransformerConfig)
-        post_norm_eps=t.get("post_norm_eps", _CFG_DEFAULTS["post_norm_eps"]),
-        residual_gate_temperature=t.get(
-            "residual_gate_temperature", _CFG_DEFAULTS["residual_gate_temperature"]
+        post_norm_eps=_get_or_default(t, "post_norm_eps", _CFG_DEFAULTS["post_norm_eps"]),
+        residual_gate_temperature=_get_or_default(
+            t, "residual_gate_temperature", _CFG_DEFAULTS["residual_gate_temperature"]
         ),
         # Defaults are MuseSparkTransformerConfig's (the released values), not 1.0.
-        qk_scale_factor=t.get("qk_scale_factor", _CFG_DEFAULTS["qk_scale_factor"]),
+        qk_scale_factor=_get_or_default(t, "qk_scale_factor", _CFG_DEFAULTS["qk_scale_factor"]),
         # HF has one ``output_multiplier`` and applies it twice: to the router logits
         # (MuseSparkTopKRouter.gating) and to the LM-head logits (before the soft-cap).
         moe_router_output_multiplier=output_multiplier,
         output_logit_multiplier=output_multiplier,
+        # a key absent from config.json is the released cap; an explicit null is "no cap", as in HF
         final_logit_softcapping=t.get("final_logit_softcapping", _CFG_DEFAULTS["final_logit_softcapping"]),
     )
 
@@ -353,9 +387,10 @@ MAX_PARAMS_KEY = "native_ckpt_max_params"
 # headroom over the plan: Python / TE objects, the safetensors reader, allocator slack
 MEMORY_MARGIN = 1.05
 _DTYPE_BYTES = {"bf16": 2, "fp16": 2, "fp32": 4}
-# cgroup v1 reports "no limit" as a huge page-aligned value (~2**63): a limit at or above this
-# is not a limit
-_CGROUP_V1_UNLIMITED = 1 << 60
+# cgroup "no limit" threshold (v1 memory.limit_in_bytes reports a huge page-aligned value,
+# ~2**63; v2 memory.max reads "max", which isdigit() already skips): a limit at or above
+# this is not a limit
+_CGROUP_NO_LIMIT_THRESHOLD = 1 << 60
 
 
 def conversion_memory_plan(fields, vocab_size=DEFAULT_VOCAB_SIZE, dtype="bf16"):
@@ -370,8 +405,9 @@ def conversion_memory_plan(fields, vocab_size=DEFAULT_VOCAB_SIZE, dtype="bf16"):
     The save adds no copy: :func:`unsplit_expert_fc1_save` keeps the torch_dist writer from
     cloning the expert weights."""
     width = _DTYPE_BYTES[dtype]  # an unsupported dtype is refused by check_convert_args
-    n = estimate_num_params(fields, vocab_size)  # the same count as the converter cap
-    parts = param_parts(_param_args(fields), vocab_size)
+    a = _param_args(fields)
+    parts = param_parts(a, vocab_size)
+    n = sum(param_split(a, parts=parts))  # the same count as the converter cap (estimate_num_params)
     per_layer = parts["layer_dense"] + parts["layer_expert"]
     plan = {"params": n, "model": n * width, "layer": per_layer * width}
     plan["total"] = int((plan["model"] + plan["layer"]) * MEMORY_MARGIN)
@@ -403,7 +439,8 @@ def _cgroup_dirs(proc_cgroup, root):
             if not path:
                 break
             path = os.path.dirname(path)
-    for d in (root, os.path.join(root, "memory")):  # no /proc/self/cgroup: the roots
+    # always check the hierarchy roots last (the only entries when /proc/self/cgroup has none)
+    for d in (root, os.path.join(root, "memory")):
         if d not in dirs:
             dirs.append(d)
     return dirs
@@ -419,7 +456,7 @@ def _cgroup_free(d):
     ):
         limit = _read_text(os.path.join(d, limit_name), "")
         usage = _read_text(os.path.join(d, usage_name), "")
-        if limit.isdigit() and usage.isdigit() and int(limit) < _CGROUP_V1_UNLIMITED:
+        if limit.isdigit() and usage.isdigit() and int(limit) < _CGROUP_NO_LIMIT_THRESHOLD:
             # the cgroup's usage counts the page cache; its inactive part is reclaimable
             stat = _read_text(os.path.join(d, "memory.stat"), "")
             cache = 0
@@ -537,9 +574,13 @@ def check_convert_args(args, hf_cfg):
     if not vocab_size:
         # Without it Megatron would size the head from the tokenizer (and its own 128*TP
         # padding): a checkpoint whose rows differ from training's, with no error.
-        src = "the HF config" if hf_cfg is not None else "no HF config (args.hf_dir is unset)"
+        if hf_cfg is None:
+            raise ValueError(
+                "Muse Spark native conversion: no HF config was loaded (args.hf_dir is unset); the "
+                "checkpoint vocab_size sizes the embedding and output layer, so the HF config is required"
+            )
         raise ValueError(
-            f"Muse Spark native conversion: {src} has no vocab_size (text_config.vocab_size or the "
+            "Muse Spark native conversion: the HF config has no vocab_size (text_config.vocab_size or the "
             "top level); the checkpoint's vocab sizes the embedding and output layer, so it is required"
         )
     return vocab_size
@@ -555,7 +596,6 @@ def build_margs(cfg_fields, args, hf_cfg=None):
     """
     hf_cfg = _hf_cfg_of(args, hf_cfg)
     vocab_size = check_convert_args(args, hf_cfg)
-    tp = pp = ep = 1  # check_convert_args accepts only TP = PP = EP = 1
 
     from megatron.training.arguments import add_megatron_arguments, validate_args
 
@@ -563,7 +603,7 @@ def build_margs(cfg_fields, args, hf_cfg=None):
     p = add_megatron_arguments(p)
     m = p.parse_args([])
 
-    m.model_type = "muse_spark"
+    m.model_type = MODEL_TYPE
     m.hidden_size = cfg_fields["hidden_size"]
     m.num_attention_heads = cfg_fields["num_attention_heads"]
     m.num_layers = cfg_fields["num_layers"]
@@ -607,7 +647,7 @@ def build_margs(cfg_fields, args, hf_cfg=None):
     m.moe_token_dispatcher_type = "alltoall"
     # convert() saves with grouped-GEMM experts (the training layout, moe_grouped_gemm: true).
     # Without the arg (e.g. the logprob-parity harness), SequentialMLP experts keep exact fp32 math.
-    m.moe_grouped_gemm = bool(getattr(args, "moe_grouped_gemm", False))
+    m.moe_grouped_gemm = bool_flag(getattr(args, "moe_grouped_gemm", None), "moe_grouped_gemm", False)
     m.moe_permute_fusion = False
 
     # the Muse fields (per-layer patterns expanded, scalars as is), built once: set here and set again after validate_args
@@ -624,7 +664,9 @@ def build_margs(cfg_fields, args, hf_cfg=None):
     # make_vocab_size_divisible_by (the module config's 128) is not read, so the converted
     # rows (202048) are the rows training builds at any TP.
     m.make_vocab_size_divisible_by = MAKE_VOCAB_SIZE_DIVISIBLE_BY
-    m.padded_vocab_size = vocab_size_with_padding(m.vocab_size, m.make_vocab_size_divisible_by, tp)
+    m.padded_vocab_size = vocab_size_with_padding(
+        m.vocab_size, m.make_vocab_size_divisible_by, 1
+    )  # TP 1 build
     m.tokenizer_type = "HuggingFaceTokenizer"
     m.tokenizer_model = args.hf_dir
     m.trust_remote_code = False
@@ -633,10 +675,10 @@ def build_margs(cfg_fields, args, hf_cfg=None):
     m.global_batch_size = 1
     m.train_iters = 1
 
-    # the validated sizes (all 1, checked above), not the raw args again
-    m.tensor_model_parallel_size = tp
-    m.pipeline_model_parallel_size = pp
-    m.expert_model_parallel_size = ep
+    # one rank: check_convert_args accepts only TP = PP = EP = 1 (Megatron reshards on load)
+    m.tensor_model_parallel_size = 1
+    m.pipeline_model_parallel_size = 1
+    m.expert_model_parallel_size = 1
     m.expert_tensor_parallel_size = 1
     m.context_parallel_size = 1
     m.sequence_parallel = False
@@ -681,7 +723,7 @@ def build_model(margs):
     """Build :class:`MuseSparkModel` with the shared ``native_convert_common.build_mcore_gpt_model``
     and the model_type this family registers (``muse_spark``). Kept as the converter's
     ``build_model(margs)`` entry point (the logprob-parity harness calls it)."""
-    model = common.build_mcore_gpt_model(margs, family="muse_spark")
+    model = common.build_mcore_gpt_model(margs, family=MODEL_TYPE)  # family registered as the model type
     # .to(dtype) casts every param; the router weight and the residual gates stay fp32
     # (MuseSparkTopKRouter._apply restores the router; the gates restore themselves too).
     return model
@@ -1002,7 +1044,7 @@ def unsplit_expert_fc1_save(model):
     such view before it writes (for the released model, about the size of the experts on
     top of the model). One shard per expert has the same key, global
     shape and expert offset, so the global tensor on disk is the same and a training run
-    (which reads it in halves, at any TP / EP) loads it as before. Only the experts' config
+    (which reads it in halves, at any TP / EP) loads it unchanged. Only the experts' config
     is replaced (a copy with ``gated_linear_unit`` False, read by their
     ``sharded_state_dict`` only; no forward runs in the block), then restored."""
     from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
@@ -1327,7 +1369,7 @@ RUN_ID_PREFIX = "run: "  # the first line of a failure or start record: the laun
 
 def format_run_line():
     """The first line of a failure or start record: this launch's id (``-``: none)."""
-    return f"{RUN_ID_PREFIX}{conversion_run_id() or '-'}\n"
+    return f"{RUN_ID_PREFIX}{conversion_run_tag() or '-'}\n"
 
 
 def format_failure_record(error):
@@ -1345,10 +1387,10 @@ def parse_run_record(text):
     return (None if value in ("", "-") else value), rest.strip()
 
 
-def conversion_run_id():
-    """An id every node of this launch shares and no other launch has, or None: the
-    optional ``PRIMUS_CONVERT_RUN_ID`` environment variable, returned as
-    ``PRIMUS_CONVERT_RUN_ID=<value>`` (None when unset or blank). The user sets one
+def conversion_run_tag():
+    """A tag every node of this launch shares and no other launch has, or None: the
+    optional ``PRIMUS_CONVERT_RUN_ID`` environment variable, returned as the tag
+    ``PRIMUS_CONVERT_RUN_ID=<value>`` that the records store (None when unset or blank). The user sets one
     new value per launch on every node (for example the Slurm job and step ids); the
     launchers do not set it. Without it, a failure of node 0 before the other nodes start
     waiting is seen after ``WAIT_START_S``; one while they wait is seen at once."""
@@ -1392,7 +1434,7 @@ def start_record_path(save_dir):
 
 def hook_before_convert(save_dir):
     """The posttrain hook's step on node 0 just before the conversion: record that this
-    launch's node 0 started (its id, :func:`conversion_run_id`), and remove a previous
+    launch's node 0 started (its id, :func:`conversion_run_tag`), and remove a previous
     launch's failure record. A failure of node 0 after this point, also one before the
     converter runs (convert-phase patches, its import), ends with the hook's lock removed;
     a waiting node that never saw the lock still knows from this record that node 0 started,
@@ -1401,6 +1443,8 @@ def hook_before_convert(save_dir):
     try:
         os.unlink(failure_record_path(save_dir))
     except FileNotFoundError:
+        # No failure record from a previous launch is the normal case (first launch or a
+        # prior success): nothing to remove.
         pass
     path = start_record_path(save_dir)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -1449,7 +1493,8 @@ def wait_for_hook_conversion(
     file server's clock (:func:`_record_age`: an mtime against the mtime of a file written
     now); when that clock cannot be read the record is not taken as this launch's:
 
-    * finished: ``done_file`` and the checkpoint's tracker (``save_dir/{TRACKER}``) exist and
+    * finished: ``done_file`` and the checkpoint's tracker (``save_dir/`` + :data:`TRACKER`,
+      Megatron's tracker file) exist and
       ``lock_file`` does not. Node 0 skips the conversion when the tracker exists and converts
       when it does not; Megatron writes the tracker last, and the hook writes ``done_file``
       before it removes the lock. So a previous run's ``done_file`` without a finished
@@ -1463,7 +1508,7 @@ def wait_for_hook_conversion(
     It raises at once when node 0's conversion writes its failure record
     (:func:`failure_record_path`, also for a refusal before the lock is ever seen, e.g. the size
     cap). A record that was there before the wait began counts at once when it carries this
-    launch's :func:`conversion_run_id` and was written less than ``WAIT_START_S`` ago (node 0
+    launch's :func:`conversion_run_tag` and was written less than ``WAIT_START_S`` ago (node 0
     failed before this node started waiting), and otherwise only once it is rewritten (a
     previous run's record, also one with a reused id).
     It raises when the hook's ``lock_file`` is gone for ``WAIT_LOCK_GONE_S`` without a
@@ -1482,7 +1527,7 @@ def wait_for_hook_conversion(
     lock_seen = gone_since = None
 
     failed = failure_record_path(save_dir)
-    run_id = conversion_run_id()
+    run_id = conversion_run_tag()
     # a record already there when this wait begins: this run's (node 0 failed before this node
     # started waiting) when it carries this launch's run id; else a previous run's, which
     # counts only once node 0 rewrites it
@@ -1559,6 +1604,8 @@ def release_output(save_dir):
     try:
         os.unlink(os.path.join(save_dir, IN_PROGRESS_MARKER))
     except FileNotFoundError:
+        # A missing marker is expected and safe to ignore: the release is idempotent, and the
+        # marker may already be removed or never written.
         pass
 
 
@@ -1570,7 +1617,6 @@ class MuseSparkConverter:
     reshards on load).
     """
 
-    family = "muse-spark"
     # the rendezvous port of the single-process build; distinct from the llama / qwen3
     # (29563) and deepseek (29561) loaders
     master_port = 29571
@@ -1603,7 +1649,10 @@ class MuseSparkConverter:
                 f"Muse Spark: native_ckpt_format {ckpt_format!r} is not supported; the converter writes "
                 "torch_dist (Megatron reshards it to the training TP / PP / EP on load)"
             )
-        refuse_existing_output(save_dir)  # before the build: a rerun fails at once, deletes nothing
+        # raises the refusal of an existing output before the Megatron import and the argument
+        # checks (the module-level convert() only records it; a direct caller of this method
+        # has no earlier check), so a rerun fails at once and deletes nothing
+        refuse_existing_output(save_dir)
         common.ensure_megatron_on_path()
         args = SimpleNamespace(
             hf_dir=hf_dir,
@@ -1691,7 +1740,7 @@ def convert(
         try:
             os.unlink(failed)
         except FileNotFoundError:
-            pass
+            pass  # no previous run's failure record to remove
         return MuseSparkConverter(log=log, num_layers=num_layers).convert(
             hf_dir,
             save_dir,
@@ -1866,15 +1915,15 @@ def cut_record_path(save_dir):
 def _cut_record_check(layers):
     """``ConvertPlan.check_existing``: refuse to reuse a checkpoint converted at another
     depth (its ``<checkpoint>.muse_spark_layers`` record; ``all`` for every layer). A
-    checkpoint without the record (converted elsewhere) is reused as before."""
+    checkpoint without the record (converted elsewhere) is reused without a depth check."""
     want = _cut_record_value(layers)
 
     def check(path):
         got = _read_text(cut_record_path(path), None)
-        if got is None or got.strip() == want:
+        if got is None or got == want:
             return None
         return (
-            f"{path} was converted with {got.strip()} decoder layer(s), but this fine-tune needs "
+            f"{path} was converted with {got} decoder layer(s), but this fine-tune needs "
             f"{want}: remove it, or set native_ckpt_out to another directory"
         )
 
