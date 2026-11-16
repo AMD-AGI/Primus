@@ -2,7 +2,7 @@
 
 MLPerf Training Flux.1-Schnell on **MI355X** via the in-tree diffusion backend and `primus-cli`.
 
-Precision defaults are in `config_common.sh`: MXFP4 `dgrad,wgrad` with A6W4 forward, fused norm/RoPE, FlyDSL attention, local AdamW, and the SDMA all-gather. The 6.1 disclosure defaults are mxfp4 linear, bfloat16 attention, and mxfp4 communication. Target validation loss is `0.586`. An evaluation runs every 262,144 training samples.
+Precision defaults are in `config_common.sh`: MXFP4 `dgrad,wgrad` with A6W4 forward, fused norm/RoPE, FlyDSL attention, local AdamW, and low-precision all-gathers. The single-node config uses SDMA; multinode configs use standard FSDP/NCCL because HIP IPC cannot span hosts. The 6.1 disclosure defaults are mxfp4 linear, bfloat16 attention, and mxfp4 communication. Target validation loss is `0.586`. An evaluation runs every 262,144 training samples.
 
 ## Key files
 
@@ -29,7 +29,7 @@ Precision defaults are in `config_common.sh`: MXFP4 `dgrad,wgrad` with A6W4 forw
 | `config_MI355X_4x8x32.sh` | 4 × 8 | 32 | 1 | 1024 | 0.00025 | 256 steps |
 | `config_MI355X_8x8x32.sh` | 8 × 8 | 32 | 1 | 2048 | 0.00027 | 128 steps |
 
-Eval step count is `262144 / global batch`. The 4-node config switches the forward to FP8 at step 7325. The 8-node config switches at step 4150 and defaults `DP_REPLICATE=2`.
+Eval step count is `262144 / global batch`. The 4-node config switches the forward to FP8 at step 7325. The 8-node config switches at step 4150 and defaults `DP_REPLICATE=2`. FP8 gather scale refresh starts at the forward switch, avoiding its per-step overhead during A6W4 training. Setting `FLUX_FP8_ALL_GATHER=0` uses bf16 weight gather after the switch instead.
 
 ## Data
 
