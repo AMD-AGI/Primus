@@ -72,8 +72,12 @@ modules:
       use_distributed_optimizer: true
       overlap_grad_reduce: true
       overlap_param_gather: true
-      # LM-head weight gradients run in the pipeline drain; the extra memory
-      # lands on the last stage, which has the most headroom.
+      # LM-head weight gradients run in the pipeline drain. Until then the last
+      # stage holds every microbatch's [seq, vocab] output gradient, ~1.6 GB
+      # each at 4096 tokens, so ~52 GB at 32 microbatches per pipeline; the last
+      # stage peaked at 239 of 288 GiB per GPU. More microbatches per pipeline
+      # need more: wgrad_deferral_limit: N defers only the first N, and false
+      # defers none.
       defer_embedding_wgrad_compute: true
       # The first step builds and autotunes Turbo's FP8 GEMMs (FlyDSL) at one
       # stage after another, and stage 0 waits for its first gradient meanwhile.
