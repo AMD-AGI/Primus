@@ -230,7 +230,9 @@ def _next_norm_weight_ready(norm, x) -> bool:
     if isinstance(norm.weight, DTensor):
         return False
     if norm._forward_pre_hooks:
-        from primus.backends.megatron.core.transformer.muse_spark.moe import _run_forward_pre_hooks
+        from primus.backends.megatron.core.transformer.muse_spark.moe import (
+            _run_forward_pre_hooks,
+        )
 
         _run_forward_pre_hooks(norm, x)
     return True
@@ -289,8 +291,14 @@ class MuseSparkGatedResidual(nn.Module):
             nxt = self.__dict__.get("_next_norm")
             if nxt is not None and _next_norm_weight_ready(nxt, residual):
                 h, y = compiled(gated_residual_norm_math)(
-                    branch, residual, self.gate, post_weight, self.temperature, self.post_norm.eps,
-                    nxt.weight, nxt.eps,
+                    branch,
+                    residual,
+                    self.gate,
+                    post_weight,
+                    self.temperature,
+                    self.post_norm.eps,
+                    nxt.weight,
+                    nxt.eps,
                 )
                 nxt.__dict__["_handed_output"] = (h, y)
                 return h

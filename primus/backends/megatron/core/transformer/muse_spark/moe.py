@@ -46,14 +46,14 @@ from primus.backends.megatron.core.models.muse_spark.model_types import (
     config_flag,
     mark_muse_spark_param,
 )
+from primus.backends.megatron.core.transformer.muse_spark.compiled_norms import (
+    compiled,
+    swiglu_math,
+)
 from primus.backends.megatron.core.transformer.muse_spark.norms import (
     MuseSparkCenteredRMSNorm,
     MuseSparkInputScaledRMSNorm,
     apply_keeping_fp32,
-)
-from primus.backends.megatron.core.transformer.muse_spark.compiled_norms import (
-    compiled,
-    swiglu_math,
 )
 from primus.backends.megatron.core.transformer.muse_spark.post_expert_norm import (
     post_expert_norm_probs,
