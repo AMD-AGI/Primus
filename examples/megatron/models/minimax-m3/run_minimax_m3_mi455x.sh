@@ -46,7 +46,10 @@ export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 # flydsl or eager (the PyTorch reference)
 export PRIMUS_MSA_BACKEND=${PRIMUS_MSA_BACKEND:-flydsl}
-export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-1}
+# 0: no recomputation. Every proxy shape the launcher allows fits without it (one GPU: 234 of 432 GB),
+# and on M3.1-Flash the recomputed first layer is an MSA layer, so recomputing it repeats its
+# whole forward (projections, indexer, MSA kernels) inside the backward.
+export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-0}
 # Primus-Turbo attention for the three dense layers. Empty: on with the flydsl backend when the
 # Primus-Turbo in use has the gfx1250 head-dim-128 kernels (see README.md), off otherwise; decided in
 # the container, below. The default backend fails in fmha_bwd here.
