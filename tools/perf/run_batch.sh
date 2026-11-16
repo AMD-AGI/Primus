@@ -57,8 +57,8 @@
 #   `diffusion` backend above; batch
 #   sizes, models and step_timeout come from that config; the runner sets no
 #   time limit on this run). It uses
-#   DOCKER_IMAGE, which must contain /workspace/AMDiffusionBenchmark and
-#   /workspace/DLRMBenchmark (rocm/primus images do), and writes its results
+#   DOCKER_IMAGE, which must contain /workspace/DLRMBenchmark (and
+#   /workspace/AMDiffusionBenchmark when diffusion models are enabled), and writes its results
 #   folder under $RESULT_DIR/diffusion_dlrm. For example, everything the
 #   PyTorch image runs:
 #     BACKEND=megatron,torchtitan,megatron_bridge,diffusion,diffusion_dlrm
