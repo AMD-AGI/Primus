@@ -8,6 +8,11 @@ from functools import partial
 
 from primus.core.utils.module_utils import log_rank_0
 
+# AMD's mlperf-common (github.com/AMD-AGI/mlperf-common), then primus_mllog, its name before
+# the rename, which images up to rocm/primus:v26.9 ship. The mlperf_common those images
+# also ship is NVIDIA's and has none of these names.
+MLPERF_COMMON_MODULES = ["mlperf_common", "primus_mllog"]
+
 
 def lazy_import(paths, symbol, log_prefix="[Primus]"):
     """
@@ -26,11 +31,11 @@ def lazy_import(paths, symbol, log_prefix="[Primus]"):
     """
     for path in paths:
         try:
-            mod = importlib.import_module(path)
-            log_rank_0(f"{log_prefix} Loaded {symbol} from {path}")
-            return getattr(mod, symbol)
-        except ImportError:
+            value = getattr(importlib.import_module(path), symbol)
+        except (ImportError, AttributeError):
             continue
+        log_rank_0(f"{log_prefix} Loaded {symbol} from {path}")
+        return value
     raise ImportError(f"{log_prefix} {symbol} not found in any of: {paths}")
 
 

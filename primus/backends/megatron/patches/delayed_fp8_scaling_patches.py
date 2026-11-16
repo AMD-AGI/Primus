@@ -269,7 +269,6 @@ def patch_grad_zero_and_data_prefetch(ctx: PatchContext):
         iteration=None,
         **train_kwargs,  # pg_collection / p2p_communicator on newer Megatron
     ):
-        # Middle pipeline stages read no data: their data_iterator is None.
         if "iter" not in _prefetch_state and tp_size == 1 and data_iterator is not None:
             if isinstance(data_iterator, (list, tuple)):
                 # Virtual pipeline parallel passes a list of per-chunk iterators,

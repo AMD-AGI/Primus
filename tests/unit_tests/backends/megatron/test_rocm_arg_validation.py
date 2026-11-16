@@ -11,6 +11,7 @@ import pytest
 from primus.backends.megatron.patches.args import rocm_arg_validation
 from primus.backends.megatron.patches.args.rocm_arg_validation import (
     ALLOC_CONF_ENVS,
+    validate_cross_entropy_exclusivity,
     validate_turbo_fp8_permute,
     validate_turbo_grouped_gemm_with_muon,
     validate_turbo_grouped_gemm_without_padding,
@@ -30,6 +31,20 @@ def _no_padding_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_cross_entropy_exclusivity_rejects_turbo_with_deferred():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_cross_entropy_exclusivity(
+            SimpleNamespace(deferred_cross_entropy=True, use_turbo_cross_entropy=True)
+        )
+
+
+@pytest.mark.parametrize(("deferred", "turbo"), [(True, False), (False, True), (False, False)])
+def test_cross_entropy_exclusivity_allows_one(deferred, turbo):
+    validate_cross_entropy_exclusivity(
+        SimpleNamespace(deferred_cross_entropy=deferred, use_turbo_cross_entropy=turbo)
+    )
 
 
 def test_turbo_grouped_gemm_without_padding_accepts_tensorwise_fp8():

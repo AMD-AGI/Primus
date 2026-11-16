@@ -3,7 +3,11 @@
 # Checked-in SpecForge YAML keeps 127.0.0.1. Primus rewrites Mooncake/SGLang
 # endpoints to the capture-rank-0 IP after allocate (HEAD_IP is rank 0 only).
 #
-# Shape is C capture nodes + T trainer nodes (defaults 1+1). Each capture node
+# Single host: PRIMUS_SPECFORGE_SINGLE_NODE=true SERVER_GPUS=0 TRAINER_GPUS=1,
+# then use -N 1 --gres=gpu:2 (or container/direct). Both role node counts stay 1.
+# See docs/04-technical-guides/specforge/running.md for the full command.
+#
+# Default shape is C capture nodes + T trainer nodes (defaults 1+1). Each capture node
 # runs SERVER_COUNT SGLang servers (GPU). Rank 0 also runs Mooncake and the
 # SpecForge producer, which is a CPU HTTP client — not the capture server.
 # Each trainer node runs trainer_nproc consumer ranks.
@@ -43,6 +47,7 @@ modules:
       output_dir: ${OUTPUT_DIR}
 
       specforge_online:
+        single_node: ${PRIMUS_SPECFORGE_SINGLE_NODE:false}
         run_id: ${RUN_ID}
         run_root: ${RUN_ROOT}
         consumer_state_dir: ${CONSUMER_STATE_DIR}

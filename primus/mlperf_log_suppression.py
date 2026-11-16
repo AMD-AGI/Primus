@@ -73,6 +73,7 @@ QUIET_LOGGER_NAMES = (
     # through loguru instead, which we drop at the FD level below).
     "primus",
     "primus_turbo",
+    "mlperf_common",
     "primus_mllog",
     # TransformerEngine import / RoPE banners that use stdlib logging.
     "transformer_engine",
