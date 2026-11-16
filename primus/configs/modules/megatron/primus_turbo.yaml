@@ -65,6 +65,11 @@ use_turbo_grouped_gemm: false
 # Fuse the grouped MLP chain (fc1 + GLU + fc2, including WGRAD) into Primus-Turbo's
 # fused grouped MLP op.
 turbo_fused_grouped_gemm: false
+# The Turbo grouped-GEMM expert wgrads accumulate straight into the weights' main_grad instead of a
+# separate DDP add (Turbo's fuse_bgrad_accum_pattern). null follows gradient_accumulation_fusion;
+# true / false set it for the grouped experts alone, e.g. true with gradient_accumulation_fusion: false
+# keeps the dense wgrads on their separate add.
+turbo_grouped_gemm_wgrad_accum_fusion: null
 # Hand the fused grouped MLP its input and output gradient already in FP8 (tensorwise current
 # scaling only): the DeepEP dispatcher quantizes the dispatched tokens before permute, and the
 # combine gradient before un-permute's backward, instead of their topk-times larger permuted
