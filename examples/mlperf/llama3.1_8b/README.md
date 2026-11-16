@@ -106,6 +106,7 @@ cd /workspace/Primus
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>
+export PRIMUS_REBUILD_RCCL=1   # see the gradient ReduceScatter note below
 source config_MI355X_1x8x1.sh
 bash run_and_time.sh
 ```
@@ -116,5 +117,6 @@ bash run_and_time.sh
 - `RUN_RUNTIME_TUNABLES=1` runs `runtime_tunables.sh` on the host before each trial (some steps need `sudo`).
 - `run_and_time.sh` sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to the file in `hipblaslt_tuning/` for the image's hipBLASLt build (`HIPBLASLT_VERSION_TWEAK`), if there is one. It tunes the output layer's weight-gradient GEMM (25.8 to 24.0 ms on `v26.9`). Set the variable yourself, empty for hipBLASLt's own choice, to override.
 - `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma` (default) runs the parameter all-gather on the SDMA copy engines. It needs `--ulimit nofile=1048576:1048576`, `NCCL_CTA_POLICY` unset and `GPU_MAX_HW_QUEUES=4` (set in the config). Set it to `nccl` for RCCL's all-gather.
+- `MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma` (default) runs the gradient reduce-scatter on the same communicator, so it needs the parameter all-gather setting above. Set it to `disabled` for Megatron's reduce-scatter. The copy engines run it only with an RCCL that has copy-engine reduce-scatter (ROCm/rocm-systems#15042); the RCCL 2.32.3 in `rocm/primus:v26.9` does not, and runs it with symmetric-memory kernels instead. `PRIMUS_REBUILD_RCCL=1` (the `run_with_docker.sh` default) builds that RCCL when the container starts (about 70 s; needs network access) through `runner/helpers/patches/12_rebuild_rccl.sh`. Set `PRIMUS_RCCL_REF` for another commit. On 8x MI355X it is 6.4 ms per step faster (760.1 vs 766.5 ms).
 - `PRIMUS_TURBO_CROSS_ENTROPY=true` (default) uses Primus-Turbo's fused cross entropy. Set it to `false` for TE's; `PRIMUS_DEFERRED_CROSS_ENTROPY=true` then defers TE's gradient to backward. The two cannot both be on.
 - For an older Primus-Turbo without `mlp_fp4` or `rope` ops, set `PRIMUS_TURBO_FUSED_DENSE_MLP=false` and `PRIMUS_TURBO_FLYDSL_ROPE=0`.
