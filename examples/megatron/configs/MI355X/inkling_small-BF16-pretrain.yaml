@@ -9,8 +9,12 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # the network. Each GPU holds 1/8 of the experts of ~10 MoE layers, the same
 # load as the single-node 12L proxy. AdamW, random init, mock data.
 #
-# Turbo off, with the LM-head weight gradient deferred to the pipeline drain
-# (defer_embedding_wgrad_compute: true), as in the measured four-node run.
+# Primus-Turbo kernels in BF16, with the Turbo settings of
+# inkling_large-BF16-pretrain.yaml (grouped GEMM, GEMM, DeepEP and RMSNorm).
+# On four nodes they are 3.7% faster than Turbo off (13.7 s against 14.2 s
+# per step), with the same loss at step 50. The LM-head weight gradient is
+# deferred to the pipeline drain (defer_embedding_wgrad_compute: true). Needs
+# Primus-Turbo 0.6 or later (rocm/primus:v26.9).
 #
 # Stage split 10/11/12/9: stage 0 keeps 4 microbatches of activations alive
 # under 1F1B and stage 1 keeps 3, so they get fewer layers; the last stage also
@@ -103,12 +107,20 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # turbo off: TE grouped GEMM + alltoall dispatcher
-      enable_primus_turbo: false
+      # Turbo grouped GEMM, RMSNorm, DeepEP dispatcher and GEMM (attention,
+      # MLPs, shared experts). Inkling keeps its own attention core, and the
+      # LM head stays Megatron's. DeepEP stays inside a node at EP=8; it needs
+      # fp32 router probs and switches the dispatcher to flex.
+      # PRIMUS_TURBO=false uses TE + alltoall.
+      enable_primus_turbo: ${PRIMUS_TURBO:true}
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
-      use_turbo_deepep: false
-      use_turbo_rms_norm: false
+      use_turbo_grouped_gemm: ${PRIMUS_TURBO:true}
+      use_turbo_deepep: ${PRIMUS_TURBO:true}
+      # 64 CUs: 0.8% faster than the default 32 at EP 8 (16 is slower; 160 is about
+      # the same as 64 and uses 2 GB more per GPU)
+      turbo_deepep_num_cu: 64
+      use_turbo_rms_norm: ${PRIMUS_TURBO:true}
+      use_turbo_gemm: ${PRIMUS_TURBO:true}
+      moe_router_dtype: fp32
       moe_grouped_gemm: true
-      moe_token_dispatcher_type: alltoall
       moe_permute_fusion: false

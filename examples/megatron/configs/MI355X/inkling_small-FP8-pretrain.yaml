@@ -9,11 +9,12 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # the network. Each GPU holds 1/8 of the experts of ~10 MoE layers, the same
 # load as the single-node 12L proxy. AdamW, random init, mock data.
 #
-# inkling_small-BF16-pretrain.yaml with the Turbo and FP8 settings
-# of inkling_large-FP8-pretrain.yaml: Turbo grouped GEMM, GEMM, DeepEP and
-# RMSNorm, and FP8 tensorwise GEMMs. Needs Primus-Turbo 0.6 or later
-# (rocm/primus:v26.9). The first step builds and autotunes Turbo's FP8 GEMMs
-# with FlyDSL at each stage in turn, so it takes far longer than the others.
+# inkling_small-BF16-pretrain.yaml with FP8 tensorwise GEMMs, as in
+# inkling_large_6L-FP8-pretrain.yaml, run by Turbo's FP8 GEMM and grouped
+# GEMM. Needs Primus-Turbo 0.6 or later (rocm/primus:v26.9). The first step
+# builds and autotunes Turbo's FP8 GEMMs with FlyDSL at each stage in turn, so
+# it takes far longer than the others, and distributed_timeout_minutes is 300
+# to allow for it.
 #
 # Stage split 10/11/12/9: stage 0 keeps 4 microbatches of activations alive
 # under 1F1B and stage 1 keeps 3, so they get fewer layers; the last stage also
