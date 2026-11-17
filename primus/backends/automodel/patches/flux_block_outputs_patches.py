@@ -3,17 +3,17 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Register the un-aliased FLUX single-stream block outputs.
+"""Register the fresh FLUX single-stream block outputs.
 
-Gated on ``primus_perf.flux_unalias_block_outputs`` for FLUX runs; see
-``models/flux/block_outputs.py``.
+Gated on ``primus_perf.flux_single_block_fresh_outputs``; skipped when the config
+names a transformer other than FLUX. See ``models/flux/block_outputs.py``.
 """
 
 from primus.backends.automodel import options
 from primus.backends.automodel.patches._conditions import transformer_is
 from primus.core.patches import PatchContext, register_patch
 
-options.declare("primus_perf", "flux_unalias_block_outputs")
+options.declare("primus_perf", "flux_single_block_fresh_outputs")
 
 _is_flux = transformer_is("FluxTransformer2DModel")
 
@@ -25,10 +25,10 @@ def _enabled(ctx: PatchContext) -> bool:
 
 
 @register_patch(
-    "automodel.models.flux.unalias_block_outputs",
+    "automodel.models.flux.single_block_fresh_outputs",
     backend="automodel",
     phase="before_train",
-    description="FLUX single-stream blocks return fresh tensors (primus_perf.flux_unalias_block_outputs)",
+    description="FLUX single-stream blocks return fresh tensors (primus_perf.flux_single_block_fresh_outputs)",
     condition=_enabled,
     priority=80,
 )

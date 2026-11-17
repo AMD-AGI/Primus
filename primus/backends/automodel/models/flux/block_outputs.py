@@ -24,54 +24,71 @@ WHAT:
   unpatched block's; along the block chain they differ by at most one BF16
   rounding step, because the next block receives contiguous inputs instead of
   strided views and Inductor compiles slightly different kernels for it. The
-  wrapper calls diffusers' own forward, so no diffusers code is copied. When
-  another patch's forward already returns two fresh tensors (it sets
-  ``FRESH_OUTPUTS_ATTR`` on the block class), the wrapper passes them on
-  uncloned: a clone of an opaque op's output would be a real copy.
+  wrapper calls diffusers' own forward, so no diffusers code is copied.
+
+  Meant for compiled blocks (``fsdp.enable_compile: true``). Without
+  compilation the clones are real copies, one [batch, sequence, hidden]
+  tensor per single-stream block, and nothing is saved.
+
+  Declines, with a warning, when the block class is not importable or its
+  forward does not take ``encoder_hidden_states``: older diffusers return one
+  tensor from this block, not the text and image pair.
 
 Settings (module config, ``primus_perf:`` section):
-    flux_unalias_block_outputs: false      apply this patch
+    flux_single_block_fresh_outputs: false      apply this patch
 """
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 
 from primus.backends.automodel import options
 
 logger = logging.getLogger(__name__)
 
-_PATCHED_ATTR = "_primus_unaliased_outputs"
-_SECTION = "primus_perf"
-# Set on FluxSingleTransformerBlock by a patch whose forward returns two fresh tensors.
-FRESH_OUTPUTS_ATTR = "_primus_fresh_outputs"
+_LOG_PREFIX = "[PrimusFluxBlockOutputs]"
+_PATCHED_ATTR = "_primus_single_block_fresh_outputs"
 
 
 def is_enabled() -> bool:
-    return options.flag(f"{_SECTION}.flux_unalias_block_outputs")
+    return options.flag("primus_perf.flux_single_block_fresh_outputs")
 
 
 def install() -> bool:
-    from diffusers.models.transformers.transformer_flux import (
-        FluxSingleTransformerBlock,
-    )
+    """Wrap ``FluxSingleTransformerBlock.forward`` to clone its two outputs.
+
+    Idempotent: returns True if it is already wrapped. Returns False, and
+    changes nothing, when the block is not importable or its forward does not
+    return the text and image pair.
+    """
+    try:
+        from diffusers.models.transformers.transformer_flux import (
+            FluxSingleTransformerBlock,
+        )
+    except ImportError as exc:
+        logger.warning(
+            "%s FluxSingleTransformerBlock is not importable (%s); not installed", _LOG_PREFIX, exc
+        )
+        return False
 
     if getattr(FluxSingleTransformerBlock, _PATCHED_ATTR, False):
         return True
     orig = FluxSingleTransformerBlock.forward
+    if "encoder_hidden_states" not in inspect.signature(orig).parameters:
+        logger.warning(
+            "%s FluxSingleTransformerBlock.forward takes no encoder_hidden_states, so it does not "
+            "return the text and image pair; not installed",
+            _LOG_PREFIX,
+        )
+        return False
 
     @functools.wraps(orig)
     def forward(self, *args, **kwargs):
         encoder_hidden_states, hidden_states = orig(self, *args, **kwargs)
-        if (
-            getattr(type(self), FRESH_OUTPUTS_ATTR, False)
-            and encoder_hidden_states._base is None
-            and hidden_states._base is None
-        ):
-            return encoder_hidden_states, hidden_states
         return encoder_hidden_states.clone(), hidden_states.clone()
 
     FluxSingleTransformerBlock.forward = forward
     setattr(FluxSingleTransformerBlock, _PATCHED_ATTR, True)
-    logger.info("[PrimusFluxBlockOutputs] single-stream blocks return fresh tensors, not slices of one.")
+    logger.info("%s single-stream blocks return fresh tensors, not slices of one.", _LOG_PREFIX)
     return True
