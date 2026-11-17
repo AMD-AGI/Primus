@@ -92,6 +92,10 @@ class MSAIndexerLossAutoScaler(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor):
         (indexer_loss,) = ctx.saved_tensors
         scale = MSAIndexerLossAutoScaler.current_loss_scale(indexer_loss)
+        if scale.numel() == 1 and indexer_loss.numel() == 1:
+            # ones * scale, summed back to the loss's shape, is scale exactly. The gradient
+            # aliases the shared scale tensor: its consumers must not modify it in place.
+            return grad_output, scale.reshape(indexer_loss.shape)
         return grad_output, torch.ones_like(indexer_loss) * scale
 
     @staticmethod

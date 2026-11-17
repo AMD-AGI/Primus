@@ -127,13 +127,13 @@ class MinimaxM3Indexer(MegatronModule):
 
             self.fused_select = fused_select_blocks
 
-    def _project(self, hidden_states: torch.Tensor, linear, norm, num_heads: int) -> torch.Tensor:
-        """``[sq, b, h]`` -> normalised ``[sq, b, num_heads, index_head_dim]``."""
+    def _project(self, hidden_states: torch.Tensor, linear, num_heads: int) -> torch.Tensor:
+        """``[sq, b, h]`` -> un-normalised ``[sq, b, num_heads, index_head_dim]``."""
         out = linear(hidden_states)
         if isinstance(out, tuple):  # Megatron linears return (output, bias)
             out = out[0]
         sq, b = out.shape[0], out.shape[1]
-        return norm(out.view(sq, b, num_heads, self.index_head_dim))
+        return out.view(sq, b, num_heads, self.index_head_dim)
 
     def forward(
         self,
@@ -154,19 +154,36 @@ class MinimaxM3Indexer(MegatronModule):
             loss consumes, and the flydsl backend's ``BlockPlan`` of the
             selection for the attention backward to reuse (None otherwise).
         """
-        index_q = self._project(
-            hidden_states, self.linear_index_q, self.index_q_layernorm, self.index_n_heads
-        )
-        index_k = self._project(hidden_states, self.linear_index_k, self.index_k_layernorm, 1)
-
+        rope = None
         if rotary_pos_emb is not None:
-            # Partial rope: freqs cover the first rotary_dim of index_head_dim and
-            # the tail passes through, which is the reference's
-            # `cos[..., :head_dim]` slice. Called unfused on purpose -- a
-            # reference implementation should not depend on apply_rope_fusion.
             rope = rotary_pos_emb if isinstance(rotary_pos_emb, RopeTables) else RopeTables(rotary_pos_emb)
-            index_q = rope.apply(index_q, self.config.rotary_interleaved)
-            index_k = rope.apply(index_k, self.config.rotary_interleaved)
+        index_q = self._project(hidden_states, self.linear_index_q, self.index_n_heads)
+        index_k = self._project(hidden_states, self.linear_index_k, 1)
+        interleaved = self.config.rotary_interleaved
+        fused = False
+        if self.config.msa_fused_qk_norm_rope:
+            # imported only when switched on: the eager backend needs no Triton
+            from primus.backends.megatron.core.transformer.minimax_m3 import (
+                qk_norm_rope,
+            )
+
+            fused = qk_norm_rope.norm_rope_ok(
+                index_q, self.index_q_layernorm, rope, interleaved
+            ) and qk_norm_rope.norm_rope_ok(index_k, self.index_k_layernorm, rope, interleaved)
+        if fused:
+            # norm + rope in one pass each way, bitwise (qk_norm_rope.py)
+            index_q = qk_norm_rope.norm_rope(index_q, self.index_q_layernorm, rope)
+            index_k = qk_norm_rope.norm_rope(index_k, self.index_k_layernorm, rope)
+        else:
+            index_q = self.index_q_layernorm(index_q)
+            index_k = self.index_k_layernorm(index_k)
+            if rope is not None:
+                # Partial rope: freqs cover the first rotary_dim of index_head_dim and
+                # the tail passes through, which is the reference's
+                # `cos[..., :head_dim]` slice. RopeTables, not apply_rope_fusion -- a
+                # reference implementation should not depend on apply_rope_fusion.
+                index_q = rope.apply(index_q, interleaved)
+                index_k = rope.apply(index_k, interleaved)
 
         if self.fused_select is not None:
             # [sq, b, n, d] straight in: the kernel never forms the [b, n, sq, sk] scores.

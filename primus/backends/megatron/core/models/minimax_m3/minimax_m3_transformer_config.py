@@ -151,6 +151,21 @@ class MSATransformerConfig(TransformerConfig):
     msa_backend: str = "eager"
     """Which kernel computes the block-sparse attention: 'eager' or 'flydsl'."""
 
+    msa_fused_qk_norm_rope: bool = False
+    """The attention's q/k split, q/k RMSNorm and partial RoPE, and the indexer's RMSNorm + RoPE,
+    as one Triton pass each way (qk_norm_rope.py). Bit-identical to the eager ops, checked on
+    first use; off for shapes or modules it does not cover."""
+
+    msa_fused_indexer_loss: bool = False
+    """The sparse indexer loss in a few Triton launches (indexer_loss_fused.py). Bit-identical to
+    compute_sparse_indexer_loss, checked on first use."""
+
+    msa_fused_select_plan: bool = False
+    """flydsl backend: the indexer's block selection and the backward's BlockPlan in a few Triton
+    launches (flydsl/select_plan.py) instead of the eager ops and build_block_plan. Integer
+    bookkeeping, identical by construction; shapes past select_plan.supported() keep the eager
+    path."""
+
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not
     differentiable, so this loss is the only gradient its projections ever receive."""
