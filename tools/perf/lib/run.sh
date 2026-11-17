@@ -32,12 +32,42 @@ check_batch_inputs() {
         echo "[ERROR] primus-cli not found or not executable at: $cli_abs" >&2
         return 1
     fi
+    perf_prepare_cli_config || return 1
 
     if [ -n "$TRAIN_STEPS" ]; then
         if ! [[ "$TRAIN_STEPS" =~ ^[1-9][0-9]*$ ]]; then
             echo "[ERROR] TRAIN_STEPS must be a positive integer, got: '$TRAIN_STEPS'" >&2
             return 1
         fi
+    fi
+}
+
+# The configuration primus-cli loads (`primus-cli --config`): PRIMUS_CLI_CONFIG,
+# by default tools/perf/primus-cli.yaml -- runner/.primus.yaml without docker's
+# --privileged and CAP_SYS_ADMIN, which some clusters refuse. Empty leaves the
+# choice to primus-cli (~/.primus.yaml, else runner/.primus.yaml). Sets
+# PERF_CLI_CONFIG (absolute, or empty) and PERF_CLI_CONFIG_ARGS.
+PERF_CLI_CONFIG=""
+PERF_CLI_CONFIG_ARGS=()
+
+perf_prepare_cli_config() {
+    PERF_CLI_CONFIG=""
+    PERF_CLI_CONFIG_ARGS=()
+    [ -n "${PRIMUS_CLI_CONFIG:-}" ] || return 0
+    PERF_CLI_CONFIG=$(perf_resolve_path "$PRIMUS_CLI_CONFIG")
+    if [ ! -f "$PERF_CLI_CONFIG" ]; then
+        echo "[ERROR] PRIMUS_CLI_CONFIG does not exist: $PERF_CLI_CONFIG" >&2
+        return 1
+    fi
+    PERF_CLI_CONFIG_ARGS=(--config "$PERF_CLI_CONFIG")
+}
+
+# primus-cli's configuration as the batch configuration shows it.
+perf_cli_config_text() {
+    if [ -n "$PERF_CLI_CONFIG" ]; then
+        echo "$PERF_CLI_CONFIG"
+    else
+        echo "<primus-cli default: ~/.primus.yaml, else runner/.primus.yaml>"
     fi
 }
 
@@ -162,6 +192,20 @@ extract_config_fields() {
             SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.seq_length" "$config_file")
             STEPS=$(yq_or_na ".modules.$MODULE.overrides.train_iters" "$config_file")
             ;;
+        diffusion)
+            # The benchmark configs write these as ${LOCAL_BATCH_SIZE:16},
+            # ${MAX_STEPS:100}: the banner shows the value the run will use.
+            # GBS is the samples of one optimizer step: the local batch of each
+            # data-parallel rank (sequence parallel ranks share one) times the
+            # gradient accumulation steps.
+            MBS=$(perf_config_value ".modules.$MODULE.overrides.training.local_batch_size" "$config_file")
+            STEPS=$(perf_config_value ".modules.$MODULE.overrides.training.steps" "$config_file")
+            SEQ_LEN="N/A"
+            GBS="N/A"
+            if [[ "$MBS" =~ ^[0-9]+$ ]]; then
+                GBS=$(diffusion_gbs "$config_file" "$MBS")
+            fi
+            ;;
         *)
             MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
             GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
@@ -183,6 +227,36 @@ torchtitan_default_gbs() {
         fi
     done
     echo $(( mbs * NNODES * ${GPUS_PER_NODE:-8} / divisor ))
+}
+
+# A diffusion config's global batch: MBS per data-parallel rank (world size
+# over parallelism.sp_size) times training.gradient_accumulation_steps.
+diffusion_gbs() {
+    local config_file="$1" mbs="$2" sp accum
+    sp=$(perf_config_value ".modules.$MODULE.overrides.parallelism.sp_size" "$config_file")
+    accum=$(perf_config_value ".modules.$MODULE.overrides.training.gradient_accumulation_steps" "$config_file")
+    [[ "$sp" =~ ^[1-9][0-9]*$ ]] || sp=1
+    [[ "$accum" =~ ^[1-9][0-9]*$ ]] || accum=1
+    echo $(( mbs * NNODES * ${GPUS_PER_NODE:-8} * accum / sp ))
+}
+
+# A config value as the run will see it. A `${VAR:default}` placeholder gives
+# VAR's value where the run gets it -- from EXTRA_ENV, from this shell in
+# direct mode, or for a PRIMUS_* name, which primus-cli forwards into its
+# container -- and the default otherwise. "N/A" when the key is absent.
+perf_config_value() {
+    local value name default
+    value=$(yq_or_na "$1" "$2")
+    if [[ "$value" =~ ^\$\{([A-Za-z_][A-Za-z0-9_]*):([^}]*)\}$ ]]; then
+        name="${BASH_REMATCH[1]}"
+        default="${BASH_REMATCH[2]}"
+        value="$default"
+        if [ -n "${!name+x}" ] && { perf_extra_env_sets "$name" || ! perf_uses_containers || [[ "$name" == PRIMUS_* ]]; }; then
+            value="${!name}"
+        fi
+        [ -n "$value" ] || value="N/A"
+    fi
+    echo "$value"
 }
 
 # Everything the loop needs to know about one config. Sets config_rel,
@@ -232,9 +306,11 @@ run_log_name() {
 # recipes warm the learning rate up for a fixed number of iterations and, with
 # lr_decay_iters unset, decay it over train_iters, so an override no longer
 # than the warmup fails Megatron's lr_warmup_steps < lr_decay_steps assertion
-# before the first step. diffusion_dlrm's models keep the num_iterations of its
+# before the first step. The diffusion benchmark configs' training.steps is
+# part of the benchmark's definition (five warmup steps are left out of the
+# throughput), and diffusion_dlrm's models keep the num_iterations of its
 # diffusion_bench config.
-PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion_dlrm"
+PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion diffusion_dlrm"
 
 train_steps_ignored() {
     [[ " $PERF_TRAIN_STEPS_IGNORED " == *" $1 "* ]]
@@ -367,7 +443,7 @@ collect_system_info() {
         echo "# CWD            : $(pwd)"
         echo "# PRIMUS_PATH    : $PRIMUS_PATH"
         echo "# PRIMUS_MODE    : $PRIMUS_MODE"
-        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
+        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses the image in ${PERF_CLI_CONFIG:-the primus-cli default config}>}"
         echo "# Script         : $SCRIPT_PATH"
         echo "# Bash           : $BASH_VERSION"
         echo "# Python         : $(command -v python3 >/dev/null && python3 --version 2>&1 || echo 'not found')"

@@ -45,7 +45,8 @@ bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/he
 
 Run the launcher from the host. It starts the container, mounts the Primus
 checkout and data directories, loads the selected system configuration, and
-runs the requested number of experiments.
+runs the requested number of experiments. The checkout needs its submodules
+(`git submodule update --init --recursive`); training uses `third_party/Megatron-LM`.
 
 ```bash
 cd /path/to/Primus
@@ -58,6 +59,7 @@ export LOGDIR=/data/mlperf_llama31_8b/results
 export CONT=rocm/primus:v26.9
 export DGXSYSTEM=MI355X_1x8x1
 export NEXP=1
+# export SEED=1234                      # same seed for every trial (default: random per trial)
 
 # Optional host runtime tunables before each trial (cpupower, THP, drop_caches; see runtime_tunables.sh):
 # export RUN_RUNTIME_TUNABLES=1
@@ -106,6 +108,7 @@ cd /workspace/Primus
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>
+export PRIMUS_REBUILD_RCCL=1   # see the gradient ReduceScatter note below
 source config_MI355X_1x8x1.sh
 bash run_and_time.sh
 ```
@@ -116,5 +119,7 @@ bash run_and_time.sh
 - `RUN_RUNTIME_TUNABLES=1` runs `runtime_tunables.sh` on the host before each trial (some steps need `sudo`).
 - `run_and_time.sh` sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to the file in `hipblaslt_tuning/` for the image's hipBLASLt build (`HIPBLASLT_VERSION_TWEAK`), if there is one. It tunes the output layer's weight-gradient GEMM (25.8 to 24.0 ms on `v26.9`). Set the variable yourself, empty for hipBLASLt's own choice, to override.
 - `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma` (default) runs the parameter all-gather on the SDMA copy engines. It needs `--ulimit nofile=1048576:1048576`, `NCCL_CTA_POLICY` unset and `GPU_MAX_HW_QUEUES=4` (set in the config). Set it to `nccl` for RCCL's all-gather.
+- `MEGATRON_GRAD_REDUCE_BACKEND` runs the gradient reduce-scatter on the same communicator. It defaults to `MEGATRON_PARAM_GATHER_BACKEND`, so `rccl_sdma` unless the all-gather is switched off. Set it to `disabled` for Megatron's reduce-scatter. The copy engines run it only with an RCCL that has copy-engine reduce-scatter (ROCm/rocm-systems#15042); the RCCL 2.32.3 in `rocm/primus:v26.9` does not, and runs it with symmetric-memory kernels instead. `PRIMUS_REBUILD_RCCL=1` (the `run_with_docker.sh` default) builds that RCCL through `runner/helpers/patches/12_rebuild_rccl.sh` at the first trial's launch. The build takes about 70 s, needs network access, and counts toward the `RESULT` wall time but not the MLPerf time to train. Set `PRIMUS_RCCL_REF` for another commit, or `PRIMUS_REBUILD_RCCL=0` to keep the image's RCCL (for example, without network access).
+- On 8x MI355X (seed 1234) the reduce-scatter is 6.4 ms per step faster with the rebuilt RCCL (760.1 ms) and 8.4 ms faster with the image's RCCL (758.1 ms) than with Megatron's (766.5 ms).
 - `PRIMUS_TURBO_CROSS_ENTROPY=true` (default) uses Primus-Turbo's fused cross entropy. Set it to `false` for TE's; `PRIMUS_DEFERRED_CROSS_ENTROPY=true` then defers TE's gradient to backward. The two cannot both be on.
 - For an older Primus-Turbo without `mlp_fp4` or `rope` ops, set `PRIMUS_TURBO_FUSED_DENSE_MLP=false` and `PRIMUS_TURBO_FLYDSL_ROPE=0`.
