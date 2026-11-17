@@ -45,7 +45,8 @@ bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/he
 
 Run the launcher from the host. It starts the container, mounts the Primus
 checkout and data directories, loads the selected system configuration, and
-runs the requested number of experiments.
+runs the requested number of experiments. The checkout needs its submodules
+(`git submodule update --init --recursive`); training uses `third_party/Megatron-LM`.
 
 ```bash
 cd /path/to/Primus
@@ -58,6 +59,7 @@ export LOGDIR=/data/mlperf_llama31_8b/results
 export CONT=rocm/primus:v26.9
 export DGXSYSTEM=MI355X_1x8x1
 export NEXP=1
+# export SEED=1234                      # same seed for every trial (default: random per trial)
 
 # Optional host runtime tunables before each trial (cpupower, THP, drop_caches; see runtime_tunables.sh):
 # export RUN_RUNTIME_TUNABLES=1
