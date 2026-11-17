@@ -734,7 +734,9 @@ class _UnpermuteScale(torch.autograd.Function):
         elif ctx.compiled:
             d_sorted, d_prob = _fused_unpermute_bwd(grad, out_sorted, perm, inv_perm, prob)
         elif ctx.counts is not None:
-            d_sorted, d_prob = _unpermute_scale_bwd_grouped(grad, out_sorted, perm, inv_perm, prob, ctx.counts)
+            d_sorted, d_prob = _unpermute_scale_bwd_grouped(
+                grad, out_sorted, perm, inv_perm, prob, ctx.counts
+            )
         else:
             d_sorted, d_prob = _unpermute_scale_bwd(grad, out_sorted, perm, inv_perm, prob)
         return d_sorted, None, None, d_prob, None, None
