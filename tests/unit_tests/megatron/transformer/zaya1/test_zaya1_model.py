@@ -394,7 +394,8 @@ def test_chunked_ce_steps_aside_for_any_fused_cross_entropy():
     assert blocker == "cross_entropy_loss_fusion is set (te)"
 
 
-def test_chunked_ce_tokens_must_be_positive():
+def test_chunked_ce_tokens_must_be_a_positive_integer():
     assert _tiny_config(zaya_chunked_ce_tokens=1).zaya_chunked_ce_tokens == 1
-    with pytest.raises(ValueError, match="zaya_chunked_ce_tokens"):
-        _tiny_config(zaya_chunked_ce_tokens=0)
+    for tokens in (0, "4096", 4096.0, True):
+        with pytest.raises(ValueError, match="zaya_chunked_ce_tokens"):
+            _tiny_config(zaya_chunked_ce_tokens=tokens)

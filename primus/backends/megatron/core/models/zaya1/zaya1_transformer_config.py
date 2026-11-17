@@ -17,6 +17,19 @@ from typing import Optional, Sequence
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+# A CLI override such as ``--zaya_fuse_norm off``, or a quoted YAML value,
+# arrives as a string, which the modules' bool() would read as on.
+_ON_OFF_FIELDS = (
+    "zaya_attn_flash",
+    "zaya_fuse_norm",
+    "zaya_fuse_cca",
+    "zaya_conv_gemm",
+    "zaya_fuse_moe",
+    "zaya_router_defer_ar",
+    "zaya_chunked_ce",
+    "zaya_chunked_ce_compile",
+)
+
 
 @dataclass
 class Zaya1TransformerConfig(TransformerConfig):
@@ -56,8 +69,15 @@ class Zaya1TransformerConfig(TransformerConfig):
         super().__post_init__()
         if self.partial_rotary_factor <= 0 or self.partial_rotary_factor > 1:
             raise ValueError(f"partial_rotary_factor must be in (0, 1], got {self.partial_rotary_factor}.")
-        if self.zaya_chunked_ce_tokens < 1:
-            raise ValueError(f"zaya_chunked_ce_tokens must be at least 1, got {self.zaya_chunked_ce_tokens}.")
+        for name in _ON_OFF_FIELDS:
+            value = getattr(self, name)
+            if type(value) is int and value in (0, 1):
+                setattr(self, name, bool(value))
+            elif not isinstance(value, bool):
+                raise ValueError(f"{name} must be true or false, got {value!r}.")
+        tokens = self.zaya_chunked_ce_tokens
+        if type(tokens) is not int or tokens < 1:
+            raise ValueError(f"zaya_chunked_ce_tokens must be a positive integer, got {tokens!r}.")
         if self.num_moe_experts is None:
             raise ValueError("ZAYA1 requires num_experts (num_moe_experts) to be set.")
         if self.moe_router_topk != 1:

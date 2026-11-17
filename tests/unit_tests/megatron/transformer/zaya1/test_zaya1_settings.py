@@ -10,8 +10,10 @@ and the build-log line."""
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 from test_zaya1_math import _cfg  # noqa: E402  (pytest puts this dir on sys.path)
+from test_zaya1_model import _tiny_config  # noqa: E402
 
 import primus
 from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
@@ -39,6 +41,16 @@ def test_every_path_is_off_by_default():
         assert getattr(Zaya1TransformerConfig, name) is False, name
     # The unit tests' stand-in configs have none of the fields.
     assert not any(zm._path_on(SimpleNamespace(), name) for name in _PATHS)
+
+
+def test_on_off_fields_take_only_true_or_false():
+    # A CLI override such as --zaya_fuse_norm off arrives as the string "off".
+    for name in _PATHS + ("zaya_chunked_ce", "zaya_chunked_ce_compile"):
+        assert getattr(_tiny_config(**{name: 1}), name) is True
+        assert getattr(_tiny_config(**{name: 0}), name) is False
+        for value in ("off", "false", "", None, 2, 1.0):
+            with pytest.raises(ValueError, match=f"{name} must be true or false"):
+                _tiny_config(**{name: value})
 
 
 def test_only_the_mi355x_recipes_turn_paths_on():
