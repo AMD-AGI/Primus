@@ -61,9 +61,40 @@ from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss import (
     slot_mass_from_slot_lse,
 )
 from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+from primus.core.utils.module_utils import log_rank_0
 
 # Backends that compute the block-sparse attention itself.
 MSA_BACKENDS = ("eager", "flydsl")
+
+_MSA_FUSIONS = ("msa_fused_qk_norm_rope", "msa_fused_indexer_loss", "msa_fused_select_plan")
+_FUSIONS_LOGGED = False
+
+
+def _log_fusions_once(config) -> None:
+    global _FUSIONS_LOGGED
+    if _FUSIONS_LOGGED:
+        return
+    _FUSIONS_LOGGED = True
+    on = [name for name in _MSA_FUSIONS if getattr(config, name, False)]
+    log_rank_0(f"MinimaxSparseAttention ({config.msa_backend}): Triton fusions {', '.join(on) or 'off'}")
+
+
+def _require_gfx1250_flydsl() -> None:
+    """Fail at build time, not at the first forward, when FlyDSL lacks what the gfx1250 MSA
+    kernels use."""
+    msg = (
+        "msa_backend='flydsl' on gfx1250 needs FlyDSL's Tensor Data Mover ops "
+        "(flydsl.expr.rocdl.tdm_ops), flydsl.expr.SharedAllocator and rocdl.ds_load_tr16_b128; "
+        "FlyDSL 0.3.4.1 (the MI455X image's) has them."
+    )
+    try:
+        import flydsl.expr as fx
+        from flydsl._mlir.dialects import rocdl
+        from flydsl.expr.rocdl import tdm_ops  # noqa: F401
+    except ImportError as e:
+        raise ImportError(msg) from e
+    if not (hasattr(fx, "SharedAllocator") and hasattr(rocdl, "ds_load_tr16_b128")):
+        raise ImportError(msg)
 
 
 @dataclass
@@ -140,7 +171,15 @@ class MinimaxSparseAttention(SelfAttention):
             from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_function import (
                 msa_attention,
             )
+            from primus.core.utils.gpu_arch import is_gfx1250
 
+            if is_gfx1250():
+                _require_gfx1250_flydsl()
+                if self.block_size != 128:
+                    raise NotImplementedError(
+                        "msa_backend='flydsl' on gfx1250 supports sparse_block_size 128 only (the "
+                        f"dK/dV backward stages 8 waves of 16 keys); got {self.block_size}."
+                    )
             heads_per_group = self.num_attention_heads_per_partition // self.num_query_groups_per_partition
             if self.hidden_size_per_attention_head != 128 or heads_per_group != 16:
                 raise NotImplementedError(
@@ -149,6 +188,7 @@ class MinimaxSparseAttention(SelfAttention):
                     f"{heads_per_group} heads per KV head."
                 )
             self.msa_attention = msa_attention
+        _log_fusions_once(config)
 
     def _fused_input_norm_weight(self) -> Optional[torch.Tensor]:
         """The input-norm weight fused into ``linear_qkv``, or None when the norm is separate."""
@@ -207,25 +247,36 @@ class MinimaxSparseAttention(SelfAttention):
         # selection is left alone: an extra allowed block is harmless, and the
         # composed mask is what decides the final weights.
 
-        # [sq, b, np, hn] / [sq, b, ng, hn] -- upstream's projections and q/k norms.
-        query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
-
+        q_rope = k_rope = None
         if rotary_pos_emb is not None:
             q_pos_emb, k_pos_emb = (
                 rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
             )
-            # Unfused on purpose; see the note in indexer.py. The indexer reuses q_rope's tables.
+            # RopeTables, not apply_rope_fusion; see the note in indexer.py. The indexer reuses
+            # q_rope's tables.
             q_rope = RopeTables(q_pos_emb)
             k_rope = q_rope if k_pos_emb is q_pos_emb else RopeTables(k_pos_emb)
-            query = q_rope.apply(query, self.config.rotary_interleaved)
-            key = k_rope.apply(key, self.config.rotary_interleaved)
-            index_pos_emb = q_rope
-        else:
-            index_pos_emb = None
 
-        block_indices, block_scores, block_plan = self.indexer(
-            self._indexer_input(hidden_states), index_pos_emb
-        )
+        # [sq, b, np, hn] / [sq, b, ng, hn] -- upstream's projections, q/k norms and rope.
+        # The Triton fusions are imported only when switched on: the eager backend needs no Triton.
+        fused_qkv = False
+        if self.config.msa_fused_qk_norm_rope and q_rope is not None and k_rope is q_rope:
+            from primus.backends.megatron.core.transformer.minimax_m3 import (
+                qk_norm_rope,
+            )
+
+            fused_qkv = qk_norm_rope.eligible(self, hidden_states, q_rope)
+        if fused_qkv:
+            # split + q/k norm + rope on the unsplit qkv output, bitwise (qk_norm_rope.py)
+            mixed_qkv, _ = self.get_query_key_value_tensors(hidden_states, key_value_states, split_qkv=False)
+            query, key, value = qk_norm_rope.qk_norm_rope(self, mixed_qkv, q_rope)
+        else:
+            query, key, value = self.get_query_key_value_tensors(hidden_states, key_value_states)
+            if q_rope is not None:
+                query = q_rope.apply(query, self.config.rotary_interleaved)
+                key = k_rope.apply(key, self.config.rotary_interleaved)
+
+        block_indices, block_scores, block_plan = self.indexer(self._indexer_input(hidden_states), q_rope)
 
         # Full recompute runs this forward twice, first under no_grad; gating on
         # grad mode computes and records the loss once, in the pass that backprops.
@@ -258,9 +309,14 @@ class MinimaxSparseAttention(SelfAttention):
             core_attn_out = outs[0]
             if want_loss:
                 slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
-                indexer_loss = compute_sparse_indexer_loss(
-                    slot_mass, block_scores, block_indices, self.indexer_loss_coeff
-                )
+                if self.config.msa_fused_indexer_loss:
+                    # bitwise, in a few Triton launches
+                    from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
+                        sparse_indexer_loss as loss_fn,
+                    )
+                else:
+                    loss_fn = compute_sparse_indexer_loss
+                indexer_loss = loss_fn(slot_mass, block_scores, block_indices, self.indexer_loss_coeff)
         else:
             # sbhd -> bhsd for the eager kernel, matching the reference's layout.
             block_keep = build_block_keep(block_indices, key.shape[0], self.block_size)

@@ -87,6 +87,11 @@ sparse_indexer_loss_type: sparse
 # dataloader attention mask. eager is the plain-PyTorch reference, for other
 # GPUs and for checking numerics. Neither supports tensor parallelism yet.
 msa_backend: flydsl
+# Triton fusions around the attention, bit-identical to the eager ops they replace
+# (MSATransformerConfig documents each); the MI455X example configs turn them on.
+msa_fused_qk_norm_rope: false
+msa_fused_indexer_loss: false
+msa_fused_select_plan: false
 
 # MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared
 moe_layer_freq: "([0]*3+[1]*57)"
