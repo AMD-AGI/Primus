@@ -43,7 +43,8 @@ a Megatron GPT layer:
 | `primus/backends/megatron/patches/inkling_muon_qkv_patches.py` | Per-layer q/k/v split for Megatron's Muon (see [Muon](#muon)) |
 | `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L`, `inkling_large_6L` and `inkling_large_20L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
 | `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml`, `inkling_large_6L-FP8-pretrain.yaml` | Single-node recipes (EP 8, AdamW, mock data) |
-| `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_large_20L-BF16-pretrain.yaml` | Four-node recipes (PP 4 × EP 8) for the full Small model and the 20-layer Large proxy; not yet run on this code |
+| `examples/megatron/configs/MI355X/inkling_large_20L-BF16-pretrain.yaml` | Four-node recipe (PP 4 × EP 8) for the 20-layer Large proxy, run on 4 MI355X nodes in BF16 with Turbo off |
+| `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_small-FP8-pretrain.yaml`, `inkling_large-BF16-pretrain.yaml`, `inkling_large-FP8-pretrain.yaml` | Multi-node recipes run on MI355X nodes: the full Small model (PP 4 × EP 8) on 4 nodes with Turbo, in BF16 and in FP8 tensorwise, and the full 66-layer Large model (PP 16 × EP 8) on 16 nodes with Turbo, in BF16 and in FP8 tensorwise with Turbo's GEMMs off |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
 
@@ -160,7 +161,7 @@ arguments can be appended after `--config` (later ones win).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `PRIMUS_TURBO` | `true` (Large recipes) | `false` turns off every Turbo kernel in the Large recipes; the Small recipe always runs without Turbo |
+| `PRIMUS_TURBO` | `true` (Large recipes) | `false` turns off every Turbo kernel in the Large recipes; the single-node Small recipe always runs without Turbo |
 | `PRIMUS_MODEL` | `inkling_small_12L` or `inkling_large_6L` | Model preset |
 | `PRIMUS_INKLING_ATTN` | `flex` | `flex` or `eager` (dense bias; about 2× the step time and more memory) |
 | `PRIMUS_TRAIN_ITERS` | `50` | Training steps; must be more than the 5 warmup steps |
@@ -168,7 +169,10 @@ arguments can be appended after `--config` (later ones win).
 
 ### Primus-Turbo
 
-The Large recipes turn on Turbo grouped GEMM, RMSNorm, DeepEP and GEMM.
+The single-node Large recipes and the multi-node recipes turn on Turbo grouped
+GEMM, RMSNorm, DeepEP and GEMM, except Large FP8, which turns on only RMSNorm
+and DeepEP and keeps TE's FP8 GEMMs (its header gives the cost of switching).
+The 12-layer Small and 20-layer Large proxies run without Turbo.
 Inkling keeps its own attention core, so `use_turbo_attention` stays off.
 
 - In BF16, Turbo's GEMM and TE's linears call the same hipBLASLt kernels, so
@@ -286,8 +290,9 @@ A resharded `torch_dist` checkpoint for multi-node runs is not written yet.
 - **Expert and data parallelism** are used by the single-node recipes and are
   covered by the 8-GPU parallel check.
 - **Pipeline parallelism**, with or without virtual (interleaved) stages, is
-  covered by the 8-GPU parallel check. The four-node recipes use PP 4 but have
-  not been run on this code yet.
+  covered by the 8-GPU parallel check. The multi-node recipes run PP 4 for
+  Small and the 20-layer Large proxy on 4 nodes and PP 16 for Large on 16
+  nodes.
 - **Tensor parallelism** has not been run. **Sequence parallelism** and
   **context parallelism** are rejected: the output ShortConvs would need a
   3-token halo exchange across ranks, which isn't written.
