@@ -46,6 +46,7 @@ def get_model_provider(model_type="gpt"):
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
             'kimi_k3', 'glm5_next', 'zaya1' or 'inkling'. Defaults to 'gpt'.
+            'granite' (IBM Granite dense) is accepted as well.
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -112,6 +113,20 @@ def get_model_provider(model_type="gpt"):
         return partial(
             deepseek_v4_module.model_provider,
             deepseek_v4_module.deepseek_v4_builder,
+        )
+
+    # Primus-owned: IBM Granite dense (upstream model_provider + GPTModel, Granite builder)
+    if model_type == "granite":
+        granite_module = importlib.import_module(
+            "primus.backends.megatron.core.models.granite.granite_builders"
+        )
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded Granite model_provider + builder "
+            f"from {granite_module.__name__}"
+        )
+        return partial(
+            granite_module.model_provider,
+            granite_module.granite_builder,
         )
 
     # Upstream Megatron-LM model types
