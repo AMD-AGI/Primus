@@ -303,15 +303,39 @@ The recipes save `torch_dist` checkpoints (`ckpt_format: torch_dist`); set
 them under `<workspace>/<work_group>/<user_name>/<exp_name>/checkpoints`
 whatever path `save` names. Megatron keys
 every tensor by its global layer and expert number, so a run can resume under a
-different PP, EP or DP size, or with Turbo switched on or off. Changing PP or EP
-also needs the optimizer state saved fully reshardable:
+different PP, EP or DP size, or with Turbo switched on or off; for the optimizer
+state, see below.
+
+### Optimizer state: `dist_ckpt_optim_fully_reshardable`
+
+**This is off in every Inkling recipe.** No recipe or preset sets it, so it
+comes from `trainer_base.yaml` as `null`, which is Megatron's default `False`.
+The recipes use the distributed optimizer, which then saves its state (fp32
+master weights and Adam moments) as `dp_reshardable`: each rank's slice of the
+optimizer's flat buffers, as laid out in memory. That save is fast, but those
+buffers depend on the parallel layout and on which expert layers are built, so
+**with the default, a resume may change only the DP size.**
+
+To resume with the optimizer state under any of these changes, **the run that
+saves** must set, under the recipe's `overrides`:
 
 ```yaml
       dist_ckpt_optim_fully_reshardable: true
 ```
 
-With the default (`dp_reshardable`), only the DP size may change between save
-and resume.
+- a different PP or EP size;
+- Turbo grouped GEMM (`use_turbo_grouped_gemm`) switched on or off: Turbo
+  trains each expert linear as one stacked tensor and TE as one tensor per
+  expert, so the optimizer buffers are laid out differently even at the same
+  PP and EP.
+
+It cannot be added at resume time: the format is fixed when the checkpoint is
+written. It stores one optimizer tensor per model parameter, under the
+parameter's global key, so any layout can load it; the save gathers the
+buffers across DP ranks and is slower and uses more memory than the default.
+The model weights reshard either way, so a run that does not load the optimizer
+state (`--no-load-optim`, as when starting from a converted checkpoint) does not
+need it. All the PP, EP and Turbo-switch resumes below were saved with it set.
 
 On Nov 9, 2026 (`rocm/primus:v26.9`, one node), the 6L recipe on a 4-layer
 model (`PRIMUS_MODEL=inkling_small_tiny --num_layers 4 --moe_layer_freq
