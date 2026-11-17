@@ -37,6 +37,22 @@ def _assert_data_parallel_only(args) -> None:
         )
 
 
+def _assert_overlap_grad_reduce_supported(args) -> None:
+    """Megatron's overlap_grad_reduce stops training when a parameter gets no gradient in a step.
+
+    Runs before the config is built, so _turbo_experts reads fp8 from the arguments.
+    """
+    from primus.backends.megatron.core.models.zaya1.zaya1_modules import _turbo_experts
+
+    if getattr(args, "overlap_grad_reduce", False) and not _turbo_experts(args)[0]:
+        raise ValueError(
+            "overlap_grad_reduce needs every parameter to get a gradient each step. ZAYA1's split "
+            "experts leave an expert that gets no tokens without one, and the first MoE stage's "
+            "router_states_scale too. Set overlap_grad_reduce: false, or run the experts as Primus "
+            "Turbo grouped GEMMs (enable_primus_turbo and use_turbo_grouped_gemm, BF16 only)."
+        )
+
+
 def prepare_zaya1_args(args) -> None:
     _assert_data_parallel_only(args)
     assert not getattr(
@@ -47,6 +63,7 @@ def prepare_zaya1_args(args) -> None:
             "ZAYA1 applies partial RoPE inside CCA. "
             f"position_embedding_type must be 'rope', got {args.position_embedding_type!r}."
         )
+    _assert_overlap_grad_reduce_supported(args)
 
 
 def zaya1_model_kwargs(args) -> dict:

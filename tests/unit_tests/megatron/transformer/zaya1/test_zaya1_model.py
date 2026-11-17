@@ -22,7 +22,11 @@ from megatron.core.transformer.enums import AttnBackend
 from torch import nn
 
 from primus.backends.megatron.core.models.builder import model_provider
-from primus.backends.megatron.core.models.zaya1.zaya1_builders import zaya1_builder
+from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
+from primus.backends.megatron.core.models.zaya1.zaya1_builders import (
+    _assert_overlap_grad_reduce_supported,
+    zaya1_builder,
+)
 from primus.backends.megatron.core.models.zaya1.zaya1_model import Zaya1Model
 from primus.backends.megatron.core.models.zaya1.zaya1_modules import RMSNorm, ZayaStack
 from primus.backends.megatron.core.models.zaya1.zaya1_transformer_config import (
@@ -195,6 +199,18 @@ def test_builder_rejects_mla_legacy_and_non_rope():
             post_process=True,
             config=_tiny_config(),
         )
+
+
+def test_builder_rejects_overlap_grad_reduce_with_split_experts(monkeypatch):
+    args = _args(overlap_grad_reduce=True)
+    with pytest.raises(ValueError, match="overlap_grad_reduce"):
+        zaya1_builder(args, pre_process=True, post_process=True, config=_tiny_config())
+    # The Turbo experts give every parameter a gradient each step; under FP8 the experts stay split.
+    turbo = SimpleNamespace(enable_primus_turbo=True, use_turbo_grouped_gemm=True)
+    monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
+    _assert_overlap_grad_reduce_supported(args)
+    with pytest.raises(ValueError, match="overlap_grad_reduce"):
+        _assert_overlap_grad_reduce_supported(_args(overlap_grad_reduce=True, fp8="hybrid"))
 
 
 def test_rmsnorm_matches_fp32_formula():
