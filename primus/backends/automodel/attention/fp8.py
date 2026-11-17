@@ -122,8 +122,7 @@ def install(configured_backend: Optional[str] = None) -> bool:
         missing = required.difference(params)
         if missing:
             raise RuntimeError(
-                "Primus-Turbo FP8 attention lacks logical tail masking: "
-                + ", ".join(sorted(missing))
+                "Primus-Turbo FP8 attention lacks logical tail masking: " + ", ".join(sorted(missing))
             )
 
     return _backend_registry.install_override(
