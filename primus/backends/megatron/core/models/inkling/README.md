@@ -43,6 +43,7 @@ a Megatron GPT layer:
 | `primus/backends/megatron/patches/inkling_muon_qkv_patches.py` | Per-layer q/k/v split for Megatron's Muon (see [Muon](#muon)) |
 | `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L`, `inkling_large_6L` and `inkling_large_20L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
 | `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml`, `inkling_large_6L-FP8-pretrain.yaml` | Single-node recipes (EP 8, AdamW, mock data) |
+| `examples/megatron/configs/MI355X/inkling_large_6L-BF16-async-ckpt-pretrain.yaml` | The 6L recipe with asynchronous checkpoint saves that resume on rerun (see [Asynchronous saving](#asynchronous-saving)) |
 | `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_large_20L-BF16-pretrain.yaml` | Four-node recipes (PP 4 × EP 8) for the full Small model and the 20-layer Large proxy; not yet run on this code |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
@@ -322,7 +323,41 @@ ways:
 The PP 2 runs differ only by summation order. With the same layout, step 11 is
 identical too. Step 12's logged loss differs in every resume (by 3e-3 with the
 same layout), yet steps 13–20 then match exactly, so the training state is
-unchanged and only that logged value differs.
+unchanged and only that logged value differs: Megatron does not reset its loss
+accumulator after the first logged step of a run, so the resumed run logs the
+mean of steps 11 and 12.
+
+### Asynchronous saving
+
+`inkling_large_6L-BF16-async-ckpt-pretrain.yaml` is the 6L recipe with
+background saves. Training pauses only while each rank copies its shard to host
+memory; the write to disk runs in a persistent worker. It sets:
+
+```yaml
+      async_save: true
+      use_persistent_ckpt_worker: true    # without it Megatron turns async_save off for torch_dist
+      async_strategy: mcore               # the default, nvrx, needs nvidia-resiliency-ext
+      save: <workspace>/<work_group>/<user_name>/<exp_name>/checkpoints
+      load: <same directory>              # a rerun of the same command resumes
+      exit_on_missing_checkpoint: false   # the first run starts from scratch
+      disable_last_saving: false
+      save_interval: ${PRIMUS_SAVE_INTERVAL:25}
+```
+
+Each checkpoint of the 6L model (weights and distributed-optimizer state) is
+about 820 GB, so set `PRIMUS_WORKSPACE` to a large local disk:
+
+```bash
+export PRIMUS_WORKSPACE=/mnt/m2m_nobackup/$USER
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI355X/inkling_large_6L-BF16-async-ckpt-pretrain.yaml
+```
+
+On Nov 16, 2026 (`rocm/primus:v26.9`, one node), a save at step 10 paused
+training for about 1 minute, against 14 minutes with a synchronous save; the
+background write finished during the next 10 steps without slowing them. A run
+stopped at step 10 (`PRIMUS_EXIT_INTERVAL=10`) and then rerun with the same
+command resumed from step 10 and saved again at step 20.
 
 ## Parallelism
 
