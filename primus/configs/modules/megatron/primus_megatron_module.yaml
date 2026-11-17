@@ -122,6 +122,15 @@ te_ce_overwrite_input: true
 # cannot be combined with use_turbo_cross_entropy.
 deferred_cross_entropy: false
 
+# ===== Bitwise kernel replacements =====
+# Faster kernels whose outputs and gradients are bit-identical to the path they replace.
+# Run the eager clamped quick-GEGLU (swigluoai: quick_gelu with activation_func_clamp_value)
+# of dense MLPs and Primus grouped experts as one Triton kernel each way.
+fused_clamped_geglu: false
+# Multiply the Primus grouped experts' activation by the routing probs, (act * probs).to(act.dtype),
+# in one Triton kernel each way instead of the FP32 product and casts.
+fused_probs_mul: false
+
 # ===== MXFP4 Weight De-oscillation =====
 # Snap weight elements whose MXFP4-quantized value oscillates while the fp32
 # master barely moves (improves MXFP4 training convergence). Requires
