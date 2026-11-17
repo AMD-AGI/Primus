@@ -24,9 +24,8 @@ What it does:
 
    - ``--ckpt-format torch_dist`` (default): a distributed checkpoint that
      Megatron reshards on load, so any PP / VPP / EP / DP layout can load it
-     (TP must match ``--tensor-model-parallel-size``, which sets the vocabulary
-     padding below); load it with ``--load <output> --ckpt-format torch_dist --finetune
-     --no-load-optim --no-load-rng``.
+     (Inkling trains only at TP=1); load it with ``--load <output> --ckpt-format torch_dist
+     --finetune --no-load-optim --no-load-rng``.
    - ``--ckpt-format torch``: a single-rank (TP=PP=EP=1) file,
      ``release/mp_rank_00/model_optim_rng.pt``, that only a single-rank run
      can load (``--ckpt-format torch``).
@@ -165,13 +164,20 @@ def main(argv=None) -> int:
         help="Megatron padded vocab (default: unpadded_vocab_size padded the way training pads it)",
     )
     p.add_argument("--make-vocab-size-divisible-by", type=int, default=128)
-    p.add_argument("--tensor-model-parallel-size", type=int, default=1)
+    p.add_argument(
+        "--tensor-model-parallel-size",
+        type=int,
+        default=1,
+        help="part of the vocab padding multiple; must be 1, as Inkling rejects TP>1",
+    )
     p.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
     p.add_argument("--ckpt-format", choices=["torch_dist", "torch"], default="torch_dist")
     p.add_argument("--dry-run", action="store_true", help="map shapes from the headers only; write nothing")
     args = p.parse_args(argv)
     if not args.dry_run and args.output is None:
         p.error("--output is required unless --dry-run")
+    if args.tensor_model_parallel_size != 1:
+        p.error("Inkling trains only with --tensor-model-parallel-size 1")
     release_dir = args.output / "release" if args.output is not None else None
     if not args.dry_run and release_dir.is_dir():
         if any(release_dir.iterdir()):

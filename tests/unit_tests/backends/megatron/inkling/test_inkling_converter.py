@@ -100,7 +100,11 @@ def test_torch_dist_matches_torch(tiny_checkpoint):
 
 @pytest.mark.parametrize(
     "flags, rows",
-    [([], 640), (["--make-vocab-size-divisible-by", "8"], 600), (["--tensor-model-parallel-size", "2"], 768)],
+    [
+        ([], 640),
+        (["--make-vocab-size-divisible-by", "8"], 600),
+        (["--make-vocab-size-divisible-by", "256"], 768),
+    ],
     ids=["default", "trim", "pad"],
 )
 def test_vocab_follows_training_padding(tiny_checkpoint, flags, rows):
@@ -110,6 +114,15 @@ def test_vocab_follows_training_padding(tiny_checkpoint, flags, rows):
     ckpt = torch.load(out_dir / "release" / "mp_rank_00" / "model_optim_rng.pt", weights_only=False)
     for key in ("embedding.word_embeddings.weight", "output_layer.weight"):
         assert ckpt["model"][key].shape[0] == rows, key
+
+
+def test_refuses_tensor_parallel(tiny_checkpoint, monkeypatch):
+    hf_dir, yaml, _ = tiny_checkpoint
+    converter = load_converter()
+    monkeypatch.setattr(converter, "checkpoint_index", lambda *a: pytest.fail("read the checkpoint"))
+    argv = ["--hf-dir", str(hf_dir), "--model-yaml", str(yaml), "--dry-run"]
+    with pytest.raises(SystemExit):
+        converter.main([*argv, "--tensor-model-parallel-size", "2"])
 
 
 def test_preset_mismatch_is_rejected(tiny_checkpoint):

@@ -274,11 +274,11 @@ python tools/checkpoint_conversion/convert_inkling_hf_megatron.py \
 
 The embedding and LM head are resized to the vocabulary that training builds:
 the 200,058 real tokens rounded up to a multiple of
-`make_vocab_size_divisible_by` × TP, which is 200,064 with the defaults (128 × 1).
-If the training run uses other values, pass the same ones with
-`--make-vocab-size-divisible-by` and `--tensor-model-parallel-size`, or set
-`--target-vocab-size` directly; otherwise loading fails on the embedding and
-LM-head shapes.
+`make_vocab_size_divisible_by` × TP, which is 200,064 with the defaults (128 × 1;
+Inkling trains only at TP 1, so the converter refuses other TP values).
+If the training run uses another `make_vocab_size_divisible_by`, pass it with
+`--make-vocab-size-divisible-by`, or set `--target-vocab-size` directly;
+otherwise loading fails on the embedding and LM-head shapes.
 
 The output is a `torch_dist` checkpoint in `<output>/release`. Megatron
 reshards it on load, so any layout (PP, virtual stages, EP, DP, with or without
