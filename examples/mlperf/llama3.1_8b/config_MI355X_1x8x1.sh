@@ -68,6 +68,29 @@ export TORCH_NCCL_HIGH_PRIORITY=1
 export MEGATRON_PARAM_GATHER_BACKEND="${MEGATRON_PARAM_GATHER_BACKEND:-rccl_sdma}"
 export MEGATRON_RCCL_SDMA_LOG="${MEGATRON_RCCL_SDMA_LOG:-1}"
 
+# Gradient ReduceScatter on the same dedicated SDMA communicator, so it follows the
+# parameter all-gather backend. The copy engines run it only with an RCCL that has CE
+# ReduceScatter (ROCm/rocm-systems#15042); other RCCLs ignore RCCL_CE_* and use
+# symmetric-memory kernels. PRIMUS_REBUILD_RCCL=1 builds that RCCL before training
+# (runner/helpers/patches/12_rebuild_rccl.sh). Any other backend value keeps Megatron's
+# ReduceScatter.
+export MEGATRON_GRAD_REDUCE_BACKEND="${MEGATRON_GRAD_REDUCE_BACKEND:-${MEGATRON_PARAM_GATHER_BACKEND}}"
+if [[ "${MEGATRON_GRAD_REDUCE_BACKEND}" == rccl_sdma ]]; then
+    if [[ "${PRIMUS_REBUILD_RCCL:-0}" == 1 ]]; then
+        export PRIMUS_RCCL_REF="${PRIMUS_RCCL_REF:-96020c5874c6252079ed63d84c8264e6c0057971}"
+        export PRIMUS_RCCL_GPU_ARCHS="${PRIMUS_RCCL_GPU_ARCHS:-gfx950}"
+    fi
+    export RCCL_CE_REDUCESCATTER=1
+    export RCCL_FORCE_CE_REDUCESCATTER="${RCCL_FORCE_CE_REDUCESCATTER:-1}"
+    export RCCL_CE_REDUCE_PER_CHUNK="${RCCL_CE_REDUCE_PER_CHUNK:-1}"
+    export RCCL_CE_REDUCE_MAX_BLOCKS="${RCCL_CE_REDUCE_MAX_BLOCKS:-64}"
+    export RCCL_CE_AR_STAGING_BYTES="${RCCL_CE_AR_STAGING_BYTES:-268435456}"
+    export RCCL_CE_COOP_LAUNCH="${RCCL_CE_COOP_LAUNCH:-0}"
+    export RCCL_DDA_ENABLE="${RCCL_DDA_ENABLE:-1}"
+    export NCCL_CUMEM_ENABLE=1
+    export NCCL_LOCAL_REGISTER=0
+fi
+
 export AITER_LOG_TUNED_CONFIG=0
 export LOG_AITER_GEMMS=0
 export AITER_LOG_LEVEL=ERROR
