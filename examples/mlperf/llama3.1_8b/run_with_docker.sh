@@ -53,8 +53,8 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 # dense-GEMM race fixes (see README.md). Empty keeps the image's Primus-Turbo.
 : "${PRIMUS_TURBO_REF:=fda6df0b4264c94c4a7dccb645e02facc97c9fca}"
 : "${PRIMUS_TURBO_GPU_ARCHS:=gfx950}"
-# RCCL with copy-engine ReduceScatter, built when the container starts, for the gradient
-# ReduceScatter (see README.md). 0 keeps the image's RCCL.
+# RCCL with copy-engine ReduceScatter for the gradient ReduceScatter, built at the first
+# trial's launch (see README.md). 0 keeps the image's RCCL.
 : "${PRIMUS_REBUILD_RCCL:=1}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
