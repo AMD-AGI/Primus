@@ -64,7 +64,7 @@ VOCAB = 32000
 GB = 1024**3
 
 
-def _config(*, moe=False, fusion=False, **mp):
+def _config(*, moe=False, fusion=False, ce_impl="native", **mp):
     base = dict(
         num_layers=N_LAYERS,
         hidden_size=HIDDEN,
@@ -75,6 +75,7 @@ def _config(*, moe=False, fusion=False, **mp):
         num_query_groups=8,
         swiglu=True,
         cross_entropy_loss_fusion=fusion,
+        cross_entropy_fusion_impl=ce_impl,
     )
     if moe:
         base.update(num_experts=8, moe_ffn_hidden_size=FFN, moe_router_topk=2, moe_pattern=[1] * N_LAYERS)
@@ -181,8 +182,10 @@ def test_loss_activation_memory_formula():
     assert LossProfiler(_config()).estimated_activation_memory(2, 128) == 2 * 128 * VOCAB * 4
 
 
-def test_loss_activation_memory_zero_with_fusion():
-    assert LossProfiler(_config(fusion=True)).estimated_activation_memory(2, 128) == 0
+def test_loss_activation_memory_by_fusion_impl():
+    # native keeps fp32 exp(logits); TE writes its gradient into the logits the output layer holds
+    assert LossProfiler(_config(fusion=True)).estimated_activation_memory(2, 128) == 2 * 128 * VOCAB * 4
+    assert LossProfiler(_config(fusion=True, ce_impl="te")).estimated_activation_memory(2, 128) == 0
 
 
 def test_loss_tensor_parallel_shards_vocab():
@@ -191,23 +194,25 @@ def test_loss_tensor_parallel_shards_vocab():
     assert sharded == full // 4
 
 
-def test_loss_forward_equals_backward_and_positive():
+def test_loss_backward_cheaper_than_forward_and_positive():
     p = LossProfiler(_config())
     fwd, bwd = p.estimated_forward_time(2, 128), p.estimated_backward_time(2, 128)
-    assert fwd > 0 and fwd == pytest.approx(bwd)
+    assert fwd > bwd > 0
 
 
-def test_loss_time_zero_with_fusion():
-    p = LossProfiler(_config(fusion=True))
-    assert p.estimated_forward_time(2, 128) == 0.0
-    assert p.estimated_backward_time(2, 128) == 0.0
+def test_loss_time_orders_fusion_impls():
+    def fwd(**kw):
+        return LossProfiler(_config(**kw)).estimated_forward_time(2, 128)
+
+    assert fwd() > fwd(fusion=True) > fwd(fusion=True, ce_impl="te") > 0
 
 
 def test_loss_time_uses_fallback_bandwidth():
-    p = LossProfiler(_config())
-    tensor_bytes = 2 * 128 * VOCAB * 2  # bf16 logits
+    p = LossProfiler(_config(fusion=True))
+    elements = 2 * 128 * VOCAB
     eff_bw = _FALLBACK_HBM_BW_GBPS * _BW_EFFICIENCY
-    assert p.estimated_forward_time(2, 128) == pytest.approx(3.0 * tensor_bytes / (eff_bw * 1e6))
+    assert p.estimated_forward_time(2, 128) == pytest.approx(22.0 * elements / (eff_bw * 1e6))
+    assert p.estimated_backward_time(2, 128) == pytest.approx(14.0 * elements / (eff_bw * 1e6))
 
 
 def test_loss_backend_bandwidth_speeds_up():

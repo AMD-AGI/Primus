@@ -197,6 +197,8 @@ def benchmark_layer(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def create_input(spec):
+        if spec is None or isinstance(spec, torch.Tensor):
+            return spec
         if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], torch.dtype):
             shape, dtype = spec
         else:
@@ -533,6 +535,8 @@ def benchmark_moe_layer_decomposed(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def create_input(spec):
+        if spec is None or isinstance(spec, torch.Tensor):
+            return spec
         if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], torch.dtype):
             shape, dtype = spec
         else:

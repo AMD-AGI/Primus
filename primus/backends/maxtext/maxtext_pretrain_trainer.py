@@ -47,6 +47,34 @@ _PRIMUS_ONLY_PARAMS = (
 )
 
 
+def _report_peak_memory() -> None:
+    """Write the largest per-device allocator peak of this process to stderr.
+
+    Written to the raw file descriptor because Primus rebinds ``print`` to its
+    debug logger once the trainer is built, which hides it at INFO level.
+    """
+    try:
+        import jax
+
+        peaks, live = [], []
+        for device in jax.local_devices():
+            stats = device.memory_stats() or {}
+            peaks.append(int(stats.get("peak_bytes_in_use", 0)))
+            live.append(int(stats.get("bytes_in_use", 0)))
+        if peaks:
+            limit = int((jax.local_devices()[0].memory_stats() or {}).get("bytes_limit", 0))
+            # Live bytes after the last step are the persistent train state (weights + optimizer state).
+            os.write(
+                2,
+                (
+                    f"[peak-mem] max_peak_bytes={max(peaks)} min_peak_bytes={min(peaks)} bytes_limit={limit} "
+                    f"max_live_bytes={max(live)}\n"
+                ).encode(),
+            )
+    except Exception as exc:  # noqa: BLE001
+        os.write(2, f"[peak-mem] unavailable: {exc}\n".encode())
+
+
 def _resolve_maxtext_train():
     """Resolve MaxText's train entrypoints across MaxText versions.
 
@@ -257,5 +285,6 @@ class MaxTextPretrainTrainer(BaseTrainer):
         # matches initialize()'s arity within a given MaxText version (3 args on
         # v26.4 with diagnostic_config, 2 args on v26.5+).
         run(*self._init_result)
+        _report_peak_memory()
 
         log_rank_0("MaxText pretrain execution completed.")

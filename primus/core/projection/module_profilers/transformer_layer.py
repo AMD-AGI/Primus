@@ -8,6 +8,7 @@ import logging
 import os
 from typing import Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import LAYER
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -209,6 +210,40 @@ def _deepep_overlap_efficiency(config) -> float:
     return _get_deepep_overlap_efficiency(model_config)
 
 
+def _is_compiled_module(module) -> bool:
+    """True when *module* is a ``torch.compile`` wrapper (FSDP2 keeps the subclass)."""
+    try:
+        from torch._dynamo.eval_frame import OptimizedModule
+    except ImportError:
+        return False
+    return isinstance(module, OptimizedModule)
+
+
+def _is_checkpointed_module(module) -> bool:
+    """True when *module* is wrapped for activation checkpointing (TorchTitan's AC, FSDP2 keeps the subclass)."""
+    try:
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            CheckpointWrapper,
+        )
+    except ImportError:
+        return False
+    return isinstance(module, CheckpointWrapper)
+
+
+def _record_layer_terms(tp_ar_ms: float, ln_res_fwd_ms: float, ln_res_bwd_ms: float) -> tuple:
+    """A layer's TP all-reduces (two per direction) and norm/residual passes, as recorded."""
+    position = kernel_report.mark()
+    tp_ar_fwd_ms = kernel_report.term("tp_allreduce", "fwd", tp_ar_ms, kind="comm")
+    tp_ar_bwd_ms = kernel_report.term("tp_allreduce", "bwd", tp_ar_ms, kind="comm")
+    kernel_report.repeat_since(position, 2)
+    return (
+        tp_ar_fwd_ms,
+        tp_ar_bwd_ms,
+        kernel_report.term("norm_residual", "fwd", ln_res_fwd_ms),
+        kernel_report.term("norm_residual", "bwd", ln_res_bwd_ms),
+    )
+
+
 def _deepep_exposed_a2a_ms(a2a_ms: float, overlap_window_ms: float, efficiency: float) -> float:
     """Exposed (non-overlapped) A2A after DeepEP hides part behind compute.
 
@@ -358,8 +393,11 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
+        tp_ar_fwd_ms, tp_ar_bwd_ms, ln_res_fwd_ms, ln_res_bwd_ms = _record_layer_terms(
+            tp_ar_ms, ln_res_fwd_ms, ln_res_bwd_ms
+        )
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_fwd_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_bwd_ms + ln_res_bwd_ms
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd
@@ -506,8 +544,13 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_fwd_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_bwd_ms + ln_res_bwd_ms
+        tp_ar_fwd_ms, tp_ar_bwd_ms, ln_res_fwd_ms, ln_res_bwd_ms = _record_layer_terms(
+            tp_ar_ms, ln_res_fwd_ms, ln_res_bwd_ms
+        )
+        moe_a2a_fwd_ms = kernel_report.term("moe_a2a_exposed", "fwd", moe_a2a_fwd_ms, kind="comm")
+        moe_a2a_bwd_ms = kernel_report.term("moe_a2a_exposed", "bwd", moe_a2a_bwd_ms, kind="comm")
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_fwd_ms + moe_a2a_fwd_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_bwd_ms + moe_a2a_bwd_ms + ln_res_bwd_ms
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd
@@ -546,11 +589,17 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             if self._gemm_backend is not None or self._sdpa_backend is not None:
                 # Use simulation mode
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
-            elif os.environ.get("PRIMUS_BENCH_MOE_LAYER_WHOLE", "0").strip().lower() in (
-                "1",
-                "true",
-                "yes",
+            elif (
+                _is_compiled_module(self.layer_module)
+                or _is_checkpointed_module(self.layer_module)
+                or os.environ.get("PRIMUS_BENCH_MOE_LAYER_WHOLE", "0").strip().lower() in ("1", "true", "yes")
             ):
+                # A compiled block (TorchTitan compile.components: model) fuses
+                # across its submodules, and a checkpointed one re-runs what its
+                # AC policy chose during backward (TorchTitan's op-level selective
+                # AC re-runs more than attention: ~10 ms per GPT-OSS 20B layer);
+                # calling the submodules directly would time them without it, so
+                # time the block as training runs it.
                 # Legacy whole-layer timing (often ~1.5-1.7x pessimistic on backward).
                 transformer_config = getattr(self.layer_module, "config", None)
                 ishapes, fkwargs = self.require_bench_inputs(LAYER, self.layer_module, batch_size, seq_len)

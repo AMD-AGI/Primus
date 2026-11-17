@@ -178,6 +178,92 @@ def test_megatron_embedding_takes_token_ids():
     assert list(inputs.args) == [((BATCH, SEQ), torch.int64)]
 
 
+def test_megatron_tied_head_gets_the_embedding_weight():
+    """With tied embeddings the head owns no weight; GPTModel passes the embedding's."""
+    shared = nn.Parameter(torch.empty(8, HIDDEN))
+    model = SimpleNamespace(
+        decoder=SimpleNamespace(layers=[_megatron_layer()]),
+        output_layer=SimpleNamespace(weight=None),
+        shared_embedding_or_output_weight=lambda: shared,
+    )
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(model)
+    inputs = adapter.inputs(OUTPUT, parts.output_layer, _ctx())
+    assert inputs.kwargs["weight"] is shared
+
+
+class ZayaStage(nn.Module):
+    def __init__(self, kind):
+        super().__init__()
+        self.kind = kind
+        self.zaya_block = SimpleNamespace(router=SimpleNamespace(width=64)) if kind == "m" else None
+
+
+def test_megatron_zaya1_stages_are_typed_and_get_the_router_state():
+    model = SimpleNamespace(decoder=SimpleNamespace(layers=[ZayaStage("a"), ZayaStage("m")]))
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(model)
+    assert parts.layer_types == ["*", "E"]
+    inputs = adapter.inputs(LAYER, parts.layers[1], _ctx())
+    assert inputs.args == [(SEQ, BATCH, HIDDEN), (SEQ, BATCH, HIDDEN), (SEQ, BATCH, 64)]
+    assert inputs.kwargs == {"position_ids": None, "attention_mask": None}
+
+
+def test_megatron_hybrid_stack_reports_its_layer_types():
+    model = SimpleNamespace(
+        decoder=SimpleNamespace(layers=[_megatron_layer(), _megatron_layer()], layer_type_list=["M", "-"])
+    )
+    assert MegatronBenchAdapter().discover(model).layer_types == ["M", "-"]
+
+
+def test_megatron_untied_head_gets_no_weight():
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(_megatron_model())
+    assert "weight" not in adapter.inputs(OUTPUT, parts.output_layer, _ctx()).kwargs
+
+
+class _MegatronRopeLayer(nn.Module):
+    def forward(self, hidden_states, attention_mask=None, rotary_pos_emb=None):
+        return hidden_states
+
+
+def _gpt_model(position_embedding_type="rope", multi_latent_attention=False, rope_len=SEQ):
+    return SimpleNamespace(
+        decoder=SimpleNamespace(layers=[_MegatronRopeLayer()]),
+        position_embedding_type=position_embedding_type,
+        config=SimpleNamespace(multi_latent_attention=multi_latent_attention),
+        rotary_pos_emb=lambda seq_len: torch.zeros(rope_len, 1, 1, 16),
+    )
+
+
+def test_megatron_layer_gets_the_models_rotary_embedding():
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(_gpt_model())
+    inputs = adapter.inputs(LAYER, parts.layers[0], _ctx())
+    assert inputs.kwargs["rotary_pos_emb"].shape == (SEQ, 1, 1, 16)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        _gpt_model(position_embedding_type="learned_absolute"),
+        _gpt_model(multi_latent_attention=True),
+        _gpt_model(rope_len=SEQ // 2),
+    ],
+    ids=["no-rope", "mla", "cp-sliced"],
+)
+def test_megatron_layer_without_layer_level_rope_gets_none(model):
+    adapter = MegatronBenchAdapter()
+    parts = adapter.discover(model)
+    assert adapter.inputs(LAYER, parts.layers[0], _ctx()).kwargs == {}
+
+
+def test_megatron_rotary_skipped_when_forward_does_not_take_it():
+    adapter = MegatronBenchAdapter()
+    adapter.discover(_gpt_model())
+    assert adapter.inputs(LAYER, nn.Identity(), _ctx()).kwargs == {}
+
+
 def test_megatron_moe_decomposition_needs_dispatch_and_combine():
     adapter = MegatronBenchAdapter()
     bare = nn.Identity()
@@ -289,12 +375,30 @@ def test_torchtitan_finds_rope_under_either_name():
     assert isinstance(inputs.args[1], torch.Tensor)
 
 
+class _TitanForwardBlock(nn.Module):
+    def forward(self, x, rope_cache, attention_masks, positions=None):
+        return x
+
+
+class _GptOssBlock(nn.Module):
+    def forward(self, x, rope_cache, attention_masks):
+        return x
+
+
 def test_torchtitan_layer_forward_gets_mask_and_positions():
     adapter = TorchTitanBenchAdapter()
     adapter.discover(_TitanModel())
-    inputs = adapter.inputs(LAYER, nn.Linear(HIDDEN, HIDDEN), _ctx())
+    inputs = adapter.inputs(LAYER, _TitanForwardBlock(), _ctx())
     # None selects the dense causal path the projection models.
     assert inputs.kwargs == {"attention_masks": None, "positions": None}
+
+
+def test_torchtitan_layer_forward_drops_kwargs_the_block_does_not_take():
+    """GPT-OSS blocks have no ``positions`` argument."""
+    adapter = TorchTitanBenchAdapter()
+    adapter.discover(_TitanModel())
+    inputs = adapter.inputs(LAYER, _GptOssBlock(), _ctx())
+    assert inputs.kwargs == {"attention_masks": None}
 
 
 def test_torchtitan_input_dtype_follows_the_module_parameters():
@@ -423,6 +527,7 @@ def test_writeback_translates_an_all_moe_stack():
 
 @pytest.mark.parametrize(
     "granularity,expected",
+    # Recompute is measured in the checkpointed backward, as training runs it.
     [("full", "full"), ("selective", "selective")],
 )
 def test_writeback_translates_recompute_granularity(granularity, expected):
@@ -587,3 +692,27 @@ def test_a_backend_that_cannot_build_inputs_fails_loudly(monkeypatch, recorded_b
     model = _TitanModel(num_layers=2, rope_attr=None)
     with pytest.raises(RuntimeError, match="cannot build benchmark inputs"):
         profiler.run_layer_benchmark(model=model, batch_size=BATCH, seq_len=SEQ)
+
+
+def test_compiled_block_is_detected_for_whole_layer_timing():
+    from primus.core.projection.module_profilers.transformer_layer import (
+        _is_compiled_module,
+    )
+
+    block = _TitanForwardBlock()
+    assert not _is_compiled_module(block)
+    assert _is_compiled_module(torch.compile(block))
+
+
+def test_checkpointed_block_is_detected_for_whole_layer_timing():
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        checkpoint_wrapper,
+    )
+
+    from primus.core.projection.module_profilers.transformer_layer import (
+        _is_checkpointed_module,
+    )
+
+    block = nn.Linear(HIDDEN, HIDDEN)
+    assert not _is_checkpointed_module(block)
+    assert _is_checkpointed_module(checkpoint_wrapper(block))

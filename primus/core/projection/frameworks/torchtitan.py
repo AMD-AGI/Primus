@@ -364,6 +364,9 @@ def _normalize(args) -> None:
         int(flat["num_layers"]) if recompute["recompute_granularity"] == "full" else 0
     )
     flat["recompute_layer_ids"] = None
+    # The bench keeps full AC on (torchtitan_apply_bench_overrides), so the
+    # measured backward carries the recompute as compiled.
+    flat["recompute_measured_in_backward"] = recompute["recompute_granularity"] == "full"
 
     flat.update(_resolve_precision(args))
 
@@ -498,6 +501,10 @@ def torchtitan_apply_bench_overrides(args) -> None:
     # microbatch and the projection composes the rest.
     _ns_set(args, "training.global_batch_size", micro_batch_size)
 
+    # Recompute stays in the measured backward, checkpointed as training runs it.
+    # A compiled, fully checkpointed block re-runs less than its whole forward
+    # (Llama 3.1 70B: ~10 ms lighter per layer in an MI325X trace), which an
+    # analytic "one more forward" term overcharges.
     granularity = getattr(args, "recompute_granularity", None)
     if granularity == "full":
         _ns_set(args, "activation_checkpoint.mode", "full")

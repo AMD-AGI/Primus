@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from primus.core.launcher.parser import load_primus_config
+from primus.core.projection import kernel_report, param_counts
 from primus.core.projection.bench_harness import get_bench_runner, resolve_model_adapter
 from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
@@ -287,7 +288,7 @@ def _merge_hybrid_profiling(
     for layer_idx, current_data in current_results.items():
         if not isinstance(current_data, dict):
             continue
-        if layer_idx in ("embedding", "output", "_tp_allreduce_benchmark", "_memory_benchmark"):
+        if layer_idx in ("embedding", "output") or str(layer_idx).startswith("_"):
             continue
 
         # Find matching baseline layer (by index, or use the representative
@@ -570,16 +571,39 @@ def calculate_collective_communication_time(
     ffn_hidden = model_config.ffn_hidden_size or hidden_size * 4
     moe_ffn = model_config.moe_ffn_hidden_size or ffn_hidden
     num_experts = model_config.num_experts or 1
-    attn_params = 4 * hidden_size * hidden_size  # Q, K, V, O projections
+    kv_channels = getattr(model_config, "kv_channels", 0) or (
+        hidden_size // max(1, getattr(model_config, "num_attention_heads", 0) or 1)
+    )
+    q_width = (getattr(model_config, "num_attention_heads", 0) or 0) * kv_channels or hidden_size
+    kv_groups = (
+        getattr(model_config, "num_query_groups", 0)
+        if getattr(model_config, "group_query_attention", False)
+        else getattr(model_config, "num_attention_heads", 0)
+    ) or 0
+    kv_width = kv_groups * kv_channels or hidden_size
+    attn_params = hidden_size * (q_width + 2 * kv_width) + q_width * hidden_size  # QKV + O
     dense_mlp_params = 3 * hidden_size * ffn_hidden  # gate, up, down
     expert_mlp_params = 3 * hidden_size * moe_ffn  # per expert
+    moe_replicated_params = hidden_size * num_experts
+    # Shared experts are replicated (synced over the full DP group like attention).
+    moe_replicated_params += (
+        3 * hidden_size * (getattr(model_config, "moe_shared_expert_intermediate_size", 0) or 0)
+    )
 
     # Non-expert params are replicated across EP; expert params are partitioned by EP
-    non_expert_params = num_layers * attn_params + num_dense_layers * dense_mlp_params
+    non_expert_params = (
+        num_layers * attn_params
+        + num_dense_layers * dense_mlp_params
+        + num_moe_layers * moe_replicated_params
+    )
     expert_total_params = num_moe_layers * num_experts * expert_mlp_params
-    # Per-GPU: non-expert (full copy) + expert (sharded by EP)
-    params_per_gpu = non_expert_params + (expert_total_params // max(ep, 1))
-    num_params_per_rank = params_per_gpu // (tp * pp)  # Further sharded by TP/PP
+    vocab_params = (getattr(model_config, "padded_vocab_size", 0) or 0) * hidden_size // tp
+    untied = not getattr(model_config, "share_embeddings_and_output_weights", False)
+    # Parameters on the most loaded stage, split by the data-parallel group that replicates them.
+    local = param_counts.local_params(training_config)
+    edp = param_counts.expert_dp_size(training_config, dp)
+    non_expert_params_per_rank = local.dense
+    num_params_per_rank = local.total
 
     breakdown = {}
     message_info = {}
@@ -591,20 +615,19 @@ def calculate_collective_communication_time(
     # use_distributed_optimizer = True means ZeRO-1 style (shards optimizer state only, uses all-reduce)
     # These are DIFFERENT! Only FSDP2 replaces gradient all-reduce with reduce-scatter.
     use_fsdp = getattr(mp_config, "use_torch_fsdp2", False)
+    # Bytes per gradient element on the wire (DDP grad buffer dtype).
+    grad_bytes = 2 if getattr(mp_config, "grad_reduce_in_bf16", False) else 4
 
     # 1. Gradient AllReduce (DP group) - ONLY if NOT using FSDP2
     # With FSDP2, gradient sync is handled by reduce-scatter, not all-reduce
     # With distributed_optimizer (ZeRO-1), we still need gradient all-reduce
     if dp > 1 and not use_fsdp:
-        # For MoE with EP > 1, expert gradient allreduce is across dp_replicas
-        # (1 GPU per node), which is bandwidth-limited by single inter-node link.
-        # Non-expert gradient allreduce is across full DP group.
-        dp_replicas = dp // max(ep, 1)  # data-parallel replicas (excluding EP)
+        # Dense gradients reduce over the full DP group, expert gradients over the expert
+        # data-parallel group only (none when expert parallelism fills the DP group).
+        dp_replicas = edp
 
-        if ep > 1 and num_moe_layers > 0 and dp_replicas > 1:
-            # Expert gradient allreduce: across dp_replicas GPUs (1 per node)
-            expert_params_per_gpu = (expert_total_params // ep) // (tp * pp)
-            expert_grad_size = expert_params_per_gpu * 4  # FP32
+        if ep > 1 and num_moe_layers > 0:
+            expert_grad_size = local.expert * grad_bytes if dp_replicas > 1 else 0
             # Single-NIC inter-node ring. Because EP fills the node (EP ==
             # gpus_per_node), each expert lives on exactly ONE GPU per node, so a
             # given expert's gradient is replicated only ACROSS nodes (1 GPU per
@@ -619,26 +642,19 @@ def calculate_collective_communication_time(
             #     rings, one per GPU/NIC).
             #
             # Ring all-reduce moves 2*(N-1)/N * msg per GPU (reduce-scatter +
-            # all-gather). The (N-1)/N volume fraction is capped at its 2-node
-            # value (0.5): per-GPU traffic is bounded (it only asymptotes 0.5->1.0
-            # per pass as N grows) and, in a ring, each GPU drives a single
-            # dedicated point-to-point link whose bandwidth does not degrade as
-            # nodes are added on a non-blocking rail/fat-tree fabric. So the
-            # per-GPU AR time saturates rather than growing with (N-1)/N; the cap
-            # holds it at the 2-node value. (Flat scaling is only exercised up to
-            # dp_replicas=4; beyond that it is a physically-motivated extrapolation
-            # — an oversubscribed fabric or O(N) ring latency could bend it up.)
+            # all-gather), each GPU driving its own NIC.
             pod_bw = getattr(coll_args, "pod_bw", 50.0)
-            ring_factor = min((dp_replicas - 1) / dp_replicas, 0.5)
+            ring_factor = (dp_replicas - 1) / dp_replicas
             expert_ar_time_ms = 2 * expert_grad_size * ring_factor / (pod_bw * 1e9) * 1e3
 
             # Non-expert gradient allreduce: across full DP group
-            non_expert_per_rank = non_expert_params // (tp * pp)
-            non_expert_grad_size = non_expert_per_rank * 4  # FP32
+            non_expert_grad_size = local.dense * grad_bytes
             non_expert_ar_time = cm.allreduce(coll_args, non_expert_grad_size, dp, groups=["dp"])
             non_expert_ar_ms = non_expert_ar_time / 1000
 
             total_ar_ms = expert_ar_time_ms + non_expert_ar_ms
+            message_info["non_expert_ar_ms_per_param"] = non_expert_ar_ms / max(1, local.dense)
+            message_info["expert_ar_ms_per_param"] = expert_ar_time_ms / max(1, local.expert)
             total_grad_size = expert_grad_size + non_expert_grad_size
 
             breakdown["gradient_allreduce"] = total_ar_ms
@@ -654,9 +670,14 @@ def calculate_collective_communication_time(
             overlap_grad_reduce_cfg = getattr(mp_config, "overlap_grad_reduce", True)
             message_info["moe_ar_no_overlap"] = not overlap_grad_reduce_cfg
         else:
-            grad_size = num_params_per_rank * 4  # FP32 gradients
+            moe_sharded = False
+            grad_size = local.total * grad_bytes
             ar_time_dp = cm.allreduce(coll_args, grad_size, dp, groups=["dp"])
             breakdown["gradient_allreduce"] = ar_time_dp / 1000  # Convert to ms
+            message_info["non_expert_ar_ms_per_param"] = ar_time_dp / 1000 / max(1, grad_size // grad_bytes)
+            message_info["expert_ar_ms_per_param"] = (
+                0.0 if moe_sharded else message_info["non_expert_ar_ms_per_param"]
+            )
             message_info["gradient_allreduce_size"] = grad_size
             message_info["gradient_allreduce_size_mb"] = grad_size / (1024 * 1024)
             message_info["moe_ar_no_overlap"] = False
@@ -665,6 +686,22 @@ def calculate_collective_communication_time(
         message_info["gradient_allreduce_size"] = 0
         message_info["gradient_allreduce_size_mb"] = 0.0
         message_info["moe_ar_no_overlap"] = False
+
+    message_info["grad_params_per_rank"] = num_params_per_rank
+    message_info["dense_params_per_layer"] = non_expert_params / max(1, num_layers) / tp
+    message_info["expert_params_per_layer"] = expert_total_params / max(1, ep) / max(1, num_layers) / tp
+    message_info["vocab_params"] = vocab_params
+    message_info["untied_embeddings"] = untied
+    message_info["non_expert_params_per_rank"] = non_expert_params_per_rank
+    message_info["expert_params_per_rank"] = num_params_per_rank - non_expert_params_per_rank
+    # 1b. The distributed optimizer's parameter all-gather (bf16 model weights), over the same
+    # groups the gradients reduce in. Kept out of ``breakdown``: the iteration adds its exposed part.
+    param_ag_ms = 0.0
+    if dp > 1 and not use_fsdp and getattr(mp_config, "use_distributed_optimizer", False):
+        param_ag_ms = cm.allgather(coll_args, local.dense * 2, dp, groups=["dp"]) / 1000
+        if edp > 1:
+            param_ag_ms += cm.allgather(coll_args, local.expert * 2, edp, groups=["dp"]) / 1000
+    message_info["param_allgather_ms"] = param_ag_ms
 
     # 2. MoE All-to-All (EP group)
     # With TP > 1 and sequence parallelism, each GPU holds S/TP tokens.
@@ -748,6 +785,24 @@ def calculate_collective_communication_time(
         message_info["fsdp_weight_size_per_layer_mb"] = weight_size_per_layer / (1024 * 1024)
         message_info["fsdp_ag_per_layer_ms"] = ag_time_per_layer_us / 1000
         message_info["fsdp_rs_per_layer_ms"] = rs_time_per_layer_us / 1000
+        # The same collectives within one node, which the in-situ term scales with.
+        node_dp = min(dp, max(1, gpus_per_node // max(1, tp * pp * cp)))
+        if num_nodes > 1 and node_dp > 1:
+            node_args = get_default_args(
+                num_nodes=1,
+                gpus_per_node=gpus_per_node,
+                tp=tp,
+                pp=pp,
+                ep=ep,
+                cp=cp,
+                hardware_config=hw if hw else None,
+            )
+            node_ag_us = cm.allgather(node_args, weight_size_per_layer, node_dp, groups=["dp"])
+            node_rs_us = cm.reduce_scatter(node_args, grad_size_per_layer, node_dp, groups=["dp"])
+        else:
+            node_ag_us, node_rs_us = ag_time_per_layer_us, rs_time_per_layer_us
+        message_info["fsdp_node_ag_per_layer_ms"] = node_ag_us / 1000
+        message_info["fsdp_node_rs_per_layer_ms"] = node_rs_us / 1000
         message_info["fsdp_ag_multiplier"] = ag_multiplier
         message_info["fsdp_enabled"] = True
     else:
@@ -910,6 +965,8 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
 
     # Get recomputation settings
     recompute_granularity = getattr(mp_config, "recompute_granularity", None)
+    if getattr(mp_config, "recompute_measured_in_backward", False):
+        recompute_granularity = None
     recompute_layer_ids = _normalized_recompute_layer_ids(mp_config)
     recompute_num_layers = _recompute_layer_count(mp_config, num_total_layers)
 
@@ -961,6 +1018,14 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
             # dense profile is implicitly discarded below because
             # num_dense_layers=0.
             observed_type = layer_data.get("type")
+            if "hybrid_kinds" in layer_data:
+                # A hybrid stack's per-layer average already weights every layer
+                # kind, so it stands for every layer, dense or MoE.
+                profiled_dense_times.append(layer_time)
+                profiled_dense_fwd_times.append(fwd_time)
+                profiled_moe_times.append(layer_time)
+                profiled_moe_fwd_times.append(fwd_time)
+                continue
             if observed_type == "dense":
                 is_dense = True
             elif observed_type == "moe":
@@ -1111,6 +1176,52 @@ def _flatten_pipeline_for_single_node(module_config):
             setattr(module_config, attr, None)
 
 
+def _limit_hybrid_layers_for_projection(module_config) -> bool:
+    """Shrink a hybrid stack to the shortest stretch that still has every layer kind.
+
+    A hybrid stack is built in mixer/MLP pairs, so the default 1-layer cap builds
+    no layers at all. Returns False for non-hybrid models.
+    """
+    from primus.core.projection.training_config import (
+        allocate_hybrid_layers,
+        hybrid_layer_pattern,
+        hybrid_layer_types,
+    )
+
+    full = hybrid_layer_types(module_config)
+    if full is None:
+        return False
+    kinds = set(full)
+    if os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is not None:
+        cap = int(os.environ["PRIMUS_PROJ_MAX_LAYERS"])
+    else:
+        cap = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
+    pattern = hybrid_layer_pattern(module_config)
+    if getattr(module_config, "model_type", None) == "zaya1":
+        if getattr(module_config, "zaya_layers", None):
+            module_config.zaya_layers = list(module_config.zaya_layers)[:cap]
+        module_config.num_layers = cap
+    elif pattern is not None:
+        trimmed = pattern[:cap]
+        for name in ("hybrid_layer_pattern", "hybrid_override_pattern"):
+            if getattr(module_config, name, None):
+                setattr(module_config, name, trimmed)
+        module_config.num_layers = len(trimmed)
+    else:
+        ratio = getattr(module_config, "hybrid_attention_ratio", 0.0) or 0.0
+        layers = next(
+            (
+                n
+                for n in range(2, len(full) + 1, 2)
+                if set(allocate_hybrid_layers(n, ratio)) == kinds and n >= cap
+            ),
+            len(full),
+        )
+        module_config.num_layers = layers
+    module_config.moe_layer_freq = [0] * module_config.num_layers
+    return True
+
+
 def _limit_layers_for_projection(module_config):
     """
     Restrict the transformer stack to a small number of layers for profiling.
@@ -1139,6 +1250,9 @@ def _limit_layers_for_projection(module_config):
         and len(_distinct_crs) > 1
         and os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is None
     ):
+        _flatten_pipeline_for_single_node(module_config)
+        return
+    if _limit_hybrid_layers_for_projection(module_config):
         _flatten_pipeline_for_single_node(module_config)
         return
     # Use 1 layer for fast profiling - results are extrapolated to full model.
@@ -2145,6 +2259,8 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
 
         # Get recomputation settings to account for extra forward pass during backward
         recompute_granularity = getattr(mp_cfg, "recompute_granularity", None)
+        if getattr(mp_cfg, "recompute_measured_in_backward", False):
+            recompute_granularity = None
         recompute_layer_ids = _normalized_recompute_layer_ids(mp_cfg)
         recompute_num_layers = getattr(mp_cfg, "recompute_num_layers", 0) or 0
         recompute_method = getattr(mp_cfg, "recompute_method", None)
@@ -2203,6 +2319,7 @@ def _build_scheduler_sim_config(
     profiling_results,
     enable_zero_bubble=False,
     scheduler_algorithm="auto",
+    p2p_time_ms=0.0,
 ):
     chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
     assert chunk_time_matrix is not None
@@ -2512,9 +2629,368 @@ def _build_scheduler_sim_config(
 
     return {
         "chunk_time_ms": chunk_time_matrix,
+        "p2p_time_ms": p2p_time_ms,
         "output_dir": str(Path.cwd() / "pp_simulation_result"),
         "schedulers": schedulers,
     }
+
+
+# Timeline of the most recent pipeline simulation, for the gradient-sync model.
+_LAST_PIPELINE_TIMELINE: Dict[str, Any] = {}
+
+
+def _last_backward_per_chunk(rank_result: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """(start, end) of each model chunk's final backward on one pipeline rank.
+
+    Megatron launches a chunk's bucketed gradient reduce-scatter during the
+    backward of its last microbatch (earlier microbatches run under no_sync).
+    """
+    last: Dict[int, Tuple[float, float]] = {}
+    for start, end, chunk in zip(
+        rank_result.get("bwd_start", []), rank_result.get("bwd_end", []), rank_result.get("bwd_chunk", [])
+    ):
+        if chunk not in last or end > last[chunk][1]:
+            last[chunk] = (start, end)
+    return [last[c] for c in sorted(last)]
+
+
+def _microbatch_component_times(training_config, profiling_results) -> Dict[str, float]:
+    """Per-microbatch fwd/bwd times of a layer, the output head (+loss) and the embedding."""
+    by_type: Dict[str, Tuple[float, float]] = {}
+    for key, data in profiling_results.items():
+        if isinstance(key, int) and isinstance(data, dict) and "backward_time_ms" in data:
+            by_type.setdefault(data.get("type", "dense"), (data["forward_time_ms"], data["backward_time_ms"]))
+    pattern = list(getattr(training_config.model_config, "moe_pattern", None) or [])
+    num_layers = training_config.model_config.num_layers
+    num_moe = sum(1 for p in pattern if p == 1) if pattern else 0
+    moe = by_type.get("moe", by_type.get("dense", (0.0, 0.0)))
+    dense = by_type.get("dense", moe)
+    layer_fwd = (num_moe * moe[0] + (num_layers - num_moe) * dense[0]) / max(1, num_layers)
+    layer_bwd = (num_moe * moe[1] + (num_layers - num_moe) * dense[1]) / max(1, num_layers)
+    out = profiling_results.get("output") or {}
+    emb = profiling_results.get("embedding") or {}
+    return {
+        "layer_fwd": layer_fwd,
+        "layer_bwd": layer_bwd,
+        "output_fwd": out.get("forward_time_ms", 0.0),
+        "output_bwd": out.get("backward_time_ms", 0.0),
+        "embedding_fwd": emb.get("forward_time_ms", 0.0),
+        "embedding_bwd": emb.get("backward_time_ms", 0.0),
+    }
+
+
+def _chunk_grad_buckets(
+    layers: int,
+    has_embedding: bool,
+    has_output: bool,
+    bucket_size: Optional[int],
+    sizes: Dict[str, float],
+    times: Dict[str, float],
+) -> List[Tuple[float, float, float, float]]:
+    """Megatron DDP buckets of one model chunk, in backward (reduce) order.
+
+    Parameters are assigned to buckets in reverse registration order (output
+    head first, embedding last) and never split, so a large tensor such as the
+    vocabulary embedding closes the final bucket on its own. Dense and expert
+    parameters live in separate buffers. Returns, per bucket,
+    ``(bwd_ready_frac, fwd_use_frac, dense_params, expert_params)`` where the
+    fractions locate the bucket within the chunk's backward / forward pass.
+    """
+    tensors = []  # (bwd_start, bwd_end, fwd_start, fwd_end, dense, expert) in backward order
+    bwd_total = (
+        layers * times["layer_bwd"]
+        + (times["output_bwd"] if has_output else 0.0)
+        + (times["embedding_bwd"] if has_embedding else 0.0)
+    ) or 1.0
+    fwd_total = (
+        layers * times["layer_fwd"]
+        + (times["output_fwd"] if has_output else 0.0)
+        + (times["embedding_fwd"] if has_embedding else 0.0)
+    ) or 1.0
+    b = 0.0
+    f = fwd_total
+    if has_output:
+        tensors.append((b, b + times["output_bwd"], f - times["output_fwd"], f, sizes["vocab"], 0.0))
+        b += times["output_bwd"]
+        f -= times["output_fwd"]
+    for _ in range(layers):
+        tensors.append(
+            (b, b + times["layer_bwd"], f - times["layer_fwd"], f, sizes["dense"], sizes["expert"])
+        )
+        b += times["layer_bwd"]
+        f -= times["layer_fwd"]
+    if has_embedding:
+        tensors.append((b, b + times["embedding_bwd"], 0.0, times["embedding_fwd"], sizes["vocab"], 0.0))
+
+    buckets = []
+    for kind in ("dense", "expert"):
+        idx = 4 if kind == "dense" else 5
+        acc, fwd_use = 0.0, None
+        for t in tensors:
+            if t[idx] <= 0:
+                continue
+            acc += t[idx]
+            fwd_use = t[2] if fwd_use is None else min(fwd_use, t[2])
+            if bucket_size and acc >= bucket_size:
+                buckets.append(
+                    (
+                        t[1] / bwd_total,
+                        fwd_use / fwd_total,
+                        acc if idx == 4 else 0.0,
+                        acc if idx == 5 else 0.0,
+                    )
+                )
+                acc, fwd_use = 0.0, None
+        if acc > 0:
+            last = [t for t in tensors if t[idx] > 0][-1]
+            buckets.append(
+                (last[1] / bwd_total, fwd_use / fwd_total, acc if idx == 4 else 0.0, acc if idx == 5 else 0.0)
+            )
+    return buckets
+
+
+def _exposed_overlapped_grad_sync_ms(
+    training_config,
+    message_info: Dict[str, Any],
+    dp: int,
+    profiling_results,
+    compute_time_ms: float,
+    time_includes_all_microbatches: bool,
+) -> float:
+    """Exposed DP gradient reduce + parameter all-gather under overlap_grad_reduce.
+
+    Follows Megatron DDP: each model chunk's gradient buckets are reduced on a
+    communication queue once ready during that chunk's last-microbatch
+    backward (earlier microbatches run under no_sync). Only pipeline rank 0's
+    first chunk is bucketed; every other chunk reduces its whole buffer once
+    its backward ends. The optimizer waits for every rank, so the exposed
+    reduce time is how far the slowest rank's queue runs past the end of
+    compute. With overlap_param_gather the next iteration's all-gathers are
+    dispatched at its start (first two chunks; later chunks one chunk ahead)
+    and each forward waits for its bucket; without it the all-gather runs
+    synchronously after the optimizer.
+    """
+    mp_config = training_config.model_parallel_config
+    model_config = training_config.model_config
+    pp = mp_config.pipeline_model_parallel_size or 1
+    vpp = getattr(mp_config, "virtual_pipeline_model_parallel_size", None) or 1
+    tp = mp_config.tensor_model_parallel_size or 1
+    cp = getattr(mp_config, "context_model_parallel_size", 1) or 1
+    ep = getattr(mp_config, "expert_model_parallel_size", 1) or 1
+    gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+    use_dist_opt = getattr(mp_config, "use_distributed_optimizer", False)
+    grad_bytes = 2 if getattr(mp_config, "grad_reduce_in_bf16", False) else 4
+
+    sizes = {
+        "dense": message_info.get("dense_params_per_layer", 0.0),
+        "expert": message_info.get("expert_params_per_layer", 0.0),
+        "vocab": message_info.get("vocab_params", 0.0),
+    }
+    # Per-parameter cost of the reduce (reduce-scatter, or all-reduce without
+    # the distributed optimizer) and of the parameter all-gather, per group.
+    # Analytical all-reduce = reduce-scatter + all-gather of equal volume;
+    # groups inside one node use the bandwidths measured on the benchmark node.
+    reduce_share = 0.5 if use_dist_opt else 1.0
+    cost = {}
+    measured = (
+        profiling_results.get("_dp_reduce_scatter_benchmark") if isinstance(profiling_results, dict) else None
+    )
+    expert_dp = max(1, dp * cp // ep)
+    for kind, group, span, ar_per_param in (
+        ("dense", dp, tp * cp * dp, message_info.get("non_expert_ar_ms_per_param", 0.0)),
+        ("expert", expert_dp, tp * ep * expert_dp, message_info.get("expert_ar_ms_per_param", 0.0)),
+    ):
+        reduce_ms, gather_ms = ar_per_param * reduce_share, ar_per_param * 0.5
+        if group <= 1:
+            reduce_ms = gather_ms = 0.0
+        elif measured and span <= gpus_per_node and measured.get("reduce_scatter_busbw_gbps"):
+            share = (group - 1) / group * 1e3 / 1e9
+            reduce_ms = share * grad_bytes / measured["reduce_scatter_busbw_gbps"]
+            gather_ms = share * 2 / measured["all_gather_busbw_gbps"]  # bf16 params
+            if not use_dist_opt:
+                reduce_ms += gather_ms
+        cost[kind] = (reduce_ms, gather_ms)
+
+    times = _microbatch_component_times(training_config, profiling_results)
+    num_layers = model_config.num_layers
+    layers_per_chunk = num_layers / (pp * vpp)
+    untied = message_info.get("untied_embeddings", True)
+
+    timeline = _LAST_PIPELINE_TIMELINE if (time_includes_all_microbatches and pp > 1) else {}
+    step_end = timeline.get("step_time_ms") or compute_time_ms
+    bwd_windows = timeline.get("last_backward")
+    fwd_windows = timeline.get("first_forward")
+    if not bwd_windows:
+        bwd = num_layers * times["layer_bwd"] + times["output_bwd"] + times["embedding_bwd"]
+        fwd = num_layers * times["layer_fwd"] + times["output_fwd"] + times["embedding_fwd"]
+        bwd_windows = [[(step_end - bwd, step_end)]]
+        fwd_windows = [[(0.0, fwd)]]
+
+    reduce_finish = step_end
+    gather_delay = 0.0
+    gather_sync_ms = 0.0
+    for rank, windows in enumerate(bwd_windows):
+        layers = round(layers_per_chunk * len(windows))
+        rank_params = layers * (sizes["dense"] + sizes["expert"])
+        rank_params += sizes["vocab"] * ((rank == 0) + (rank == pp - 1 and untied))
+        bucket_size = getattr(mp_config, "ddp_bucket_size", None)
+        if getattr(mp_config, "ddp_num_buckets", None):
+            bucket_size = rank_params // mp_config.ddp_num_buckets
+        if not bucket_size:
+            bucket_size = max(40_000_000, 1_000_000 * dp * cp)
+
+        reduces, gathers = [], []
+        for chunk, (bwd_start, bwd_end) in enumerate(windows):
+            virtual_stage = chunk * pp + rank
+            bucketed = rank == 0 and chunk == 0
+            buckets = _chunk_grad_buckets(
+                round(layers_per_chunk),
+                has_embedding=virtual_stage == 0,
+                has_output=virtual_stage == pp * vpp - 1,
+                bucket_size=bucket_size if bucketed else None,
+                sizes=sizes,
+                times=times,
+            )
+            fwd_start, fwd_end = fwd_windows[rank][chunk] if chunk < len(fwd_windows[rank]) else (0.0, 0.0)
+            dispatch = 0.0 if chunk < 2 else fwd_windows[rank][chunk - 1][0]
+            for bwd_frac, fwd_frac, dense_n, expert_n in buckets:
+                reduce_ms = dense_n * cost["dense"][0] + expert_n * cost["expert"][0]
+                gather_ms = dense_n * cost["dense"][1] + expert_n * cost["expert"][1]
+                reduces.append((bwd_start + (bwd_end - bwd_start) * bwd_frac, reduce_ms))
+                gathers.append((dispatch, fwd_start + (fwd_end - fwd_start) * fwd_frac, gather_ms))
+
+        free = 0.0
+        for ready, ms in sorted(reduces):
+            free = max(free, ready) + ms
+        reduce_finish = max(reduce_finish, free)
+
+        if use_dist_opt:
+            if getattr(mp_config, "overlap_param_gather", False):
+                free = 0.0
+                for dispatch, use, ms in sorted(gathers, key=lambda g: (g[0], g[1])):
+                    free = max(free, dispatch) + ms
+                    gather_delay = max(gather_delay, free - use)
+            else:
+                gather_sync_ms = max(gather_sync_ms, sum(g[2] for g in gathers))
+
+    exposed = (reduce_finish - step_end) + max(0.0, gather_delay) + gather_sync_ms
+    print(
+        f"  [Grad sync] reduce tail {reduce_finish - step_end:.1f} ms, "
+        f"param all-gather stall {max(0.0, gather_delay) + gather_sync_ms:.1f} ms"
+    )
+    return exposed
+
+
+# Compute kernels overlapping an RCCL collective run ~20% slower than the same
+# kernels alone (Llama 3.1 8B BF16: +22%, Qwen 2.5 7B FP8: +21%, MI325X traces).
+# Under Megatron's overlap_grad_reduce the bucketed reduce-scatter, itself slowed
+# by the compute, stays in flight for 64-100% of the last microbatch's backward.
+_MEGATRON_DDP_OVERLAP_SLOWDOWN = 0.2
+
+
+def _megatron_ddp_overlap_contention_ms(
+    training_config, message_info: Dict[str, Any], dp: int, profiling_results
+) -> float:
+    """Per-iteration slowdown of the backward that overlaps Megatron's DDP gradient reduce.
+
+    Scaled by the share of gradients the data-parallel group reduces: experts
+    sharded across the whole DP group (EP == DP) have nothing to reduce.
+    """
+    mp_config = training_config.model_parallel_config
+    if getattr(training_config, "framework", None) != "megatron" or dp <= 1:
+        return 0.0
+    if getattr(mp_config, "use_torch_fsdp2", False):
+        return 0.0
+    dense = message_info.get("dense_params_per_layer", 0.0)
+    expert = message_info.get("expert_params_per_layer", 0.0)
+    if dense + expert <= 0:
+        return 0.0
+    cp = getattr(mp_config, "context_model_parallel_size", 1) or 1
+    ep = getattr(mp_config, "expert_model_parallel_size", 1) or 1
+    reduced = dense + (expert if dp * cp // ep > 1 else 0.0)
+    pp = mp_config.pipeline_model_parallel_size or 1
+    times = _microbatch_component_times(training_config, profiling_results)
+    stage_bwd = training_config.model_config.num_layers / pp * times["layer_bwd"]
+    return _MEGATRON_DDP_OVERLAP_SLOWDOWN * stage_bwd * reduced / (dense + expert)
+
+
+def _first_forward_per_chunk(rank_result: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """(start, end) of each model chunk's first forward on one pipeline rank."""
+    first: Dict[int, Tuple[float, float]] = {}
+    for start, end, chunk in zip(
+        rank_result.get("fwd_start", []), rank_result.get("fwd_end", []), rank_result.get("fwd_chunk", [])
+    ):
+        if chunk not in first or start < first[chunk][0]:
+            first[chunk] = (start, end)
+    return [first[c] for c in sorted(first)]
+
+
+def _mix_attention_window_variants(profiling_results, training_config) -> None:
+    """Weight windowed/full attention timings by the full model's layer pattern.
+
+    Alternating sliding-window models (windowed on odd 1-indexed layers)
+    benchmark both attention variants on one representative layer; the
+    per-layer times used downstream are the layer-count-weighted mix.
+    """
+    num_layers = training_config.model_config.num_layers
+    windowed = (num_layers + 1) // 2 / num_layers
+    seen = set()
+    for data in profiling_results.values():
+        if not isinstance(data, dict) or id(data) in seen:
+            continue
+        seen.add(id(data))
+        attn = data.get("attention") or {}
+        variants = attn.get("window_variants")
+        if not variants or attn.get("window_mix") is not None:
+            continue
+        for phase in ("forward_time_ms", "backward_time_ms"):
+            mixed = windowed * variants["windowed"][phase] + (1 - windowed) * variants["full"][phase]
+            data[phase] += mixed - attn[phase]
+            attn[phase] = mixed
+        attn["window_mix"] = windowed
+    if (
+        seen
+        and int(os.getenv("RANK", "0")) == 0
+        and any(
+            isinstance(d, dict) and (d.get("attention") or {}).get("window_mix") is not None
+            for d in profiling_results.values()
+        )
+    ):
+        print(
+            f"[Primus:Performance Projection] Attention: windowed/full variants weighted "
+            f"{windowed:.3f}/{1 - windowed:.3f} over {num_layers} layers"
+        )
+
+
+def _pp_p2p_transfer_ms(training_config, world_size, gpus_per_node, pp_size, hw, gpu_arch=None) -> float:
+    """Latency + bytes / bandwidth of one pipeline send (activation or its grad).
+
+    Megatron orders ranks tp-cp-ep-dp-pp, so neighbouring stages are
+    ``world_size / pp`` ranks apart: inter-node once a stage spans a node.
+    """
+    if pp_size <= 1:
+        return 0.0
+    rt = training_config.runtime_config
+    mc = training_config.model_config
+    mp = training_config.model_parallel_config
+    tp = getattr(mp, "tensor_model_parallel_size", 1) or 1
+    cp = getattr(mp, "context_model_parallel_size", 1) or 1
+    tokens = (getattr(rt, "micro_batch_size", 1) or 1) * (getattr(rt, "sequence_length", 0) or 0) // cp
+    if getattr(mp, "sequence_parallel", False):
+        tokens //= tp
+    nbytes = tokens * mc.hidden_size * 2
+    coll = get_default_args(
+        num_nodes=max(1, world_size // gpus_per_node),
+        gpus_per_node=gpus_per_node,
+        pp=pp_size,
+        hardware_config=hw,
+        gpu_arch=gpu_arch,
+    )
+    if world_size // pp_size >= gpus_per_node:
+        bw_gbps, lat_us = coll.pod_bw, coll.pod_lat
+    else:
+        bw_gbps, lat_us = coll.node_bw, coll.node_lat
+    return lat_us / 1e3 + nbytes / (bw_gbps * 1e9) * 1e3
 
 
 def _report_simulation_results(sim_results, training_config):
@@ -2540,6 +3016,12 @@ def _report_simulation_results(sim_results, training_config):
         summary.get("rank_totals") or []
 
         per_rank = sim.get("per_rank") or []
+        _LAST_PIPELINE_TIMELINE.clear()
+        _LAST_PIPELINE_TIMELINE.update(
+            step_time_ms=step_time_ms,
+            last_backward=[_last_backward_per_chunk(r) for r in per_rank],
+            first_forward=[_first_forward_per_chunk(r) for r in per_rank],
+        )
         mp_cfg = training_config.model_parallel_config
         param_mem_cache: Dict[int, float] = {}
         rank_stats = []
@@ -2735,6 +3217,106 @@ def _build_runtime_primus_config(legacy_primus_config, args, module_name="pre_tr
     return runtime_cfg
 
 
+def _optimizer_shard_elems(model_chunks) -> Dict[str, int]:
+    """Parameter counts this rank's optimizer steps, split by sync group.
+
+    Megatron tags expert parameters with ``allreduce=False``; the distributed
+    optimizer shards dense parameters over the DP group and expert parameters
+    over the expert-DP group.
+    """
+    dense = expert = 0
+    sharded = False
+    for chunk in model_chunks:
+        for p in chunk.parameters():
+            if not p.requires_grad:
+                continue
+            # FSDP parameters are DTensors; the optimizer steps only the local shard.
+            numel = p.to_local().numel() if hasattr(p, "to_local") else p.numel()
+            sharded = sharded or hasattr(p, "to_local")
+            if getattr(p, "allreduce", True):
+                dense += numel
+            else:
+                expert += numel
+    dp = edp = 1
+    try:
+        from megatron.core import parallel_state as ps
+
+        dp = ps.get_data_parallel_world_size()
+        edp = ps.get_expert_data_parallel_world_size()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"dense_params": dense, "expert_params": expert, "dp": dp, "expert_dp": edp, "sharded": sharded}
+
+
+def _inner_torch_optimizers(optimizer):
+    found = []
+    for opt in getattr(optimizer, "chained_optimizers", None) or [optimizer]:
+        inner = getattr(opt, "optimizer", None)
+        if inner is not None and hasattr(inner, "param_groups"):
+            found.append(inner)
+        # TorchTitan's OptimizersContainer holds one torch optimizer per model part.
+        for inner in getattr(opt, "optimizers", None) or []:
+            if hasattr(inner, "param_groups"):
+                found.append(inner)
+    return found
+
+
+def _optimizer_per_element_ms(optimizer, numel: int = 1 << 28) -> Optional[float]:
+    """Time the per-element work of one distributed-optimizer step on a dummy shard.
+
+    Runs the same inner optimizer class over ``numel`` fp32 main params, plus
+    the elementwise passes Megatron's step makes per shard element: copy the
+    reduced bf16 gradient into the fp32 main grad, the grad-norm read, and the
+    copy of the updated main param back into the bf16 model param.
+    """
+    import torch
+
+    inners = _inner_torch_optimizers(optimizer)
+    if not inners:
+        return None
+    inner = inners[0]
+    try:
+        main = torch.zeros(numel, dtype=torch.float32, device="cuda", requires_grad=True)
+        main.grad = torch.randn(numel, dtype=torch.float32, device="cuda")
+        model_grad = torch.randn(numel, dtype=torch.bfloat16, device="cuda")
+        model_param = torch.empty(numel, dtype=torch.bfloat16, device="cuda")
+        defaults = {k: v for k, v in inner.defaults.items() if k in ("lr", "betas", "eps", "weight_decay")}
+        try:
+            dummy = type(inner)([main], **defaults)
+        except Exception:  # noqa: BLE001
+            dummy = torch.optim.AdamW([main], fused=True, **defaults)
+
+        def _step():
+            main.grad.copy_(model_grad)
+            torch.linalg.vector_norm(main.grad)
+            dummy.step()
+            model_param.copy_(main.detach())
+
+        for _ in range(3):
+            _step()
+        torch.cuda.synchronize()
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        # The result is multiplied by the full model's shard size (billions of elements), so
+        # one disturbed window would dominate the projected step: keep the fastest of 3 rounds.
+        rounds = []
+        for _ in range(3):
+            start.record()
+            for _ in range(5):
+                _step()
+            end.record()
+            torch.cuda.synchronize()
+            rounds.append(start.elapsed_time(end) / 5 / numel)
+        return min(rounds)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _optimizer_step_elems(dense_params, expert_params, dp, expert_dp, distributed) -> float:
+    if not distributed:
+        return float(dense_params + expert_params)
+    return dense_params / max(1, dp) + expert_params / max(1, expert_dp)
+
+
 def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
     """Measure a real ``optimizer.step()`` on silicon (benchmark mode).
 
@@ -2772,13 +3354,27 @@ def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
         # layout is not exposed.
         filled = False
         for chunk in model:
-            buffers = list(getattr(chunk, "buffers", []) or [])
-            buffers += list(getattr(chunk, "expert_parallel_buffers", []) or [])
+            buffers = []
+            # Megatron's DDP exposes grad buffers as lists; on a plain nn.Module
+            # (TorchTitan's FSDP wrapping) ``buffers`` is the method.
+            for name in ("buffers", "expert_parallel_buffers"):
+                attr = getattr(chunk, name, None)
+                if attr and not callable(attr):
+                    buffers += list(attr)
             for buf in buffers:
                 gd = getattr(buf, "grad_data", None)
                 if gd is not None:
                     gd.normal_()
                     filled = True
+        if not filled and getattr(optimizer, "optimizers", None):
+            # TorchTitan: the optimizer steps the FSDP-sharded parameters, not
+            # the unsharded views the module exposes during the benchmark.
+            for inner in _inner_torch_optimizers(optimizer):
+                for group in inner.param_groups:
+                    for p in group["params"]:
+                        if p.requires_grad:
+                            p.grad = torch.randn_like(p) if p.grad is None else p.grad.normal_()
+                            filled = True
         if not filled:
             for chunk in model:
                 params = chunk.parameters() if hasattr(chunk, "parameters") else []
@@ -2825,7 +3421,22 @@ def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
                 f"median {median_ms:.2f} ms over {num_iters} iters "
                 f"(samples: {[round(s, 2) for s in samples]})"
             )
-        return {"step_time_ms": median_ms, "samples_ms": samples}
+        per_elem_ms = _optimizer_per_element_ms(optimizer)
+        if rank == 0 and per_elem_ms:
+            print(
+                f"[Primus:Performance Projection] Optimizer per-element work: "
+                f"{per_elem_ms * 1e9:.2f} ms per 1e9 elements"
+            )
+        return {
+            "step_time_ms": median_ms,
+            "samples_ms": samples,
+            "per_element_ms": per_elem_ms,
+            "overlap_param_gather": any(
+                getattr(getattr(o, "ddp_config", None), "overlap_param_gather", False)
+                for o in getattr(optimizer, "chained_optimizers", None) or [optimizer]
+            ),
+            **_optimizer_shard_elems(model),
+        }
     except Exception as exc:  # noqa: BLE001
         if rank == 0:
             print(
@@ -3042,6 +3653,10 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
         optimizer_bench = _benchmark_optimizer_step(trainer, rank)
     if optimizer_bench:
         profiling_results["_optimizer_benchmark"] = optimizer_bench
+    if bench_runner is None:
+        ddp_collectives = _benchmark_ddp_collectives(trainer, rank)
+        if ddp_collectives:
+            profiling_results["_dp_reduce_scatter_benchmark"] = ddp_collectives
 
     # Attach the memory benchmark payload to the profiling results dict so
     # _save_profiling_results / _load_profiling_results can persist it
@@ -3071,6 +3686,69 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
             )
 
     return profiling_results
+
+
+def _benchmark_ddp_collectives(trainer, rank, num_iters=5):
+    """Time the benchmark model's own DDP gradient reduce and parameter all-gather.
+
+    Drives Megatron's synchronous ``finish_grad_sync`` / ``start_param_sync``
+    on the real grad/param buffers, so the measured bus bandwidth includes the
+    actual process group, reduce op, dtype and bucket padding of training.
+    """
+    import torch
+
+    model = getattr(trainer, "model", None)
+    if model is None:
+        return {}
+    chunks = model if isinstance(model, (list, tuple)) else [model]
+    if not all(hasattr(c, "finish_grad_sync") and hasattr(c, "start_param_sync") for c in chunks):
+        return {}
+    wire = 0.0
+    for chunk in chunks:
+        for buf in list(getattr(chunk, "buffers", [])) + list(getattr(chunk, "expert_parallel_buffers", [])):
+            n = buf.data_parallel_world_size
+            if n > 1:
+                wire += (n - 1) / n * buf.grad_data.numel() * buf.grad_data.element_size()
+    if wire <= 0:
+        return {}
+
+    def _time(op):
+        for _ in range(2):
+            op()
+        torch.cuda.synchronize()
+        times = []
+        for _ in range(num_iters):
+            start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            start.record()
+            op()
+            end.record()
+            torch.cuda.synchronize()
+            times.append(start.elapsed_time(end))
+        times.sort()
+        return times[len(times) // 2]
+
+    try:
+        rs_ms = _time(lambda: [c.finish_grad_sync() for c in chunks])
+        ag_ms = _time(lambda: [c.start_param_sync(force_sync=True) for c in chunks])
+    except Exception as exc:  # noqa: BLE001
+        if rank == 0:
+            print(f"[Primus:Performance Projection] DDP collective benchmark failed: {exc}")
+        return {}
+    result = {
+        "wire_bytes": wire,
+        "reduce_scatter_ms": rs_ms,
+        "all_gather_ms": ag_ms,
+        "reduce_scatter_busbw_gbps": wire / (rs_ms * 1e6),
+        "all_gather_busbw_gbps": wire / (ag_ms * 1e6),
+    }
+    if rank == 0:
+        print(
+            f"[Primus:Performance Projection] DDP grad reduce: {rs_ms:.2f} ms, "
+            f"bus bandwidth {result['reduce_scatter_busbw_gbps']:.0f} GB/s; param all-gather: "
+            f"{ag_ms:.2f} ms, {result['all_gather_busbw_gbps']:.0f} GB/s "
+            f"({wire / 2**20:.0f} MB on the wire)"
+        )
+    return result
 
 
 def _benchmark_tp_allreduce_on_gpu(training_config, rank, world_size):
@@ -3214,6 +3892,7 @@ def _run_layer_simulation(primus_config, args):
         gpu_clock_mhz=gpu_clock_mhz,
     )
     sdpa_backend = get_sdpa_simulation_backend(gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock_mhz)
+    gemm_backend, sdpa_backend = kernel_report.wrap_backends(gemm_backend, sdpa_backend)
 
     # ---- Build profiler tree (no model needed) ----
     if is_rank_0:
@@ -3405,6 +4084,7 @@ def _run_pipeline_simulation(
     profiling_results,
     enable_zero_bubble=False,
     scheduler_algorithm="auto",
+    p2p_time_ms=0.0,
 ):
     """
     Run pipeline simulation and return the step time.
@@ -3445,6 +4125,7 @@ def _run_pipeline_simulation(
             profiling_results,
             enable_zero_bubble,
             scheduler_algorithm,
+            p2p_time_ms=p2p_time_ms,
         )
         if sim_config is None:
             return None
@@ -3595,6 +4276,56 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
     return num_params * bytes_per_param / _BYTES_PER_GB
 
 
+# FSDP2 runs every layer slower in training than in the isolated layer benchmark,
+# which runs without overlapping collectives. Per layer, as
+# (x FSDP traffic time per microbatch, x layer compute per microbatch,
+#  x FSDP traffic time once per iteration):
+#
+# Megatron, MI325X (8- and 16-layer training sweeps with and without FSDP2, kernel
+# traces, and the full-depth runs):
+#   - compute overlapping the all-gathers / reduce-scatters runs slower than the same
+#     kernels alone, which grows with the layer's compute;
+#   - all-gather copy-out, reduce-scatter copy-in and fp32 gradient foreach kernels,
+#     and the FP8 GEMMs slowed by them, which grow with the layer's FSDP traffic;
+#   - a per-iteration share that grows with the traffic: with one microbatch per
+#     iteration the traffic-bound cost per layer is twice that at four microbatches.
+#   Fitted on Llama 3.1 70B and Qwen 3 32B (BF16 and FP8); Llama 2 70B, Llama 3.3 70B
+#   and Qwen 2.5 72B (BF16 and FP8) are held out.
+#
+# TorchTitan: overlapped compute runs 19-23% slower and 2-2.4% of the step is exposed
+# collective time (Llama 3.1 8B / 70B, GPT-OSS 20B traces), 6-8% of the step in all;
+# its FSDP copies are already in the benchmarked block.
+_FSDP_INSITU_FACTORS = {"megatron": (0.7, 0.06, 1.0), "torchtitan": (0.0, 0.06, 0.0)}
+
+
+def _fsdp_insitu_ms(training_config, message_info, microbatch_time_ms, num_microbatches: int = 1) -> float:
+    """Per-microbatch FSDP2 cost the layer benchmark misses (0 without FSDP2).
+
+    The per-iteration share is spread over the iteration's ``num_microbatches``.
+    """
+    factors = _FSDP_INSITU_FACTORS.get(getattr(training_config, "framework", None))
+    if factors is None or not message_info.get("fsdp_enabled"):
+        return 0.0
+    num_layers = message_info.get("num_layers", 0)
+    if num_layers <= 0 or microbatch_time_ms <= 0:
+        return 0.0
+    # Two all-gathers (forward, and backward including any recompute) and one
+    # reduce-scatter per layer and microbatch, as traced. Priced within one node: the
+    # copies and contention follow the bytes each GPU moves, and per-GPU throughput
+    # of the FSDP configs is flat from 1 to 4 nodes.
+    ag_ms = message_info.get("fsdp_node_ag_per_layer_ms", message_info.get("fsdp_ag_per_layer_ms", 0.0))
+    rs_ms = message_info.get("fsdp_node_rs_per_layer_ms", message_info.get("fsdp_rs_per_layer_ms", 0.0))
+    comm_ms = 2 * ag_ms + rs_ms
+    comm_factor, compute_factor, per_iteration_factor = factors
+    per_layer = (
+        comm_factor * comm_ms
+        + compute_factor * microbatch_time_ms / num_layers
+        + per_iteration_factor * comm_ms / max(1, num_microbatches)
+    )
+    message_info["fsdp_insitu_per_layer_ms"] = per_layer
+    return per_layer * num_layers
+
+
 def _run_multinode_projection(
     training_config,
     single_node_time_ms,
@@ -3711,6 +4442,8 @@ def _run_multinode_projection(
     # microbatch), not once per microbatch. We track the exposed (non-overlapped)
     # portion separately and add it as a per-iteration overhead.
     grad_ar_per_iteration_ms = 0.0  # Non-overlapped allreduce time (added once)
+    param_ag_per_iteration_ms = 0.0  # Non-overlapped parameter all-gather (distributed optimizer)
+    ddp_contention_ms = 0.0
     if dp_target > 1:
         # Calculate gradient all-reduce for target
         _, target_breakdown, target_message_info, _ = calculate_collective_communication_time(
@@ -3727,50 +4460,28 @@ def _run_multinode_projection(
         target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
 
         if overlap_grad_reduce:
-            # Overlapped: bucketed grad sync runs concurrently with compute.
-            # The hiding window spans the full fwd+bwd of ALL microbatches in the
-            # iteration, not just the backward of one: gradients accumulate and
-            # the distributed optimizer issues bucketed reduces throughout the
-            # backward, while the matching parameter all-gather overlaps the NEXT
-            # iteration's forward (overlap_param_gather). Using only 0.63×bwd of a
-            # single microbatch made the exposed AR explode once the reduce
-            # exceeded that tiny window
-            rt_cfg = getattr(training_config, "runtime_config", None)
-            # NOTE: time_includes_all_microbatches handling below avoids a
-            # double-count: when the compute time came from the pipeline
-            # simulation it already sums every microbatch.
-            gbs = getattr(rt_cfg, "global_batch_size", None) or 1
-            mbs = getattr(rt_cfg, "micro_batch_size", None) or 1
-            target_microbatches = max(1, gbs // (mbs * dp_target))
-            # The hiding window is the fwd+bwd compute of ALL microbatches in the
-            # iteration. When the time came from the pipeline simulation it ALREADY
-            # sums all microbatches (time_includes_all_microbatches), so multiplying
-            # again would double-count; only scale the per-microbatch path.
-            if time_includes_all_microbatches:
-                overlap_window = projected_compute_time_ms
-            else:
-                overlap_window = projected_compute_time_ms * target_microbatches
-            # With the distributed optimizer (ZeRO-1), the per-iteration grad
-            # sync is a reduce-scatter (half the all-reduce volume); the matching
-            # parameter all-gather overlaps the NEXT forward (overlap_param_gather).
-            use_dist_opt = getattr(mp_config, "use_distributed_optimizer", False)
-            effective_ar = target_grad_ar * (0.5 if use_dist_opt else 1.0)
-            # Exposed grad-AR has two parts:
-            #   1. Bandwidth-bound excess that does not fit the compute hiding
-            #      window: max(0, effective_ar - overlap_window).
-            #   2. An overlap-inefficiency residual: even when the reduce fits the
-            #      window, comm/compute overlap is never perfect (per-bucket launch
-            #      & sync overhead, reduce-scatter reduction compute, and the param
-            #      all-gather not fully tucking under the next forward).
-            GRAD_AR_OVERLAP_INEFFICIENCY = 0.20  # 80% of the reduce is hidden
-            residual = GRAD_AR_OVERLAP_INEFFICIENCY * effective_ar
-            grad_ar_per_iteration_ms = min(
-                effective_ar,
-                max(residual, effective_ar - overlap_window),
+            grad_ar_per_iteration_ms = _exposed_overlapped_grad_sync_ms(
+                training_config,
+                target_message_info,
+                dp_target,
+                profiling_results,
+                projected_compute_time_ms,
+                time_includes_all_microbatches,
             )
+            ddp_contention_ms = _megatron_ddp_overlap_contention_ms(
+                training_config, target_message_info, dp_target, profiling_results
+            )
+            if ddp_contention_ms > 0 and is_rank_0:
+                print(f"  [Grad sync] backward slowed by the overlapped reduce: +{ddp_contention_ms:.1f} ms")
         else:
             # Not overlapped: all-reduce runs sequentially after backward
             grad_ar_per_iteration_ms = target_grad_ar
+        param_ag = target_message_info.get("param_allgather_ms", 0.0)
+        if getattr(mp_config, "overlap_param_gather", False):
+            # Overlaps the next forward, with the same imperfect hiding as the gradient reduce.
+            param_ag_per_iteration_ms = 0.20 * param_ag
+        else:
+            param_ag_per_iteration_ms = param_ag
 
     # Per-microbatch projected time stays as compute only
     projected_time_ms = projected_compute_time_ms
@@ -3907,6 +4618,22 @@ def _run_multinode_projection(
     if fsdp_exposed > 0:
         projected_time_ms += fsdp_exposed
 
+    if not time_includes_all_microbatches:
+        rc = training_config.runtime_config
+        insitu_dp = target_nodes * gpus_per_node // max(1, tp * pp * cp)
+        insitu_microbatches = max(
+            1,
+            getattr(rc, "global_batch_size", 1) // max(1, getattr(rc, "micro_batch_size", 1) * insitu_dp),
+        )
+        fsdp_insitu = _fsdp_insitu_ms(training_config, message_info, single_node_time_ms, insitu_microbatches)
+        if fsdp_insitu > 0:
+            projected_time_ms += fsdp_insitu
+            if is_rank_0:
+                print(
+                    f"  [FSDP2 in-situ] +{fsdp_insitu:.1f} ms per microbatch "
+                    f"({message_info['fsdp_insitu_per_layer_ms']:.2f} ms/layer the layer benchmark does not see)"
+                )
+
     # Calculate values needed for both printing and return
     target_world_size = target_nodes * gpus_per_node
     target_dp_for_microbatch = target_world_size // (tp * pp * cp)
@@ -3963,6 +4690,54 @@ def _run_multinode_projection(
     )
     if _optimizer_bench and _optimizer_bench.get("step_time_ms"):
         _measured_opt_ms = float(_optimizer_bench["step_time_ms"])
+        if _optimizer_bench.get("dense_params") is not None:
+            # The step streams every element of this rank's optimizer shard, so
+            # it scales with the shard size from the 1-node benchmark model to
+            # the target pipeline stage and DP sharding.
+            _mp = training_config.model_parallel_config
+            _dist = bool(
+                getattr(_mp, "use_distributed_optimizer", False)
+                or getattr(_mp, "use_torch_fsdp2", False)
+                or _optimizer_bench.get("sharded", False)
+            )
+            _bench_elems = _optimizer_step_elems(
+                _optimizer_bench["dense_params"],
+                _optimizer_bench["expert_params"],
+                _optimizer_bench.get("dp", 1),
+                _optimizer_bench.get("expert_dp", 1),
+                _dist,
+            )
+            _, _, _tgt_info, _ = calculate_collective_communication_time(
+                training_config, target_nodes, gpus_per_node, tp, pp, ep, cp, dp_target, hardware_config_dict
+            )
+            _tgt_elems = _optimizer_step_elems(
+                _tgt_info["non_expert_params_per_rank"],
+                _tgt_info["expert_params_per_rank"],
+                dp_target,
+                max(1, dp_target // max(ep, 1)),
+                _dist,
+            )
+            _per_elem = _optimizer_bench.get("per_element_ms")
+            if _bench_elems > 0 and _per_elem:
+                # Split the measured step into per-element work (measured on a
+                # dummy shard) and per-step work (launches, grad-norm
+                # reduction); the benchmark's synchronous parameter all-gather
+                # is removed since the target's is modelled with the grad sync.
+                _bench_gather_ms = 0.0
+                _coll = profiling_results.get("_dp_reduce_scatter_benchmark") or {}
+                # Only Megatron's distributed optimizer gathers params inside step().
+                if getattr(_mp, "use_distributed_optimizer", False) and not _optimizer_bench.get(
+                    "overlap_param_gather"
+                ):
+                    _bench_gather_ms = float(_coll.get("all_gather_ms", 0.0))
+                _fixed_ms = max(0.0, _measured_opt_ms - _bench_gather_ms - _per_elem * _bench_elems)
+                if is_rank_0:
+                    print(
+                        f"[Primus:Performance Projection] Optimizer step: per-step {_fixed_ms:.2f} ms + "
+                        f"{_per_elem * 1e9:.2f} ms/1e9 elems x {_tgt_elems / 1e6:.0f}M target elems "
+                        f"(benchmark {_bench_elems / 1e6:.0f}M elems, param all-gather {_bench_gather_ms:.2f} ms)"
+                    )
+                _measured_opt_ms = _fixed_ms + _per_elem * _tgt_elems
         if is_rank_0:
             print(
                 f"[Primus:Performance Projection] Optimizer step: using MEASURED "
@@ -3970,21 +4745,56 @@ def _run_multinode_projection(
             )
         optimizer_step_ms = _measured_opt_ms
 
+    grad_ar_per_iteration_ms = kernel_report.term(
+        "dp_grad_reduce", "step", grad_ar_per_iteration_ms, kind="comm", scope_name="iteration"
+    )
+    optimizer_step_ms = kernel_report.term(
+        "optimizer", "step", optimizer_step_ms, kind="optimizer", scope_name="iteration"
+    )
+    if param_ag_per_iteration_ms > 0:
+        param_ag_per_iteration_ms = kernel_report.term(
+            "dp_param_gather", "step", param_ag_per_iteration_ms, kind="comm", scope_name="iteration"
+        )
+    grad_ar_per_iteration_ms += param_ag_per_iteration_ms
+    if ddp_contention_ms > 0:
+        ddp_contention_ms = kernel_report.term(
+            "dp_reduce_contention", "step", ddp_contention_ms, kind="compute", scope_name="iteration"
+        )
+    engine_step_ms = kernel_report.extras("iteration", "step")
+
     # Build full iteration time:
     #   compute (per-microbatch) × num_microbatches + gradient allreduce + optimizer step
     if time_includes_all_microbatches:
-        full_iteration_time_ms = projected_time_ms + grad_ar_per_iteration_ms + optimizer_step_ms
+        full_iteration_time_ms = (
+            projected_time_ms
+            + grad_ar_per_iteration_ms
+            + optimizer_step_ms
+            + engine_step_ms
+            + ddp_contention_ms
+        )
         time_breakdown_str = f"{full_iteration_time_ms:.3f} ms (from pipeline simulation"
         if grad_ar_per_iteration_ms > 0:
             time_breakdown_str += f" + {grad_ar_per_iteration_ms:.1f} ms grad AR"
-        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer)"
+        if ddp_contention_ms > 0:
+            time_breakdown_str += f" + {ddp_contention_ms:.1f} ms reduce contention"
+        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer"
+        if engine_step_ms > 0:
+            time_breakdown_str += f" + {engine_step_ms:.1f} ms calibrated per-step engine work"
+        time_breakdown_str += ")"
     else:
         compute_total = projected_time_ms * target_microbatches_per_gpu
-        full_iteration_time_ms = compute_total + grad_ar_per_iteration_ms + optimizer_step_ms
+        full_iteration_time_ms = (
+            compute_total + grad_ar_per_iteration_ms + optimizer_step_ms + engine_step_ms + ddp_contention_ms
+        )
         time_breakdown_str = f"{full_iteration_time_ms:.3f} ms ({target_microbatches_per_gpu} microbatches × {projected_time_ms:.3f} ms"
         if grad_ar_per_iteration_ms > 0:
             time_breakdown_str += f" + {grad_ar_per_iteration_ms:.1f} ms grad AR"
-        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer)"
+        if ddp_contention_ms > 0:
+            time_breakdown_str += f" + {ddp_contention_ms:.1f} ms reduce contention"
+        time_breakdown_str += f" + {optimizer_step_ms:.1f} ms optimizer"
+        if engine_step_ms > 0:
+            time_breakdown_str += f" + {engine_step_ms:.1f} ms calibrated per-step engine work"
+        time_breakdown_str += ")"
 
     # Calculate tokens/s/GPU (tokens processed per second per GPU)
     tokens_per_iter = global_batch * seq_len
@@ -4059,6 +4869,29 @@ def _run_multinode_projection(
     }
 
 
+_KERNEL_ENV = {
+    "kernel_report": "PRIMUS_KERNEL_REPORT",
+    "kernel_calibration": "PRIMUS_KERNEL_CALIBRATION",
+    "kernel_speedups": "PRIMUS_KERNEL_SPEEDUPS",
+}
+
+
+def _kernel_option(args, name: str) -> str:
+    """A kernel-report path from the CLI, or else from its environment variable."""
+    return getattr(args, name, None) or os.getenv(_KERNEL_ENV[name], "")
+
+
+def _activate_kernel_ledger(args) -> Optional[kernel_report.Ledger]:
+    """Start recording the simulated kernels when a report, calibration or speedups was asked for."""
+    if not any(_kernel_option(args, name) for name in _KERNEL_ENV):
+        return None
+    ledger = kernel_report.Ledger.from_paths(
+        _kernel_option(args, "kernel_calibration"), _kernel_option(args, "kernel_speedups")
+    )
+    kernel_report.activate(ledger)
+    return ledger
+
+
 def launch_projection_from_cli(args, overrides):
     """
     Entry point for the 'performance_projection' subcommand.
@@ -4114,6 +4947,7 @@ def launch_projection_from_cli(args, overrides):
     cli_vpp = getattr(args, "num_virtual_stages_per_pipeline_rank", None)
     if cli_vpp is not None:
         module_cfg.virtual_pipeline_model_parallel_size = cli_vpp
+        module_cfg.num_virtual_stages_per_pipeline_rank = cli_vpp
         cli_overrides_applied.append(f"virtual_pipeline_model_parallel_size={cli_vpp}")
 
     cli_enable_zb = getattr(args, "enable_zero_bubble", False)
@@ -4207,6 +5041,7 @@ def launch_projection_from_cli(args, overrides):
     # Skip when: bg==ep (no reduction), simulation mode, --profile-only,
     # or --load-benchmark (the artifact already has the merged compute).
     profiling_mode = getattr(args, "profiling_mode", "benchmark")
+    kernel_ledger = _activate_kernel_ledger(args) if profiling_mode == "simulate" else None
     _auto_bg1_results = None
     _auto_bg1_meta = None
     need_auto_hybrid = (
@@ -4395,6 +5230,7 @@ def launch_projection_from_cli(args, overrides):
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
+    _mix_attention_window_variants(profiling_results, training_config)
 
     # Update data_parallel_size based on target_nodes
     # This ensures the pipeline simulation calculates the correct number of microbatches.
@@ -4885,11 +5721,24 @@ def launch_projection_from_cli(args, overrides):
                 f"[Primus:Performance Projection] Running pipeline simulation with original PP={original_pp} "
                 f"(benchmarked with PP={pp})"
             )
+        p2p_time_ms = _pp_p2p_transfer_ms(
+            training_config,
+            target_nodes * gpus_per_node,
+            gpus_per_node,
+            original_pp,
+            load_hardware_config(args.hardware_config) if getattr(args, "hardware_config", None) else None,
+            gpu_arch=getattr(args, "gpu_arch", None),
+        )
+        if is_rank_0:
+            print(
+                f"[Primus:Performance Projection] PP stage-to-stage transfer: {p2p_time_ms:.3f} ms per send"
+            )
         pipeline_simulation_time_ms = _run_pipeline_simulation(
             training_config,
             profiling_results,
             enable_zero_bubble,
             scheduler_algorithm,
+            p2p_time_ms=p2p_time_ms,
         )
 
     # Restore training_config PP to benchmark value for consistency
@@ -4897,6 +5746,7 @@ def launch_projection_from_cli(args, overrides):
 
     # Run multinode projection if target_nodes > min_nodes_required (scaling up)
     # or always run to show performance summary
+    result = None
     if target_nodes >= min_nodes_required:
         if is_rank_0:
             print("" + "=" * 100)
@@ -5157,7 +6007,7 @@ def launch_projection_from_cli(args, overrides):
 
         # Run multinode projection
         benchmark_ep = reduction_info.get("benchmark_ep", reduction_info.get("original_ep", None))
-        _run_multinode_projection(
+        result = _run_multinode_projection(
             training_config,
             benchmarked_time_ms,
             profiling_results,
@@ -5166,3 +6016,28 @@ def launch_projection_from_cli(args, overrides):
             time_includes_all_microbatches,
             benchmark_ep=benchmark_ep,
         )
+
+    if kernel_ledger is not None:
+        kernel_report.activate(None)
+        kernel_ledger.result.update(result or {})
+        report_path = _kernel_option(args, "kernel_report")
+        if report_path:
+            kernel_report.write_report(
+                kernel_ledger,
+                convert_primus_config_to_projection_config(primus_config_original),
+                target_world_size,
+                report_path,
+                provenance={
+                    "config": getattr(args, "config", None),
+                    "gpu_arch": getattr(args, "gpu_arch", None),
+                    "profiling_mode": profiling_mode,
+                    "simulated_parallelism": {
+                        k: v for k, v in reduction_info.items() if k.startswith("benchmark_")
+                    },
+                    "calibration": _kernel_option(args, "kernel_calibration") or None,
+                    "speedups": _kernel_option(args, "kernel_speedups") or None,
+                },
+            )
+            if is_rank_0:
+                print(f"[Primus:Performance Projection] Kernel report written to: {report_path}")
+    return result

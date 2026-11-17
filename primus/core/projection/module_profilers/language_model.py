@@ -8,6 +8,7 @@ import os
 import re
 from typing import List, Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
@@ -468,14 +469,15 @@ class LanguageModelProfiler(BaseModuleProfiler):
             getattr(mp, "use_torch_fsdp2", False)
         )
         multiplier = 4  # param weights + gradients, bf16
-        # fp32 optimizer state: 2 for main params + 4 + 4 for 1st & 2nd moments.
+        # fp32 optimizer state: 4 for main params + 4 + 4 for 1st & 2nd moments
+        # (a gpt-oss MI355X run holds 16 bytes per parameter outside the step).
         # Muon orthogonalizes the 2D weights with momentum only (no 2nd moment),
         # so it drops the 4 bytes of 2nd-moment state on the matrix params that
-        # dominate the parameter count (2 main + 4 momentum = 6).  Embeddings/
+        # dominate the parameter count (4 main + 4 momentum = 8).  Embeddings/
         # norms nominally stay on Adam, but they are a negligible fraction of
         # params, so approximating the whole model at the Muon rate is accurate.
         is_muon = str(getattr(self.config.model_config, "optimizer", "") or "").lower() == "muon"
-        optimizer_state_multiplier = 6.0 if is_muon else 10.0
+        optimizer_state_multiplier = 8.0 if is_muon else 12.0
         if use_dist:
             # Distributed optimizer / dist_muon shards the fp32 optimizer state
             # across the DP group.  get_dp_size() returns world/(EP·PP) = EDP, the
@@ -606,6 +608,66 @@ class LanguageModelProfiler(BaseModuleProfiler):
         total_act *= gs_saving * interleaved_schedule_memory_penalty
         return int(total_act)
 
+    def _run_hybrid_layer_benchmark(self, layers, layer_types, full_types, batch_size, seq_len) -> dict:
+        """Time one layer of each kind in a hybrid stack and weight by the full model's mix.
+
+        Hybrid layers are single-purpose (a mixer, or an MLP), so each is timed as
+        a whole layer. Every full-model layer index is given the per-layer
+        average, which the extrapolation multiplies back up to the full count.
+        """
+        from collections import Counter
+
+        from primus.core.projection.bench_harness import LAYER
+
+        from .utils import benchmark_layer
+
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        profiler = self.sub_profilers["dense_transformer_layer"]
+        per_kind = {}
+        for module, kind in zip(layers, layer_types):
+            kind = str(kind)
+            if kind in per_kind:
+                continue
+            if is_rank_0:
+                print(
+                    f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})..."
+                )
+            shapes, kwargs = profiler.require_bench_inputs(LAYER, module, batch_size, seq_len)
+            with kernel_report.scope(kernel_report.layer_scope("dense", None)):
+                fwd, bwd, mem = benchmark_layer(
+                    module, shapes, transformer_config=getattr(module, "config", None), forward_kwargs=kwargs
+                )
+            per_kind[kind] = (fwd, bwd, mem)
+            if is_rank_0:
+                print(f"  Forward time:  {fwd:.2f} ms (measured)")
+                print(f"  Backward time: {bwd:.2f} ms (measured)")
+
+        counts = Counter(str(k) for k in full_types)
+        missing = set(counts) - set(per_kind)
+        if missing:
+            raise RuntimeError(f"Hybrid benchmark model has no layer of kind(s) {sorted(missing)}")
+        total = len(full_types)
+        avg = [sum(counts[k] * per_kind[k][i] for k in counts) / total for i in range(3)]
+        if is_rank_0:
+            mix = ", ".join(f"{counts[k]}x'{k}'" for k in sorted(counts))
+            print(f"  Hybrid mix ({mix}): {avg[0]:.2f} ms fwd, {avg[1]:.2f} ms bwd per layer on average")
+
+        zero = {"forward_time_ms": 0.0, "backward_time_ms": 0.0, "activation_memory_bytes": 0}
+        layer_stats = {
+            "type": "dense",
+            "compress_ratio": None,
+            "forward_time_ms": avg[0],
+            "backward_time_ms": avg[1],
+            "activation_memory_bytes": int(avg[2]),
+            "attention": dict(zero, window_variants=None),
+            "mlp": dict(zero, a2a_forward_time_ms=0.0, a2a_backward_time_ms=0.0),
+            "hybrid_kinds": {
+                k: {"forward_time_ms": f, "backward_time_ms": b, "count": counts.get(k, 0)}
+                for k, (f, b, _m) in per_kind.items()
+            },
+        }
+        return {layer_idx: dict(layer_stats) for layer_idx in self.layers}
+
     def run_layer_benchmark(self, model, batch_size: int, seq_len: int) -> dict:
         """Benchmark or simulate transformer layers plus embedding/output layers on this rank.
 
@@ -625,6 +687,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         # -----------------------------------------------------------------
         embedding_module = None
         output_module = None
+        loss_owner = None
         all_layers = []
 
         if model is not None:
@@ -635,6 +698,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             all_layers = list(parts.layers)
             embedding_module = parts.embedding
             output_module = parts.output_layer
+            loss_owner = getattr(parts, "loss_owner", None)
         elif not is_simulation_mode:
             raise ValueError(
                 "model=None is only allowed when simulation backends are set "
@@ -681,8 +745,11 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 # In simulation mode without a model, the profiler uses its
                 # analytical estimate (set_simulation_mode was already called
                 # by set_simulation_backends).
-                emb_forward = profiler.measured_forward_time(batch_size, seq_len)
-                emb_backward = profiler.measured_backward_time(batch_size, seq_len)
+                with kernel_report.scope("embedding"):
+                    emb_forward = profiler.measured_forward_time(batch_size, seq_len)
+                    emb_backward = profiler.measured_backward_time(batch_size, seq_len)
+                emb_forward += kernel_report.extras("embedding", "fwd")
+                emb_backward += kernel_report.extras("embedding", "bwd")
                 emb_mem = profiler.measured_activation_memory(batch_size, seq_len)
                 if is_rank_0:
                     print(
@@ -716,22 +783,37 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 # In simulation mode without a model, the output_layer profiler
                 # uses its GEMM backend (set_gemm_backend was already called by
                 # set_simulation_backends).
-                out_forward = profiler.measured_forward_time(batch_size, seq_len)
-                out_backward = profiler.measured_backward_time(batch_size, seq_len)
-                out_mem = profiler.measured_activation_memory(batch_size, seq_len)
-                if is_rank_0:
-                    print(
-                        f"  Output Layer -> fwd: {out_forward:.2f} ms, "
-                        f"bwd: {out_backward:.2f} ms, "
-                        f"act: {out_mem / (1024**2):.2f} MB"
-                    )
+                with kernel_report.scope("output"):
+                    out_forward = profiler.measured_forward_time(batch_size, seq_len)
+                    out_backward = profiler.measured_backward_time(batch_size, seq_len)
+                    out_mem = profiler.measured_activation_memory(batch_size, seq_len)
+                    if is_rank_0:
+                        print(
+                            f"  Output Layer -> fwd: {out_forward:.2f} ms, "
+                            f"bwd: {out_backward:.2f} ms, "
+                            f"act: {out_mem / (1024**2):.2f} MB"
+                        )
 
                 loss_profiler = self.sub_profilers["calc_loss"]
+                if not is_simulation_mode and loss_owner is not None and output_module is not None:
+                    weight = getattr(output_module, "weight", None)
+                    vocab_per_rank = (
+                        int(weight.shape[0])
+                        if weight is not None
+                        else self.config.model_config.padded_vocab_size
+                        // self.config.model_parallel_config.tensor_model_parallel_size
+                    )
+                    loss_profiler.benchmark_loss(loss_owner, vocab_per_rank, batch_size, seq_len)
                 loss_fwd = loss_profiler.measured_forward_time(batch_size, seq_len)
                 loss_bwd = loss_profiler.measured_backward_time(batch_size, seq_len)
+                out_forward += kernel_report.extras("output", "fwd")
+                out_backward += kernel_report.extras("output", "bwd")
                 loss_mem = loss_profiler.estimated_activation_memory(batch_size, seq_len)
                 if is_rank_0:
-                    fused_label = "(fused – 0)" if loss_fwd == 0.0 else "(unfused)"
+                    if getattr(loss_profiler, "_measured", None):
+                        fused_label = "(measured)"
+                    else:
+                        fused_label = "(fused – 0)" if loss_fwd == 0.0 else "(unfused)"
                     print(
                         f"  Loss {fused_label} -> fwd: {loss_fwd:.2f} ms, "
                         f"bwd: {loss_bwd:.2f} ms, "
@@ -744,6 +826,17 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     "backward_time_ms": out_backward + loss_bwd,
                     "activation_memory_bytes": out_mem + loss_mem,
                 }
+
+        full_hybrid_types = getattr(self.config.model_config, "hybrid_layer_types", None)
+        if model is not None and full_hybrid_types and parts.layer_types and not is_simulation_mode:
+            final_results = self._run_hybrid_layer_benchmark(
+                all_layers, parts.layer_types, full_hybrid_types, batch_size, seq_len
+            )
+            if embedding_stats is not None:
+                final_results["embedding"] = embedding_stats
+            if output_stats is not None:
+                final_results["output"] = output_stats
+            return final_results
 
         # ==============================================================================
         # BENCHMARK / SIMULATE LAYER TYPES (one of each type: dense, moe)
@@ -807,28 +900,32 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 layer_profiler._cache_key = None
 
             # Benchmark/simulate full layer
-            forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
-            backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
-            activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
+            layer_scope = kernel_report.layer_scope(layer_type, cr)
+            with kernel_report.scope(layer_scope):
+                forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
+                backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
+                activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
 
-            # Benchmark/simulate Attention
-            attn_profiler = layer_profiler.get_sub_profiler("self_attention")
-            attn_forward = attn_profiler.measured_forward_time(batch_size, seq_len)
-            attn_backward = attn_profiler.measured_backward_time(batch_size, seq_len)
-            attn_mem = attn_profiler.measured_activation_memory(batch_size, seq_len)
+                # Benchmark/simulate Attention
+                attn_profiler = layer_profiler.get_sub_profiler("self_attention")
+                attn_forward = attn_profiler.measured_forward_time(batch_size, seq_len)
+                attn_backward = attn_profiler.measured_backward_time(batch_size, seq_len)
+                attn_mem = attn_profiler.measured_activation_memory(batch_size, seq_len)
 
-            # Benchmark/simulate MLP
-            mlp_profiler = layer_profiler.get_sub_profiler("mlp")
-            mlp_forward = mlp_profiler.measured_forward_time(batch_size, seq_len)
-            mlp_backward = mlp_profiler.measured_backward_time(batch_size, seq_len)
-            mlp_mem = mlp_profiler.measured_activation_memory(batch_size, seq_len)
+                # Benchmark/simulate MLP
+                mlp_profiler = layer_profiler.get_sub_profiler("mlp")
+                mlp_forward = mlp_profiler.measured_forward_time(batch_size, seq_len)
+                mlp_backward = mlp_profiler.measured_backward_time(batch_size, seq_len)
+                mlp_mem = mlp_profiler.measured_activation_memory(batch_size, seq_len)
 
-            # Get decomposed A2A timings for MoE layers (0 for dense layers)
-            mlp_a2a_fwd = 0.0
-            mlp_a2a_bwd = 0.0
-            if is_moe and hasattr(mlp_profiler, "measured_a2a_forward_time"):
-                mlp_a2a_fwd = mlp_profiler.measured_a2a_forward_time(batch_size, seq_len)
-                mlp_a2a_bwd = mlp_profiler.measured_a2a_backward_time(batch_size, seq_len)
+                # Get decomposed A2A timings for MoE layers (0 for dense layers)
+                mlp_a2a_fwd = 0.0
+                mlp_a2a_bwd = 0.0
+                if is_moe and hasattr(mlp_profiler, "measured_a2a_forward_time"):
+                    mlp_a2a_fwd = mlp_profiler.measured_a2a_forward_time(batch_size, seq_len)
+                    mlp_a2a_bwd = mlp_profiler.measured_a2a_backward_time(batch_size, seq_len)
+            forward_time += kernel_report.extras(layer_scope, "fwd")
+            backward_time += kernel_report.extras(layer_scope, "bwd")
 
             results[type_key] = {
                 "type": layer_type,
@@ -840,6 +937,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     "forward_time_ms": attn_forward,
                     "backward_time_ms": attn_backward,
                     "activation_memory_bytes": attn_mem,
+                    "window_variants": getattr(attn_profiler, "window_variants", None),
                 },
                 "mlp": {
                     "forward_time_ms": mlp_forward,

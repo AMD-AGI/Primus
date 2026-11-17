@@ -20,6 +20,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from .. import kernel_report
+
 
 @dataclass
 class SimulationResult:
@@ -144,29 +146,48 @@ class GEMMSimulationBackend(ABC):
         # Valid under uniform token distribution (all experts get the same M).
         # TODO: switch to native grouped-GEMM simulation if/when Origami supports it.
         b = num_experts
+        prefix = kernel_report.module_name("mlp")
 
         if swiglu:
             # Gate projection fwd:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            gate_fwd = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            gate_fwd = kernel_report.gemm(
+                self, f"{prefix}_gate", "fwd", batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Up projection fwd:  same shape as gate
-            up_fwd = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            up_fwd = kernel_report.gemm(
+                self, f"{prefix}_up", "fwd", batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down projection fwd:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            down_fwd = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            down_fwd = kernel_report.gemm(
+                self, f"{prefix}_down", "fwd", batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
 
             fwd_time = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
 
             # Backward: simulate actual dgrad + wgrad GEMMs per projection
             # Gate dgrad:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            gate_dgrad = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            gate_dgrad = kernel_report.gemm(
+                self, f"{prefix}_gate", "dgrad", batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
             # Gate wgrad:  [hidden, tokens] x [tokens, ffn] -> [hidden, ffn]
-            gate_wgrad = self.simulate_gemm(hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b)
+            gate_wgrad = kernel_report.gemm(
+                self, f"{prefix}_gate", "wgrad", hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b
+            )
             # Up dgrad + wgrad: same shapes as gate
-            up_dgrad = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
-            up_wgrad = self.simulate_gemm(hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b)
+            up_dgrad = kernel_report.gemm(
+                self, f"{prefix}_up", "dgrad", batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
+            up_wgrad = kernel_report.gemm(
+                self, f"{prefix}_up", "wgrad", hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b
+            )
             # Down dgrad:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            down_dgrad = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            down_dgrad = kernel_report.gemm(
+                self, f"{prefix}_down", "dgrad", batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down wgrad:  [ffn, tokens] x [tokens, hidden] -> [ffn, hidden]
-            down_wgrad = self.simulate_gemm(ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b)
+            down_wgrad = kernel_report.gemm(
+                self, f"{prefix}_down", "wgrad", ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b
+            )
 
             bwd_time = (
                 gate_dgrad.forward_time_ms
@@ -178,21 +199,33 @@ class GEMMSimulationBackend(ABC):
             )
         else:
             # Up projection fwd:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            up_fwd = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            up_fwd = kernel_report.gemm(
+                self, f"{prefix}_up", "fwd", batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down projection fwd:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            down_fwd = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            down_fwd = kernel_report.gemm(
+                self, f"{prefix}_down", "fwd", batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
 
             fwd_time = up_fwd.forward_time_ms + down_fwd.forward_time_ms
 
             # Backward: simulate actual dgrad + wgrad GEMMs per projection
             # Up dgrad:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            up_dgrad = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            up_dgrad = kernel_report.gemm(
+                self, f"{prefix}_up", "dgrad", batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
             # Up wgrad:  [hidden, tokens] x [tokens, ffn] -> [hidden, ffn]
-            up_wgrad = self.simulate_gemm(hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b)
+            up_wgrad = kernel_report.gemm(
+                self, f"{prefix}_up", "wgrad", hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b
+            )
             # Down dgrad:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            down_dgrad = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            down_dgrad = kernel_report.gemm(
+                self, f"{prefix}_down", "dgrad", batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down wgrad:  [ffn, tokens] x [tokens, hidden] -> [ffn, hidden]
-            down_wgrad = self.simulate_gemm(ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b)
+            down_wgrad = kernel_report.gemm(
+                self, f"{prefix}_down", "wgrad", ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b
+            )
 
             bwd_time = (
                 up_dgrad.forward_time_ms
@@ -224,47 +257,48 @@ class GEMMSimulationBackend(ABC):
         """
         fwd_time = 0.0
         bwd_time = 0.0
+        prefix = kernel_report.module_name("attn")
 
         # Q projection fwd: [tokens, hidden] x [hidden, heads*kv_channels]
         q_out = num_attention_heads * kv_channels
-        q_fwd = self.simulate_gemm(batch_tokens, q_out, hidden_size, dtype)
+        q_fwd = kernel_report.gemm(self, f"{prefix}_q", "fwd", batch_tokens, q_out, hidden_size, dtype)
         fwd_time += q_fwd.forward_time_ms
 
         # K projection fwd: [tokens, hidden] x [hidden, num_query_groups*kv_channels]
         k_out = num_query_groups * kv_channels
-        k_fwd = self.simulate_gemm(batch_tokens, k_out, hidden_size, dtype)
+        k_fwd = kernel_report.gemm(self, f"{prefix}_k", "fwd", batch_tokens, k_out, hidden_size, dtype)
         fwd_time += k_fwd.forward_time_ms
 
         # V projection fwd: same shape as K
-        v_fwd = self.simulate_gemm(batch_tokens, k_out, hidden_size, dtype)
+        v_fwd = kernel_report.gemm(self, f"{prefix}_v", "fwd", batch_tokens, k_out, hidden_size, dtype)
         fwd_time += v_fwd.forward_time_ms
 
         # Output projection fwd: [tokens, heads*kv_channels] x [heads*kv_channels, hidden]
-        o_fwd = self.simulate_gemm(batch_tokens, hidden_size, q_out, dtype)
+        o_fwd = kernel_report.gemm(self, f"{prefix}_o", "fwd", batch_tokens, hidden_size, q_out, dtype)
         fwd_time += o_fwd.forward_time_ms
 
         # Backward: simulate actual dgrad + wgrad GEMMs per projection
         # Q dgrad:  [tokens, q_out] x [q_out, hidden] -> [tokens, hidden]
-        q_dgrad = self.simulate_gemm(batch_tokens, hidden_size, q_out, dtype)
+        q_dgrad = kernel_report.gemm(self, f"{prefix}_q", "dgrad", batch_tokens, hidden_size, q_out, dtype)
         # Q wgrad:  [hidden, tokens] x [tokens, q_out] -> [hidden, q_out]
-        q_wgrad = self.simulate_gemm(hidden_size, q_out, batch_tokens, dtype)
+        q_wgrad = kernel_report.gemm(self, f"{prefix}_q", "wgrad", hidden_size, q_out, batch_tokens, dtype)
         bwd_time += q_dgrad.forward_time_ms + q_wgrad.forward_time_ms
 
         # K dgrad:  [tokens, k_out] x [k_out, hidden] -> [tokens, hidden]
-        k_dgrad = self.simulate_gemm(batch_tokens, hidden_size, k_out, dtype)
+        k_dgrad = kernel_report.gemm(self, f"{prefix}_k", "dgrad", batch_tokens, hidden_size, k_out, dtype)
         # K wgrad:  [hidden, tokens] x [tokens, k_out] -> [hidden, k_out]
-        k_wgrad = self.simulate_gemm(hidden_size, k_out, batch_tokens, dtype)
+        k_wgrad = kernel_report.gemm(self, f"{prefix}_k", "wgrad", hidden_size, k_out, batch_tokens, dtype)
         bwd_time += k_dgrad.forward_time_ms + k_wgrad.forward_time_ms
 
         # V dgrad + wgrad: same shapes as K
-        v_dgrad = self.simulate_gemm(batch_tokens, hidden_size, k_out, dtype)
-        v_wgrad = self.simulate_gemm(hidden_size, k_out, batch_tokens, dtype)
+        v_dgrad = kernel_report.gemm(self, f"{prefix}_v", "dgrad", batch_tokens, hidden_size, k_out, dtype)
+        v_wgrad = kernel_report.gemm(self, f"{prefix}_v", "wgrad", hidden_size, k_out, batch_tokens, dtype)
         bwd_time += v_dgrad.forward_time_ms + v_wgrad.forward_time_ms
 
         # O dgrad:  [tokens, hidden] x [hidden, q_out] -> [tokens, q_out]
-        o_dgrad = self.simulate_gemm(batch_tokens, q_out, hidden_size, dtype)
+        o_dgrad = kernel_report.gemm(self, f"{prefix}_o", "dgrad", batch_tokens, q_out, hidden_size, dtype)
         # O wgrad:  [q_out, tokens] x [tokens, hidden] -> [q_out, hidden]
-        o_wgrad = self.simulate_gemm(q_out, hidden_size, batch_tokens, dtype)
+        o_wgrad = kernel_report.gemm(self, f"{prefix}_o", "wgrad", q_out, hidden_size, batch_tokens, dtype)
         bwd_time += o_dgrad.forward_time_ms + o_wgrad.forward_time_ms
 
         return SimulationResult(forward_time_ms=fwd_time, backward_time_ms=bwd_time)
