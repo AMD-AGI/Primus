@@ -52,6 +52,9 @@ _this_host="$(hostname -s)"
 echo "Running on host: ${_this_host}"
 
 _local_data="${FLUX_LOCAL_DATADIR:-/data/mlperf_flux1}"
+if [[ "${FLUX_TRAIN_FROM_SHARED:-0}" == 1 ]]; then
+    echo "[flux1] ${_this_host}: FLUX_TRAIN_FROM_SHARED=1, training from shared ${DATADIR}"
+else
 _staged_from=""
 for _src in "${DATADIR}" ${FLUX_LOCAL_DATA_ALT_SOURCES:-}; do
     if grep -qxF "source=${_src}" "${_local_data}/.stage_complete" 2>/dev/null; then
@@ -65,6 +68,7 @@ if [[ -z "${_staged_from}" ]]; then
 fi
 echo "[flux1] ${_this_host}: using node-local dataset ${_local_data} (staged from ${_staged_from})"
 export DATADIR="${_local_data}"
+fi
 
 mkdir -p "${LOGDIR}" && chmod 777 "${LOGDIR}"
 _cont_mounts=(
@@ -122,7 +126,9 @@ for _extra_env in TORCHINDUCTOR_CACHE_SEED TORCHINDUCTOR_CACHE_DIR TORCHINDUCTOR
                   NCCL_MAX_NCHANNELS NCCL_MIN_NCHANNELS ATTENTION_BACKEND \
                   NCCL_MAX_CTAS NCCL_ALGO NCCL_PROTO \
                   NCCL_MIN_P2P_NCHANNELS NCCL_MIN_CTAS NCCL_NCHANNELS_PER_NET_PEER \
-                  GPU_FORCE_BLIT_COPY_SIZE PRIMUS_TURBO_DGATE_ACC_ATOMIC \
+                  GPU_FORCE_BLIT_COPY_SIZE GPU_MAX_HW_QUEUES CUDA_DEVICE_MAX_CONNECTIONS \
+                  FLUX_FSDP_RS_MAX_BUFFERS FLUX_FSDP_RS_STREAM \
+                  PRIMUS_TURBO_DGATE_ACC_ATOMIC \
                   NCCL_DEBUG NCCL_DEBUG_SUBSYS NCCL_DEBUG_FILE \
                   FSDP_ALL_GATHER_BACKEND NCCL_RMA_DISABLE TORCH_NCCL_ALLOCATOR_HOOK_OVERRIDE \
                   FSDP_SDMA_MODULES NCCL_CROSS_NIC NCCL_CUMEM_ENABLE NCCL_CTA_POLICY NCCL_SYM_GIN_KERNELS_ENABLE \

@@ -91,11 +91,16 @@ if [[ -z "${MLPERF_CACHE_CLEARED:-}" ]]; then
 fi
 
 # Training params come from $EXP plus the env exported by config_*.sh.
+# The launcher log, pip cache, and Primus data dir default under the Primus
+# tree. That tree is a root-squashed NFS mount, so all three go on local disk.
+export TRAIN_LOG=${TRAIN_LOG:-/tmp/primus_direct.log}
+export PIP_CACHE_DIR=${PIP_CACHE_DIR:-/tmp/pip_cache}
+export PRIMUS_DATA_PATH=${PRIMUS_DATA_PATH:-/tmp/primus_data}
 set +e
 cd "${PRIMUS_PATH}"
 # EXTRA_ARGS is a passthrough word list from the caller.
 # shellcheck disable=SC2086
-./primus-cli direct -- train pretrain --config "${EXP}" ${EXTRA_ARGS:-}
+./primus-cli direct -- train pretrain --config "${EXP}" --data_path "${PRIMUS_DATA_PATH}" ${EXTRA_ARGS:-}
 ret_code=$?
 set -e
 
