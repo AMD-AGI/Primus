@@ -2088,7 +2088,7 @@ def test_the_hook_passes_the_cut_to_convert(monkeypatch):
     assert seen == {"num_layers": 4}
 
 
-def test_the_prepare_step_refuses_a_layout_that_cannot_fit_before_converting():
+def test_the_prepare_step_refuses_a_layout_that_cannot_fit_before_converting(monkeypatch):
     from primus.backends.megatron.checkpoint import native_registry as registry
 
     # the full model on one node of MI355X: refused before hours of conversion
@@ -2097,6 +2097,7 @@ def test_the_prepare_step_refuses_a_layout_that_cannot_fit_before_converting():
     # the skip flag, or no visible GPU, leaves it to the before_train check
     skip = {**_FULL_TRAINING, "muse_spark_skip_memory_check": True}
     conv.check_training_fits(_train_ctx(62, skip), gpu_bytes=288 * 10**9, world_size=8)
+    monkeypatch.setattr(conv, "_gpu_memory_bytes", lambda: None)
     conv.check_training_fits(_train_ctx(62, _FULL_TRAINING), gpu_bytes=None, world_size=8)
     # the full-scale layout (TP 8 PP 5 EP 16, 14 layers first, 20 nodes) fits
     full = {
