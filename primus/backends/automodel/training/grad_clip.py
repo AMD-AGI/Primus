@@ -22,7 +22,7 @@ WHAT:
   Rebinds ``torch.nn.utils.clip_grads_with_norm_`` -- the name AutoModel looks up
   at call time -- to an equivalent that multiplies the gradients' local shards
   with a single ``torch._foreach_mul_`` per (device, dtype), passing the clamped
-  coefficient cast to the gradients' dtype. Scaling the local shard is exact for
+  coefficient cast to the gradients' dtype on the GPU. Scaling the local shard is exact for
   every DTensor placement: a Shard or Replicate local tensor is scaled like the
   whole, and a Partial one sums to the scaled whole. The formula is torch's,
   ``min(max_norm / (total_norm + 1e-6), 1)``, kept on the device so there is no
@@ -37,9 +37,11 @@ WHAT:
   PyTorch source is edited. Off by default; idempotent.
 
 NUMERICS:
-  Bit-identical to torch's result, clipped or not: torch's per-tensor ``mul_``
-  already rounds the 0-dim float64 coefficient to the gradient dtype, which is what
-  this does explicitly (``tests/unit_tests/backends/automodel/test_fast_grad_clip.py``).
+  Bit-identical to torch's result, clipped or not. On the GPU torch's per-tensor
+  ``mul_`` rounds the 0-dim float64 coefficient to the gradient dtype, which is what
+  this does explicitly; on the CPU ``mul_`` multiplies by it in FP32, so CPU
+  gradients get the coefficient as torch passes it
+  (``tests/unit_tests/backends/automodel/test_fast_grad_clip.py``).
 
 Setting (``primus_train:`` section, off by default):
     fast_grad_clip: false      apply this patch
@@ -82,7 +84,10 @@ def clip_grads_with_norm_(parameters, max_norm, total_norm, foreach=None) -> Non
             if local.numel():
                 groups.setdefault((local.device, local.dtype), []).append(local)
         for (device, dtype), tensors in groups.items():
-            torch._foreach_mul_(tensors, clip_coef.to(device=device, dtype=dtype))
+            # torch's mul_ reads a CPU coefficient as an FP32 scalar but casts a GPU one to the gradient
+            # dtype; the fused GPU path needs the coefficient in the gradient dtype.
+            coef = clip_coef.to(device) if device.type == "cpu" else clip_coef.to(device=device, dtype=dtype)
+            torch._foreach_mul_(tensors, coef)
 
 
 def install() -> bool:
