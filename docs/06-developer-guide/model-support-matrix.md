@@ -30,7 +30,7 @@ The following aligns with the backend overview and the configs present in this t
 
 Model presets live in `primus/configs/models/megatron/`. Example experiments that reference those presets appear under `examples/megatron/configs/MI300X/`, `MI325X/`, and `MI355X/`.
 
-For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 82 example configs and MI325X 70: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 124, adding models such as `glm5`, `glm5_3_flash`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5`, and `minimax_m3`. **gfx1250** has seven single-GPU LoRA-SFT configs: the BF16 recipes, plus FP8 hybrid proxies for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B added in v26.9. Each row's SKU list in the following table reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
+For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the same model set (25 configs each). For **Megatron**, MI300X has 83 example configs and MI325X 71: MI325X has everything MI300X has except the pure GDN/KDA and the GDN/KDA/300M Zebra LLaMA hybrid recipes, and `qwen3_5_35B_A3B` (BF16 and FP8). **MI355X** has 125, adding models such as `glm5`, `glm5_3_flash`, `gpt_oss_120B`, `kimi_k2`, `lfm2_8B_A1B`, `minimax_m2.5`, and `minimax_m3`. **gfx1250** has seven single-GPU LoRA-SFT configs: the BF16 recipes, plus FP8 hybrid proxies for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B added in v26.9. Each row's SKU list in the following table reflects exactly which SKUs ship a curated example (see, for example, `qwen3_5_35B_A3B`, which is MI300X/MI355X only).
 
 | Model name (file) | Preset path | Role | Example experiment dirs | Precision in examples |
 | ----------------- | ----------- | ---- | ----------------------- | ---------------------- |
@@ -105,6 +105,8 @@ For **TorchTitan**, the MI300X, MI325X, and MI355X example directories carry the
 | `qwen3_5_35B_A3B.yaml` | `primus/configs/models/megatron/qwen3_5_35B_A3B.yaml` | MoE model preset | MI300X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B.yaml` | MoE model preset | MI300X, MI325X, MI355X | BF16, FP8 |
 | `qwen3_235B_A22B_4layer_proxy.yaml` | `primus/configs/models/megatron/qwen3_235B_A22B_4layer_proxy.yaml` | 4-layer single-GPU MoE proxy | gfx1250 (LoRA SFT) | BF16, FP8 |
+| `smollm3_base.yaml` | `primus/configs/models/megatron/smollm3_base.yaml` | Base fragment | — | — |
+| `smollm3_3B_Base.yaml` | `primus/configs/models/megatron/smollm3_3B_Base.yaml` | Model preset (NoPE every 4th layer, tied embeddings) | MI300X, MI325X, MI355X | BF16 |
 | `zaya1.yaml` | `primus/configs/models/megatron/zaya1.yaml` | MoE model preset (ZAYA1-8B, CCA + MoE) | MI300X, MI325X, MI355X | BF16, FP8 |
 | `zaya1_base.yaml` | `primus/configs/models/megatron/zaya1_base.yaml` | Base fragment | — | — |
 | `zebra_mamba_1B_hybrid.yaml` | `primus/configs/models/megatron/zebra_mamba_1B_hybrid.yaml` | Model preset | MI300X, MI325X, MI355X | Set in experiment overrides |
@@ -239,6 +241,7 @@ Values below come from `primus/configs/models/megatron/` presets (merged through
 | LLaMA 3 70B | `llama3_70B.yaml` | 8192 | 80 | 64 | 8 | 8192 |
 | LLaMA 3.1 405B | `llama3.1_405B.yaml` | 16384 | 126 | 128 | 8 | 8192 |
 | Qwen3 8B | `qwen3_8B.yaml` | 4096 | 36 | 32 | 8 | 131072 (`qwen2.5_base` chain) |
+| SmolLM3 3B | `smollm3_3B_Base.yaml` | 2048 | 36 | 16 | 4 | 65536 |
 | Mixtral 8x7B | `mixtral_8x7B_v0.1.yaml` | 4096 | 32 | 32 | — | 4096 |
 | DeepSeek-V3 (MoE) | `deepseek_v3.yaml` | 7168 | 61 | 128 (MLA) | — | See preset / HF |
 | Mamba 370M | `mamba_370M.yaml` | (Mamba stack) | — | — | — | — |
