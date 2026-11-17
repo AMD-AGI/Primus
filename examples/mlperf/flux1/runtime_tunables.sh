@@ -36,15 +36,18 @@ do
     fi
 done
 
+# NHC drains a node when transparent_hugepage/enabled is "always".
+# "madvise" is the value that check accepts.
 for _thp in \
     /sys/kernel/mm/transparent_hugepage/enabled \
     /sys/kernel/mm/transparent_hugepage/defrag
 do
     if [[ -w "${_thp}" ]] 2>/dev/null; then
-        echo always >"${_thp}" 2>/dev/null
+        echo madvise >"${_thp}" 2>/dev/null
     else
-        sudo -n sh -c "echo always > ${_thp}" 2>/dev/null
+        sudo -n sh -c "echo madvise > ${_thp}" 2>/dev/null
     fi
 done
+echo "[runtime_tunables] THP enabled=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)"
 
 echo "[runtime_tunables] Done."

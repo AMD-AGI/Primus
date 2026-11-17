@@ -36,7 +36,9 @@ export NCCL_MIN_P2P_NCHANNELS=${NCCL_MIN_P2P_NCHANNELS:-32}
 export NCCL_MIN_CTAS=${NCCL_MIN_CTAS:-32}
 export NCCL_NCHANNELS_PER_NET_PEER=${NCCL_NCHANNELS_PER_NET_PEER:-32}
 
-export FSDP_ALL_GATHER_BACKEND=${FSDP_ALL_GATHER_BACKEND:-rccl_sdma}
+# rccl_sdma fails on rocm/primus:v26.9 at 4 nodes. Set rccl_sdma before
+# sourcing this file to take the 6.1 path.
+export FSDP_ALL_GATHER_BACKEND=${FSDP_ALL_GATHER_BACKEND:-default}
 
 if [[ "${FSDP_ALL_GATHER_BACKEND:-}" == "rccl_sdma" ]]; then
     export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-2}
@@ -181,9 +183,6 @@ export TARGET_ACCURACY=${TARGET_ACCURACY:-0.586}
 export VAL_CHECK_INTERVAL=${VAL_CHECK_INTERVAL:-262144}
 # 1-node MLPerf recipe evaluates at the train microbatch, not batch 1.
 export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-${LOCAL_BATCH_SIZE:-32}}
-# copy runs the parameter all-gather on the GPU copy engines. symm is the 6.1
-# symmetric-memory path; torch 2.16 cannot find its NCCL host communicator.
-export FSDP_ALL_GATHER_IMPL=${FSDP_ALL_GATHER_IMPL:-copy}
 export SEED=${SEED:-10007}
 export ENABLE_WANDB_LOGGER=false
 export LOG_FREQ=${LOG_FREQ:-999999}
@@ -208,8 +207,6 @@ fi
 export FLUX_STEP_TIMING=${FLUX_STEP_TIMING:-0}
 export FLUX_STEP_TIMING_EVERY=${FLUX_STEP_TIMING_EVERY:-10}
 export FLUX_AG_TIMING=${FLUX_AG_TIMING:-0}
-export FLUX_PROFILE_MEMORY=${FLUX_PROFILE_MEMORY:-1}
-
 export FLUX_FUSED_NORM_ROPE=${FLUX_FUSED_NORM_ROPE:-1}
 export FLUX_FUSED_NORM_ROPE_BWD_BLOCK_M=${FLUX_FUSED_NORM_ROPE_BWD_BLOCK_M:-8}
 export FLUX_ROPE_TABLES_BF16=${FLUX_ROPE_TABLES_BF16:-1}
