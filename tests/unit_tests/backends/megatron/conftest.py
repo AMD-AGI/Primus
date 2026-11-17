@@ -60,6 +60,32 @@ requires_mxfp4 = pytest.mark.skipif(
 )
 
 
+def _is_gfx1250():
+    if not torch.cuda.is_available():
+        return False
+    return getattr(torch.cuda.get_device_properties(0), "gcnArchName", "").startswith("gfx1250")
+
+
+@pytest.fixture
+def require_bitwise():
+    """``require_bitwise(ok, what)`` with the result of a bitwise kernel's self-check.
+
+    The bitwise kernels are verified on gfx1250 (MI455X), where a failed check fails the test.
+    Elsewhere bit identity depends on the GPU and the installed torch / Triton / TE / Turbo,
+    and the runtime keeps the original path when the check fails, so the test is skipped."""
+
+    def require(ok: bool, what: str) -> None:
+        if ok:
+            return
+        if _is_gfx1250():
+            pytest.fail(f"{what}: the self-check fails on gfx1250")
+        pytest.skip(
+            f"{what} is not bit-identical on this GPU / these versions; the runtime keeps the original path"
+        )
+
+    return require
+
+
 @pytest.fixture(scope="function")
 def init_parallel_state():
     """

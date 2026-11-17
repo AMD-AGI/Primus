@@ -132,6 +132,17 @@ def warning_rank_0(msg, *args, **kwargs):
         log_func(msg, module_name, function_name, line)
 
 
+def warning_rank_all(msg, *args, **kwargs):
+    log_func = logger.warning_with_caller
+
+    caller_frame = sys._getframe(1)
+    function_name = caller_frame.f_code.co_name
+    module_name = caller_frame.f_globals["__name__"].split(".")[-1]
+    line = caller_frame.f_lineno
+
+    log_func(msg, module_name, function_name, line)
+
+
 def error_rank_0(msg, *args, **kwargs):
     log_func = logger.error_with_caller
 
