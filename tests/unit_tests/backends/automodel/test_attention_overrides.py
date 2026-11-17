@@ -546,6 +546,35 @@ class TestContextParallel:
         warned = any("no flash_attn_usp_func" in r.getMessage() for r in caplog.records)
         assert warned is not with_usp
 
+    @pytest.mark.parametrize("has_logical_lengths", [True, False])
+    def test_the_fp8_install_requires_logical_tail_masking(self, monkeypatch, has_logical_lengths):
+        from primus.backends.automodel.attention import fp8
+
+        ops = types.ModuleType("primus_turbo.pytorch.ops")
+        if has_logical_lengths:
+
+            def flash_attn_fp8_func(*args, logical_seqlen_q=None, logical_seqlen_k=None, **kwargs):
+                return None
+
+        else:
+
+            def flash_attn_fp8_func(*args, **kwargs):
+                return None
+
+        ops.flash_attn_fp8_func = flash_attn_fp8_func
+        monkeypatch.setitem(sys.modules, "primus_turbo.pytorch.ops", ops)
+
+        def install_override(**kwargs):
+            kwargs["probe"]()
+            return True
+
+        monkeypatch.setattr(fp8._backend_registry, "install_override", install_override)
+        if has_logical_lengths:
+            assert fp8.install("flash") is True
+        else:
+            with pytest.raises(RuntimeError, match="logical tail masking"):
+                fp8.install("flash")
+
 
 class TestSettings:
     def test_fp8_attn_is_off_by_default(self, set_option):
@@ -620,38 +649,29 @@ class TestPadToBlock:
     def test_the_padded_length_is_the_next_multiple(self, seqlen, expected):
         assert ((seqlen + 63) // 64) * 64 == expected
 
-    @pytest.mark.parametrize("skv,aligned", [(64, True), (4096, True), (77, False), (300, False)])
-    def test_only_aligned_keys_are_served(self, skv, aligned):
-        """A zero-padded key adds exp(0) to every softmax denominator, which
-        dilutes a short text context badly; unaligned keys fall back instead."""
+    @pytest.mark.parametrize("skv", [64, 4096, 77, 300])
+    def test_any_matching_key_value_length_is_served(self, skv):
         from primus.backends.automodel.attention import fp8
 
         q = types.SimpleNamespace(shape=(1, 100, 4, 64))
         kv = types.SimpleNamespace(shape=(1, skv, 4, 64))
-        reason = fp8.unaligned_lengths(q, kv, kv)
-        assert (reason is None) is aligned
-        if not aligned:
-            assert str(skv) in reason
+        assert fp8.unsupported_lengths(q, kv, kv) is None
 
-    @pytest.mark.parametrize("sq,served", [(100, False), (128, True)])
-    def test_a_causal_call_needs_aligned_queries(self, sq, served):
-        """The causal mask is aligned bottom-right when the lengths differ, so
-        padding the queries would move the diagonal."""
+    @pytest.mark.parametrize("sq", [100, 128])
+    def test_a_causal_call_uses_logical_lengths(self, sq):
         from primus.backends.automodel.attention import fp8
 
         q = types.SimpleNamespace(shape=(1, sq, 4, 64))
         kv = types.SimpleNamespace(shape=(1, 256, 4, 64))
-        reason = fp8.unaligned_lengths(q, kv, kv, is_causal=True)
-        assert (reason is None) is served
-        if not served:
-            assert "causal" in reason
+        assert fp8.unsupported_lengths(q, kv, kv, is_causal=True) is None
 
-    def test_a_non_causal_call_pads_unaligned_queries(self):
+    def test_mismatched_key_and_value_lengths_fall_back(self):
         from primus.backends.automodel.attention import fp8
 
         q = types.SimpleNamespace(shape=(1, 100, 4, 64))
-        kv = types.SimpleNamespace(shape=(1, 256, 4, 64))
-        assert fp8.unaligned_lengths(q, kv, kv, is_causal=False) is None
+        key = types.SimpleNamespace(shape=(1, 77, 4, 64))
+        value = types.SimpleNamespace(shape=(1, 76, 4, 64))
+        assert "differ" in fp8.unsupported_lengths(q, key, value)
 
 
 try:
@@ -693,15 +713,27 @@ class TestPadding:
         assert torch.all(padded[:, :real] == 1)
         assert torch.all(padded[:, real:] == 0)
 
-    def test_only_the_query_is_padded_and_sliced_back(self, monkeypatch):
-        """Query rows are independent, so padding them is exact; the keys reach
-        the kernel as they are."""
+    def test_qkv_are_padded_with_logical_lengths_and_output_is_sliced(self, monkeypatch):
         from primus.backends.automodel.attention import fp8
 
         seen = {}
 
-        def flash_attn_fp8_func(q, k, v, softmax_scale=None, causal=False):
-            seen.update(q=tuple(q.shape), k=tuple(k.shape), v=tuple(v.shape))
+        def flash_attn_fp8_func(
+            q,
+            k,
+            v,
+            softmax_scale=None,
+            causal=False,
+            logical_seqlen_q=None,
+            logical_seqlen_k=None,
+        ):
+            seen.update(
+                q=tuple(q.shape),
+                k=tuple(k.shape),
+                v=tuple(v.shape),
+                logical_q=logical_seqlen_q,
+                logical_k=logical_seqlen_k,
+            )
             return q * 2
 
         ops = types.ModuleType("primus_turbo.pytorch.ops")
@@ -709,9 +741,15 @@ class TestPadding:
         monkeypatch.setitem(sys.modules, "primus_turbo.pytorch.ops", ops)
 
         q = torch.ones(1, 100, 2, 8)
-        kv = torch.ones(1, 128, 2, 8)
+        kv = torch.ones(1, 77, 2, 8)
         out = fp8.flash_attn_fp8_pad64(q, kv, kv)
-        assert seen == {"q": (1, 128, 2, 8), "k": (1, 128, 2, 8), "v": (1, 128, 2, 8)}
+        assert seen == {
+            "q": (1, 128, 2, 8),
+            "k": (1, 128, 2, 8),
+            "v": (1, 128, 2, 8),
+            "logical_q": 100,
+            "logical_k": 77,
+        }
         assert out.shape == q.shape and torch.all(out == 2)
 
 

@@ -21,20 +21,12 @@ WHAT:
 
 SEQUENCE LENGTHS:
   The kernel block-scales q/k/v along the sequence with ``block_size=64`` and so
-  requires ``seqlen % 64 == 0``; a non-conforming length fails with a reshape
-  error. The two sides are handled differently because padding is exact for one
-  and not the other:
-
-  * Queries are zero-padded up to the next multiple of 64 and the real rows
-    sliced back out. Without a causal mask each query row is independent, so
-    this is exact. A causal mask is aligned to the bottom-right corner when the
-    query and key lengths differ, so padding the queries would move the
-    diagonal; a causal call with an unaligned query length therefore runs the
-    original kernel instead.
-  * Keys are never padded. A zero key adds ``exp(0)`` to every row's softmax
-    denominator, which dilutes the output by a large factor when the real key
-    count is small (a 77-token text context, say). A call whose key length is not
-    a multiple of 64 runs the original kernel instead, logged once.
+  requires physically padded sequence dimensions. The wrapper zero-pads q/k/v
+  to the next block, passes their unpadded logical lengths to Primus-Turbo, and
+  slices the output back to the real query length. Both forward and backward
+  bound their tiles by those logical lengths, so padded keys never enter the
+  softmax and padded gradients remain zero. Causal alignment also uses the
+  logical lengths rather than the physical padding.
 
 Settings (module config):
   primus_turbo.fp8_attention: false    enable the override (default off = no-op)
@@ -76,26 +68,18 @@ def pad_to_block(t, mult: int = ATTN_BLOCK):
     return torch.nn.functional.pad(t, (0, 0, 0, 0, 0, s_pad - s)), s
 
 
-def unaligned_lengths(q, k, v, is_causal: bool = False) -> Optional[str]:
-    """Why the FP8 kernel cannot serve this call exactly, or None if it can."""
-    skv = k.shape[1]
-    if skv % ATTN_BLOCK:
-        return f"the key length {skv} is not a multiple of {ATTN_BLOCK}"
-    sq = q.shape[1]
-    if is_causal and sq % ATTN_BLOCK:
-        return (
-            f"the call is causal and the query length {sq} is not a multiple of {ATTN_BLOCK}, "
-            "so padding the queries would move the causal diagonal"
-        )
+def unsupported_lengths(q, k, v, is_causal: bool = False) -> Optional[str]:
+    """Why logical tail masking cannot serve this call exactly, or None."""
+    if k.shape[1] != v.shape[1]:
+        return f"key and value lengths differ ({k.shape[1]} != {v.shape[1]})"
     return None
 
 
 def flash_attn_fp8_pad64(q, k, v, softmax_scale=None, causal: bool = False):
-    """FP8 flash attention, padding the query sequence up to a multiple of 64.
+    """FP8 flash attention with masked q/k/v padding to a multiple of 64.
 
-    q is (B, Sq, H, D) and k/v are (B, Skv, H, D) with ``Skv % 64 == 0``, and
-    ``Sq % 64 == 0`` when ``causal`` (see ``unaligned_lengths``); returns
-    (B, Sq, H, D).
+    q/k/v are BSHD. The Turbo kernel receives both physical padded tensors and
+    logical sequence bounds; this function returns the original query length.
     """
     from primus_turbo.pytorch.ops import flash_attn_fp8_func
 
@@ -103,7 +87,19 @@ def flash_attn_fp8_pad64(q, k, v, softmax_scale=None, causal: bool = False):
         softmax_scale = q.shape[-1] ** -0.5
 
     q_pad, sq_real = pad_to_block(q)
-    out = flash_attn_fp8_func(q_pad, k, v, softmax_scale=softmax_scale, causal=causal)
+    k_pad, sk_real = pad_to_block(k)
+    v_pad, sv_real = pad_to_block(v)
+    if sk_real != sv_real:
+        raise ValueError(f"key and value lengths differ ({sk_real} != {sv_real})")
+    out = flash_attn_fp8_func(
+        q_pad,
+        k_pad,
+        v_pad,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        logical_seqlen_q=sq_real,
+        logical_seqlen_k=sk_real,
+    )
     return out[:, :sq_real].contiguous()
 
 
@@ -117,7 +113,18 @@ def install(configured_backend: Optional[str] = None) -> bool:
 
     def probe() -> None:
         # Raise before rebinding anything; see install_override's ``probe``.
-        from primus_turbo.pytorch.ops import flash_attn_fp8_func  # noqa: F401
+        from inspect import signature
+
+        from primus_turbo.pytorch.ops import flash_attn_fp8_func
+
+        params = signature(flash_attn_fp8_func).parameters
+        required = {"logical_seqlen_q", "logical_seqlen_k"}
+        missing = required.difference(params)
+        if missing:
+            raise RuntimeError(
+                "Primus-Turbo FP8 attention lacks logical tail masking: "
+                + ", ".join(sorted(missing))
+            )
 
     return _backend_registry.install_override(
         kernel=flash_attn_fp8_pad64,
@@ -126,5 +133,5 @@ def install(configured_backend: Optional[str] = None) -> bool:
         description="FP8 flash attention (flash_attn_fp8_func)",
         probe=probe,
         configured_backend=configured_backend,
-        unsupported=unaligned_lengths,
+        unsupported=unsupported_lengths,
     )
