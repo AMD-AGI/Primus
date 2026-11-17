@@ -99,8 +99,9 @@ The folder is mounted read-only into the container at `/diffusion_bench`.
 - Docker, with your user in the `docker` group (`docker info` must work without sudo).
 - The benchmark image available locally or pullable (default:
   `rocm/primus:v26.8`; run `docker login` for
-  private registries). The image must contain `/workspace/AMDiffusionBenchmark` and
-  `/workspace/DLRMBenchmark`.
+  private registries). The image must contain `/workspace/DLRMBenchmark`, and
+  `/workspace/AMDiffusionBenchmark` when diffusion models are enabled (`rocm/primus` images ship
+  both; the Primus CI image ships DLRMBenchmark only).
 - `python3` with PyYAML on the host (`python3 -c "import yaml"`). Install with
   `pip install --user pyyaml` or `sudo apt install python3-yaml` if missing.
 - A Hugging Face token with access to the gated models (FLUX.1-dev in particular: accept the license
