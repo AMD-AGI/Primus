@@ -1,0 +1,40 @@
+extends:
+  - olmo_base.yaml
+
+# allenai/Olmo-3-1025-7B. For SFT, set hf_path to a local download of the HF checkpoint: the
+# posttrain hook converts it natively (TP=PP=EP=1 build) to the experiment's ckpt_format;
+# torch_dist (the default) is resharded by Megatron on load to the run's tensor / pipeline parallel
+# size (the hook pads the vocabulary for the run's TP). A legacy torch checkpoint (ckpt_format:
+# torch) loads only at TP=PP=1.
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: allenai/Olmo-3-1025-7B
+
+num_layers: 32
+hidden_size: 4096
+ffn_hidden_size: 11008
+num_attention_heads: 32
+group_query_attention: false
+num_query_groups: 32
+kv_channels: 128
+max_position_embeddings: 65536
+
+# RoPE base and YaRN on full-attention layers (config.json rope_theta, rope_scaling)
+rotary_base: 500000
+olmo3_yarn_rotary_scaling_factor: 8.0
+olmo3_yarn_original_max_position_embeddings: 8192
+olmo3_yarn_beta_fast: 32.0
+olmo3_yarn_beta_slow: 1.0
+# olmo3_yarn_attention_factor is not set: it is derived from the factor, 0.1 * ln(factor) + 1
+# (= 1.2079441541679836 for factor 8, the HF config's attention_factor), so an override of
+# olmo3_yarn_rotary_scaling_factor changes it too. An explicit value that disagrees with the derived
+# one is used as given (an HF checkpoint may carry its own), and the config logs a warning naming both.
+
+# sliding window on 3 of every 4 layers (config.json sliding_window, layer_types). The window is
+# olmo3_sliding_window: W (4096 keys, current token included); it is required. window_size is only
+# checked to agree with W, and its shape says which form it is: an int is W itself (4096 here, as
+# config.json states it), a pair is the Megatron/TE (W - 1, 0); null is fine. The OLMo-3 args patch
+# sets window_size to (W - 1, 0), the value TE receives. To change the window, set
+# olmo3_sliding_window and window_size to the same W (or null); 4096 next to another W is refused.
+olmo3_sliding_window: 4096
+window_size: 4096
+window_attn_skip_freq: 4

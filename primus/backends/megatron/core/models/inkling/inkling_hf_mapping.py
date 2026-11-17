@@ -43,6 +43,10 @@ from typing import (
 
 import torch
 
+# Group-interleave q/k/v rows into Megatron's ``linear_qkv`` layout (see ``attention.py``): the
+# shared row-layout helper (inverse: split_qkv below).
+from primus.backends.megatron.core.models.common.qkv_layout import fuse_qkv
+
 __all__ = [
     "InklingGeometry",
     "RELEASE_TEXT_PREFIX",
@@ -215,18 +219,6 @@ def interleave_glu(gate: torch.Tensor, up: torch.Tensor, dim: int) -> torch.Tens
     shape = list(gate.shape)
     shape[dim] *= 2
     return torch.stack([gate, up], dim=dim + 1).reshape(shape)
-
-
-def fuse_qkv(q, k, v, *, heads: int, groups: int, head_dim: int) -> torch.Tensor:
-    """Group-interleave q/k/v rows into Megatron's ``linear_qkv`` layout (see ``attention.py``)."""
-    hidden = q.shape[-1]
-    per = heads // groups
-    parts = (
-        q.reshape(groups, per * head_dim, hidden),
-        k.reshape(groups, head_dim, hidden),
-        v.reshape(groups, head_dim, hidden),
-    )
-    return torch.cat(parts, dim=1).reshape(-1, hidden)
 
 
 def split_qkv(fused, *, heads: int, groups: int, head_dim: int):

@@ -464,7 +464,7 @@ models:
 |-----------|---------|-------------|
 | `use_legacy_models` | `false` | Use legacy Megatron model code paths. |
 | `deprecated_use_mcore_models` | `false` | Deprecated flag for Megatron-Core models; prefer current `transformer_impl` + stack. |
-| `model_type` | `gpt` | `gpt` or `mamba` family. |
+| `model_type` | `gpt` | `gpt` or `mamba` family, or a Primus-owned model such as `olmo3` (§10.8). |
 | `num_layers` | `24` | Transformer layers (decoder or unified stack). |
 | `encoder_num_layers` | `null` | Encoder depth (encoder–decoder). |
 | `decoder_num_layers` | `null` | Decoder depth. |
@@ -607,6 +607,32 @@ models:
 | `final_logit_softcapping` | `null` | Softcap value for final logits; `null` disables. |
 | `attn_logit_softcapping` | `null` | Softcap for attention logits. |
 | `router_logit_softcapping` | `null` | Softcap for MoE router logits. |
+
+### 10.8 OLMo-3 (`model_type: olmo3`, preset `olmo_3_1025_7B.yaml`)
+
+The `olmo3_*` keys are read only by the Primus-owned OLMo-3 model. The OLMo-3 checks (args patch,
+config and builder) refuse settings the model does not implement; the error names the key.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `olmo3_sliding_window` | `null` | Sliding window W in the HF convention (keys incl. the current token); 4096 in the preset. Required. |
+| `window_size` | `null` (upstream) | Upstream Megatron key (a `(left, right)` pair). **OLMo-3 only:** with `model_type: olmo3` it is checked against `olmo3_sliding_window` W, and an int means W itself while a pair means the Megatron / TE `(W - 1, 0)` (so `4096` and `[4095, 0]` are the same window; `[4096, 0]` is refused). The OLMo-3 args patch sets `(W - 1, 0)`. To change the window, set `olmo3_sliding_window` and `window_size: null` (or the new W). |
+| `window_attn_skip_freq` | `null` (upstream) | Which layers are full attention: an int k (every k-th layer) or a 0/1 list per layer (1 = sliding). The preset sets `4`. |
+| `olmo3_yarn_rotary_scaling_factor` | `1.0` | YaRN factor (HF `rope_scaling.factor`; `8.0` in the preset). `1.0` means no YaRN. |
+| `olmo3_yarn_original_max_position_embeddings` | `null` | YaRN original context (`8192` in the preset). Required when the factor is > 1. |
+| `olmo3_yarn_beta_fast` | `32.0` | YaRN `beta_fast`. |
+| `olmo3_yarn_beta_slow` | `1.0` | YaRN `beta_slow`. |
+| `olmo3_yarn_attention_factor` | `null` | YaRN attention factor m (logits scaled by m²); `null` derives `0.1 * ln(factor) + 1`. |
+| `olmo3_rope_layout` | `per_type` | YaRN on full-attention layers only (`per_type`, as trained) or on every layer (`yarn_all`). |
+
+Notes:
+
+- YaRN is set only by the `olmo3_yarn_*` keys. Upstream RoPE scaling (`position_embedding_type: yarn`,
+  `use_rope_scaling` / `rope_scaling_factor`, `rotary_seq_len_interpolation_factor`, a `rotary_percent`
+  other than 1.0, `rotary_interleaved`) is refused; `rope_type` and `rotary_scaling_factor` belong to
+  multi-latent attention, which OLMo-3 does not use.
+- `window_attn_skip_freq` may also be written as a quoted list expression such as `"([1]*3 + [0])*8"`;
+  it needs at least one sliding and one full layer.
 
 ---
 
