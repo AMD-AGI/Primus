@@ -4,55 +4,32 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Kimi K3 model builder + ``model_provider`` entry points.
+"""Kimi K3 hooks for the shared builder (``MODEL_FAMILIES["kimi_k3"]`` in ``registry.py``).
 
-Mirrors ``deepseek_v4_builders.py``: ``model_provider`` is the thin wrapper
-Megatron's ``pretrain()`` calls, and ``kimi_k3_builder`` does the actual
-instantiation. Both live in one Primus-owned module so the dispatch in
-``primus/core/utils/import_utils.py`` does not have to chase symbols across
-``third_party/Megatron-LM``.
-
-``KimiK3TransformerConfig`` carries every Kimi-K3-specific field; the two
-plumbing helpers DeepSeek-V4 needs before config construction
-(``_maybe_plumb_v4_sink_attention_args`` / ``_maybe_plumb_v4_turbo_deepep_args``)
-have no Kimi K3 analogue — K3 has no sink attention and its MoE uses the
-stock dispatcher — so there is nothing to derive here.
+The shared builder already checks that ``KimiK3TransformerConfig`` survived
+``core_transformer_config_from_args``. K3 has no sink attention and its MoE
+uses the stock dispatcher, so it needs no ``prepare_args`` hook; it only adds
+the model's positional-embedding argument and a check that the configured
+latent MoE width reached the built weights.
 """
 
-from typing import Optional
+from functools import partial
 
-from megatron.core.transformer.spec_utils import import_module
-from megatron.training import get_args, print_rank_0
-from megatron.training.arguments import core_transformer_config_from_args
+from megatron.training import print_rank_0
 
-from primus.backends.megatron.core.models.kimi_k3.kimi_k3_model import KimiK3Model
-from primus.backends.megatron.core.models.kimi_k3.kimi_k3_transformer_config import (
-    KimiK3TransformerConfig,
+from primus.backends.megatron.core.models.builder import (
+    build_model,
+    family_model_provider,
 )
 
 __all__ = [
     "kimi_k3_builder",
     "model_provider",
+    "kimi_k3_model_kwargs",
+    "check_kimi_k3_model",
     "describe_latent_moe_resolution",
     "assert_latent_moe_width_reached_the_model",
 ]
-
-
-def _resolve_runtime_decoder_spec(args, config: KimiK3TransformerConfig, vp_stage):
-    """Resolve the effective runtime decoder spec for the Kimi K3 decoder.
-
-    ``args.spec`` is the user override escape hatch, exactly as in
-    ``deepseek_v4_builders.py``; otherwise the Kimi-K3-owned spec
-    builder assembles the stage-local layer tree.
-    """
-    if args.spec is not None:
-        return import_module(args.spec)
-
-    from primus.backends.megatron.core.models.kimi_k3.kimi_k3_layer_specs import (
-        get_kimi_k3_runtime_decoder_spec,
-    )
-
-    return get_kimi_k3_runtime_decoder_spec(config, vp_stage=vp_stage)
 
 
 def describe_latent_moe_resolution(args, config, model) -> str:
@@ -87,7 +64,7 @@ def describe_latent_moe_resolution(args, config, model) -> str:
     # bug, or hide a real one.
     parts.append(f"built.routed_expert_in={_expert_input_width(model, routed=True)}")
     parts.append(f"built.shared_expert_in={_expert_input_width(model, routed=False)}")
-    return "[Primus:Kimi-K3] latent MoE width -- " + ", ".join(parts)
+    return "[Primus:kimi_k3] latent MoE width -- " + ", ".join(parts)
 
 
 def _first_latent_proj_shape(model):
@@ -167,87 +144,14 @@ def assert_latent_moe_width_reached_the_model(config, model) -> None:
     )
 
 
-def kimi_k3_builder(
-    args,
-    pre_process,
-    post_process,
-    vp_stage=None,
-    config: Optional[KimiK3TransformerConfig] = None,
-    pg_collection=None,
-):
-    """Build a Kimi K3 model."""
-    print_rank_0("[Primus:Kimi-K3] building KimiK3Model...")
+def kimi_k3_model_kwargs(args) -> dict:
+    return {"position_embedding_type": args.position_embedding_type}
 
-    if config is None:
-        config = core_transformer_config_from_args(args, config_class=KimiK3TransformerConfig)
 
-    # core_transformer_config_from_args silently replaces the requested
-    # config_class with plain MLATransformerConfig when
-    # args.multi_latent_attention is true (arguments.py), which
-    # would drop every Kimi-K3 field without any error. Fail loudly instead.
-    assert isinstance(config, KimiK3TransformerConfig), (
-        f"Expected a KimiK3TransformerConfig, got {type(config).__name__}. "
-        "This happens when the YAML sets multi_latent_attention: true — "
-        "megatron/training/arguments.py then overrides config_class. "
-        "Kimi K3 builds its own attention specs and must leave the flag false."
-    )
-    assert not args.use_legacy_models, "Kimi K3 requires use_legacy_models=False (Mcore-only)."
-
-    runtime_decoder_spec = _resolve_runtime_decoder_spec(args, config, vp_stage)
-
-    model = KimiK3Model(
-        config=config,
-        transformer_layer_spec=runtime_decoder_spec,
-        vocab_size=args.padded_vocab_size,
-        max_sequence_length=args.max_position_embeddings,
-        pre_process=pre_process,
-        post_process=post_process,
-        fp16_lm_cross_entropy=args.fp16_lm_cross_entropy,
-        parallel_output=True,
-        share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
-        position_embedding_type=args.position_embedding_type,
-        pg_collection=pg_collection,
-        vp_stage=vp_stage,
-    )
-
+def check_kimi_k3_model(args, config, model) -> None:
     print_rank_0(describe_latent_moe_resolution(args, config, model))
     assert_latent_moe_width_reached_the_model(config, model)
 
-    return model
 
-
-def model_provider(
-    model_builder=None,
-    pre_process: bool = True,
-    post_process: bool = True,
-    vp_stage: Optional[int] = None,
-    config: Optional[KimiK3TransformerConfig] = None,
-    pg_collection=None,
-):
-    """``model_provider`` entry point used by Megatron's ``pretrain()``.
-
-    ``get_model_provider`` binds :func:`kimi_k3_builder` as the first arg
-    via ``functools.partial`` so upstream ``pretrain()`` can call this with
-    the standard ``(pre_process, post_process, vp_stage)`` signature.
-    """
-    if model_builder is None:
-        model_builder = kimi_k3_builder
-
-    args = get_args()
-    if args.record_memory_history:
-        import torch
-
-        torch.cuda.memory._record_memory_history(
-            True,
-            trace_alloc_max_entries=100000,
-            trace_alloc_record_context=True,
-        )
-
-    return model_builder(
-        args,
-        pre_process,
-        post_process,
-        vp_stage,
-        config=config,
-        pg_collection=pg_collection,
-    )
+kimi_k3_builder = partial(build_model, "kimi_k3")
+model_provider = family_model_provider(kimi_k3_builder)

@@ -123,7 +123,7 @@ class MuseSparkModel(GPTModel):
                 link_next_norm(layer.self_attn_bda, layer.pre_mlp_layernorm)
             for layer, nxt in zip(layers, layers[1:]):
                 link_next_norm(layer.mlp_bda, nxt.input_layernorm)
-        log_rank_0(f"[Primus:MuseSpark] built modules: {built_module_summary(self)}")
+        log_rank_0(f"[Primus:muse_spark] built modules: {built_module_summary(self)}")
 
     def _scale_logits(self, logits: torch.Tensor) -> torch.Tensor:
         # Every loss path calls this: the plain output layer, the fused vocab-parallel cross
