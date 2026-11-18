@@ -32,12 +32,42 @@ check_batch_inputs() {
         echo "[ERROR] primus-cli not found or not executable at: $cli_abs" >&2
         return 1
     fi
+    perf_prepare_cli_config || return 1
 
     if [ -n "$TRAIN_STEPS" ]; then
         if ! [[ "$TRAIN_STEPS" =~ ^[1-9][0-9]*$ ]]; then
             echo "[ERROR] TRAIN_STEPS must be a positive integer, got: '$TRAIN_STEPS'" >&2
             return 1
         fi
+    fi
+}
+
+# The configuration primus-cli loads (`primus-cli --config`): PRIMUS_CLI_CONFIG,
+# by default tools/perf/primus-cli.yaml -- runner/.primus.yaml without docker's
+# --privileged and CAP_SYS_ADMIN, which some clusters refuse. Empty leaves the
+# choice to primus-cli (~/.primus.yaml, else runner/.primus.yaml). Sets
+# PERF_CLI_CONFIG (absolute, or empty) and PERF_CLI_CONFIG_ARGS.
+PERF_CLI_CONFIG=""
+PERF_CLI_CONFIG_ARGS=()
+
+perf_prepare_cli_config() {
+    PERF_CLI_CONFIG=""
+    PERF_CLI_CONFIG_ARGS=()
+    [ -n "${PRIMUS_CLI_CONFIG:-}" ] || return 0
+    PERF_CLI_CONFIG=$(perf_resolve_path "$PRIMUS_CLI_CONFIG")
+    if [ ! -f "$PERF_CLI_CONFIG" ]; then
+        echo "[ERROR] PRIMUS_CLI_CONFIG does not exist: $PERF_CLI_CONFIG" >&2
+        return 1
+    fi
+    PERF_CLI_CONFIG_ARGS=(--config "$PERF_CLI_CONFIG")
+}
+
+# primus-cli's configuration as the batch configuration shows it.
+perf_cli_config_text() {
+    if [ -n "$PERF_CLI_CONFIG" ]; then
+        echo "$PERF_CLI_CONFIG"
+    else
+        echo "<primus-cli default: ~/.primus.yaml, else runner/.primus.yaml>"
     fi
 }
 
@@ -162,6 +192,20 @@ extract_config_fields() {
             SEQ_LEN=$(yq_or_na ".modules.$MODULE.overrides.seq_length" "$config_file")
             STEPS=$(yq_or_na ".modules.$MODULE.overrides.train_iters" "$config_file")
             ;;
+        diffusion)
+            # The benchmark configs write these as ${LOCAL_BATCH_SIZE:16},
+            # ${MAX_STEPS:100}: the banner shows the value the run will use.
+            # GBS is the samples of one optimizer step: the local batch of each
+            # data-parallel rank (sequence parallel ranks share one) times the
+            # gradient accumulation steps.
+            MBS=$(perf_config_value ".modules.$MODULE.overrides.training.local_batch_size" "$config_file")
+            STEPS=$(perf_config_value ".modules.$MODULE.overrides.training.steps" "$config_file")
+            SEQ_LEN="N/A"
+            GBS="N/A"
+            if [[ "$MBS" =~ ^[0-9]+$ ]]; then
+                GBS=$(diffusion_gbs "$config_file" "$MBS")
+            fi
+            ;;
         *)
             MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
             GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
@@ -185,6 +229,36 @@ torchtitan_default_gbs() {
     echo $(( mbs * NNODES * ${GPUS_PER_NODE:-8} / divisor ))
 }
 
+# A diffusion config's global batch: MBS per data-parallel rank (world size
+# over parallelism.sp_size) times training.gradient_accumulation_steps.
+diffusion_gbs() {
+    local config_file="$1" mbs="$2" sp accum
+    sp=$(perf_config_value ".modules.$MODULE.overrides.parallelism.sp_size" "$config_file")
+    accum=$(perf_config_value ".modules.$MODULE.overrides.training.gradient_accumulation_steps" "$config_file")
+    [[ "$sp" =~ ^[1-9][0-9]*$ ]] || sp=1
+    [[ "$accum" =~ ^[1-9][0-9]*$ ]] || accum=1
+    echo $(( mbs * NNODES * ${GPUS_PER_NODE:-8} * accum / sp ))
+}
+
+# A config value as the run will see it. A `${VAR:default}` placeholder gives
+# VAR's value where the run gets it -- from EXTRA_ENV, from this shell in
+# direct mode, or for a PRIMUS_* name, which primus-cli forwards into its
+# container -- and the default otherwise. "N/A" when the key is absent.
+perf_config_value() {
+    local value name default
+    value=$(yq_or_na "$1" "$2")
+    if [[ "$value" =~ ^\$\{([A-Za-z_][A-Za-z0-9_]*):([^}]*)\}$ ]]; then
+        name="${BASH_REMATCH[1]}"
+        default="${BASH_REMATCH[2]}"
+        value="$default"
+        if [ -n "${!name+x}" ] && { perf_extra_env_sets "$name" || ! perf_uses_containers || [[ "$name" == PRIMUS_* ]]; }; then
+            value="${!name}"
+        fi
+        [ -n "$value" ] || value="N/A"
+    fi
+    echo "$value"
+}
+
 # Everything the loop needs to know about one config. Sets config_rel,
 # config_name (path relative to the repo, shown in banners), the
 # extract_config_fields globals, YAML_STEPS, STEPS (with the TRAIN_STEPS
@@ -206,7 +280,11 @@ prepare_config() {
     extract_config_fields "$config_file"
     YAML_STEPS="$STEPS"
     if [ -n "$TRAIN_STEPS" ]; then
-        STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+        if train_steps_ignored "$FRAMEWORK"; then
+            STEPS="$YAML_STEPS (TRAIN_STEPS=$TRAIN_STEPS not applied to $FRAMEWORK)"
+        else
+            STEPS="$TRAIN_STEPS (CLI override; yaml=$YAML_STEPS)"
+        fi
     fi
 
     fw_safe=$(sanitize "$FRAMEWORK")
@@ -221,6 +299,98 @@ prepare_config() {
 run_log_name() {
     local rep="$1" suffix="${2:-}"
     echo "${RESULT_DIR}/${fw_safe}-${name_safe}-${config_hash}-MBS${mbs_safe}-GBS${gbs_safe}-rep${rep}${suffix}_${BATCH_TS}.log"
+}
+
+# Backends whose configs keep their own training length when TRAIN_STEPS is
+# set, separated by spaces (not commas as in BACKEND). The Megatron-Bridge
+# recipes warm the learning rate up for a fixed number of iterations and, with
+# lr_decay_iters unset, decay it over train_iters, so an override no longer
+# than the warmup fails Megatron's lr_warmup_steps < lr_decay_steps assertion
+# before the first step. The diffusion benchmark configs' training.steps is
+# part of the benchmark's definition (five warmup steps are left out of the
+# throughput), and diffusion_dlrm's models keep the num_iterations of its
+# diffusion_bench config.
+PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion diffusion_dlrm"
+
+train_steps_ignored() {
+    [[ " $PERF_TRAIN_STEPS_IGNORED " == *" $1 "* ]]
+}
+
+# TRAIN_STEPS as the batch configuration shows it, naming the backends of this
+# batch (CONFIG_FILES, and diffusion_dlrm when it runs) that it does not reach.
+train_steps_text() {
+    local f name present=" " skipped=""
+    if [ -z "$TRAIN_STEPS" ]; then
+        echo "<unset; use YAML>"
+        return 0
+    fi
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+        present+="$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null) "
+    done
+    if [ "${PERF_RUN_DIFFUSION_DLRM:-0}" = 1 ]; then
+        present+="$PERF_DIFFUSION_DLRM_BACKEND "
+    fi
+    for name in $PERF_TRAIN_STEPS_IGNORED; do
+        if [[ "$present" == *" $name "* ]]; then
+            skipped+="${skipped:+, }$name"
+        fi
+    done
+    echo "$TRAIN_STEPS${skipped:+ (not applied to $skipped)}"
+}
+
+# TRAIN_STEPS against a Megatron config's learning-rate schedule: with
+# lr_decay_iters unset Megatron decays over train_iters and asserts
+# lr_warmup_steps < lr_decay_steps, so a TRAIN_STEPS no longer than
+# lr_warmup_iters fails during setup. Returns 1 for such a config, with the
+# reason in TRAIN_STEPS_CONFLICT. Each value comes from the experiment's
+# overrides, else from its module config file (not the files either
+# `extends`); a schedule set by fraction or by samples, or a value neither
+# sets, is not checked. CHECK_TRAIN_STEPS=0 turns this off.
+CHECK_TRAIN_STEPS="${CHECK_TRAIN_STEPS:-1}"
+TRAIN_STEPS_CONFLICT=""
+
+schedule_value() {
+    local key="$1" config_file="$2" module="$3" base="$4" value
+    value=$(yq -r ".modules.$module.overrides.$key // \"\"" "$config_file" 2>/dev/null)
+    if [ -z "$value" ] && [ -f "$base" ]; then
+        value=$(yq -r ".$key // \"\"" "$base" 2>/dev/null)
+    fi
+    # ${VAR:default}: the default, as the container sees it unless VAR is set there.
+    if [[ "$value" =~ ^\$\{[^:}]+:([^}]*)\}$ ]]; then
+        value="${BASH_REMATCH[1]}"
+    fi
+    [ "$value" = "null" ] && value=""
+    printf '%s' "$value"
+}
+
+train_steps_conflict() {
+    local config_file="$1" framework="$2" module="$3" base warmup key
+    TRAIN_STEPS_CONFLICT=""
+    [ -n "$TRAIN_STEPS" ] && [ "$CHECK_TRAIN_STEPS" = 1 ] || return 0
+    case "$framework" in megatron|megatron_bridge) ;; *) return 0 ;; esac
+    train_steps_ignored "$framework" && return 0
+    base="$PRIMUS_PATH/primus/configs/modules/$framework/$(yq_or_na ".modules.$module.config" "$config_file")"
+    for key in lr_decay_iters lr_warmup_fraction lr_decay_samples train_samples; do
+        [ -z "$(schedule_value "$key" "$config_file" "$module" "$base")" ] || return 0
+    done
+    warmup=$(schedule_value lr_warmup_iters "$config_file" "$module" "$base")
+    [[ "$warmup" =~ ^[0-9]+$ ]] && [ "$TRAIN_STEPS" -le "$warmup" ] || return 0
+    TRAIN_STEPS_CONFLICT="TRAIN_STEPS=$TRAIN_STEPS is not more than lr_warmup_iters=$warmup, and with lr_decay_iters unset Megatron's lr_warmup_steps < lr_decay_steps check fails during setup; raise TRAIN_STEPS above $warmup or set lr_decay_iters"
+    return 1
+}
+
+# A config that is not launched still gets a log for each repetition, so it
+# has results rows: the banner, and a footer with exit code 2 and
+# "not_run: <why>". Uses the config prepare_config and build_launch_argv set up.
+perf_log_not_run() {
+    local why="$1" rep result_file
+    for rep in $(seq 1 "$NUM_REPS"); do
+        result_file=$(run_log_name "$rep")
+        print_per_run_banner "$result_file" "$config_file" "$config_name" "$config_hash" \
+            "$FRAMEWORK" "$MODEL" "$MBS" "$GBS" "$SEQ_LEN" "$STEPS" "$rep" "$NUM_REPS" \
+            "$launcher_cmd" "$MODULE" "$TRAIN_SUITE" 0 "${MAX_ATTEMPTS_PER_CONFIG:-1}"
+        print_per_run_footer "$result_file" 2 0 "not_run: $why"
+    done
 }
 
 # Primus CLI override flag that sets training length for a given framework.
@@ -239,13 +409,14 @@ train_step_override_flag() {
 
 # Append the TRAIN_STEPS override to LAUNCH_ARGV with the flag the config's
 # framework understands. Extra tokens after --config are deep-merged into the
-# overrides of the module being trained (CLI > YAML). No-op when unset.
+# overrides of the module being trained (CLI > YAML). No-op when unset, and for
+# the backends in PERF_TRAIN_STEPS_IGNORED.
 append_train_steps_override() {
     local config_file="$1"
     local framework="$2"
     local flag
 
-    if [ -z "$TRAIN_STEPS" ]; then
+    if [ -z "$TRAIN_STEPS" ] || train_steps_ignored "$framework"; then
         return 0
     fi
 
@@ -272,7 +443,7 @@ collect_system_info() {
         echo "# CWD            : $(pwd)"
         echo "# PRIMUS_PATH    : $PRIMUS_PATH"
         echo "# PRIMUS_MODE    : $PRIMUS_MODE"
-        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses runner/.primus.yaml>}"
+        echo "# Docker image   : ${DOCKER_IMAGE:-<unset; container mode uses the image in ${PERF_CLI_CONFIG:-the primus-cli default config}>}"
         echo "# Script         : $SCRIPT_PATH"
         echo "# Bash           : $BASH_VERSION"
         echo "# Python         : $(command -v python3 >/dev/null && python3 --version 2>&1 || echo 'not found')"
@@ -406,19 +577,21 @@ print_per_run_banner() {
 # Footer appended once the run has ended (or been interrupted). The extractor
 # reads `Exit code` and `Elapsed (sec)` from the last lines of the log;
 # `Failure reason` is "none" or "<category>: <detail>" (see
-# perf_launch_with_watchdog).
+# perf_launch_with_watchdog). <section>, when given, goes between the run
+# output and the footer (the failing rank's own log, see lib/control.sh).
 print_per_run_footer() {
     local result_file="$1"
     local exit_code="$2"
     local run_elapsed="$3"
     local failure_reason="$4"
+    local section="${5:+$5$'\n\n'}"
     local rule="################################################################################"
     local footer
     # Built first and written with one printf: a signal can then not land
     # between its lines, nor run the interrupt handler with stdout still
     # pointing into the log.
-    printf -v footer '\n%s\n\n%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
-        "############################### End Run Output #################################" "$rule" \
+    printf -v footer '\n%s\n\n%s%s\n# Run finished at  : %s\n# Exit code        : %s\n# Elapsed (sec)    : %s\n# Failure reason   : %s\n%s\n' \
+        "############################### End Run Output #################################" "$section" "$rule" \
         "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$exit_code" "$run_elapsed" "$failure_reason" "$rule"
     printf '%s' "$footer" >> "$result_file"
 }

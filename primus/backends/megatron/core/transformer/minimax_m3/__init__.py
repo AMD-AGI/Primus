@@ -10,7 +10,7 @@
     indexer.py        the branch that picks which KV blocks to read
     eager.py          the reference block-sparse attention kernel
     indexer_loss.py   the distillation loss that trains the indexer
-    flydsl/           the gfx950 forward/backward kernels, imported lazily
+    flydsl/           the gfx950 and gfx1250 forward/backward kernels, imported lazily
 
 ``MSA_BACKENDS`` names the kernels: ``eager`` (this reference) and ``flydsl``.
 """

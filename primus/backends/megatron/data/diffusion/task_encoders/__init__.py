@@ -12,11 +12,17 @@ from .image import (
     cook_preencoded_diffusion,
     cook_raw_images,
 )
+from .video import EncodedWanTaskEncoder, WanSample, cook_wan_preencoded
 
 __all__ = [
+    # Image / Flux family
     "DiffusionSample",
     "EncodedDiffusionTaskEncoder",
     "RawDiffusionTaskEncoder",
     "cook_preencoded_diffusion",
     "cook_raw_images",
+    # Video / Wan family
+    "WanSample",
+    "EncodedWanTaskEncoder",
+    "cook_wan_preencoded",
 ]

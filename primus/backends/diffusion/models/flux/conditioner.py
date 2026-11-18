@@ -12,10 +12,13 @@ import torch
 from torch import Tensor, nn
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokenizer
 
+from primus.backends.diffusion.utils.hf_load import disable_safetensors_auto_conversion
+
 
 class HFEmbedder(nn.Module):
     def __init__(self, version: str, max_length: int, **hf_kwargs):
         super().__init__()
+        disable_safetensors_auto_conversion()
         self.is_clip = "clip" in version.lower() or version.startswith("openai")
         self.max_length = max_length
         self.output_key = "pooler_output" if self.is_clip else "last_hidden_state"
@@ -24,6 +27,9 @@ class HFEmbedder(nn.Module):
             self.tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(version, max_length=max_length)
             self.hf_module: CLIPTextModel = CLIPTextModel.from_pretrained(version, **hf_kwargs)
         else:
+            # google/t5-v1_1-xxl publishes pytorch shards. Auto-conversion is
+            # disabled on this module so Transformers loads those shards, while
+            # a checkpoint that ships only model.safetensors still loads.
             self.tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(version, max_length=max_length)
             self.hf_module: T5EncoderModel = T5EncoderModel.from_pretrained(version, **hf_kwargs)
 

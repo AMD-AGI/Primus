@@ -108,26 +108,15 @@ def patch_load_checkpoint_for_distributed(ctx: PatchContext):
 
     original_load_checkpoint = checkpointing.load_checkpoint
 
-    def patched_load_checkpoint(
-        ddp_model,
-        optimizer,
-        opt_param_scheduler,
-        load_arg="load",
-        strict=True,
-        checkpointing_context=None,
-        skip_load_to_model_and_opt=False,
-    ):
-        """Wrapper that handles missing 'model' key for torch_dist checkpoints in finetune mode."""
+    def patched_load_checkpoint(*args, **kwargs):
+        """Wrapper that handles missing 'model' key for torch_dist checkpoints in finetune mode.
+
+        All arguments are forwarded unchanged, so the wrapper follows the signature of the
+        installed Megatron (newer versions add e.g. tp_group, pp_group, dp_group,
+        rng_state_key_prefix).
+        """
         try:
-            return original_load_checkpoint(
-                ddp_model,
-                optimizer,
-                opt_param_scheduler,
-                load_arg,
-                strict,
-                checkpointing_context,
-                skip_load_to_model_and_opt,
-            )
+            return original_load_checkpoint(*args, **kwargs)
         except KeyError as e:
             if str(e) == "'model'":
                 # For torch_dist checkpoints in finetune mode, model weights are already loaded

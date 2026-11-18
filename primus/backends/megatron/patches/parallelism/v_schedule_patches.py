@@ -36,6 +36,33 @@ def _is_v_schedule_enabled(ctx: PatchContext) -> bool:
     return False
 
 
+def _make_v_schedule_get_batch_on_this_tp_rank(original):
+    def get_batch_on_this_tp_rank(*args, **kwargs):
+        # Under the V schedule PP rank 0 runs both the first and the last (loss) chunk, but
+        # Megatron-core 0.19 drops labels / loss_mask on the first stage. Keep every field
+        # there, as older Megatron did on TP rank 0.
+        if kwargs.get("is_pipeline_first_stage"):
+            kwargs["pipeline_model_parallel_size"] = 1
+        return original(*args, **kwargs)
+
+    get_batch_on_this_tp_rank._primus_v_schedule = True
+    return get_batch_on_this_tp_rank
+
+
+def _patch_get_batch_for_v_schedule():
+    import megatron.core.utils as core_utils
+
+    from primus.backends.megatron.patches._rebind import rebind_everywhere
+
+    original = core_utils.get_batch_on_this_tp_rank
+    if getattr(original, "_primus_v_schedule", False):
+        return
+    rebound = rebind_everywhere(
+        core_utils, "get_batch_on_this_tp_rank", _make_v_schedule_get_batch_on_this_tp_rank(original)
+    )
+    log_rank_0(f"[Patch:megatron.pp.v_schedule]   Rebound get_batch_on_this_tp_rank in {rebound}")
+
+
 @register_patch(
     "megatron.pp.v_schedule",
     backend="megatron",
@@ -54,8 +81,9 @@ def patch_v_schedule_support(ctx: PatchContext):
     """
     # Patch parallel_state
     import megatron.core.parallel_state as ori_parallel_state
+    import megatron.core.pipeline_parallel.schedules  # noqa: F401
     import megatron.core.pipeline_parallel.utils as ori_pipeline_parallel_utils
-    import megatron.training.training as ori_training
+    import megatron.training.training  # noqa: F401  (loaded first so its aliases are rebound)
 
     from primus.backends.megatron.core.parallel_state import (
         default_embedding_ranks,
@@ -64,40 +92,19 @@ def patch_v_schedule_support(ctx: PatchContext):
         is_pp_last_stage,
         is_rank_in_embedding_group,
     )
+    from primus.backends.megatron.patches._rebind import rebind_everywhere
 
-    ori_parallel_state.default_embedding_ranks = default_embedding_ranks
-    ori_parallel_state.is_pipeline_last_stage = is_pipeline_last_stage
-    ori_parallel_state.is_rank_in_embedding_group = is_rank_in_embedding_group
-    ori_pipeline_parallel_utils.is_pp_first_stage = is_pp_first_stage
-    ori_pipeline_parallel_utils.is_pp_last_stage = is_pp_last_stage
-    ori_training.is_pp_first_stage = is_pp_first_stage
-    ori_training.is_pp_last_stage = is_pp_last_stage
-
-    import megatron.core.pipeline_parallel.schedules as ori_schedules
-
-    ori_schedules.is_pp_first_stage = is_pp_first_stage
-    ori_schedules.is_pp_last_stage = is_pp_last_stage
-
-    log_rank_0(
-        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.parallel_state.default_embedding_ranks "
-        f"-> {default_embedding_ranks.__name__}"
-    )
-    log_rank_0(
-        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.parallel_state.is_pipeline_last_stage "
-        f"-> {is_pipeline_last_stage.__name__}"
-    )
-    log_rank_0(
-        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.parallel_state.is_rank_in_embedding_group "
-        f"-> {is_rank_in_embedding_group.__name__}"
-    )
-    log_rank_0(
-        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.pipeline_parallel.utils.is_pp_first_stage "
-        f"-> {is_pp_first_stage.__name__}"
-    )
-    log_rank_0(
-        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.pipeline_parallel.utils.is_pp_last_stage "
-        f"-> {is_pp_last_stage.__name__}"
-    )
+    # Megatron-core 0.19 recomputes pre/post_process in megatron.training.models.*, which
+    # bind these by name too, so rebind every alias rather than a fixed list of modules.
+    for module, name, value in (
+        (ori_parallel_state, "default_embedding_ranks", default_embedding_ranks),
+        (ori_parallel_state, "is_pipeline_last_stage", is_pipeline_last_stage),
+        (ori_parallel_state, "is_rank_in_embedding_group", is_rank_in_embedding_group),
+        (ori_pipeline_parallel_utils, "is_pp_first_stage", is_pp_first_stage),
+        (ori_pipeline_parallel_utils, "is_pp_last_stage", is_pp_last_stage),
+    ):
+        rebound = rebind_everywhere(module, name, value)
+        log_rank_0(f"[Patch:megatron.pp.v_schedule]   Rebound {name} in {rebound}")
 
     # Patch finalize_model_grads
     import megatron.core.distributed.finalize_model_grads as ori_finalize_model_grads
@@ -120,6 +127,7 @@ def patch_v_schedule_support(ctx: PatchContext):
     )
 
     ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
+    _patch_get_batch_for_v_schedule()
     log_rank_0(
         f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.transformer.transformer_layer.get_transformer_layer_offset "
         f"-> {get_transformer_layer_offset.__name__}"

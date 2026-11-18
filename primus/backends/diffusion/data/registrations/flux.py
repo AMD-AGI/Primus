@@ -26,6 +26,7 @@ def _build_flux_dataset_from_config(dataset_config: dict, *, role: str):
             dataset_format=dataset_config.get("dataset_format", "webdataset"),
             dataset_name=dataset_config.get("dataset"),
             data_folder=dataset_config.get("data_folder"),
+            benchmark_loader=bool(dataset_config.get("benchmark_loader", False)),
         )
         logger.info(f"Built FLUX {role} raw image-text dataset with {len(dataset)} samples")
     elif dataset_type == "precomputed":

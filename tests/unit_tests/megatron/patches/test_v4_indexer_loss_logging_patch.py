@@ -6,7 +6,7 @@
 
 """Tests for the indexer-distillation-loss logging patch.
 
-The patch reaches into ``track_moe_metrics``, which every MoE model calls, so
+The patch reaches into ``MoEMetricsTracker.report``, which every MoE model calls, so
 the tests that matter are the negative ones: it must not install for anything
 but a V4 run that has the loss switched on.
 """
@@ -17,10 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from primus.backends.megatron.patches.deepseek_v4_indexer_loss_patches import (
-    _indexer_distill_enabled,
-    _make_tracked_with_indexer_loss,
-)
+import primus.backends.megatron.patches.deepseek_v4_indexer_loss_patches as mod
 
 _LOSS_NAME = "indexer_distill_loss"
 
@@ -35,8 +32,6 @@ class _Ctx:
 @pytest.fixture(autouse=True)
 def _args_from_ctx(monkeypatch):
     """Point the patch module's ``get_args`` at the fake context."""
-    import primus.backends.megatron.patches.deepseek_v4_indexer_loss_patches as mod
-
     monkeypatch.setattr(mod, "get_args", lambda ctx: ctx.args)
 
 
@@ -60,7 +55,7 @@ def _args_from_ctx(monkeypatch):
     ],
 )
 def test_patch_only_installs_for_v4_with_the_loss_on(args, expected, why):
-    assert _indexer_distill_enabled(_Ctx(**args)) is expected, why
+    assert mod._indexer_distill_enabled(_Ctx(**args)) is expected, why
 
 
 # ---------------------------------------------------------------------------
@@ -71,18 +66,18 @@ def test_patch_only_installs_for_v4_with_the_loss_on(args, expected, why):
 def _recorder():
     seen = {}
 
-    def fake_track_moe_metrics(*args, track_names=None, **kwargs):
+    def fake_report(*args, track_names=None, **kwargs):
         seen["args"] = args
         seen["track_names"] = track_names
         seen["kwargs"] = kwargs
         return "sentinel"
 
-    return fake_track_moe_metrics, seen
+    return fake_report, seen
 
 
 def test_wrapper_appends_the_key_to_an_explicit_list():
     fake, seen = _recorder()
-    wrapped = _make_tracked_with_indexer_loss(fake)
+    wrapped = mod._make_tracked_with_indexer_loss(fake)
 
     assert wrapped(0.5, 7, track_names=["load_balancing_loss"]) == "sentinel"
     assert seen["track_names"] == ["load_balancing_loss", _LOSS_NAME]
@@ -92,7 +87,7 @@ def test_wrapper_appends_the_key_to_an_explicit_list():
 
 def test_wrapper_does_not_duplicate_the_key():
     fake, seen = _recorder()
-    wrapped = _make_tracked_with_indexer_loss(fake)
+    wrapped = mod._make_tracked_with_indexer_loss(fake)
 
     wrapped(track_names=["z_loss", _LOSS_NAME])
     assert seen["track_names"].count(_LOSS_NAME) == 1
@@ -101,7 +96,7 @@ def test_wrapper_does_not_duplicate_the_key():
 def test_wrapper_leaves_none_alone():
     """``None`` already means every key in the tracker, ours included."""
     fake, seen = _recorder()
-    wrapped = _make_tracked_with_indexer_loss(fake)
+    wrapped = mod._make_tracked_with_indexer_loss(fake)
 
     wrapped(track_names=None)
     assert seen["track_names"] is None
@@ -110,7 +105,7 @@ def test_wrapper_leaves_none_alone():
 def test_wrapper_does_not_mutate_the_caller_list():
     """``training_log`` reuses its list; appending in place would grow it."""
     fake, _ = _recorder()
-    wrapped = _make_tracked_with_indexer_loss(fake)
+    wrapped = mod._make_tracked_with_indexer_loss(fake)
 
     caller_list = ["load_balancing_loss"]
     wrapped(track_names=caller_list)
@@ -121,19 +116,31 @@ def test_wrapper_does_not_mutate_the_caller_list():
 def test_wrapper_is_idempotent():
     """Re-running the patch must not stack wrappers."""
     fake, _ = _recorder()
-    once = _make_tracked_with_indexer_loss(fake)
+    once = mod._make_tracked_with_indexer_loss(fake)
     assert getattr(once, "_v4_indexer_loss_patched", False) is True
 
 
 def test_patch_skips_when_already_installed(monkeypatch):
     """A second install leaves the first wrapper in place."""
-    import megatron.training.training as training_module
-
-    import primus.backends.megatron.patches.deepseek_v4_indexer_loss_patches as mod
+    from megatron.core.transformer.moe.moe_logging import MoEMetricsTracker
 
     fake, _ = _recorder()
-    already = _make_tracked_with_indexer_loss(fake)
-    monkeypatch.setattr(training_module, "track_moe_metrics", already, raising=False)
+    already = mod._make_tracked_with_indexer_loss(fake)
+    monkeypatch.setattr(MoEMetricsTracker, "report", already)
 
     mod.patch_indexer_distill_loss_logging(_Ctx(model_type="deepseek_v4"))
-    assert training_module.track_moe_metrics is already
+    assert MoEMetricsTracker.report is already
+
+
+def test_patch_wraps_report_once(monkeypatch):
+    """The first install wraps ``MoEMetricsTracker.report``; the second keeps it."""
+    from megatron.core.transformer.moe.moe_logging import MoEMetricsTracker
+
+    original = MoEMetricsTracker.report
+    monkeypatch.setattr(MoEMetricsTracker, "report", original)
+
+    mod.patch_indexer_distill_loss_logging(_Ctx(model_type="deepseek_v4"))
+    wrapped = MoEMetricsTracker.report
+    assert wrapped is not original
+    mod.patch_indexer_distill_loss_logging(_Ctx(model_type="deepseek_v4"))
+    assert MoEMetricsTracker.report is wrapped

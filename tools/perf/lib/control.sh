@@ -178,6 +178,225 @@ perf_stop_leftover_containers() {
     ' _ "$PERF_LABEL_KEY" "$(id -un)" "$PERF_LABEL_VALUE" 2>/dev/null | perf_log_stream
 }
 
+# DATA_PATH: where Primus keeps what it downloads (HF_HOME is
+# $DATA_PATH/huggingface: models, datasets), <checkout>/data when unset.
+# runner/.primus.yaml does not forward it into the container (the perf
+# primus-cli.yaml does), and neither mounts a path outside the checkout, so
+# the runner does both. The mount is left out when
+# the path is inside the checkout (mounted already) or a volume of the config
+# file primus-cli loads: docker refuses the same mount point twice.
+#
+# PERF_DATA_PATH is the value the runner was given. check_batch_inputs later
+# exports EXTRA_ENV's pairs, so DATA_PATH itself may then come from EXTRA_ENV;
+# that one is passed on by EXTRA_ENV as before, and mounting it is up to the
+# caller.
+DATA_PATH="${DATA_PATH:-}"
+PERF_DATA_PATH="$DATA_PATH"
+PERF_DATA_ARGS=()
+PERF_DATA_MOUNT=""
+PERF_DATA_CHECK="<unset; Primus uses <checkout>/data>"
+
+# The container volumes of the one config file primus-cli loads (PERF_CLI_CONFIG
+# when set, else ~/.primus.yaml if it exists, else runner/.primus.yaml), read
+# with primus-cli's own parser. Its "already sourced" guards are cleared, or an
+# exported one would skip the definitions.
+perf_config_volumes() {
+    # shellcheck disable=SC2016
+    env -u __PRIMUS_COMMON_SOURCED -u __PRIMUS_CONFIG_SOURCED bash -c 'PRIMUS_RUNNER_DIR=$1/runner
+        source "$1/runner/lib/common.sh" && source "$1/runner/lib/config.sh" &&
+            load_config_auto "$2" perf >/dev/null 2>&1 &&
+            printf "%s\n" "${PRIMUS_CONFIG[container.options.volume]:-}"' _ "$PRIMUS_PATH" "${PERF_CLI_CONFIG:-}" 2>/dev/null
+}
+
+# True when the container already gets PERF_DATA_PATH at the same path.
+perf_data_path_mounted() {
+    local volumes entry host dest
+    case "$PERF_DATA_PATH/" in "${PRIMUS_PATH%/}"/*) return 0 ;; esac
+    if ! volumes=$(perf_config_volumes); then
+        echo "[WARN] Could not read primus-cli's config file; assuming it does not mount DATA_PATH." >&2
+        return 1
+    fi
+    while IFS= read -r entry; do
+        IFS=: read -r host dest _ <<< "$entry"
+        dest="${dest:-$host}"
+        [ "${dest%/}" = "$PERF_DATA_PATH" ] && return 0
+    done <<< "$volumes"
+    return 1
+}
+
+# Prints the DATA_PATH value EXTRA_ENV sets (PERF_EXTRA_ENV_ARGS is parsed);
+# returns 1 when it sets none.
+perf_extra_env_data_path() {
+    local arg value="" found=1
+    for arg in ${PERF_EXTRA_ENV_ARGS[@]+"${PERF_EXTRA_ENV_ARGS[@]}"}; do
+        if [[ "$arg" == DATA_PATH=* ]]; then
+            value="${arg#DATA_PATH=}"
+            found=0
+        fi
+    done
+    printf '%s' "$value"
+    return "$found"
+}
+
+# Checks DATA_PATH and sets PERF_DATA_ARGS, the launcher's --volume/--env for
+# it. No side effects, so DRY_RUN can show them. Returns 1 to refuse.
+perf_prepare_data_path() {
+    local given="$PERF_DATA_PATH" extra in_extra=0
+    PERF_DATA_ARGS=()
+    extra=$(perf_extra_env_data_path) && in_extra=1
+    if [ -z "$given" ]; then
+        [ "$in_extra" = 1 ] && PERF_DATA_CHECK="${extra:-<empty>} (from EXTRA_ENV; not mounted by the runner)"
+        return 0
+    fi
+    PERF_DATA_PATH="${given%/}"
+    case "$PERF_DATA_PATH" in
+        *:*)
+            echo "[ERROR] DATA_PATH cannot contain ':', which separates docker volume fields: '$given'" >&2
+            return 1
+            ;;
+        /?*) ;;
+        *)
+            echo "[ERROR] DATA_PATH must be an absolute path below /, got: '$given'" >&2
+            return 1
+            ;;
+    esac
+    if [ "$in_extra" = 1 ] && [ "${extra%/}" != "$PERF_DATA_PATH" ]; then
+        echo "[ERROR] DATA_PATH=$given but EXTRA_ENV sets DATA_PATH=$extra; set it once." >&2
+        return 1
+    fi
+    export DATA_PATH="$PERF_DATA_PATH"
+    # Direct mode runs in this shell's environment; there is no container.
+    PERF_DATA_MOUNT="no container"
+    perf_uses_containers || return 0
+    PERF_DATA_ARGS=(--env "DATA_PATH=$PERF_DATA_PATH")
+    PERF_DATA_MOUNT="already mounted"
+    if ! perf_data_path_mounted; then
+        PERF_DATA_ARGS=(--volume "$PERF_DATA_PATH:$PERF_DATA_PATH" "${PERF_DATA_ARGS[@]}")
+        PERF_DATA_MOUNT="mounted by the runner"
+    fi
+}
+
+# Before the first run: PERF_DATA_PATH exists on every node, owned by the user
+# (docker would create a missing one as root), and PERF_DATA_CHECK says where
+# it is and how much room it has (a quota shows in df too). Returns 1 to refuse.
+perf_ensure_data_path() {
+    local free err rc=0
+    [ -n "$PERF_DATA_PATH" ] || return 0
+    # shellcheck disable=SC2016
+    err=$(PERF_ON_NODES_TIMEOUT=120 perf_on_nodes bash -c 'mkdir -p "$1"' _ "$PERF_DATA_PATH" 2>&1 >/dev/null) || rc=$?
+    if [ "$rc" != 0 ]; then
+        [ "$rc" = 124 ] && err="timed out after 120 s"
+        perf_log "[ERROR] DATA_PATH=$PERF_DATA_PATH cannot be created on every node: ${err:-exit code $rc}"
+        return 1
+    fi
+    free=$(timeout -k 5 10 df -Ph "$PERF_DATA_PATH" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    PERF_DATA_CHECK="$PERF_DATA_PATH (${free:-?} free on $(hostname -s); $PERF_DATA_MOUNT)"
+    perf_log "[INFO] DATA_PATH: $PERF_DATA_CHECK"
+}
+
+# ---------------------------------------------------------------------------
+# Diffusion model cache
+#
+# The diffusion backend's prepare hook downloads a benchmark's checkpoints and
+# dataset (tens of GB per model) into PRIMUS_HF_HOME, and without it into
+# ~/cache/huggingface -- in container mode a directory that goes away with the
+# container, so every run would download them again. For diffusion configs the
+# runner sets PRIMUS_HF_HOME to DIFFUSION_HF_CACHE and mounts that directory
+# when the container would not see it otherwise. The default is PRIMUS_HF_HOME
+# when that is set, else <DATA_PATH, or <checkout>/data>/huggingface_diffusion:
+# next to Primus' other downloads, in a directory of its own, as the backend
+# keeps its benchmark assets apart from the generic Hugging Face cache.
+# ---------------------------------------------------------------------------
+
+DIFFUSION_HF_CACHE="${DIFFUSION_HF_CACHE:-}"
+PERF_DIFFUSION_CACHE=""
+PERF_DIFFUSION_ARGS=()
+PERF_DIFFUSION_MOUNT=""
+PERF_DIFFUSION_CACHE_CHECK="not used (no diffusion config in this batch)"
+
+# True when <path> is <dir> or below it.
+perf_path_under() {
+    case "${1%/}/" in "${2%/}"/*) return 0 ;; esac
+    return 1
+}
+
+# True when a selected config trains the diffusion framework.
+perf_batch_has_diffusion() {
+    local f
+    for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
+        [ "$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null)" = diffusion ] &&
+            return 0
+    done
+    return 1
+}
+
+# True when the container already sees PERF_DIFFUSION_CACHE: it is in the
+# checkout, in the DATA_PATH the runner passes, or in a volume of the config
+# file primus-cli loads.
+perf_diffusion_cache_mounted() {
+    local volumes entry host dest
+    perf_path_under "$PERF_DIFFUSION_CACHE" "$PRIMUS_PATH" && return 0
+    [ -n "$PERF_DATA_PATH" ] && perf_path_under "$PERF_DIFFUSION_CACHE" "$PERF_DATA_PATH" && return 0
+    volumes=$(perf_config_volumes) || return 1
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        IFS=: read -r host dest _ <<< "$entry"
+        dest="${dest:-$host}"
+        perf_path_under "$PERF_DIFFUSION_CACHE" "$dest" && return 0
+    done <<< "$volumes"
+    return 1
+}
+
+# Checks DIFFUSION_HF_CACHE and sets PERF_DIFFUSION_ARGS, the launcher's
+# --volume/--env for a diffusion config. No side effects, so DRY_RUN can show
+# them. Returns 1 to refuse.
+perf_prepare_diffusion_cache() {
+    local given="${DIFFUSION_HF_CACHE:-${PRIMUS_HF_HOME:-${DATA_PATH:-$PRIMUS_PATH/data}/huggingface_diffusion}}"
+    PERF_DIFFUSION_ARGS=()
+    PERF_DIFFUSION_CACHE=""
+    perf_batch_has_diffusion || return 0
+    if [ -n "$DIFFUSION_HF_CACHE" ] && perf_extra_env_sets PRIMUS_HF_HOME && [ "${DIFFUSION_HF_CACHE%/}" != "${PRIMUS_HF_HOME%/}" ]; then
+        echo "[ERROR] DIFFUSION_HF_CACHE=$DIFFUSION_HF_CACHE but EXTRA_ENV sets PRIMUS_HF_HOME=$PRIMUS_HF_HOME; set it once." >&2
+        return 1
+    fi
+    PERF_DIFFUSION_CACHE="${given%/}"
+    case "$PERF_DIFFUSION_CACHE" in
+        *:*)
+            echo "[ERROR] DIFFUSION_HF_CACHE cannot contain ':', which separates docker volume fields: '$given'" >&2
+            return 1
+            ;;
+        /?*) ;;
+        *)
+            echo "[ERROR] DIFFUSION_HF_CACHE must be an absolute path below /, got: '$given'" >&2
+            return 1
+            ;;
+    esac
+    PERF_DIFFUSION_ARGS=(--env "PRIMUS_HF_HOME=$PERF_DIFFUSION_CACHE")
+    PERF_DIFFUSION_MOUNT="no container"
+    perf_uses_containers || return 0
+    PERF_DIFFUSION_MOUNT="already mounted"
+    if ! perf_diffusion_cache_mounted; then
+        PERF_DIFFUSION_ARGS=(--volume "$PERF_DIFFUSION_CACHE:$PERF_DIFFUSION_CACHE" "${PERF_DIFFUSION_ARGS[@]}")
+        PERF_DIFFUSION_MOUNT="mounted by the runner"
+    fi
+}
+
+# Before the first run: the cache exists, owned by the user (docker would
+# create a missing one as root), and PERF_DIFFUSION_CACHE_CHECK says where it
+# is and how much room it has. Returns 1 to refuse.
+perf_ensure_diffusion_cache() {
+    local free
+    [ -n "$PERF_DIFFUSION_CACHE" ] || return 0
+    if ! mkdir -p "$PERF_DIFFUSION_CACHE" 2>/dev/null || [ ! -w "$PERF_DIFFUSION_CACHE" ]; then
+        perf_log "[ERROR] the diffusion model cache is not a writable directory: $PERF_DIFFUSION_CACHE"
+        perf_log "        Point DIFFUSION_HF_CACHE at a directory you own."
+        return 1
+    fi
+    free=$(timeout -k 5 10 df -Ph "$PERF_DIFFUSION_CACHE" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    PERF_DIFFUSION_CACHE_CHECK="$PERF_DIFFUSION_CACHE (${free:-?} free; $PERF_DIFFUSION_MOUNT)"
+    perf_log "[INFO] Diffusion model cache: $PERF_DIFFUSION_CACHE_CHECK"
+}
+
 # Make sure every node has the image before the first run. Without this the
 # first `docker run` pulls it, which both counts against the run limits (a
 # silent multi-GB pull can trip MAX_IDLE_SECONDS) and leaves the image digest
@@ -456,7 +675,9 @@ perf_check_socket_ifname() {
 # ---------------------------------------------------------------------------
 
 perf_preflight() {
-    perf_log "[INFO] Pre-run checks: image, leftover containers, GPU memory, NCCL interface."
+    perf_log "[INFO] Pre-run checks: DATA_PATH, image, leftover containers, GPU memory, NCCL interface."
+    perf_ensure_data_path || return 1
+    perf_ensure_diffusion_cache || return 1
     if ! perf_ensure_image; then
         perf_log "[ERROR] the image check failed (see above)."
         return 1
@@ -610,7 +831,11 @@ perf_launch_with_watchdog() {
     kill -TERM -- "-$group" 2>/dev/null
     RUN_PID=""
 
-    print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON"
+    local section=""
+    if [ "$RUN_FAILURE_REASON" != "none" ]; then
+        section=$(perf_failing_rank_section "$result_file" "$start")
+    fi
+    print_per_run_footer "$result_file" "$RUN_EXIT_CODE" "$RUN_ELAPSED" "$RUN_FAILURE_REASON" "$section"
     CURRENT_RESULT_FILE=""
     PERF_RUN_DONE=0
 
@@ -621,6 +846,98 @@ perf_launch_with_watchdog() {
     kill "$TAIL_PID" 2>/dev/null
     wait "$TAIL_PID" 2>/dev/null
     TAIL_PID=""
+}
+
+# ---------------------------------------------------------------------------
+# The failing rank's own log
+#
+# torchrun passes on the output of local rank 0 only (and the last local rank
+# of the last node), so when another rank fails first, its error is not in
+# the run log. torchrun's summary names that rank, and Primus writes each
+# rank's ERROR records to <workspace>/.../rank-<N>/error.log; failure.py finds
+# that file and prints this run's records as a section for the log.
+# FAILING_RANK_OUTPUT=0 turns this off.
+# ---------------------------------------------------------------------------
+
+FAILING_RANK_OUTPUT="${FAILING_RANK_OUTPUT:-1}"
+
+# perf_failing_rank_section <log> <run start, epoch seconds>
+perf_failing_rank_section() {
+    local result_file="$1" since="$2" spec out=""
+    [ "$FAILING_RANK_OUTPUT" = 1 ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    spec=$(timeout -k 5 60 python3 "$SCRIPT_DIR/failure.py" failing-rank \
+        --log "$result_file" --primus-path "$PRIMUS_PATH" --since "$since" 2>/dev/null)
+    [ -n "$spec" ] || return 0
+    # The file is on the node the rank ran on, unless the workspace is shared;
+    # each node looks, and the first section printed wins.
+    if [ "${PERF_MULTINODE:-0}" = 1 ]; then
+        out=$(PERF_ON_NODES_TIMEOUT=90 perf_on_nodes python3 "$SCRIPT_DIR/failure.py" rank-log \
+            --spec "$spec" --this-host-only 2>/dev/null |
+            awk '/Begin Failing Rank Output/ { n++ } n == 1 { print } /End Failing Rank Output/ && n == 1 { exit }')
+    fi
+    if [ -z "$out" ]; then
+        out=$(timeout -k 5 60 python3 "$SCRIPT_DIR/failure.py" rank-log --spec "$spec" 2>/dev/null)
+    fi
+    printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# Why a run failed, and whether another attempt can help
+# ---------------------------------------------------------------------------
+
+RETRY_ALL_FAILURES="${RETRY_ALL_FAILURES:-0}"
+PERF_VERDICT=""
+PERF_VERDICT_REASON=""
+PERF_VERDICT_RECURS=0
+
+# Exceptions a config or the code raises, not the cluster: during setup they
+# recur on every attempt. RuntimeError, OSError, ImportError (a half-synced
+# checkout, a shared library) and the distributed errors are left out, as a
+# rendezvous, network or file system hiccup raises those too, and so is any
+# message that reads like one.
+PERF_CONFIG_ERRORS="AssertionError ValueError KeyError TypeError AttributeError IndexError ZeroDivisionError NotImplementedError ModuleNotFoundError"
+PERF_TRANSIENT_WORDS_RE='connection|timed out|timeout|temporarily|unavailable|address already in use|eaddrinuse|stale file handle|broken pipe'
+
+# perf_failure_verdict <log>: PERF_VERDICT is the extractor's reading of a
+# failed run, e.g. "python_error at setup: AssertionError: ...", empty when it
+# cannot tell, and PERF_VERDICT_REASON its failure_reason. PERF_VERDICT_RECURS
+# is 1 when another attempt would fail the same way: a config error during
+# setup (PERF_CONFIG_ERRORS, or an omegaconf, hydra or yaml one) that a
+# traceback shows as the exception that stopped the run, or an unusable NIC.
+perf_failure_verdict() {
+    local log="$1" status="" reason="" failed_at="" from_traceback="" detail="" exception
+    PERF_VERDICT=""
+    PERF_VERDICT_REASON=""
+    PERF_VERDICT_RECURS=0
+    command -v python3 >/dev/null 2>&1 || return 0
+    IFS=$'\x1f' read -r status reason failed_at from_traceback detail < <(
+        timeout -k 5 120 python3 "$SCRIPT_DIR/extract_results.py" --verdict "$log" 2>/dev/null
+    )
+    [ -n "$reason" ] || return 0
+    PERF_VERDICT="${reason}${failed_at:+ at $failed_at}${detail:+: $detail}"
+    PERF_VERDICT_REASON="$reason"
+    case "$reason" in
+        nic_error) PERF_VERDICT_RECURS=1 ;;
+        python_error)
+            exception="${detail%%[: (]*}"
+            if [ "$failed_at" = setup ] && [ "$from_traceback" = yes ] && ! [[ "${detail,,}" =~ $PERF_TRANSIENT_WORDS_RE ]] &&
+                { [[ " $PERF_CONFIG_ERRORS " == *" ${exception##*.} "* ]] ||
+                [[ "$exception" == omegaconf.* || "$exception" == hydra.* || "$exception" == yaml.* ]]; }; then
+                PERF_VERDICT_RECURS=1
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# perf_print_cause <log> <runner's failure reason>: the cause line under a
+# [FAIL] line, unless it would only repeat the runner's own verdict.
+perf_print_cause() {
+    perf_failure_verdict "$1"
+    if [ -n "$PERF_VERDICT" ] && [ "$PERF_VERDICT_REASON" != "${2%%:*}" ]; then
+        echo "                           cause: $PERF_VERDICT" | tee -a "$SUMMARY_FILE"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -745,6 +1062,7 @@ perf_print_plan() {
     echo "Config source: $CONFIG_SOURCE"
     echo "RESULT_DIR   : $RESULT_DIR"
     echo "Run limits   : $(perf_run_limits_text)"
+    echo "TRAIN_STEPS  : $(train_steps_text)"
     echo ""
     for config_file in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
         n=$((n + 1))
@@ -754,6 +1072,9 @@ perf_print_plan() {
         if build_launch_argv "$config_file" "$FRAMEWORK" "$TRAIN_SUITE" 2>/dev/null; then
             echo "      log: $(run_log_name 1)"
             echo "      cmd: $(perf_display_argv "${LAUNCH_ARGV[@]}")"
+            if ! train_steps_conflict "$config_file" "$FRAMEWORK" "$MODULE"; then
+                echo "      NOT RUN: $TRAIN_STEPS_CONFLICT"
+            fi
         else
             echo "      cannot build a launch command for this config (see the error when run)."
         fi

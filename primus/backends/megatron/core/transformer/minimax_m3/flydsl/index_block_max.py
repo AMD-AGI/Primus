@@ -49,6 +49,12 @@ from primus_turbo.flydsl.utils import buffer_ops
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
     _tr16,
 )
+from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import (
+    cat_bf16_16,
+    pack_low16_bf16,
+    permlane16_halves,
+    wmma_f32_16x16x32_bf16,
+)
 
 WAVES = 4
 THREADS = 64 * WAVES
@@ -60,7 +66,175 @@ TKEYS = 16  # keys per MFMA tile
 _ROW_EPT = 2
 
 
+def _build_index_block_max_w32(num_heads: int, index_dim: int, block_size: int):
+    """Same contract as ``build_index_block_max``, on the wave32 WMMA layout.
+
+    Four waves still cover 64 queries. Each wave is 32 lanes: lanes 0..15 and
+    16..31 share a query column and split K, and the 16 keys of a tile sit in
+    the 8 accumulator rows of the two halves. One ``permlane16`` finishes the
+    block max. Only the low half writes.
+    """
+    elem = fx.BFloat16
+    H, DI = num_heads, index_dim
+    assert DI % 32 == 0 and block_size % TKEYS == 0
+    KSI = DI // 32
+    KT = block_size // TKEYS
+    STR = DI + 16
+    threads = 32 * WAVES
+    CPL = block_size * DI // threads
+    assert CPL % 8 == 0 and DI % CPL == 0
+    LPR = DI // CPL
+
+    allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_index_block_max_w32_smem")
+    k_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = allocator._align(k_off + block_size * STR * 2, 16)
+
+    @flyc.kernel(known_block_size=[threads, 1, 1])
+    def k_fn(
+        Q: fx.Tensor,
+        K: fx.Tensor,
+        BMAX: fx.Tensor,
+        ARG: fx.Tensor,
+        S: fx.Int32,
+        B: fx.Int32,
+        NB: fx.Int32,
+    ):
+        v8 = Vec.make_type(8, elem)
+        lds_k = SmemPtr(allocator.get_base(), k_off, elem.ir_type, shape=(block_size * STR,)).get()
+
+        tid = fx.Index(gpu.thread_idx.x)
+        wave = tid // fx.Index(32)
+        lane = tid % fx.Index(32)
+        lo = lane % fx.Index(16)
+        half = lane // fx.Index(16)
+        Sn = fx.Index(S)
+        Bn = fx.Index(B)
+        NBn = fx.Index(NB)
+        qg = fx.Index(gpu.block_idx.x)
+        b = fx.Index(gpu.block_idx.y)
+
+        q_rsrc = buffer_ops.create_buffer_resource(
+            Q, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(H * DI * 2))
+        )
+        k_rsrc = buffer_ops.create_buffer_resource(
+            K, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(DI * 2))
+        )
+        out_bytes = _raw(Bn * fx.Index(H) * Sn * NBn * fx.Index(4))
+        bmax_rsrc = buffer_ops.create_buffer_resource(BMAX, max_size=False, num_records_bytes=out_bytes)
+        arg_rsrc = buffer_ops.create_buffer_resource(ARG, max_size=False, num_records_bytes=out_bytes)
+
+        c_neg_inf = fx.Float32(float("-inf"))
+        t = qg * fx.Index(QPG) + wave * fx.Index(QPW) + lo
+        t_i32 = fx.Int32(t)
+        q_packs = []
+        for h in range_constexpr(H):
+            packs = []
+            for ks in range_constexpr(KSI):
+                base = ((t * Bn + b) * fx.Index(H) + fx.Index(h)) * fx.Index(DI) + fx.Index(ks * 32)
+                base = base + half * fx.Index(16)
+                packs.append(
+                    cat_bf16_16(
+                        buffer_ops.buffer_load(q_rsrc, base, vec_width=8, dtype=elem),
+                        buffer_ops.buffer_load(q_rsrc, base + fx.Index(8), vec_width=8, dtype=elem),
+                    )
+                )
+            q_packs.append(packs)
+
+        last_q = fx.Int32(qg * fx.Index(QPG) + fx.Index(QPG - 1))
+        last_q = fx.Int32(
+            ArithValue(last_q < fx.Int32(S)).select(_raw(last_q), _raw(fx.Int32(S) - fx.Int32(1)))
+        )
+        n_kb = fx.Index(last_q // fx.Int32(block_size) + fx.Int32(1))
+        st_row = tid // fx.Index(LPR)
+        st_col = (tid % fx.Index(LPR)) * fx.Index(CPL)
+        write_ok = ArithValue(
+            arith.AndIOp(_raw(ArithValue(half == fx.Index(0))), _raw(ArithValue(t_i32 < fx.Int32(S)))).result
+        )
+
+        def as_f32_bits(x):
+            return fx.Float32(_raw(ArithValue(_raw(x)).bitcast(fx.Float32.ir_type)))
+
+        def as_i32_bits(x):
+            return fx.Int32(_raw(ArithValue(_raw(x)).bitcast(fx.Int32.ir_type)))
+
+        def pick(v1, a1, v2, a2):
+            better = ArithValue(
+                arith.OrIOp(
+                    _raw(ArithValue(v2 > v1)),
+                    _raw(
+                        ArithValue(arith.AndIOp(_raw(ArithValue(v2 == v1)), _raw(ArithValue(a2 < a1))).result)
+                    ),
+                ).result
+            )
+            return fx.Float32(better.select(_raw(v2), _raw(v1))), fx.Int32(better.select(_raw(a2), _raw(a1)))
+
+        def crossgrp_argmax(v, a):
+            v0, v1 = permlane16_halves(v)
+            a0, a1 = permlane16_halves(as_f32_bits(a))
+            return pick(v0, as_i32_bits(a0), v1, as_i32_bits(a1))
+
+        for kb, _ in range(fx.Index(0), n_kb, fx.Index(1), init=[]):
+            key0 = kb * fx.Index(block_size)
+            gpu.barrier()
+            src = ((key0 + st_row) * Bn + b) * fx.Index(DI) + st_col
+            for c in range_constexpr(CPL // 8):
+                val = buffer_ops.buffer_load(k_rsrc, src + fx.Index(c * 8), vec_width=8, dtype=elem)
+                Vec(val).store(lds_k, [st_row * fx.Index(STR) + st_col + fx.Index(c * 8)])
+            gpu.barrier()
+
+            key0_i32 = fx.Int32(key0)
+            for h in range_constexpr(H):
+                mx = c_neg_inf
+                am = fx.Int32(-1)
+                for kt in range_constexpr(KT):
+                    acc = Vec.filled(8, 0.0, fx.Float32)
+                    for ks in range_constexpr(KSI):
+                        row = (fx.Index(kt * TKEYS) + lo) * fx.Index(STR) + fx.Index(ks * 32)
+                        row = row + half * fx.Index(16)
+                        a_k = cat_bf16_16(
+                            Vec.load(v8, lds_k, [row]),
+                            Vec.load(v8, lds_k, [row + fx.Index(8)]),
+                        )
+                        acc = wmma_f32_16x16x32_bf16(a_k, q_packs[h][ks], acc)
+                    for i in range_constexpr(8):
+                        key = key0_i32 + fx.Int32(half) * fx.Int32(8) + fx.Int32(kt * TKEYS + i)
+                        ok = ArithValue(
+                            arith.AndIOp(
+                                _raw(ArithValue(key <= t_i32)), _raw(ArithValue(key < fx.Int32(S)))
+                            ).result
+                        )
+                        v = fx.Float32(ok.select(_raw(fx.Float32(_raw(Vec(acc)[i]))), _raw(c_neg_inf)))
+                        gt = ArithValue(v > mx)
+                        mx = fx.Float32(gt.select(_raw(v), _raw(mx)))
+                        am = fx.Int32(gt.select(_raw(key), _raw(am)))
+                mx, am = crossgrp_argmax(mx, am)
+                out = ((b * fx.Index(H) + fx.Index(h)) * Sn + t) * NBn + kb
+                buffer_ops.buffer_store(
+                    mx, bmax_rsrc, out * fx.Index(4), mask=_raw(write_ok), offset_is_bytes=True
+                )
+                buffer_ops.buffer_store(
+                    am, arg_rsrc, out * fx.Index(4), mask=_raw(write_ok), offset_is_bytes=True
+                )
+            yield []
+
+    @flyc.jit
+    def launch(Q, K, BMAX, ARG, S, B, NB, stream):
+        allocator.finalized = False
+        with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
+            allocator.finalize()
+        k_fn(Q, K, BMAX, ARG, S, B, NB).launch(
+            grid=((fx.Index(S) + fx.Index(QPG - 1)) // fx.Index(QPG), fx.Index(B), 1),
+            block=(threads, 1, 1),
+            stream=stream,
+        )
+
+    launch.compile = lambda *a: flyc.compile(launch, *a)
+    return launch
+
+
 def build_index_block_max(num_heads: int, index_dim: int, block_size: int):
+    if "gfx1250" in get_hip_arch():
+        return _build_index_block_max_w32(num_heads, index_dim, block_size)
     elem = fx.BFloat16
     H, DI = num_heads, index_dim
     assert DI % 32 == 0 and block_size % TKEYS == 0
@@ -239,6 +413,170 @@ def build_index_block_max(num_heads: int, index_dim: int, block_size: int):
     return launch
 
 
+def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: int):
+    """Wave32 ``build_index_dk``. One wave owns 16 keys; the two halves split the
+    16 entries of a K-tile and the 8 d-rows of each output tile."""
+    elem = fx.BFloat16
+    H, DI = num_heads, index_dim
+    waves = block_size // TKEYS
+    threads = 32 * waves
+    tk = 16
+    nsub = 4
+    tt = tk * nsub
+    dti = DI // 16
+    stride = DI + 16
+    vec = 8
+    np = tt * DI // (threads * vec)
+    assert DI % 16 == 0 and block_size % TKEYS == 0 and tt * DI % (threads * vec) == 0
+
+    allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_index_dk_w32_smem")
+    q_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = allocator._align(q_off + tt * stride * 2, 16)
+
+    @flyc.kernel(known_block_size=[threads, 1, 1])
+    def k_fn(
+        ENT: fx.Tensor,
+        CHUNKS: fx.Tensor,
+        GS: fx.Tensor,
+        KEYS: fx.Tensor,
+        Q: fx.Tensor,
+        WS: fx.Tensor,
+        S: fx.Int32,
+        B: fx.Int32,
+        NB: fx.Int32,
+        NCH: fx.Int32,
+    ):
+        v1 = Vec.make_type(1, elem)
+        lds_q = SmemPtr(allocator.get_base(), q_off, elem.ir_type, shape=(tt * stride,)).get()
+        tid = fx.Index(gpu.thread_idx.x)
+        wave = tid // fx.Index(32)
+        lane = tid % fx.Index(32)
+        lo = lane % fx.Index(16)
+        half = lane // fx.Index(16)
+        grp0 = ArithValue(half == fx.Index(0))
+        Sn = fx.Index(S)
+        Bn = fx.Index(B)
+        NBn = fx.Index(NB)
+        chunk = fx.Index(gpu.block_idx.x)
+        c_zero = fx.Float32(0.0)
+        c_bf0 = fx.BFloat16(0.0)
+
+        n_entries = Bn * fx.Index(H) * Sn * fx.Index(topk)
+        entry_bytes = _raw(n_entries * fx.Index(4))
+        ent_rsrc = buffer_ops.create_buffer_resource(ENT, max_size=False, num_records_bytes=entry_bytes)
+        gs_rsrc = buffer_ops.create_buffer_resource(GS, max_size=False, num_records_bytes=entry_bytes)
+        key_rsrc = buffer_ops.create_buffer_resource(KEYS, max_size=False, num_records_bytes=entry_bytes)
+        q_rsrc = buffer_ops.create_buffer_resource(
+            Q, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(H * DI * 2))
+        )
+        ch_rsrc = buffer_ops.create_buffer_resource(
+            CHUNKS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(3 * 4))
+        )
+        ws_rsrc = buffer_ops.create_buffer_resource(
+            WS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(block_size * DI * 4))
+        )
+
+        def load_i32(rsrc, idx):
+            return fx.Int32(buffer_ops.buffer_load(rsrc, idx, vec_width=1, dtype=fx.Int32))
+
+        row = fx.Index(load_i32(ch_rsrc, chunk * fx.Index(3)))
+        e_begin = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(1))
+        e_end = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(2))
+        bh = row // NBn
+        blk = row % NBn
+        b = bh // fx.Index(H)
+        h = bh % fx.Index(H)
+        my_key = fx.Int32(blk * fx.Index(block_size) + wave * fx.Index(tk) + lo)
+
+        st_flat = [(fx.Index(p * threads) + tid) * fx.Index(vec) for p in range_constexpr(np)]
+        st_rows = [f // fx.Index(DI) for f in st_flat]
+        st_cols = [f % fx.Index(DI) for f in st_flat]
+
+        def entry_at(r):
+            r = ArithValue(r < e_end).select(_raw(r), _raw(e_end - fx.Int32(1)))
+            return fx.Index(load_i32(ent_rsrc, fx.Index(fx.Int32(r))))
+
+        def bf16_round(x):
+            """``x`` rounded to bf16, kept in fp32 for the cross-lane gather."""
+            return fx.Float32(arith.ExtFOp(fx.Float32.ir_type, _raw(fx.BFloat16(_raw(x)))).result)
+
+        c_zero_v8 = Vec.filled(8, 0.0, fx.Float32)
+        init = [c_zero_v8 for _ in range_constexpr(dti)]
+        results = init
+        for r0, it in range(fx.Index(e_begin), fx.Index(e_end), fx.Index(tt), init=init):
+            r0_i32 = fx.Int32(r0)
+            q_st = []
+            for p in range_constexpr(np):
+                t_st = (entry_at(r0_i32 + fx.Int32(st_rows[p])) // fx.Index(topk)) % Sn
+                q_st.append(
+                    buffer_ops.buffer_load(
+                        q_rsrc,
+                        ((t_st * Bn + b) * fx.Index(H) + h) * fx.Index(DI) + st_cols[p],
+                        vec_width=vec,
+                        dtype=elem,
+                    )
+                )
+            gpu.barrier()
+            for p in range_constexpr(np):
+                Vec(q_st[p]).store(lds_q, [st_rows[p] * fx.Index(stride) + st_cols[p]])
+            gpu.barrier()
+            acc = [it[dt] for dt in range_constexpr(dti)]
+            for sub in range_constexpr(nsub):
+                hi_v, lo_v = [], []
+                for i in range_constexpr(8):
+                    r = r0_i32 + fx.Int32(sub * tk + half * fx.Index(8) + fx.Index(i))
+                    e = entry_at(r)
+                    gv = fx.Float32(buffer_ops.buffer_load(gs_rsrc, e, vec_width=1, dtype=fx.Float32))
+                    kv = load_i32(key_rsrc, e)
+                    hit = ArithValue(
+                        arith.AndIOp(_raw(ArithValue(r < e_end)), _raw(ArithValue(kv == my_key))).result
+                    )
+                    val = fx.Float32(hit.select(_raw(gv), _raw(c_zero)))
+                    hi = bf16_round(val)
+                    hi_v.append(hi)
+                    lo_v.append(bf16_round(val - hi))
+                b_hi = pack_low16_bf16(hi_v, grp0)
+                b_lo = pack_low16_bf16(lo_v, grp0)
+                new_acc = []
+                for dt in range_constexpr(dti):
+                    d_col = fx.Index(dt * 16) + lo
+                    a_elems = []
+                    for i in range_constexpr(16):
+                        lrow = fx.Index(sub * tk + i) * fx.Index(stride) + d_col
+                        qv = fx.BFloat16(_raw(Vec.load(v1, lds_q, [lrow])[0]))
+                        a_elems.append(fx.BFloat16(grp0.select(_raw(qv), _raw(c_bf0))))
+                    a_q = Vec.from_elements(a_elems, elem)
+                    step = wmma_f32_16x16x32_bf16(a_q, b_hi, acc[dt])
+                    new_acc.append(wmma_f32_16x16x32_bf16(a_q, b_lo, step))
+                acc = new_acc
+            results = yield acc
+
+        ws_row = (chunk * fx.Index(block_size) + wave * fx.Index(tk) + lo) * fx.Index(DI)
+        for dt in range_constexpr(dti):
+            values = Vec(results[dt])
+            off = ws_row + fx.Index(dt * 16) + half * fx.Index(8)
+            for part in range_constexpr(2):
+                chunk4 = Vec.from_elements([values[part * 4 + i] for i in range_constexpr(4)], fx.Float32)
+                buffer_ops.buffer_store(
+                    _raw(chunk4),
+                    ws_rsrc,
+                    (off + fx.Index(part * 4)) * fx.Index(4),
+                    offset_is_bytes=True,
+                )
+
+    @flyc.jit
+    def launch(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH, stream):
+        allocator.finalized = False
+        with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
+            allocator.finalize()
+        k_fn(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH).launch(
+            grid=(fx.Index(NCH), 1, 1), block=(threads, 1, 1), stream=stream
+        )
+
+    launch.compile = lambda *a: flyc.compile(launch, *a)
+    return launch
+
+
 def build_index_dk(num_heads: int, index_dim: int, topk: int, block_size: int):
     """dK for the fused selection, pass 1: one work-group per chunk of the block plan.
 
@@ -263,6 +601,8 @@ def build_index_dk(num_heads: int, index_dim: int, topk: int, block_size: int):
     ``ENT`` holds flat ``[B, n_index, S, topk]`` entry ids; ``GS`` and ``KEYS``
     are indexed by them (``GS`` is 0 on slots that carry no gradient).
     """
+    if "gfx1250" in get_hip_arch():
+        return _build_index_dk_w32(num_heads, index_dim, topk, block_size)
     elem = fx.BFloat16
     H, DI = num_heads, index_dim
     KW = block_size // TKEYS  # waves, one per 16 keys

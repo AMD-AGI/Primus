@@ -3,6 +3,13 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zebra_llama_mamba_8B_BF16-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# MLA attention runs through TransformerEngine, not the direct flash-attn path.
+# flash-attn 2.8.4 built with ROCm 10.3 puts ~5 KB of scratch per lane in its
+# gfx950 CK-tile backward kernels, which makes the MLA backward ~28x slower and
+# the step 2.8x slower. The TE path is as fast or faster with ROCm 10.2 too.
+env:
+  PRIMUS_FLA_MLA_ATTN: "0"
+
 modules:
   pre_trainer:
     framework: megatron

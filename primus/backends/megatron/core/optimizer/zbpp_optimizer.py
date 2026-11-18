@@ -90,7 +90,7 @@ class ZeroBubblePPChainedOptimizer(ChainedOptimizer):
         return mpu.get_tensor_model_parallel_group()
 
     def calc_local_grad_norm(self):
-        grads_for_norm = self.get_main_grads_for_grad_norm()
+        grads_for_norm = self.get_grads_for_grad_norm()
         return self.do_clac_local_grad_norm(
             grads_for_norm, tensor_parallel_group=self.get_mp_group_except_pp_for_bypassing_sync()
         )

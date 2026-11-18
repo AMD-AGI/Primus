@@ -11,7 +11,9 @@ import pytest
 from primus.backends.megatron.patches.args import rocm_arg_validation
 from primus.backends.megatron.patches.args.rocm_arg_validation import (
     ALLOC_CONF_ENVS,
+    validate_cross_entropy_exclusivity,
     validate_turbo_fp8_permute,
+    validate_turbo_grouped_gemm_with_muon,
     validate_turbo_grouped_gemm_without_padding,
     warn_turbo_grouped_gemm_without_expandable_segments,
 )
@@ -29,6 +31,20 @@ def _no_padding_args(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_cross_entropy_exclusivity_rejects_turbo_with_deferred():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        validate_cross_entropy_exclusivity(
+            SimpleNamespace(deferred_cross_entropy=True, use_turbo_cross_entropy=True)
+        )
+
+
+@pytest.mark.parametrize(("deferred", "turbo"), [(True, False), (False, True), (False, False)])
+def test_cross_entropy_exclusivity_allows_one(deferred, turbo):
+    validate_cross_entropy_exclusivity(
+        SimpleNamespace(deferred_cross_entropy=deferred, use_turbo_cross_entropy=turbo)
+    )
 
 
 def test_turbo_grouped_gemm_without_padding_accepts_tensorwise_fp8():
@@ -66,6 +82,44 @@ def test_turbo_grouped_gemm_without_padding_disabled_is_noop():
 def test_turbo_grouped_gemm_without_padding_rejects_unsupported_config(overrides, message):
     with pytest.raises(ValueError, match=message):
         validate_turbo_grouped_gemm_without_padding(_no_padding_args(**overrides))
+
+
+def _muon_args(**overrides):
+    values = dict(
+        optimizer="muon",
+        enable_primus_turbo=True,
+        use_turbo_grouped_gemm=True,
+        moe_grouped_gemm=True,
+        num_experts=8,
+        turbo_sync_free_moe_stage=0,
+    )
+    return SimpleNamespace(**{**values, **overrides})
+
+
+@pytest.mark.parametrize("optimizer", ["muon", "dist_muon", "adaptive_muon"])
+def test_turbo_grouped_gemm_rejects_muon(optimizer):
+    with pytest.raises(ValueError, match="use_turbo_grouped_gemm=false.$"):
+        validate_turbo_grouped_gemm_with_muon(_muon_args(optimizer=optimizer))
+
+
+@pytest.mark.parametrize("stage", [2, 3])
+def test_turbo_grouped_gemm_with_muon_advises_sync_free_stage(stage):
+    with pytest.raises(ValueError, match="turbo_sync_free_moe_stage below 2"):
+        validate_turbo_grouped_gemm_with_muon(_muon_args(turbo_sync_free_moe_stage=stage))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"optimizer": "adam"},
+        {"use_turbo_grouped_gemm": False},
+        {"enable_primus_turbo": False},
+        {"num_experts": None},
+        {"moe_grouped_gemm": False},
+    ],
+)
+def test_turbo_grouped_gemm_with_muon_allows_other_configs(overrides):
+    validate_turbo_grouped_gemm_with_muon(_muon_args(**overrides))
 
 
 def _fp8_permute_args(**overrides):

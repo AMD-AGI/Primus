@@ -482,6 +482,48 @@ def test_param_buffer_wrapper_rejects_unsupported_layouts(
         )
 
 
+def test_param_buffer_wrapper_reads_megatron_019_params_with_names(monkeypatch):
+    import megatron.core.distributed.param_and_grad_buffer as pgb
+
+    param = SimpleNamespace(device=torch.device("cuda", 0))
+    checked = []
+    monkeypatch.setattr(pgb, "is_mxfp8tensor", lambda value: checked.append(value) or True)
+
+    def original(
+        self,
+        ddp_config,
+        param_dtype,
+        grad_dtype,
+        params_with_names,
+        data_parallel_group,
+        bucket_size,
+        param_to_name,
+        gradient_scaling_factor,
+        param_indices,
+        nccl_ub,
+        pg_collection=None,
+        param_layout=None,
+    ):
+        pytest.fail("unsupported direct-gather layout reached Megatron allocation")
+
+    wrapped = rccl_sdma_param_all_gather_patches.make_param_and_grad_buffer_init(original)
+    with pytest.raises(RuntimeError, match="does not support MXFP8 parameter storage"):
+        wrapped(
+            SimpleNamespace(),
+            SimpleNamespace(use_distributed_optimizer=True),
+            torch.bfloat16,
+            torch.float32,
+            [(param, "decoder.layers.0.weight")],
+            SimpleNamespace(),
+            1024,
+            {},
+            1.0,
+            [0],
+            False,
+        )
+    assert checked == [param]
+
+
 def test_global_cta_policy_is_rejected_for_megatron_backend(monkeypatch):
     monkeypatch.setenv("NCCL_CTA_POLICY", "2")
 
@@ -489,7 +531,13 @@ def test_global_cta_policy_is_rejected_for_megatron_backend(monkeypatch):
         rccl_sdma_param_all_gather_patches.validate_global_cta_policy()
 
 
-def test_dedicated_group_gets_zero_cta_without_mutating_original(monkeypatch):
+@pytest.mark.parametrize(
+    ("lazy_available", "expected_backend"),
+    [(True, "nccl-lazy"), (False, "nccl")],
+)
+def test_dedicated_group_gets_zero_cta_without_mutating_original(
+    monkeypatch, lazy_available, expected_backend
+):
     class OriginalGroup:
         def __init__(self):
             self.policy = "unchanged"
@@ -522,7 +570,13 @@ def test_dedicated_group_gets_zero_cta_without_mutating_original(monkeypatch):
     monkeypatch.setattr(rccl_sdma_param_gather.dist, "get_world_size", lambda: 8)
     monkeypatch.setattr(rccl_sdma_param_gather.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(rccl_sdma_param_gather.dist, "new_group", fake_new_group)
+    monkeypatch.setattr(
+        rccl_sdma_param_gather.dist,
+        "is_backend_available",
+        lambda name: lazy_available and name == "nccl-lazy",
+    )
     monkeypatch.delenv("MEGATRON_RCCL_SDMA_CTA_POLICY", raising=False)
+    monkeypatch.delenv("MEGATRON_RCCL_SDMA_GROUP_BACKEND", raising=False)
     rccl_sdma_param_gather.reset_runtime_state_for_tests()
 
     try:
@@ -532,7 +586,7 @@ def test_dedicated_group_gets_zero_cta_without_mutating_original(monkeypatch):
 
     assert result is dedicated_group
     assert captured["ranks"] == list(range(8))
-    assert captured["backend"] == "nccl"
+    assert captured["backend"] == expected_backend
     assert captured["pg_options"].config.cta_policy == 2
     assert captured["pg_options"].config.split_share == 0
     assert "PARAM_GATHER_POLICY_2" in captured["group_desc"]

@@ -460,9 +460,9 @@ class TestGating:
     def test_the_reading_matches_automodels_loader(self, value):
         """Pins the mirror against the real loader wherever AutoModel is installed."""
         loader = pytest.importorskip("nemo_automodel.components.config.loader")
-        from primus.backends.automodel.patches import ideogram4_zero1_patches
+        from primus.backends.automodel.patches._conditions import as_automodel_reads_it
 
-        assert ideogram4_zero1_patches.as_automodel_reads_it(value) == loader.translate_value(value)
+        assert as_automodel_reads_it(value) == loader.translate_value(value)
 
     @pytest.mark.parametrize(
         "transformer_cls, flag, applies",

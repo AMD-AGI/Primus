@@ -1,0 +1,14 @@
+model:
+  name: hunyuan-video
+  config:
+    load_from_pretrained_path: ${PRETRAINED_PATH:}
+    resolution: ${RESOLUTION:960,544}
+    num_frames: ${NUM_FRAMES:9}
+    config:
+      variant: HYVideo-T/2-cfgdistill
+      guidance: 1000.0
+      in_channels: 16
+      out_channels: 16
+    encoder:
+      llm: ${LLM_ENCODER:}
+      clip: ${CLIP_ENCODER:openai/clip-vit-large-patch14}

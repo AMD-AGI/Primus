@@ -1,0 +1,47 @@
+###############################################################################
+# MiniMax-M3.1-Flash text tower (GQA + MoE, MSA in every layer).
+#
+# ~428B total params, ~23B active, vocab 200064 -- M3's shapes.
+# Sources:
+#   - https://huggingface.co/MiniMaxAI/MiniMax-M3.1-Flash (config.json, README)
+#   - MiniMax Sparse Attention, arXiv:2606.13392
+#
+# M3.1-Flash keeps M3's architecture: its config.json and the
+# configuration_minimax_m3_vl.py it ships match M3's except for the values
+# below, so this preset extends minimax_m3.yaml and overrides only those. The
+# MSA, swigluoai, gemma-norm and MoE mapping is documented there.
+###############################################################################
+
+extends:
+  - minimax_m3.yaml
+
+tokenizer_model: MiniMaxAI/MiniMax-M3.1-Flash
+
+# rope_theta: 1e7 (M3: 5e6). rotary_dim 64 of head_dim 128 is unchanged.
+rotary_base: 10000000
+
+# MSA in all 60 layers. M3 runs dense attention in layers 1-3; M3.1-Flash
+# gives those layers the index branch too (the checkpoint carries
+# index_{q,k}_proj / index_{q,k}_norm from layer 0 on). They keep their dense
+# MLP, so moe_layer_freq is still M3's "([0]*3+[1]*57)".
+#
+# `1` is moe_freq_type's "every layer", so unlike M3's list expressions these
+# two follow num_layers: a reduced-depth proxy only has to override
+# moe_layer_freq.
+sparse_attention_freq: 1
+sparse_disable_index_value: 1
+
+###############################################################################
+# Unmapped: parts of M3.1-Flash this preset does not express, beyond the
+# "Unmapped" block in minimax_m3.yaml (MSA parallelism limits, vision tower).
+#
+# MTP: config.json drops M3's `num_mtp_modules` / `num_nextn_predict_layers`.
+#   Speculative decoding moves to DSpark, a separate 5-layer draft model under
+#   dspark/ in the release, so `mtp_num_layers: 0` (inherited) is exact here.
+#
+# Quantization-aware training: the release stores the routed experts as NVFP4
+#   (group 16) and the other linears -- attention, indexer, dense and shared
+#   MLPs -- as MXFP8 (block [1, 32]); router gates, embeddings and lm_head stay
+#   bf16. That is a serving format: this preset trains in bf16, and the FP8
+#   example runs Transformer Engine's `fp8: hybrid`, not the QAT recipe.
+###############################################################################

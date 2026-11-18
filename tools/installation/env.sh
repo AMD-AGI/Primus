@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # env.sh — Primus venv environment (Python 3.12, ROCm via pip rocm-sdk-devel)
-# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.8
+# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.9
 #
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
@@ -61,9 +61,8 @@ export SRC_DIR="${SRC_DIR:-/tmp/primus-build}"
 export MAX_JOBS="${MAX_JOBS:-128}"
 
 # ---- Python version ----
-# 3.12 matches the image and is the version this environment is validated on.
-# torch 2.14.0+rocm10.1.0 publishes cp310-cp314 Linux wheels, so it is no longer
-# a packaging constraint; changing it means re-validating every source build.
+# 3.12 matches the image and is the version this environment is validated on;
+# changing it means re-validating every source build.
 export PRIMUS_PYTHON_VERSION="${PRIMUS_PYTHON_VERSION:-3.12}"
 # Interpreters provisioned by `uv python install` land under PRIMUS_BASE rather
 # than uv's default in ~/.local/share, so the whole environment stays in one
@@ -159,9 +158,12 @@ _primus_check_inside_base PRIMUS_PIP_CONSTRAINTS "$PRIMUS_PIP_CONSTRAINTS"
 export HSA_ENABLE_SCRATCH_ASYNC_RECLAIM=0
 export HSA_NO_SCRATCH_RECLAIM=1
 
-# Device (AQL) queue path, enabled by the v26.8 image.
+# Device (AQL) queue path, enabled by the image since v26.8.
 export GPU_USE_DEVICE_QUEUE="${GPU_USE_DEVICE_QUEUE:-1}"
 export DEBUG_CLR_AQL_DEV_QUEUE="${DEBUG_CLR_AQL_DEV_QUEUE:-1}"
+
+# Set by the v26.9 image, alongside Primus #1286, to resolve memory issues.
+export TORCH_DIST_USE_NCCL2="${TORCH_DIST_USE_NCCL2:-0}"
 
 # ---- ROCm path: comes from the pip-installed _rocm_sdk_devel package ----
 # Computed dynamically so it works for any Python minor version.
@@ -214,8 +216,7 @@ export NVTE_CK_HOW_V3_BF16_CVT="${NVTE_CK_HOW_V3_BF16_CVT:-2}"
 # iteration 1 with "found Inf in local grad norm for bucket #0 in backward pass".
 # Primus's own tuning guide prescribes 1 for these GPUs
 # (docs/02-user-guide/training-recipes.md), so default it per detected arch.
-# Measured on MI325X: BWD_V3=1 + fp32 atomics = 614 TFLOP/s/GPU, versus 535 with
-# BWD_V3 disabled, so this is worth ~15% as well as being the correct fix.
+# It keeps BWD_V3=1 usable on these GPUs instead of having to disable it.
 case ";${PYTORCH_ROCM_ARCH};" in
     *";gfx942;"*) _PRIMUS_CK_ATOMIC_FP32=1 ;;
     *)            _PRIMUS_CK_ATOMIC_FP32=0 ;;

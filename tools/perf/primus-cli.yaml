@@ -1,0 +1,149 @@
+# Primus CLI configuration for the perf batch runners (tools/perf/run_batch*.sh)
+#
+# A copy of runner/.primus.yaml that starts the training container without
+# docker's --privileged and CAP_SYS_ADMIN, which some clusters' docker refuses
+# (Crusoe's authorization plugin rejects both). The GPUs need only the devices
+# below; IPC_LOCK, which --privileged used to grant, keeps RDMA memory
+# registration working for multi-node runs. DATA_PATH is forwarded too, so an
+# exported DATA_PATH reaches the container.
+#
+# The runners pass it as `primus-cli --config <this file>`, so it replaces
+# ~/.primus.yaml and runner/.primus.yaml for perf runs. PRIMUS_CLI_CONFIG
+# selects another file, and PRIMUS_CLI_CONFIG= (empty) restores primus-cli's
+# own choice.
+#
+# Main settings (apply to all modes)
+main:
+  debug: false
+  dry_run: false
+
+# Slurm-specific settings
+slurm:
+  debug: false
+  dry_run: false
+  # partition: ""
+  nodes: 1
+  gpus_per_node: 8
+  time: "4:00:00"
+
+# Container-specific settings
+container:
+  debug: false
+  dry_run: false
+
+  # Docker/Podman runtime options
+  # All keys directly map to CLI arguments (--key value)
+  options:
+    # Container image
+    image: "rocm/primus:v26.9"
+
+    # Single-value options
+    ipc: "host"
+    network: "host"
+    # cpus: "96"
+    # memory: "256G"
+    name: "primus-training"
+    security-opt: "seccomp=unconfined"
+    group-add: "video"
+    ulimit: "nofile=1048576:1048576"
+
+    # Cumulative options (can be specified multiple times via CLI)
+    # Device access (each passed as --device)
+    # NOTE: Do not modify these device paths - they are required for ROCm/GPU access
+    #   /dev/kfd  - Kernel Fusion Driver (ROCm core)
+    #   /dev/dri  - Direct Rendering Infrastructure (GPU access)
+    #   /dev/infiniband - InfiniBand network device (multi-node communication)
+    device:
+      - "/dev/kfd"
+      - "/dev/dri"
+      - "/dev/infiniband"
+
+    # Linux capabilities (each passed as --cap-add)
+    #   SYS_PTRACE - debugging and profiling tools
+    #   IPC_LOCK   - pinned memory for RDMA (multi-node)
+    cap-add:
+      - "SYS_PTRACE"
+      - "IPC_LOCK"
+
+    # Volume mounts (each passed as --volume)
+    volume: []
+    # volume:
+    #   - "/data:/data"
+    #   - "/output:/output"
+    #   - "/workspace/Primus"
+    #   - "/model_weights:/model_weights:ro"
+
+    # Environment variables (each passed as --env KEY=VALUE)
+    env:
+      - "MASTER_ADDR"
+      - "MASTER_PORT"
+      - "NNODES"
+      - "NODE_RANK"
+      - "GPUS_PER_NODE"
+      - "DOCKER_IMAGE"
+      - "DATA_PATH"
+      - "HF_TOKEN"
+      - "WANDB_API_KEY"
+      - "DATABRICKS_TOKEN"
+      - "DATABRICKS_HOST"
+      - "MLFLOW_TRACKING_URI"
+      - "MLFLOW_REGISTRY_URI"
+      - "MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING"
+      - "ENABLE_NUMA_BINDING"
+      - "REBUILD_PRIMUS_TURBO"
+      - "GPU_ARCHS"
+      - "USING_UEP"
+      - "REBUILD_UEP"
+      - "USING_AINIC"
+      - "PATCH_TE_FLASH_ATTN"
+      - "REBUILD_BNXT"
+      - "HSA_NO_SCRATCH_RECLAIM"
+      - "NVTE_CK_USES_BWD_V3"
+      - "GPU_MAX_HW_QUEUES"
+      - "HSA_KERNARG_POOL_SIZE"
+      - "PRIMUS_TURBO_DEEPEP_TIMEOUT"
+      - "NCCL_IB_HCA"
+      - "NCCL_SOCKET_IFNAME"
+      - "GLOO_SOCKET_IFNAME"
+      - "NCCL_IB_GID_INDEX"
+      - "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
+      - "NVTE_CK_IS_V3_ATOMIC_FP32"
+
+      - "PATH_TO_BNXT_TAR_PACKAGE"
+      - "ANP_HOME_DIR"
+      - "RCCL_HOME_DIR"
+      - "MPI_HOME_DIR"
+      - "DUMP_HLO"
+      - "DUMP_HLO_DIR"
+
+      - "PRIMUS_DETERMINISTIC"
+      - "PRIMUS_HIPBLASLT_TUNING"
+      - "PRIMUS_HIPBLASLT_TUNING_STAGE"
+      - "TE_HIPBLASLT_TUNING_RUN_COUNT"
+      - "TE_HIPBLASLT_TUNING_ALGO_COUNT"
+      - "HIPBLASLT_LOG_MASK"
+      - "HIPBLASLT_LOG_FILE"
+      - "HIPBLASLT_LOG_LEVEL"
+      - "HIPBLASLT_TUNING_OVERRIDE_FILE"
+# Direct mode settings
+direct:
+  debug: false
+
+  # Distributed training parameters
+  gpus_per_node: 8
+  master_port: 1234
+  nnodes: 1
+  master_addr: "localhost"
+
+  # Direct mode specific options
+  # run_mode: deliberately omitted here so that primus-cli-direct.sh can
+  # auto-select 'single' for subcommands that require it (e.g. node_smoke).
+  # Set run_mode explicitly in your own config to force a specific launcher.
+  # Precedence: CLI --single > user config direct.run_mode > auto-detect > torchrun.
+  script: "primus/cli/main.py"
+  numa: "auto"
+  log_file: ""
+
+  # Default patch scripts and env vars
+  patch: []
+  env: []

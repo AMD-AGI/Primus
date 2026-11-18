@@ -23,6 +23,16 @@ Workflows span **pretraining** and **post-training** (including SFT and LoRA). S
 
 ---
 
+## Primus training performance
+
+AMD publishes measured training performance of the Primus training images on AMD Instinct GPUs in
+[Performance Results with AMD ROCm™ Software](https://www.amd.com/en/developer/resources/rocm-hub/ai-cloud-development/performance-results.html#ai-training),
+under **AI Training**. It covers PyTorch, Megatron-LM, and JAX MaxText training on
+MI355X, MI325X, and MI300X, and lists the results of earlier image releases under **Previous versions**.
+For the software stack in each image, see the [release notes](./release-notes.md).
+
+---
+
 ## Primus ecosystem
 
 The training component (Primus-LM) serves as the layer between the stability and platform services above it and the low-level operator libraries below it:
@@ -73,7 +83,7 @@ Backend choice is specified in the configuration YAML and resolved through Primu
 |------|----------------|
 | **GPUs** | AMD Instinct™ **MI300X**, **MI325X**, **MI355X** |
 | **Platform** | **ROCm** (version **≥ 7.0** recommended) |
-| **Container image (reference)** | `docker.io/rocm/primus:v26.8` |
+| **Container image (reference)** | `docker.io/rocm/primus:v26.9` |
 
 Exact kernel and driver packages should match AMD’s documentation for your GPU SKU and ROCm release.
 

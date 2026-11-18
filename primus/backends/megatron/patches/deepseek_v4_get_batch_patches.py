@@ -211,6 +211,18 @@ def _make_v4_pre_broadcast_schedule(original_schedule, original_get_batch):
     return patched_schedule
 
 
+def _make_v4_get_fbf(original_get_fbf, original_get_batch):
+    """Wrap ``get_forward_backward_func`` so every schedule it returns pre-broadcasts."""
+
+    def wrapped_get_fbf(*args, **kwargs):
+        original_schedule = original_get_fbf(*args, **kwargs)
+        if getattr(original_schedule, "_v4_pp_schedule_wrapped", False):
+            return original_schedule
+        return _make_v4_pre_broadcast_schedule(original_schedule, original_get_batch)
+
+    return wrapped_get_fbf
+
+
 @register_patch(
     "megatron.deepseek_v4.pp_token_pre_broadcast",
     backend="megatron",
@@ -259,14 +271,7 @@ def patch_v4_pp_token_pre_broadcast(ctx: PatchContext):
 
     # Hook 2: replace get_forward_backward_func so every schedule fetched
     # by ``train_step`` is wrapped with the pre-broadcast.
-    original_get_fbf = pp_module.get_forward_backward_func
-
-    def wrapped_get_fbf():
-        original_schedule = original_get_fbf()
-        if getattr(original_schedule, "_v4_pp_schedule_wrapped", False):
-            return original_schedule
-        return _make_v4_pre_broadcast_schedule(original_schedule, original_get_batch)
-
+    wrapped_get_fbf = _make_v4_get_fbf(pp_module.get_forward_backward_func, original_get_batch)
     pp_module.get_forward_backward_func = wrapped_get_fbf
     training_module.get_forward_backward_func = wrapped_get_fbf
 

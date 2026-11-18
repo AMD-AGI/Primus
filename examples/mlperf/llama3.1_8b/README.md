@@ -7,10 +7,23 @@ MLPerf-compliant LLama3.1 8B pretraining using Primus
 ### Configuration
 
 - **Model**: LLama3.1 8B (4096 hidden, 32 layers, 32 attention heads)
-- **Training**: 1.2M iterations, GBS=32, MBS=2, LR=8e-4
+- **Training**: 1.2M iterations, GBS=32, MBS=4, LR=7.6e-4
 - **Precision**: MXFP4
 - **Data**: C4 dataset (tokenized)
+- **Kernels**: Primus-Turbo FlyDSL attention, MXFP4 GEMMs and fused dense MLP, Turbo RMSNorm,
+  FlyDSL fused QKV RoPE, Turbo fused cross entropy and TE FusedAdam
 
+On 8x MI355X with `rocm/primus:v26.9` and Primus-Turbo `fda6df0b`, this recipe reaches eval
+loss 3.289 at 196,608 samples, the MLPerf v6.0 submission's sample count, in 78.0 minutes
+(761 ms per step).
+
+### Image
+
+Use `rocm/primus:v26.9` with Primus-Turbo at or after `54d628c9`. The Primus-Turbo that `v26.9`
+ships (`de8fa6ca`) lacks the gfx950 dense-GEMM race fixes of Primus-Turbo#570.
+`run_with_docker.sh` builds Primus-Turbo `PRIMUS_TURBO_REF` (default `fda6df0b`) into the
+container; set `PRIMUS_TURBO_REF=` to keep the image's. After changing Primus-Turbo, clear
+FlyDSL's compile cache (`~/.flydsl/cache`), whose key does not cover every kernel change.
 
 ### Data
 
@@ -32,7 +45,8 @@ bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/he
 
 Run the launcher from the host. It starts the container, mounts the Primus
 checkout and data directories, loads the selected system configuration, and
-runs the requested number of experiments.
+runs the requested number of experiments. The checkout needs its submodules
+(`git submodule update --init --recursive`); training uses `third_party/Megatron-LM`.
 
 ```bash
 cd /path/to/Primus
@@ -42,9 +56,10 @@ export MODELDIR=/data/mlperf_llama31_8b/model
 export LOGDIR=/data/mlperf_llama31_8b/results
 
 # Optional; these are the defaults.
-export CONT=rocm/primus:v26.5
+export CONT=rocm/primus:v26.9
 export DGXSYSTEM=MI355X_1x8x1
 export NEXP=1
+# export SEED=1234                      # same seed for every trial (default: random per trial)
 
 # Optional host runtime tunables before each trial (cpupower, THP, drop_caches; see runtime_tunables.sh):
 # export RUN_RUNTIME_TUNABLES=1
@@ -68,26 +83,43 @@ bash examples/mlperf/llama3.1_8b/run_with_docker.sh
 ### Start Docker Image
 
 ```bash
-docker run -it     --device /dev/dri     --device /dev/kfd     --device /dev/infiniband     --network host --ipc host     --group-add video     --cap-add SYS_PTRACE     --security-opt seccomp=unconfined     --privileged     -v $HOME:$HOME   --shm-size 128G     --name primus_training_env rocm/primus:v26.5
+docker run -it     --device /dev/dri     --device /dev/kfd     --device /dev/infiniband     --network host --ipc host     --group-add video     --cap-add SYS_PTRACE     --security-opt seccomp=unconfined     --privileged     --ulimit nofile=1048576:1048576     -v $HOME:$HOME   --shm-size 128G     --name primus_training_env rocm/primus:v26.9
 
+cd /workspace/Primus
+```
+
+Then rebuild Primus-Turbo (see [Image](#image)):
+
+```bash
+git clone https://github.com/AMD-AGI/Primus-Turbo.git /tmp/primus_turbo_src
+cd /tmp/primus_turbo_src && git checkout fda6df0b && git submodule update --init --recursive
+pip uninstall -y primus_turbo && GPU_ARCHS=gfx950 pip install --no-build-isolation --no-deps .
+rm -rf ~/.flydsl/cache
 cd /workspace/Primus
 ```
 
 ### Key Files
 
 - `configs/MI355X/llama3.1_8B-pretrain-FP4.yaml` - Model and training config
-    - Update `train_data_path` and `train_data_path` to your local downloaded location
+    - `train_data_path` and `valid_data_path` point under `/data`
 - `config_MI355X_1x8x1.sh` - System config and env vars
-   - Update `PRIMUS_PATH` to clone Primus Repo
-   - Update `EXP`to `<PRIMUS_PATH>/examples/mlperf/configs/MI355X/llama3.1_8B-pretrain-FP4.yaml`
+    - `PRIMUS_PATH` is the Primus checkout (default `/workspace/Primus`); `EXP` is the yaml above
 - `run_and_time.sh` - Run script
 
 ```bash
 export HF_TOKEN=<your_huggingface_token>
+export PRIMUS_REBUILD_RCCL=1   # see the gradient ReduceScatter note below
 source config_MI355X_1x8x1.sh
 bash run_and_time.sh
 ```
+
 ## Notes
 
-- `log_interval: 99999999` suppresses regular Primus logs
-- `RUN_RUNTIME_TUNABLES` defaults to `0`; set `RUN_RUNTIME_TUNABLES=1` to run `runtime_tunables.sh` on the host before each trial (some steps require `sudo`).
+- `log_interval: 999999` suppresses regular Primus logs.
+- `RUN_RUNTIME_TUNABLES=1` runs `runtime_tunables.sh` on the host before each trial (some steps need `sudo`).
+- `run_and_time.sh` sets `HIPBLASLT_TUNING_OVERRIDE_FILE` to the file in `hipblaslt_tuning/` for the image's hipBLASLt build (`HIPBLASLT_VERSION_TWEAK`), if there is one. It tunes the output layer's weight-gradient GEMM (25.8 to 24.0 ms on `v26.9`). Set the variable yourself, empty for hipBLASLt's own choice, to override.
+- `MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma` (default) runs the parameter all-gather on the SDMA copy engines. It needs `--ulimit nofile=1048576:1048576`, `NCCL_CTA_POLICY` unset and `GPU_MAX_HW_QUEUES=4` (set in the config). Set it to `nccl` for RCCL's all-gather.
+- `MEGATRON_GRAD_REDUCE_BACKEND` runs the gradient reduce-scatter on the same communicator. It defaults to `MEGATRON_PARAM_GATHER_BACKEND`, so `rccl_sdma` unless the all-gather is switched off. Set it to `disabled` for Megatron's reduce-scatter. The copy engines run it only with an RCCL that has copy-engine reduce-scatter (ROCm/rocm-systems#15042); the RCCL 2.32.3 in `rocm/primus:v26.9` does not, and runs it with symmetric-memory kernels instead. `PRIMUS_REBUILD_RCCL=1` (the `run_with_docker.sh` default) builds that RCCL through `runner/helpers/patches/12_rebuild_rccl.sh` at the first trial's launch. The build takes about 70 s, needs network access, and counts toward the `RESULT` wall time but not the MLPerf time to train. Set `PRIMUS_RCCL_REF` for another commit, or `PRIMUS_REBUILD_RCCL=0` to keep the image's RCCL (for example, without network access).
+- On 8x MI355X (seed 1234) the reduce-scatter is 6.4 ms per step faster with the rebuilt RCCL (760.1 ms) and 8.4 ms faster with the image's RCCL (758.1 ms) than with Megatron's (766.5 ms).
+- `PRIMUS_TURBO_CROSS_ENTROPY=true` (default) uses Primus-Turbo's fused cross entropy. Set it to `false` for TE's; `PRIMUS_DEFERRED_CROSS_ENTROPY=true` then defers TE's gradient to backward. The two cannot both be on.
+- For an older Primus-Turbo without `mlp_fp4` or `rope` ops, set `PRIMUS_TURBO_FUSED_DENSE_MLP=false` and `PRIMUS_TURBO_FLYDSL_ROPE=0`.

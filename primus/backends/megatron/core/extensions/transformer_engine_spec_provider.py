@@ -33,13 +33,19 @@ from megatron.core.transformer.moe.experts import SequentialMLP, TEGroupedMLP
 try:
     from megatron.core.transformer.moe.experts import TEGroupedMLPSubmodules
 except ImportError:  # renamed in Megatron-core 0.17
-    from megatron.core.transformer.moe.experts import (
-        GroupedMLPSubmodules as TEGroupedMLPSubmodules,
-    )
+    try:
+        from megatron.core.transformer.moe.experts import (
+            GroupedMLPSubmodules as TEGroupedMLPSubmodules,
+        )
+    except ImportError:  # Bridge's Megatron-LM still types TEGroupedMLP with MLPSubmodules
+        TEGroupedMLPSubmodules = MLPSubmodules
 
 from megatron.core.utils import get_te_version, is_te_min_version
 
-from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+try:
+    from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+except ImportError:
+    PrimusGroupedMLP = None  # Bridge Megatron-LM lacks MoE offload APIs; dense Llama-2 unused
 from primus.backends.megatron.training.global_vars import get_primus_args
 
 try:

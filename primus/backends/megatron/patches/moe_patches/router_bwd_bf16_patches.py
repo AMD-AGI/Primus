@@ -75,3 +75,25 @@ def patch_router_bwd_bf16(ctx: PatchContext) -> None:
     router_function.backward = staticmethod(backward)
     router_function._primus_router_bwd_bf16_patched = True
     log_rank_0("[Patch:megatron.moe.router_bwd_bf16] Installed BF16 router backward GEMMs")
+
+
+def _grad_merge_enabled(ctx: PatchContext) -> bool:
+    return bool(getattr(get_args(ctx), "moe_router_grad_merge", False))
+
+
+# Wraps the BF16 router backward, so it must be installed after it.
+@register_patch(
+    "megatron.moe.router_grad_merge",
+    backend="megatron",
+    phase="before_train",
+    description="Join the BF16 router input gradient with the expert input gradient",
+    condition=_grad_merge_enabled,
+    priority=60,
+)
+def patch_router_grad_merge(ctx: PatchContext) -> None:
+    if not _enabled(ctx):
+        raise ValueError("moe_router_grad_merge requires moe_router_bwd_bf16")
+    from primus.backends.megatron.core.extensions import router_grad_merge
+
+    if router_grad_merge.install(_uses_bf16_router_backward):
+        log_rank_0("[Patch:megatron.moe.router_grad_merge] Installed MoE router/expert input-gradient join")

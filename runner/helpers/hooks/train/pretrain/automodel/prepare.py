@@ -16,9 +16,9 @@ AutoModel-specific differences from the torchtitan flow:
      pull CUDA torch wheels on top of the image's ROCm build. We pin the native
      ROCm packages (torch/torchvision/torchaudio/triton/aiter/flash-attn) to the
      versions already installed and pass them as a pip *constraint*, so the
-     editable install never replaces the ROCm stack. The same constraints cap the
-     few open dependencies whose newer releases break on these images
-     (``_COMPAT_CAPS``), and the CUDA-only wheels the install pulls in are removed
+     editable install never replaces the ROCm stack. The same constraints bound the
+     few open dependencies the pinned AutoModel needs tighter than it declares
+     (``_COMPAT_BOUNDS``), and the CUDA-only wheels the install pulls in are removed
      again on ROCm (``_CUDA_ONLY_PREFIX``). The ``diffusion`` extras are installed
      for the Wan diffusion recipe.
   2. **Pinned, not merely present.** Base images may ship no AutoModel or
@@ -66,13 +66,16 @@ _ROCM_PINS = [
     "flash_attn",
 ]
 
-# Upper bounds on dependencies the pinned AutoModel leaves open, for releases that
-# break on the images this backend supports. diffusers 0.41.0 imports
-# ``torchao.quantization.FqnToConfig`` whenever torchao is installed, and torchao
-# 0.15, which ``rocm/primus:v26.5`` ships, lacks it, so no diffusers model can be
-# imported. Drop a bound once the images ship a release that works without it.
-_COMPAT_CAPS = [
-    "diffusers<0.41",
+# Bounds on dependencies the pinned AutoModel declares more loosely than its
+# recipes need. It asks for diffusers>=0.39.0, which the images' 0.40.0 satisfies,
+# but its FLUX 3 and Qwen-Image-2.1 recipes import classes first released in
+# diffusers 0.42.0 (``Flux3Transformer2DModel``, ``QwenImage21Pipeline``), so the
+# image's copy would be kept and those recipes would fail at import. The floor is
+# 0.42.1, the security release that fixes 0.42.0's ``from_pretrained`` component
+# resolution (GHSA-4prv-5hj7-c2xr). Drop a bound once AutoModel declares it or the
+# images ship a release that satisfies it.
+_COMPAT_BOUNDS = [
+    "diffusers>=0.42.1",
 ]
 
 # CUDA-only distributions the pinned AutoModel's dependencies pull in
@@ -136,7 +139,7 @@ def resolve_backend_path(cli_path, primus_path: Path) -> Path:
 
 def write_rocm_constraints() -> str:
     """Pin currently-installed ROCm packages so pip treats them as satisfied, and
-    add the ``_COMPAT_CAPS`` bounds."""
+    add ``_COMPAT_BOUNDS``."""
     import importlib.metadata as md
 
     lines = []
@@ -146,11 +149,11 @@ def write_rocm_constraints() -> str:
         except md.PackageNotFoundError:
             continue
     pins = len(lines)
-    lines.extend(_COMPAT_CAPS)
+    lines.extend(_COMPAT_BOUNDS)
     fd, path = tempfile.mkstemp(prefix="primus_rocm_constraints.", suffix=".txt")
     with os.fdopen(fd, "w") as f:
         f.write("\n".join(lines) + "\n")
-    log_info(f"ROCm constraints ({pins} pins, caps: {', '.join(_COMPAT_CAPS)}) -> {path}")
+    log_info(f"ROCm constraints ({pins} pins, bounds: {', '.join(_COMPAT_BOUNDS)}) -> {path}")
     return path
 
 
@@ -394,8 +397,10 @@ def _unsatisfied_requirements():
 
     The ROCm packages are left out: the install holds them at the image's
     versions on purpose, so a mismatch there is not something reinstalling fixes,
-    and counting it would reinstall on every launch. The ``_COMPAT_CAPS`` bounds
-    are counted, so a copy installed before a cap existed is reinstalled under it.
+    and counting it would reinstall on every launch. The ``_COMPAT_BOUNDS``
+    are counted, so a copy installed before a bound existed is reinstalled under it,
+    but only for packages the selected extras require: the install does not touch
+    any other, so counting one would reinstall on every launch.
     """
     import importlib.metadata as md
 
@@ -410,12 +415,14 @@ def _unsatisfied_requirements():
         *filter(None, (e.strip() for e in os.environ.get("AUTOMODEL_EXTRAS", _DEFAULT_EXTRAS).split(","))),
     ]
     held = {_canonical(p) for p in _ROCM_PINS}
+    required = set()
     unmet = []
     for line in declared:
         req = Requirement(line)
-        if _canonical(req.name) in held:
-            continue
         if req.marker is not None and not any(req.marker.evaluate({"extra": extra}) for extra in extras):
+            continue
+        required.add(_canonical(req.name))
+        if _canonical(req.name) in held:
             continue
         try:
             version = md.version(req.name)
@@ -424,8 +431,10 @@ def _unsatisfied_requirements():
             continue
         if req.specifier and not req.specifier.contains(version, prereleases=True):
             unmet.append(f"{req} (installed {version})")
-    for line in _COMPAT_CAPS:
+    for line in _COMPAT_BOUNDS:
         req = Requirement(line)
+        if _canonical(req.name) not in required:
+            continue
         try:
             version = md.version(req.name)
         except md.PackageNotFoundError:

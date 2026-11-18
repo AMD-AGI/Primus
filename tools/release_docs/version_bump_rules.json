@@ -53,12 +53,53 @@
     "third_party/": "vendored"
   },
 
+  "family_paths": {
+    "primus": [
+      "tools/installation/",
+      "docs/01-getting-started/bare-metal-installation.md",
+      "docs/02-user-guide/megatron-lm-training.md",
+      "docs/02-user-guide/torchtitan-training.md"
+    ],
+    "jax": [
+      "tools/installation-jax/",
+      "docs/01-getting-started/bare-metal-installation-jax.md",
+      "docs/02-user-guide/jax-maxtext-training.md"
+    ]
+  },
+  "_family_paths_why": [
+    "The two image families are not released in lockstep. With --family, a file that",
+    "documents only the other family is left for that family's run, and a replacement",
+    "tagged with the other family (third element of a 'replace' pair) is not applied,",
+    "so a shared page moves rocm/primus:vX.Y without touching the JAX tag next to it.",
+    "Untagged replacements (release branch, primus==, __version__, headings in shared",
+    "files) move with whichever family is released first; the second run finds them done."
+  ],
+
+  "install_paths": [
+    "tools/installation/",
+    "tools/installation-jax/",
+    "docs/01-getting-started/bare-metal-installation.md",
+    "docs/01-getting-started/bare-metal-installation-jax.md"
+  ],
+  "_install_paths_why": [
+    "The install scripts and their guides are re-pinned against the new Dockerfile in the",
+    "install phase, after the docs (--scope docs, then --scope install). Bumping their",
+    "'(from Dockerfile.<family>-vX.Y)' header early is what made install_parity --check",
+    "fail between the bump and the re-pin."
+  ],
+
   "rules": [
     {
       "name": "dated-changelog-entry",
       "action": "hold",
       "match": "^\\s*[-*]\\s*\\*\\*\\[\\d{4}/\\d{2}/\\d{2}\\]\\*\\*",
       "why": "a dated announcement is history: the README 'What's New' list gains a new entry per release (v26.6 prepended one in #1114) and older entries keep the tags they shipped with, so rewriting them produces 'Primus v26.6 training images: rocm/primus:v26.7'"
+    },
+    {
+      "name": "absence-statement",
+      "action": "hold",
+      "match": "\\b(ships no|contains no|has no)\\b",
+      "why": "what an image lacks is a fact about that image, not a version label: rewriting 'the v26.8 image ships no Primus' for v26.9 (which bundles it again) made it false; it comes before the rules that move every version token on a line"
     },
     {
       "name": "ci-base-image",
@@ -78,9 +119,9 @@
       "action": "rewrite",
       "match": "rocm/primus:{old}|rocm/jax-training:maxtext-{old}|maxtext-{old}",
       "replace": [
-        ["rocm/primus:{old}", "rocm/primus:{new}"],
-        ["rocm/jax-training:maxtext-{old}", "rocm/jax-training:maxtext-{new}"],
-        ["maxtext-{old}", "maxtext-{new}"]
+        ["rocm/primus:{old}", "rocm/primus:{new}", "primus"],
+        ["rocm/jax-training:maxtext-{old}", "rocm/jax-training:maxtext-{new}", "jax"],
+        ["maxtext-{old}", "maxtext-{new}", "jax"]
       ],
       "why": "published image tags always move to the new release"
     },
@@ -88,7 +129,10 @@
       "name": "dockerfile-filename",
       "action": "rewrite",
       "match": "Dockerfile\\.(primus|jax)-{old}",
-      "replace": [["Dockerfile\\.(primus|jax)-{old}", "Dockerfile.\\1-{new}"]],
+      "replace": [
+        ["Dockerfile\\.primus-{old}", "Dockerfile.primus-{new}", "primus"],
+        ["Dockerfile\\.jax-{old}", "Dockerfile.jax-{new}", "jax"]
+      ],
       "why": "references to the release Dockerfile track the release"
     },
     {
@@ -121,8 +165,8 @@
     {
       "name": "historical-statement",
       "action": "hold",
-      "match": "\\b(since|as of|dropped|drops|step down|predate|previous|earlier|used to|no longer|was built|workaround|fix(ed|es)?|bug|issue)\\b",
-      "why": "may be history to preserve rather than a claim to update"
+      "match": "\\b(since|as of|dropped|drops|step down|predate|previous|earlier|used to|no longer|was built|workaround|fix(ed|es)?|bug|issue|ships no|contains no|has no)\\b",
+      "why": "may be history to preserve rather than a claim to update ('the v26.8 image ships no Primus' became false when rewritten for v26.9, which bundles it again)"
     },
     {
       "name": "markdown-heading",

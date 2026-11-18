@@ -93,22 +93,29 @@ def _dense_mlp_spec(backend: TESpecProvider):
 
 
 def _moe_spec(config: InklingTransformerConfig, backend: TESpecProvider) -> ModuleSpec:
-    experts = backend.grouped_mlp_modules(bool(config.moe_grouped_gemm))
-    if isinstance(experts, functools.partial):  # Megatron-core 0.19+ return an ExpertsBuilder
-        expert_module, expert_submodules = experts.func, experts.keywords.get("submodules")
-    else:
+    grouped_gemm = bool(config.moe_grouped_gemm)
+    experts = backend.grouped_mlp_modules(grouped_gemm)
+    if isinstance(experts, tuple):
         expert_module, expert_submodules = experts
+    elif isinstance(experts, functools.partial):  # Megatron-core 0.19+ return an ExpertsBuilder
+        expert_module, expert_submodules = experts.func, experts.keywords.get("submodules")
+    else:  # PrimusTurboSpecProvider on Megatron-core 0.19+: an opaque ExpertsBuilder
+        expert_module, expert_submodules = backend._grouped_mlp_module_and_submodules(grouped_gemm)
     if expert_module is TEGroupedMLP:
-        expert_module = InklingGroupedMLP
+        expert_spec = ModuleSpec(module=InklingGroupedMLP, submodules=expert_submodules)
     elif config.inkling_fp32_activations:
         raise NotImplementedError(
             "inkling_fp32_activations needs TE grouped experts (moe_grouped_gemm: true, "
             f"use_turbo_grouped_gemm: false), got {expert_module.__name__}"
         )
+    elif isinstance(experts, (tuple, functools.partial)):
+        expert_spec = ModuleSpec(module=expert_module, submodules=expert_submodules)
+    else:
+        expert_spec = experts
     return ModuleSpec(
         module=InklingMoELayer,
         submodules=MoESubmodules(
-            experts=ModuleSpec(module=expert_module, submodules=expert_submodules),
+            experts=expert_spec,
             shared_experts=ModuleSpec(
                 module=InklingSharedExperts,
                 submodules=MLPSubmodules(

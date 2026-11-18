@@ -546,6 +546,37 @@ def test_direct_state_seeding_closure_and_checkpoint(monkeypatch, slabs):
     assert runner._period_index == 1
 
 
+@pytest.mark.parametrize("start", [0, 45])
+def test_direct_state_slab_views_follow_logical_tile_phase(monkeypatch, start):
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_qdq", lambda *a, **kw: None)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_update", lambda *a, **kw: None)
+    monkeypatch.setattr(weight_deosc, "_weight_deosc_close", lambda *a, **kw: None)
+    monkeypatch.setattr(weight_deosc, "_forward_scale_rounding_mode", lambda: 2)
+    model = torch.zeros((4, 64), dtype=torch.bfloat16)
+    end = start + 155
+    main = torch.zeros(end - start)
+    opt = _FakeDistOpt(model, main, start, end)
+    config = WeightDeOscConfig(
+        enable=True,
+        start_step=2,
+        period=2,
+        fusion=True,
+        direct_qdq=True,
+        state_slabs=True,
+    )
+    runner = WeightDeOscRunner(config)
+    runner.run(opt)
+    runner.run(opt)
+    state = next(iter(runner._state.values()))
+    snaps, distances = runner._state_slabs[main.device]
+    for name, slab in (("prev", snaps), ("prev_q", snaps), ("dist_w", distances), ("dist_w_qdq", distances)):
+        view = getattr(state, name)
+        assert view.shape == main.shape
+        assert view.untyped_storage().data_ptr() == slab.untyped_storage().data_ptr()
+        assert view.storage_offset() % 32 == start % 32
+        assert view.storage_offset() + view.numel() <= slab.numel()
+
+
 def test_direct_qdq_requires_fusion():
     with pytest.raises(ValueError, match="requires"):
         WeightDeOscConfig(enable=True, direct_qdq=True, fusion=False).validate()

@@ -123,7 +123,7 @@ modules:
     overrides:
       specforge_mode: train              # train | capture
       specforge_train_mode: offline      # online | offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-offline-amd.yaml}  # SpecForge Hydra YAML
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/offline/colocated/qwen3.5-4b-dflash-amd.yaml}  # SpecForge Hydra YAML
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
@@ -151,7 +151,7 @@ export CONSUMER_STATE_DIR=/path/to/local/nvme/specforge/$RUN_ID/consumer-state
 export TRAIN_DATA_PATH=/path/to/sharegpt_train.jsonl
 export MAX_STEPS=20
 ./runner/primus-cli slurm srun -N 2 --gres=gpu:1 \
-  -- container --image primus-specforge:v0.5.14-rocm700-mi35x \
+  -- container --image primus-specforge:local-mi35x \
   --volume /shared:/shared \
   -- train pretrain \
   --config examples/specforge/configs/qwen3.5-4b-dflash-online.yaml
@@ -188,11 +188,12 @@ modules:
     overrides:
       specforge_mode: train              # train | capture
       specforge_train_mode: online       # online | offline
-      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-online-amd.yaml}  # SpecForge Hydra YAML
+      specforge_config: ${SPECFORGE_CONFIG:/workspace/SpecForge/examples/configs/online/disaggregated/external/qwen3.5-4b-dflash-amd.yaml}  # SpecForge Hydra YAML
       specforge_root: ${SPECFORGE_ROOT:/workspace/SpecForge}  # SpecForge checkout
       output_dir: ${OUTPUT_DIR}          # checkpoints / logs
 
       specforge_online:
+        single_node: ${PRIMUS_SPECFORGE_SINGLE_NODE:false}  # both roles on one host
         run_id: ${RUN_ID}                # required; letters, digits, . _ -
         run_root: ${RUN_ROOT}            # required; shared control dir
         consumer_state_dir: ${CONSUMER_STATE_DIR}  # required; local NVMe
@@ -204,9 +205,14 @@ modules:
         trainer_gpus: ${TRAINER_GPUS:0}  # trainer GPU ids; 0 means 0,1,…,trainer_nproc-1
         trainer_nproc: ${NPROC_PER_NODE:1}  # trainer processes per trainer node
         target_model_path: ${TARGET_MODEL:Qwen/Qwen3.5-4B}  # HF id or local path
+        # Omit target_model_path here to let TARGET_MODEL beat the Hydra file.
+        # skip_tokenizer_init: true   # or SKIP_TOKENIZER_INIT; false inits the tokenizer
         mooncake_protocol: ${MOONCAKE_PROTOCOL:tcp}  # Mooncake transport
         mooncake_lease_ttl_ms: ${MOONCAKE_LEASE_TTL_MS:500}  # KV lease TTL
-        # capture_layer_ids: 1,8,15,22,29  # else from SpecForge draft json
+        # Capture layer ids come from the draft JSON named by model.draft_model_config.
+        # DFlash-family drafts use dflash_config.target_layer_ids. EAGLE drafts use
+        # eagle_config.eagle_aux_hidden_state_layer_ids, or the target depth when
+        # that list is omitted. They are not set here.
         # server_port: 30000             # first SGLang HTTP port
         # server_mem_fraction: 0.85      # SGLang GPU memory fraction
         # mooncake_rpc_port: 35551       # Mooncake RPC
@@ -254,11 +260,15 @@ on every node. Point `OUTPUT_DIR` / `HIDDEN_STATES_PATH` at shared storage.
 Multi-GPU on one node is `NPROC_PER_NODE`. On Ethernet without IB, pass
 `NCCL_IB_DISABLE=1` and `NCCL_SOCKET_IFNAME=<iface>`.
 
-Online train is `slurm` only. `-N` must equal `CAPTURE_NNODES + TRAINER_NNODES`
-(default 1+1 so `-N 2`). Do not use `direct` or `container` on a single host.
-Do not wrap SpecForge `managed_local`; for one-node online, run the SpecForge
-CLI inside the image (AMD ROCm tutorial §4). `specforge export` and data-prep
-scripts stay on the SpecForge CLI.
+Online train defaults to separate capture and trainer nodes: `-N` must equal
+`CAPTURE_NNODES + TRAINER_NNODES` (default 1+1 so `-N 2`).
+Set `specforge_online.single_node: true` (recipe env
+`PRIMUS_SPECFORGE_SINGLE_NODE=true`) to share one host, with both role counts
+set to 1. This supports `slurm -N 1`, `container`, and `direct`.
+Set disjoint `server_gpus` / `trainer_gpus`, such as `0` / `1`, and request
+capture GPUs plus trainer GPUs. See the [single-node example](running.md#single-node-online-training).
+The flag defaults to false; separate-node behavior is unchanged.
+`specforge export` and data-prep scripts stay on the SpecForge CLI.
 
 Inside the docker image:
 
@@ -270,7 +280,7 @@ Inside the docker image:
 From the host:
 
 ```bash
-./runner/primus-cli container --image primus-specforge:v0.5.14-rocm700-mi35x \
+./runner/primus-cli container --image primus-specforge:local-mi35x \
   --shm-size 64g --volume /data:/data --env KEY=VALUE \
   -- train pretrain --config <experiment.yaml> \
   [dotted.overrides...]

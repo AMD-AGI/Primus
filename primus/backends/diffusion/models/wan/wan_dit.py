@@ -4,9 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 #
-# Vendored from `Wan2.2/wan/modules/model.py` with minimal changes:
+# Vendored from the Wan2.1 implementation, with these local changes:
+# - Wan2.2 `wan/modules/model.py` for the shared DiT
+# - Wan2.1 image-to-video cross-attention and CLIP projection
+#   (`WanI2VCrossAttention`, `MLPProj`)
 # - remove diffusers dependencies (ModelMixin/ConfigMixin/register_to_config)
 # - keep pure PyTorch modeling as close as possible
 # - provide a `DiTBlock` alias class so existing Wan configs can keep
@@ -257,6 +259,70 @@ class WanCrossAttention(WanSelfAttention):
         return x
 
 
+class WanI2VCrossAttention(WanSelfAttention):
+    """Official Wan2.1 image-to-video cross-attention.
+
+    CLIP image tokens are concatenated in front of the T5 context. This block
+    attends to both and adds the two attention outputs before the projection.
+    """
+
+    def __init__(self, dim, num_heads, window_size=(-1, -1), qk_norm=True, eps=1e-6, text_len=512):
+        super().__init__(dim, num_heads, window_size, qk_norm, eps)
+        self.text_len = text_len
+        self.k_img = nn.Linear(dim, dim)
+        self.v_img = nn.Linear(dim, dim)
+        self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def forward(
+        self,
+        x,
+        seq_lens=None,
+        grid_sizes=None,
+        freqs=None,
+        sp_group: Optional[dist.ProcessGroup] = None,
+        context=None,
+        context_lens=None,
+    ):
+        del seq_lens, grid_sizes, freqs, sp_group
+        if context is None:
+            raise ValueError("WanI2VCrossAttention requires context.")
+        image_context_length = context.shape[1] - self.text_len
+        if image_context_length <= 0:
+            raise ValueError("Wan I2V cross-attention expects CLIP tokens before the text context.")
+        context_img = context[:, :image_context_length]
+        context = context[:, image_context_length:]
+        batch, heads, head_dim = x.size(0), self.num_heads, self.head_dim
+        x = x.to(dtype=self.q.weight.dtype)
+        context = context.to(dtype=self.k.weight.dtype)
+        context_img = context_img.to(dtype=self.k_img.weight.dtype)
+        query = self.norm_q(self.q(x)).view(batch, -1, heads, head_dim)
+        key = self.norm_k(self.k(context)).view(batch, -1, heads, head_dim)
+        value = self.v(context).view(batch, -1, heads, head_dim)
+        key_img = self.norm_k_img(self.k_img(context_img)).view(batch, -1, heads, head_dim)
+        value_img = self.v_img(context_img).view(batch, -1, heads, head_dim)
+        image = attention(query, key_img, value_img, dtype=self.q.weight.dtype)
+        text = attention(query, key, value, k_lens=context_lens, dtype=self.q.weight.dtype)
+        hidden = (text + image).to(dtype=self.o.weight.dtype).flatten(2)
+        return self.o(hidden)
+
+
+class MLPProj(nn.Module):
+    """Project Wan2.1 CLIP vision tokens into the DiT context width."""
+
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, in_dim),
+            nn.GELU(),
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+        )
+
+    def forward(self, image_embeds):
+        return self.proj(image_embeds)
+
+
 class WanAttentionBlock(nn.Module):
     def __init__(
         self,
@@ -267,6 +333,8 @@ class WanAttentionBlock(nn.Module):
         qk_norm=True,
         cross_attn_norm=False,
         eps=1e-6,
+        cross_attn_type="t2v",
+        text_len=512,
     ):
         super().__init__()
         self.dim = dim
@@ -280,7 +348,10 @@ class WanAttentionBlock(nn.Module):
         self.norm1 = WanLayerNorm(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+        if cross_attn_type == "i2v":
+            self.cross_attn = WanI2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps, text_len=text_len)
+        else:
+            self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim)
@@ -417,9 +488,20 @@ class WanModel(nn.Module):
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
         # blocks (use DiTBlock for YAML compatibility)
+        cross_attn_type = "i2v" if model_type == "i2v" else "t2v"
         self.blocks = nn.ModuleList(
             [
-                DiTBlock(dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps)
+                DiTBlock(
+                    dim,
+                    ffn_dim,
+                    num_heads,
+                    window_size,
+                    qk_norm,
+                    cross_attn_norm,
+                    eps,
+                    cross_attn_type=cross_attn_type,
+                    text_len=text_len,
+                )
                 for _ in range(num_layers)
             ]
         )
@@ -439,11 +521,24 @@ class WanModel(nn.Module):
             dim=1,
         )
 
+        if model_type == "i2v":
+            self.img_emb = MLPProj(1280, dim)
+
         self.init_weights()
 
-    def forward(self, x, t, context, seq_len, y=None, sp_group: Optional[dist.ProcessGroup] = None):
+    def forward(
+        self,
+        x,
+        t,
+        context,
+        seq_len,
+        y=None,
+        clip_fea=None,
+        sp_group: Optional[dist.ProcessGroup] = None,
+    ):
         if self.model_type == "i2v":
-            assert y is not None
+            if y is None or clip_fea is None:
+                raise ValueError("Wan I2V requires both latent condition `y` and CLIP features `clip_fea`.")
 
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
@@ -491,6 +586,9 @@ class WanModel(nn.Module):
         )
         context_in = context_in.to(dtype=self.text_embedding[0].weight.dtype)
         context = self.text_embedding(context_in)
+        if clip_fea is not None:
+            context_clip = self.img_emb(clip_fea.to(dtype=context.dtype))
+            context = torch.cat([context_clip, context], dim=1)
 
         freqs = self.freqs
         seq_lens_ = seq_lens

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# setup.sh — Reproduce the Primus JAX/MaxText training environment (v26.8) in a
-# Python venv (no sudo, no docker). Mirrors the v26.8 JAX training Dockerfile,
+# setup.sh — Reproduce the Primus JAX/MaxText training environment (v26.9) in a
+# Python venv (no sudo, no docker). Mirrors the v26.9 JAX training Dockerfile,
 # adapted for bare metal:
-#   * ROCm from pip TheRock wheels (`rocm-sdk-*` 10.2.0a20260923, a nightly on
+#   * ROCm from pip TheRock wheels (`rocm-sdk-*` 10.3.0a20261026, a nightly on
 #     nightly.repo.amd.com), same delivery as the image
 #   * builds/checkouts on a big disk (home quota is usually tiny)
 #   * GPU arch auto-detected (gfx942 and/or gfx950); apt/sudo steps skipped
 #   * MaxText's own setup.sh apt/interactive steps skipped (system packages are
 #     a one-time root action, documented in the guide's Section 2)
 #   * TensorFlow (2.21 CPU) is built from source in the default flow (matching
-#     the v26.8 image); RCCL is not — the image uses the ROCm SDK copy
-#   * JAX 0.11.1 + jax_rocm10_{pjrt,plugin} 0.11.1+rocm10.2.0a20260923 from the
+#     the v26.9 image); RCCL is not — the image uses the ROCm SDK copy
+#   * JAX 0.12.0 + jax_rocm10_{pjrt,plugin} 0.12.0+rocm10.3.0a20261026 from the
 #     ROCm nightly index
 #
 # Usage:
@@ -31,31 +31,32 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 # shellcheck disable=SC1091
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
-# ---- pinned versions / commits (from Dockerfile.jax-v26.8) ----
-# ROCm: TheRock pip wheels. v26.8 takes a ROCm 10.2 nightly, so the SDK comes
-# from nightly.repo.amd.com rather than the stable.repo.amd.com index v26.7 used.
+# ---- pinned versions / commits (from Dockerfile.jax-v26.9) ----
+# ROCm: TheRock pip wheels. Since v26.8 the image takes a ROCm nightly (v26.9: a
+# 10.3 nightly), so the SDK comes from nightly.repo.amd.com.
 # Nightly indexes are pruned; see the README if this pin stops resolving.
 # See: https://nightly.repo.amd.com/rocm/core/whl-next/rocm/
 ROCM_INDEX="https://nightly.repo.amd.com/rocm/core/whl-next/"
-THE_ROCK_VERSION="10.2.0a20260923"
+THE_ROCK_VERSION="10.3.0a20261026"
 
 # JAX + ROCm PJRT/plugin (jax_rocm10_*), from the ROCm nightly jax index.
-JAX_VERSION="0.11.1"
-JAX_ROCM_VERSION="0.11.1+rocm10.2.0a20260923"
+JAX_VERSION="0.12.0"
+JAX_ROCM_VERSION="0.12.0+rocm10.3.0a20261026"
 JAX_ROCM_INDEX="https://nightly.repo.amd.com/rocm/jax/whl-next/"
 
-# TransformerEngine (prebuilt ROCm JAX wheels). v26.8 installs two distributions,
+# TransformerEngine (prebuilt ROCm JAX wheels). Two distributions since v26.8,
 # both from the frameworks-nightlies staging index: the jax flavour and the
-# transformer-engine-rocm10 native core (a manylinux_2_28 wheel). The
-# `transformer_engine` meta package v26.7 also installed is gone.
+# transformer-engine-rocm10 native core (a manylinux_2_28 wheel). Note the
+# v26.9 wheels are a ROCm 10.2 build next to the 10.3 SDK, as in the image.
 # See: https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/transformer-engine-rocm-jax/
-TE_VERSION="2.18.0.dev0+rocm10.2.0a20260929.03afd8f"
+TE_VERSION="2.19.0.dev0+rocm10.2.0a20261002.bfe94fb"
 TE_INDEX="https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/"
 # From-source TransformerEngine (the optional `te_source` stage, used on hosts
 # whose glibc is older than the wheels need). The commit is the one the wheel's
-# local label names.
+# local label names; the label carries only the abbreviated id, so that is what
+# is checked out until the full commit id is pinned here.
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
-TE_SOURCE_COMMIT="${TE_SOURCE_COMMIT:-03afd8f813300417ee1a41a4471d89be71c88f2d}"
+TE_SOURCE_COMMIT="${TE_SOURCE_COMMIT:-bfe94fb}"
 
 # TensorFlow (CPU) built from source — replaces the stock PyPI wheel, whose
 # bundled LLVM collides with ROCm's libLLVM in Grain workers (SIGSEGV on
@@ -63,9 +64,12 @@ TE_SOURCE_COMMIT="${TE_SOURCE_COMMIT:-03afd8f813300417ee1a41a4471d89be71c88f2d}"
 # NCCL, preserving the XLA->RCCL collective fix.
 TF_REPO="https://github.com/ROCm/tensorflow-upstream.git"
 TF_BRANCH="upstream-v2.21.0"
+# The sha256 the image checks TF's pinned LLVM archive against (Dockerfile:
+# `grep -q <sha> third_party/xla/third_party/llvm/workspace.bzl`).
+TF_LLVM_SHA256="3f986184ee126677dbd77edb16d6b82c057ec869fefd7a9871979941e52e837a"
 BAZELISK_VERSION="v1.29.0"
 
-# RCCL. Not built since v26.7: the pip ROCm SDK ships RCCL (2.31.2 in the v26.8
+# RCCL. Not built since v26.7: the pip ROCm SDK ships RCCL (2.32.3 in the v26.9
 # image), so the `rccl` stage is not in DEFAULT_STAGES. These pins remain only
 # for the optional stage, which reproduces the v26.6 behaviour of overriding the
 # SDK copy from rocm-systems.
@@ -74,18 +78,18 @@ RCCL_COMMIT="9e5e4084a4b8e1e86551b0eb054725c62354a926"
 
 # MaxText (ROCm fork)
 MAXTEXT_REPO="https://github.com/ROCm/maxtext.git"
-MAXTEXT_BRANCH="${MAXTEXT_BRANCH:-release/v26.8}"
+MAXTEXT_BRANCH="${MAXTEXT_BRANCH:-release/v26.9}"
 # Which MaxText requirements set to install. The reference Docker image runs
 # MaxText's setup.sh with defaults (DEVICE=tpu), which — on ROCm — pulls the
 # framework-agnostic deps WITHOUT any CUDA packages. Override to `cuda12` only
 # if you specifically need that set.
 MAXTEXT_DEVICE="${MAXTEXT_DEVICE:-tpu}"
 
-# Primus. The v26.8 image no longer ships Primus at all -- it runs from a mounted
-# checkout -- so there is no image commit to match; this is the release branch
-# the docs pair with the image.
+# Primus. The v26.9 image bundles Primus again (v26.8 shipped none). This is the
+# commit Dockerfile.jax-v26.9 pins (2026-10-30, on `release/v26.9`); the commit
+# is used rather than the branch so the install keeps matching the image.
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-PRIMUS_BRANCH="release/v26.8"
+PRIMUS_BRANCH="db1a41601833294231daadb3cdbb2933eb805c73"
 
 PIP="python -m pip"
 UVPIP="python -m uv pip"
@@ -155,7 +159,7 @@ stage_venv() {
         wheel==0.46.2 \
         packaging==25.0 \
         setuptools==80.10.2 \
-        msgpack==1.2.1 \
+        msgpack==1.2.3 \
         urllib3==2.8.0 \
         uv
     rm -rf /root/.cache 2>/dev/null || true
@@ -197,7 +201,7 @@ stage_jax() {
     # Note: JAX and related libraries need to be installed BEFORE TE and AFTER
     # MaxText (whose setup.sh pulls in a stock jax/tensorflow we override here).
     # jax/jaxlib come from PyPI; the jax_rocm10_* plugin pair comes from the ROCm
-    # jax index. jaxlib 0.11.1 knows the rocm10 plugin names, so the in-place
+    # jax index. jaxlib (since 0.11.1) knows the rocm10 plugin names, so the in-place
     # rename v26.7 applied is no longer needed (the Dockerfile dropped it too).
     $PIP install "jax==${JAX_VERSION}" "jaxlib==${JAX_VERSION}" scipy==1.16
     $PIP install --index-url "$JAX_ROCM_INDEX" --pre \
@@ -222,9 +226,9 @@ stage_te() {
         pybind11==3.0.4 \
         importlib-metadata==8.7.1 \
         pydantic==2.13.4 \
-        flax==0.12.9
+        flax==0.12.10
     # Drop the `transformer_engine` meta package an older (v26.7) install left
-    # behind; v26.8 no longer ships it.
+    # behind; the image has not shipped it since v26.8.
     $PIP uninstall -y transformer_engine >/dev/null 2>&1 || true
     $PIP install \
         --index-url "$TE_INDEX" \
@@ -255,9 +259,9 @@ for base in {sysconfig.get_paths()[k] for k in ("purelib", "platlib")}:
 PY
 }
 
-# TE locates its native core by distribution name. Dockerfile.jax-v26.8 seds
-# `transformer-engine-rocm10` into that list; the 2.18.0.dev0 wheel already
-# carries it (the image ends up listing it twice), so only patch when missing.
+# TE locates its native core by distribution name. Dockerfile.jax-v26.9 seds
+# `transformer-engine-rocm10` into that list; wheels since 2.18.0.dev0 already
+# carry it (the image then lists it twice), so only patch when missing.
 patch_te_rocm10_core() {
     local f
     f="$(python - <<'PY'
@@ -293,7 +297,7 @@ stage_te_source() {
     # and gfx950 appear in CMAKE_HIP_ARCHITECTURES. A gfx942-only configure
     # still defines USE_HIPKITTENS_GEMM and then fails to find
     # kittens_grouped_mxfp8_gemm (CDNA4). The image builds both archs.
-    $PIP install pybind11==3.0.4 importlib-metadata==8.7.1 pydantic==2.13.4 flax==0.12.9
+    $PIP install pybind11==3.0.4 importlib-metadata==8.7.1 pydantic==2.13.4 flax==0.12.10
     # Remove ALL prebuilt/stale TE variants so TE's install sanity-check sees a
     # single, self-consistent from-source package.
     $PIP uninstall -y transformer_engine transformer-engine transformer_engine_rocm7 \
@@ -379,6 +383,9 @@ stage_tf_source() {
     fi
     export PATH="$PRIMUS_JAX_BASE/bin:$PATH"
     fresh_clone "$TF_REPO" tensorflow-upstream --depth 1 --branch "$TF_BRANCH"
+    # The image's own check: TF must still pin the LLVM archive it was built with.
+    grep -q "$TF_LLVM_SHA256" "$SRC_DIR/tensorflow-upstream/third_party/xla/third_party/llvm/workspace.bzl" \
+        || die "$TF_BRANCH no longer pins the LLVM archive sha256 $TF_LLVM_SHA256 that Dockerfile.jax-v26.9 checks"
     local distdir="$SRC_DIR/bazel_distdir"
     fetch_tf_llvm_archive "$SRC_DIR/tensorflow-upstream" "$distdir"
     # Build the wheel for the venv's ACTUAL Python (the reference image uses 3.12;
@@ -409,11 +416,14 @@ stage_tf_source() {
 # is gone (404) and GitHub generates the .tar.gz on the fly, with a gzip stream
 # that is not stable: the same commit has come back under two different hashes.
 # The image feeds Bazel a frozen copy through --distdir. Do the same: fetch from
-# GitHub until the bytes match the pinned hash, or take a known-good copy from
-# PRIMUS_TF_LLVM_ARCHIVE. The checksum is never relaxed.
+# GitHub and, when the bytes differ, re-gzip the (identical) tar the ways git
+# archive does until one matches the pinned hash; or take a known-good copy from
+# PRIMUS_TF_LLVM_ARCHIVE. If neither works, build the archive from the pinned
+# LLVM commit (git_archive_tf_llvm below). The archive is always pinned: by
+# TF's sha256, or by the commit id.
 fetch_tf_llvm_archive() {  # fetch_tf_llvm_archive <tf_src> <distdir>
     local bzl="$1/third_party/xla/third_party/llvm/workspace.bzl"
-    local distdir="$2" commit sha target attempt
+    local distdir="$2" commit sha target attempt regzipped=0
     commit="$(sed -n 's/^ *LLVM_COMMIT = "\([0-9a-f]*\)".*/\1/p' "$bzl")"
     sha="$(sed -n 's/^ *LLVM_SHA256 = "\([0-9a-f]*\)".*/\1/p' "$bzl")"
     if [ -z "$commit" ] || [ -z "$sha" ]; then
@@ -430,16 +440,84 @@ fetch_tf_llvm_archive() {  # fetch_tf_llvm_archive <tf_src> <distdir>
     fi
     for attempt in 1 2 3 4 5 6; do
         log "Fetching LLVM $commit archive for bazel --distdir (attempt $attempt)"
-        if curl -fsSL --retry 3 -o "$target" "https://github.com/llvm/llvm-project/archive/$commit.tar.gz" \
-            && echo "$sha  $target" | sha256sum -c --status; then
-            return 0
+        if ! curl -fsSL --retry 3 -o "$target" "https://github.com/llvm/llvm-project/archive/$commit.tar.gz"; then
+            log "LLVM archive download failed, retrying"
+            sleep 30
+            continue
+        fi
+        echo "$sha  $target" | sha256sum -c --status && return 0
+        # The tar is the same in every variant, so re-gzipping once is enough.
+        if [ "$regzipped" = 0 ]; then
+            regzipped=1
+            log "LLVM archive hash differs from the pinned $sha; re-gzipping the tar as git archive does"
+            regzip_tf_llvm_archive "$target" "$sha" && return 0
         fi
         log "LLVM archive hash differs from the pinned $sha; GitHub regenerated it, retrying"
         sleep 30
     done
-    die "GitHub did not serve the LLVM $commit archive with the sha256 TensorFlow pins ($sha).
+    git_archive_tf_llvm "$bzl" "$commit" "$sha" "$target" && return 0
+    die "Neither GitHub's LLVM $commit archive, a re-gzipped copy, nor one built from the commit could be used.
   Export PRIMUS_TF_LLVM_ARCHIVE=/path/to/$commit.tar.gz pointing at a copy that
-  matches, re-run 'bash setup.sh tf_source', or use the lighter tf_cpu_fix stage."
+  matches $sha, re-run 'bash setup.sh tf_source', or use the lighter tf_cpu_fix stage."
+}
+
+# Last resort, for a pinned archive no public source still serves (v26.9: the
+# image takes its copy from a private mirror, and no gzip of GitHub's tar
+# matches). Fetch the LLVM commit itself -- git verifies the objects against the
+# commit id, so the content stays pinned -- `git archive` it under the prefix
+# TF strips, and re-pin LLVM_SHA256 in the TF checkout to that archive. Only
+# the gzip bytes are new; the substitution is logged with both hashes.
+git_archive_tf_llvm() {  # git_archive_tf_llvm <bzl> <commit> <sha> <archive>
+    local bzl="$1" commit="$2" sha="$3" archive="$4" repo="$SRC_DIR/llvm-project" newsha
+    log "No GitHub archive matches $sha; building the LLVM $commit archive from the commit with git archive"
+    rm -rf "$repo"
+    if ! { git init -q "$repo" \
+        && git -C "$repo" fetch -q --depth 1 https://github.com/llvm/llvm-project.git "$commit" \
+        && [ "$(git -C "$repo" rev-parse FETCH_HEAD)" = "$commit" ] \
+        && git -C "$repo" archive --format=tar --prefix="llvm-project-$commit/" "$commit" \
+            | gzip -n > "$archive"; }; then
+        rm -rf "$repo"
+        return 1
+    fi
+    rm -rf "$repo"
+    newsha="$(sha256sum "$archive" | cut -d' ' -f1)"
+    [ -n "$newsha" ] || return 1
+    sed -i "s/^\( *LLVM_SHA256 = \"\)$sha\"/\1$newsha\"/" "$bzl"
+    grep -q "LLVM_SHA256 = \"$newsha\"" "$bzl" || return 1
+    log "LLVM $commit archive built from the commit; LLVM_SHA256 re-pinned $sha -> $newsha in $bzl"
+}
+
+# GitHub's archives come from `git archive`, gzipped either by an external
+# `gzip -cn` or by git's built-in zlib gzip; the tar inside is the same. Rebuild
+# both streams from the downloaded tar and keep the one with the pinned hash.
+regzip_tf_llvm_archive() {  # regzip_tf_llvm_archive <archive> <sha>
+    local archive="$1" sha="$2" tar="$1.tar" cand="$1.cand" level
+    gzip -dc "$archive" > "$tar" || { rm -f "$tar"; return 1; }
+    for level in 6 9; do
+        if gzip -cn -"$level" < "$tar" > "$cand" \
+            && echo "$sha  $cand" | sha256sum -c --status; then
+            mv "$cand" "$archive"; rm -f "$tar"
+            log "Re-gzipped LLVM archive (gzip -n -$level) matches $sha"
+            return 0
+        fi
+    done
+    # wbits=31: zlib's own gzip wrapper (mtime 0, no name), as git's built-in gzip.
+    local zgz='import sys, zlib
+z = zlib.compressobj(int(sys.argv[3]), zlib.DEFLATED, 31)
+with open(sys.argv[1], "rb") as src, open(sys.argv[2], "wb") as dst:
+    for chunk in iter(lambda: src.read(1 << 20), b""):
+        dst.write(z.compress(chunk))
+    dst.write(z.flush())'
+    for level in 6 9; do
+        if python -c "$zgz" "$tar" "$cand" "$level" \
+            && echo "$sha  $cand" | sha256sum -c --status; then
+            mv "$cand" "$archive"; rm -f "$tar"
+            log "Re-gzipped LLVM archive (zlib -$level) matches $sha"
+            return 0
+        fi
+    done
+    rm -f "$tar" "$cand"
+    return 1
 }
 
 stage_rccl() {
@@ -479,9 +557,8 @@ stage_primus() {
         && git checkout "$PRIMUS_BRANCH" \
         && git submodule update --init third_party/maxtext/ ) || die "Primus checkout failed"
     # Primus' (torch-oriented) requirements.txt is not installed; the JAX runtime
-    # deps live in requirements-jax.txt (the `jaxreqs` stage). Up to v26.7 the
-    # image also removed stale dataclasses backports here, which conflict on
-    # modern Python; that is kept.
+    # deps live in requirements-jax.txt (the `jaxreqs` stage). As in the image,
+    # stale dataclasses backports, which conflict on modern Python, are removed.
     $PIP uninstall -y dataclasses dataclasses_json || true
 }
 
@@ -499,21 +576,24 @@ stage_jaxreqs() {
     # maxtext/Primus pull these in transitively at older, CVE-affected versions.
     # jax/jaxlib are re-pinned as a guardrail, as in the image, so nothing in the
     # requirements above can move them off JAX_VERSION.
-    log "Force-upgrading CVE-fix pins from the v26.8 image"
+    log "Force-upgrading CVE-fix pins from the v26.9 image"
     $PIP install --upgrade \
-        pillow==12.3.0 \
+        pillow==13.0.0 \
         starlette==1.3.1 \
         pyasn1==0.6.4 \
         cryptography==50.0.0 \
         httplib2==0.32.0 \
+        aiohttp==3.14.4 \
         urllib3==2.8.0 \
-        virtualenv==21.7.13 \
-        black==26.3.1 \
-        msgpack==1.2.1 \
+        virtualenv==21.14.13 \
+        filelock==4.2.4 \
+        black==26.10.1 \
+        msgpack==1.2.3 \
         setuptools==80.10.2 \
-        flax==0.12.9 \
+        flax==0.12.10 \
         keras==3.15.0 \
-        nltk==3.10.3 \
+        nltk==3.10.4 \
+        oauthlib==4.0.0 \
         "jax==${JAX_VERSION}" \
         "jaxlib==${JAX_VERSION}"
     python - <<'PY' || true
@@ -531,7 +611,7 @@ stage_manifest() {
     log "Writing manifest to $WORKSPACE_DIR/.manifest"
     mkdir -p "$WORKSPACE_DIR/.manifest"
     env > "$WORKSPACE_DIR/.manifest/env.txt"
-    echo "Dockerfile.jax-v26.8" > "$WORKSPACE_DIR/.manifest/derived_from"
+    echo "Dockerfile.jax-v26.9" > "$WORKSPACE_DIR/.manifest/derived_from"
     $PIP list > "$WORKSPACE_DIR/.manifest/requirements.txt"
     cp "$SCRIPT_DIR/env.sh" "$WORKSPACE_DIR/.manifest/env.sh"
 }

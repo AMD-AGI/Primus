@@ -208,7 +208,7 @@ def main():
     if need_download:
         # Remote repo_id case — download via Titan script
         hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
+        if not hf_token and not tokenizer_file.exists():
             log_error_and_exit("HF_TOKEN not set. Please export HF_TOKEN before running prepare.")
 
         if get_node_rank() == 0:
