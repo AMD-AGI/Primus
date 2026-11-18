@@ -110,6 +110,10 @@ use_turbo_rms_norm: false
 # GEMM on Transformer Engine. use_turbo_gemm moves that GEMM to Turbo as well,
 # which costs more than the norm saves on the GPT-OSS-20B shapes.
 use_turbo_norm_te_linear: false
+# [num_warps, num_stages] for Turbo's RMSNorm backward instead of its step-1 autotune.
+# num_warps changes the bits of dx, so the autotune's timing race decides a run's gradient
+# bits; pinning makes runs reproducible. null keeps the autotune.
+turbo_rmsnorm_bwd_config: null
 
 # ===== MoE gather quantization =====
 # EP1/TP1 all-to-all with the fused Turbo MXFP4 grouped MLP only.

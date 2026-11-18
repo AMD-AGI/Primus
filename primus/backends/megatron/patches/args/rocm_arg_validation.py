@@ -12,8 +12,8 @@ constraints (deterministic-mode env vars, Turbo FP8/FP4 recipes, sync-free MoE
 auto-config, DeepEP restrictions, ...).
 """
 
-import inspect
 import os
+import sys
 
 import torch
 
@@ -32,11 +32,10 @@ def print_rank_last(msg):
     """If distributed is initialized, print only on last rank."""
     log_func = logger.info_with_caller
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
+    caller_frame = sys._getframe(1)
     function_name = caller_frame.f_code.co_name
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
 
     if torch.distributed.is_initialized():
         if is_last_rank():

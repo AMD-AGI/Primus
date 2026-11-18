@@ -65,6 +65,10 @@ modules:
       # flydsl: gfx950 MFMA kernels, or the wave32 WMMA kernels on gfx1250.
       # eager: plain PyTorch, for numerics. flydsl rejects a dataloader mask.
       msa_backend: ${PRIMUS_MSA_BACKEND:flydsl}
+      # Triton fusions around the attention, bit-identical to the eager ops (minimax_m3.yaml)
+      msa_fused_qk_norm_rope: true
+      msa_fused_indexer_loss: true
+      msa_fused_select_plan: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.
@@ -86,11 +90,11 @@ modules:
       # The check is a norm over every gradient each step: 5 ms at EP4 with 8 layers.
       check_for_nan_in_loss_and_grad: false
 
-      # block recomputes the first recompute_num_layers layers: on the 4-layer proxy,
-      # dense layer 1, not the MSA/MoE layer.
+      # block recomputes the first recompute_num_layers layers (dense layer 1 on M3, an MSA
+      # layer on M3.1-Flash). 0: every proxy shape fits without recomputation.
       recompute_granularity: full
       recompute_method: block
-      recompute_num_layers: ${PRIMUS_RECOMPUTE_NUM_LAYERS:1}
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_NUM_LAYERS:0}
 
       # data. MSA builds its own causal mask; a dataloader mask is rejected by flydsl.
       create_attention_mask_in_dataloader: false
@@ -134,12 +138,20 @@ modules:
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: true
+      # the config the reference run's autotune picks, so the gradient bits do not depend
+      # on step-1 timing
+      turbo_rmsnorm_bwd_config: [4, 2]
       use_turbo_deepep: false
       moe_shared_expert_overlap: false
 
       # cross entropy
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+      deferred_cross_entropy: true
+
+      # bitwise kernel replacements (primus_megatron_module.yaml)
+      fused_clamped_geglu: true
+      fused_probs_mul: true
 
       # training control. A full gc.collect() takes about 280 ms here, longer than
       # the 1-GPU step, and collects nothing, so not every iteration.
