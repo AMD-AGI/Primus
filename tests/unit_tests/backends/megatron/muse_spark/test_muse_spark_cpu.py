@@ -2155,31 +2155,36 @@ def test_derive_fields_rejects_linear_biases(key):
 
 
 def test_dispatch_uses_model_type(monkeypatch):
-    """The trainer needs no Muse Spark branch (its default branch serves it).
-    get_model_provider returns the Muse Spark builder for ``model_type == "muse_spark"`` (a
-    string literal: no other model imports the Muse Spark package); both use
-    layer_patterns.MODEL_TYPE. The config schema check must see the branch, so
-    MuseSparkTransformerConfig fields are validated."""
+    """Muse Spark trains through the GPT entrypoint and is built by the shared builder from
+    its ``MODEL_FAMILIES`` entry, keyed by layer_patterns.MODEL_TYPE (the registry names the
+    package as a string, so no other model imports it). The config schema check reads the
+    entry, so MuseSparkTransformerConfig fields are validated."""
     import pathlib
     from functools import partial
 
     pytest.importorskip("megatron.core")
-    from primus.backends.megatron.core.models.muse_spark import muse_spark_builders
+    from primus.backends.megatron.core.models.builder import build_model, model_provider
     from primus.backends.megatron.core.models.muse_spark.layer_patterns import (
         MODEL_TYPE,
     )
-    from primus.core.config.schema_check import _model_provider_branches
+    from primus.backends.megatron.core.models.registry import (
+        GPT_TRAINING,
+        MODEL_FAMILIES,
+    )
+    from primus.core.config.schema_check import _registered_config_classes
     from primus.core.utils import import_utils
 
+    assert MODEL_FAMILIES[MODEL_TYPE].training == GPT_TRAINING
     monkeypatch.setattr(import_utils, "log_rank_0", lambda *a, **k: None)
     provider = import_utils.get_model_provider(model_type=MODEL_TYPE)
     assert isinstance(provider, partial)
-    assert provider.func is muse_spark_builders.model_provider
-    assert provider.args == (muse_spark_builders.muse_spark_builder,)
+    assert provider.func is model_provider
+    (builder,) = provider.args
+    assert (builder.func, builder.args) == (build_model, (MODEL_TYPE,))
 
     root = pathlib.Path(__file__).resolve().parents[5]
-    _, branches, _ = _model_provider_branches(root, "megatron")
-    assert branches.get(MODEL_TYPE, "").endswith("muse_spark.muse_spark_builders")
+    _, config_classes, _ = _registered_config_classes(root, "megatron")
+    assert config_classes[MODEL_TYPE] == "MuseSparkTransformerConfig"
 
 
 @pytest.mark.parametrize(

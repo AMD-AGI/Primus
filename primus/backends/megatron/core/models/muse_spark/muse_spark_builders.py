@@ -4,22 +4,16 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Muse Spark (``muse_spark``) builder + ``model_provider``."""
+"""Muse Spark hooks for the shared builder (``MODEL_FAMILIES["muse_spark"]`` in ``registry.py``)."""
 
-from typing import Optional
+from functools import partial
 
-from megatron.training import get_args, print_rank_0
-from megatron.training.arguments import core_transformer_config_from_args
+from primus.backends.megatron.core.models.builder import (
+    build_model,
+    family_model_provider,
+)
 
-from primus.backends.megatron.core.models.muse_spark.muse_spark_layer_specs import (
-    get_muse_spark_decoder_block_spec,
-)
-from primus.backends.megatron.core.models.muse_spark.muse_spark_model import (
-    MuseSparkModel,
-)
-from primus.backends.megatron.core.models.muse_spark.muse_spark_transformer_config import (
-    MuseSparkTransformerConfig,
-)
+__all__ = ["muse_spark_builder", "model_provider", "check_builder_args", "muse_spark_model_kwargs"]
 
 
 def check_builder_args(args):
@@ -45,54 +39,13 @@ def check_builder_args(args):
         raise ValueError("Muse Spark does not support: " + "; ".join(problems))
 
 
-def muse_spark_builder(
-    args,
-    pre_process,
-    post_process,
-    vp_stage=None,
-    config: Optional[MuseSparkTransformerConfig] = None,
-    pg_collection=None,
-):
-    print_rank_0("[Primus:MuseSpark] building MuseSparkModel...")
-    if config is None:
-        config = core_transformer_config_from_args(args, config_class=MuseSparkTransformerConfig)
-    # Megatron-LM core_v0.19 dropped the legacy models (and the arg): absent means Mcore
-    assert not getattr(
-        args, "use_legacy_models", False
-    ), "Muse Spark requires use_legacy_models=False (Mcore-only)."
-
-    check_builder_args(args)
-    decoder_spec = get_muse_spark_decoder_block_spec(config=config, vp_stage=vp_stage)
-
-    return MuseSparkModel(
-        config=config,
-        transformer_layer_spec=decoder_spec,
-        vocab_size=args.padded_vocab_size,
-        max_sequence_length=args.max_position_embeddings,
-        pre_process=pre_process,
-        post_process=post_process,
-        fp16_lm_cross_entropy=args.fp16_lm_cross_entropy,
-        parallel_output=True,
-        share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
-        position_embedding_type=args.position_embedding_type,
-        rotary_percent=args.rotary_percent,
-        rotary_base=args.rotary_base,
-        pg_collection=pg_collection,
-        vp_stage=vp_stage,
-    )
+def muse_spark_model_kwargs(args) -> dict:
+    return {
+        "position_embedding_type": args.position_embedding_type,
+        "rotary_percent": args.rotary_percent,
+        "rotary_base": args.rotary_base,
+    }
 
 
-def model_provider(
-    model_builder=None,
-    pre_process: bool = True,
-    post_process: bool = True,
-    vp_stage: Optional[int] = None,
-    config: Optional[MuseSparkTransformerConfig] = None,
-    pg_collection=None,
-):
-    if model_builder is None:
-        model_builder = muse_spark_builder
-    args = get_args()
-    return model_builder(
-        args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
-    )
+muse_spark_builder = partial(build_model, "muse_spark")
+model_provider = family_model_provider(muse_spark_builder)
