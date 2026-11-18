@@ -35,13 +35,15 @@ MODULE_NAMES = {"pre_trainer", "post_trainer"}
 
 # Files shipped next to the recipes that are not runnable experiments, so
 # resolving them is not meaningful:
-#   - lfm2...te-precision: a Transformer Engine precision-matcher fragment with
-#     no work_group / modules of its own.
+#   - lfm2...te-precision / muse_spark...te-precision-dense-bf16: Transformer Engine
+#     precision-matcher fragments (read through te_precision_config_file) with no
+#     work_group / modules of their own.
 #   - native_hf_to_megatron_sft.template: a copy-and-fill template whose `model`
 #     preset and paths are <...> placeholders by design, so it only resolves
 #     once a user substitutes them.
 NOT_AN_EXPERIMENT = {
     "examples/megatron/configs/MI355X/lfm2_8B_A1B-FP8-te-precision.yaml",
+    "examples/megatron/configs/MI455X/muse_spark_816B_A42B-te-precision-dense-bf16.yaml",
     "examples/megatron/configs/MI355X/native_hf_to_megatron_sft.template.yaml",
 }
 

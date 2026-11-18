@@ -366,7 +366,7 @@ def get_kimi_k3_runtime_decoder_spec(
 
     pattern = "".join("K" if s.params["is_kda_layer"] else "F" for s in layer_specs)
     logger.info(
-        "[Primus:Kimi-K3] spec provider=%s, %d layer specs, attention pattern=%s",
+        "[Primus:kimi_k3] spec provider=%s, %d layer specs, attention pattern=%s",
         type(provider).__name__,
         len(layer_specs),
         pattern,
