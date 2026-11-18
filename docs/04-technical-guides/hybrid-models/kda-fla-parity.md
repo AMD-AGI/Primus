@@ -94,7 +94,7 @@ precedence rules.  Defaults below match FLA's numerics on MI300X:
 
 | YAML knob | Env var | Default | Effect |
 |--|--|--|--|
-| `fused_ce_mode` | `PRIMUS_FUSED_CE` | `1` | `1` = FLA `FusedLinearCrossEntropyLoss` (chunked, no full logits tensor); `2` = FLA `FusedCrossEntropyLoss` (matches FLA exactly); `3` = Primus's chunked linear cross-entropy, which ZAYA1 selects the same way (per-token loss with Megatron's rounding, TP=1; YAML `fused_ce_chunk_tokens`, default 4096 tokens per chunk, and `fused_ce_compile`); `0` = native Megatron CE. |
+| `fused_ce_mode` | `PRIMUS_FUSED_CE` | `1` | `1` = FLA `FusedLinearCrossEntropyLoss` (chunked, no full logits tensor); `2` = FLA `FusedCrossEntropyLoss` (matches FLA exactly); `0` = native Megatron CE. |
 | `fused_ce_chunks` | `PRIMUS_FUSED_CE_CHUNKS` | `32` | Number of chunks the FLA CE splits the logits across.  Lower = faster but bigger peak allocation. |
 | `use_fla_fused_swiglu` | `PRIMUS_FLA_SWIGLU` | `1` | Replaces Megatron's naive SwiGLU with FLA's Triton-fused kernel (≈20 ms/step saved). |
 | `use_fla_fused_rmsnorm` | `PRIMUS_FLA_NORM` | `1` | Use FLA's `RMSNorm` Triton kernel via `WrappedTorchNorm`.  KDA's gated output norm is selected separately via `use_fla_fused_norm_gated` in the model YAML. |
