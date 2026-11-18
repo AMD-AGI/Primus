@@ -114,6 +114,14 @@ MODEL_FAMILIES = {
         model_kwargs="kimi_k3_builders:kimi_k3_model_kwargs",
         check_model="kimi_k3_builders:check_kimi_k3_model",
     ),
+    "muse_spark": ModelFamily(
+        package="primus.backends.megatron.core.models.muse_spark",
+        config_class="muse_spark_transformer_config:MuseSparkTransformerConfig",
+        model_class="muse_spark_model:MuseSparkModel",
+        decoder_spec="muse_spark_layer_specs:get_muse_spark_decoder_block_spec",
+        prepare_args="muse_spark_builders:check_builder_args",
+        model_kwargs="muse_spark_builders:muse_spark_model_kwargs",
+    ),
     "zaya1": ModelFamily(
         package="primus.backends.megatron.core.models.zaya1",
         config_class="zaya1_transformer_config:Zaya1TransformerConfig",

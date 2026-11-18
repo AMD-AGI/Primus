@@ -46,7 +46,10 @@ def build_model(
         "core_transformer_config_from_args swaps the config class when multi_latent_attention "
         f"or heterogeneous_layers_config_path is set; model_type {model_type!r} must leave both unset."
     )
-    assert not args.use_legacy_models, f"model_type {model_type!r} requires use_legacy_models=False."
+    # Megatron-LM core_v0.19 dropped the legacy models (and the arg): absent means Mcore
+    assert not getattr(
+        args, "use_legacy_models", False
+    ), f"model_type {model_type!r} requires use_legacy_models=False."
 
     kwargs = dict(
         config=config,
