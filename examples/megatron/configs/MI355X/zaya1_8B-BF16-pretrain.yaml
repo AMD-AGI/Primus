@@ -112,9 +112,13 @@ modules:
 
       # The 16 experts run as two Primus Turbo grouped GEMMs whose group sizes
       # stay on the GPU, with Turbo's moe_permute and moe_unpermute moving the
-      # tokens, so no MoE layer waits on the host.
+      # tokens, so no MoE layer waits on the host. The router's gate multiplies
+      # inside Turbo's swiglu_with_probs, in fp32 before the activation's one
+      # bf16 rounding, instead of scaling the unpermuted output: one bf16
+      # rounding fewer per expert row than main's expert(x) * p.
       # The distributed-optimizer state does not carry across a switch between
       # split and grouped experts; load with --no-load-optim when switching.
       enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
+      use_turbo_fused_act_with_probs: true

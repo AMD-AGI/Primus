@@ -121,6 +121,9 @@ modules:
       # experts where the split experts' TE linears take one each. The
       # distributed-optimizer state does not carry across a switch between
       # split and grouped experts; load with --no-load-optim when switching.
+      # use_turbo_fused_act_with_probs, on in the BF16 recipe, stays off: with
+      # the FP8 experts it left the router probabilities' gradient about 20%
+      # less precise than main's.
       enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
