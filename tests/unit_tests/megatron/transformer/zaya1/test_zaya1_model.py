@@ -20,10 +20,8 @@ import torch.nn.functional as F
 from megatron.core.transformer.enums import AttnBackend
 from torch import nn
 
-from primus.backends.megatron.core.models.zaya1.zaya1_builders import (
-    model_provider,
-    zaya1_builder,
-)
+from primus.backends.megatron.core.models.builder import model_provider
+from primus.backends.megatron.core.models.zaya1.zaya1_builders import zaya1_builder
 from primus.backends.megatron.core.models.zaya1.zaya1_model import Zaya1Model
 from primus.backends.megatron.core.models.zaya1.zaya1_modules import RMSNorm, ZayaStack
 from primus.backends.megatron.core.models.zaya1.zaya1_transformer_config import (
@@ -162,7 +160,8 @@ def test_get_model_provider_wires_zaya1_builder():
     _ensure_logger()
     provider = get_model_provider("zaya1")
     assert provider.func is model_provider
-    assert provider.args == (zaya1_builder,)
+    (builder,) = provider.args
+    assert (builder.func, builder.args) == (zaya1_builder.func, zaya1_builder.args)
 
 
 def test_builder_rejects_non_data_parallel():
