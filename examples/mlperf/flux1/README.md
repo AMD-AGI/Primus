@@ -1,5 +1,8 @@
 # FLUX.1-Schnell MLPerf on MI355X (Primus)
 
+> [!NOTE]
+> This in-tree recipe (`rocm/primus:v26.9`) is still being validated; its results and defaults may change and will differ from the published AMD MLPerf Training v6.1 submission. To reproduce the v6.1 submission results, follow the [AMD MLPerf Training v6.1 reproduction blog](https://rocm.blogs.amd.com/artificial-intelligence/mlperf-training6.1-repro/README.html), which uses its own images and code.
+
 MLPerf Training Flux.1-Schnell on **MI355X** via the in-tree diffusion backend and `primus-cli`.
 
 Precision defaults are in `config_common.sh`: MXFP4 `dgrad,wgrad` with A6W4 forward, fused norm/RoPE, FlyDSL attention, local AdamW, and the SDMA all-gather. The 6.1 disclosure defaults are mxfp4 linear, bfloat16 attention, and mxfp4 communication. Target validation loss is `0.586`. An evaluation runs every 262,144 training samples.
