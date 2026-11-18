@@ -117,6 +117,15 @@ def test_switch_summary_names_the_paths_that_run(monkeypatch):
     assert "zaya_sort_dispatch=off (boolean masks)" in zm.switch_summary(_cfg())
     line = zm.switch_summary(_cfg(zaya_attn_flash=False, zaya_fuse_norm=False, zaya_router_defer_ar=True))
     assert "zaya_attn_flash=off (dense mask)" in line and "zaya_fuse_norm=off" in line
+    turbo_attention = SimpleNamespace(enable_primus_turbo=True, use_turbo_attention=True)
+    monkeypatch.setattr(zm, "_megatron_args", lambda: turbo_attention)
+    assert "zaya_attn_flash=on (Primus Turbo flash_attn_func)" in zm.switch_summary(
+        _cfg(zaya_attn_flash=True)
+    )
+    assert "zaya_attn_flash=off (dense mask; use_turbo_attention needs zaya_attn_flash)" in zm.switch_summary(
+        _cfg(zaya_attn_flash=False)
+    )
+    monkeypatch.setattr(zm, "_megatron_args", lambda: SimpleNamespace(enable_primus_turbo=True))
     assert "zaya_router_defer_ar=on" in line and "zaya_conv_gemm=off (nn.Conv1d)" in line
     assert "zaya_conv_gemm=on (GEMM)" in zm.switch_summary(_cfg(zaya_conv_gemm=True))
     assert (

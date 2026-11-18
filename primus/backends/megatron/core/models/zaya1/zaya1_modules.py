@@ -29,7 +29,11 @@ from primus.backends.megatron.core.utils import maybe_compile
 # zaya_attn_flash (default off): drop a purely causal dense mask once per forward
 # and run CCA attention through flash_attn_func with native GQA, or through
 # SDPA enable_gqa when flash_attn is unavailable. Off runs the dense-mask +
-# repeat_interleave path.
+# repeat_interleave path. With Primus Turbo's enable_primus_turbo and
+# use_turbo_attention, the causal path runs through Turbo's flash_attn_func
+# instead, which reads the memory layout of the [b, s, h, d] views it gets, so
+# the [s, b, h, d] query, key and value go in and the output comes out without
+# a copy (FlyDSL, Turbo's default backend on MI355X, takes only that layout).
 try:
     from flash_attn import flash_attn_func as _flash_attn_func
 except Exception:  # pragma: no cover - depends on the image
@@ -141,6 +145,16 @@ def _conv_path(config) -> Tuple[bool, str]:
     return True, "GEMM"
 
 
+def _attention_path(config) -> Tuple[bool, str]:
+    """Whether CCA attention runs through Primus Turbo's flash_attn_func, and its path as the build log names it."""
+    turbo = _turbo_on("use_turbo_attention")
+    if not _path_on(config, "zaya_attn_flash"):
+        return False, "dense mask; use_turbo_attention needs zaya_attn_flash" if turbo else "dense mask"
+    if turbo:
+        return True, "Primus Turbo flash_attn_func"
+    return False, "flash_attn" if _flash_attn_func is not None else "SDPA, flash_attn not importable"
+
+
 def _dispatch_path(config) -> str:
     """How the tokens reach the experts, as the build log names it."""
     if _turbo_experts(config)[0]:
@@ -154,13 +168,10 @@ def switch_summary(config) -> str:
     def on(name: str) -> str:
         return "on" if _path_on(config, name) else "off"
 
-    if not _path_on(config, "zaya_attn_flash"):
-        attention = "dense mask"
-    else:
-        attention = "flash_attn" if _flash_attn_func is not None else "SDPA, flash_attn not importable"
     conv = _conv_path(config)[1]
     return (
-        f"zaya_attn_flash={on('zaya_attn_flash')} ({attention}), zaya_fuse_norm={on('zaya_fuse_norm')}, "
+        f"zaya_attn_flash={on('zaya_attn_flash')} ({_attention_path(config)[1]}), "
+        f"zaya_fuse_norm={on('zaya_fuse_norm')}, "
         f"zaya_fuse_cca={on('zaya_fuse_cca')}, zaya_conv_gemm={on('zaya_conv_gemm')} ({conv}), "
         f"zaya_fuse_moe={on('zaya_fuse_moe')}, "
         f"zaya_sort_dispatch={on('zaya_sort_dispatch')} ({_dispatch_path(config)}), "
@@ -538,6 +549,7 @@ class CCA(nn.Module):
         self._conv_gemm_ok, _ = _conv_path(config)
         self.fuse_cca = _path_on(config, "zaya_fuse_cca")
         self.attn_flash = _path_on(config, "zaya_attn_flash")
+        self.turbo_attn, _ = _attention_path(config)
         # Ones, not zeros: a zero default is the pre-checkpoint initialization, and a
         # raw temperature of zero would wipe the keys at step 0.
         self.temp = nn.Parameter(torch.ones(self.num_k_heads))
@@ -583,7 +595,7 @@ class CCA(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor, position_ids: Optional[torch.Tensor], attention_mask):
         query, key, value = self.project(hidden_states, position_ids)
-        attn = attention(query, key, value, attention_mask, flash=self.attn_flash)
+        attn = attention(query, key, value, attention_mask, flash=self.attn_flash, turbo=self.turbo_attn)
         seq, batch = hidden_states.shape[:2]
         return self.o_proj(attn.reshape(seq, batch, self.latent_q))
 
@@ -626,13 +638,30 @@ def _attention_causal_gqa(query, key, value) -> torch.Tensor:
     return out.permute(2, 0, 1, 3)
 
 
-def attention(query, key, value, attention_mask: Optional[torch.Tensor], flash: bool = False) -> torch.Tensor:
+def _turbo_flash_attn(query, key, value) -> torch.Tensor:
+    """Causal GQA through Primus Turbo's flash_attn_func. ``[s, b, h, d]`` in and out.
+
+    Turbo takes ``[b, s, h, d]``-shaped tensors and reads their memory layout,
+    as Primus's PrimusTurboAttention relies on: the transposed views of the
+    ``[s, b, h, d]`` tensors go in as they are, and the output comes back in
+    the same layout. Softmax scale 1/sqrt(d), as on the other paths.
+    """
+    from primus_turbo.pytorch.ops import flash_attn_func
+
+    q, k, v = (t.contiguous().transpose(0, 1) for t in (query, key, value))
+    return flash_attn_func(q, k, v, causal=True).transpose(0, 1)
+
+
+def attention(
+    query, key, value, attention_mask: Optional[torch.Tensor], flash: bool = False, turbo: bool = False
+) -> torch.Tensor:
     """Causal GQA. ``attention_mask`` uses Megatron's convention: True blocks a key.
 
     ``flash`` is zaya_attn_flash: with no mask, run the causal kernel instead of a dense causal mask.
+    ``turbo`` picks Primus Turbo's kernel for that causal path.
     """
     if flash and attention_mask is None:
-        return _attention_causal_gqa(query, key, value)
+        return (_turbo_flash_attn if turbo else _attention_causal_gqa)(query, key, value)
     # [s, b, h, d] -> [b, h, s, d]
     q = query.permute(1, 2, 0, 3)
     k = key.permute(1, 2, 0, 3)
