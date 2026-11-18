@@ -46,6 +46,7 @@ def get_model_provider(model_type="gpt"):
     Args:
         model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
             'kimi_k3', 'glm5_next', 'zaya1' or 'inkling'. Defaults to 'gpt'.
+            Also accepted: 'muse_spark' (the Muse Spark text decoder).
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
@@ -87,6 +88,21 @@ def get_model_provider(model_type="gpt"):
         return partial(
             glm5_next_module.model_provider,
             glm5_next_module.glm5_next_builder,
+        )
+
+    # Primus-owned: Muse Spark text decoder (gated residuals, latent MoE). The package is
+    # imported only inside this branch; a test keeps the literal equal to layer_patterns.MODEL_TYPE.
+    if model_type == "muse_spark":
+        muse_spark_module = importlib.import_module(
+            "primus.backends.megatron.core.models.muse_spark.muse_spark_builders"
+        )
+        log_rank_0(
+            "[Primus][MegatronCompat] Loaded Muse-Spark model_provider + builder "
+            f"from {muse_spark_module.__name__}"
+        )
+        return partial(
+            muse_spark_module.model_provider,
+            muse_spark_module.muse_spark_builder,
         )
 
     # Primus-owned: ZAYA1 (data parallel only)
