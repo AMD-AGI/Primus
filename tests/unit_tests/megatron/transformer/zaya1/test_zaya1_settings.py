@@ -71,7 +71,7 @@ def test_only_the_mi355x_recipes_turn_paths_on():
         "MI355X/zaya1_8B-BF16-pretrain.yaml": compute
         | turbo
         | {"zaya_sort_dispatch", "zaya_router_defer_ar", "use_turbo_fused_act_with_probs"},
-        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute | turbo | {"zaya_sort_dispatch"},
+        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute | {"zaya_sort_dispatch"},
     }
     configs = Path(primus.__file__).parents[1] / "examples" / "megatron" / "configs"
     recipes = sorted(configs.glob("*/zaya1_8B-*-pretrain.yaml"))
