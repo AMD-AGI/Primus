@@ -30,7 +30,7 @@ _PATHS = (
     "zaya_sort_dispatch",
     "zaya_router_defer_ar",
 )
-_CHUNKED_CE = ("zaya_chunked_ce", "zaya_chunked_ce_tokens", "zaya_chunked_ce_compile")
+_CHUNKED_CE = ("fused_ce_mode", "fused_ce_chunk_tokens", "fused_ce_compile")
 
 
 def test_every_path_is_off_by_default():
@@ -38,15 +38,17 @@ def test_every_path_is_off_by_default():
     values = yaml.safe_load(base.read_text())
     for name in _PATHS + _CHUNKED_CE:
         assert values[name] == getattr(Zaya1TransformerConfig, name), name
-    for name in _PATHS + ("zaya_chunked_ce", "zaya_chunked_ce_compile"):
+    for name in _PATHS + ("fused_ce_compile",):
         assert getattr(Zaya1TransformerConfig, name) is False, name
+    # Unset rather than 0, which would also run the FLA runtime-knob patch.
+    assert values["fused_ce_mode"] is None
     # The unit tests' stand-in configs have none of the fields.
     assert not any(zm._path_on(SimpleNamespace(), name) for name in _PATHS)
 
 
 def test_on_off_fields_take_only_true_or_false():
     # A CLI override such as --zaya_fuse_norm off arrives as the string "off".
-    for name in _PATHS + ("zaya_chunked_ce", "zaya_chunked_ce_compile"):
+    for name in _PATHS + ("fused_ce_compile",):
         assert getattr(_tiny_config(**{name: 1}), name) is True
         assert getattr(_tiny_config(**{name: 0}), name) is False
         for value in ("off", "false", "", None, 2, 1.0):
@@ -76,7 +78,9 @@ def test_only_the_mi355x_recipes_turn_paths_on():
     assert len(recipes) == 6
     for path in recipes:
         overrides = yaml.safe_load(path.read_text())["modules"]["pre_trainer"]["overrides"]
-        on = {name for name in _PATHS + _CHUNKED_CE + _TURBO if overrides.get(name) is True}
+        on = {name for name in _PATHS + ("fused_ce_compile",) + _TURBO if overrides.get(name) is True}
+        if overrides.get("fused_ce_mode"):
+            on.add("fused_ce_mode")
         assert on == expected.get(path.relative_to(configs).as_posix(), set()), path
 
 

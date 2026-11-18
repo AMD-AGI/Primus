@@ -17,6 +17,12 @@ from typing import Optional, Sequence
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+from primus.backends.megatron.core.fusions.chunked_linear_cross_entropy import (
+    CHUNKED_CE_MODE,
+    DEFAULT_CHUNK_TOKENS,
+    check_chunk_tokens,
+)
+
 # A CLI override such as ``--zaya_fuse_norm off``, or a quoted YAML value,
 # arrives as a string, which the modules' bool() would read as on.
 _ON_OFF_FIELDS = (
@@ -27,8 +33,7 @@ _ON_OFF_FIELDS = (
     "zaya_fuse_moe",
     "zaya_sort_dispatch",
     "zaya_router_defer_ar",
-    "zaya_chunked_ce",
-    "zaya_chunked_ce_compile",
+    "fused_ce_compile",
 )
 
 
@@ -54,8 +59,7 @@ class Zaya1TransformerConfig(TransformerConfig):
     zaya_balance_wd: float = 0.0
     # Optional explicit stage list. ``None`` alternates CCA, MoE, CCA, MoE, ...
     zaya_layers: Optional[Sequence] = None
-    # Kernel paths, all off by default; zaya1_modules.py and zaya1_chunked_ce.py
-    # describe each one.
+    # Kernel paths, all off by default; zaya1_modules.py describes each one.
     zaya_attn_flash: bool = False
     zaya_fuse_norm: bool = False
     zaya_fuse_cca: bool = False
@@ -63,9 +67,12 @@ class Zaya1TransformerConfig(TransformerConfig):
     zaya_fuse_moe: bool = False
     zaya_sort_dispatch: bool = False
     zaya_router_defer_ar: bool = False
-    zaya_chunked_ce: bool = False
-    zaya_chunked_ce_tokens: int = 4096
-    zaya_chunked_ce_compile: bool = False
+    # The loss, selected as in the Mamba models: fused_ce_mode 3 is the chunked
+    # linear cross-entropy (chunked_linear_cross_entropy.py), and unset or 0 is
+    # Megatron's cross-entropy.
+    fused_ce_mode: Optional[int] = None
+    fused_ce_chunk_tokens: int = DEFAULT_CHUNK_TOKENS
+    fused_ce_compile: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -77,9 +84,10 @@ class Zaya1TransformerConfig(TransformerConfig):
                 setattr(self, name, bool(value))
             elif not isinstance(value, bool):
                 raise ValueError(f"{name} must be true or false, got {value!r}.")
-        tokens = self.zaya_chunked_ce_tokens
-        if type(tokens) is not int or tokens < 1:
-            raise ValueError(f"zaya_chunked_ce_tokens must be a positive integer, got {tokens!r}.")
+        mode = self.fused_ce_mode
+        if mode is not None and (type(mode) is not int or mode not in (0, 1, 2, CHUNKED_CE_MODE)):
+            raise ValueError(f"fused_ce_mode must be 0, 1, 2 or {CHUNKED_CE_MODE}, got {mode!r}.")
+        check_chunk_tokens(self.fused_ce_chunk_tokens)
         if self.num_moe_experts is None:
             raise ValueError("ZAYA1 requires num_experts (num_moe_experts) to be set.")
         if self.moe_router_topk != 1:

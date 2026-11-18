@@ -78,8 +78,8 @@ modules:
       # TE 2.20 (rocm/primus:v26.9) it rounds the logits gradient to bf16 once,
       # as Megatron's path does; TE 2.17.1 (rocm/primus:v26.8) rounds it twice,
       # so leave it off there. Primus's warning that TE lacks the FP32-gradient
-      # fix (TE PR #3193) misreads TE 2.20. The ZAYA1 chunked cross-entropy
-      # (zaya_chunked_ce) stays off: it rounds each chunk's output-layer weight
+      # fix (TE PR #3193) misreads TE 2.20. The chunked linear cross-entropy
+      # (fused_ce_mode: 3) stays off: it rounds each chunk's output-layer weight
       # gradient to bf16 before summing.
       cross_entropy_loss_fusion: true
       cross_entropy_fusion_impl: te

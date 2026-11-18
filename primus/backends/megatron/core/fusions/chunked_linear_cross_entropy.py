@@ -4,12 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Chunked output-projection + cross-entropy for ZAYA1 (TP=1).
+"""Chunked output projection + cross-entropy (TP=1), ``fused_ce_mode`` 3.
 
 The stock path materializes ``logits = x @ W^T`` for every token
-([s*b, 262272] in bf16), then ``vocab_parallel_cross_entropy`` upcasts it to
-fp32 and keeps an fp32 softmax for backward. At mbs 248 x seq 128 that is
-~16.6 GB bf16 + ~33 GB fp32 + temporaries.
+([s*b, vocab] in bf16), then ``vocab_parallel_cross_entropy`` upcasts it to
+fp32 and keeps an fp32 softmax for backward. For ZAYA1's 262,272-token
+vocabulary at mbs 248 x seq 128 that is ~16.6 GB bf16 + ~33 GB fp32 +
+temporaries.
 
 ``ChunkedLinearCrossEntropy`` walks the tokens in chunks. Forward keeps only
 the fp32 log-sum-exp per token. Backward recomputes each chunk's logits,
@@ -26,10 +27,13 @@ out-of-range labels (their max-shifted predicted logit is 0, so the loss is
 ``lse - max``, exactly as the stock kernel computes it).
 Returns per-token loss ``[b, s]``. The caller applies ``loss_mask``.
 
-Config fields: ``zaya_chunked_ce`` (default off) turns it on,
-``zaya_chunked_ce_tokens`` (default 4096) is the tokens per chunk, and
-``zaya_chunked_ce_compile`` (default off) fuses each chunk's CE math with
-torch.compile.
+ZAYA1 and the Mamba models select it the same way. ``fused_ce_mode`` is the
+Mamba models' loss switch (``fla_runtime_patches.py``), where 1 and 2 are
+FLA's kernels; 3 is this one, in ``mamba_fused_ce_patches.py`` and in
+``zaya1_model.py``, and unset or 0 is Megatron's cross-entropy.
+``fused_ce_chunk_tokens`` (default 4096) is the tokens per chunk, and
+``fused_ce_compile`` (default off) fuses each chunk's CE math with
+torch.compile. ``chunked_ce_blocker`` holds the rules both models apply.
 """
 
 from typing import Optional
@@ -40,9 +44,46 @@ from torch import Tensor
 from primus.backends.megatron.core.utils import maybe_compile
 
 __all__ = [
+    "CHUNKED_CE_MODE",
+    "DEFAULT_CHUNK_TOKENS",
     "ChunkedLinearCrossEntropy",
+    "check_chunk_tokens",
+    "chunked_ce_blocker",
     "chunked_linear_cross_entropy",
+    "mup_logit_scale",
 ]
+
+CHUNKED_CE_MODE = 3
+DEFAULT_CHUNK_TOKENS = 4096
+
+
+def chunked_ce_blocker(config, tp_size: int, mode: Optional[int] = CHUNKED_CE_MODE) -> Optional[str]:
+    """Why ``fused_ce_mode`` ``mode`` leaves the loss to Megatron's cross-entropy, or None when this one runs."""
+    if getattr(config, "cross_entropy_loss_fusion", False):
+        # A fused cross-entropy was asked for: Megatron's native or TE kernel,
+        # or Turbo's, which only runs with this flag set.
+        impl = getattr(config, "cross_entropy_fusion_impl", "native")
+        return f"cross_entropy_loss_fusion is set ({impl})"
+    if mode != CHUNKED_CE_MODE:
+        if mode in (1, 2):
+            return f"fused_ce_mode {mode} selects FLA's kernel, which this model doesn't wire up"
+        return "fused_ce_mode is unset" if mode is None else f"fused_ce_mode is {mode}"
+    if tp_size != 1 or getattr(config, "sequence_parallel", False):
+        return "it needs TP=1 without sequence parallel"
+    return None
+
+
+def check_chunk_tokens(tokens) -> int:
+    if type(tokens) is not int or tokens < 1:
+        raise ValueError(f"fused_ce_chunk_tokens must be a positive integer, got {tokens!r}.")
+    return tokens
+
+
+def mup_logit_scale(config) -> Optional[float]:
+    """The MuP output scale ``LanguageModule._scale_logits`` puts on the logits, or None."""
+    if getattr(config, "use_mup", False) and config.mup_output_mult != 1.0:
+        return float(config.mup_output_mult)
+    return None
 
 
 def _chunk_logits(x_c: Tensor, weight: Tensor, logit_scale: Optional[float]) -> Tensor:
@@ -54,7 +95,7 @@ def _chunk_logits(x_c: Tensor, weight: Tensor, logit_scale: Optional[float]) -> 
     return logits
 
 
-# Per-chunk CE math. Compiled (zaya_chunked_ce_compile), each reads the bf16
+# Per-chunk CE math. Compiled (fused_ce_compile), each reads the bf16
 # chunk logits once or twice and writes only [chunk] fp32 stats (forward) or
 # the bf16 dlogits (backward), instead of ~6 eager passes over a
 # [chunk, vocab] fp32 tensor.
@@ -171,7 +212,7 @@ def chunked_linear_cross_entropy(
 
     Tokens are processed in ``[s, b]`` order so ``hidden_states`` is a free
     view; only the small label / loss tensors are transposed. ``chunk_tokens``
-    and ``compiled`` are ``zaya_chunked_ce_tokens`` and ``zaya_chunked_ce_compile``.
+    and ``compiled`` are ``fused_ce_chunk_tokens`` and ``fused_ce_compile``.
     """
     s, b, h = hidden_states.shape
     x = hidden_states.reshape(s * b, h)

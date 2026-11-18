@@ -58,7 +58,7 @@ corresponding env var before any FLA module is imported.
 
 | YAML knob | Env var | Default | Effect |
 |--|--|--|--|
-| `fused_ce_mode` | `PRIMUS_FUSED_CE` | `1` | `1` = FLA `FusedLinearCrossEntropyLoss` (chunked, no full logits tensor); `2` = FLA `FusedCrossEntropyLoss` (matches FLA exactly); `0` = native Megatron CE. |
+| `fused_ce_mode` | `PRIMUS_FUSED_CE` | `1` | `1` = FLA `FusedLinearCrossEntropyLoss` (chunked, no full logits tensor); `2` = FLA `FusedCrossEntropyLoss` (matches FLA exactly); `3` = Primus's chunked linear cross-entropy, which ZAYA1 selects the same way (per-token loss with Megatron's rounding, TP=1; YAML `fused_ce_chunk_tokens`, default 4096 tokens per chunk, and `fused_ce_compile`); `0` = native Megatron CE. |
 | `fused_ce_chunks` | `PRIMUS_FUSED_CE_CHUNKS` | `32` | Number of chunks the FLA CE splits the logits across.  Lower = faster but bigger peak allocation. |
 | `use_fla_fused_swiglu` | `PRIMUS_FLA_SWIGLU` | `1` | Replaces Megatron's naive SwiGLU with FLA's Triton-fused kernel (≈20 ms/step saved). |
 | `use_fla_fused_rmsnorm` | `PRIMUS_FLA_NORM` | `0` | Use FLA's `RMSNorm` in `WrappedTorchNorm`. |
@@ -100,7 +100,7 @@ it on the relevant config flag, so it's a no-op unless that flag is set.
 
 | Patch id | File | Change | Reason |
 |-------|------|--------|--------|
-| `megatron.mamba.fla_fused_ce` | `mamba_fused_ce_patches.py` | Add `_use_fused_cross_entropy` path to `MambaModel`. Mode 1 = `FusedLinearCrossEntropyLoss` (chunked, never materializes the full logits tensor). Mode 2 = `FusedCrossEntropyLoss` (matches FLA exactly, materializes bf16 logits). Selected by `args.fused_ce_mode` via `get_args()`. | Megatron always materializes a `(batch*seq, vocab)` fp32 logits tensor before CE — for 1024 batch × 2048 seq × 32k vocab this is 256 GB at fp32. FLA chunks it. Massive memory + speed win. |
+| `megatron.mamba.fla_fused_ce` | `mamba_fused_ce_patches.py` | Add `_use_fused_cross_entropy` path to `MambaModel`. Mode 1 = `FusedLinearCrossEntropyLoss` (chunked, never materializes the full logits tensor). Mode 2 = `FusedCrossEntropyLoss` (matches FLA exactly, materializes bf16 logits). Mode 3 = Primus's chunked linear cross-entropy, shared with ZAYA1. Selected by `args.fused_ce_mode` via `get_args()`. | Megatron always materializes a `(batch*seq, vocab)` fp32 logits tensor before CE — for 1024 batch × 2048 seq × 32k vocab this is 256 GB at fp32. FLA chunks it. Massive memory + speed win. |
 | `megatron.optimizer.torch_fused_adam` | `torch_fused_adam_patches.py` | Add `PRIMUS_TORCH_OPTIM=1` opt-in path that selects `torch.optim.AdamW(fused=True)` over TE/Apex `FusedAdam`. | TE's FusedAdam has slightly different epsilon-handling internally; toggling this lets us prove that Primus's AdamW is bit-identical to FLA's when both use torch's fused kernel. |
 | `megatron.mlp.fla_swiglu` | `mlp_fla_swiglu_patches.py` | Replace the naive `silu(x_glu) * x_linear` (2 separate kernel launches + intermediate tensor) with FLA's Triton-fused `swiglu(x_glu, x_linear)` (1 fwd + 1 bwd kernel) in `MLP`. Toggle: `args.use_fla_fused_swiglu` (default True) via `get_args()`. | Profiler shows ~3.8× fewer GPU cycles spent on the activation step. Saves ~20 ms/iter at our batch size. |
 | `megatron.torch_norm.fla_rmsnorm` | `torch_norm_fla_rmsnorm_patches.py` | When `args.use_fla_fused_rmsnorm=True`, return `fla.modules.RMSNorm` from `WrappedTorchNorm` instead of `torch.nn.RMSNorm`. Reads from `get_args()`. | FLA's RMSNorm is a fused Triton kernel that matches the reference run's normalization semantics bit-for-bit. |

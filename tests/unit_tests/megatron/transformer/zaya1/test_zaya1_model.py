@@ -443,7 +443,7 @@ def test_turbo_fp8_experts_track_the_split_fp8_experts(parallel_state, monkeypat
 
 
 def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
-    """``zaya_chunked_ce`` on (chunked output projection + CE) vs off (stock)."""
+    """``fused_ce_mode`` 3 (chunked output projection + CE) vs unset (stock)."""
     del parallel_state
     for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
         monkeypatch.delenv(name, raising=False)
@@ -466,8 +466,8 @@ def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
     mask = (torch.rand(batch, seq, device=device) > 0.25).float()
 
     def run(chunked):
-        config.zaya_chunked_ce = chunked
-        config.zaya_chunked_ce_tokens = 5
+        config.fused_ce_mode = 3 if chunked else None
+        config.fused_ce_chunk_tokens = 5
         model.zero_grad(set_to_none=True)
         loss = model(input_ids, position_ids, attention_mask=None, labels=labels)
         ((loss * mask).sum() / mask.sum()).backward()
@@ -485,17 +485,24 @@ def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
 
 def _loss_settings(**config):
     defaults = dict(
-        zaya_chunked_ce=True,
+        fused_ce_mode=3,
+        fused_ce_chunk_tokens=4096,
+        fused_ce_compile=False,
         cross_entropy_loss_fusion=False,
         cross_entropy_fusion_impl="native",
         sequence_parallel=False,
     )
     defaults.update(config)
-    return SimpleNamespace(config=SimpleNamespace(**defaults), pg_collection=None)
+    settings = SimpleNamespace(config=SimpleNamespace(**defaults), pg_collection=None)
+    settings._chunked_ce_blocker = lambda: Zaya1Model._chunked_ce_blocker(settings)
+    return settings
 
 
 def test_chunked_ce_steps_aside_for_any_fused_cross_entropy():
     assert Zaya1Model._chunked_ce_blocker(_loss_settings()) is None
+    assert Zaya1Model._loss_summary(_loss_settings()) == (
+        "chunked linear cross-entropy (fused_ce_mode 3, 4096 tokens per chunk, eager)"
+    )
     for impl in ("native", "te"):
         # Turbo cross-entropy also runs only with cross_entropy_loss_fusion.
         blocker = Zaya1Model._chunked_ce_blocker(
@@ -503,16 +510,27 @@ def test_chunked_ce_steps_aside_for_any_fused_cross_entropy():
         )
         assert blocker == f"cross_entropy_loss_fusion is set ({impl})"
     assert "sequence parallel" in Zaya1Model._chunked_ce_blocker(_loss_settings(sequence_parallel=True))
-    assert Zaya1Model._chunked_ce_blocker(_loss_settings(zaya_chunked_ce=False)) == "zaya_chunked_ce is off"
-    # The build log names the fused cross-entropy that runs, whatever zaya_chunked_ce says.
+    assert Zaya1Model._loss_summary(_loss_settings(fused_ce_mode=None)) == (
+        "Megatron's cross-entropy, as fused_ce_mode is unset"
+    )
+    assert Zaya1Model._chunked_ce_blocker(_loss_settings(fused_ce_mode=0)) == "fused_ce_mode is 0"
+    # FLA's kernels (modes 1 and 2) are wired up only in the Mamba models.
+    for mode in (1, 2):
+        assert "FLA's kernel" in Zaya1Model._chunked_ce_blocker(_loss_settings(fused_ce_mode=mode))
+    # The build log names the fused cross-entropy that runs, whatever fused_ce_mode says.
     blocker = Zaya1Model._chunked_ce_blocker(
-        _loss_settings(zaya_chunked_ce=False, cross_entropy_loss_fusion=True, cross_entropy_fusion_impl="te")
+        _loss_settings(fused_ce_mode=None, cross_entropy_loss_fusion=True, cross_entropy_fusion_impl="te")
     )
     assert blocker == "cross_entropy_loss_fusion is set (te)"
 
 
-def test_chunked_ce_tokens_must_be_a_positive_integer():
-    assert _tiny_config(zaya_chunked_ce_tokens=1).zaya_chunked_ce_tokens == 1
+def test_fused_ce_settings_are_checked():
+    assert _tiny_config(fused_ce_chunk_tokens=1).fused_ce_chunk_tokens == 1
     for tokens in (0, "4096", 4096.0, True):
-        with pytest.raises(ValueError, match="zaya_chunked_ce_tokens"):
-            _tiny_config(zaya_chunked_ce_tokens=tokens)
+        with pytest.raises(ValueError, match="fused_ce_chunk_tokens"):
+            _tiny_config(fused_ce_chunk_tokens=tokens)
+    for mode in (None, 0, 1, 2, 3):
+        assert _tiny_config(fused_ce_mode=mode).fused_ce_mode == mode
+    for mode in (4, -1, "3", 3.0, True):
+        with pytest.raises(ValueError, match="fused_ce_mode must be 0, 1, 2 or 3"):
+            _tiny_config(fused_ce_mode=mode)

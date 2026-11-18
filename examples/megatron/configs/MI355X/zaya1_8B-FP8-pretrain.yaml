@@ -76,8 +76,8 @@ modules:
       # elementwise chains, CCA's convolutions as GEMMs, and the split
       # experts' sort-based dispatch (unused while the experts run as grouped
       # GEMMs, below).
-      # zaya_router_defer_ar stays off: it gained under 1% here. The ZAYA1
-      # chunked cross-entropy (zaya_chunked_ce) stays off too: it rounds each
+      # zaya_router_defer_ar stays off: it gained under 1% here. The chunked
+      # linear cross-entropy (fused_ce_mode: 3) stays off too: it rounds each
       # chunk's output-layer weight gradient to bf16 before summing, below
       # Megatron's own fp32 cross-entropy.
       zaya_attn_flash: true
