@@ -426,12 +426,12 @@ def test_turbo_fp8_experts_track_the_split_fp8_experts(parallel_state, monkeypat
             for expert in moe.local_experts:
                 w = zm._expert_weight(getattr(expert, f"linear_{fc}"))
                 experts.append((torch.zeros_like(w) if w.grad is None else w.grad).float().flatten())
+        # The Turbo experts give the first MoE layer's unused router_states_scale
+        # an exact-zero gradient, where the split experts leave it without one.
         others = sorted(
-            (n, p.grad.float().flatten())
+            (n, (torch.zeros_like(p) if p.grad is None else p.grad).float().flatten())
             for n, p in model.named_parameters()
-            if p.grad is not None
-            and "local_experts" not in n
-            and not n.endswith(("fc1_weight", "fc2_weight"))
+            if "local_experts" not in n and not n.endswith(("fc1_weight", "fc2_weight"))
         )
         return {
             "loss": loss.detach().float(),
