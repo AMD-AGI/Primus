@@ -116,8 +116,11 @@ class MuseSparkModel(GPTModel):
         if config_flag(config, "muse_spark_compile_norms", False) and config_flag(
             config, "muse_spark_compile_fuse_next_norm", False
         ):
-            # each layer's MoE residual also computes the next local layer's input norm
+            # each layer's attention residual also computes its pre-MLP norm, and its MoE
+            # residual the next local layer's input norm
             layers = getattr(getattr(self, "decoder", None), "layers", None) or []
+            for layer in layers:
+                link_next_norm(layer.self_attn_bda, layer.pre_mlp_layernorm)
             for layer, nxt in zip(layers, layers[1:]):
                 link_next_norm(layer.mlp_bda, nxt.input_layernorm)
         log_rank_0(f"[Primus:MuseSpark] built modules: {built_module_summary(self)}")

@@ -234,6 +234,7 @@ def _attn(hn, eps):
     a.hidden_size_per_attention_head = hn
     a.o_norm_eps = eps
     a.o_norm_fused = True  # the CPU tensors here take the eager path anyway
+    a.o_norm_compile = False
     return a
 
 
