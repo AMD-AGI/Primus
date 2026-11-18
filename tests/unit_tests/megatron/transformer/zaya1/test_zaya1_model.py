@@ -286,6 +286,19 @@ def test_tiny_model_wires_stages_and_forwards(parallel_state, monkeypatch):
         model(input_ids, position_ids, None, packed_seq_params=object())
 
 
+def _te_fp8_off():
+    """Transformer Engine's own autocast with FP8 off, for a high-precision reference run.
+
+    Primus's FP8 context saves and restores TE's FP8 flag through class
+    attributes that Transformer Engine 2.20 no longer reads, so once an FP8
+    step has run, TE keeps quantizing outside the context.
+    """
+    import transformer_engine.pytorch as te
+
+    autocast = getattr(te, "autocast", None) or te.fp8_autocast
+    return autocast(enabled=False)
+
+
 def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch):
     """A fresh FP8 model is accurate on its first step, with no amax history.
 
@@ -330,8 +343,10 @@ def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch)
     with torch.no_grad():
         fp8_logits = model(input_ids, position_ids, attention_mask=None).float()
         config.fp8 = None
-        ref_logits = model(input_ids, position_ids, attention_mask=None).float()
+        with _te_fp8_off():
+            ref_logits = model(input_ids, position_ids, attention_mask=None).float()
         config.fp8 = "hybrid"
+    assert not torch.equal(fp8_logits, ref_logits), "the FP8 forward matches the high-precision one exactly"
     assert torch.isfinite(fp8_logits).all()
     cosine = F.cosine_similarity(fp8_logits.flatten(), ref_logits.flatten(), dim=0)
     assert cosine > 0.99, f"cold FP8 logits drifted from high precision: cosine={cosine:.4f}"
@@ -433,12 +448,14 @@ def test_turbo_fp8_experts_track_the_split_fp8_experts(parallel_state, monkeypat
     torch.testing.assert_close(turbo.decoder.layers[1].zaya_block.fc1_weight, stacked, rtol=0, atol=0)
 
     config.fp8 = None
-    reference = run(split)
+    with _te_fp8_off():
+        reference = run(split)
     config.fp8 = "hybrid"
     split_fp8, turbo_fp8 = run(split), run(turbo)
     for what, ref in reference.items():
         e_split, e_turbo = _rel(split_fp8[what], ref), _rel(turbo_fp8[what], ref)
         assert torch.isfinite(turbo_fp8[what]).all(), what
+        assert e_split > 0, f"{what}: the TE FP8 run matches the high-precision reference exactly"
         assert e_turbo <= 1.5 * e_split + 1e-3, f"{what}: Turbo {e_turbo:.3e} against TE {e_split:.3e}"
 
 
