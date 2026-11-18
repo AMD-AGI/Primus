@@ -38,7 +38,6 @@ modules:
       adam_beta2: 0.95
       eod_mask_loss: true
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
 
       # parallel -- TP/PP are env-overridable for multi-node / TP scaling.
       # Defaults 1/1 match the FP8 sibling's single-node DP+FSDP layout (that sibling

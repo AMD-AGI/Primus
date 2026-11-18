@@ -68,7 +68,7 @@ add_bias_linear: false
 
 # Scale-only RMSNorm, no bias (1e-6 set in pretrain override)
 normalization: RMSNorm
-norm_epsilon: 1.0e-6
+layernorm_epsilon: 1.0e-6
 
 # Positional encoding — MLA handles its own RoPE (rotary_base=500000);
 # Mamba2 layers are recurrent and don't use position embeddings.

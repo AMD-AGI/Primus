@@ -75,7 +75,7 @@ attention_dropout: 0.0
 
 position_embedding_type: rope
 normalization: RMSNorm
-norm_epsilon: 1.0e-5
+layernorm_epsilon: 1.0e-5
 init_method_std: 0.008
 
 masked_softmax_fusion: false

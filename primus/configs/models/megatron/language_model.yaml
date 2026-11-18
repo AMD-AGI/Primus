@@ -84,7 +84,7 @@ apply_rope_fusion: true
 # miscellaneous
 clone_scatter_output_in_embedding: true
 
-norm_epsilon: 1.0e-05
+layernorm_epsilon: 1.0e-05
 normalization: "LayerNorm" # alt value supported by TE: "RMSNorm"
 
 # MLA

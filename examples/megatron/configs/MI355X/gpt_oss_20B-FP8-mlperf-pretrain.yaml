@@ -79,7 +79,6 @@ modules:
       adam_eps: 1.0e-5
       eod_mask_loss: true
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
       layernorm_epsilon: 1.0e-05  # RMSNorm epsilon (matches HF rms_norm_eps)
 
       # Dropout (disabled for training)

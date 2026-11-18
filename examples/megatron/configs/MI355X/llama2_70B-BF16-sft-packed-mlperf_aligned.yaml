@@ -180,7 +180,7 @@ modules:
       seed: 1234
       eod_mask_loss: false
       init_method_std: 0.02
-      norm_epsilon: 1.0e-05
+      layernorm_epsilon: 1.0e-05
 
       # ============================================================
       # Parallelism: TP=8 to fit 70B on MI300X 192 GB, SP=false to

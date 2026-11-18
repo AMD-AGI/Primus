@@ -64,7 +64,7 @@ modules:
       seed: 1234
       eod_mask_loss: false
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
+      layernorm_epsilon: 1.0e-6
 
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1

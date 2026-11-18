@@ -88,7 +88,6 @@ modules:
       seed: 5678
       eod_mask_loss: false
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
 
       # ---------- Parallelism (8x MI355X default) ----
       tensor_model_parallel_size: ${PRIMUS_TP:2}

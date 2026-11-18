@@ -38,7 +38,7 @@ attention_dropout: 0.0
 
 position_embedding_type: rope
 normalization: RMSNorm
-norm_epsilon: 1.0e-6
+layernorm_epsilon: 1.0e-6
 init_method_std: 0.008
 
 apply_rope_fusion: true

@@ -64,7 +64,6 @@ modules:
       seed: 1234
       eod_mask_loss: false
       init_method_std: 0.008
-      norm_epsilon: 1.0e-5
       add_qkv_bias: true
       apply_rope_fusion: false
 

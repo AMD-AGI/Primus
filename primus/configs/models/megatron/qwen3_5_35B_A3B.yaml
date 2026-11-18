@@ -54,6 +54,6 @@ rotary_base: 10000000
 rotary_percent: 0.25
 
 init_method_std: 0.02
-norm_epsilon: 1.0e-6
+layernorm_epsilon: 1.0e-6
 
 bias_swiglu_fusion: false

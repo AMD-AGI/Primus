@@ -86,7 +86,6 @@ modules:
       exp_avg_sq_dtype: ${PRIMUS_EXP_AVG_SQ_DTYPE:fp32}
       eod_mask_loss: true
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
       layernorm_epsilon: 1.0e-05
 
       # Dropout

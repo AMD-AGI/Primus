@@ -139,7 +139,6 @@ modules:
       eod_mask_loss: false
 
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
 
       # ---------- Parallelism ----------
       ##pretrained_checkpoint: /workspace/megatron_checkpoints/Llama-2-70b-hf
