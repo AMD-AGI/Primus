@@ -110,6 +110,16 @@ def _install_gdn_rocm_gate_patch() -> None:
         log_rank_0(f"[Patch:{_PATCH_KEY}] GatedDeltaNet already patched; skipping.")
         return
 
+    # Megatron-core 0.19 (`_compute_g_and_beta`) and Megatron-LM main (`_compute_gates`)
+    # compute g in fp32 and hand it to the training kernel, which is what this patch
+    # enforces; only main's inference path still fuses the gate in-kernel.
+    if hasattr(GatedDeltaNet, "_compute_gates") or hasattr(GatedDeltaNet, "_compute_g_and_beta"):
+        log_rank_0(
+            f"[Patch:{_PATCH_KEY}] GatedDeltaNet already precomputes the gate outside the "
+            "training kernel; skipping."
+        )
+        return
+
     patch_method_source(GatedDeltaNet, "forward", _GATE_ORI, _GATE_NEW)
 
     mark_patched(GatedDeltaNet, _PATCH_KEY)

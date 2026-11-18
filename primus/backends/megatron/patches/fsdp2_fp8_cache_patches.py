@@ -62,6 +62,7 @@ def patch_train_step_fp8_cache(ctx: PatchContext):
         config,
         forward_backward_func,
         iteration=None,
+        **train_kwargs,  # pg_collection / p2p_communicator on newer Megatron
     ):
         result = _original_train_step(
             forward_step_func,
@@ -72,6 +73,7 @@ def patch_train_step_fp8_cache(ctx: PatchContext):
             config,
             forward_backward_func,
             iteration=iteration,
+            **train_kwargs,
         )
         if _refresh_scales:
             precompute_fp8_scales_for_fsdp(

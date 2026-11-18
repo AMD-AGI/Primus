@@ -7,7 +7,8 @@
 """Unit tests for the Megatron upstream GatedDeltaNet ROCm gate patch.
 
 Verifies:
-  1. The source anchor still matches upstream ``GatedDeltaNet.forward``.
+  1. The source anchor still matches upstream ``GatedDeltaNet.forward``, or the
+     patch skips itself where upstream already precomputes the gate.
   2. The patch rewrites the forward body and is idempotent.
   3. Registration condition requires both ROCm and ``gated_delta_net``.
 """
@@ -25,6 +26,15 @@ import primus.backends.megatron.patches.gdn_rocm_gate_patches as patch_mod
 from primus.backends.megatron.patches._patch_guard import is_patched
 from primus.core.patches.context import PatchContext
 
+# Megatron-core 0.19 (`_compute_g_and_beta`) and Megatron-LM main (`_compute_gates`) compute
+# the gate in fp32 before the kernel, so there is nothing to rewrite and the patch skips itself.
+_UPSTREAM_PRECOMPUTES_GATE = hasattr(GatedDeltaNet, "_compute_gates") or hasattr(
+    GatedDeltaNet, "_compute_g_and_beta"
+)
+needs_old_forward = pytest.mark.skipif(
+    _UPSTREAM_PRECOMPUTES_GATE, reason="upstream GatedDeltaNet already precomputes the gate"
+)
+
 
 def _clear_patch_state(cls):
     if hasattr(cls, "_primus_applied_patch_keys"):
@@ -40,6 +50,7 @@ def pristine_gdn_forward():
     _clear_patch_state(GatedDeltaNet)
 
 
+@needs_old_forward
 def test_gate_anchor_matches_upstream_forward():
     source = inspect.getsource(GatedDeltaNet.forward)
     assert (
@@ -53,6 +64,7 @@ def test_gate_new_differs_from_anchor():
     assert "A_log.float().exp()" in patch_mod._GATE_NEW
 
 
+@needs_old_forward
 def test_install_patch_rewrites_forward(pristine_gdn_forward, monkeypatch):
     monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
     original = GatedDeltaNet.forward
@@ -69,6 +81,18 @@ def test_install_patch_rewrites_forward(pristine_gdn_forward, monkeypatch):
     assert "A_log.float().exp()" in rewritten
 
 
+@pytest.mark.skipif(not _UPSTREAM_PRECOMPUTES_GATE, reason="older GatedDeltaNet fuses the gate")
+def test_install_patch_skips_when_upstream_precomputes_gate(pristine_gdn_forward, monkeypatch):
+    monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
+    original = GatedDeltaNet.forward
+
+    patch_mod._install_gdn_rocm_gate_patch()
+
+    assert GatedDeltaNet.forward is original
+    assert not is_patched(GatedDeltaNet, patch_mod._PATCH_KEY)
+
+
+@needs_old_forward
 def test_install_patch_is_idempotent(pristine_gdn_forward, monkeypatch):
     monkeypatch.setattr(patch_mod, "log_rank_0", lambda *a, **k: None)
 

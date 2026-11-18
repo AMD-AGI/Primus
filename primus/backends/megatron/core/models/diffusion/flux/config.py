@@ -140,6 +140,8 @@ class FluxConfig(BaseDiffusionConfig):
 
     # Normalization
     layernorm_epsilon: float = 1e-6
+    # Flux specs always fill q/k_layernorm; Megatron-core 0.19+ reject them unless this is on.
+    qk_layernorm: bool = True
 
     # Initialization
     use_cpu_initialization: bool = True
@@ -263,6 +265,8 @@ class FluxConfig(BaseDiffusionConfig):
         if any(d <= 0 for d in self.axes_dim):
             raise ValueError(f"All axes_dim values must be positive, got {self.axes_dim}")
 
+        self._validate_sensitive_layers_on_te_spec()
+
         # Validate RoPE fusion constraints
         if self.apply_rope_fusion:
             import warnings
@@ -284,6 +288,48 @@ class FluxConfig(BaseDiffusionConfig):
                 "=" * 80,
                 UserWarning,
                 stacklevel=2,
+            )
+
+    def _validate_sensitive_layers_on_te_spec(self):
+        """Reject sensitive-layer settings the TransformerEngine spec cannot honour."""
+        from primus.backends.megatron.core.transformer.diffusion_transformer_block import (
+            uses_per_layer_quantization_context,
+        )
+
+        if self.transformer_impl == "local":
+            return
+
+        # Megatron can only switch a first/last layer's quantization off, so on
+        # this spec those layers run in bf16 whatever else is asked for.
+        if self.sensitive_layers_enabled and self.sensitive_layer_precision != "bf16":
+            raise ValueError(
+                f"sensitive_layer_precision={self.sensitive_layer_precision!r} is not supported on "
+                "transformer_impl='transformer_engine', which can only keep sensitive layers in bf16; "
+                "use sensitive_layer_precision: bf16, or transformer_impl: local with fp4"
+            )
+
+        # The stack and full_dit runners call the layers directly, so they miss
+        # the per-layer contexts DiffusionTransformerBlock enters. This also
+        # applies when first_last_layers_bf16 is set without sensitive_layers_enabled.
+        if uses_per_layer_quantization_context(self) and self.torch_compile_strategy not in (
+            "whole_model",
+            "per_block",
+        ):
+            raise ValueError(
+                f"bf16 first/last layers with fp8/fp4 on transformer_impl='transformer_engine' "
+                f"needs torch_compile_strategy 'per_block' or 'whole_model', got "
+                f"{self.torch_compile_strategy!r}: the stack runners bypass the per-layer "
+                "quantization contexts that keep sensitive layers in bf16"
+            )
+
+        # An MXFP4 weight has no lazy column-wise copy, and TE quantizes one for
+        # recompute only when an autocast is already active where the checkpoint
+        # starts, which the per-layer contexts rule out.
+        if uses_per_layer_quantization_context(self) and self.fp4 and self.recompute_granularity == "full":
+            raise ValueError(
+                "bf16 first/last layers with fp4 on transformer_impl='transformer_engine' cannot run "
+                "with full activation recompute: the recomputed MXFP4 linears miss the column-wise "
+                "weight their backward needs; turn recompute off, or use transformer_impl: local"
             )
 
     def get_num_layers(self):

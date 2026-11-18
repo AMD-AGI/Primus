@@ -8,25 +8,35 @@ MaxText for ROCm is a specialized fork of upstream MaxText, designed to enable t
 
 AMD provides a ready-to-use Docker image for AMD Instinct MI300X and MI355X GPUs containing essential components, including JAX, XLA, ROCm libraries, and MaxText utilities.
 
-For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.8`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v268). The release notes are the single source of truth for image contents.
+For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.9`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v269). The release notes are the single source of truth for image contents.
 
-> **Primus source:** the v26.8 image ships no Primus of its own. Use a `release/v26.8` checkout — `primus-cli container` mounts it into the image for you. See [Release notes → Primus source for v26.8](../01-getting-started/release-notes.md#primus-source-for-v268).
+> **Primus source:** The v26.9 image bundles Primus at its build commit `db1a4160` (`/workspace/Primus`). Use a `release/v26.9` checkout all the same—`primus-cli container` mounts it into the image for you. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
 
 ---
 
-## Important notes for v26.8
+## Important notes for v26.9
 
 Read this section before starting a training run. It collects the settings this release requires, the architecture-specific workarounds, and the known issues. The contents change from release to release, so re-read it when you move to a new image tag.
 
 ### Required settings
 
-**Use a `release/v26.8` checkout.** The image contains no Primus, and the branch carries three MaxText environment defaults that restore performance on JAX 0.11.1: CUB radix sort is disabled for MoE top-k (`--xla_gpu_enable_cub_radix_sort=false`), stream priority is honoured again (`DEBUG_HIP_IGNORE_STREAM_PRIORITY=0`) so collectives overlap compute, and dynamic-slice fusion is disabled (`--xla_gpu_enable_dynamic_slice_fusion=false`). An older checkout runs without them and is measurably slower — about 0.8 s/step on DeepSeek-V2-16B and about 10% on Llama-2-7B FP8. They are Primus-managed defaults, so a config's own `env:` block or `XLA_FLAGS_APPEND` can still override them ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
+**MoE recipes on the development branch need a newer stack.** On `main`, the default recipes for Qwen3 30B-A3B, DeepSeek-V2-lite (16B) and Gemma4 26B are dropless and run on the Primus-Turbo grouped GEMM; they need MaxText `release/v26.10` and Primus-Turbo with the JAX grouped GEMM backends, not the v26.9 image. On the v26.9 image, use their `-token_dropping-` recipes. See [Dropless MoE recipes](#dropless-moe-recipes-primus-turbo-grouped-gemm).
 
-**Keep Shardy on.** Shardy is the partitioning system in JAX, and JAX 0.11.1 uses it. Primus enables it by default (`shardy: true` in its MaxText module config), so you only need to act if you have turned it off. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
+**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/jax-training:maxtext-v26.9` image. The image bundles Primus again, at its build commit `db1a4160` on that branch, with MaxText `release/v26.9` (`8d1d43c0`) in `/workspace/maxtext`. `primus-cli container` mounts your checkout into the image and runs it, so a checkout keeps you current if later commits land on the branch. The branch carries the Primus-managed MaxText environment defaults: CUB radix sort is turned off for MoE top-k (`--xla_gpu_enable_cub_radix_sort=false`), stream priority is honored (`DEBUG_HIP_IGNORE_STREAM_PRIORITY=0`) so collectives overlap compute, and dynamic-slice fusion is turned off (`--xla_gpu_enable_dynamic_slice_fusion=false`) ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)). A config's own `env:` block or `XLA_FLAGS_APPEND` can still override them.
+
+**XLA autotuning now defaults to level 3.** Level 4, the previous Primus default, adds the autotuner's correctness checks, which intermittently aborted compilation of the train step on GPU 0 with `Mismatched results with host and device comparison` (`redzone_allocator.cc`) or `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. It shows up most under `primus-cli container`, where every run compiles from scratch; a warm JAX compilation cache in a long-lived container hides it. Level 3 keeps autotuning and drops only those checks ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)). The change was checked for finite losses on the MI325X `nanoo_fp8` MoE recipes; if a plain `fp8` MoE run on MI355X produces NaN losses, set `XLA_GPU_AUTOTUNE_LEVEL=4`, which also restores the old default.
+
+**Keep Shardy on.** Shardy is the partitioning system in JAX, and the JAX in this image uses it. Primus enables it by default (`shardy: true` in its MaxText module config), so you only need to act if you have turned it off. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
 
 ### Changes you may need to act on
 
-**Drop `pure_nnx_decoder` from local configs.** MaxText `release/v26.8` removed the Linen modules and the `pure_nnx_decoder` key with them, and its config schema rejects unknown keys, so a config that still sets it fails validation. The three MI325X `nanoo_fp8` recipes that set it (DeepSeek-V2-16B, Mixtral-8x7B, Qwen3-30B-A3B) are fixed in `release/v26.8` ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
+**MaxText moves to `release/v26.9`.** Upstream drops the `retry_when_tokens_dropped` config key and renames the `cosmos3-*-reasoner` model configs to `weaver-max` / `weaver-mini` ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)). Nothing in Primus uses either, but remove the key from local configs, since the MaxText config schema rejects unknown keys.
+
+**A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so a job restricted to particular GPUs could land on another user's GPU on a shared node. It now keeps the value you or your scheduler set, and warns when it lists a different number of GPUs than `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
+
+If you are moving from v26.7 or earlier:
+
+**Drop `pure_nnx_decoder` from local configs.** MaxText `release/v26.8` removed the Linen modules and the `pure_nnx_decoder` key with them, and its config schema rejects unknown keys, so a config that still sets it fails validation. The three MI325X `nanoo_fp8` recipes that set it (DeepSeek-V2-16B, Mixtral-8x7B, Qwen3-30B-A3B) were fixed in v26.8 ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
 
 **`XLA_FLAGS` in a config now takes precedence** over the Primus-managed defaults, as it always should have; use `XLA_FLAGS_APPEND` to add flags without replacing them ([#1054](https://github.com/AMD-AGI/Primus/pull/1054)). If you relied on the old behaviour, check the effective flags in the launch log.
 
@@ -42,9 +52,17 @@ This variable is a no-op on MI300X (gfx942).
 
 ### Known issues
 
-**Loss curve discrepancy with `packing=false`.** With `packing=false` the loss converges at a slightly higher value than in previous images. To reproduce the earlier convergence, set `NVTE_CK_USES_FWD_V3=0`, which uses Flash Attention v2 for the forward pass instead of v3. This is being tracked and will be addressed in a future release.
+The v26.9 QA runs found no MaxText issues. They covered the MaxText recipes on MI300X and MI355X; the MI325X recipes were not re-run on this image.
 
-**v26.8 runs on a ROCm nightly.** The image takes ROCm `10.2.0a20260923` and a Transformer Engine 2.18 development build. The per-model settings below have not all been re-validated on this stack; re-check throughput and convergence on your own hardware before trusting a number here.
+**v26.9 runs on a ROCm nightly.** The image takes ROCm `10.3.0a20261026` and a Transformer Engine 2.19 development build. Re-check convergence on your own hardware before relying on a recipe for a long run.
+
+**Loss curve discrepancy with `packing=false`.** With `packing=false` the loss converges at a slightly higher value than in earlier images. To reproduce the earlier convergence, set `NVTE_CK_USES_FWD_V3=0`, which uses Flash Attention v2 for the forward pass instead of v3. This is being tracked for a future release.
+
+**Fixed in v26.9:**
+
+- The MI355X Mixtral-8x7B `fp8` recipe ran out of memory on this image; the recipe is fixed ([#1338](https://github.com/AMD-AGI/Primus/pull/1338)).
+- Runs that start grain worker processes (`grain_worker_count` above 0; MaxText's default is 1) trained zero steps and still exited 0, because grain read absl flags that Primus had left unparsed. Synthetic-data runs were not affected ([#1229](https://github.com/AMD-AGI/Primus/pull/1229)).
+- Transformer Engine printed a `return_max_logit` warning on every backward attention call, filling most of a training log. A Primus patch passes the value TE was already falling back to, so the warning is gone and numerics are unchanged ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)).
 
 ---
 
@@ -78,6 +96,26 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 | Qwen3 30B-A3B | `qwen3_30B_A3B` | `bf16`, `nanoo_fp8` | `bf16`, `fp8` |
 
 Browse `examples/maxtext/configs/` for the authoritative list — it tracks whatever configs ship in your checkout.
+
+### Dropless MoE recipes (Primus-Turbo grouped GEMM)
+
+For Qwen3 30B-A3B, DeepSeek-V2-lite (16B) and Gemma4 26B, the default `bf16` recipes (and the `fp8` recipes on MI355X) are dropless: every token reaches every expert it is routed to (`capacity_factor: -1`), and the expert matmuls run as one grouped GEMM on Primus-Turbo (`sparse_matmul: true`, `megablox: false`, `use_turbo_grouped_gemm: true`) with FSDP 8 instead of expert parallelism. The grouped GEMM backend is `hipblaslt` on MI300X/MI325X and `flydsl` on MI355X.
+
+**Requirements.** These recipes need MaxText `release/v26.10` or later and Primus-Turbo built for JAX with the hipBLASLt and FlyDSL grouped GEMM backends (FlyDSL 0.3.4.1 on MI355X), as in the JAX CI image. The `rocm/jax-training:maxtext-v26.9` image described in the rest of this page does not have them: there, MaxText rejects the recipes at startup. Use the `<model>-bf16-token_dropping-pretrain.yaml` recipes on that image.
+
+**fp8 on MI355X.** The dropless `fp8` recipes set `turbo_grouped_gemm_quant: fp8` instead of MaxText's `quantization: fp8`: the routed-expert matmuls run in fp8 (per-tensor e4m3, forward and both gradients), while attention and the other dense layers run in bf16. MaxText's `quantization` cannot be combined with the Turbo grouped GEMM.
+
+| Model | MI300X `bf16` | MI325X `bf16` | MI355X `bf16` | MI355X `fp8` |
+| ----- | ------------- | ------------- | ------------- | ------------ |
+| Qwen3 30B-A3B | 9,484 (5,656) | 11,221 (7,455) | 20,232 (10,038) | 21,059 (12,606) |
+| DeepSeek-V2-lite (16B) | 15,384 (10,056) | 18,558 (12,416) | 36,158 (20,633) | 38,943 (25,921) |
+| Gemma4 26B | 8,268 (5,510) | 10,112 (6,478) | 16,770 (11,445) | 17,505 (13,750) |
+
+Tokens/s/device on 8 GPUs, synthetic data, 20 steps; in parentheses, the previous token-dropping recipe. The MI300X recipes (192 GB HBM) use smaller per-device batches than the MI325X ones (256 GB).
+
+The previous token-dropping recipes (8-way expert parallelism, dense dispatch, a capacity factor of 1 or 1.25) are kept as `<model>-bf16-token_dropping-pretrain.yaml` (and `<model>-fp8-token_dropping-pretrain.yaml` on MI355X). The `nanoo_fp8` recipes on MI300X/MI325X and the Mixtral recipes are unchanged: for Mixtral the token-dropping recipes are as fast as the dropless ones (Mixtral 8x7B `fp8` on MI355X: 15,864 tokens/s/device token-dropping, 15,451 dropless).
+
+**Environment set by the recipes.** The dropless recipes set `XLA_GPU_AUTOTUNE_LEVEL: "1"` (the level they were tuned and measured at) and their own `XLA_FLAGS_APPEND` in their `env:` block; these take precedence over values exported in the shell or passed with `primus-cli --env`, so change them in the recipe. The flags lower the collective combine thresholds (256 MiB on MI300X/MI325X, 1 GiB with pipelined collectives on MI355X) so FSDP collectives overlap with compute, and set `--xla_gpu_first_collective_call_terminate_timeout_seconds=900`: the first collective of a run can start more than 40 s late on one GPU, and XLA's default 40 s limit for it would abort the run.
 
 > **Note:** Some models, such as Llama 3, require an external license agreement through a third party (for example, Meta). The only models supported in this workflow are those listed above.
 
@@ -179,13 +217,13 @@ JAX MaxText is integrated into [Primus](https://github.com/AMD-AGI/Primus), whic
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.8
+git checkout release/v26.9
 git submodule update --init third_party/maxtext/
 ```
 
-That is all the setup required. `primus-cli container` starts the image for you, mounts this checkout into it at the same path, and runs the training inside — so this is the code that executes. (The v26.8 image has no Primus of its own.) It also forwards environment variables you export on the host; the forwarded list is `container.options.env` in `runner/.primus.yaml`.
+That is all the setup required. `primus-cli container` starts the image for you, mounts this checkout into it at the same path, and runs the training inside—so this is the code that executes. It also forwards environment variables you export on the host; the forwarded list is `container.options.env` in `runner/.primus.yaml`.
 
-> **Pass `--image` for MaxText.** The default image in `runner/.primus.yaml` is `rocm/primus`, which is the PyTorch image. MaxText runs need `--image rocm/jax-training:maxtext-v26.8` in container mode, or the image set in your Slurm config file.
+> **Pass `--image` for MaxText.** The default image in `runner/.primus.yaml` is `rocm/primus`, which is the PyTorch image. MaxText runs need `--image rocm/jax-training:maxtext-v26.9` in container mode, or the image set in your Slurm config file.
 
 For detailed usage of `primus-cli`, refer to the [CLI reference](./cli-reference.md).
 
@@ -194,7 +232,7 @@ The examples below target MI355X. Primus automatically sets `RCCL_WARP_SPEED_AUT
 **Container mode (recommended)**—run from the host; `primus-cli` starts the container:
 
 ```bash
-./runner/primus-cli container --image rocm/jax-training:maxtext-v26.8 \
+./runner/primus-cli container --image rocm/jax-training:maxtext-v26.9 \
   -- train pretrain --config examples/maxtext/configs/MI355X/llama2_7B-bf16-pretrain.yaml
 ```
 
@@ -222,7 +260,7 @@ To run a different model or GPU architecture, swap the `--config` path. Configur
 Use the following command to pull the Docker image from Docker Hub:
 
 ```bash
-docker pull rocm/jax-training:maxtext-v26.8
+docker pull rocm/jax-training:maxtext-v26.9
 ```
 
 ### Single-node training
@@ -252,7 +290,7 @@ docker run -it \
   -v $HF_HOME:/hf_cache -e HF_HOME=/hf_cache \
   -e HF_TOKEN=$HF_TOKEN \
   --shm-size 64G --name training_env \
-  rocm/jax-training:maxtext-v26.8
+  rocm/jax-training:maxtext-v26.9
 ```
 
 Execute the `training_env` container (optional if you are already in the container):
@@ -262,10 +300,10 @@ docker start training_env
 docker exec -it training_env bash
 ```
 
-The v26.8 image does not contain Primus, so run from your `release/v26.8` checkout. The `docker run` above mounts `$HOME`, so a checkout under your home directory is visible at the same path. Run training with `primus-cli` in direct mode; configs live under `examples/maxtext/configs/<DEVICE>/` where `<DEVICE>` is `MI300X`, `MI325X` or `MI355X`.
+The image carries Primus at its build commit in `/workspace/Primus`, but run from your `release/v26.9` checkout. The preceding `docker run` command mounts `$HOME`, so a checkout under your home directory is visible at the same path. Run training with `primus-cli` in direct mode; configs live under `examples/maxtext/configs/<DEVICE>/` where `<DEVICE>` is `MI300X`, `MI325X`, or `MI355X`.
 
 ```bash
-cd ~/Primus   # your release/v26.8 checkout
+cd ~/Primus   # your release/v26.9 checkout
 
 # Unquantized (bf16), e.g. Llama 2 7B on MI300X
 # Note: RCCL_WARP_SPEED_AUTO=0 is auto-set by Primus on MI355X (gfx950).
@@ -310,7 +348,7 @@ Every listed model has a bf16 variant. Quantization is device-specific: MI300X u
 Multi-node training is launched through the unified `primus-cli` in Slurm mode. The general form for a multi-node run is:
 
 ```bash
-# From your release/v26.8 Primus checkout
+# From your release/v26.9 Primus checkout
 # RCCL_WARP_SPEED_AUTO=0 is auto-set by Primus on MI355X (gfx950).
 ./primus-cli --config my_maxtext_config.yaml slurm srun -N <NUM_NODES> \
   -- train pretrain --config examples/maxtext/configs/<DEVICE>/<model>-<precision>-pretrain.yaml
@@ -405,8 +443,8 @@ Profile output will be written under the `base_output_directory` specified in th
 #!/bin/bash
 set -e
 
-IMAGE="$1"       # Docker image, e.g. rocm/jax-training:maxtext-v26.8
-TAG="$2"         # Short tag for output folder, e.g. v26.8_llama2_7b
+IMAGE="$1"       # Docker image, for example rocm/jax-training:maxtext-v26.9
+TAG="$2"         # Short tag for output folder, for example v26.9_llama2_7b
 PROFILE_DIR="/path/to/profiles/${TAG}"
 
 mkdir -p "${PROFILE_DIR}"

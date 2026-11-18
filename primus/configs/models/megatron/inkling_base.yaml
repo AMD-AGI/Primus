@@ -1,0 +1,81 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Inkling (Thinking Machines) family defaults: everything that does not change
+# with model size. Size presets (inkling_small*.yaml) extend this file.
+#
+# Numerical reference: transformers `models/inkling` (InklingForCausalLM).
+# Config class: primus/backends/megatron/core/models/inkling/
+#   inkling_transformer_config.py -- every non-Megatron key below is a field
+#   there and is bound by core_transformer_config_from_args.
+#
+# Architecture in one paragraph: decoder-only, no RoPE. Attention alternates
+# five sliding-window layers with one global layer; every layer adds a learned
+# relative-position logit bias (rel_logits = r_t @ P, with r_t a per-token
+# projection of width d_rel per head) and RMS-normalises q and k per head
+# (softmax scale 1/head_dim). Depthwise causal short convolutions (fp32,
+# residual) sit on K, V, the attention output and the MLP output. The first
+# layers are a dense SwiGLU MLP times a learned scalar; the rest are a
+# sigmoid-scored MoE whose shared experts join the top-k routed experts in one
+# joint log-sigmoid normalisation (the "sink"), scaled by route_scale and a
+# learned global_scale. The embedding is RMS-normalised and the final hidden
+# state is divided by a muP width multiplier before the untied LM head.
+###############################################################################
+extends:
+  - llama_base.yaml
+
+model_type: inkling
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: thinkingmachines/Inkling-Small
+
+# ---------- embedding / head ----------
+# Inkling has no positional embedding; position comes from the relative bias.
+# The *args* value must stay "rope": MCore has no NoPE type, and arguments.py
+# raises '--no-position-embedding is deprecated' for anything else once
+# add_position_embedding is false (language_model.yaml). InklingModel
+# hard-codes "none" and never builds a rotary module, so this value is unused.
+position_embedding_type: rope
+apply_rope_fusion: false
+untie_embeddings_and_output_weights: true
+use_embed_norm: true
+# The checkpoint's embed/unembed hold 201024 rows, of which unpadded_vocab_size
+# are real tokens. Megatron pads the tokenizer vocab its own way
+# (make_vocab_size_divisible_by * TP); the importer trims or zero-pads the
+# rows to that size.
+
+# ---------- norms ----------
+normalization: RMSNorm
+layernorm_epsilon: 1.0e-06           # the TransformerConfig field; norm_epsilon is DeepSeek-V4-only
+rms_norm_eps_moe_gate: 1.0e-06
+
+# ---------- attention ----------
+multi_latent_attention: false        # must stay false: arguments.py would swap the config class
+group_query_attention: true
+qk_layernorm: true                   # per-head RMSNorm on q and k (always built by the Inkling spec)
+attention_dropout: 0.0
+hidden_dropout: 0.0
+add_bias_linear: false
+add_qkv_bias: false
+local_layer_ids: null                # null = 5 sliding : 1 global (layer i slides unless (i+1) % 6 == 0)
+inkling_attention_backend: eager     # eager = dense [b, h, s, s] bias (reference); flex = FlexAttention score_mod + block mask
+
+# ---------- MLP / MoE ----------
+swiglu: true
+moe_grouped_gemm: true
+moe_router_score_function: sigmoid
+moe_router_pre_softmax: false
+moe_router_dtype: fp32
+moe_router_enable_expert_bias: true  # e_score_correction_bias: aux-loss-free balancing
+moe_router_load_balancing_type: none
+moe_aux_loss_coeff: 0.0
+moe_token_dispatcher_type: alltoall
+# true = SwiGLUs, routing-weight products, expert combine and global_scale in
+# fp32 (Miles); false = model dtype, as in the transformers reference.
+inkling_fp32_activations: false
+# moe_shared_expert_intermediate_size is derived as
+# moe_num_shared_experts * moe_ffn_hidden_size when left null.
+moe_shared_expert_intermediate_size: null

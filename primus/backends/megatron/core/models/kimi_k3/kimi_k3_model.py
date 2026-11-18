@@ -37,11 +37,7 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
 from megatron.core.models.common.language_module.language_module import LanguageModule
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import ModelType
-from megatron.core.transformer.multi_token_prediction import (
-    MultiTokenPredictionBlock,
-    mtp_on_this_rank,
-    process_mtp_loss,
-)
+from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from torch import Tensor
 
@@ -50,6 +46,10 @@ from primus.backends.megatron.core.models.kimi_k3.kimi_k3_mtp_specs import (
 )
 from primus.backends.megatron.core.models.kimi_k3.kimi_k3_transformer_config import (
     KimiK3TransformerConfig,
+)
+from primus.backends.megatron.core.utils import (
+    mtp_on_this_rank_compat,
+    process_mtp_loss_compat,
 )
 
 __all__ = ["KimiK3Model"]
@@ -116,7 +116,7 @@ class KimiK3Model(LanguageModule):
             # ``self.mtp_block_spec``, so the wiring stays inspectable —
             # ``deepseek_v4_model.py`` does the same.
             try:
-                self.mtp_process = mtp_on_this_rank(self.config, ignore_virtual=False, vp_stage=vp_stage)
+                self.mtp_process = mtp_on_this_rank_compat(self.config, vp_stage, self.pg_collection)
             except (AssertionError, RuntimeError, AttributeError):
                 self.mtp_process = False
 
@@ -275,7 +275,7 @@ class KimiK3Model(LanguageModule):
             output_weight = self.shared_embedding_or_output_weight()
 
         if self.mtp_process and getattr(self, "mtp", None) is not None:
-            hidden_states = process_mtp_loss(
+            hidden_states = process_mtp_loss_compat(
                 hidden_states=hidden_states,
                 labels=labels,
                 loss_mask=loss_mask,
@@ -286,6 +286,7 @@ class KimiK3Model(LanguageModule):
                 compute_language_model_loss=self.compute_language_model_loss,
                 config=self.config,
                 cp_group=getattr(self.pg_collection, "cp", None),
+                tp_group=getattr(self.pg_collection, "tp", None),
                 packed_seq_params=packed_seq_params,
                 scale_logits_fn=(self._scale_logits if getattr(self.config, "use_mup", False) else None),
             )

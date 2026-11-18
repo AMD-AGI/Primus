@@ -70,6 +70,62 @@ echo "Rank:    ${NODE_RANK}"
 echo "Master:  ${MASTER_ADDR}:${MASTER_PORT}"
 echo "============================================"
 
+# RCCL turns cuMem off when uname reports a kernel older than 6.8, even if
+# amdgpu supports cuMem (a RHEL 5.14 uname is one example). Preload the shim
+# only then, or when FAKE_UNAME_RELEASE / LUX_FAKE_KERNEL is set. A 6.8+
+# report is left unchanged. This preload is process-local. run_with_docker.sh
+# reaches training only through this script, so the shim is built here too.
+_kernel_release_needs_fake_uname() {
+    local rel="$1" major rest minor
+    major="${rel%%.*}"
+    rest="${rel#*.}"
+    minor="${rest%%.*}"
+    major="${major%%[^0-9]*}"
+    minor="${minor%%[^0-9]*}"
+    if [[ -z "${major}" || -z "${minor}" ]]; then
+        return 0
+    fi
+    if (( major > 6 || (major == 6 && minor >= 8) )); then
+        return 1
+    fi
+    return 0
+}
+
+_resolve_fake_uname_release() {
+    if [[ -n "${FAKE_UNAME_RELEASE:-}" ]]; then
+        printf '%s' "${FAKE_UNAME_RELEASE}"
+        return 0
+    fi
+    if [[ -n "${LUX_FAKE_KERNEL:-}" ]]; then
+        printf '%s' "${LUX_FAKE_KERNEL}"
+        return 0
+    fi
+    if _kernel_release_needs_fake_uname "$(uname -r)"; then
+        printf '%s' "6.8.0"
+        return 0
+    fi
+    return 1
+}
+
+_fake_release=""
+if _fake_release="$(_resolve_fake_uname_release)"; then
+    _fakeuname_src="${SCRIPT_DIR}/libfakeuname.c"
+    _fakeuname_so="${FAKE_UNAME_SO:-${LUX_FAKE_UNAME_SO:-/tmp/libfakeuname.so}}"
+    if [[ ! -f "${_fakeuname_src}" ]]; then
+        echo "[ERROR] libfakeuname source not found: ${_fakeuname_src}" >&2
+        exit 1
+    fi
+    gcc -shared -fPIC -O2 -o "${_fakeuname_so}" "${_fakeuname_src}" -ldl
+    export FAKE_UNAME_RELEASE="${_fake_release}"
+    case ":${LD_PRELOAD:-}:" in
+        *":${_fakeuname_so}:"*) ;;
+        *) export LD_PRELOAD="${_fakeuname_so}${LD_PRELOAD:+:${LD_PRELOAD}}" ;;
+    esac
+    echo "fake uname $(uname -r) (real kernel $(env -u FAKE_UNAME_RELEASE -u LUX_FAKE_KERNEL -u LD_PRELOAD uname -r))"
+else
+    echo "reported kernel $(uname -r) is 6.8 or newer; uname left unchanged"
+fi
+
 # Start timing
 start=$(date +%s)
 start_fmt=$(date +%Y-%m-%d\ %r)

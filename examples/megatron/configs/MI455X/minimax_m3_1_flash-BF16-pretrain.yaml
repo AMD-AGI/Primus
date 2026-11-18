@@ -1,0 +1,29 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# MiniMax-M3.1-Flash BF16 proxy pretraining on MI455X (gfx1250): the MiniMax-M3
+# experiment with MSA in every layer, the first three included; those keep their
+# dense MLPs. Launch with
+#   EXP=examples/megatron/configs/MI455X/minimax_m3_1_flash-BF16-pretrain.yaml \
+#       bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
+# The launcher's PRIMUS_TOTAL_LAYERS sets the depth; moe_layer_freq stays the
+# launcher's (first three dense). The M3 experiment sets the two sparse patterns
+# to M3's, so they are put back to the preset's `1` (every layer), which follows
+# num_layers.
+###############################################################################
+
+extends:
+  - minimax_m3-BF16-pretrain.yaml
+
+exp_name: ${PRIMUS_EXP_NAME:minimax_m3_1_flash-pretrain}
+
+modules:
+  pre_trainer:
+    model: minimax_m3.1_flash.yaml
+    overrides:
+      wandb_project: "Primus_MiniMax_M3_1_Flash_Pretrain"
+      sparse_attention_freq: 1
+      sparse_disable_index_value: 1

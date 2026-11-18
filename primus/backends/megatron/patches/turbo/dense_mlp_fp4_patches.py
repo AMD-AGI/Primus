@@ -9,7 +9,7 @@ Dense MXFP4 SwiGLU MLP patch
 ============================
 
 Replaces Megatron ``MLP.forward``'s fused-LN ``linear_fc1`` + SwiGLU +
-``linear_fc2`` with Primus-Turbo ``dense_mlp_fp4`` (dense ``kernel_gemm_4w``
+``linear_fc2`` with Primus-Turbo ``mlp_fp4`` (dense ``kernel_gemm_4w``
 + ``StoreCSwiGLU`` for MLP-up; ``gemm_fp4`` for fc2 / backward). TE's spec
 bakes pre-MLP RMSNorm into ``linear_fc1`` as ``layer_norm_weight``; that
 norm still runs here so DDP overlap hooks see it. QKV and O-proj stay on
@@ -25,6 +25,8 @@ per-token MoE scale.
 from __future__ import annotations
 
 import os
+
+import torch
 
 from primus.backends.megatron.patches._patch_guard import is_patched, mark_patched
 from primus.core.patches import PatchContext, get_args, register_patch
@@ -146,8 +148,65 @@ def _run_module_forward_pre_hooks(module, args):
     return args
 
 
+def _wrap_prequant(x, prequant, config):
+    """Wrap a fused-norm ``(row, row_scale, col, col_scale)`` as MXFP4 operands.
+
+    ``row`` is the forward operand; ``col`` is the RHT col-wise wgrad operand.
+    """
+    from primus_turbo.pytorch.core.low_precision import (
+        MXFP4_BLOCK_SIZE,
+        ScalingGranularity,
+        ScalingRecipe,
+        float4_e2m1fn_x2,
+    )
+    from primus_turbo.pytorch.core.quantized_tensor import QuantizedTensor
+
+    row, row_scale, col, col_scale = prequant
+    hidden = x.shape[-1]
+    rows = x.reshape(-1, hidden).shape[0]
+
+    def _wrap(data, scale, shape, axis, recipe):
+        return QuantizedTensor(
+            data.contiguous(),
+            scale.contiguous(),
+            shape=shape,
+            orig_dtype=x.dtype,
+            dest_dtype=float4_e2m1fn_x2,
+            granularity=ScalingGranularity.MX_BLOCKWISE,
+            block_size=MXFP4_BLOCK_SIZE,
+            scaling_recipe=recipe,
+            scale_rounding_mode=config.scale_rounding_mode,
+            quantized_axis=axis,
+        )
+
+    return (
+        _wrap(row, row_scale, torch.Size((rows, hidden)), -1, ScalingRecipe()),
+        _wrap(col, col_scale, torch.Size((hidden, rows)), -2, ScalingRecipe(use_rht=True)),
+    )
+
+
+class _PrequantSTE(torch.autograd.Function):
+    """Keep the MLP dgrad connected to the BF16 norm output ``x``."""
+
+    @staticmethod
+    def forward(ctx, x, prequant, config):
+        ctx.input_shape = x.shape
+        ctx.set_materialize_grads(False)
+        row, col = _wrap_prequant(x, prequant, config)
+        # The col-wise operand only feeds the weight gradient.
+        ctx.mark_non_differentiable(col)
+        return row, col
+
+    @staticmethod
+    def backward(ctx, grad_row, grad_col):
+        del grad_col
+        grad_x = None if grad_row is None else grad_row.reshape(ctx.input_shape)
+        return grad_x, None, None
+
+
 def _forward_turbo_dense_mlp_fp4(mlp, hidden_states):
-    from primus_turbo.pytorch.ops.dense_mlp_fp4 import dense_mlp_fp4
+    from primus_turbo.pytorch.core.quantized_tensor import QuantizedTensorPair
+    from primus_turbo.pytorch.ops.mlp_fp4 import mlp_fp4
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboLowPrecisionGlobalStateManager,
@@ -167,18 +226,20 @@ def _forward_turbo_dense_mlp_fp4(mlp, hidden_states):
 
     quant = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
     assert quant is not None and quant.mxfp4_scaling(), "turbo_fused_gemm requires MXFP4 Turbo autocast"
+    config = quant.data()
     pre = getattr(mlp.linear_fc1, "_prequant_x", None)
-    y = dense_mlp_fp4(
+    if pre is not None:
+        x = QuantizedTensorPair(*_PrequantSTE.apply(x, pre, config))
+    y = mlp_fp4(
         x,
         w1,
         w2,
         trans_w1=True,
         trans_w2=True,
         out_dtype=hidden_states.dtype,
-        config=quant.data(),
+        config=config,
         fuse_wgrad_accum_pattern=_fuse_wgrad_accum_pattern(mlp.config, w1),
         activation="silu",
-        x_prequant=pre,
     )
     return y.view(*leading, y.shape[-1]), None
 
@@ -217,7 +278,7 @@ def _install_dense_mlp_fp4_patch() -> None:
     mark_patched(MLP, _PATCH_KEY)
     log_rank_0(
         f"[Patch:{_PATCH_KEY}] MLP.forward routes dense SwiGLU through "
-        "primus_turbo.ops.dense_mlp_fp4 when turbo_fused_gemm is set."
+        "primus_turbo.ops.mlp_fp4 when turbo_fused_gemm is set."
     )
 
 

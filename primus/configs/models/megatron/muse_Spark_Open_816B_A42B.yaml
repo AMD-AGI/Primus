@@ -1,0 +1,33 @@
+###############################################################################
+# Muse-Spark-Open-816B-A42B (text decoder): 62 layers, 256 experts top-8.
+###############################################################################
+
+extends:
+  - muse_spark/muse_spark_base.yaml
+
+tokenizer_model: meta-models/Muse-Spark-Open-816B-A42B
+# HF text_config.vocab_size. The embedding / head rows are this rounded up to a multiple
+# of 64 (the muse_spark_vocab patch and the converter; TP is not a factor), for the HF
+# tokenizer and for mock data alike, so the shapes match the checkpoint at every TP.
+vocab_size: 202048
+
+num_layers: 62  # an even PP split needs PP in {1, 2, 31, 62}; else decoder_first/last_pipeline_num_layers
+hidden_size: 8192
+ffn_hidden_size: 16384
+num_attention_heads: 128
+num_query_groups: 16
+kv_channels: 64
+max_position_embeddings: 1048576
+rotary_base: 500000
+# per layer, 1 = sliding window / 1 = NoPE; pattern of 4: [sliding, full(NoPE), sliding, sliding],
+# exactly the 62 layers of the released model (a depth-reduced run keeps the first num_layers,
+# with a warning in the log)
+window_attn_skip_freq: "([1,0,1,1]*15+[1,0])"
+no_rope_freq: "([0,1,0,0]*15+[0,1])"
+
+num_experts: 256
+moe_router_topk: 8
+moe_ffn_hidden_size: 4096
+moe_latent_size: 4096
+
+init_method_std: 0.02

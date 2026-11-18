@@ -322,6 +322,13 @@ one. They often differ in `eos_token_id` — `Llama-3.3-70B-Instruct` reports
 `128009` (`<|eot_id|>`) where the base model reports `128001`
 (`<|end_of_text|>`) — and that id is appended to every document as EOD.
 
+Some tokenizers have no eos token at all; Inkling's leaves `eos_token`,
+`bos_token` and `pad_token` unset. Name the end-of-document token with
+`--eod-token`, e.g. `--eod-token '<|endoftext|>'` for Inkling. It must be a
+single token of the vocabulary, and it is saved as the `eos_token` of the
+tokenizer copy in the dataset directory, so the data and the training config
+agree on it.
+
 > The stock `examples/megatron/prepare.py` cannot do this job: it fetches
 > BookCorpus through a dataset loading script, which `datasets>=3.0` refuses to
 > execute. `examples/megatron/preprocess_data.py` cannot either: it imports

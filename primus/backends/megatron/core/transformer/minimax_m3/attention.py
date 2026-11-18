@@ -25,8 +25,8 @@ upstream's -- only the attention core is replaced. (The unused
 parameters, so leaving it costs nothing.)
 
 ``msa_backend`` picks the core: ``eager``, the plain-PyTorch reference that
-materialises the full score matrix, or ``flydsl``, the gfx950 kernels in
-``minimax_m3/flydsl`` that never do.
+materialises the full score matrix, or ``flydsl``, the gfx950 (MFMA) and
+gfx1250 (wave32 WMMA) kernels in ``minimax_m3/flydsl`` that never do.
 
 Mirrors ``MiniMaxM3VLAttention`` in transformers'
 ``models/minimax_m3_vl/modeling_minimax_m3_vl.py``.
@@ -36,7 +36,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import torch
-from megatron.core.models.common.embeddings.rope_utils import _apply_rotary_pos_emb_bshd
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
@@ -61,6 +60,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss import (
     slot_mass_from_probs,
     slot_mass_from_slot_lse,
 )
+from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
 
 # Backends that compute the block-sparse attention itself.
 MSA_BACKENDS = ("eager", "flydsl")
@@ -88,6 +88,7 @@ class MinimaxSparseAttention(SelfAttention):
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         if not isinstance(config, MSATransformerConfig):
             raise TypeError(
@@ -103,6 +104,7 @@ class MinimaxSparseAttention(SelfAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+            **({"name": name} if name is not None else {}),
         )
 
         self.block_size = config.sparse_block_size
@@ -134,7 +136,7 @@ class MinimaxSparseAttention(SelfAttention):
 
         self.msa_attention = None
         if config.msa_backend == "flydsl":
-            # Imported here, not at module level: flydsl exists only on gfx950 builds.
+            # Imported here, not at module level: flydsl is not in every build.
             from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_function import (
                 msa_attention,
             )
@@ -212,14 +214,12 @@ class MinimaxSparseAttention(SelfAttention):
             q_pos_emb, k_pos_emb = (
                 rotary_pos_emb if isinstance(rotary_pos_emb, tuple) else (rotary_pos_emb,) * 2
             )
-            # Unfused on purpose; see the note in indexer.py.
-            query = _apply_rotary_pos_emb_bshd(
-                query, q_pos_emb, rotary_interleaved=self.config.rotary_interleaved
-            )
-            key = _apply_rotary_pos_emb_bshd(
-                key, k_pos_emb, rotary_interleaved=self.config.rotary_interleaved
-            )
-            index_pos_emb = q_pos_emb
+            # Unfused on purpose; see the note in indexer.py. The indexer reuses q_rope's tables.
+            q_rope = RopeTables(q_pos_emb)
+            k_rope = q_rope if k_pos_emb is q_pos_emb else RopeTables(k_pos_emb)
+            query = q_rope.apply(query, self.config.rotary_interleaved)
+            key = k_rope.apply(key, self.config.rotary_interleaved)
+            index_pos_emb = q_rope
         else:
             index_pos_emb = None
 

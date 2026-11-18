@@ -20,6 +20,8 @@ echo "[INFO] Using pip cache: ${PIP_CACHE_DIR}"
 mkdir -p "${PIP_CACHE_DIR}"
 
 pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
+# The image stub satisfies `import modelopt` but has no modelopt.torch. Install
+# the real package over it. Training calls modelopt.torch.distill at startup.
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia_resiliency_ext
 

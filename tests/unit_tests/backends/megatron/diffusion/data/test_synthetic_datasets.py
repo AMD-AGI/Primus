@@ -124,6 +124,50 @@ class TestSyntheticDatasetProviderLookup(PrimusUT):
         assert cls is not None
         assert cls.__name__ == "PreGeneratedMockFluxSchnellDataset"
 
+    # Note: PrimusUT is a unittest.TestCase, which pytest cannot parametrize,
+    # so the two families are spelled out rather than swept.
+
+    def test_family_key_selects_pregenerated_wan_dataset(self):
+        """A 'family' key reaches the Wan defaults that model_type cannot.
+
+        The trainer collapses the generic 'diffusion_model' model_type to
+        'flux' before the provider is built, so without this key no config
+        could select a Wan mock dataset at all.
+        """
+        provider = SyntheticDatasetProvider(dataset_config={"family": "wan"})
+        assert provider._import_dataset_class().__name__ == "PreGeneratedMockWanDataset"
+
+    def test_family_key_selects_onthefly_wan_dataset(self):
+        provider = SyntheticDatasetProvider(dataset_config={"family": "wan_onthefly"})
+        assert provider._import_dataset_class().__name__ == "MockWanDataset"
+
+    def test_family_key_overrides_model_type(self):
+        """'family' wins over model_type, which is the point of the key."""
+        provider = SyntheticDatasetProvider(dataset_config={"family": "wan"}, model_type="flux")
+        assert provider.model_type == "wan"
+        assert provider._import_dataset_class().__name__ == "PreGeneratedMockWanDataset"
+
+    def test_absent_family_key_preserves_model_type(self):
+        """Configs that do not set 'family' behave exactly as before."""
+        provider = SyntheticDatasetProvider(dataset_config={}, model_type="flux_schnell")
+        assert provider.model_type == "flux_schnell"
+        assert provider._import_dataset_class().__name__ == "PreGeneratedMockFluxSchnellDataset"
+
+    def test_explicit_class_still_wins_over_family(self):
+        """An explicit 'class' outranks the family default."""
+        provider = SyntheticDatasetProvider(
+            dataset_config={
+                "family": "wan",
+                "class": "primus.backends.megatron.data.synthetic.MockFluxDataset",
+            }
+        )
+        assert provider._import_dataset_class().__name__ == "MockFluxDataset"
+
+    def test_unknown_family_names_the_resolved_type(self):
+        """The error reports the family that was resolved, not the raw model_type."""
+        with pytest.raises(ValueError, match="model_type='nope'"):
+            SyntheticDatasetProvider(dataset_config={"family": "nope"}, model_type="flux")
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

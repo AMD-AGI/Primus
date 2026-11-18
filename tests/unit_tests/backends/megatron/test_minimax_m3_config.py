@@ -65,6 +65,15 @@ def test_layer_pattern_defaults_to_every_layer():
     assert _config().sparse_layer_pattern == (1,) * 60
 
 
+def test_layer_pattern_from_an_int_follows_num_layers():
+    """M3.1-Flash's preset spells "every layer" as `1`, so its 8-layer proxy
+    overrides num_layers without touching the two sparse patterns."""
+    config = _config(num_layers=8, sparse_attention_freq=1, sparse_disable_index_value=1)
+
+    assert config.sparse_layer_pattern == (1,) * 8
+    assert config.sparse_disable_index_value == (1,) * 8
+
+
 def test_released_defaults_match_config_json():
     config = _config(sparse_attention_freq=_M3_FREQ)
 
@@ -238,7 +247,17 @@ def test_patch_is_idempotent(patched_config_selection):
     assert arguments_module.core_transformer_config_from_args is patched_config_selection.wrapper
 
 
-def test_preset_builds_the_real_config(monkeypatch):
+@pytest.mark.parametrize(
+    "preset_name, tokenizer_model, rotary_base, sparse_pattern",
+    [
+        ("minimax_m3.yaml", "MiniMaxAI/MiniMax-M3", 5000000, (0,) * 3 + (1,) * 57),
+        # M3.1-Flash extends M3 and moves layers 1-3 onto MSA as well.
+        ("minimax_m3.1_flash.yaml", "MiniMaxAI/MiniMax-M3.1-Flash", 10000000, (1,) * 60),
+    ],
+)
+def test_preset_builds_the_real_config(
+    monkeypatch, preset_name, tokenizer_model, rotary_base, sparse_pattern
+):
     """End-to-end over the shipped preset: YAML -> args -> MSATransformerConfig.
 
     The stubbed tests above pin the patch's dispatch; this one pins that the
@@ -253,7 +272,7 @@ def test_preset_builds_the_real_config(monkeypatch):
     from primus.backends.megatron.argument_builder import MegatronArgBuilder
     from primus.core.config.preset_loader import PresetLoader
 
-    preset = PresetLoader.load("minimax_m3.yaml", "megatron", "models")
+    preset = PresetLoader.load(preset_name, "megatron", "models")
 
     builder = MegatronArgBuilder()
     builder.update(preset)
@@ -281,6 +300,8 @@ def test_preset_builds_the_real_config(monkeypatch):
     config = arguments_module.core_transformer_config_from_args(args)
 
     assert isinstance(config, MSATransformerConfig)
+    assert args.tokenizer_model == tokenizer_model
+    assert args.rotary_base == rotary_base
     # swigluoai
     assert config.activation_func is quick_gelu
     assert config.gated_linear_unit is True
@@ -289,9 +310,11 @@ def test_preset_builds_the_real_config(monkeypatch):
     # use_gemma_norm
     assert config.normalization == "RMSNorm"
     assert config.layernorm_zero_centered_gamma is True
-    # MSA
-    assert config.sparse_layer_pattern == (0,) * 3 + (1,) * 57
+    # MSA; both models keep dense MLPs in layers 1-3
+    assert config.sparse_layer_pattern == sparse_pattern
     assert config.sparse_topk_blocks == 16
+    assert config.num_moe_experts == 128
+    assert config.moe_layer_freq == "([0]*3+[1]*57)"
 
 
 def test_bias_activation_fusion_is_rejected():

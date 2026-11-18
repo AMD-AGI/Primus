@@ -86,6 +86,20 @@ def _import_real_megatron_transformer_block():
     return TransformerBlock
 
 
+def _require_block_checkpointed_forward(TransformerBlock):
+    """Megatron-LM main replaced the method with ``megatron.core.recompute.checkpointed_forward``."""
+    if not hasattr(TransformerBlock, "_checkpointed_forward"):
+        pytest.skip("TransformerBlock._checkpointed_forward is gone (Megatron-LM main)")
+
+
+def _import_main_recompute():
+    try:
+        import megatron.core.recompute as recompute_mod
+    except ImportError:
+        pytest.skip("megatron.core.recompute only exists on Megatron-LM main")
+    return recompute_mod
+
+
 def _current_checkpointed_forward_sha256(TransformerBlock) -> str:
     src = inspect.getsource(TransformerBlock._checkpointed_forward)
     src = src.replace("\r\n", "\n").replace("\r", "\n")
@@ -108,6 +122,7 @@ def _import_patch_module():
 def test_megatron_checkpointed_forward_signature_is_compatible():
     """The wrapper forwards using these exact kwargs; upstream must match."""
     TransformerBlock = _import_real_megatron_transformer_block()
+    _require_block_checkpointed_forward(TransformerBlock)
     actual_params = list(inspect.signature(TransformerBlock._checkpointed_forward).parameters)
 
     assert actual_params == _EXPECTED_CHECKPOINTED_FORWARD_PARAMS, (
@@ -126,6 +141,7 @@ def test_megatron_checkpointed_forward_source_unchanged():
     is confirmed, update ``_EXPECTED_MEGATRON_CHECKPOINTED_FORWARD_SHA256``.
     """
     TransformerBlock = _import_real_megatron_transformer_block()
+    _require_block_checkpointed_forward(TransformerBlock)
     current = _current_checkpointed_forward_sha256(TransformerBlock)
 
     assert current == _EXPECTED_MEGATRON_CHECKPOINTED_FORWARD_SHA256, (
@@ -135,6 +151,40 @@ def test_megatron_checkpointed_forward_source_unchanged():
         "Please audit primus/backends/megatron/patches/recompute_layer_patches.py "
         "and, once compatibility is confirmed, update the expected fingerprint."
     )
+
+
+def test_main_recompute_anchor_is_unique():
+    """The recompute_layer_ids branch is spliced in front of exactly one dispatch."""
+    recompute_mod = _import_main_recompute()
+    mod = _import_patch_module()
+
+    source = inspect.getsource(recompute_mod.checkpointed_forward)
+
+    assert source.count(mod._MAIN_RECOMPUTE_ORI) == 1
+    # The injected branch drives upstream's own per-layer runner.
+    assert "def chunk_runner(start: int, end: int, use_checkpoint: bool)" in source
+
+
+def test_main_install_rebinds_both_references(monkeypatch):
+    """transformer_block imports checkpointed_forward by name, so both bindings must move."""
+    recompute_mod = _import_main_recompute()
+    import megatron.core.transformer.transformer_block as transformer_block_mod
+
+    mod = _import_patch_module()
+    original = recompute_mod.checkpointed_forward
+    # setattr to the same value only so monkeypatch restores both on teardown.
+    monkeypatch.setattr(recompute_mod, "checkpointed_forward", original)
+    monkeypatch.setattr(transformer_block_mod, "checkpointed_forward", original)
+
+    mod._install_main_recompute_layer_ids()
+    patched = recompute_mod.checkpointed_forward
+
+    assert patched is not original
+    assert patched._primus_original is original
+    assert transformer_block_mod.checkpointed_forward is patched
+
+    mod._install_main_recompute_layer_ids()
+    assert recompute_mod.checkpointed_forward is patched
 
 
 # ---------------------------------------------------------------------------

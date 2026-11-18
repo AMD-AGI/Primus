@@ -18,9 +18,16 @@ import torch
 pytest.importorskip("megatron")
 pytest.importorskip("flydsl")
 
+
+def _gcn_arch() -> str:
+    if not torch.cuda.is_available():
+        return ""
+    return torch.cuda.get_device_properties(0).gcnArchName
+
+
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName,
-    reason="the flydsl MSA kernels target gfx950",
+    "gfx950" not in _gcn_arch() and "gfx1250" not in _gcn_arch(),
+    reason="flydsl MSA kernels target gfx950, plus the wave32 WMMA path on gfx1250",
 )
 
 S, BATCH, GROUPS, HIDDEN = 600, 2, 2, 512
@@ -68,6 +75,7 @@ def _build(backend):
         msa_backend=backend,
         params_dtype=torch.bfloat16,
         bf16=True,
+        qk_layernorm=True,  # the spec below fills q/k_layernorm; Megatron-core >= 0.19 requires the flag
     )
     spec = get_gpt_layer_with_transformer_engine_spec(qk_layernorm=True)
     submodules = _widen_submodules(spec.submodules.self_attention.submodules)
@@ -83,14 +91,25 @@ def _run(module, hidden, rope, dout):
         MSA_INDEXER_LOSS_NAME,
     )
 
-    tracker = get_moe_layer_wise_logging_tracker()
-    tracker.pop(MSA_INDEXER_LOSS_NAME, None)
+    try:
+        from megatron.core.transformer.moe.moe_utils import get_moe_metrics_tracker
+    except ImportError:  # older Megatron: the legacy dict is the tracker itself
+        get_moe_metrics_tracker = None
+
+    def clear():
+        if get_moe_metrics_tracker is not None:
+            get_moe_metrics_tracker().clear()
+        else:
+            get_moe_layer_wise_logging_tracker().pop(MSA_INDEXER_LOSS_NAME, None)
+
+    clear()
     module.train()
     module.zero_grad(set_to_none=True)
     x = hidden.clone().requires_grad_(True)
     out, _ = module(x, rotary_pos_emb=rope)
     out.backward(dout)
-    loss = tracker.pop(MSA_INDEXER_LOSS_NAME)["values"][0].item()
+    loss = get_moe_layer_wise_logging_tracker()[MSA_INDEXER_LOSS_NAME]["values"][0].item()
+    clear()
     grads = {name: p.grad.float() for name, p in module.named_parameters() if p.grad is not None}
     return out.float(), x.grad.float(), grads, loss
 

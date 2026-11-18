@@ -30,6 +30,14 @@ manual edit:
 - Keeps exactly **three** detailed sections, evicting the rest.
 - Is idempotent: a second run replaces the existing section rather than adding one.
 
+With `--family` it merges one family into a release section that may already hold the
+other family's (the two images can be weeks apart): that family's image block, its part
+of `### Changes since`, and any other block the body carries (`### Primus source`) are
+replaced or inserted; the other family's blocks are kept. `--highlights <file>` does the
+same for `## Highlights for vX.Y`, whose subsections are `### Both families`,
+``### `rocm/primus` — ...`` and ``### `rocm/jax-training:maxtext` — ...``. The golden
+replay checks that v26.8 replayed a family at a time gives the page that shipped.
+
 Two things it deliberately leaves to you, and reports as NEXT steps:
 
 - Adding the evicted release's headline row under `## Earlier releases`. Never edit
@@ -39,8 +47,10 @@ Two things it deliberately leaves to you, and reports as NEXT steps:
   `check_links.py` — rotating v26.4 out orphaned `#primus-source-for-v264` on the
   first run.
 
-The outgoing release's `## Highlights` moves down into its own section as a
-`### Highlights` subsection, so the page keeps its history.
+The outgoing release's `## Highlights for vX.Y` moves down into its own section as a
+`### Highlights for vX.Y` subsection (every heading one level deeper), so the page keeps
+its history. `rotate` does this as soon as a newer release is rotated in; it was a hand
+edit until v26.8.
 
 ### What `check` verifies, and what it allows
 
@@ -108,28 +118,30 @@ PyTorch family, and a single merged list implied MaxText gained capability it di
 
 ### The management email
 
-`tools/release_docs/announcements/vX.Y.md`, written to be pasted into an inbox rather
-than read next to the docs. It restates the page highlights for a different reader, so it
-is a derived artifact and never the source of a version number or of a highlight — take
-versions from `data/vX.Y-*.json` like everything else, and put anything new on the page
-first.
+One email per image family: `output/release-docs/vX.Y/announcement-<family>.md`
+(`primus` or `jax`), written to be pasted into an inbox rather than read next to the docs.
+It restates the page highlights for a different reader, so it is a derived artifact and
+never the source of a version number or of a highlight — take versions from
+`data/vX.Y-*.json` like everything else, and put anything new on the page first.
 
-The file is public — it is committed to the Primus repo — so it contains only the
-highlights. Nothing addressed to the next agent (how the file was produced, where the
-source of truth is, why it lives under `tools/`), and no section recording what was left
-out. That reasoning goes to the user and to the gitignored
+It is not committed. Up to v26.8 the email lived in `tools/release_docs/announcements/` in
+this public repository, which is the wrong home for internal mail; it now stays in the
+gitignored `output/` folder, and whoever runs the release keeps it with the release's
+records (the release agent stores it with its run). Write it as if it were public anyway:
+the highlights only, nothing addressed to the next agent, no section recording what was
+left out. That reasoning goes to the user and to
 `output/release-docs/vX.Y/announcement-notes.md`; see the last editorial rule below.
 
 #### Format
 
-`announcements/v26.8.md` is the model; copy its shape. A reader who reads only the bold
-text should still come away with the release.
+The v26.8 email (below, both families in one file as it was sent then) is the model; copy
+its shape, one family per file. A reader who reads only the bold text should still come
+away with the release.
 
 ```markdown
-# vX.Y release highlights
+# vX.Y release highlights: JAX MaxText
 
-Images: `rocm/primus:vX.Y` (built YYYY-MM-DD) and `rocm/jax-training:maxtext-vX.Y`
-(built YYYY-MM-DD).
+Image: `rocm/jax-training:maxtext-vX.Y` (built YYYY-MM-DD).
 
 ## JAX MaxText — `rocm/jax-training:maxtext-vX.Y`
 
@@ -140,6 +152,12 @@ Images: `rocm/primus:vX.Y` (built YYYY-MM-DD) and `rocm/jax-training:maxtext-vX.
   - <what changed, in one line>
 - **<Packaging or behaviour change, stated plainly>**
   - <one-line consequence for the user>
+```
+
+```markdown
+# vX.Y release highlights: PyTorch
+
+Image: `rocm/primus:vX.Y` (built YYYY-MM-DD).
 
 ## PyTorch — `rocm/primus:vX.Y`
 
@@ -152,8 +170,8 @@ Images: `rocm/primus:vX.Y` (built YYYY-MM-DD) and `rocm/jax-training:maxtext-vX.
   - <bug>, now <resolved state>
 ```
 
-- **One section per family**, JAX first, each headed with its image tag, under a line that
-  names both images and their build dates.
+- **One family per file**, headed with its image tag, under a line that names the image
+  and its build date.
 - **4-6 top-level bullets per family.** Each opens with a bold lead that makes the point
   on its own: the stack upgrade, the backend version, new models, new features,
   performance, fixes. Omit a lead that has nothing behind it rather than padding it.
@@ -170,6 +188,41 @@ Images: `rocm/primus:vX.Y` (built YYYY-MM-DD) and `rocm/jax-training:maxtext-vX.
   DeepSeek-V2-16B". Measured gains stay on the release-notes page.
 - **No PR links, file paths or config keys**, except a single parenthetical name a reader
   would search for (`qk_clip`).
+
+The v26.8 email:
+
+````markdown
+# v26.8 release highlights
+
+Images: `rocm/primus:v26.8` (built 2026-10-08) and `rocm/jax-training:maxtext-v26.8`
+(built 2026-10-01).
+
+## JAX MaxText — `rocm/jax-training:maxtext-v26.8`
+
+- **Upgraded to JAX 0.11.1 and TransformerEngine 2.18** (dev build), on a ROCm 10.2 nightly
+- **Pinned MaxText to v26.8**, with about 290 upstream commits
+  - including the fix for the FP8 correctness issue
+- **Speed regressions from JAX 0.11.1 fixed** with new XLA and HIP settings in Primus defaults
+  - MoE top-k routing no longer goes through a slow CUB radix sort
+  - Collectives overlap compute again (stream priority restored)
+  - Dynamic-slice fusion disabled, so attention's backward pass is no longer recomputed per layer
+- **Primus source is no longer bundled** in the image
+  - users run it with the matching Primus release branch, which the Primus launcher mounts automatically
+- **Your XLA flags are respected** instead of being overridden by Primus defaults
+
+## PyTorch — `rocm/primus:v26.8`
+
+- **Upgraded to ROCm 10.1.0 and PyTorch 2.14**, with TransformerEngine and Flash Attention built from source
+- **New models:** ZAYA1-8B and MiniMax-M3
+- **New features**
+  - Fused FP8/FP4 expert layers for MoE models
+  - Distributed-optimizer parameter gather on the GPU's copy engines (SDMA)
+  - MuonClip (`qk_clip`) attention-logit clipping for hybrid models
+- **Performance:** faster gradient handling and FP4 training; retuned MI355X and MI325X recipes
+- **Fixes**
+  - A compiler bug that could silently corrupt gradients is now detected and worked around
+  - DeepSeek-V4 throughput was over-reported 3.6×; now correct (training was unaffected)
+````
 
 #### Editorial rules
 
@@ -192,7 +245,7 @@ Each one a mistake avoided in an earlier release.
   because v26.6 carried a ROCm 10.1 nightly on a 7.15 base.
 - **Nothing marked NEEDS CONFIRMATION goes in.** An unverified known issue is worse in an
   exec summary than in a doc, where the marker is at least visible.
-- **Report what was held back and why — outside the file.** Tell the user in the Gate C
+- **Report what was held back and why — outside the file.** Tell the user in the Gate B
   summary and write the same list to `output/release-docs/vX.Y/announcement-notes.md`,
   which is gitignored. A judgement that will recur (like "upgraded" needing a version
   change) becomes an editorial rule in this list instead, worded without naming
@@ -249,13 +302,14 @@ it if the changelog supports it; otherwise ask.
 ## Regression testing
 
 ```bash
-python tools/release_docs/golden_replay.py            # replay v26.5 -> v26.6, plus invariants
+python tools/release_docs/golden_replay.py            # replay v26.5 -> v26.6 and the v26.8 rotation, plus invariants
 python tools/release_docs/check_links.py              # anchors and relative links
 python tools/release_docs/install_parity.py --check   # pins, package set, indexes
 ```
 
 The golden replay runs today's tooling against the tree as it was before the v26.6
-release and compares the outcome with what shipped. Its gate is asymmetric on
+release (version bump, install parity) and before the v26.8 release notes (rotation, for
+both families at once and one at a time), and compares the outcome with what shipped. Its gate is asymmetric on
 purpose: **over-reach fails** (rewriting a reference the release deliberately kept
 is silent corruption), while under-reach passes provided the item is surfaced for
 review.

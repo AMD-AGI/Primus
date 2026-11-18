@@ -8,6 +8,11 @@ from functools import partial
 
 from primus.core.utils.module_utils import log_rank_0
 
+# AMD's mlperf-common (github.com/AMD-AGI/mlperf-common), then primus_mllog, its name before
+# the rename, which images up to rocm/primus:v26.9 ship. The mlperf_common those images
+# also ship is NVIDIA's and has none of these names.
+MLPERF_COMMON_MODULES = ["mlperf_common", "primus_mllog"]
+
 
 def lazy_import(paths, symbol, log_prefix="[Primus]"):
     """
@@ -26,104 +31,63 @@ def lazy_import(paths, symbol, log_prefix="[Primus]"):
     """
     for path in paths:
         try:
-            mod = importlib.import_module(path)
-            log_rank_0(f"{log_prefix} Loaded {symbol} from {path}")
-            return getattr(mod, symbol)
-        except ImportError:
+            value = getattr(importlib.import_module(path), symbol)
+        except (ImportError, AttributeError):
             continue
+        log_rank_0(f"{log_prefix} Loaded {symbol} from {path}")
+        return value
     raise ImportError(f"{log_prefix} {symbol} not found in any of: {paths}")
 
 
 def get_model_provider(model_type="gpt"):
     """
-    Resolve model_provider across Megatron versions and model types.
+    Resolve the model_provider for a ``model_type`` registered in
+    ``primus/backends/megatron/core/models/registry.py``.
 
-    Args:
-        model_type (str): Type of model - 'gpt', 'mamba', 'deepseek_v4',
-            'kimi_k3', 'glm5_next', or 'zaya1'. Defaults to 'gpt'.
+    Primus-owned families bind the shared Primus ``model_provider`` to their own
+    builder when they name one, else to the shared builder. Upstream families
+    (``gpt``, ``mamba``) resolve across Megatron versions:
 
     - New:   model_provider + gpt_builder/mamba_builder
     - Mid:   model_provider only
     - Old:   pretrain_gpt.model_provider / pretrain_mamba.model_provider
+
+    An unregistered ``model_type`` raises rather than building ``gpt``: a misspelt
+    family would otherwise train a different model. Trainers for unregistered
+    values (the diffusion trainers) supply their own ``model_provider``.
     """
-    # Primus-owned: Kimi K3 (text backbone / Kimi-Linear)
-    if model_type == "kimi_k3":
-        kimi_k3_module = importlib.import_module(
-            "primus.backends.megatron.core.models.kimi_k3.kimi_k3_builders"
-        )
-        log_rank_0(
-            "[Primus][MegatronCompat] Loaded Kimi-K3 model_provider + builder "
-            f"from {kimi_k3_module.__name__}"
-        )
-        return partial(
-            kimi_k3_module.model_provider,
-            kimi_k3_module.kimi_k3_builder,
+    from primus.backends.megatron.core.models.registry import (
+        DEFAULT_MODEL_TYPE,
+        MODEL_FAMILIES,
+    )
+
+    log_prefix = "[Primus][MegatronCompat]"
+    model_type = model_type or DEFAULT_MODEL_TYPE
+    family = MODEL_FAMILIES.get(model_type)
+    if family is None:
+        raise ValueError(
+            f"{log_prefix} model_type {model_type!r} is not registered in "
+            "primus/backends/megatron/core/models/registry.py; "
+            f"registered: {', '.join(sorted(MODEL_FAMILIES))}."
         )
 
-    # Primus-owned: GLM-5.3 (KDA + DSA hybrid with mHC)
-    if model_type == "glm5_next":
-        glm5_next_module = importlib.import_module(
-            "primus.backends.megatron.core.models.glm5_next.glm5_next_builders"
-        )
-        log_rank_0(
-            "[Primus][MegatronCompat] Loaded GLM5-Next model_provider + builder "
-            f"from {glm5_next_module.__name__}"
-        )
-        return partial(
-            glm5_next_module.model_provider,
-            glm5_next_module.glm5_next_builder,
-        )
+    if family.package:
+        builder_module = importlib.import_module("primus.backends.megatron.core.models.builder")
+        if family.builder:
+            model_builder = family.resolve(family.builder)
+        else:
+            model_builder = partial(builder_module.build_model, model_type)
+        log_rank_0(f"{log_prefix} Loaded Primus model_provider + builder for model_type {model_type!r}")
+        return partial(builder_module.model_provider, model_builder)
 
-    # Primus-owned: ZAYA1 (data parallel only)
-    if model_type == "zaya1":
-        zaya1_module = importlib.import_module("primus.backends.megatron.core.models.zaya1.zaya1_builders")
-        log_rank_0(
-            "[Primus][MegatronCompat] Loaded ZAYA1 model_provider + builder " f"from {zaya1_module.__name__}"
-        )
-        return partial(
-            zaya1_module.model_provider,
-            zaya1_module.zaya1_builder,
-        )
-
-    # Primus-owned: DeepSeek-V4 (Phase 2 stub; full V4 wiring lands in Phase 3+)
-    if model_type == "deepseek_v4":
-        deepseek_v4_module = importlib.import_module(
-            "primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_builders"
-        )
-        log_rank_0(
-            "[Primus][MegatronCompat] Loaded DeepSeek-V4 model_provider + builder "
-            f"from {deepseek_v4_module.__name__}"
-        )
-        return partial(
-            deepseek_v4_module.model_provider,
-            deepseek_v4_module.deepseek_v4_builder,
-        )
-
-    # Upstream Megatron-LM model types
-    if model_type == "mamba":
-        model_provider = lazy_import(
-            ["model_provider", "pretrain_mamba"], "model_provider", log_prefix="[Primus][MegatronCompat]"
-        )
-        # Try to import mamba_builder (for Mamba models)
-        try:
-            mamba_builder = lazy_import(
-                ["mamba_builders"], "mamba_builder", log_prefix="[Primus][MegatronCompat]"
-            )
-            return partial(model_provider, mamba_builder)
-        except ImportError:
-            return model_provider
-    else:
-        # Default GPT behavior
-        model_provider = lazy_import(
-            ["model_provider", "pretrain_gpt"], "model_provider", log_prefix="[Primus][MegatronCompat]"
-        )
-
-        # Try to import gpt_builder (only exists in newer versions)
-        try:
-            gpt_builder = lazy_import(["gpt_builders"], "gpt_builder", log_prefix="[Primus][MegatronCompat]")
-            return partial(model_provider, gpt_builder)
-        except ImportError:
-            return model_provider
+    model_provider = lazy_import(
+        ["model_provider", *family.training_modules], "model_provider", log_prefix=log_prefix
+    )
+    builder_module, _, builder_name = family.builder.partition(":")
+    try:
+        return partial(model_provider, lazy_import([builder_module], builder_name, log_prefix=log_prefix))
+    except ImportError:
+        return model_provider
 
 
 def get_custom_fsdp():

@@ -13,13 +13,26 @@ a single ``@jit_fuser`` forward/backward pair instead of separate ``chunk`` /
 
 from __future__ import annotations
 
+import inspect
+
 import torch
 import triton
 import triton.language as tl
-from megatron.core.fusions.fused_bias_swiglu import WeightedSwiGLUFunction
+from megatron.core.fusions.fused_bias_swiglu import (
+    SwiGLUFunction,
+    WeightedSwiGLUFunction,
+)
 
 # Column tile size for the elementwise kernels / reduction inner loop.
 _BLOCK_N = 1024
+
+# Megatron-LM main appended clamp_value / gate_clamp_scale / linear_clamp_scale to
+# WeightedSwiGLUFunction.forward(ctx, input, weights, fp8_input_store, ...) and
+# SwiGLUFunction.forward(ctx, input, fp8_input_store, cpu_offload_input, ...); pass None.
+_WEIGHTED_SWIGLU_EXTRA_ARGS = (None,) * (
+    len(inspect.signature(WeightedSwiGLUFunction.forward).parameters) - 4
+)
+_SWIGLU_EXTRA_ARGS = (None,) * (len(inspect.signature(SwiGLUFunction.forward).parameters) - 4)
 
 
 @triton.jit
@@ -294,7 +307,7 @@ def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp
     if clamp_value is not None:
         output = ClampedWeightedSwiGLUFunction.apply(input, weights, fp8_input_store, float(clamp_value))
     else:
-        output = WeightedSwiGLUFunction.apply(input, weights, fp8_input_store)
+        output = WeightedSwiGLUFunction.apply(input, weights, fp8_input_store, *_WEIGHTED_SWIGLU_EXTRA_ARGS)
 
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 
@@ -335,8 +348,6 @@ def swiglu_impl(input, bias, fp8_input_store=False, clamp_value=None):
     if clamp_value is not None:
         output = ClampedSwiGLUFunction.apply(input, fp8_input_store, float(clamp_value))
     else:
-        from megatron.core.fusions.fused_bias_swiglu import SwiGLUFunction
-
-        output = SwiGLUFunction.apply(input, fp8_input_store, False)
+        output = SwiGLUFunction.apply(input, fp8_input_store, False, *_SWIGLU_EXTRA_ARGS)
 
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)

@@ -4,9 +4,16 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Read a published training image and write a committed JSON snapshot of its
-software stack, so the release notes are rendered from machine-extracted facts
-instead of hand-transcribed ones.
+"""Read a training image and write a committed JSON snapshot of its software
+stack, so the release notes are rendered from machine-extracted facts instead of
+hand-transcribed ones.
+
+The docs are written before the images are published, from the CI images that
+passed QA: `--image` is the CI tag that is probed and `--publish-as` the tag the
+release will carry, which is the name the snapshot (and the release notes) use.
+A retag keeps the image ID, the build date and the size, so the snapshot of the
+CI image is the snapshot of the published one. `--expect-digest` refuses a
+local tag that has moved to another build.
 
 Everything comes out of one `docker run`: the artifacts the image ships under
 /workspace/.manifest/ (full `pip list`, `dpkg -l`, baked env, build tag, and the
@@ -20,9 +27,18 @@ The release notes claim v26.4-v26.6 were "cross-checked against the release
 Dockerfiles" by hand; this makes that automatic and catches a committed
 Dockerfile that is not what the image was actually built from.
 
+`--write-dockerfile` saves the image's baked-in Dockerfile as the release
+Dockerfile (.github/workflows/docker-release/Dockerfile.<family>-<version>), so
+the file is committed from what the image was built from rather than copied by
+hand. An existing file that differs is never overwritten: that is the blocker
+the comparison exists to catch.
+
 Usage:
     python tools/release_docs/probe_image.py --version v26.7 --family jax
     python tools/release_docs/probe_image.py --image rocm/primus:v26.7
+    python tools/release_docs/probe_image.py --version v26.9 \
+        --image registry/ci:primus_ci_8c8b5b3_20261030 --publish-as rocm/primus:v26.9 \
+        --expect-digest sha256:cd67... --write-dockerfile
 """
 
 import argparse
@@ -118,30 +134,41 @@ def split_sections(stdout):
 
 
 def inspect_image(image):
-    """Short image id, build date and size, as the release-notes tables show them.
+    """Short image id, build date, size and repo digests, as the release-notes
+    tables show them.
 
     Size comes from `docker images`, not `docker image inspect`. Inspect only
     exposes the content (compressed) size -- 14.3 GB for rocm/primus:v26.6 --
     while the release notes quote on-disk usage, 54.0 GB. Verified against the
-    committed v26.4-v26.6 tables for both families.
+    committed v26.4-v26.6 tables for both families. The row is matched by image
+    ID rather than by name, so a digest reference or a CI tag finds it too.
     """
     result = run(["docker", "image", "inspect", image, "--format", "{{json .}}"])
     if result.returncode != 0:
         raise SystemExit(f"ERROR: docker image inspect {image} failed:\n{result.stderr.strip()}")
     data = json.loads(result.stdout)
-    image_id = data.get("Id", "")
-    if image_id.startswith("sha256:"):
-        image_id = image_id[len("sha256:") : len("sha256:") + 12]
+    full_id = data.get("Id", "")
+    image_id = full_id[len("sha256:") : len("sha256:") + 12] if full_id.startswith("sha256:") else full_id
     created = (data.get("Created") or "")[:10]
     content_size = data.get("Size") or 0
 
-    disk = run(["docker", "images", "--format", "{{.Size}}", image])
+    disk = run(["docker", "images", "--no-trunc", "--format", "{{.ID}} {{.Size}}"])
     size_display = None
-    match = re.match(r"([\d.]+)\s*([KMGT]?B)", disk.stdout.strip())
-    if match:
-        value, unit = float(match.group(1)), match.group(2)
-        size_display = f"{value:.1f} {unit}"
-    return image_id, created, content_size, size_display
+    for line in disk.stdout.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2 or fields[0] != full_id:
+            continue
+        match = re.match(r"([\d.]+)\s*([KMGT]?B)", fields[1].strip())
+        if match:
+            value, unit = float(match.group(1)), match.group(2)
+            size_display = f"{value:.1f} {unit}"
+        break
+    return image_id, created, content_size, size_display, sorted(data.get("RepoDigests") or [])
+
+
+def digest_of(reference):
+    """'repo@sha256:abc' or 'sha256:abc' -> 'sha256:abc'."""
+    return reference.rsplit("@", 1)[-1].strip()
 
 
 def probe_container(image):
@@ -209,7 +236,9 @@ def verify_dockerfile(family, version, in_image_text, in_image_name):
     }
 
 
-def build_snapshot(image, version, family, sections, image_id, created, content_size, size_display):
+def build_snapshot(
+    image, version, family, sections, image_id, created, content_size, size_display, probed=None, digests=None
+):
     # The build-time manifest is not always what ships. rocm/jax-training:maxtext-v26.6
     # records transformers 5.14.1 in /workspace/.manifest/requirements.txt, but the
     # MaxDiffusion stage runs afterwards and pins it back to 4.57.3 -- which is what
@@ -252,6 +281,8 @@ def build_snapshot(image, version, family, sections, image_id, created, content_
         "version": version,
         "family": family,
         "image": image,
+        "probed_image": probed if probed and probed != image else None,
+        "repo_digests": digests or [],
         "image_id": image_id,
         "built": created,
         "size": size_display,
@@ -274,29 +305,75 @@ def build_snapshot(image, version, family, sections, image_id, created, content_
     }
 
 
+def write_dockerfile(family, version, sections):
+    """Save the image's baked-in Dockerfile as the release Dockerfile.
+
+    Returns a message. An existing file is left alone: if it matches there is
+    nothing to do, and if it differs the comparison reports the blocker.
+    """
+    text = sections.get("dockerfile", "")
+    path = C.dockerfile_for(family, version)
+    rel = path.relative_to(C.ROOT).as_posix()
+    if not text.strip():
+        return f"not written: the image has no Dockerfile under {C.MANIFEST_DIR}"
+    if path.exists():
+        return f"kept the existing {rel}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.rstrip("\n") + "\n")
+    return f"wrote {rel} from the image"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--version", help="Release version, e.g. v26.7")
-    parser.add_argument("--family", choices=sorted(C.FAMILIES), help="Image family (inferred from --image)")
-    parser.add_argument("--image", help="Explicit image reference; defaults to the family convention")
+    parser.add_argument(
+        "--family", choices=sorted(C.FAMILIES), help="Image family (inferred from --publish-as or --image)"
+    )
+    parser.add_argument(
+        "--image", help="Image to probe, e.g. a CI tag; defaults to the published tag of the family"
+    )
+    parser.add_argument(
+        "--publish-as",
+        help="Tag the image is released as; the snapshot and the notes use it (default: --image)",
+    )
+    parser.add_argument(
+        "--expect-digest", help="sha256 digest the probed image must carry (one of its RepoDigests)"
+    )
+    parser.add_argument(
+        "--write-dockerfile",
+        action="store_true",
+        help="save the image's Dockerfile as the release Dockerfile when it is not committed yet",
+    )
     parser.add_argument(
         "--dockerfile-version",
         help="Version to use when locating the in-repo Dockerfile (defaults to --version)",
     )
     args = parser.parse_args()
 
-    family = args.family or (C.family_for_image(args.image) if args.image else None)
+    family = args.family
+    for ref in (args.publish_as, args.image):
+        family = family or (C.family_for_image(ref) if ref else None)
     if not family:
         parser.error("could not infer --family; pass it explicitly")
     if not args.version:
         parser.error("--version is required")
 
-    image = args.image or C.image_for(family, args.version)
-    print(f"Probing {image} (family={family}, version={args.version})")
+    published = args.publish_as or args.image or C.image_for(family, args.version)
+    image = args.image or published
+    if published != C.image_for(family, args.version):
+        print(f"NOTE: {published} is not the family convention {C.image_for(family, args.version)}")
+    print(f"Probing {image} as {published} (family={family}, version={args.version})")
 
-    image_id, created, content_size, size_display = inspect_image(image)
+    image_id, created, content_size, size_display, digests = inspect_image(image)
+    if args.expect_digest:
+        want = digest_of(args.expect_digest)
+        if want not in {digest_of(d) for d in digests}:
+            raise SystemExit(
+                f"ERROR: {image} is not the expected build: want {want}, has {', '.join(digests) or 'no digest'}. "
+                "Pull the tag again or probe by digest."
+            )
     sections = probe_container(image)
     if not sections.get("requirements"):
         raise SystemExit(
@@ -304,8 +381,18 @@ def main():
             "Images older than v26.3 predate the manifest and cannot be probed."
         )
 
+    dockerfile_note = write_dockerfile(family, args.version, sections) if args.write_dockerfile else None
     snapshot = build_snapshot(
-        image, args.version, family, sections, image_id, created, content_size, size_display
+        published,
+        args.version,
+        family,
+        sections,
+        image_id,
+        created,
+        content_size,
+        size_display,
+        probed=image,
+        digests=digests,
     )
     if args.dockerfile_version:
         snapshot["dockerfile"] = verify_dockerfile(
@@ -325,12 +412,18 @@ def main():
     print(f"  native         {snapshot['native']}")
     print(f"  build commit   {snapshot['build_commit_short']}")
     print(f"  manifest       {snapshot['manifest_version']}")
+    if dockerfile_note:
+        print(f"  dockerfile     {dockerfile_note}")
     print(f"  dockerfile     {snapshot['dockerfile']['status']} ({snapshot['dockerfile']['path']})")
     print(f"  wrote          {path.relative_to(C.ROOT)}")
 
     if snapshot["dockerfile"]["status"] == "differs":
         print("\nWARNING: the committed Dockerfile is not what this image was built from.")
         return 1
+    if snapshot["dockerfile"]["status"] == "missing-in-repo":
+        print(
+            "\nNOTE: no release Dockerfile committed yet; re-run with --write-dockerfile to save the image's."
+        )
     return 0
 
 

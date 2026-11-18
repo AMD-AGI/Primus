@@ -152,6 +152,7 @@ def patch_delayed_fp8_update(ctx: PatchContext):
         config,
         forward_backward_func,
         iteration=None,
+        **train_kwargs,  # pg_collection / p2p_communicator on newer Megatron
     ):
         nonlocal _registry
         if not _cached_delayed_modules:
@@ -189,6 +190,7 @@ def patch_delayed_fp8_update(ctx: PatchContext):
             config,
             forward_backward_func,
             iteration=iteration,
+            **train_kwargs,
         )
 
     megatron_training.train_step = _patched_train_step
@@ -265,8 +267,9 @@ def patch_grad_zero_and_data_prefetch(ctx: PatchContext):
         config,
         forward_backward_func,
         iteration=None,
+        **train_kwargs,  # pg_collection / p2p_communicator on newer Megatron
     ):
-        if "iter" not in _prefetch_state and tp_size == 1:
+        if "iter" not in _prefetch_state and tp_size == 1 and data_iterator is not None:
             if isinstance(data_iterator, (list, tuple)):
                 # Virtual pipeline parallel passes a list of per-chunk iterators,
                 # which the single-stream prefetcher cannot wrap. Skip prefetch
@@ -328,6 +331,7 @@ def patch_grad_zero_and_data_prefetch(ctx: PatchContext):
             config,
             _synced_prefetch_fwd_bwd,
             iteration=iteration,
+            **train_kwargs,
         )
 
     megatron_training.train_step = _patched_train_step

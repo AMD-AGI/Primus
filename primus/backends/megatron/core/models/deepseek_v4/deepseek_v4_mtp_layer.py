@@ -35,6 +35,7 @@ and the upstream layer does not thread ``position_ids`` into
 
 from __future__ import annotations
 
+import inspect
 from contextlib import nullcontext
 from typing import Optional
 
@@ -55,6 +56,9 @@ except Exception:  # pragma: no cover - defensive: keep BF16 path working
 
     def get_fp8_context(config, *args, **kwargs):  # type: ignore[misc]
         return nullcontext()
+
+
+_UPSTREAM_PROJ_SIGNATURE = inspect.signature(MultiTokenPredictionLayer._proj_and_transformer_layer)
 
 
 class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
@@ -135,21 +139,7 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
 
     # ------------------------------------------------------------------
 
-    def _proj_and_transformer_layer(  # pylint: disable=unused-argument
-        self,
-        hidden_states: torch.Tensor,
-        decoder_input: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        context: Optional[torch.Tensor] = None,
-        context_mask: Optional[torch.Tensor] = None,
-        rotary_pos_emb: Optional[torch.Tensor] = None,
-        rotary_pos_cos: Optional[torch.Tensor] = None,
-        rotary_pos_sin: Optional[torch.Tensor] = None,
-        attention_bias: Optional[torch.Tensor] = None,
-        inference_params=None,
-        packed_seq_params=None,
-        sequence_len_offset: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def _proj_and_transformer_layer(self, *args, **kwargs) -> torch.Tensor:
         """eh_proj -> (lift -> V4 hybrid layer -> per-depth HyperHead) -> norm.
 
         Mirrors the upstream method's fp8 / rng context handling but inserts
@@ -158,14 +148,19 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
         decoder block exactly (same ``_lift_streams_in`` / ``_lower_streams_out``
         helpers).
 
-        Every upstream keyword is spelled out even though V4 consumes none of
-        them past ``decoder_input``: upstream's ``_checkpointed_forward``
-        forwards its kwargs *positionally*
-        (``tensor_parallel.checkpoint(forward_func, ..., *kwargs.values())``),
-        so a ``**kwargs`` catch-all would raise ``TypeError: takes from 3 to 4
-        positional arguments but 13 were given`` under
-        ``recompute_granularity=full`` + ``recompute_method=uniform``.
+        Arguments are bound against the *upstream* signature: upstream's
+        ``_checkpointed_forward`` forwards its kwargs *positionally*
+        (``tensor_parallel.checkpoint(forward_func, ..., *kwargs.values())``), and
+        the parameter list differs across Megatron versions (Megatron-LM main
+        inserts ``padding_mask`` fourth and appends the CP layout arguments).
+        V4 consumes only ``hidden_states``, ``decoder_input`` and
+        ``packed_seq_params``.
         """
+        bound = _UPSTREAM_PROJ_SIGNATURE.bind(self, *args, **kwargs).arguments
+        hidden_states = bound["hidden_states"]
+        decoder_input = bound["decoder_input"]
+        packed_seq_params = bound.get("packed_seq_params")
+
         if self.config.sequence_parallel:
             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
         else:
@@ -207,6 +202,8 @@ class DeepseekV4MTPLayer(MultiTokenPredictionLayer):
 
         hidden_states = self._postprocess(hidden_states)
         return hidden_states
+
+    _proj_and_transformer_layer.__signature__ = _UPSTREAM_PROJ_SIGNATURE
 
 
 __all__ = ["DeepseekV4MTPLayer"]

@@ -26,6 +26,9 @@ group_query_attention: false
 swiglu: true
 num_query_groups: null
 multi_latent_attention: true
+# MLA q/kv latent RMSNorms. Older Megatron applies them whenever q_lora_rank is set;
+# Megatron-LM main gates them on qk_layernorm, so it must be on to keep the same model.
+qk_layernorm: true
 num_attention_heads: 32
 q_lora_rank: 2048   # Query LoRA rank
 kv_lora_rank: 160   # Key-Value LoRA rank

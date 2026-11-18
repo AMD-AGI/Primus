@@ -22,11 +22,7 @@ from megatron.core.models.common.embeddings.language_model_embedding import (
 from megatron.core.models.common.language_module.language_module import LanguageModule
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import ModelType
-from megatron.core.transformer.multi_token_prediction import (
-    MultiTokenPredictionBlock,
-    mtp_on_this_rank,
-    process_mtp_loss,
-)
+from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionBlock
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from torch import Tensor
 
@@ -35,6 +31,10 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp_specs impo
 )
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
+)
+from primus.backends.megatron.core.utils import (
+    mtp_on_this_rank_compat,
+    process_mtp_loss_compat,
 )
 
 
@@ -121,7 +121,7 @@ class DeepseekV4Model(LanguageModule):
             # still inspect the MTP wiring (the spec helper itself is fully
             # CPU-testable).
             try:
-                self.mtp_process = mtp_on_this_rank(self.config, ignore_virtual=False, vp_stage=vp_stage)
+                self.mtp_process = mtp_on_this_rank_compat(self.config, vp_stage, self.pg_collection)
             except (AssertionError, RuntimeError, AttributeError):
                 self.mtp_process = False
 
@@ -299,7 +299,7 @@ class DeepseekV4Model(LanguageModule):
         mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
         if mtp_num_layers > 0 and getattr(self, "mtp", None) is not None:
             cp_group = getattr(self.pg_collection, "cp", None)
-            hidden_states = process_mtp_loss(
+            hidden_states = process_mtp_loss_compat(
                 hidden_states=hidden_states,
                 labels=labels,
                 loss_mask=loss_mask,
@@ -310,6 +310,7 @@ class DeepseekV4Model(LanguageModule):
                 compute_language_model_loss=self.compute_language_model_loss,
                 config=self.config,
                 cp_group=cp_group,
+                tp_group=getattr(self.pg_collection, "tp", None),
                 packed_seq_params=packed_seq_params,
                 scale_logits_fn=self._scale_logits if getattr(self.config, "use_mup", False) else None,
             )

@@ -107,6 +107,7 @@ class TestLinearWithGradAccumulationAndAsyncCommunicationForward(MultiProcessTes
             None,
             0,
             dist.group.WORLD,
+            1,
         )
 
     def test_sequence_parallel_matches_independent_gathered_matmul_with_bias(self):
@@ -146,6 +147,14 @@ class TestLinearWithGradAccumulationAndAsyncCommunicationForward(MultiProcessTes
         torch.testing.assert_close(got, expected, atol=1e-5, rtol=1e-5)
         self.assertEqual(got.shape[0], _SEQ_PER_RANK)
         self.assertEqual(gather_calls, [])
+
+
+def test_gtp_weight_remat_is_rejected():
+    weight = torch.zeros(_HIDDEN, _HIDDEN)
+    with pytest.raises(NotImplementedError, match="GTP weight remat"):
+        LinearWithGradAccumulationAndAsyncCommunication.apply(
+            torch.zeros(_SEQ_PER_RANK, _HIDDEN), weight, None, False, False, False, None, 0, None, 2
+        )
 
 
 if __name__ == "__main__":

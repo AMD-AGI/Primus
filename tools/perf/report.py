@@ -368,6 +368,9 @@ RUN_FIELDS = (
     "rdma_nics",
     "hmean_nominal_tflops",
     "throughput_note",
+    "failed_at",
+    "failing_rank",
+    "failing_host",
 )
 
 # One Performance row per distinct combination; the image is its ID (its tag
@@ -924,7 +927,11 @@ def write_overview(
             "- Within a run, Primus throughput is the harmonic mean over the steps after warmup "
             "(at least the first three logged steps are dropped)."
         ),
-        "- Diffusion and DLRM numbers are diffusion_bench's own averages (they match its summary.md).",
+        (
+            "- Rows of a diffusion_dlrm run (those with a step log) are diffusion_bench's own averages (they "
+            "match its summary.md); diffusion configs run through primus-cli drop five warmup steps and use the "
+            "harmonic mean."
+        ),
         (
             "- Throughput is per GPU: tokens/s (language models), samples/s or frames/s (diffusion), "
             "recommendations/s (DLRM). 'All GPUs' multiplies it by the GPU count."
@@ -933,7 +940,7 @@ def write_overview(
             "- Run-to-run CV is the spread between repetitions (stdev / mean), shown from two successful runs; "
             f"above {CV_WARN:.0%} it is highlighted. Step-to-step CV (Runs sheet) is the spread within one run."
         ),
-        "- GPU memory is as the backend logs it: GB for Megatron, GiB for TorchTitan.",
+        "- GPU memory is as the backend logs it: GB for Megatron, GiB for TorchTitan, peak GB for diffusion.",
         (
             "- Runs lists every run as an Excel table, with the failure reason and detail of those that did not "
             "pass; Insert > PivotTable on it for other views."
@@ -1079,6 +1086,8 @@ RUN_COLUMNS = [
     {"header": "Attempt", "width": 7, "key": "attempt", "fmt": "int"},
     {"header": "Status", "width": 11, "key": "status"},
     {"header": "Failure reason", "width": 14, "key": "failure_reason"},
+    {"header": "Failed at", "width": 12, "key": "failed_at"},
+    {"header": "Failing rank", "width": 8, "key": "failing_rank", "fmt": "int"},
     {"header": "Failure detail", "width": 40, "key": "failure_detail"},
     {"header": "TFLOP/s per GPU", "width": 10, "key": "hmean_tflops", "fmt": "tflops"},
     {"header": "Nominal TFLOP/s per GPU", "width": 11, "key": "hmean_nominal_tflops", "fmt": "tflops"},

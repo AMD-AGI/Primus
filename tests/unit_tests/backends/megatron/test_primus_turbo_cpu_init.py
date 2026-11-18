@@ -78,6 +78,7 @@ class TestPrimusTurboCPUInit(PrimusUT):
             params_dtype=torch.float32,
         )
         setattr(config, "symmetric_ar_type", "none")
+        setattr(config, "quant_recipe", None)  # read by Megatron-LM main's TE linears
         setattr(config, "disable_parameter_transpose_cache", False)
         setattr(config, "init_model_with_meta_device", False)
 
@@ -110,6 +111,7 @@ class TestPrimusTurboCPUInit(PrimusUT):
             params_dtype=torch.float32,
         )
         setattr(config, "symmetric_ar_type", "none")
+        setattr(config, "quant_recipe", None)  # read by Megatron-LM main's TE linears
         setattr(config, "disable_parameter_transpose_cache", False)
         setattr(config, "init_model_with_meta_device", False)
 
@@ -171,6 +173,7 @@ class TestPrimusTurboCPUInit(PrimusUT):
             params_dtype=torch.float32,
         )
         setattr(config, "symmetric_ar_type", "none")
+        setattr(config, "quant_recipe", None)  # read by Megatron-LM main's TE linears
         setattr(config, "disable_parameter_transpose_cache", False)
         setattr(config, "init_model_with_meta_device", False)
 

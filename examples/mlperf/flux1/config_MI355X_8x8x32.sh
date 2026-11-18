@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+export DGXSYSTEM=MI355X_8x8x32
+export NNODES=8
+export DGXNNODES=${NNODES}
+export MLLOG_SUBMISSION_PLATFORM=MI355X
+export LOCAL_BATCH_SIZE=32
+export GRADIENT_ACCUMULATION_STEPS=1
+export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-$LOCAL_BATCH_SIZE}
+export GLOBAL_BATCH_SIZE=2048
+export LR=${LR:-0.00027}
+export WARMUP_STEPS=${WARMUP_STEPS:-0}
+export DP_REPLICATE=${DP_REPLICATE:-2}
+export FLUX_FP8_AG_PREQUANT=${FLUX_FP8_AG_PREQUANT:-0}
+export FLUX_FPROP_SWITCH_STEP=${FLUX_FPROP_SWITCH_STEP-4150}  # 8.5M samples
+if [ "${DP_REPLICATE}" = "1" ]; then
+  export FLUX_FP4_ALL_GATHER=0
+fi
+# shellcheck disable=SC1091
+source "$(dirname -- "${BASH_SOURCE[0]}")/config_common.sh"

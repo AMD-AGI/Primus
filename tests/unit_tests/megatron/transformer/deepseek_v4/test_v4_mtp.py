@@ -267,7 +267,8 @@ def test_model_forward_calls_process_mtp_loss() -> None:
     has_call = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == "process_mtp_loss":
+            # process_mtp_loss_compat forwards to upstream's process_mtp_loss.
+            if node.func.id in ("process_mtp_loss", "process_mtp_loss_compat"):
                 has_call = True
                 break
     assert has_call, (

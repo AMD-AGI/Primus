@@ -59,6 +59,7 @@ def patch_wall_clock_timer(ctx: PatchContext):
         config,
         forward_backward_func,
         iteration=None,
+        **train_kwargs,  # pg_collection / p2p_communicator on newer Megatron
     ):
         t0 = time.perf_counter()
         result = _original_train_step(
@@ -70,6 +71,7 @@ def patch_wall_clock_timer(ctx: PatchContext):
             config,
             forward_backward_func,
             iteration=iteration,
+            **train_kwargs,
         )
         dt_ms = (time.perf_counter() - t0) * 1000.0
         if runtime_state is not None:
