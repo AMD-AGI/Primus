@@ -53,6 +53,7 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
     fused_mega_moe_fp8_stage2,
 )
 
+from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import log_rank_0
 
 # Megatron's quick_gelu hardcodes its sigmoid scale.
@@ -123,12 +124,24 @@ def _log_once(message: str) -> None:
 
 
 @functools.lru_cache(maxsize=None)
-def _turbo_stages_take_wgrad_accum() -> bool:
-    """Whether this Primus-Turbo's staged MegaMoE ops take ``fuse_wgrad_accum_pattern`` (logged once)."""
-    takes = all(
-        "fuse_wgrad_accum_pattern" in inspect.signature(fn).parameters
-        for fn in (fused_mega_moe_stage1, fused_mega_moe_stage2)
+def _takes(fn, name: str) -> bool:
+    """Whether ``fn`` (a Primus-Turbo op) takes the argument ``name``."""
+    try:
+        return name in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+@functools.lru_cache(maxsize=None)
+def _turbo_stages_take_wgrad_accum(fp8: bool = False) -> bool:
+    """Whether this Primus-Turbo's staged MegaMoE ops (the mxfp8 pair for ``fp8``) take
+    ``fuse_wgrad_accum_pattern`` (logged once)."""
+    stages = (
+        (fused_mega_moe_fp8_stage1, fused_mega_moe_fp8_stage2)
+        if fp8
+        else (fused_mega_moe_stage1, fused_mega_moe_stage2)
     )
+    takes = all(_takes(fn, "fuse_wgrad_accum_pattern") for fn in stages)
     if not takes:
         log_rank_0(
             "[MegaMoE] this Primus-Turbo's staged ops cannot accumulate the expert wgrads into "
@@ -183,6 +196,8 @@ class MegaMoEWeightModule(MegatronModule):
 
 class MegaMoEExperts(MegatronModule):
     """Two-stage bf16 expert with separately wrapped w1/w2 parameters."""
+
+    _fp8_stages = False  # the stage pair forward() calls
 
     def __init__(
         self,
@@ -258,7 +273,7 @@ class MegaMoEExperts(MegatronModule):
         The ops resolve ``main_grad`` per call and fall back to the ordinary gradient when they
         cannot accumulate into it, so this only says that DDP's add may be fused away.
         """
-        if mega_moe_wgrad_accum_fusion(config) and _turbo_stages_take_wgrad_accum():
+        if mega_moe_wgrad_accum_fusion(config) and _turbo_stages_take_wgrad_accum(self._fp8_stages):
             return "megatron"
         return None
 
@@ -297,22 +312,34 @@ class MegaMoEFP8Experts(MegaMoEExperts):
     quantized operands that cannot ride autograd's gradient slots.
     """
 
-    def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
-        """None: the mxfp8 stages take no accumulation pattern, so DDP keeps adding their wgrads."""
-        if mega_moe_wgrad_accum_fusion(config):
-            _log_once(
-                "[MegaMoE] mxfp8 experts: the expert wgrads keep the separate main_grad add "
-                "(turbo_mega_moe_wgrad_accum_fusion applies to the bf16 experts)"
-            )
-        return None
+    _fp8_stages = True
+
+    def __init__(self, config: TransformerConfig, *args, **kwargs) -> None:
+        super().__init__(config, *args, **kwargs)
+        # gfx1250's mxfp8 stages compute the configured activation exactly and take no kernel default: a SiLU
+        # config without a clamp (DeepSeek-V3) is plain SwiGLU, which they compute without an offset.
+        if self.activation is None and config.activation_func_clamp_value is None and is_gfx1250():
+            if config.glu_linear_offset:
+                raise ValueError(
+                    "MegaMoE mxfp8 experts on gfx1250 compute SiLU-SwiGLU without a glu_linear_offset; got "
+                    f"glu_linear_offset={config.glu_linear_offset}"
+                )
+            self.activation = GLUActivation(gate_clamp_lo=None, gate_clamp_hi=None, up_clamp=None)
 
     # The mxfp8 weight-quant cache is dropped by the megatron.turbo.mega_moe_weight_generation
     # patch, which advances the generation once per optimizer step. Doing it there rather than
     # here keeps the refresh tied to the weights actually moving, not to how often this layer
     # happens to run a forward.
     def forward(self, x, topk_idx, topk_weights):
+        # only passed when set, so a Primus-Turbo without the argument still runs
+        accum = {"fuse_wgrad_accum_pattern": self.wgrad_accum_pattern} if self.wgrad_accum_pattern else {}
+        # A stage1 that takes stage2's activation checks it before its dispatch prologue, so one the stages
+        # cannot compute fails before any rank has sent anything.
+        act = {"activation": self.activation} if _takes(fused_mega_moe_fp8_stage1, "activation") else {}
         w1, b1 = self.fc1_weight()
-        l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
+        l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(
+            x, topk_idx, topk_weights, w1, self.ep_group, **accum, **act
+        )
         w2, b2 = self.fc2_weight()
         return fused_mega_moe_fp8_stage2(
             l1_out,
@@ -326,6 +353,7 @@ class MegaMoEFP8Experts(MegaMoEExperts):
             self.activation,
             fc1_bias=b1,
             fc2_bias=b2,
+            **accum,
         )
 
 
