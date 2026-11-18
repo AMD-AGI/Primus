@@ -357,6 +357,36 @@ def _bf16_grouped_wgrad_can_accumulate(main_grad: Optional[torch.Tensor] = None)
     return backend is None or name in _BF16_WGRAD_ACCUM_BACKENDS
 
 
+@lru_cache(maxsize=1)
+def _turbo_mx_wgrad_accum_supported() -> Optional[Callable]:
+    """Primus-Turbo's ``mx_wgrad_accum_supported(grouped, main_grad)``, or None from one without it."""
+    try:
+        from primus_turbo.pytorch.ops import mx_wgrad_accum_supported
+    except ImportError:
+        return None
+    return mx_wgrad_accum_supported
+
+
+@lru_cache(maxsize=1)
+def _warn_mxfp8_wgrad_not_fused() -> None:
+    warning_rank_0("MXFP8 wgrad: Primus-Turbo does not add it into main_grad here; keeping the separate add.")
+
+
+def _mxfp8_wgrad_can_accumulate(weight: torch.Tensor, grouped: bool) -> bool:
+    """Whether the MXFP8 wgrad of ``weight`` is fused into its ``main_grad`` (beta=1): on gfx1250, where
+    Primus-Turbo says its wgrad GEMM (the grouped one for the experts' weight stack, ``grouped``) adds into this
+    ``main_grad``. Other archs keep the framework's separate add, and so does a Primus-Turbo that cannot be asked
+    or declines (said once)."""
+    main_grad = getattr(weight, "main_grad", None)
+    if not isinstance(main_grad, torch.Tensor) or not _is_gfx1250():
+        return False
+    supported = _turbo_mx_wgrad_accum_supported()
+    if supported is not None and supported(grouped, main_grad):
+        return True
+    _warn_mxfp8_wgrad_not_fused()
+    return False
+
+
 def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape.
 
@@ -475,8 +505,9 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor, grouped: bool = Fals
 
     Only the BF16/FP16 GEMMs, the FP8 current-scaling (tensorwise) ones, and
     non-preshuffled MXFP4 GEMMs (FlyDSL ``gemm_fp4_accum_impl``) carry that
-    epilogue. FP8 block / MXFP8 scaling and preshuffled or non-MX FP4 recipes
-    keep the framework's separate add.
+    epilogue, and on gfx1250 the MXFP8 GEMMs are fused too
+    (:func:`_mxfp8_wgrad_can_accumulate`). FP8 block scaling, MXFP8 elsewhere and
+    preshuffled or non-MX FP4 recipes keep the framework's separate add.
 
     ``weight`` must be the real parameter, not a quantized buffer: the buffer carries
     no ``main_grad``. On the multi-microbatch path the parameter's attributes are
@@ -505,7 +536,12 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor, grouped: bool = Fals
             return None
     elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
         quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-        if quant_config is None or not quant_config.current_scaling():
+        if quant_config is None:
+            return None
+        if quant_config.mxfp8_scaling():
+            if not _mxfp8_wgrad_can_accumulate(weight, grouped):
+                return None
+        elif not quant_config.current_scaling():
             return None
     elif weight.dtype not in (torch.bfloat16, torch.float16):
         return None

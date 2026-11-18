@@ -162,6 +162,33 @@ def validate_turbo_fp8_permute(args) -> None:
         raise ValueError(f"{option}=True does not support recompute of moe_act.")
 
 
+def validate_mxfp8_on_gfx1250(args) -> None:
+    """MXFP8 on gfx1250 runs through Primus-Turbo only: TransformerEngine's MXFP8 recipe does not run there, so
+    Primus keeps its autocast off (``fp8_utils.get_fp8_context``). Refuses the two cases that are wrong from the
+    start: no Primus-Turbo GEMM switched on (nothing would quantize), and a Primus-Turbo without the gfx1250
+    MXFP8 GEMMs (its MXFP8 GEMM would fall back to a backend that is wrong there). A run in which only some
+    modules quantize passes; ``get_fp8_context`` says once which ones do."""
+    if not (getattr(args, "fp8", None) and getattr(args, "fp8_recipe", None) == "mxfp8"):
+        return
+    from primus.backends.megatron.patches.turbo.utils import turbo_quantizes_mxfp8
+    from primus.core.utils.gpu_arch import is_gfx1250
+
+    if not is_gfx1250():
+        return
+    if not turbo_quantizes_mxfp8(args):
+        raise ValueError(
+            "fp8_recipe=mxfp8 on gfx1250 quantizes only in Primus-Turbo's GEMMs: set enable_primus_turbo=True "
+            "with use_turbo_gemm=True and/or use_turbo_grouped_gemm=True, or train without fp8."
+        )
+    try:
+        from primus_turbo.pytorch.ops import mx_wgrad_accum_supported  # noqa: F401
+    except ImportError:
+        raise ValueError(
+            "fp8_recipe=mxfp8 on gfx1250 needs a Primus-Turbo with the gfx1250 MXFP8 GEMMs; the installed one "
+            "has none (no primus_turbo.pytorch.ops.mx_wgrad_accum_supported)."
+        ) from None
+
+
 def expandable_segments_requested() -> bool:
     """Return True if any allocator config env var sets ``expandable_segments:True``."""
     for env in ALLOC_CONF_ENVS:
@@ -303,6 +330,7 @@ def validate_args_on_rocm(args):
     validate_turbo_fp8_permute(args)
     # After sync-free MoE, which may auto-enable use_turbo_grouped_gemm.
     warn_turbo_grouped_gemm_without_expandable_segments(args)
+    validate_mxfp8_on_gfx1250(args)
 
     # turbo deepep
     if args.use_turbo_deepep:

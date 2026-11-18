@@ -12,6 +12,7 @@ from megatron.core.fp8_utils import is_first_last_bf16_layer
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
+from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import warning_rank_0
 
 # Check if Transformer Engine is installed
@@ -194,6 +195,8 @@ if HAVE_TE and HAVE_TURBO:
             # fp8 training and this layer_no is in fp8
             fp8_recipe, fp8_recipe_none_reason = get_fp8_recipe(config)
             fp8_quant_config, fp8_quant_config_none_reason = get_fp8_quant_config(config)
+            # TransformerEngine's MXFP8 recipe does not run on gfx1250: its autocast stays off there
+            te_mxfp8_unsupported = config.fp8_recipe == Fp8Recipe.mxfp8 and is_gfx1250()
 
             global WARN_ONCE
             if WARN_ONCE:
@@ -209,6 +212,12 @@ if HAVE_TE and HAVE_TURBO:
                     warning_rank_0(
                         f"Primus-Turbo FP8 {config.fp8_recipe} not work since Primus-Turbo not support fp8 model init."
                     )
+                if te_mxfp8_unsupported:
+                    warning_rank_0(
+                        "MXFP8 on gfx1250: TransformerEngine's autocast stays off. Primus-Turbo quantizes the "
+                        "use_turbo_gemm linears, the use_turbo_grouped_gemm experts and MegaMoE's experts with "
+                        "turbo_mega_moe_precision=mxfp8; every other module runs BF16."
+                    )
                 WARN_ONCE = False
 
             fp8_group = None
@@ -223,7 +232,7 @@ if HAVE_TE and HAVE_TURBO:
                 )
 
                 fp8_context = primus_turbo_fp8_autocast(
-                    enabled=True if fp8_recipe is not None else False,
+                    enabled=fp8_recipe is not None and not te_mxfp8_unsupported,
                     fp8_recipe=fp8_recipe,
                     fp8_group=fp8_group,
                     enabled_turbo=True if fp8_quant_config is not None else False,
