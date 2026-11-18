@@ -22,9 +22,10 @@ from megatron.core.transformer.enums import AttnBackend
 from torch import nn
 
 from primus.backends.megatron.core.models.builder import model_provider
+from primus.backends.megatron.core.models.registry import MODEL_FAMILIES
 from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
 from primus.backends.megatron.core.models.zaya1.zaya1_builders import (
-    _assert_overlap_grad_reduce_supported,
+    check_zaya1_model,
     zaya1_builder,
 )
 from primus.backends.megatron.core.models.zaya1.zaya1_model import Zaya1Model
@@ -117,6 +118,14 @@ def _args(**overrides):
     return args
 
 
+def _fp8_config(fp8_recipe: str) -> Zaya1TransformerConfig:
+    # Set after construction: without Transformer Engine, as on the CPU,
+    # TransformerConfig rejects FP8 for MoE models.
+    config = _tiny_config()
+    config.fp8, config.fp8_recipe = "hybrid", fp8_recipe
+    return config
+
+
 @pytest.fixture(scope="module")
 def parallel_state():
     """TP=1 process group so ``Zaya1Model`` can build its embedding and logits."""
@@ -201,19 +210,22 @@ def test_builder_rejects_mla_legacy_and_non_rope():
         )
 
 
-def test_builder_rejects_overlap_grad_reduce_with_split_experts(monkeypatch):
+def test_check_model_rejects_overlap_grad_reduce_with_split_experts(monkeypatch):
+    family = MODEL_FAMILIES["zaya1"]
+    assert family.resolve(family.check_model) is check_zaya1_model
     args = _args(overlap_grad_reduce=True)
     with pytest.raises(ValueError, match="overlap_grad_reduce"):
-        zaya1_builder(args, pre_process=True, post_process=True, config=_tiny_config())
+        check_zaya1_model(args, _tiny_config(), None)
+    check_zaya1_model(_args(overlap_grad_reduce=False), _tiny_config(), None)
     # The Turbo experts give every parameter a gradient each step; under FP8
     # they need the tensorwise recipe, and other recipes keep the experts split.
+    # FP8 is set on the config only, as when a caller passes the config in.
     turbo = SimpleNamespace(enable_primus_turbo=True, use_turbo_grouped_gemm=True)
     monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
-    _assert_overlap_grad_reduce_supported(args)
-    fp8 = dict(overlap_grad_reduce=True, fp8="hybrid")
-    _assert_overlap_grad_reduce_supported(_args(**fp8, fp8_recipe="tensorwise"))
+    check_zaya1_model(args, _tiny_config(), None)
+    check_zaya1_model(args, _fp8_config("tensorwise"), None)
     with pytest.raises(ValueError, match="overlap_grad_reduce"):
-        _assert_overlap_grad_reduce_supported(_args(**fp8, fp8_recipe="delayed"))
+        check_zaya1_model(args, _fp8_config("delayed"), None)
 
 
 def test_rmsnorm_matches_fp32_formula():
