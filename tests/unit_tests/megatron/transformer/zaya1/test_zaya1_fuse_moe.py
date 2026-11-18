@@ -179,7 +179,7 @@ def test_unpermute_scale_without_prob_grad(compiled, fused):
     inv[perm] = torch.arange(n)
     x = torch.randn(n, h, requires_grad=True)
     p = torch.rand(n, 1)
-    out = zm._UnpermuteScale.apply(x, perm, inv, p, fused)
+    out = zm._UnpermuteScale.apply(x, perm, inv, p, fused, [n])
     out.sum().backward()
     torch.testing.assert_close(out, x.detach()[inv] * p)
     torch.testing.assert_close(x.grad, p[perm].expand(n, h))

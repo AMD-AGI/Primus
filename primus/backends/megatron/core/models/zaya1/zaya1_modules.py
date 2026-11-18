@@ -779,12 +779,13 @@ class _PermuteRows(torch.autograd.Function):
 class _UnpermuteScale(torch.autograd.Function):
     """``out[t] = out_sorted[inv_perm[t]] * prob[t]`` as one gather*scale, compiled when ``compiled``.
 
-    ``counts`` (host group sizes, in sorted order) makes the uncompiled backward
-    sum ``d_prob`` group by group; without it, one sum covers every token.
+    ``counts`` holds the host group sizes in sorted order. The uncompiled
+    backward sums ``d_prob`` group by group over them, as main's per-expert
+    multiply does; the compiled one takes one sum over every token.
     """
 
     @staticmethod
-    def forward(ctx, out_sorted, perm, inv_perm, prob, compiled: bool, counts: Optional[List[int]] = None):
+    def forward(ctx, out_sorted, perm, inv_perm, prob, compiled: bool, counts: List[int]):
         ctx.save_for_backward(out_sorted, perm, inv_perm, prob)
         ctx.compiled = compiled
         ctx.counts = counts
@@ -800,12 +801,10 @@ class _UnpermuteScale(torch.autograd.Function):
             d_sorted, d_prob = unpermute_bwd(grad, perm, prob), None
         elif ctx.compiled:
             d_sorted, d_prob = _fused_unpermute_bwd(grad, out_sorted, perm, inv_perm, prob)
-        elif ctx.counts is not None:
+        else:
             d_sorted, d_prob = _unpermute_scale_bwd_grouped(
                 grad, out_sorted, perm, inv_perm, prob, ctx.counts
             )
-        else:
-            d_sorted, d_prob = _unpermute_scale_bwd(grad, out_sorted, perm, inv_perm, prob)
         return d_sorted, None, None, d_prob, None, None
 
 
@@ -1253,8 +1252,8 @@ class ZayaMoE(nn.Module):
         boolean-mask loop gives it. The forward syncs three times per layer
         (bincount reads its input's min and max, then counts.tolist()) instead
         of one torch.any plus two nonzero syncs per expert in forward and more
-        in backward. Only the first waits for queued work, so scatter_add_
-        counts as in _forward_turbo save little here. The permute and
+        in backward. Only the first waits for queued work, so counts kept on
+        the device, as in _forward_turbo, would save little here. The permute and
         unpermute backwards are gathers by the inverse permutation, with no
         host sync.
         """
