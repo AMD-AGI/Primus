@@ -53,6 +53,8 @@ env:
   #ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   TRITON_COMMIT: fc8d31a5439ec9842557a284dc7ca61aee69246b # triton-lang/triton release/3.9.x (3.9.0), built from source in Dockerfile
+  # ROCm/rocm-libraries, for run-unittest-torch-gfx950. Keep in sync with the origami install in .github/workflows/docker/Dockerfile.
+  ORIGAMI_COMMIT: 223648a26928ebed7f3dd0ccdc044c09f1dccf9b
   BASE_IMAGE: docker.io/rocm/primus:v26.8
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.8
 
@@ -753,6 +755,174 @@ jobs:
           owner="$(stat -c '%u:%g' "${GITHUB_WORKSPACE}" 2>/dev/null)"
           [ -n "$owner" ] && find "${GITHUB_WORKSPACE}" -user 0 -exec chown "$owner" {} + 2>/dev/null
           IN
+
+  run-unittest-torch-gfx950:
+    env:
+      # No docker on this runner pod: steps run in the pod's own Python environment,
+      # which later runs reuse. Pinned dependencies are installed once per commit,
+      # with markers in DEPS_DIR; it is pod-local, so a pod restart clears the
+      # markers together with the environment.
+      DEPS_DIR: /opt/primus-deps
+      # E2E tokenizers and HF assets, downloaded by the prepare hooks on first use.
+      E2E_DATA_PATH: /shared_nfs/users/f95e10815db72d062ca0da826d4f52c9/primus-ci-data
+      # No shared log dir on this runner; failed runs upload the logs instead.
+      UT_LOG_PATH: ${{ github.workspace }}/ut_out
+    needs: [code-lint]
+    # Keep the test steps' tier args and deselects in sync with run-unittest-torch.
+    # PRs: ci:gpu label, not draft, not from a fork. Fork code would run directly
+    # in the reused pod environment above, so fork PRs skip this job.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'ci:gpu') &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [primus-torch-ut-mi355-v2608] # MI355X runner pod based on rocm/primus:v26.8
+    steps:
+      - run: echo "🎉 Begin Primus Unit Test (gfx950)."
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+      - name: Install pinned Triton
+        run: |
+          mkdir -p "${DEPS_DIR}"
+          if [ "$(cat "${DEPS_DIR}/triton.commit" 2>/dev/null)" = "${TRITON_COMMIT}" ]; then echo "triton ${TRITON_COMMIT} already installed"; exit 0; fi
+          rm -rf "${DEPS_DIR}/triton" && git clone --filter=blob:none https://github.com/triton-lang/triton.git "${DEPS_DIR}/triton"
+          cd "${DEPS_DIR}/triton" && git checkout "${TRITON_COMMIT}"
+          pip3 install -r python/requirements.txt
+          MAX_JOBS=96 pip3 install --no-build-isolation --force-reinstall --no-deps .
+          # Same torch METADATA fix as the Dockerfile: otherwise a later pip install
+          # sees torch's triton pin as unsatisfiable and replaces torch from PyPI.
+          TORCH_META=$(python3 -c "import importlib.metadata as m; print(m.distribution('torch')._path / 'METADATA')")
+          TRITON_VER=$(python3 -c "import importlib.metadata as m; print(m.version('triton'))")
+          sed -i -E "s/^Requires-Dist: triton==.*/Requires-Dist: triton==${TRITON_VER}/" "${TORCH_META}"
+          echo "${TRITON_COMMIT}" > "${DEPS_DIR}/triton.commit"
+      - name: Install pinned AITER
+        run: |
+          if [ "$(cat "${DEPS_DIR}/aiter.commit" 2>/dev/null)" = "${PRIMUS_TURBO_AITER_COMMIT}" ]; then echo "aiter ${PRIMUS_TURBO_AITER_COMMIT} already installed"; exit 0; fi
+          pip3 uninstall -y aiter amd-aiter || true
+          SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          rm -rf "${SITE_PACKAGES}/aiter" "${SITE_PACKAGES}/aiter_meta"
+          AITER_USE_SYSTEM_TRITON=1 pip3 install "amd-aiter @ git+https://github.com/ROCm/aiter.git@${PRIMUS_TURBO_AITER_COMMIT}"
+          echo "${PRIMUS_TURBO_AITER_COMMIT}" > "${DEPS_DIR}/aiter.commit"
+      - name: Install pinned Primus-Turbo
+        run: |
+          if [ "$(cat "${DEPS_DIR}/turbo.commit" 2>/dev/null)" = "${PRIMUS_TURBO_COMMIT}" ]; then echo "Primus-Turbo ${PRIMUS_TURBO_COMMIT} already installed"; exit 0; fi
+          rm -rf "${DEPS_DIR}/Primus-Turbo" && git clone --filter=blob:none https://github.com/AMD-AGI/Primus-Turbo.git "${DEPS_DIR}/Primus-Turbo"
+          cd "${DEPS_DIR}/Primus-Turbo" && git checkout "${PRIMUS_TURBO_COMMIT}"
+          git submodule update --init --recursive --depth 1 --filter=blob:none
+          pip3 install -r requirements.txt
+          GPU_ARCHS="gfx950" PRIMUS_TURBO_FRAMEWORK="PYTORCH" pip3 install --no-build-isolation . -v
+          echo "${PRIMUS_TURBO_COMMIT}" > "${DEPS_DIR}/turbo.commit"
+      - name: Install pinned origami
+        run: |
+          if [ "$(cat "${DEPS_DIR}/origami.commit" 2>/dev/null)" = "${ORIGAMI_COMMIT}" ]; then echo "origami ${ORIGAMI_COMMIT} already installed"; exit 0; fi
+          rm -rf "${DEPS_DIR}/rocm-libraries" && git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git "${DEPS_DIR}/rocm-libraries"
+          cd "${DEPS_DIR}/rocm-libraries" && git sparse-checkout init --cone && git sparse-checkout set shared/origami && git checkout "${ORIGAMI_COMMIT}"
+          pip3 uninstall -y origami || true
+          # -Bsymbolic keeps the extension off ROCm 10.1's ABI-incompatible liborigami.so.1.
+          LDFLAGS="-Wl,-Bsymbolic" pip3 install --no-cache-dir ./shared/origami/python
+          echo "${ORIGAMI_COMMIT}" > "${DEPS_DIR}/origami.commit"
+      - name: Install Primus
+        run: pip install -r requirements.txt
+      - name: Run CLI Shell and Runner Tests
+        run: |
+          echo "Running Primus CLI shell tests..."
+          bash ./tests/runner/run_all_tests.sh
+          echo "Running Primus runner pytest tests..."
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
+          pytest -q ./tests/runner/ --junitxml="${GITHUB_WORKSPACE}/test-reports/runner.xml"
+      - name: Run Primus Core Tests
+        env:
+          HSA_NO_SCRATCH_RECLAIM: 1
+          # torch 2.14's native bmm outer-product kernel overflows its index at 2^32 elements.
+          TORCH_DISABLE_NATIVE_JIT: 1
+        run: |
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] && TIER_ARGS=(--run-slow)
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward \
+            --deselect=tests/unit_tests/core/projection/test_performance_projection.py::test_limit_layers_moe_with_dense_keeps_two \
+            --deselect=tests/unit_tests/backends/megatron/diffusion/test_te_vs_local_spec_attention.py::TestTEvsLocalSpecAttention::test_single_pass_te_vs_local
+      - name: Decide E2E scope (torch)
+        run: |
+          M=1; T=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              e2e="$(printf '%s\n' "${changed}" | python tools/ci/select_tests.py)"
+              echo "Selected torch E2E scope: ${e2e:-<none>}"
+              if [[ "${e2e}" != "all" ]]; then
+                echo "${e2e}" | grep -qw megatron   || M=0
+                echo "${e2e}" | grep -qw torchtitan || T=0
+              fi
+            fi
+          fi
+          echo "RUN_MEGATRON_E2E=${M}" >> "$GITHUB_ENV"
+          echo "RUN_TORCHTITAN_E2E=${T}" >> "$GITHUB_ENV"
+      - name: Run Primus Model Tests -- Megatron-LM
+        env:
+          HF_TOKEN: ${{secrets.HF_TOKEN}}
+          MASTER_PORT: 10009
+          DATA_PATH: ${{ env.E2E_DATA_PATH }}
+          HSA_NO_SCRATCH_RECLAIM: 1
+          GPU_ARCHS: gfx950
+        run: |
+          if [[ "${RUN_MEGATRON_E2E:-1}" != "1" ]]; then echo "Skipping Megatron-LM E2E: no relevant changes."; exit 0; fi
+          rm -rf "${UT_LOG_PATH}" && mkdir -p "${UT_LOG_PATH}" "${DATA_PATH}"
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_mamba_1B_hybrid \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
+      - name: Run Primus Model Tests -- TorchTitan
+        env:
+          HF_TOKEN: ${{secrets.HF_TOKEN}}
+          MASTER_PORT: 10009
+          DATA_PATH: ${{ env.E2E_DATA_PATH }}
+          HSA_NO_SCRATCH_RECLAIM: 1
+        run: |
+          if [[ "${RUN_TORCHTITAN_E2E:-1}" != "1" ]]; then echo "Skipping TorchTitan E2E: no relevant changes."; exit 0; fi
+          mkdir -p "${UT_LOG_PATH}" "${DATA_PATH}"
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_torchtitan_trainer.py "${TIER_ARGS[@]}" \
+            --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_671b \
+            --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_16b_fp8 \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: torch-gfx950-test-reports
+          path: test-reports/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload UT logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: torch-gfx950-ut-logs
+          path: ${{ env.UT_LOG_PATH }}
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Write test summary
+        if: always()
+        run: |
+          python tools/ci/junit_summary.py --title torch-gfx950 test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
 
   run-unittest-jax:
     permissions:
