@@ -90,6 +90,10 @@ def test_switch_summary_names_the_paths_that_run(monkeypatch):
     line = zm.switch_summary(_cfg(zaya_sort_dispatch=True))
     assert line.endswith("; experts: Primus Turbo grouped GEMM (backend: triton)")
     assert "zaya_sort_dispatch=on (unused: the grouped GEMMs use Turbo's moe_permute)" in line
+    turbo.use_turbo_fused_act_with_probs = True
+    assert zm.switch_summary(_cfg()).endswith(
+        "; experts: Primus Turbo grouped GEMM (backend: triton), gate in Turbo's swiglu_with_probs"
+    )
     line = zm.switch_summary(_cfg(fp8="hybrid", zaya_sort_dispatch=True))
     assert line.endswith("; experts: split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)")
     assert "zaya_sort_dispatch=on (sort)" in line

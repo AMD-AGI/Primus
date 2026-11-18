@@ -9,16 +9,17 @@
 The experts run as Turbo grouped GEMMs when Primus Turbo's enable_primus_turbo
 and use_turbo_grouped_gemm are set. The CPU tests swap primus_turbo's grouped
 GEMM for a reference with the same contract (rows past group_offs[-1] come
-back zero), and its moe_permute and moe_unpermute for a stable sort and its
-inverse, so they check the dispatch, the MoD skip slot, empty experts,
-gradients and checkpoint keys of the grouped path against the per-expert split
-path.
+back zero, and are never read), its moe_permute and moe_unpermute for a stable
+sort and its inverse, and its swiglu_with_probs for silu(gate) * up * p, so
+they check the dispatch, the MoD skip slot, empty experts, gradients and
+checkpoint keys of the grouped path against the per-expert split path.
 """
 
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn.functional as F
 from test_zaya1_math import _cfg  # noqa: E402  (pytest puts this dir on sys.path)
 
 from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
@@ -28,19 +29,24 @@ def _reference_grouped_gemm(a, b, group_lens, group_offs):
     lens = group_lens.tolist()
     offs = group_offs.tolist()
     pieces = [a[offs[g] : offs[g] + n] @ b[g].t() for g, n in enumerate(lens)]
-    tail = a.shape[0] - offs[-1]
-    pieces.append(a.new_zeros(tail, b.shape[1]) * a[offs[-1] :, :1])
+    pieces.append(a.new_zeros(a.shape[0] - offs[-1], b.shape[1]))
     return torch.cat(pieces, dim=0)
 
 
-def _reference_permute(flat, flat_idx, num_groups):
-    """moe_permute's contract: rows grouped by slot in token order, a map back, and each slot's count."""
+def _reference_permute(flat, flat_idx, num_groups, probs=None):
+    """moe_permute's contract: rows grouped by slot in token order, a map back, each slot's count, the probs."""
     perm = torch.sort(flat_idx, stable=True)[1]
-    return flat[perm], perm, torch.bincount(flat_idx, minlength=num_groups)
+    row_probs = None if probs is None else probs.view(-1)[perm]
+    return flat[perm], perm, torch.bincount(flat_idx, minlength=num_groups), row_probs
 
 
 def _reference_unpermute(rows, row_map, num_groups):
     return rows.new_zeros(rows.shape).index_copy(0, row_map, rows)
+
+
+def _reference_swiglu_with_probs(gate_up, probs, group_lens):
+    gate, up = gate_up.float().chunk(2, dim=-1)
+    return (F.silu(gate) * up * probs.unsqueeze(-1)).to(gate_up.dtype)
 
 
 @pytest.fixture
@@ -48,19 +54,23 @@ def turbo_cpu(monkeypatch):
     monkeypatch.setattr(zm, "_turbo_grouped_gemm", _reference_grouped_gemm)
     monkeypatch.setattr(zm, "_turbo_permute", _reference_permute)
     monkeypatch.setattr(zm, "_turbo_unpermute", _reference_unpermute)
+    monkeypatch.setattr(zm, "_turbo_swiglu_with_probs", _reference_swiglu_with_probs)
 
 
-def _turbo_settings(monkeypatch, on):
+def _turbo_settings(monkeypatch, on, gate_in_act=False):
     """Megatron arguments with Turbo's grouped GEMM on or off, and its default backend left as is."""
     args = SimpleNamespace(
-        enable_primus_turbo=on, use_turbo_grouped_gemm=on, turbo_grouped_gemm_backend="default"
+        enable_primus_turbo=on,
+        use_turbo_grouped_gemm=on,
+        use_turbo_fused_act_with_probs=gate_in_act,
+        turbo_grouped_gemm_backend="default",
     )
     monkeypatch.setattr(zm, "_megatron_args", lambda: args)
     monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: None)
 
 
-def _build_moe(mode, monkeypatch, seed=0, **cfg_overrides):
-    _turbo_settings(monkeypatch, mode == "turbo")
+def _build_moe(mode, monkeypatch, seed=0, gate_in_act=False, **cfg_overrides):
+    _turbo_settings(monkeypatch, mode == "turbo", gate_in_act)
     torch.manual_seed(seed)
     return zm.ZayaMoE(_cfg(**cfg_overrides))
 
@@ -84,12 +94,16 @@ def _expert_grads(moe, fc):
     return out
 
 
+@pytest.mark.parametrize("gate_in_act", [False, True])
 @pytest.mark.parametrize("fuse_moe", [True, False])
 @pytest.mark.parametrize("use_mod", [True, False])
-def test_turbo_matches_split_forward_and_backward(turbo_cpu, monkeypatch, use_mod, fuse_moe):
+def test_turbo_matches_split_forward_and_backward(turbo_cpu, monkeypatch, use_mod, fuse_moe, gate_in_act):
     split = _build_moe("split", monkeypatch, zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe)
-    turbo = _build_moe("turbo", monkeypatch, zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe)
+    turbo = _build_moe(
+        "turbo", monkeypatch, gate_in_act=gate_in_act, zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe
+    )
     assert split.local_experts is not None and turbo.use_turbo_gemm
+    assert turbo.gate_in_act is gate_in_act and not split.gate_in_act
     # Same init stream, same weights.
     for i, expert in enumerate(split.local_experts):
         torch.testing.assert_close(turbo.fc1_weight[i], expert.linear_fc1.weight, rtol=0, atol=0)
@@ -128,6 +142,60 @@ def test_turbo_matches_split_forward_and_backward(turbo_cpu, monkeypatch, use_mo
             assert torch.count_nonzero(p_t.grad) == 0
         else:
             torch.testing.assert_close(p_t.grad, p_s.grad)
+
+
+class _NanGradRows(torch.autograd.Function):
+    """The identity, whose gradient comes back NaN in ``rows``."""
+
+    @staticmethod
+    def forward(ctx, x, rows):
+        ctx.save_for_backward(rows)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        (rows,) = ctx.saved_tensors
+        return grad.masked_fill(rows.view(-1, *[1] * (grad.dim() - 1)), float("nan")), None
+
+
+def _swiglu_with_probs_nan_masked(gate_up, probs, group_lens):
+    """The reference, with NaN wherever swiglu_with_probs leaves the masked rows unwritten or unspecified."""
+    rows = torch.arange(gate_up.shape[0]) >= group_lens.sum()
+    out = _reference_swiglu_with_probs(
+        _NanGradRows.apply(gate_up, rows), _NanGradRows.apply(probs, rows), group_lens
+    )
+    return out.masked_fill(rows.unsqueeze(-1), float("nan"))
+
+
+@pytest.mark.parametrize("fuse_moe", [True, False])
+def test_turbo_gate_in_act_never_reads_the_rows_it_masks(turbo_cpu, monkeypatch, fuse_moe):
+    """The MoD skip rows still come out as ``x * p``, with their gradients, from whatever the kernel leaves there."""
+    monkeypatch.setattr(zm, "_turbo_swiglu_with_probs", _swiglu_with_probs_nan_masked)
+    split = _build_moe("split", monkeypatch, zaya_fuse_moe=fuse_moe)
+    turbo = _build_moe("turbo", monkeypatch, gate_in_act=True, zaya_fuse_moe=fuse_moe)
+    for moe in (split, turbo):
+        moe.eval()
+        _skew_routes(moe, empty=(1, 2))
+    torch.manual_seed(1)
+    hidden = torch.randn(16, 3, 32)
+    prev = torch.randn(16, 3, 8)
+    _, idx, _ = split.router(hidden, prev)
+    assert split.num_real_experts in set(idx.flatten().tolist())
+    runs = []
+    for moe in (split, turbo):
+        h = hidden.clone().requires_grad_(True)
+        p = prev.clone().requires_grad_(True)
+        out, nxt = moe(h, p)
+        (out * torch.linspace(-1, 1, out.numel()).view_as(out)).sum().add(nxt.square().sum()).backward()
+        runs.append([out.detach(), h.grad, p.grad] + [q.grad for q in moe.router.parameters()])
+    for a, b in zip(*runs):
+        if a is None:
+            assert torch.count_nonzero(b) == 0
+        else:
+            assert torch.isfinite(b).all()
+            torch.testing.assert_close(b, a)
+    for fc in ("fc1", "fc2"):
+        assert torch.isfinite(getattr(turbo, f"{fc}_weight").grad).all()
 
 
 def test_turbo_keeps_per_expert_checkpoint_keys(turbo_cpu, monkeypatch):
@@ -207,6 +275,26 @@ def test_turbo_needs_both_settings_and_bf16(monkeypatch):
     monkeypatch.setattr(zm, "_linear", lambda i, o, b, c, fp8=True: torch.nn.Linear(i, o, bias=b))
     assert not zm.ZayaMoE(_cfg()).use_turbo_gemm
     assert len(published) == 1
+
+
+def test_turbo_gate_in_act_needs_the_turbo_experts(monkeypatch):
+    """use_turbo_fused_act_with_probs moves the gate only when the experts run as Turbo grouped GEMMs."""
+    monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: None)
+    for enable, grouped, fused in (
+        (True, True, True),
+        (True, True, False),
+        (True, False, True),
+        (False, True, True),
+    ):
+        args = SimpleNamespace(
+            enable_primus_turbo=enable, use_turbo_grouped_gemm=grouped, use_turbo_fused_act_with_probs=fused
+        )
+        monkeypatch.setattr(zm, "_megatron_args", lambda: args)
+        assert zm.ZayaMoE(_cfg()).gate_in_act == (enable and grouped and fused)
+    _turbo_settings(monkeypatch, True, gate_in_act=True)
+    monkeypatch.setattr(zm, "_fp8_requested", lambda config: True)
+    monkeypatch.setattr(zm, "_linear", lambda i, o, b, c, fp8=True: torch.nn.Linear(i, o, bias=b))
+    assert not zm.ZayaMoE(_cfg()).gate_in_act
 
 
 def test_turbo_settings_come_from_megatron_args(monkeypatch):
@@ -299,7 +387,8 @@ def test_deferred_router_flushes_on_next_forward_without_backward():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
-def test_turbo_gpu_matches_split_without_host_sync(monkeypatch):
+@pytest.mark.parametrize("gate_in_act", [False, True])
+def test_turbo_gpu_matches_split_without_host_sync(monkeypatch, gate_in_act):
     pytest.importorskip("primus_turbo.pytorch.ops")
     split = (
         _build_moe(
@@ -317,6 +406,7 @@ def test_turbo_gpu_matches_split_without_host_sync(monkeypatch):
         _build_moe(
             "turbo",
             monkeypatch,
+            gate_in_act=gate_in_act,
             hidden_size=256,
             moe_ffn_hidden_size=128,
             ffn_hidden_size=128,
@@ -341,11 +431,12 @@ def test_turbo_gpu_matches_split_without_host_sync(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
-def test_turbo_permute_moves_rows_like_a_stable_sort(monkeypatch):
+@pytest.mark.parametrize("gate_in_act", [False, True])
+def test_turbo_permute_moves_rows_like_a_stable_sort(monkeypatch, gate_in_act):
     """Turbo's moe_permute and moe_unpermute against a stable sort and its inverse, bit for bit."""
     pytest.importorskip("primus_turbo.pytorch.ops")
     shape = dict(hidden_size=256, moe_ffn_hidden_size=128, ffn_hidden_size=128, num_moe_experts=16)
-    moe = _build_moe("turbo", monkeypatch, **shape).cuda().bfloat16().eval()
+    moe = _build_moe("turbo", monkeypatch, gate_in_act=gate_in_act, **shape).cuda().bfloat16().eval()
     _skew_routes(moe, empty=(3,))
     torch.manual_seed(5)
     hidden = torch.randn(64, 8, 256, device="cuda", dtype=torch.bfloat16)
@@ -378,8 +469,9 @@ def _rel(a, b):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
+@pytest.mark.parametrize("gate_in_act", [False, True])
 @pytest.mark.parametrize("fuse_moe", [True, False])
-def test_turbo_gpu_backward_matches_split(monkeypatch, fuse_moe):
+def test_turbo_gpu_backward_matches_split(monkeypatch, fuse_moe, gate_in_act):
     """primus_turbo's grouped GEMM backward, with an empty expert and MoD skip rows, against split."""
     pytest.importorskip("primus_turbo.pytorch.ops")
     shape = dict(
@@ -390,7 +482,7 @@ def test_turbo_gpu_backward_matches_split(monkeypatch, fuse_moe):
         zaya_fuse_moe=fuse_moe,
     )
     split = _build_moe("split", monkeypatch, **shape).cuda().bfloat16()
-    turbo = _build_moe("turbo", monkeypatch, **shape).cuda().bfloat16()
+    turbo = _build_moe("turbo", monkeypatch, gate_in_act=gate_in_act, **shape).cuda().bfloat16()
     for moe in (split, turbo):
         moe.eval()  # keep the balancing bias fixed between the two runs
         _skew_routes(moe, empty=(3,))

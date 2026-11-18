@@ -64,7 +64,10 @@ except Exception:  # pragma: no cover - depends on the image
 # [E, out, in] parameters and run as two Primus Turbo grouped GEMMs whose
 # group sizes stay on device, with Turbo's moe_permute and moe_unpermute
 # moving the tokens, so a MoE layer never syncs with the host;
-# turbo_grouped_gemm_backend picks the kernel. Only Turbo's BF16 grouped GEMM
+# turbo_grouped_gemm_backend picks the kernel. Turbo's
+# use_turbo_fused_act_with_probs moves the gate multiply from after fc2 into
+# the SwiGLU kernel (silu(gate) * up * p in fp32, rounded to bf16 once), one
+# bf16 rounding fewer than scaling fc2's output. Only Turbo's BF16 grouped GEMM
 # is wired up here; Turbo's FP8 grouped GEMM isn't yet, so under FP8 the
 # experts stay split. Checkpoint keys stay local_experts.N.linear_fc{1,2}.weight
 # either way; the distributed-optimizer state is shaped per parameter, so it
@@ -84,15 +87,23 @@ def _megatron_args():
         return None
 
 
+def _turbo_on(name: str) -> bool:
+    """A Primus Turbo setting, which only counts with enable_primus_turbo."""
+    args = _megatron_args()
+    return bool(getattr(args, "enable_primus_turbo", False) and getattr(args, name, False))
+
+
 def _turbo_experts(config) -> Tuple[bool, str]:
     """Whether the experts run as Primus Turbo grouped GEMMs, and their path as the build log names it."""
-    args = _megatron_args()
-    if not (getattr(args, "enable_primus_turbo", False) and getattr(args, "use_turbo_grouped_gemm", False)):
+    if not _turbo_on("use_turbo_grouped_gemm"):
         return False, "split"
     if _fp8_requested(config):
         return False, "split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)"
-    backend = getattr(args, "turbo_grouped_gemm_backend", "default")
-    return True, f"Primus Turbo grouped GEMM (backend: {backend})"
+    backend = getattr(_megatron_args(), "turbo_grouped_gemm_backend", "default")
+    path = f"Primus Turbo grouped GEMM (backend: {backend})"
+    if _turbo_on("use_turbo_fused_act_with_probs"):
+        path += ", gate in Turbo's swiglu_with_probs"
+    return True, path
 
 
 def _publish_turbo_grouped_gemm_backend() -> None:
@@ -694,6 +705,11 @@ def _unpermute_scale_bwd_noprob(grad, perm, prob):
     return (grad * prob).index_select(0, perm)
 
 
+def _scaled_skip_rows(y, x_sorted, prob, skip):
+    """The MoD skip rows take ``x * p`` in place of the grouped GEMMs' zeros, as main's ``flat * prob``."""
+    return torch.where(skip.unsqueeze(-1), x_sorted * prob.unsqueeze(-1), y)
+
+
 # Expert token counts change every layer and step: compile SwiGLU with dynamic
 # shapes so it is one graph instead of a recompile per count.
 _fused_swiglu = maybe_compile(_swiglu, dynamic=True)
@@ -702,6 +718,7 @@ _fused_route_select = maybe_compile(_route_select)
 _fused_unpermute_fwd = maybe_compile(_unpermute_scale_fwd)
 _fused_unpermute_bwd = maybe_compile(_unpermute_scale_bwd)
 _fused_unpermute_bwd_noprob = maybe_compile(_unpermute_scale_bwd_noprob)
+_fused_scaled_skip_rows = maybe_compile(_scaled_skip_rows)
 
 
 class _PermuteRows(torch.autograd.Function):
@@ -959,25 +976,29 @@ def _turbo_grouped_gemm(a, b, group_lens, group_offs):
     return grouped_gemm(a, b, group_lens, group_offs, trans_b=True)
 
 
-def _turbo_permute(flat, flat_idx, num_groups: int):
+def _turbo_permute(flat, flat_idx, num_groups: int, probs=None):
     """Primus Turbo's moe_permute for top-1 routes over ``num_groups`` slots.
 
     Returns the rows grouped by slot, in token order inside each group (a
-    stable sort by slot), the map that moe_unpermute takes back, and each
-    slot's token count on device. Every token takes exactly one slot, so the
-    permuted row count is the token count, which spares moe_permute its host
-    read of the counts' sum. Tests swap this for a CPU reference.
+    stable sort by slot), the map that moe_unpermute takes back, each slot's
+    token count on device, and ``probs`` (fp32, one per token) in the rows'
+    order, or None. Every token takes exactly one slot, so the permuted row
+    count is the token count, which spares moe_permute its host read of the
+    counts' sum. With ``probs``, a token whose probability is exactly zero
+    gets a zero row, which its zero gate cancels anyway. Tests swap this for
+    a CPU reference.
     """
     from primus_turbo.pytorch.ops import moe_permute
 
-    rows, row_map, counts, _, _, _ = moe_permute(
+    rows, row_map, counts, _, _, row_probs = moe_permute(
         flat,
         topk_indices=flat_idx.view(-1, 1),
         num_local_experts=num_groups,
         num_topk=1,
         num_permuted_tokens=flat.shape[0],
+        probs=probs,
     )
-    return rows, row_map, counts
+    return rows, row_map, counts, None if row_probs is None else row_probs.view(-1)
 
 
 def _turbo_unpermute(rows, row_map, num_groups: int):
@@ -985,6 +1006,21 @@ def _turbo_unpermute(rows, row_map, num_groups: int):
     from primus_turbo.pytorch.ops import moe_unpermute
 
     return moe_unpermute(rows, row_map, restore_shape=rows.shape, num_local_experts=num_groups)[0]
+
+
+def _turbo_swiglu_with_probs(gate_up, probs, group_lens):
+    """``silu(gate) * up * probs`` per row in one Primus Turbo kernel, through Primus's helper.
+
+    Rows past the groups' end (the MoD skip slot) are masked: the kernel
+    writes neither them nor their input gradient, and leaves their
+    probability gradient unspecified, so nothing may read them. Tests swap
+    this for a CPU reference.
+    """
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        fused_bias_act_with_probs,
+    )
+
+    return fused_bias_act_with_probs(gate_up, None, probs, group_lens, "silu")
 
 
 def _expert_key(prefix: str, expert_id: int, fc: str) -> str:
@@ -1003,6 +1039,7 @@ class ZayaMoE(nn.Module):
             SwiGLUExpert(int(config.hidden_size), intermediate, config) for _ in range(self.num_real_experts)
         ]
         self.use_turbo_gemm, _ = _turbo_experts(config)
+        self.gate_in_act = self.use_turbo_gemm and _turbo_on("use_turbo_fused_act_with_probs")
         if self.use_turbo_gemm:
             _publish_turbo_grouped_gemm_backend()
             # Built from the same per-expert modules (same init RNG stream),
@@ -1056,21 +1093,32 @@ class ZayaMoE(nn.Module):
         rows add their identity input there instead, which reproduces the
         split path's per-group results (``expert(x) * p`` or ``x * p``) row
         for row. moe_permute and moe_unpermute only move rows, so the gate
-        multiply comes after the unpermute.
+        multiply comes after the unpermute, or, with
+        use_turbo_fused_act_with_probs, inside the SwiGLU kernel for the
+        expert rows and on the identity input for the skip rows.
         """
         num_groups = self.router.num_scored
         E = self.num_real_experts
-        x_sorted, row_map, counts = _turbo_permute(flat, flat_idx, num_groups)
+        probs = flat_prob.float() if self.gate_in_act else None
+        x_sorted, row_map, counts, p_sorted = _turbo_permute(flat, flat_idx, num_groups, probs)
         group_lens = counts[:E]
         group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
-        swiglu = _fused_swiglu if self.fuse_moe else _swiglu
+        skip = torch.arange(flat.shape[0], device=flat.device) >= group_offs[-1]
         gate_up = _turbo_grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
-        y = _turbo_grouped_gemm(swiglu(gate_up), self.fc2_weight, group_lens, group_offs)
-        if self.router.use_mod:
+        if self.gate_in_act:
+            # masked_fill zeroes the probability gradient the kernel leaves unspecified on the skip rows.
+            h = _turbo_swiglu_with_probs(gate_up, p_sorted.masked_fill(skip, 0.0), group_lens)
+        else:
+            h = (_fused_swiglu if self.fuse_moe else _swiglu)(gate_up)
+        y = _turbo_grouped_gemm(h, self.fc2_weight, group_lens, group_offs)
+        if self.router.use_mod and self.gate_in_act:
+            scale_skip_rows = _fused_scaled_skip_rows if self.fuse_moe else _scaled_skip_rows
+            y = scale_skip_rows(y, x_sorted, p_sorted.to(x_sorted.dtype), skip)
+        elif self.router.use_mod:
             # Skip rows take the identity input; the GEMM left them zero.
-            skip = torch.arange(y.shape[0], device=y.device) >= group_offs[-1]
             y = torch.where(skip.unsqueeze(-1), x_sorted, y)
-        return _turbo_unpermute(y, row_map, num_groups) * flat_prob
+        out = _turbo_unpermute(y, row_map, num_groups)
+        return out if self.gate_in_act else out * flat_prob
 
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         if (
