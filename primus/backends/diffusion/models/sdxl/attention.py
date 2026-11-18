@@ -18,8 +18,6 @@ from packaging import version
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
-from primus.backends.diffusion.attention import attention as backend_attention
-
 logpy = logging.getLogger(__name__)
 
 if version.parse(torch.__version__) >= version.parse("2.0.0"):
@@ -308,13 +306,12 @@ class CrossAttention(nn.Module):
 
         out = einsum('b i j, b j d -> b i d', sim, v)
         """
-        # Unmasked bf16/fp16 steps use the shared backend (flash_attn_aiter for
-        # the benchmark configs). Masked and fp32 steps stay on PyTorch SDPA.
+        # q/k/v are (batch, heads, seq, dim). PyTorch SDPA is the fast path on
+        # the 26.10 RC: aiter's gfx950 flash-attention backward is 20-30x slower
+        # for these SDXL shapes (149 ms vs 4.9 ms at seq 4096, batch 20), while
+        # SDPA matches the v26.9 aiter time. Masked and fp32 steps stay on SDPA too.
         if mask is None and q.dtype in (torch.float16, torch.bfloat16):
-            query = q.transpose(1, 2).contiguous()
-            key = k.transpose(1, 2).contiguous()
-            value = v.transpose(1, 2).contiguous()
-            out = backend_attention(q=query, k=key, v=value, dtype=q.dtype).transpose(1, 2)
+            out = F.scaled_dot_product_attention(q, k, v)
         else:
             with sdp_kernel(**BACKEND_MAP[self.backend]):
                 out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
