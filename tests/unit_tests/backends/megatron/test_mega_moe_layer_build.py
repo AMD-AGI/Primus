@@ -14,7 +14,6 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import NamedTuple, Optional
 
 import megatron.training
 import pytest
@@ -33,16 +32,6 @@ TopKRouter = PrimusTopKRouter.__bases__[0]
 _MEGA_MOE = Path(__file__).resolve().parents[4] / "primus/backends/megatron/core/extensions/mega_moe.py"
 
 
-class _GLUActivation(NamedTuple):
-    """Primus-Turbo's ``GLUActivation``, fields and defaults (SiLU-SwiGLU, both halves clamped to +-10)."""
-
-    alpha: float = 1.0
-    glu_offset: float = 0.0
-    gate_clamp_lo: Optional[float] = -10.0
-    gate_clamp_hi: Optional[float] = 10.0
-    up_clamp: Optional[float] = 10.0
-
-
 @pytest.fixture(scope="module")
 def mega_moe():
     """``mega_moe.py`` loaded under a private name, with the two Turbo op modules it imports stubbed."""
@@ -58,7 +47,7 @@ def mega_moe():
                 package.__path__ = []
                 mp.setitem(sys.modules, name, package)
         ops = ModuleType("primus_turbo.pytorch.ops.moe.fused_mega_moe")
-        ops.GLUActivation = _GLUActivation
+        ops.GLUActivation = dict  # records the fields the experts pass
         ops.fused_mega_moe_stage1 = ops.fused_mega_moe_stage2 = None
         fp8_ops = ModuleType("primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8")
         fp8_ops.fused_mega_moe_fp8_stage1 = fp8_ops.fused_mega_moe_fp8_stage2 = None
@@ -305,6 +294,7 @@ def test_mxfp8_experts_pass_the_pattern_and_stage1_the_activation(mega_moe, args
     the activation (it checks it before dispatching), when this Primus-Turbo's mxfp8 stages take them; an
     older one is called as before and DDP adds the wgrads."""
     calls = []
+    stage2 = _stub_stages(calls, takes)[1]
     if takes:
 
         def stage1(
@@ -313,19 +303,11 @@ def test_mxfp8_experts_pass_the_pattern_and_stage1_the_activation(mega_moe, args
             calls.append(("stage1", fuse_wgrad_accum_pattern, activation))
             return x, None, None, None
 
-        def stage2(*args, fc1_bias=None, fc2_bias=None, fuse_wgrad_accum_pattern=None):
-            calls.append(("stage2", fuse_wgrad_accum_pattern))
-            return args[0]
-
     else:
 
         def stage1(x, topk_idx, topk_weights, w1, group):
             calls.append(("stage1", None, "unset"))
             return x, None, None, None
-
-        def stage2(*args, fc1_bias=None, fc2_bias=None):
-            calls.append(("stage2", None))
-            return args[0]
 
     monkeypatch.setattr(mega_moe, "fused_mega_moe_fp8_stage1", stage1)
     monkeypatch.setattr(mega_moe, "fused_mega_moe_fp8_stage2", stage2)
@@ -358,7 +340,7 @@ def test_mxfp8_experts_on_gfx1250_get_exact_swiglu(
     SwiGLU. Every other case keeps upstream's rule, None, the kernels' SiLU default."""
     monkeypatch.setattr(mega_moe, "is_gfx1250", lambda: gfx1250)
     experts = getattr(mega_moe, experts_cls)(_config(activation_func_clamp_value=clamp), 4, 32, 8, _EPGroup())
-    unclamped = _GLUActivation(gate_clamp_lo=None, gate_clamp_hi=None, up_clamp=None)
+    unclamped = dict(gate_clamp_lo=None, gate_clamp_hi=None, up_clamp=None)
     assert experts.activation == (unclamped if exact else None)
 
 

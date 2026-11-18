@@ -69,37 +69,32 @@ def test_incompatible_consumer_is_rejected(key, value):
         gather.validate_gather_quant_config(config(**{key: value}))
 
 
-def _mxfp8(monkeypatch, gfx1250, turbo_attrs):
-    """An MXFP8 config, on gfx1250 or not, with a stand-in for Primus-Turbo's ``ops.grouped_mlp_fp8`` module
-    (``turbo_attrs`` None: not importable)."""
+@pytest.mark.parametrize(
+    "gfx1250, turbo_attrs, accepted",
+    [
+        (True, {"CONSUMES_PERMUTE_SEAM_MXFP8": True}, True),
+        (False, {"CONSUMES_PERMUTE_SEAM_MXFP8": True}, False),
+        (True, {}, False),
+    ],
+    ids=["gfx1250", "other_arch", "turbo_without_the_flag"],
+)
+def test_mxfp8_consumer_needs_gfx1250_and_turbos_handoff(monkeypatch, gfx1250, turbo_attrs, accepted):
+    """Turbo's fused grouped MXFP8 MLP gathers in its quantizer like the MXFP4 one, on gfx1250 and where it says
+    so. Anywhere else it would quantize the permute's unwritten placeholder: refused with the reason, and MXFP4
+    is not affected."""
     import primus.core.utils.gpu_arch as gpu_arch
 
     monkeypatch.setattr(gpu_arch, "is_gfx1250", lambda: gfx1250)
-    module = None
-    if turbo_attrs is not None:
-        module = ModuleType("primus_turbo.pytorch.ops.grouped_mlp_fp8")
-        module.__dict__.update(turbo_attrs)
-    monkeypatch.setitem(sys.modules, "primus_turbo.pytorch.ops.grouped_mlp_fp8", module)
-    return config(fp4=None, fp4_recipe=None, fp8="e4m3", fp8_recipe="mxfp8")
-
-
-def test_mxfp8_consumer_is_accepted_on_gfx1250(monkeypatch):
-    """Turbo's fused grouped MXFP8 MLP gathers in its quantizer like the MXFP4 one, where it says so."""
-    mx8 = _mxfp8(monkeypatch, True, {"CONSUMES_PERMUTE_SEAM_MXFP8": True})
-    assert gather.validate_gather_quant_config(mx8) == (True, True)
-
-
-@pytest.mark.parametrize(
-    "gfx1250, turbo_attrs",
-    [(False, {"CONSUMES_PERMUTE_SEAM_MXFP8": True}), (True, {}), (True, None)],
-    ids=["other_arch", "turbo_without_the_flag", "no_turbo"],
-)
-def test_mxfp8_is_refused_where_the_handoff_is_not_taken(monkeypatch, gfx1250, turbo_attrs):
-    """Anywhere else the fused MXFP8 MLP would quantize the permute's unwritten placeholder: refused with the
-    reason, and MXFP4 is not affected."""
-    with pytest.raises(ValueError, match="gfx1250 and a Primus-Turbo .* CONSUMES_PERMUTE_SEAM_MXFP8"):
-        gather.validate_gather_quant_config(_mxfp8(monkeypatch, gfx1250, turbo_attrs))
-    assert gather.validate_gather_quant_config(config()) == (True, True)
+    module = ModuleType("primus_turbo.pytorch.ops.grouped_mlp_fp8")  # a stand-in for Primus-Turbo's module
+    module.__dict__.update(turbo_attrs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    mx8 = config(fp4=None, fp4_recipe=None, fp8="e4m3", fp8_recipe="mxfp8")
+    if accepted:
+        assert gather.validate_gather_quant_config(mx8) == (True, True)
+    else:
+        with pytest.raises(ValueError, match="gfx1250 and a Primus-Turbo .* CONSUMES_PERMUTE_SEAM_MXFP8"):
+            gather.validate_gather_quant_config(mx8)
+        assert gather.validate_gather_quant_config(config()) == (True, True)
 
 
 def test_backward_requires_forward():

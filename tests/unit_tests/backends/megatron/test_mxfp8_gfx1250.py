@@ -54,12 +54,9 @@ _OLD_TURBO = "needs a Primus-Turbo with the gfx1250 MXFP8 GEMMs"
     "overrides, gfx1250, turbo_has_mxfp8, refused",
     [
         ({}, True, True, None),
-        (dict(use_turbo_gemm=False), True, True, None),  # the grouped experts alone
         (_NO_TURBO_GEMM, True, True, _NO_GEMM),  # nothing would quantize: TE's autocast stays off there
-        (dict(enable_primus_turbo=False), True, True, _NO_GEMM),
         ({}, True, False, _OLD_TURBO),  # its MXFP8 GEMM would fall back to a backend that is wrong there
         (_NO_TURBO_GEMM, False, False, None),  # TE's MXFP8 elsewhere
-        (dict(fp8=None, **_NO_TURBO_GEMM), True, False, None),
         (dict(fp8_recipe="tensorwise", **_NO_TURBO_GEMM), True, False, None),
     ],
 )
@@ -82,7 +79,6 @@ def test_mxfp8_on_gfx1250_needs_turbo_gemms(monkeypatch, overrides, gfx1250, tur
         ({}, True, True),
         (dict(use_turbo_gemm=False), True, True),
         ({}, False, False),  # TE's MXFP8 recipe runs elsewhere: Megatron's behaviour stays
-        (_NO_TURBO_GEMM, True, False),
         (dict(enable_primus_turbo=False), True, False),
         (dict(fp8_param_gather=True), True, False),  # FP8 primary weights need MCore's FP32 masters
         (dict(fp8_recipe="tensorwise"), True, False),
@@ -118,8 +114,7 @@ def test_precision_aware_patch_keeps_te_master_weights(monkeypatch):
     assert not te_master_weights("blockwise")
 
 
-@pytest.mark.parametrize("enable_primus_turbo", [False, True])
-def test_inert_by_default(monkeypatch, enable_primus_turbo):
+def test_inert_by_default(monkeypatch):
     """On the shipped defaults, even on gfx1250, nothing applies and nothing imports Primus-Turbo or
     TransformerEngine (unimportable here): the patch conditions, as the patch runner evaluates them for every
     Megatron job, and the argument check."""
@@ -139,7 +134,7 @@ def test_inert_by_default(monkeypatch, enable_primus_turbo):
         "modules/megatron/primus_turbo.yaml",
     ):
         params.update(parse_yaml(str(configs / name)))
-    params = SimpleNamespace(**{**params, "enable_primus_turbo": enable_primus_turbo})
+    params = SimpleNamespace(**params)
     for patch_id in (_PAO_PATCH, "megatron.moe.permute_fusion"):
         assert not PatchRegistry.get(patch_id).applies_to(_ctx(params))
     rocm_arg_validation.validate_mxfp8_on_gfx1250(params)

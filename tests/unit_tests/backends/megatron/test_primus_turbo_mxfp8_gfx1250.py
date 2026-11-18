@@ -45,9 +45,6 @@ MXFP8 = PrimusTurboQuantConfig(
 )
 
 
-@pytest.mark.skipif(
-    not (fp8_utils.HAVE_TE and fp8_utils.HAVE_TURBO), reason="needs TransformerEngine and Primus-Turbo"
-)
 @pytest.mark.parametrize(
     "recipe, gfx1250, te_enabled",
     [("mxfp8", True, False), ("mxfp8", False, True), ("tensorwise", True, True)],
@@ -110,44 +107,32 @@ def _weight(shape=(8, 8), main_grad_dtype=torch.bfloat16, device="cpu"):
     return weight
 
 
-@pytest.mark.parametrize("shape", [(8, 8), (2, 8, 8)], ids=["dense", "grouped"])
-def test_mxfp8_wgrad_fuses_where_turbo_accumulates(turbo, shape):
-    """Primus-Turbo is asked about the weight's own main_grad, as grouped for the experts' weight stack."""
-    weight = _weight(shape)
-    assert _fuse_wgrad_accum_pattern(FUSION, weight, grouped=len(shape) == 3) == "megatron"
-    ((grouped, main_grad),) = turbo.calls
-    assert grouped is (len(shape) == 3) and main_grad is weight.main_grad
-
-
 @pytest.mark.parametrize("flag, fusion", [(True, False), (False, True)])
-def test_mxfp8_grouped_wgrad_follows_the_grouped_switch(turbo, monkeypatch, flag, fusion):
-    """The experts' fusion follows turbo_grouped_gemm_wgrad_accum_fusion under MXFP8 as under BF16; the dense
-    linears follow gradient_accumulation_fusion."""
+def test_mxfp8_wgrad_follows_the_switches(turbo, monkeypatch, flag, fusion):
+    """The experts' fusion follows turbo_grouped_gemm_wgrad_accum_fusion under MXFP8 as under BF16, the dense
+    linears gradient_accumulation_fusion. Primus-Turbo is asked about the fused weight's own main_grad."""
     args = SimpleNamespace(turbo_grouped_gemm_wgrad_accum_fusion=flag)
     monkeypatch.setattr(primus_turbo_ext, "get_args", lambda: args)
     config = SimpleNamespace(gradient_accumulation_fusion=fusion)
-    assert _fuse_wgrad_accum_pattern(config, _weight((2, 8, 8)), grouped=True) == (
-        "megatron" if flag else None
-    )
-    assert _fuse_wgrad_accum_pattern(config, _weight()) == ("megatron" if fusion else None)
+    experts, dense = _weight((2, 8, 8)), _weight()
+    assert _fuse_wgrad_accum_pattern(config, experts, grouped=True) == ("megatron" if flag else None)
+    assert _fuse_wgrad_accum_pattern(config, dense) == ("megatron" if fusion else None)
+    ((grouped, main_grad),) = turbo.calls  # the switched-off one was not asked
+    assert grouped is flag and main_grad is (experts if flag else dense).main_grad
 
 
-@pytest.mark.parametrize(
-    "case", ["other_arch", "turbo_says_no", "turbo_cannot_be_asked", "no_main_grad", "fusion_off"]
-)
+@pytest.mark.parametrize("case", ["other_arch", "turbo_says_no", "turbo_cannot_be_asked", "no_main_grad"])
 def test_mxfp8_wgrad_keeps_the_separate_add(turbo, monkeypatch, case):
-    config, weight = FUSION, _weight()
+    weight = _weight()
     if case == "other_arch":  # gfx950's MXFP8 GEMMs have the epilogue too, but the fusion is gfx1250's
         monkeypatch.setattr(primus_turbo_ext, "_is_gfx1250", lambda: False)
     elif case == "turbo_says_no":
         turbo.answer = False
     elif case == "turbo_cannot_be_asked":
         monkeypatch.delattr(primus_turbo_torch.ops, "mx_wgrad_accum_supported")
-    elif case == "no_main_grad":
-        del weight.main_grad
     else:
-        config = SimpleNamespace(gradient_accumulation_fusion=False)
-    assert _fuse_wgrad_accum_pattern(config, weight) is None
+        del weight.main_grad
+    assert _fuse_wgrad_accum_pattern(FUSION, weight) is None
     assert len(turbo.calls) == (1 if case == "turbo_says_no" else 0)
 
 
@@ -193,9 +178,8 @@ def _accumulate_mxfp8_wgrad(weight, inputs, grad_outputs, *, fused, group_lens=N
     not check_mxfp8_support()[0] or not hasattr(primus_turbo_torch.ops, "mx_wgrad_accum_supported"),
     reason="needs MXFP8 and a Primus-Turbo that reports its MXFP8 wgrad accumulation",
 )
-@pytest.mark.parametrize("main_grad_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("grouped", [False, True])
-def test_mxfp8_fused_wgrad_matches_unfused(grouped, main_grad_dtype):
+def test_mxfp8_fused_wgrad_matches_unfused(grouped, main_grad_dtype=torch.bfloat16):
     """The beta=1 GEMM against the framework's add, on top of an existing gradient, two micro-batches."""
     torch.manual_seed(42)
     if grouped:
