@@ -1,6 +1,6 @@
 # FLUX.1-Schnell MLPerf on MI355X (Primus) - under validation
 
->Look [here](https://rocm.blogs.amd.com/artificial-intelligence/mlperf-training6.1-repro/README.html) for instructions to reproduce AMD MLPerf Training v6.1 submission results  
+>Look [here](https://rocm.blogs.amd.com/artificial-intelligence/mlperf-training6.1-repro/README.html) for instructions to reproduce AMD MLPerf Training v6.1 submission results
 
 MLPerf Training Flux.1-Schnell on **MI355X** via the in-tree diffusion backend and `primus-cli`.
 
