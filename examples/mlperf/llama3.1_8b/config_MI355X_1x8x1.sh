@@ -72,8 +72,8 @@ export MEGATRON_RCCL_SDMA_LOG="${MEGATRON_RCCL_SDMA_LOG:-1}"
 # parameter all-gather backend. The copy engines run it only with an RCCL that has CE
 # ReduceScatter (ROCm/rocm-systems#15042); other RCCLs ignore RCCL_CE_* and use
 # symmetric-memory kernels. PRIMUS_REBUILD_RCCL=1 builds that RCCL before training
-# (runner/helpers/patches/12_rebuild_rccl.sh). Any other backend value keeps Megatron's
-# ReduceScatter.
+# (runner/helpers/patches/12_rebuild_rccl.sh); it occasionally corrupts gradients (see
+# README.md), so it is off by default. Any other backend value keeps Megatron's ReduceScatter.
 export MEGATRON_GRAD_REDUCE_BACKEND="${MEGATRON_GRAD_REDUCE_BACKEND:-${MEGATRON_PARAM_GATHER_BACKEND}}"
 if [[ "${MEGATRON_GRAD_REDUCE_BACKEND}" == rccl_sdma ]]; then
     if [[ "${PRIMUS_REBUILD_RCCL:-0}" == 1 ]]; then
