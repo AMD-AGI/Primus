@@ -111,7 +111,8 @@ modules:
       ckpt_format: torch
 
       # The 16 experts run as two Primus Turbo grouped GEMMs whose group sizes
-      # stay on the GPU, so no MoE layer waits on the host. Turbo's FP8 grouped
+      # stay on the GPU, with Turbo's moe_permute and moe_unpermute moving the
+      # tokens, so no MoE layer waits on the host. Turbo's FP8 grouped
       # GEMM isn't wired up for ZAYA1 yet, so with FP8 the experts stay split.
       # The distributed-optimizer state does not carry across a switch between
       # split and grouped experts; load with --no-load-optim when switching.

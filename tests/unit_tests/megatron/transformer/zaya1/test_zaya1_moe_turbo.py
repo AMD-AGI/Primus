@@ -9,7 +9,8 @@
 The experts run as Turbo grouped GEMMs when Primus Turbo's enable_primus_turbo
 and use_turbo_grouped_gemm are set. The CPU tests swap primus_turbo's grouped
 GEMM for a reference with the same contract (rows past group_offs[-1] come
-back zero), so they check the dispatch, the MoD skip slot, empty experts,
+back zero), and its moe_permute and moe_unpermute for a stable sort and its
+inverse, so they check the dispatch, the MoD skip slot, empty experts,
 gradients and checkpoint keys of the grouped path against the per-expert split
 path.
 """
@@ -32,9 +33,21 @@ def _reference_grouped_gemm(a, b, group_lens, group_offs):
     return torch.cat(pieces, dim=0)
 
 
+def _reference_permute(flat, flat_idx, num_groups):
+    """moe_permute's contract: rows grouped by slot in token order, a map back, and each slot's count."""
+    perm = torch.sort(flat_idx, stable=True)[1]
+    return flat[perm], perm, torch.bincount(flat_idx, minlength=num_groups)
+
+
+def _reference_unpermute(rows, row_map, num_groups):
+    return rows.new_zeros(rows.shape).index_copy(0, row_map, rows)
+
+
 @pytest.fixture
 def turbo_cpu(monkeypatch):
     monkeypatch.setattr(zm, "_turbo_grouped_gemm", _reference_grouped_gemm)
+    monkeypatch.setattr(zm, "_turbo_permute", _reference_permute)
+    monkeypatch.setattr(zm, "_turbo_unpermute", _reference_unpermute)
 
 
 def _turbo_settings(monkeypatch, on):
@@ -325,6 +338,39 @@ def test_turbo_gpu_matches_split_without_host_sync(monkeypatch):
     finally:
         torch.cuda.set_sync_debug_mode("default")
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
+def test_turbo_permute_moves_rows_like_a_stable_sort(monkeypatch):
+    """Turbo's moe_permute and moe_unpermute against a stable sort and its inverse, bit for bit."""
+    pytest.importorskip("primus_turbo.pytorch.ops")
+    shape = dict(hidden_size=256, moe_ffn_hidden_size=128, ffn_hidden_size=128, num_moe_experts=16)
+    moe = _build_moe("turbo", monkeypatch, **shape).cuda().bfloat16().eval()
+    _skew_routes(moe, empty=(3,))
+    torch.manual_seed(5)
+    hidden = torch.randn(64, 8, 256, device="cuda", dtype=torch.bfloat16)
+    prev = torch.randn(64, 8, 8, device="cuda", dtype=torch.bfloat16)
+    weights = torch.linspace(-1, 1, hidden.numel(), device="cuda").view_as(hidden)
+    _, idx, _ = moe.router(hidden, prev)
+    routed = set(idx.flatten().tolist())
+    assert 3 not in routed and moe.num_real_experts in routed
+
+    def run():
+        moe.zero_grad(set_to_none=True)
+        h = hidden.clone().requires_grad_(True)
+        p = prev.clone().requires_grad_(True)
+        out, nxt = moe(h, p)
+        ((out.float() * weights).sum() + nxt.float().square().sum()).backward()
+        grads = {f"{n} grad": q.grad for n, q in moe.named_parameters()}
+        return {"output": out, "input grad": h.grad, "router-state grad": p.grad, **grads}
+
+    turbo = run()
+    monkeypatch.setattr(zm, "_turbo_permute", _reference_permute)
+    monkeypatch.setattr(zm, "_turbo_unpermute", _reference_unpermute)
+    reference = run()
+    assert turbo.keys() == reference.keys()
+    for name, ref in reference.items():
+        assert ref is not None and torch.equal(turbo[name], ref), name
 
 
 def _rel(a, b):

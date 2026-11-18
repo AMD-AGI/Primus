@@ -62,7 +62,8 @@ except Exception:  # pragma: no cover - depends on the image
 # max, then counts.tolist()). With Primus Turbo's enable_primus_turbo and
 # use_turbo_grouped_gemm, the 16 experts' weights live in two stacked
 # [E, out, in] parameters and run as two Primus Turbo grouped GEMMs whose
-# group sizes stay on device, so a MoE layer never syncs with the host;
+# group sizes stay on device, with Turbo's moe_permute and moe_unpermute
+# moving the tokens, so a MoE layer never syncs with the host;
 # turbo_grouped_gemm_backend picks the kernel. Only Turbo's BF16 grouped GEMM
 # is wired up here; Turbo's FP8 grouped GEMM isn't yet, so under FP8 the
 # experts stay split. Checkpoint keys stay local_experts.N.linear_fc{1,2}.weight
@@ -124,7 +125,7 @@ def _conv_path(config) -> Tuple[bool, str]:
 def _dispatch_path(config) -> str:
     """How the tokens reach the experts, as the build log names it."""
     if _turbo_experts(config)[0]:
-        return "unused: the grouped GEMMs always sort"
+        return "unused: the grouped GEMMs use Turbo's moe_permute"
     return "sort" if _path_on(config, "zaya_sort_dispatch") else "boolean masks"
 
 
@@ -958,6 +959,34 @@ def _turbo_grouped_gemm(a, b, group_lens, group_offs):
     return grouped_gemm(a, b, group_lens, group_offs, trans_b=True)
 
 
+def _turbo_permute(flat, flat_idx, num_groups: int):
+    """Primus Turbo's moe_permute for top-1 routes over ``num_groups`` slots.
+
+    Returns the rows grouped by slot, in token order inside each group (a
+    stable sort by slot), the map that moe_unpermute takes back, and each
+    slot's token count on device. Every token takes exactly one slot, so the
+    permuted row count is the token count, which spares moe_permute its host
+    read of the counts' sum. Tests swap this for a CPU reference.
+    """
+    from primus_turbo.pytorch.ops import moe_permute
+
+    rows, row_map, counts, _, _, _ = moe_permute(
+        flat,
+        topk_indices=flat_idx.view(-1, 1),
+        num_local_experts=num_groups,
+        num_topk=1,
+        num_permuted_tokens=flat.shape[0],
+    )
+    return rows, row_map, counts
+
+
+def _turbo_unpermute(rows, row_map, num_groups: int):
+    """Primus Turbo's moe_unpermute: ``rows`` back in token order. Tests swap this for a CPU reference."""
+    from primus_turbo.pytorch.ops import moe_unpermute
+
+    return moe_unpermute(rows, row_map, restore_shape=rows.shape, num_local_experts=num_groups)[0]
+
+
 def _expert_key(prefix: str, expert_id: int, fc: str) -> str:
     return f"{prefix}local_experts.{expert_id}.linear_{fc}.weight"
 
@@ -1020,32 +1049,28 @@ class ZayaMoE(nn.Module):
     def _forward_turbo(self, flat, flat_idx, flat_prob):
         """Grouped-GEMM experts with no host sync.
 
-        Tokens are stably sorted by routed group; the MoD skip slot has the
-        largest index, so its rows form the tail past the last real expert's
-        offset. The grouped GEMMs leave that tail zero, and the skip rows add
-        their identity input there instead, which reproduces the split path's
-        per-group results (``expert(x) * p`` or ``x * p``) row for row.
+        Primus Turbo's moe_permute groups the tokens by routed slot in token
+        order, the order the sort dispatch gives them; the MoD skip slot has
+        the largest index, so its rows form the tail past the last real
+        expert's offset. The grouped GEMMs leave that tail zero, and the skip
+        rows add their identity input there instead, which reproduces the
+        split path's per-group results (``expert(x) * p`` or ``x * p``) row
+        for row. moe_permute and moe_unpermute only move rows, so the gate
+        multiply comes after the unpermute.
         """
         num_groups = self.router.num_scored
         E = self.num_real_experts
-        sorted_idx, perm = torch.sort(flat_idx, stable=True)
-        # scatter_add instead of bincount: CUDA bincount reads max() on host.
-        counts = torch.zeros(num_groups, dtype=torch.int64, device=flat.device)
-        counts.scatter_add_(0, sorted_idx, torch.ones_like(sorted_idx, dtype=torch.int64))
-        group_lens = counts[:E].contiguous()
+        x_sorted, row_map, counts = _turbo_permute(flat, flat_idx, num_groups)
+        group_lens = counts[:E]
         group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
-        # The split path's permute, SwiGLU and gather*prob unpermute, with the
-        # per-expert loop replaced by two grouped GEMMs.
-        inv_perm = torch.empty_like(perm)
-        inv_perm.scatter_(0, perm, torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype))
-        x_sorted = _PermuteRows.apply(flat, perm, inv_perm)
         swiglu = _fused_swiglu if self.fuse_moe else _swiglu
         gate_up = _turbo_grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
         y = _turbo_grouped_gemm(swiglu(gate_up), self.fc2_weight, group_lens, group_offs)
         if self.router.use_mod:
             # Skip rows take the identity input; the GEMM left them zero.
-            y = torch.where((sorted_idx == E).unsqueeze(-1), x_sorted, y)
-        return _UnpermuteScale.apply(y, perm, inv_perm, flat_prob, self.fuse_moe)
+            skip = torch.arange(y.shape[0], device=y.device) >= group_offs[-1]
+            y = torch.where(skip.unsqueeze(-1), x_sorted, y)
+        return _turbo_unpermute(y, row_map, num_groups) * flat_prob
 
     def forward(self, hidden_states: torch.Tensor, prev_router: Optional[torch.Tensor]):
         if (

@@ -89,7 +89,7 @@ def test_switch_summary_names_the_paths_that_run(monkeypatch):
     monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
     line = zm.switch_summary(_cfg(zaya_sort_dispatch=True))
     assert line.endswith("; experts: Primus Turbo grouped GEMM (backend: triton)")
-    assert "zaya_sort_dispatch=on (unused: the grouped GEMMs always sort)" in line
+    assert "zaya_sort_dispatch=on (unused: the grouped GEMMs use Turbo's moe_permute)" in line
     line = zm.switch_summary(_cfg(fp8="hybrid", zaya_sort_dispatch=True))
     assert line.endswith("; experts: split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)")
     assert "zaya_sort_dispatch=on (sort)" in line
