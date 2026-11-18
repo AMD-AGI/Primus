@@ -37,9 +37,10 @@ modules:
       # than BF16. micro_batch_size 208 was sized before the ZAYA1 kernel
       # changes as the largest multiple of 8 that completed on MI355X with
       # rocm/primus:v26.8 (284 of 288 GB per GPU; 216 ran out of memory). It
-      # now peaks at 192 GB. Larger micro batches were not tried. On fewer
-      # GPUs, lower micro_batch_size or num_layers (keep it even). Do not edit
-      # the model yaml to shrink the architecture.
+      # now peaks at 238 GB on rocm/primus:v26.9, including the fp32 copy of
+      # the logits that Megatron's cross-entropy keeps. Larger micro batches
+      # were not tried. On fewer GPUs, lower micro_batch_size or num_layers
+      # (keep it even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
       micro_batch_size: 208
       # One micro batch per GPU per step at DP=8.
