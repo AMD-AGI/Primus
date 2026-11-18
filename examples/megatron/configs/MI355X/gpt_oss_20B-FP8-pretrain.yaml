@@ -1,7 +1,7 @@
-work_group: ${PRIMUS_TEAM:tas}
-user_name: ${PRIMUS_USER:qyy}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:gpt_oss_20B-pretrain}
-workspace: ./output
+workspace: ${PRIMUS_WORKSPACE:./output}
 
 # expandable segments are both faster and lower-peak with the real 201088-token vocab
 env:
