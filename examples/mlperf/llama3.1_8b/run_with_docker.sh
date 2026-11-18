@@ -51,7 +51,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${MLPERF_COMMON_REF:=b708a19e8bd8cb33305c72db2487c366d36ddd03}"
 # Primus-Turbo built into the container; the one rocm/primus:v26.9 ships predates the gfx950
 # dense-GEMM race fixes (see README.md). Empty keeps the image's Primus-Turbo.
-: "${PRIMUS_TURBO_REF:=fda6df0b4264c94c4a7dccb645e02facc97c9fca}"
+: "${PRIMUS_TURBO_REF=fda6df0b4264c94c4a7dccb645e02facc97c9fca}"
 : "${PRIMUS_TURBO_GPU_ARCHS:=gfx950}"
 # 1 builds an RCCL with copy-engine ReduceScatter for the gradient ReduceScatter at the first
 # trial's launch. Off by default: that RCCL (96020c58) occasionally corrupts gradients, which
@@ -310,7 +310,8 @@ for _experiment_index in $(seq 1 "${NEXP}"); do
         fi
     fi
 
-    _run_env=("${_base_exec_env[@]}" --env="SEED=${RANDOM}")
+    # SEED=<n> from the host: the same seed for every trial (default: random per trial).
+    _run_env=("${_base_exec_env[@]}" --env="SEED=${SEED:-${RANDOM}}")
 
     set +e
     docker exec "${_run_env[@]}" "${_cont_name}" bash -lc "${_run_cmd}" \
