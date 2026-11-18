@@ -273,6 +273,40 @@ def test_turbo_gate_in_act_leaves_no_row_unwritten(turbo_cpu, monkeypatch, fuse_
         assert torch.isfinite(getattr(turbo, f"{fc}_weight").grad).all()
 
 
+@pytest.mark.parametrize("fp8", [False, True])
+def test_turbo_fp8_groups_cover_the_skip_rows(turbo_cpu, monkeypatch, fp8):
+    """Under FP8 the last expert's group takes the MoD skip rows, so no row runs past the groups.
+
+    Turbo's FP8 weight-gradient kernel can fault or hang on a long tail past
+    the last group. The BF16 grouped GEMMs keep leaving the skip rows out.
+    """
+    calls = []
+
+    def recording_gemm(a, b, group_lens, group_offs):
+        calls.append((a.shape[0], int(group_offs[-1]), group_lens.tolist()))
+        return _reference_grouped_gemm(a, b, group_lens, group_offs)
+
+    monkeypatch.setattr(zm, "_turbo_grouped_gemm", recording_gemm)
+    monkeypatch.setattr(zm, "_turbo_grouped_gemm_fp8", recording_gemm)
+    if fp8:
+        monkeypatch.setattr(zm, "_linear", _linear_stand_in)
+    turbo = _build_moe("turbo", monkeypatch, zaya_use_mod=True, **(_FP8 if fp8 else {}))
+    assert turbo.turbo_fp8 is fp8
+    turbo.eval()
+    _skew_routes(turbo, empty=(1, 2))
+    torch.manual_seed(1)
+    hidden = torch.randn(16, 3, 32)
+    prev = torch.randn(16, 3, 8)
+    turbo(hidden, prev)
+    _, idx, _ = turbo.router(hidden, prev)
+    E = turbo.num_real_experts
+    counts = torch.bincount(idx[..., 0].flatten(), minlength=E + 1).tolist()
+    assert counts[E] > 0 and 0 in counts[:E]  # skip rows and an empty expert
+    rows = hidden.shape[0] * hidden.shape[1]
+    lens = counts[: E - 1] + [counts[E - 1] + counts[E]] if fp8 else counts[:E]
+    assert calls == [(rows, rows if fp8 else rows - counts[E], lens)] * 2
+
+
 def test_turbo_keeps_per_expert_checkpoint_keys(turbo_cpu, monkeypatch):
     split = _build_moe("split", monkeypatch, seed=3)
     turbo = _build_moe("turbo", monkeypatch, seed=4)

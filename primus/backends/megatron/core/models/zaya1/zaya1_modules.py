@@ -743,7 +743,7 @@ def _unpermute_scale_bwd_noprob(grad, perm, prob):
 
 
 def _scaled_skip_rows(y, x_sorted, prob, skip):
-    """The MoD skip rows take ``x * p`` in place of the grouped GEMMs' zeros, as main's ``flat * prob``."""
+    """The MoD skip rows take ``x * p`` in place of the grouped GEMMs' output, as main's ``flat * prob``."""
     return torch.where(skip.unsqueeze(-1), x_sorted * prob.unsqueeze(-1), y)
 
 
@@ -1163,13 +1163,16 @@ class ZayaMoE(nn.Module):
         Primus Turbo's moe_permute groups the tokens by routed slot in token
         order, the order the sort dispatch gives them; the MoD skip slot has
         the largest index, so its rows form the tail past the last real
-        expert's offset. The grouped GEMMs leave that tail zero, and the skip
-        rows add their identity input there instead, which reproduces the
-        split path's per-group results (``expert(x) * p`` or ``x * p``) row
-        for row. moe_permute and moe_unpermute only move rows, so the gate
-        multiply comes after the unpermute, or, with
-        use_turbo_fused_act_with_probs, inside the SwiGLU kernel for the
-        expert rows and on the identity input for the skip rows.
+        expert's offset. The BF16 grouped GEMMs leave that tail zero; the FP8
+        ones run it as part of the last expert's group, because Turbo's FP8
+        weight-gradient kernel can fault or hang when a long tail runs past the
+        last group. Either way the skip rows then take their identity input,
+        and their gradient into the GEMMs is zero, which reproduces the split
+        path's per-group results (``expert(x) * p`` or ``x * p``) row for row.
+        moe_permute and moe_unpermute only move rows, so the gate multiply
+        comes after the unpermute, or, with use_turbo_fused_act_with_probs,
+        inside the SwiGLU kernel for the expert rows and on the identity input
+        for the skip rows.
         """
         num_groups = self.router.num_scored
         E = self.num_real_experts
@@ -1178,6 +1181,11 @@ class ZayaMoE(nn.Module):
         group_lens = counts[:E]
         group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
         skip = torch.arange(flat.shape[0], device=flat.device) >= group_offs[-1]
+        if self.turbo_fp8 and num_groups > E:
+            group_lens = torch.cat(
+                [counts[: E - 1], counts[E - 1 :].sum(0, keepdim=True, dtype=counts.dtype)]
+            )
+            group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
         grouped_gemm = _turbo_grouped_gemm_fp8 if self.turbo_fp8 else _turbo_grouped_gemm
         gate_up = grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
         if self.gate_in_act:
@@ -1191,7 +1199,7 @@ class ZayaMoE(nn.Module):
             scale_skip_rows = _fused_scaled_skip_rows if self.fuse_moe else _scaled_skip_rows
             y = scale_skip_rows(y, x_sorted, p_sorted.to(x_sorted.dtype), skip)
         elif self.router.use_mod:
-            # Skip rows take the identity input; the GEMM left them zero.
+            # Skip rows take the identity input in place of the GEMM's output.
             y = torch.where(skip.unsqueeze(-1), x_sorted, y)
         out = _turbo_unpermute(y, row_map, num_groups)
         return out if self.gate_in_act else out * flat_prob
