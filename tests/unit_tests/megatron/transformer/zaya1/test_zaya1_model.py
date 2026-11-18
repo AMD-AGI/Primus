@@ -205,12 +205,15 @@ def test_builder_rejects_overlap_grad_reduce_with_split_experts(monkeypatch):
     args = _args(overlap_grad_reduce=True)
     with pytest.raises(ValueError, match="overlap_grad_reduce"):
         zaya1_builder(args, pre_process=True, post_process=True, config=_tiny_config())
-    # The Turbo experts give every parameter a gradient each step; under FP8 the experts stay split.
+    # The Turbo experts give every parameter a gradient each step; under FP8
+    # they need the tensorwise recipe, and other recipes keep the experts split.
     turbo = SimpleNamespace(enable_primus_turbo=True, use_turbo_grouped_gemm=True)
     monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
     _assert_overlap_grad_reduce_supported(args)
+    fp8 = dict(overlap_grad_reduce=True, fp8="hybrid")
+    _assert_overlap_grad_reduce_supported(_args(**fp8, fp8_recipe="tensorwise"))
     with pytest.raises(ValueError, match="overlap_grad_reduce"):
-        _assert_overlap_grad_reduce_supported(_args(overlap_grad_reduce=True, fp8="hybrid"))
+        _assert_overlap_grad_reduce_supported(_args(**fp8, fp8_recipe="delayed"))
 
 
 def test_rmsnorm_matches_fp32_formula():
@@ -339,6 +342,104 @@ def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch)
     assert torch.isfinite(loss).all()
     loss.sum().backward()
     assert torch.isfinite(cca.linear_q.linear.weight.grad).all()
+
+
+def _rel(a, b):
+    return ((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-12)).item()
+
+
+def test_turbo_fp8_experts_track_the_split_fp8_experts(parallel_state, monkeypatch):
+    """Turbo's tensorwise FP8 grouped GEMMs against the split experts' TE FP8 linears.
+
+    Each model loads the other's checkpoint strictly, TE's extra state
+    included, and the Turbo experts stay as close to the high-precision
+    forward and backward as the TE ones. Two stages, so both MoE layers see
+    the same CCA output and route the same tokens.
+    """
+    del parallel_state
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.delenv(name, raising=False)
+    pytest.importorskip("transformer_engine")
+    pytest.importorskip("primus_turbo.pytorch.ops")
+    import megatron.core.fp8_utils as fp8_utils
+    from megatron.core.utils import is_te_min_version
+    from megatron.training.global_vars import set_args
+
+    if not is_te_min_version("2.2.0.dev0"):
+        pytest.skip("Float8CurrentScaling needs Transformer Engine >= 2.2.")
+    from primus.backends.megatron.core.fp8_utils import get_fp8_context
+
+    # What Primus's megatron.fp8.context patch installs before training.
+    monkeypatch.setattr(fp8_utils, "get_fp8_context", get_fp8_context)
+    config = _tiny_config(
+        num_layers=2,
+        num_attention_heads=2,
+        kv_channels=16,
+        ffn_hidden_size=32,
+        moe_ffn_hidden_size=32,
+        zaya_mlp_expansion=16,
+        zaya_balance_lr=0.0,
+        fp8="hybrid",
+        fp8_recipe="tensorwise",
+    )
+    models = {}
+    for name, turbo in (("split", False), ("turbo", True)):
+        set_args(_args(enable_primus_turbo=turbo, use_turbo_grouped_gemm=turbo))
+        models[name] = get_model_provider("zaya1")(pre_process=True, post_process=True, config=config)
+        models[name].cuda().bfloat16().eval()
+    split, turbo = models["split"], models["turbo"]
+    assert split.decoder.layers[1].zaya_block.local_experts is not None
+    assert turbo.decoder.layers[1].zaya_block.turbo_fp8
+
+    device = torch.device("cuda")
+    batch, seq, vocab = 2, 16, 64
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, vocab, (batch, seq), device=device)
+    position_ids = torch.arange(seq, device=device).unsqueeze(0).expand(batch, -1)
+    labels = torch.randint(0, vocab, (batch, seq), device=device)
+
+    def run(model):
+        model.zero_grad(set_to_none=True)
+        loss = model(input_ids, position_ids, attention_mask=None, labels=labels)
+        loss.float().mean().backward()
+        moe = model.decoder.layers[1].zaya_block
+        experts = []
+        for fc in ("fc1", "fc2"):
+            if moe.use_turbo_gemm:
+                experts.append(getattr(moe, f"{fc}_weight").grad.float().flatten())
+                continue
+            for expert in moe.local_experts:
+                w = zm._expert_weight(getattr(expert, f"linear_{fc}"))
+                experts.append((torch.zeros_like(w) if w.grad is None else w.grad).float().flatten())
+        others = sorted(
+            (n, p.grad.float().flatten())
+            for n, p in model.named_parameters()
+            if p.grad is not None
+            and "local_experts" not in n
+            and not n.endswith(("fc1_weight", "fc2_weight"))
+        )
+        return {
+            "loss": loss.detach().float(),
+            "expert grads": torch.cat(experts),
+            "other grads": torch.cat([g for _, g in others]),
+        }
+
+    run(split)  # an FP8 step, so TE's extra state is what a saved run would hold
+    turbo.load_state_dict(split.state_dict(), strict=True)
+    split.load_state_dict(turbo.state_dict(), strict=True)
+    stacked = torch.stack(
+        [e.linear_fc1.linear.weight for e in split.decoder.layers[1].zaya_block.local_experts]
+    )
+    torch.testing.assert_close(turbo.decoder.layers[1].zaya_block.fc1_weight, stacked, rtol=0, atol=0)
+
+    config.fp8 = None
+    reference = run(split)
+    config.fp8 = "hybrid"
+    split_fp8, turbo_fp8 = run(split), run(turbo)
+    for what, ref in reference.items():
+        e_split, e_turbo = _rel(split_fp8[what], ref), _rel(turbo_fp8[what], ref)
+        assert torch.isfinite(turbo_fp8[what]).all(), what
+        assert e_turbo <= 1.5 * e_split + 1e-3, f"{what}: Turbo {e_turbo:.3e} against TE {e_split:.3e}"
 
 
 def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):

@@ -12,9 +12,9 @@ exp_name: ${PRIMUS_EXP_NAME:zaya1-fp8-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 # The runner enables Transformer Engine's Triton FP8 cast-transpose, which
-# autotunes once per new tensor shape. Expert token counts change every step,
-# so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
-# per-shape cost.
+# autotunes once per new tensor shape. Split experts' token counts change
+# every step, so it keeps retuning and FP8 steps stall. The HIP cast kernel
+# has no per-shape cost.
 env:
   NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
 
@@ -74,7 +74,8 @@ modules:
       # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
       # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
       # elementwise chains, CCA's convolutions as GEMMs, and the split
-      # experts' sort-based dispatch.
+      # experts' sort-based dispatch (unused while the experts run as grouped
+      # GEMMs, below).
       # zaya_router_defer_ar stays off: it gained under 1% here. The ZAYA1
       # chunked cross-entropy (zaya_chunked_ce) stays off too: it rounds each
       # chunk's output-layer weight gradient to bf16 before summing, below
@@ -113,15 +114,21 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Off: Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet, so with
-      # FP8 the experts stay split.
-      enable_primus_turbo: false
+      # The 16 experts run as two Primus Turbo FP8 grouped GEMMs whose group
+      # sizes stay on the GPU, with Turbo's moe_permute and moe_unpermute
+      # moving the tokens, so no MoE layer waits on the host. They quantize
+      # like the tensorwise recipe below, but with one scale for all 16
+      # experts where the split experts' TE linears take one each. The
+      # distributed-optimizer state does not carry across a switch between
+      # split and grouped experts; load with --no-load-optim when switching.
+      enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true
 
-      # Hybrid FP8: E4M3 forward, E5M2 backward. CCA Q/K/V/O and expert
-      # SwiGLU run as TE GEMMs. Router, conv, RMSNorm, attention, embeddings,
-      # and the tied logits projection stay in BF16.
+      # Hybrid FP8: E4M3 forward, E5M2 backward. CCA Q/K/V/O run as TE GEMMs
+      # and the expert SwiGLU as Turbo's grouped GEMMs (above). Router, conv,
+      # RMSNorm, attention, embeddings, and the tied logits projection stay
+      # in BF16.
       # Tensorwise (current) scaling takes each scale from the tensor being
       # cast, so FP8 is correct from the first step, including a cold start
       # from a fresh or loaded checkpoint. Delayed scaling starts with an

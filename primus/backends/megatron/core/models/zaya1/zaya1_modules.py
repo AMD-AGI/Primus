@@ -67,11 +67,16 @@ except Exception:  # pragma: no cover - depends on the image
 # turbo_grouped_gemm_backend picks the kernel. Turbo's
 # use_turbo_fused_act_with_probs moves the gate multiply from after fc2 into
 # the SwiGLU kernel (silu(gate) * up * p in fp32, rounded to bf16 once), one
-# bf16 rounding fewer than scaling fc2's output. Only Turbo's BF16 grouped GEMM
-# is wired up here; Turbo's FP8 grouped GEMM isn't yet, so under FP8 the
-# experts stay split. Checkpoint keys stay local_experts.N.linear_fc{1,2}.weight
-# either way; the distributed-optimizer state is shaped per parameter, so it
-# does not carry across a switch (load with --no-load-optim when switching).
+# bf16 rounding fewer than scaling fc2's output. Under FP8 with the tensorwise
+# recipe the grouped GEMMs are Turbo's FP8 ones, quantized as Primus's FP8
+# context tells Turbo: E4M3 forward and E5M2 backward under hybrid, as in the
+# split experts' TE linears, but with one scale for all the rows and one for
+# all 16 experts' weights where TE takes one per expert. Other FP8 recipes keep
+# the experts split. Checkpoint keys stay the split experts' either way
+# (local_experts.N.linear_fc{1,2}.weight, or .linear.weight and TE's
+# .linear._extra_state under FP8); the distributed-optimizer state is shaped
+# per parameter, so it does not carry across a switch (load with
+# --no-load-optim when switching).
 def _megatron_args():
     """Megatron's parsed arguments, which hold the Primus Turbo settings, or None.
 
@@ -97,10 +102,13 @@ def _turbo_experts(config) -> Tuple[bool, str]:
     """Whether the experts run as Primus Turbo grouped GEMMs, and their path as the build log names it."""
     if not _turbo_on("use_turbo_grouped_gemm"):
         return False, "split"
-    if _fp8_requested(config):
-        return False, "split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)"
     backend = getattr(_megatron_args(), "turbo_grouped_gemm_backend", "default")
-    path = f"Primus Turbo grouped GEMM (backend: {backend})"
+    if not _fp8_requested(config):
+        path = f"Primus Turbo grouped GEMM (backend: {backend})"
+    elif getattr(config, "fp8_recipe", None) == "tensorwise":
+        path = f"Primus Turbo FP8 grouped GEMM (tensorwise, backend: {backend})"
+    else:
+        return False, "split (Turbo's FP8 grouped GEMM runs only the tensorwise recipe here)"
     if _turbo_on("use_turbo_fused_act_with_probs"):
         path += ", gate in Turbo's swiglu_with_probs"
     return True, path
@@ -976,6 +984,27 @@ def _turbo_grouped_gemm(a, b, group_lens, group_offs):
     return grouped_gemm(a, b, group_lens, group_offs, trans_b=True)
 
 
+def _turbo_grouped_gemm_fp8(a, b, group_lens, group_offs):
+    """``_turbo_grouped_gemm`` in FP8, quantized as Primus's FP8 context tells Turbo.
+
+    Tensorwise scaling: one scale for all of ``a``'s rows and one for all of
+    ``b``'s groups. Tests swap this for a CPU reference.
+    """
+    from primus_turbo.pytorch.ops import grouped_gemm_fp8
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboLowPrecisionGlobalStateManager as fp8_state,
+    )
+
+    quant = fp8_state.get_turbo_quant_config() if fp8_state.is_turbo_fp8_enabled() else None
+    if quant is None or not quant.current_scaling():
+        raise RuntimeError(
+            "ZAYA1's Turbo FP8 experts run inside Primus's FP8 context with the tensorwise recipe: "
+            "enable_primus_turbo, fp8_recipe: tensorwise, and disable_fp8_context_patches off."
+        )
+    return grouped_gemm_fp8(a, b, group_lens, group_offs, trans_b=True, config=quant.data())
+
+
 def _turbo_permute(flat, flat_idx, num_groups: int, probs=None):
     """Primus Turbo's moe_permute for top-1 routes over ``num_groups`` slots.
 
@@ -1011,10 +1040,11 @@ def _turbo_unpermute(rows, row_map, num_groups: int):
 def _turbo_swiglu_with_probs(gate_up, probs, group_lens):
     """``silu(gate) * up * probs`` per row in one Primus Turbo kernel, through Primus's helper.
 
-    Rows past the groups' end (the MoD skip slot) are masked: the kernel
-    writes neither them nor their input gradient, and leaves their
-    probability gradient unspecified, so nothing may read them. Tests swap
-    this for a CPU reference.
+    The kernel writes neither the rows past the groups' end nor their input
+    gradient, and leaves their probability gradient unspecified, so the
+    groups must cover every row: tensorwise FP8 takes its scale from every
+    row of the next GEMM's input and of the gradient it passes back. Tests
+    swap this for a CPU reference.
     """
     from primus.backends.megatron.core.extensions.primus_turbo import (
         fused_bias_act_with_probs,
@@ -1023,8 +1053,13 @@ def _turbo_swiglu_with_probs(gate_up, probs, group_lens):
     return fused_bias_act_with_probs(gate_up, None, probs, group_lens, "silu")
 
 
-def _expert_key(prefix: str, expert_id: int, fc: str) -> str:
-    return f"{prefix}local_experts.{expert_id}.linear_{fc}.weight"
+def _expert_key(prefix: str, expert_id: int, fc: str, leaf: str = "weight") -> str:
+    return f"{prefix}local_experts.{expert_id}.linear_{fc}.{leaf}"
+
+
+def _expert_weight(linear: nn.Module) -> torch.Tensor:
+    """The weight of a split expert's projection: ``nn.Linear``, or the TE linear inside ``_Fp8Linear``."""
+    return getattr(linear, "linear", linear).weight
 
 
 class ZayaMoE(nn.Module):
@@ -1040,6 +1075,8 @@ class ZayaMoE(nn.Module):
         ]
         self.use_turbo_gemm, _ = _turbo_experts(config)
         self.gate_in_act = self.use_turbo_gemm and _turbo_on("use_turbo_fused_act_with_probs")
+        self.turbo_fp8 = self.use_turbo_gemm and _fp8_requested(config)
+        self._weight_leaf = "linear.weight" if self.turbo_fp8 else "weight"
         if self.use_turbo_gemm:
             _publish_turbo_grouped_gemm_backend()
             # Built from the same per-expert modules (same init RNG stream),
@@ -1047,8 +1084,8 @@ class ZayaMoE(nn.Module):
             # the grouped GEMM runs with trans_b=True). The per-expert copies
             # are dropped; state_dict hooks keep the per-expert keys.
             with torch.no_grad():
-                self.fc1_weight = nn.Parameter(torch.stack([e.linear_fc1.weight for e in experts]))
-                self.fc2_weight = nn.Parameter(torch.stack([e.linear_fc2.weight for e in experts]))
+                self.fc1_weight = nn.Parameter(torch.stack([_expert_weight(e.linear_fc1) for e in experts]))
+                self.fc2_weight = nn.Parameter(torch.stack([_expert_weight(e.linear_fc2) for e in experts]))
             del experts
             self.local_experts = None
             self._register_state_dict_hook(ZayaMoE._unstack_state_dict)
@@ -1062,14 +1099,23 @@ class ZayaMoE(nn.Module):
         for fc in ("fc1", "fc2"):
             stacked = state_dict.pop(f"{prefix}{fc}_weight").detach()
             for expert_id in range(module.num_real_experts):
-                state_dict[_expert_key(prefix, expert_id, fc)] = stacked[expert_id]
+                state_dict[_expert_key(prefix, expert_id, fc, module._weight_leaf)] = stacked[expert_id]
+                if module.turbo_fp8:
+                    # What TE saves for a recipe that keeps no FP8 state, such as tensorwise.
+                    state_dict[_expert_key(prefix, expert_id, fc, "linear._extra_state")] = torch.empty(
+                        0, dtype=torch.uint8
+                    )
         return state_dict
 
     def _stack_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
         for fc in ("fc1", "fc2"):
-            keys = [_expert_key(prefix, i, fc) for i in range(self.num_real_experts)]
+            if self.turbo_fp8:
+                # Tensorwise scaling has no FP8 state to carry over.
+                for expert_id in range(self.num_real_experts):
+                    state_dict.pop(_expert_key(prefix, expert_id, fc, "linear._extra_state"), None)
+            keys = [_expert_key(prefix, i, fc, self._weight_leaf) for i in range(self.num_real_experts)]
             if all(k in state_dict for k in keys):
                 state_dict[f"{prefix}{fc}_weight"] = torch.stack([state_dict.pop(k) for k in keys])
             elif any(k in state_dict for k in keys):
@@ -1104,13 +1150,15 @@ class ZayaMoE(nn.Module):
         group_lens = counts[:E]
         group_offs = F.pad(torch.cumsum(group_lens, dim=0), (1, 0))
         skip = torch.arange(flat.shape[0], device=flat.device) >= group_offs[-1]
-        gate_up = _turbo_grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
+        grouped_gemm = _turbo_grouped_gemm_fp8 if self.turbo_fp8 else _turbo_grouped_gemm
+        gate_up = grouped_gemm(x_sorted, self.fc1_weight, group_lens, group_offs)
         if self.gate_in_act:
-            # masked_fill zeroes the probability gradient the kernel leaves unspecified on the skip rows.
-            h = _turbo_swiglu_with_probs(gate_up, p_sorted.masked_fill(skip, 0.0), group_lens)
+            # The skip slot is a group here too, with probability 0, so every row comes out written
+            # (the skip rows as zeros, which take x * p below).
+            h = _turbo_swiglu_with_probs(gate_up, p_sorted.masked_fill(skip, 0.0), counts)
         else:
             h = (_fused_swiglu if self.fuse_moe else _swiglu)(gate_up)
-        y = _turbo_grouped_gemm(h, self.fc2_weight, group_lens, group_offs)
+        y = grouped_gemm(h, self.fc2_weight, group_lens, group_offs)
         if self.router.use_mod and self.gate_in_act:
             scale_skip_rows = _fused_scaled_skip_rows if self.fuse_moe else _scaled_skip_rows
             y = scale_skip_rows(y, x_sorted, p_sorted.to(x_sorted.dtype), skip)

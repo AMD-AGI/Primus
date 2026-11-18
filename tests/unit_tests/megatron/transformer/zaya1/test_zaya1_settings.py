@@ -54,18 +54,29 @@ def test_on_off_fields_take_only_true_or_false():
                 _tiny_config(**{name: value})
 
 
+_TURBO = (
+    "enable_primus_turbo",
+    "use_turbo_grouped_gemm",
+    "use_turbo_fused_act_with_probs",
+    "use_turbo_attention",
+)
+
+
 def test_only_the_mi355x_recipes_turn_paths_on():
     compute = {"zaya_attn_flash", "zaya_fuse_norm", "zaya_fuse_cca", "zaya_conv_gemm", "zaya_fuse_moe"}
+    turbo = {"enable_primus_turbo", "use_turbo_grouped_gemm"}
     expected = {
-        "MI355X/zaya1_8B-BF16-pretrain.yaml": compute | {"zaya_sort_dispatch", "zaya_router_defer_ar"},
-        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute | {"zaya_sort_dispatch"},
+        "MI355X/zaya1_8B-BF16-pretrain.yaml": compute
+        | turbo
+        | {"zaya_sort_dispatch", "zaya_router_defer_ar"},
+        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute | turbo | {"zaya_sort_dispatch"},
     }
     configs = Path(primus.__file__).parents[1] / "examples" / "megatron" / "configs"
     recipes = sorted(configs.glob("*/zaya1_8B-*-pretrain.yaml"))
     assert len(recipes) == 6
     for path in recipes:
         overrides = yaml.safe_load(path.read_text())["modules"]["pre_trainer"]["overrides"]
-        on = {name for name in _PATHS + _CHUNKED_CE if overrides.get(name) is True}
+        on = {name for name in _PATHS + _CHUNKED_CE + _TURBO if overrides.get(name) is True}
         assert on == expected.get(path.relative_to(configs).as_posix(), set()), path
 
 
@@ -94,8 +105,12 @@ def test_switch_summary_names_the_paths_that_run(monkeypatch):
     assert zm.switch_summary(_cfg()).endswith(
         "; experts: Primus Turbo grouped GEMM (backend: triton), gate in Turbo's swiglu_with_probs"
     )
-    line = zm.switch_summary(_cfg(fp8="hybrid", zaya_sort_dispatch=True))
-    assert line.endswith("; experts: split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)")
+    turbo.use_turbo_fused_act_with_probs = False
+    line = zm.switch_summary(_cfg(fp8="hybrid", fp8_recipe="tensorwise", zaya_sort_dispatch=True))
+    assert line.endswith("; experts: Primus Turbo FP8 grouped GEMM (tensorwise, backend: triton)")
+    assert "zaya_sort_dispatch=on (unused: the grouped GEMMs use Turbo's moe_permute)" in line
+    line = zm.switch_summary(_cfg(fp8="hybrid", fp8_recipe="delayed", zaya_sort_dispatch=True))
+    assert line.endswith("; experts: split (Turbo's FP8 grouped GEMM runs only the tensorwise recipe here)")
     assert "zaya_sort_dispatch=on (sort)" in line
     monkeypatch.setattr(zm, "_megatron_args", lambda: SimpleNamespace(enable_primus_turbo=True))
     assert zm.switch_summary(_cfg()).endswith("; experts: split")

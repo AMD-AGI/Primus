@@ -40,7 +40,7 @@ def _assert_data_parallel_only(args) -> None:
 def _assert_overlap_grad_reduce_supported(args) -> None:
     """Megatron's overlap_grad_reduce stops training when a parameter gets no gradient in a step.
 
-    Runs before the config is built, so _turbo_experts reads fp8 from the arguments.
+    Runs before the config is built, so _turbo_experts reads fp8 and fp8_recipe from the arguments.
     """
     from primus.backends.megatron.core.models.zaya1.zaya1_modules import _turbo_experts
 
@@ -49,7 +49,8 @@ def _assert_overlap_grad_reduce_supported(args) -> None:
             "overlap_grad_reduce needs every parameter to get a gradient each step. ZAYA1's split "
             "experts leave an expert that gets no tokens without one, and the first MoE stage's "
             "router_states_scale too. Set overlap_grad_reduce: false, or run the experts as Primus "
-            "Turbo grouped GEMMs (enable_primus_turbo and use_turbo_grouped_gemm, BF16 only)."
+            "Turbo grouped GEMMs (enable_primus_turbo and use_turbo_grouped_gemm, and under FP8 "
+            "fp8_recipe: tensorwise)."
         )
 
 

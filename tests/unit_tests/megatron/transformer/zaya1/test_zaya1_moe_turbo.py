@@ -52,9 +52,48 @@ def _reference_swiglu_with_probs(gate_up, probs, group_lens):
 @pytest.fixture
 def turbo_cpu(monkeypatch):
     monkeypatch.setattr(zm, "_turbo_grouped_gemm", _reference_grouped_gemm)
+    monkeypatch.setattr(zm, "_turbo_grouped_gemm_fp8", _reference_grouped_gemm)
     monkeypatch.setattr(zm, "_turbo_permute", _reference_permute)
     monkeypatch.setattr(zm, "_turbo_unpermute", _reference_unpermute)
     monkeypatch.setattr(zm, "_turbo_swiglu_with_probs", _reference_swiglu_with_probs)
+
+
+class _TeLinearStandIn(torch.nn.Linear):
+    """``nn.Linear`` with Transformer Engine's extra state, in place of TELinear."""
+
+    def get_extra_state(self):
+        return torch.empty(0, dtype=torch.uint8)
+
+    def set_extra_state(self, state):
+        self.loaded_extra_state = state
+
+
+class _Fp8LinearStandIn(torch.nn.Module):
+    """``_Fp8Linear``'s layout, the TE linear under ``.linear``, without Transformer Engine."""
+
+    def __init__(self, in_features, out_features, bias):
+        super().__init__()
+        self.linear = _TeLinearStandIn(in_features, out_features, bias=bias)
+
+    def forward(self, x):
+        return self.linear(x)
+
+
+_linear = zm._linear
+
+
+def _linear_stand_in(in_features, out_features, bias, config, fp8=True):
+    """``_linear``, with ``_Fp8Linear``'s layout under FP8 but no Transformer Engine."""
+    if not (fp8 and zm._fp8_requested(config)):
+        return _linear(in_features, out_features, bias, config, fp8=False)
+    stand_in = _Fp8LinearStandIn(in_features, out_features, bias)
+    zm._init_weight(stand_in.linear.weight, config)
+    if bias:
+        torch.nn.init.zeros_(stand_in.linear.bias)
+    return stand_in
+
+
+_FP8 = dict(fp8="hybrid", fp8_recipe="tensorwise")
 
 
 def _turbo_settings(monkeypatch, on, gate_in_act=False):
@@ -76,8 +115,14 @@ def _build_moe(mode, monkeypatch, seed=0, gate_in_act=False, **cfg_overrides):
 
 
 def _skew_routes(moe, empty=(1,), mod_bias=0.3):
-    # Push some experts out of every topk and give the MoD slot a share.
+    # At init the router's scores barely depend on the token, so every token
+    # takes the slot with the largest bias. Scale its projections so the
+    # routes spread, push some experts out of every topk and give the MoD slot
+    # a share.
     with torch.no_grad():
+        for module in (moe.router.down_proj, *moe.router.router_mlp):
+            if isinstance(module, torch.nn.Linear):
+                module.weight.mul_(50.0)
         for e in empty:
             moe.router.balancing_biases[e] = -100.0
         moe.router.balancing_biases[-1] = mod_bias
@@ -89,25 +134,30 @@ def _expert_grads(moe, fc):
         return [g[i] for i in range(moe.num_real_experts)]
     out = []
     for expert in moe.local_experts:
-        w = getattr(expert, f"linear_{fc}").weight
+        w = zm._expert_weight(getattr(expert, f"linear_{fc}"))
         out.append(torch.zeros_like(w) if w.grad is None else w.grad)
     return out
 
 
+@pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("gate_in_act", [False, True])
 @pytest.mark.parametrize("fuse_moe", [True, False])
 @pytest.mark.parametrize("use_mod", [True, False])
-def test_turbo_matches_split_forward_and_backward(turbo_cpu, monkeypatch, use_mod, fuse_moe, gate_in_act):
-    split = _build_moe("split", monkeypatch, zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe)
-    turbo = _build_moe(
-        "turbo", monkeypatch, gate_in_act=gate_in_act, zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe
-    )
+def test_turbo_matches_split_forward_and_backward(
+    turbo_cpu, monkeypatch, use_mod, fuse_moe, gate_in_act, fp8
+):
+    if fp8:
+        monkeypatch.setattr(zm, "_linear", _linear_stand_in)
+    cfg = dict(zaya_use_mod=use_mod, zaya_fuse_moe=fuse_moe, **(_FP8 if fp8 else {}))
+    split = _build_moe("split", monkeypatch, **cfg)
+    turbo = _build_moe("turbo", monkeypatch, gate_in_act=gate_in_act, **cfg)
     assert split.local_experts is not None and turbo.use_turbo_gemm
     assert turbo.gate_in_act is gate_in_act and not split.gate_in_act
+    assert turbo.turbo_fp8 is fp8
     # Same init stream, same weights.
     for i, expert in enumerate(split.local_experts):
-        torch.testing.assert_close(turbo.fc1_weight[i], expert.linear_fc1.weight, rtol=0, atol=0)
-        torch.testing.assert_close(turbo.fc2_weight[i], expert.linear_fc2.weight, rtol=0, atol=0)
+        torch.testing.assert_close(turbo.fc1_weight[i], zm._expert_weight(expert.linear_fc1), rtol=0, atol=0)
+        torch.testing.assert_close(turbo.fc2_weight[i], zm._expert_weight(expert.linear_fc2), rtol=0, atol=0)
     for moe in (split, turbo):
         moe.eval()  # keep the balancing bias fixed between the two runs
         _skew_routes(moe, empty=(1, 2) if use_mod else (1,))
@@ -126,6 +176,7 @@ def test_turbo_matches_split_forward_and_backward(turbo_cpu, monkeypatch, use_mo
     _, idx, _ = split.router(hidden, prev)
     routed = set(idx.flatten().tolist())
     assert 1 not in routed  # an empty expert is exercised
+    assert len(routed - {split.num_real_experts}) >= 2  # so are the offsets between groups
     if use_mod:
         assert split.num_real_experts in routed  # the skip slot is exercised
 
@@ -167,12 +218,36 @@ def _swiglu_with_probs_nan_masked(gate_up, probs, group_lens):
     return out.masked_fill(rows.unsqueeze(-1), float("nan"))
 
 
+class _ScaledByEveryElement(torch.autograd.Function):
+    """``out``, but NaN everywhere if any element of ``seen`` is not finite, and the same for its gradient."""
+
+    @staticmethod
+    def forward(ctx, out, seen):
+        return out * (seen.abs().amax() * 0 + 1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad * (grad.abs().amax() * 0 + 1), None
+
+
+def _grouped_gemm_reading_every_row(a, b, group_lens, group_offs):
+    """The reference grouped GEMM, reading every row of its input and output gradient as tensorwise FP8 does."""
+    return _ScaledByEveryElement.apply(_reference_grouped_gemm(a, b, group_lens, group_offs), a)
+
+
+@pytest.mark.parametrize("fp8", [False, True])
 @pytest.mark.parametrize("fuse_moe", [True, False])
-def test_turbo_gate_in_act_never_reads_the_rows_it_masks(turbo_cpu, monkeypatch, fuse_moe):
-    """The MoD skip rows still come out as ``x * p``, with their gradients, from whatever the kernel leaves there."""
+def test_turbo_gate_in_act_leaves_no_row_unwritten(turbo_cpu, monkeypatch, fuse_moe, fp8):
+    """No row the kernel leaves unwritten reaches a grouped GEMM, and the skip rows still come out as ``x * p``."""
     monkeypatch.setattr(zm, "_turbo_swiglu_with_probs", _swiglu_with_probs_nan_masked)
-    split = _build_moe("split", monkeypatch, zaya_fuse_moe=fuse_moe)
-    turbo = _build_moe("turbo", monkeypatch, gate_in_act=True, zaya_fuse_moe=fuse_moe)
+    monkeypatch.setattr(zm, "_turbo_grouped_gemm", _grouped_gemm_reading_every_row)
+    monkeypatch.setattr(zm, "_turbo_grouped_gemm_fp8", _grouped_gemm_reading_every_row)
+    if fp8:
+        monkeypatch.setattr(zm, "_linear", _linear_stand_in)
+    cfg = dict(zaya_fuse_moe=fuse_moe, **(_FP8 if fp8 else {}))
+    split = _build_moe("split", monkeypatch, **cfg)
+    turbo = _build_moe("turbo", monkeypatch, gate_in_act=True, **cfg)
+    assert turbo.turbo_fp8 is fp8
     for moe in (split, turbo):
         moe.eval()
         _skew_routes(moe, empty=(1, 2))
@@ -226,6 +301,28 @@ def test_turbo_keeps_per_expert_checkpoint_keys(turbo_cpu, monkeypatch):
     assert "fc1_weight" in names and "fc2_weight" in names
 
 
+def test_turbo_fp8_keeps_the_split_fp8_checkpoint_keys(turbo_cpu, monkeypatch):
+    """Under FP8 the split experts' weights sit in TE linears, next to TE's extra state."""
+    monkeypatch.setattr(zm, "_linear", _linear_stand_in)
+    split = _build_moe("split", monkeypatch, seed=3, **_FP8)
+    turbo = _build_moe("turbo", monkeypatch, seed=4, **_FP8)
+    sd_split = split.state_dict()
+    sd_turbo = turbo.state_dict()
+    assert sorted(sd_split) == sorted(sd_turbo)
+    assert "local_experts.0.linear_fc1.linear.weight" in sd_turbo
+    assert sd_turbo["local_experts.0.linear_fc1.linear._extra_state"].numel() == 0
+
+    turbo.load_state_dict(sd_split, strict=True)
+    for i, expert in enumerate(split.local_experts):
+        torch.testing.assert_close(turbo.fc1_weight[i], expert.linear_fc1.linear.weight, rtol=0, atol=0)
+    with torch.no_grad():
+        turbo.fc2_weight.add_(1.0)
+    split.load_state_dict(turbo.state_dict(), strict=True)
+    for i, expert in enumerate(split.local_experts):
+        torch.testing.assert_close(expert.linear_fc2.linear.weight, turbo.fc2_weight[i], rtol=0, atol=0)
+        assert expert.linear_fc2.linear.loaded_extra_state.numel() == 0
+
+
 def test_turbo_load_reports_missing_expert_keys(turbo_cpu, monkeypatch):
     split = _build_moe("split", monkeypatch, seed=3)
     partial = split.state_dict()
@@ -257,7 +354,7 @@ def test_turbo_mod_skip_scales_the_hidden_state(turbo_cpu, monkeypatch):
     torch.testing.assert_close(out, hidden / (moe.num_real_experts + 1))
 
 
-def test_turbo_needs_both_settings_and_bf16(monkeypatch):
+def test_turbo_needs_both_settings_and_tensorwise_fp8(monkeypatch):
     published = []
     monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: published.append(True))
     for enable, grouped in ((True, True), (True, False), (False, True), (False, False)):
@@ -268,13 +365,17 @@ def test_turbo_needs_both_settings_and_bf16(monkeypatch):
     # Megatron not initialized: no Turbo settings, so split.
     monkeypatch.setattr(zm, "_megatron_args", lambda: None)
     assert not zm.ZayaMoE(_cfg()).use_turbo_gemm
-    # Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet: FP8 keeps the split experts.
+    # Under FP8 only the tensorwise recipe runs Turbo's FP8 grouped GEMM; the others keep the split experts.
     _turbo_settings(monkeypatch, True)
     monkeypatch.setattr(zm, "_publish_turbo_grouped_gemm_backend", lambda: published.append(True))
-    monkeypatch.setattr(zm, "_fp8_requested", lambda config: True)
-    monkeypatch.setattr(zm, "_linear", lambda i, o, b, c, fp8=True: torch.nn.Linear(i, o, bias=b))
-    assert not zm.ZayaMoE(_cfg()).use_turbo_gemm
+    monkeypatch.setattr(zm, "_linear", _linear_stand_in)
+    for recipe in ("delayed", "blockwise", "mxfp8", None):
+        moe = zm.ZayaMoE(_cfg(fp8="hybrid", fp8_recipe=recipe))
+        assert not moe.use_turbo_gemm and not moe.turbo_fp8
     assert len(published) == 1
+    moe = zm.ZayaMoE(_cfg(**_FP8))
+    assert moe.use_turbo_gemm and moe.turbo_fp8
+    assert len(published) == 2
 
 
 def test_turbo_gate_in_act_needs_the_turbo_experts(monkeypatch):
@@ -292,9 +393,9 @@ def test_turbo_gate_in_act_needs_the_turbo_experts(monkeypatch):
         monkeypatch.setattr(zm, "_megatron_args", lambda: args)
         assert zm.ZayaMoE(_cfg()).gate_in_act == (enable and grouped and fused)
     _turbo_settings(monkeypatch, True, gate_in_act=True)
-    monkeypatch.setattr(zm, "_fp8_requested", lambda config: True)
-    monkeypatch.setattr(zm, "_linear", lambda i, o, b, c, fp8=True: torch.nn.Linear(i, o, bias=b))
-    assert not zm.ZayaMoE(_cfg()).gate_in_act
+    monkeypatch.setattr(zm, "_linear", _linear_stand_in)
+    assert not zm.ZayaMoE(_cfg(fp8="hybrid", fp8_recipe="delayed")).gate_in_act
+    assert zm.ZayaMoE(_cfg(**_FP8)).gate_in_act
 
 
 def test_turbo_settings_come_from_megatron_args(monkeypatch):
@@ -428,6 +529,40 @@ def test_turbo_gpu_matches_split_without_host_sync(monkeypatch, gate_in_act):
     finally:
         torch.cuda.set_sync_debug_mode("default")
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
+@pytest.mark.parametrize("gate_in_act", [False, True])
+def test_turbo_fp8_gpu_runs_without_host_sync(monkeypatch, gate_in_act):
+    """Turbo's tensorwise FP8 grouped GEMMs inside Primus's FP8 context, near the BF16 split experts."""
+    pytest.importorskip("primus_turbo.pytorch.ops")
+    from primus_turbo.pytorch.core.low_precision import Format, ScalingGranularity
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboQuantConfig,
+        primus_turbo_fp8_autocast,
+    )
+
+    monkeypatch.setattr(zm, "_linear", _linear_stand_in)
+    shape = dict(hidden_size=256, moe_ffn_hidden_size=256, ffn_hidden_size=256, num_moe_experts=16, **_FP8)
+    split = _build_moe("split", monkeypatch, **shape).cuda().bfloat16().eval()
+    turbo = _build_moe("turbo", monkeypatch, gate_in_act=gate_in_act, **shape).cuda().bfloat16().eval()
+    for moe in (split, turbo):
+        _skew_routes(moe, empty=(3,))
+    hidden = torch.randn(64, 8, 256, device="cuda", dtype=torch.bfloat16)
+    ref, _ = split(hidden, None)  # the stand-in linears run in BF16
+    quant = PrimusTurboQuantConfig(granularity=ScalingGranularity.TENSORWISE, format=Format.HYBRID)
+    with primus_turbo_fp8_autocast(enabled=False, enabled_turbo=True, turbo_quant_config=quant):
+        turbo(hidden, None)  # warm up / autotune
+        torch.cuda.synchronize()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            out, _ = turbo(hidden, None)
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+    assert _rel(out, ref) < 0.15, f"{_rel(out, ref):.3e}"
+    with pytest.raises(RuntimeError, match="Primus's FP8 context"):
+        turbo(hidden, None)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
