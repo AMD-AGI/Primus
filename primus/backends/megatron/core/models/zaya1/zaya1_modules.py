@@ -53,8 +53,12 @@ except Exception:  # pragma: no cover - depends on the image
 # the per-layer path.
 
 
-# By default the experts run split: per-expert nn.Linear GEMMs over host-sized
-# chunks (three host syncs per MoE layer: bincount reads its input's min and
+# By default the experts run split, as on main: per-expert nn.Linear GEMMs,
+# each expert taking its tokens through a boolean mask (a torch.any host sync
+# per expert, and more inside the masked indexing, forward and backward).
+# zaya_sort_dispatch (default off) sorts the tokens by expert instead, so each
+# expert takes one contiguous chunk with the same rows in the same order, bit
+# for bit: three host syncs per MoE layer (bincount reads its input's min and
 # max, then counts.tolist()). With Primus Turbo's enable_primus_turbo and
 # use_turbo_grouped_gemm, the 16 experts' weights live in two stacked
 # [E, out, in] parameters and run as two Primus Turbo grouped GEMMs whose
@@ -117,6 +121,13 @@ def _conv_path(config) -> Tuple[bool, str]:
     return True, "GEMM"
 
 
+def _dispatch_path(config) -> str:
+    """How the tokens reach the experts, as the build log names it."""
+    if _turbo_experts(config)[0]:
+        return "unused: the grouped GEMMs always sort"
+    return "sort" if _path_on(config, "zaya_sort_dispatch") else "boolean masks"
+
+
 def switch_summary(config) -> str:
     """The kernel-path fields and the paths in effect for ``config``, as one line for the build log."""
 
@@ -131,8 +142,9 @@ def switch_summary(config) -> str:
     return (
         f"zaya_attn_flash={on('zaya_attn_flash')} ({attention}), zaya_fuse_norm={on('zaya_fuse_norm')}, "
         f"zaya_fuse_cca={on('zaya_fuse_cca')}, zaya_conv_gemm={on('zaya_conv_gemm')} ({conv}), "
-        f"zaya_fuse_moe={on('zaya_fuse_moe')}, zaya_router_defer_ar={on('zaya_router_defer_ar')}; "
-        f"experts: {_turbo_experts(config)[1]}"
+        f"zaya_fuse_moe={on('zaya_fuse_moe')}, "
+        f"zaya_sort_dispatch={on('zaya_sort_dispatch')} ({_dispatch_path(config)}), "
+        f"zaya_router_defer_ar={on('zaya_router_defer_ar')}; experts: {_turbo_experts(config)[1]}"
     )
 
 
@@ -625,9 +637,9 @@ def attention(query, key, value, attention_mask: Optional[torch.Tensor], flash: 
 # zaya_fuse_moe (default off): compile the MoE-stage elementwise chains that
 # zaya_fuse_norm/zaya_fuse_cca do not cover: the expert SwiGLU (silu * up, one
 # kernel fwd and bwd, dynamic token count), the router EDA add + RMSNorm and
-# the fp32 softmax/bias/top-k/gather/cast, and the gate multiply + unpermute
-# (one gather*prob kernel replacing the per-expert multiplies). Off runs the
-# same functions uncompiled.
+# the fp32 softmax/bias/top-k/gather/cast, and, when the tokens are sorted,
+# the gate multiply + unpermute (one gather*prob kernel replacing the
+# per-expert multiplies). Off runs the same functions uncompiled.
 
 
 def _swiglu(fc1_out: torch.Tensor) -> torch.Tensor:
@@ -956,6 +968,7 @@ class ZayaMoE(nn.Module):
         self.num_real_experts = int(config.num_moe_experts)
         intermediate = int(getattr(config, "moe_ffn_hidden_size", None) or config.ffn_hidden_size)
         self.fuse_moe = _path_on(config, "zaya_fuse_moe")
+        self.sort_dispatch = _path_on(config, "zaya_sort_dispatch")
         self.router = ZayaRouter(config)
         experts = [
             SwiGLUExpert(int(config.hidden_size), intermediate, config) for _ in range(self.num_real_experts)
@@ -1058,16 +1071,43 @@ class ZayaMoE(nn.Module):
         flat_idx = index[..., 0].reshape(-1)
         flat_prob = prob.reshape(-1, 1).to(dtype=flat.dtype)
         if self.use_turbo_gemm:
-            return self._forward_turbo(flat, flat_idx, flat_prob).view_as(hidden_states), next_router
-        # Sort-based dispatch. A stable sort keeps the original token order
-        # inside each expert group, so every expert sees exactly the rows (in
-        # the same order) that the old boolean-mask loop gave it. The forward
-        # syncs three times per layer (bincount reads its input's min and max,
-        # then counts.tolist()) instead of one torch.any plus two nonzero syncs
-        # per expert in forward and more in backward. Only the first waits for
-        # queued work, so scatter_add_ counts as in _forward_turbo save little
-        # here. The permute and unpermute backwards are gathers by the inverse
-        # permutation, with no host sync.
+            out = self._forward_turbo(flat, flat_idx, flat_prob)
+        elif self.sort_dispatch:
+            out = self._forward_sort(flat, flat_idx, flat_prob)
+        else:
+            out = self._forward_mask(flat, flat_idx, flat_prob)
+        return out.view_as(hidden_states), next_router
+
+    def _forward_mask(self, flat, flat_idx, flat_prob):
+        """main's dispatch: each expert takes its tokens through a boolean mask."""
+        out = flat.new_zeros(flat.shape)
+        for expert_id, expert in enumerate(self.local_experts):
+            chosen = flat_idx == expert_id
+            # Experts with no tokens are skipped: their params get no autograd
+            # grad and their main_grad stays zero.
+            if not torch.any(chosen):
+                continue
+            out[chosen] = expert(flat[chosen]) * flat_prob[chosen]
+        if self.router.use_mod:
+            # Mixture-of-depths skip slot: the identity.
+            skip = flat_idx == self.num_real_experts
+            if torch.any(skip):
+                out[skip] = flat[skip] * flat_prob[skip]
+        return out
+
+    def _forward_sort(self, flat, flat_idx, flat_prob):
+        """zaya_sort_dispatch: the experts take contiguous chunks of the tokens sorted by expert.
+
+        A stable sort keeps the original token order inside each expert group,
+        so every expert sees exactly the rows (in the same order) that the
+        boolean-mask loop gives it. The forward syncs three times per layer
+        (bincount reads its input's min and max, then counts.tolist()) instead
+        of one torch.any plus two nonzero syncs per expert in forward and more
+        in backward. Only the first waits for queued work, so scatter_add_
+        counts as in _forward_turbo save little here. The permute and
+        unpermute backwards are gathers by the inverse permutation, with no
+        host sync.
+        """
         num_groups = self.router.num_scored
         sorted_idx, perm = torch.sort(flat_idx, stable=True)
         counts = torch.bincount(sorted_idx, minlength=num_groups).tolist()
@@ -1088,8 +1128,7 @@ class ZayaMoE(nn.Module):
         # the concatenation covers all rows in sorted order. The gate multiply
         # comes after the unpermute, as one gather*prob over all tokens.
         out_sorted = pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=0)
-        out = _UnpermuteScale.apply(out_sorted, perm, inv_perm, flat_prob, self.fuse_moe, counts)
-        return out.view_as(hidden_states), next_router
+        return _UnpermuteScale.apply(out_sorted, perm, inv_perm, flat_prob, self.fuse_moe, counts)
 
 
 class ZayaStage(nn.Module):

@@ -97,6 +97,7 @@ zaya_fuse_norm: false
 zaya_fuse_cca: false
 zaya_conv_gemm: false
 zaya_fuse_moe: false
+zaya_sort_dispatch: false
 zaya_router_defer_ar: false
 zaya_chunked_ce: false
 zaya_chunked_ce_tokens: 4096

@@ -25,6 +25,7 @@ _ON_OFF_FIELDS = (
     "zaya_fuse_cca",
     "zaya_conv_gemm",
     "zaya_fuse_moe",
+    "zaya_sort_dispatch",
     "zaya_router_defer_ar",
     "zaya_chunked_ce",
     "zaya_chunked_ce_compile",
@@ -60,6 +61,7 @@ class Zaya1TransformerConfig(TransformerConfig):
     zaya_fuse_cca: bool = False
     zaya_conv_gemm: bool = False
     zaya_fuse_moe: bool = False
+    zaya_sort_dispatch: bool = False
     zaya_router_defer_ar: bool = False
     zaya_chunked_ce: bool = False
     zaya_chunked_ce_tokens: int = 4096

@@ -27,6 +27,7 @@ _PATHS = (
     "zaya_fuse_cca",
     "zaya_conv_gemm",
     "zaya_fuse_moe",
+    "zaya_sort_dispatch",
     "zaya_router_defer_ar",
 )
 _CHUNKED_CE = ("zaya_chunked_ce", "zaya_chunked_ce_tokens", "zaya_chunked_ce_compile")
@@ -56,8 +57,8 @@ def test_on_off_fields_take_only_true_or_false():
 def test_only_the_mi355x_recipes_turn_paths_on():
     compute = {"zaya_attn_flash", "zaya_fuse_norm", "zaya_fuse_cca", "zaya_conv_gemm", "zaya_fuse_moe"}
     expected = {
-        "MI355X/zaya1_8B-BF16-pretrain.yaml": compute | {"zaya_router_defer_ar"},
-        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute,
+        "MI355X/zaya1_8B-BF16-pretrain.yaml": compute | {"zaya_sort_dispatch", "zaya_router_defer_ar"},
+        "MI355X/zaya1_8B-FP8-pretrain.yaml": compute | {"zaya_sort_dispatch"},
     }
     configs = Path(primus.__file__).parents[1] / "examples" / "megatron" / "configs"
     recipes = sorted(configs.glob("*/zaya1_8B-*-pretrain.yaml"))
@@ -75,6 +76,7 @@ def test_modules_read_the_fields_when_built():
         assert stack.fuse_norm is stack.attn_flash is stack.layers[0].fuse_norm is flag
         assert cca.attn_flash is cca.fuse_cca is cca._conv_gemm_ok is flag
         assert moe.fuse_moe is moe.router.fuse_moe is moe.router.defer_bias_update is flag
+        assert moe.sort_dispatch is flag
         assert all(expert.fuse_moe is flag for expert in moe.local_experts)
     # The GEMM convolutions cover kernel 2 only; CCA falls back to nn.Conv1d.
     assert zm.CCA(_cfg(zaya_conv_gemm=True, cca_time1=3))._conv_gemm_ok is False
@@ -85,12 +87,15 @@ def test_switch_summary_names_the_paths_that_run(monkeypatch):
         enable_primus_turbo=True, use_turbo_grouped_gemm=True, turbo_grouped_gemm_backend="triton"
     )
     monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
-    assert zm.switch_summary(_cfg()).endswith("; experts: Primus Turbo grouped GEMM (backend: triton)")
-    assert zm.switch_summary(_cfg(fp8="hybrid")).endswith(
-        "; experts: split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)"
-    )
+    line = zm.switch_summary(_cfg(zaya_sort_dispatch=True))
+    assert line.endswith("; experts: Primus Turbo grouped GEMM (backend: triton)")
+    assert "zaya_sort_dispatch=on (unused: the grouped GEMMs always sort)" in line
+    line = zm.switch_summary(_cfg(fp8="hybrid", zaya_sort_dispatch=True))
+    assert line.endswith("; experts: split (Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet)")
+    assert "zaya_sort_dispatch=on (sort)" in line
     monkeypatch.setattr(zm, "_megatron_args", lambda: SimpleNamespace(enable_primus_turbo=True))
     assert zm.switch_summary(_cfg()).endswith("; experts: split")
+    assert "zaya_sort_dispatch=off (boolean masks)" in zm.switch_summary(_cfg())
     line = zm.switch_summary(_cfg(zaya_attn_flash=False, zaya_fuse_norm=False, zaya_router_defer_ar=True))
     assert "zaya_attn_flash=off (dense mask)" in line and "zaya_fuse_norm=off" in line
     assert "zaya_router_defer_ar=on" in line and "zaya_conv_gemm=off (nn.Conv1d)" in line

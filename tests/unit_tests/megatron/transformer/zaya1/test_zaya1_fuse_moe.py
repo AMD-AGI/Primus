@@ -75,9 +75,9 @@ def compiled(monkeypatch):
             assert fn.compiled_ok(), f"{name} fell back to eager"
 
 
-def _eager_twin(module, build):
+def _eager_twin(module, build, **overrides):
     """``build(cfg)`` with zaya_fuse_moe off, holding ``module``'s weights and buffers."""
-    twin = build(_cfg(zaya_fuse_moe=False)).to(next(module.parameters()).dtype)
+    twin = build(_cfg(zaya_fuse_moe=False, **overrides)).to(next(module.parameters()).dtype)
     twin.load_state_dict(module.state_dict())
     return twin
 
@@ -125,16 +125,17 @@ def test_swiglu_expert_matches_eager(compiled, dtype):
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("with_prev", [False, True])
-def test_moe_layer_matches_eager(compiled, dtype, with_prev):
+@pytest.mark.parametrize("sort_dispatch", [True, False])
+def test_moe_layer_matches_eager(compiled, dtype, with_prev, sort_dispatch):
     torch.manual_seed(1)
-    cfg = _cfg(zaya_fuse_moe=True)
+    cfg = _cfg(zaya_fuse_moe=True, zaya_sort_dispatch=sort_dispatch)
     moe = zm.ZayaMoE(cfg).to(dtype)
     with torch.no_grad():
         moe.router.router_states_scale.uniform_(0.2, 1.8)
         for m in moe.router.router_mlp:
             if hasattr(m, "weight"):
                 m.weight.mul_(20.0)  # spread the routing over all experts and MoD
-    ref = _eager_twin(moe, zm.ZayaMoE)
+    ref = _eager_twin(moe, zm.ZayaMoE, zaya_sort_dispatch=sort_dispatch)
     seq, batch = 7, 3
     hidden = torch.randn(seq, batch, cfg.hidden_size, dtype=dtype)
     prev = torch.randn(seq, batch, cfg.zaya_mlp_expansion, dtype=dtype) if with_prev else None

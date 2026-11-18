@@ -4,7 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""The MoE's router and sort-based dispatch against main's router and boolean-mask dispatch, bit for bit."""
+"""The MoE's router and split dispatch, with zaya_sort_dispatch on (sort) and off (boolean masks),
+against main's router and boolean-mask dispatch, bit for bit."""
 
 import pytest
 import torch
@@ -63,7 +64,7 @@ def _main_dispatch(moe, hidden_states, prev_router):
     return out, next_router
 
 
-def _sort_dispatch(moe, hidden_states, prev_router):
+def _branch_dispatch(moe, hidden_states, prev_router):
     return moe(hidden_states, prev_router)
 
 
@@ -78,6 +79,7 @@ def _run(moe, dispatch, hidden, prev, out_weight, router_weight):
     return {"output": out, "hidden_states grad": hidden.grad, "prev_router grad": prev.grad, **grads}
 
 
+@pytest.mark.parametrize("sort_dispatch", [True, False])
 @pytest.mark.parametrize(
     "device, dtype, hidden_size",
     [
@@ -90,13 +92,18 @@ def _run(moe, dispatch, hidden, prev, out_weight, router_weight):
         ("cuda", torch.float32, 2048),
     ],
 )
-def test_sort_dispatch_matches_main_bit_for_bit(device, dtype, hidden_size):
+def test_split_dispatch_matches_main_bit_for_bit(device, dtype, hidden_size, sort_dispatch):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("No GPU.")
     torch.manual_seed(0)
-    cfg = _cfg(hidden_size=hidden_size, moe_ffn_hidden_size=32, zaya_mlp_expansion=16)
+    cfg = _cfg(
+        hidden_size=hidden_size,
+        moe_ffn_hidden_size=32,
+        zaya_mlp_expansion=16,
+        zaya_sort_dispatch=sort_dispatch,
+    )
     moe = ZayaMoE(cfg)
-    assert not moe.use_turbo_gemm
+    assert not moe.use_turbo_gemm and moe.sort_dispatch is sort_dispatch
     with torch.no_grad():
         for module in moe.router.router_mlp:
             if hasattr(module, "weight"):
@@ -117,7 +124,7 @@ def test_sort_dispatch_matches_main_bit_for_bit(device, dtype, hidden_size):
     assert counts[1] == 0 and counts[-1] > 0 and sum(c > 0 for c in counts[:-1]) >= 2, counts
 
     expected = _run(moe, _main_dispatch, hidden, prev, out_weight, router_weight)
-    actual = _run(moe, _sort_dispatch, hidden, prev, out_weight, router_weight)
+    actual = _run(moe, _branch_dispatch, hidden, prev, out_weight, router_weight)
     assert actual.keys() == expected.keys()
     assert expected["local_experts.1.linear_fc1.weight grad"] is None
     for name, ref in expected.items():

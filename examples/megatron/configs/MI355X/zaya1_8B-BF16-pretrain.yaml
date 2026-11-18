@@ -61,14 +61,16 @@ modules:
 
       # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
       # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
-      # elementwise chains, CCA's convolutions as GEMMs, and one data-parallel
-      # all-reduce per micro batch for every router's balancing-bias update,
-      # instead of one per MoE layer.
+      # elementwise chains, CCA's convolutions as GEMMs, the split experts'
+      # sort-based dispatch (unused while the experts run as grouped GEMMs,
+      # below), and one data-parallel all-reduce per micro batch for every
+      # router's balancing-bias update, instead of one per MoE layer.
       zaya_attn_flash: true
       zaya_fuse_norm: true
       zaya_fuse_cca: true
       zaya_conv_gemm: true
       zaya_fuse_moe: true
+      zaya_sort_dispatch: true
       zaya_router_defer_ar: true
 
       # Transformer Engine's fused cross-entropy on the output logits, in
