@@ -225,8 +225,11 @@ def _v4_fp8_attn_proj(config: "DeepSeekV4TransformerConfig") -> bool:
     we keep the bf16 gather/scatter native path for TP>1. Opt-in via
     PRIMUS_V4_FP8_ATTN_PROJ=1.
     """
+    # PRIMUS_TURBO_FP8_BLOCK=1 (128-block FP8 paper recipe) defaults this on: q-up / o-proj are
+    # dense linears that the recipe runs in FP8; PRIMUS_V4_FP8_ATTN_PROJ=0 still opts out.
+    default = "1" if os.environ.get("PRIMUS_TURBO_FP8_BLOCK", "0").strip().lower() in ("1", "true") else "0"
     return (
-        os.environ.get("PRIMUS_V4_FP8_ATTN_PROJ", "0") == "1"
+        os.environ.get("PRIMUS_V4_FP8_ATTN_PROJ", default) == "1"
         and getattr(config, "tensor_model_parallel_size", 1) == 1
     )
 

@@ -455,7 +455,12 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
         quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
         if quant_config is None:
             return None
-        if quant_config.mxfp8_scaling() and _is_gfx1250():
+        if quant_config.block_scaling():
+            # No Turbo BLOCKWISE wgrad kernel has a beta=1 epilogue yet (dense gemm_fp8 asserts,
+            # the grouped variable-K Triton backend rejects inplace_add_to_out): the framework
+            # adds the returned gradient into main_grad.
+            return None
+        elif quant_config.mxfp8_scaling() and _is_gfx1250():
             # gfx1250 FlyDSL MXFP8 dense GEMM has a beta=1 epilogue for a 16-bit main_grad
             # (grouped MXFP8 weights keep the separate add).
             if not (
@@ -989,21 +994,42 @@ def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, tra
 #   PRIMUS_TURBO_BF16_TORCH_LINEAR=1
 #       BF16 dense linears run torch.matmul (hipBLASLt) with an addmm_ wgrad into
 #       main_grad, instead of the Turbo BF16 GEMM (which costs extra host time).
+#
+#   PRIMUS_TURBO_FP8_BLOCK=1  (DeepSeek-V3/V4 paper recipe, no Transformer Engine)
+#       Megatron runs WITHOUT --fp8 (BF16 everywhere: embedding, output head, router,
+#       norms, attention core); the Turbo dense linears and the Turbo grouped MoE experts
+#       quantize themselves to FP8 E4M3 with 128-element block scaling -- activations and
+#       output grads 1x128 tiles (plus the transposed 1x128 tiles for wgrad), weights
+#       128x128 blocks -- and run Turbo BLOCKWISE GEMMs (fwd, dgrad, wgrad). Scales are
+#       UE8M0 (powers of two): sets PRIMUS_TURBO_FP8_BLOCK_UE8M0=1 for Turbo's quant
+#       kernels unless already set. Defaults dense/grouped recipe to "blockwise" (an
+#       explicit PRIMUS_TURBO_DENSE_RECIPE / PRIMUS_TURBO_GROUPED_RECIPE still wins, e.g.
+#       bf16). Kernel choice lives in Turbo's BLOCKWISE dispatch (gemm_fp8 /
+#       grouped_gemm_fp8), so faster FlyDSL blockwise kernels drop in there.
 # ---------------------------------------------------------------------------
-_PRECISION_RECIPES = ("inherit", "bf16", "mxfp8", "tensorwise", "auto")
+_PRECISION_RECIPES = ("inherit", "bf16", "mxfp8", "tensorwise", "auto", "blockwise")
+
+
+def _fp8_block_mode() -> bool:
+    return os.environ.get("PRIMUS_TURBO_FP8_BLOCK", "0").strip().lower() in ("1", "true")
 
 
 @lru_cache(maxsize=None)
 def _precision_env():
-    dense = os.environ.get("PRIMUS_TURBO_DENSE_RECIPE", "inherit").strip().lower()
-    grouped = os.environ.get("PRIMUS_TURBO_GROUPED_RECIPE", "inherit").strip().lower()
+    block = _fp8_block_mode()
+    if block:
+        os.environ.setdefault("PRIMUS_TURBO_FP8_BLOCK_UE8M0", "1")
+    default = "blockwise" if block else "inherit"
+    dense = os.environ.get("PRIMUS_TURBO_DENSE_RECIPE", default).strip().lower()
+    grouped = os.environ.get("PRIMUS_TURBO_GROUPED_RECIPE", default).strip().lower()
     assert dense in _PRECISION_RECIPES, f"PRIMUS_TURBO_DENSE_RECIPE={dense!r}"
-    assert grouped in _PRECISION_RECIPES[:-1], f"PRIMUS_TURBO_GROUPED_RECIPE={grouped!r}"
+    assert grouped in _PRECISION_RECIPES and grouped != "auto", f"PRIMUS_TURBO_GROUPED_RECIPE={grouped!r}"
     mx_min_mnk = float(os.environ.get("PRIMUS_TURBO_MX_MIN_MNK", "6e10"))
     torch_bf16 = os.environ.get("PRIMUS_TURBO_BF16_TORCH_LINEAR", "0").strip().lower() in ("1", "true")
     warning_rank_0(
         f"[precision] Turbo dense recipe={dense} (mx_min_mnk={mx_min_mnk:.3g}), "
-        f"grouped recipe={grouped}, bf16 dense via torch={torch_bf16}; "
+        f"grouped recipe={grouped}, bf16 dense via torch={torch_bf16}, fp8 block mode={block} "
+        f"(ue8m0={os.environ.get('PRIMUS_TURBO_FP8_BLOCK_UE8M0', '0')}); "
         f"primus_turbo imported from {primus_turbo_torch.__file__}"
     )
     return dense, grouped, mx_min_mnk, torch_bf16
@@ -1011,6 +1037,10 @@ def _precision_env():
 
 @lru_cache(maxsize=None)
 def _override_quant_config(kind: str) -> PrimusTurboQuantConfig:
+    if kind == "blockwise":
+        # 1x128 activation / grad tiles, 128x128 weight blocks (Turbo BLOCKWISE); UE8M0 scale
+        # rounding is applied inside Turbo's quant kernels (PRIMUS_TURBO_FP8_BLOCK_UE8M0).
+        return PrimusTurboQuantConfig(granularity=ScalingGranularity.BLOCKWISE, format=Format.E4M3, block_size=128)
     if kind == "mxfp8":
         return PrimusTurboQuantConfig(
             granularity=ScalingGranularity.MX_BLOCKWISE,
@@ -1047,7 +1077,11 @@ def _in_turbo_low_precision() -> bool:
 
 def _dense_precision_context(x: torch.Tensor, weight: torch.Tensor):
     dense, _, mx_min_mnk, _ = _precision_env()
-    if dense == "inherit" or not _in_turbo_low_precision():
+    if dense == "inherit":
+        return nullcontext()
+    if not _in_turbo_low_precision() and not _fp8_block_mode():
+        # BF16 layers / runs are left alone, except in FP8 block mode where Megatron runs
+        # without --fp8 and the Turbo modules own the quantization.
         return nullcontext()
     kind = dense
     if dense == "auto":
@@ -1059,7 +1093,7 @@ def _dense_precision_context(x: torch.Tensor, weight: torch.Tensor):
 
 def _grouped_precision_context():
     _, grouped, _, _ = _precision_env()
-    if grouped == "inherit" or not _in_turbo_low_precision():
+    if grouped == "inherit" or (not _in_turbo_low_precision() and not _fp8_block_mode()):
         return nullcontext()
     return _turbo_precision(grouped)
 
