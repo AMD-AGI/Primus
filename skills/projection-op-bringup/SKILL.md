@@ -1,6 +1,6 @@
 ---
 name: projection-op-bringup
-description: Add an analytical performance model for a new op (a new attention variant, linear-attention / state-space layer, gate, convolution, MTP head, ...) to the Primus projection when it reports a PRIMUS_OP_GAP or `[Primus:OpCoverage] GAP` line, or when the tuning agent's op bring-up leaves a context pack (op_bringup/<op_id>/context.md). Use when a model's op is unmodeled, priced as a built-in stand-in, or when asked to bring up / model / validate a new op for projection or the tuning agent.
+description: Add an analytical performance model for a new op (a new attention variant, linear-attention / state-space layer, gate, convolution, MTP head, ...) to the Primus projection when it reports a PRIMUS_OP_GAP or `[Primus:OpCoverage] GAP` line, or when the projection agent leaves a context pack (op_bringup/<op_id>/context.md). Use when a model's op is unmodeled, priced as a built-in stand-in, or when asked to bring up / model / validate a new op for projection or the tuning agent.
 ---
 
 # Projection op bring-up
@@ -17,7 +17,7 @@ Create, Validate, Register.
 - Validator: `primus/core/projection/op_models/validate.py`
 - Registered ops: `primus/core/projection/op_models/generated/*.py` (auto-discovered)
 - Negligible ops: `primus/core/projection/op_models/generated/acknowledged.yaml`
-- Driver: `primus/agents/tuning_agent/op_bringup.py`
+- Driver: the projection agent, `primus/agents/projection_agent/` (`agent.py` per workload, `bringup.py` per op)
 
 Worked examples: `generated/gated_delta_net.py` (fused chunked recurrence on
 the 1-CU tile simulator), `generated/attention_output_gate.py` (additive GEMM +
@@ -26,8 +26,8 @@ elementwise), `generated/lfm2_short_conv.py` (replacing block, GEMM + streams).
 ## 1. Context
 
 ```bash
-python -m primus.agents.tuning_agent.op_bringup --workload <pretrain.yaml> --out-dir runs/ \
-    [--paper paper.txt] [--hf-config <repo id | config.json>]
+python -m primus.agents.projection_agent --workload <pretrain.yaml> --op-out-dir runs/ \
+    --op-coder none [--op-paper paper.txt] [--hf-config <repo id | config.json>]
 ```
 
 This lists the gaps and writes `runs/op_bringup/<op_id>/context.md`. That file
@@ -90,11 +90,16 @@ Fix the model, not the check.
 - A/B against the stand-in with `PRIMUS_OP_MODELS=0`.
 - Check the size of the change in Tokens/s/GPU against what the op's arithmetic implies.
 
-## Automated (tuning agent)
+## Automated (projection agent)
 
-The tuning agent's `--op-bringup auto` default runs this flow before seeding,
-and again whenever a trial prints a new `PRIMUS_OP_GAP`. Who writes the model:
+The projection agent runs this flow for every gap of a workload. It is invoked by:
+
+- `primus projection <suite> --config <yaml> --op-bringup auto`, which then projects with the new models;
+- `python -m primus.agents.projection_agent --workload <yaml>`, which only brings the ops up;
+- the tuning agent (`--op-bringup auto` by default), before seeding and whenever a trial prints a new `PRIMUS_OP_GAP`.
+
+Who writes the model:
 
 - `--op-coder-cmd '<coding agent> ... {prompt_file} ... {target_file}'` uses an external coding agent.
-- Otherwise the agent's own LLM writes it.
+- Otherwise an LLM: `--op-llm-model` / `$LLM_MODEL`, or the tuning agent's own.
 - With no LLM, it falls back to `report` (context packs only), and a human or IDE agent finishes the work with this skill.

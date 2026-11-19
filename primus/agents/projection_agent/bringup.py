@@ -1,8 +1,8 @@
-"""Op bring-up: when the projection meets an op it does not model, add a model for it.
+"""Op bring-up: turn one op the projection does not model into a validated op model.
 
 New models keep shipping ops the projection's built-in profilers do not know
 (a linear-attention layer, a new gate, a multi-token-prediction head).  The
-projection reports each one as a ``PRIMUS_OP_GAP`` marker; this stage turns a
+projection reports each one as a ``PRIMUS_OP_GAP`` marker; this module turns a
 gap into a validated op model under
 ``primus/core/projection/op_models/generated/`` in four steps:
 
@@ -10,8 +10,8 @@ gap into a validated op model under
    included), the HF ``config.json``, any paper text given, the op-model API,
    and the existing op models / profilers closest to the gap's slot.  Written
    to ``<out>/op_bringup/<op_id>/context.md``.
-2. **Create** -- a coder writes one op-model module from that context: the
-   tuning agent's DSPy LM, an external coding agent (``--op-coder-cmd``), or
+2. **Create** -- a coder writes one op-model module from that context: an LLM
+   through DSPy / LiteLLM, an external coding agent (``--op-coder-cmd``), or
    none (the context pack is the deliverable, for a human or an IDE agent).
 3. **Validate** -- :mod:`primus.core.projection.op_models.validate` in a
    subprocess, on the workload's shapes: roofline floor, closed-form FLOPs,
@@ -22,17 +22,12 @@ gap into a validated op model under
    may instead judge the op negligible and *acknowledge* its keys, with the
    estimate, in ``generated/acknowledged.yaml``.
 
-Standalone::
-
-    python -m primus.agents.tuning_agent.op_bringup \\
-        --workload examples/megatron/configs/MI355X/qwen3_5_35B_A3B-BF16-pretrain.yaml \\
-        --coder command --coder-cmd 'cursor-agent -p "$(cat {prompt_file})" --output-format text' \\
-        --paper papers/gated_delta_net.txt
+:class:`~primus.agents.projection_agent.ProjectionAgent` drives this for every
+gap of a workload.
 """
 
 from __future__ import annotations
 
-import argparse
 import inspect
 import json
 import os
@@ -385,19 +380,33 @@ def parse_acknowledgements(reply: str) -> dict:
     return out
 
 
-def dspy_coder(agent_cfg=None) -> Coder:
-    """Coder backed by the tuning agent's DSPy LM."""
+def llm_model_from_env() -> Optional[str]:
+    return os.getenv("PRIMUS_OP_LLM_MODEL") or os.getenv("LLM_MODEL")
+
+
+def dspy_coder(model: Optional[str] = None, *, timeout: int = 600, max_tokens: int = 16000) -> Coder:
+    """Coder backed by an LLM through DSPy / LiteLLM.
+
+    Uses the LM already configured in ``dspy.settings`` (the tuning agent's),
+    else builds one from *model*, ``$PRIMUS_OP_LLM_MODEL`` or ``$LLM_MODEL`` -- a
+    LiteLLM model string such as ``anthropic/claude-opus-4-5``, with the
+    provider's usual key variable (or ``$LLM_API_KEY`` / ``$OPENAI_API_BASE``).
+    """
     import dspy
 
-    if agent_cfg is not None and getattr(dspy.settings, "lm", None) is None:
-        from .agent import configure_dspy
-
-        configure_dspy(agent_cfg)
+    lm = getattr(dspy.settings, "lm", None)
+    if lm is None:
+        model = model or llm_model_from_env()
+        if not model:
+            raise RuntimeError("no LLM configured: pass --op-llm-model or set LLM_MODEL")
+        kw: dict = {"cache": False, "timeout": timeout, "max_tokens": max_tokens}
+        if os.getenv("LLM_API_KEY"):
+            kw["api_key"] = os.environ["LLM_API_KEY"]
+        if os.getenv("OPENAI_API_BASE"):
+            kw["api_base"] = os.environ["OPENAI_API_BASE"]
+        lm = dspy.LM(model, **kw)
 
     def _code(prompt: str, target: Path) -> str:
-        lm = dspy.settings.lm
-        if lm is None:
-            raise RuntimeError("no DSPy LM configured")
         out = lm(messages=[{"role": "user", "content": prompt}])
         first = out[0] if isinstance(out, list) and out else out
         return first.get("text", "") if isinstance(first, dict) else str(first)
@@ -433,7 +442,7 @@ def command_coder(cmd_template: str, timeout: int = 1800) -> Coder:
     return _code
 
 
-def make_coder(kind: str, *, cmd: Optional[str] = None, agent_cfg=None) -> Optional[Coder]:
+def make_coder(kind: str, *, cmd: Optional[str] = None, model: Optional[str] = None) -> Optional[Coder]:
     if kind == "none":
         return None
     if kind == "command":
@@ -441,7 +450,7 @@ def make_coder(kind: str, *, cmd: Optional[str] = None, agent_cfg=None) -> Optio
             raise ValueError("--op-coder command needs --op-coder-cmd")
         return command_coder(cmd)
     if kind == "dspy":
-        return dspy_coder(agent_cfg)
+        return dspy_coder(model)
     raise ValueError(f"unknown coder {kind!r}")
 
 
@@ -541,12 +550,12 @@ import pytest
 
 pytest.importorskip("yaml")
 
-from primus.core.projection.op_models.validate import load_workload, validate_op_model
 from primus.core.projection.op_models.registry import registered_op_models
+from primus.core.projection.op_models.validate import load_workload, validate_op_model
 
 _ROOT = Path(__file__).resolve().parents[{depth}]
-_WORKLOAD = _ROOT / {workload!r}
-_GAP_KEYS = {gap_keys!r}
+_WORKLOAD = _ROOT / {workload}
+_GAP_KEYS = {gap_keys}
 
 
 @pytest.mark.skipif(not _WORKLOAD.is_file(), reason="workload YAML not in this checkout")
@@ -555,9 +564,9 @@ def test_{name}_validates(monkeypatch):
     monkeypatch.setenv("GPUS_PER_NODE", "8")
     monkeypatch.setenv("PRIMUS_OP_COVERAGE", "0")
     ops = {{c.name: c for c in registered_op_models()}}
-    assert {name!r} in ops
+    assert "{name}" in ops
     wl = load_workload(str(_WORKLOAD), simulate_backends=False)
-    rep = validate_op_model(ops[{name!r}], wl, gap_keys=_GAP_KEYS)
+    rep = validate_op_model(ops["{name}"], wl, gap_keys=_GAP_KEYS)
     assert rep.ok, rep.feedback()
 '''
 
@@ -574,7 +583,11 @@ def _write_test(primus_root: Path, name: str, workload: Path, gap_keys: Sequence
         rel = str(workload.resolve())
     depth = len(tdir.relative_to(primus_root).parts)
     path = tdir / f"test_generated_{name}.py"
-    path.write_text(_TEST_TEMPLATE.format(name=name, workload=rel, gap_keys=list(gap_keys), depth=depth))
+    path.write_text(
+        _TEST_TEMPLATE.format(
+            name=name, workload=json.dumps(rel), gap_keys=json.dumps(list(gap_keys)), depth=depth
+        )
+    )
     return path
 
 
@@ -724,172 +737,3 @@ def bring_up_gaps(gaps: Sequence, **kwargs) -> List[BringupResult]:
         seen.add(g.op_id)
         out.append(bring_up_op(g, **kwargs))
     return out
-
-
-def detect_workload_gaps(arch) -> list:
-    """Gaps of a resolved :class:`ArchitectureRecord`, before any projection runs."""
-    from primus.core.projection.op_models.coverage import detect_op_gaps
-    from primus.core.projection.op_models.registry import discover_op_models
-
-    discover_op_models(force=True)
-    flat = {
-        **(arch.raw_model or {}),
-        **{k: v for k, v in (arch.raw_overrides or {}).items() if not isinstance(v, dict)},
-    }
-    return detect_op_gaps(flat, framework=getattr(arch, "framework", "megatron")).blocking
-
-
-class TuningAgentOpBringup:
-    """Op bring-up as the tuning agent runs it: a preflight pass, then a runtime handler.
-
-    ``policy`` is ``auto`` (write models with *coder*), ``report`` (write the
-    context packs only) or ``off``.
-    """
-
-    def __init__(
-        self,
-        arch,
-        *,
-        primus_root: Path,
-        out_dir: Path,
-        gpu_arch: Optional[str],
-        policy: str = "auto",
-        coder: Optional[Coder] = None,
-        papers: Sequence[str] = (),
-        hf_config: Optional[str] = None,
-        env: Optional[dict] = None,
-    ):
-        self.arch = arch
-        self.primus_root = Path(primus_root)
-        self.out_dir = Path(out_dir)
-        self.gpu_arch = gpu_arch
-        self.policy = policy if coder is not None or policy != "auto" else "report"
-        self.coder = coder
-        self.papers = list(papers)
-        self.hf_config = hf_config
-        self.env = env
-        self.results: List[BringupResult] = []
-        self.gaps_seen: dict = {}
-
-    def _run(self, gaps: Sequence) -> List[BringupResult]:
-        if self.policy == "off" or not gaps:
-            return []
-        for g in gaps:
-            self.gaps_seen[g.op_id] = asdict(g)
-        res = bring_up_gaps(
-            gaps,
-            workload=Path(self.arch.workload_path),
-            primus_root=self.primus_root,
-            out_dir=self.out_dir,
-            coder=self.coder if self.policy == "auto" else None,
-            gpu_arch=self.gpu_arch,
-            model_path=Path(self.arch.model_path) if getattr(self.arch, "model_path", None) else None,
-            raw_model=self.arch.raw_model,
-            hf_config=self.hf_config,
-            papers=self.papers,
-            env=self.env,
-            log=lambda s: print(f"[tuning-agent] {s}"),
-        )
-        self.results.extend(res)
-        return res
-
-    def preflight(self) -> List[BringupResult]:
-        """Bring up the gaps visible in the workload YAML before any trial runs."""
-        try:
-            gaps = detect_workload_gaps(self.arch)
-        except Exception as exc:
-            print(f"[tuning-agent] op coverage check failed: {exc}")
-            return []
-        if not gaps:
-            print("[tuning-agent] op coverage:   every op in the workload is modeled")
-            return []
-        print(
-            f"[tuning-agent] op coverage:   {len(gaps)} unmodeled op(s): {[g.op_id for g in gaps]} (policy={self.policy})"
-        )
-        return self._run(gaps)
-
-    def handle_runtime_gaps(self, gap_dicts: list) -> bool:
-        """Evaluator hook: True when a model or acknowledgement was added."""
-        from primus.core.projection.op_models.coverage import OpGap
-
-        gaps = [
-            OpGap(**{k: g[k] for k in ("op_id", "severity", "slot", "reason", "keys") if k in g})
-            for g in gap_dicts
-        ]
-        return any(r.changed_projection for r in self._run(gaps))
-
-    def summary(self) -> dict:
-        return {
-            "policy": self.policy,
-            "gaps_seen": self.gaps_seen,
-            "results": [{k: v for k, v in r.as_dict().items() if k != "validation"} for r in self.results],
-        }
-
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-
-def _parse(argv: Optional[Sequence[str]]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        prog="primus.agents.tuning_agent.op_bringup", description=__doc__.split("\n\n")[0]
-    )
-    p.add_argument("--workload", required=True, type=Path)
-    p.add_argument("--out-dir", type=Path, default=Path("op_bringup_runs"))
-    p.add_argument("--gpu-arch", default=os.getenv("PRIMUS_GPU_ARCH", "mi355x"))
-    p.add_argument("--coder", choices=("none", "command", "dspy"), default="none")
-    p.add_argument("--coder-cmd", default=None, help="Shell template with {prompt_file} / {target_file}")
-    p.add_argument(
-        "--paper", action="append", default=[], help="Paper text: file, URL or inline (repeatable)"
-    )
-    p.add_argument("--hf-config", default=None, help="config.json path, URL or HF repo id")
-    p.add_argument("--op", action="append", default=[], help="Only these op ids")
-    p.add_argument("--max-attempts", type=int, default=3)
-    p.add_argument("--no-register", action="store_true", help="Validate but do not copy into generated/")
-    p.add_argument("--target-cluster", type=Path, default=None, help="For --coder dspy: LLM settings")
-    return p.parse_args(argv)
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    from .workload import _find_primus_root, resolve_workload
-
-    args = _parse(argv)
-    workload = args.workload.resolve()
-    primus_root = _find_primus_root(workload)
-    sys.path.insert(0, str(primus_root))
-    arch = resolve_workload(workload, primus_root=primus_root)
-    gaps = detect_workload_gaps(arch)
-    if args.op:
-        gaps = [g for g in gaps if g.op_id in args.op]
-    if not gaps:
-        print(f"[op-bringup] {arch.model_name}: every op is modeled")
-        return 0
-    for g in gaps:
-        print(f"[op-bringup] gap {g.op_id} [{g.slot}]: {', '.join(g.keys)}")
-    agent_cfg = None
-    if args.coder == "dspy" and args.target_cluster:
-        from .config import load_config
-
-        agent_cfg = load_config(args.target_cluster.resolve(), workload, out_dir=args.out_dir)
-    coder = make_coder(args.coder, cmd=args.coder_cmd, agent_cfg=agent_cfg)
-    results = bring_up_gaps(
-        gaps,
-        workload=workload,
-        primus_root=primus_root,
-        out_dir=args.out_dir,
-        coder=coder,
-        gpu_arch=args.gpu_arch,
-        model_path=Path(arch.model_path) if arch.model_path else None,
-        raw_model=arch.raw_model,
-        hf_config=args.hf_config,
-        papers=args.paper,
-        max_attempts=args.max_attempts,
-        register=not args.no_register,
-    )
-    print(json.dumps([r.as_dict() for r in results], indent=2, default=str))
-    return 0 if all(r.status in ("registered", "acknowledged", "context_only") for r in results) else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

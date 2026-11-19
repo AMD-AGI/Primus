@@ -129,9 +129,24 @@ trials/*.yaml      one workload-overlay YAML per trial (re-runnable)
 
 A new model often ships an op the projection does not model: a linear-attention
 layer, a gate, a short convolution. The projection prices such an op as the
-built-in block it resembles and prints a `PRIMUS_OP_GAP` line for it. Before
-seeding, the agent checks the workload for these ops, and again after every
-trial. For each one it runs the op bring-up stage (`op_bringup.py`):
+built-in block it resembles and prints a `PRIMUS_OP_GAP` line for it.
+
+Adding those ops is the job of the **projection agent**
+(`primus/agents/projection_agent/`), not of the tuning agent. The tuning agent
+calls it before seeding, for the gaps the workload YAML reveals, and again for
+any new gap a trial prints. The same agent serves a plain projection run, so a
+workload gets its ops whether or not anyone is tuning it:
+
+```bash
+# add the missing ops, then project
+primus projection performance --config <yaml> --profiling-mode simulate --op-bringup auto \
+    --op-coder-cmd 'cursor-agent -p "$(cat {prompt_file})" --output-format text'
+
+# add them only
+python -m primus.agents.projection_agent --workload <yaml> --op-llm-model anthropic/claude-opus-4-5
+```
+
+For each gap the projection agent runs op bring-up (`projection_agent/bringup.py`):
 
 1. **Context.** It writes `op_bringup/<op_id>/context.md`, which contains:
    - the gap's keys and the model YAML chain;
@@ -140,7 +155,7 @@ trial. For each one it runs the op bring-up stage (`op_bringup.py`):
    - the op-model API and the existing op models and profilers closest to the gap.
 2. **Create.** A coder writes one op model:
    - `--op-coder-cmd` runs an external coding agent;
-   - otherwise the agent's own LLM writes it.
+   - otherwise an LLM writes it: `--op-llm-model` / `$LLM_MODEL`, or, under the tuning agent, the search's own LLM.
 
    Attention-like ops are priced on the FAv3 or 1-CU tile simulator; everything else analytically.
 3. **Validate.** The validator (`primus.core.projection.op_models.validate`) checks:
@@ -152,16 +167,20 @@ trial. For each one it runs the op bring-up stage (`op_bringup.py`):
    Failures go back to the coder, up to 3 attempts.
 4. **Register.** The model is copied into `primus/core/projection/op_models/generated/` with a regression test, and the trial is re-run. An op the coder judges negligible is acknowledged in `generated/acknowledged.yaml` instead.
 
+The same `--op-*` flags work on the tuning agent, on `primus projection
+{memory,performance,both}` and on `python -m primus.agents.projection_agent`:
+
 | flag | meaning |
 |---|---|
-| `--op-bringup auto\|report\|off` | `auto` (default) writes models. It falls back to `report` (context packs only) when no coder is available. |
+| `--op-bringup auto\|report\|off` | `auto` writes models. It falls back to `report` (context packs only) when no coder is available. Default `auto` for the tuning agent and the projection agent, `off` for `primus projection`. |
 | `--op-coder auto\|dspy\|command\|none` | Who writes the model. |
 | `--op-coder-cmd '...{prompt_file}...{target_file}...'` | Shell template for an external coding agent. |
+| `--op-llm-model MODEL` | LiteLLM model string for the LLM coder, when it is not the tuning agent's. |
 | `--op-paper FILE\|URL\|TEXT` | Paper text for the new op. Repeatable. |
 | `--hf-config PATH\|URL\|REPO` | HF config, if the YAML has no `tokenizer_model`. |
+| `--op-out-dir DIR` | Where context packs and reports go (the tuning agent uses its `--out-dir`). |
 
-To run the stage on its own, use `python -m primus.agents.tuning_agent.op_bringup --workload <yaml>`. The
-`projection-op-bringup` skill covers doing the same work by hand.
+The `projection-op-bringup` skill covers doing the same work by hand.
 
 ## Two-stage flow
 
