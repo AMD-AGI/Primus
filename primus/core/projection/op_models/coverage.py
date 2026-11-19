@@ -488,6 +488,21 @@ def report_op_coverage(
     return report
 
 
+def report_model_coverage(model_config) -> Optional[CoverageReport]:
+    """:func:`report_op_coverage` for a built ``ModelConfig``.
+
+    The view is the args the dataclass dropped (``extra_args``) plus any
+    selector that *is* a field, so an unknown value of a known selector is
+    still reported.
+    """
+    view = dict(getattr(model_config, "extra_args", None) or {})
+    for key, *_ in _SELECTORS:
+        val = getattr(model_config, key, None)
+        if val is not None and key not in view:
+            view[key] = val
+    return report_op_coverage(view)
+
+
 def parse_gap_markers(text: str) -> List[OpGap]:
     """Recover :class:`OpGap` records from projection stdout."""
     out = []
