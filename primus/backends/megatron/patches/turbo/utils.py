@@ -30,6 +30,17 @@ def optional_layer_loop_modules() -> list:
     return modules
 
 
+def turbo_quantizes_mxfp8(args) -> bool:
+    """Whether a run's MXFP8 recipe (``--fp8`` with ``fp8_recipe: mxfp8``) reaches Primus-Turbo GEMMs: the Turbo
+    linears (``use_turbo_gemm``) or grouped experts (``use_turbo_grouped_gemm``). Reads the args only."""
+    return bool(
+        getattr(args, "fp8", None)
+        and getattr(args, "fp8_recipe", None) == "mxfp8"
+        and getattr(args, "enable_primus_turbo", False)
+        and (getattr(args, "use_turbo_gemm", False) or getattr(args, "use_turbo_grouped_gemm", False))
+    )
+
+
 def is_primus_turbo_can_patch(ctx: PatchContext) -> bool:
     """
     Check if PrimusTurbo is enabled and can be used.

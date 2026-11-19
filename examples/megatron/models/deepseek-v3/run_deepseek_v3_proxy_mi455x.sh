@@ -68,6 +68,25 @@ if [[ -n "${PRIMUS_TURBO_GROUPED_GEMM_BACKEND:-}" ]]; then
     echo "set TURBO_GROUPED_GEMM_BACKEND instead of PRIMUS_TURBO_GROUPED_GEMM_BACKEND" >&2
     exit 2
 fi
+# 1: MXFP8 training, quantized by Primus-Turbo (it needs one with the gfx1250 MXFP8 GEMMs: TURBO_DIR): the MLA
+# and shared-expert linears and the routed experts' grouped GEMMs. Under MegaMoE, which is on for EP 2 to 8, the
+# routed experts stay BF16 unless --turbo_mega_moe_precision mxfp8 is passed. The LM head stays BF16. README.md
+# has a command per expert path.
+export PRIMUS_MXFP8=${PRIMUS_MXFP8:-0}
+case "${PRIMUS_MXFP8}" in
+    0) ;;
+    1)
+        # the grouped experts would otherwise go through TransformerEngine's zero-padding into BF16 GEMMs
+        if [[ "${USE_TURBO_GROUPED_GEMM,,}" != true ]]; then
+            echo "PRIMUS_MXFP8=1 needs USE_TURBO_GROUPED_GEMM=True" >&2
+            exit 2
+        fi
+        ;;
+    *)
+        echo "PRIMUS_MXFP8 must be 0 or 1, not '${PRIMUS_MXFP8}'" >&2
+        exit 2
+        ;;
+esac
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
 # 1: bind each rank's CPU threads and host memory to the NUMA node of its GPU (a little faster)
@@ -189,6 +208,12 @@ if [[ "${ENABLE_NUMA_BINDING}" == 1 ]]; then
     RUNNER_ARGS+=(--numa)
 fi
 
+MXFP8_ARGS=()
+if [[ "${PRIMUS_MXFP8}" == 1 ]]; then
+    # the expert groups reach the grouped GEMMs as they are, without TransformerEngine's zero-padding
+    MXFP8_ARGS=(--fp8 e4m3 --fp8_recipe mxfp8 --use_turbo_gemm True --turbo_grouped_gemm_without_padding True)
+fi
+
 if [[ -n "${PRIMUS_RECOMPUTE_LAYER_IDS}" ]]; then
     # as a list: Primus reads a single id as an int
     RECOMPUTE_ARGS=(--recompute_granularity full --recompute_layer_ids "[${PRIMUS_RECOMPUTE_LAYER_IDS//[][]/}]")
@@ -219,4 +244,5 @@ mkdir -p "${LOG_DIR}"
     --use_pytorch_profiler "${PROFILE}" \
     --profile_step_start 6 \
     --profile_step_end 8 \
+    "${MXFP8_ARGS[@]}" \
     "$@" 2>&1 | tee "${LOG_DIR}/train.log"

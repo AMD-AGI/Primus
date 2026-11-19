@@ -200,6 +200,51 @@ def patch_fsdp2_bf16_master_weight_optimizer(ctx: PatchContext):
         log_rank_0(f"Traceback: {traceback.format_exc()}")
 
 
+def _precision_aware_turbo_mxfp8_condition(ctx: PatchContext) -> bool:
+    """The precision-aware optimizer under Primus-Turbo MXFP8 on gfx1250 with BF16 primary weights (no
+    ``--fp8-param-gather``). Any other run keeps Megatron's behaviour. The arch is probed last."""
+    from primus.backends.megatron.patches.turbo.utils import turbo_quantizes_mxfp8
+    from primus.core.utils.gpu_arch import is_gfx1250
+
+    args = get_args(ctx)
+    if not getattr(args, "use_precision_aware_optimizer", False) or getattr(args, "fp8_param_gather", False):
+        return False
+    return turbo_quantizes_mxfp8(args) and is_gfx1250()
+
+
+@register_patch(
+    "megatron.optimizer.precision_aware_turbo_mxfp8",
+    backend="megatron",
+    phase="before_train",
+    description=(
+        "Keep the precision-aware optimizer's TE-managed master weights for Primus-Turbo MXFP8 on gfx1250 "
+        "with BF16 primary weights (no --fp8-param-gather), as without FP8."
+    ),
+    priority=35,
+    condition=_precision_aware_turbo_mxfp8_condition,
+)
+def patch_precision_aware_for_turbo_mxfp8(ctx: PatchContext):
+    """With FP32 ``main_params_dtype`` and no optimizer CPU offload, Megatron's
+    ``use_precision_aware_optimizer_no_fp8_or_ds_fp8`` is False for every FP8 recipe but delayed scaling: MCore
+    then keeps FP32 master params, which FP8 primary weights need. Primus-Turbo quantizes MXFP8 inside its GEMMs
+    and the parameters stay BF16, so the flag stays True: the optimizer keeps the TE-managed master weights
+    (``decoupled_grad``) of the same run without FP8."""
+    from megatron.core.optimizer.optimizer_config import OptimizerConfig
+
+    original_post_init = OptimizerConfig.__post_init__
+
+    def patched_post_init(self):
+        original_post_init(self)
+        if self.use_precision_aware_optimizer and self.fp8_recipe == "mxfp8":
+            self.use_precision_aware_optimizer_no_fp8_or_ds_fp8 = True
+
+    OptimizerConfig.__post_init__ = patched_post_init
+    log_rank_0(
+        "[Patch:megatron.optimizer.precision_aware_turbo_mxfp8] MXFP8 with BF16 primary weights keeps the "
+        "precision-aware optimizer's TE-managed master weights (decoupled_grad)"
+    )
+
+
 @register_patch(
     "megatron.optimizer.precision_aware_fp8_tensorwise",
     backend="megatron",
