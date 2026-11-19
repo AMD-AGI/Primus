@@ -669,7 +669,7 @@ def patch_k3_args_moe_latent_size(ctx: PatchContext):
 
     **The model was never affected**; this patch only fixes reporting. Verified
     on a live launcher run, not inferred: the builder's own
-    ``[Primus:Kimi-K3] latent MoE width`` line shows
+    ``[Primus:kimi_k3] latent MoE width`` line shows
     ``config.moe_latent_size=512, args.moe_latent_size=None`` with
     ``built.fc1_latent_proj=(…, (512, 1024))`` — i.e. the weights are the
     configured width even while the args copy is ``None``.

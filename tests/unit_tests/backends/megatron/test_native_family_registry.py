@@ -214,7 +214,8 @@ def test_unknown_model_message_lists_registered_families(tmp_path, monkeypatch, 
     hf = _hf(tmp_path, {"architectures": ["MistralForCausalLM"]})
     with pytest.raises(ValueError) as e:
         hook.native_convert_checkpoint(hf, "out", {})
-    assert "Qwen3 dense/MoE, DeepSeek-V2/V3, Llama 2/3/3.1, Toy LM" in str(e.value)
+    # every registered family, the built-ins and any model package's (e.g. Muse Spark) included
+    assert registry.supported_text() in str(e.value) and "Toy LM" in str(e.value)
 
     monkeypatch.setattr(hook, "get_checkpoint_config", lambda config: (hf, None))
     monkeypatch.setattr(
@@ -227,7 +228,7 @@ def test_unknown_model_message_lists_registered_families(tmp_path, monkeypatch, 
         hook.main()
     err = capsys.readouterr().err
     assert f"no native converter matches the HF model at {hf}" in err
-    assert "Llama 2/3/3.1, Toy LM" in err and "native_ckpt_convert: false" in err
+    assert registry.supported_text() in err and "native_ckpt_convert: false" in err
 
 
 # ---------------------------------------------------------------------------

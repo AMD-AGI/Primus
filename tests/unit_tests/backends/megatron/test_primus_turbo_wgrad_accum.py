@@ -225,7 +225,9 @@ def test_bf16_grouped_wgrad_can_accumulate(monkeypatch, choice, global_auto_tune
 def test_bf16_prepare_weights_keeps_ddp_add_where_the_wgrad_cannot_accumulate(monkeypatch, can_accumulate):
     """prepare_weights drops the pattern of a BF16 grouped GEMM whose wgrad cannot add into main_grad."""
     monkeypatch.setattr(PrimusTurboLowPrecisionGlobalStateManager, "PRIMUS_TURBO_FP4_ENABLED", False)
-    monkeypatch.setattr(primus_turbo_ext, "_bf16_grouped_wgrad_can_accumulate", lambda: can_accumulate)
+    monkeypatch.setattr(
+        primus_turbo_ext, "_bf16_grouped_wgrad_can_accumulate", lambda main_grad=None: can_accumulate
+    )
     weight = _weight()
     layer = SimpleNamespace(
         _ensure_weight_views=lambda: None,
