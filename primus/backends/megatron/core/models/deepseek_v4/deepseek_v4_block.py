@@ -97,6 +97,11 @@ from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
 )
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_fused import (
+    hc_fused_enabled,
+    hc_fused_post,
+    hc_fused_supported,
+)
 from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
@@ -721,6 +726,12 @@ class DeepseekV4HybridLayer(TransformerLayer):
             # Single-stream: classic residual; x already has shape [B, S, D].
             out = sub_block(x, *args)
             return x + out
+
+        if hc_fused_enabled() and hasattr(mixer, "fused_pre") and hc_fused_supported(x, mixer.hc_mult):
+            # g90mem: 3 fwd + 4 bwd launches per HC application, one dx write (opt-in: PRIMUS_HC_FUSED=1).
+            collapsed, post, combt, link = mixer.fused_pre(x)
+            out = sub_block(collapsed, *args)
+            return hc_fused_post(x, out, post, combt, link)
 
         pre, post, comb = mixer.compute_weights(x)  # [..., K], [..., K], [..., K, K]
         collapsed = HyperMixer.collapse(x, pre)  # [B, S, D]
