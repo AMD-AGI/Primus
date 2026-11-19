@@ -13,6 +13,8 @@ construction path.
 """
 
 import os
+
+import torch
 from typing import Literal, Optional, Union
 
 from megatron.core import tensor_parallel
@@ -41,6 +43,15 @@ from primus.backends.megatron.core.utils import (
 def _v4_fused_ce_enabled() -> bool:
     """Chunked linear+CE switch, shared spelling with the GPTModel patch."""
     return os.environ.get("FUSED_LINEAR_CE", "0") == "1"
+
+
+def _v4_lm_head_recipe() -> str:
+    """PRIMUS_V4_LM_HEAD_RECIPE: ``bf16`` (default, Megatron ColumnParallelLinear) or ``mxfp8``.
+
+    ``mxfp8`` runs the output projection through Primus-Turbo's MXFP8 GEMM (on gfx1250 the
+    FlyDSL WMMA-scale kernel: ~0.9 ms/iter faster than BF16 at vocab 129280). TP=1 only.
+    """
+    return os.environ.get("PRIMUS_V4_LM_HEAD_RECIPE", "bf16").strip().lower()
 
 
 class DeepseekV4Model(LanguageModule):
@@ -351,6 +362,38 @@ class DeepseekV4Model(LanguageModule):
                 w = output_weight if output_weight is not None else self.output_layer.weight
                 return _ChunkedLinearCE.apply(hidden_states, w, labels, self, _chunk_size())
 
+        if (
+            _v4_lm_head_recipe() == "mxfp8"
+            and self.config.tensor_model_parallel_size == 1
+            and not getattr(self.output_layer, "_primus_mxfp8_forward", False)
+        ):
+            # Swap the module's forward (not the call site): the module __call__ must still run,
+            # because DDP's overlapped param all-gather chains its buckets through the
+            # forward pre-hooks of every module that owns parameters.
+            from primus.backends.megatron.core.extensions.primus_turbo import (
+                mxfp8_linear,
+            )
+
+            layer = self.output_layer
+
+            def _mxfp8_forward(input_, weight=None, runtime_gather_output=None, **_):
+                w = layer.weight if weight is None else weight
+                out = mxfp8_linear(input_, w, layer.config)
+                if os.environ.get("PRIMUS_V4_LM_HEAD_DEBUG", "0") == "1":
+                    with torch.no_grad():
+                        ref = torch.nn.functional.linear(input_, w)
+                        err = (ref.float() - out.float()).pow(2).sum() / ref.float().pow(2).sum()
+                        print(
+                            f"[lm_head debug] in {tuple(input_.shape)} {input_.dtype} stride {input_.stride()} "
+                            f"w {tuple(w.shape)} {w.dtype} out {tuple(out.shape)} {out.dtype} "
+                            f"rel_err {err.item():.3e} |ref| {ref.float().abs().mean().item():.4f} "
+                            f"|out| {out.float().abs().mean().item():.4f} |x|max {input_.float().abs().max().item():.3f}",
+                            flush=True,
+                        )
+                return out, None
+
+            layer.forward = _mxfp8_forward
+            layer._primus_mxfp8_forward = True
         logits, _ = self.output_layer(
             hidden_states,
             weight=output_weight,

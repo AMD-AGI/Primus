@@ -201,6 +201,18 @@ def _build_inverted_topk_slice(topk_indices_slice, r_start, R_CHUNK, num_kv=None
     """
     T, RC = topk_indices_slice.shape
     n_kv = T if num_kv is None else int(num_kv)
+    if topk_indices_slice.is_cuda:
+        from .._triton_common.inverted_index import (
+            build_inverted_topk_counting,
+            counting_sort_applicable,
+            counting_sort_enabled,
+        )
+
+        if counting_sort_enabled() and counting_sort_applicable(T, RC, n_kv):
+            # Sort-free transpose (see inverted_index.py): same inv_ptr and the same
+            # (stable) valid entries as the argsort below, without rocprim's ~21-launch
+            # merge sort over T*R_CHUNK int64 keys.
+            return build_inverted_topk_counting(topk_indices_slice, n_kv)
     flat_kv = topk_indices_slice.reshape(-1).long()  # [T*R_CHUNK]; -1 marks invalid
 
     # Sort ALL entries by KV token. argsort returns the flat positions (q*RC+r) in

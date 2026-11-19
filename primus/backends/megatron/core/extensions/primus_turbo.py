@@ -453,7 +453,19 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
             return None
     elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
         quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-        if quant_config is None or not quant_config.current_scaling():
+        if quant_config is None:
+            return None
+        if quant_config.mxfp8_scaling() and _is_gfx1250():
+            # gfx1250 FlyDSL MXFP8 dense GEMM has a beta=1 epilogue for a 16-bit main_grad
+            # (grouped MXFP8 weights keep the separate add).
+            if not (
+                weight.dim() == 2
+                and isinstance(getattr(weight, "main_grad", None), torch.Tensor)
+                and weight.main_grad.dtype == weight.dtype
+                and weight.dtype in (torch.bfloat16, torch.float16)
+            ):
+                return None
+        elif not quant_config.current_scaling():
             return None
     elif weight.dtype not in (torch.bfloat16, torch.float16):
         return None
@@ -960,6 +972,163 @@ def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, tra
         return _get_fp8_autocast_for_quant_recipe(qparams.training_recipe)
 
 
+# ---------------------------------------------------------------------------
+# Per-module precision recipe (DSv4 on gfx1250).
+#
+# The layer-level FP8 context (get_fp8_context) picks one Turbo recipe for every
+# GEMM of a layer. On gfx1250 that is a poor fit: FP8 / MXFP8 only pays off where
+# the GEMM is large enough to amortize the per-call quantization (large dense
+# GEMMs, MoE experts), and BF16 wins everywhere else. These env knobs re-pick the
+# Turbo recipe per module inside FP8 layers (BF16 layers / runs are never touched):
+#
+#   PRIMUS_TURBO_DENSE_RECIPE   inherit (default) | bf16 | mxfp8 | tensorwise | auto
+#       Turbo dense linears. auto = MXFP8 when M*N*K >= PRIMUS_TURBO_MX_MIN_MNK, else BF16.
+#   PRIMUS_TURBO_GROUPED_RECIPE inherit (default) | bf16 | mxfp8 | tensorwise
+#       Turbo grouped linears (MoE experts).
+#   PRIMUS_TURBO_MX_MIN_MNK     M*N*K threshold of the auto rule (default 6e10).
+#   PRIMUS_TURBO_BF16_TORCH_LINEAR=1
+#       BF16 dense linears run torch.matmul (hipBLASLt) with an addmm_ wgrad into
+#       main_grad, instead of the Turbo BF16 GEMM (which costs extra host time).
+# ---------------------------------------------------------------------------
+_PRECISION_RECIPES = ("inherit", "bf16", "mxfp8", "tensorwise", "auto")
+
+
+@lru_cache(maxsize=None)
+def _precision_env():
+    dense = os.environ.get("PRIMUS_TURBO_DENSE_RECIPE", "inherit").strip().lower()
+    grouped = os.environ.get("PRIMUS_TURBO_GROUPED_RECIPE", "inherit").strip().lower()
+    assert dense in _PRECISION_RECIPES, f"PRIMUS_TURBO_DENSE_RECIPE={dense!r}"
+    assert grouped in _PRECISION_RECIPES[:-1], f"PRIMUS_TURBO_GROUPED_RECIPE={grouped!r}"
+    mx_min_mnk = float(os.environ.get("PRIMUS_TURBO_MX_MIN_MNK", "6e10"))
+    torch_bf16 = os.environ.get("PRIMUS_TURBO_BF16_TORCH_LINEAR", "0").strip().lower() in ("1", "true")
+    warning_rank_0(
+        f"[precision] Turbo dense recipe={dense} (mx_min_mnk={mx_min_mnk:.3g}), "
+        f"grouped recipe={grouped}, bf16 dense via torch={torch_bf16}; "
+        f"primus_turbo imported from {primus_turbo_torch.__file__}"
+    )
+    return dense, grouped, mx_min_mnk, torch_bf16
+
+
+@lru_cache(maxsize=None)
+def _override_quant_config(kind: str) -> PrimusTurboQuantConfig:
+    if kind == "mxfp8":
+        return PrimusTurboQuantConfig(
+            granularity=ScalingGranularity.MX_BLOCKWISE,
+            format=Format.E4M3,
+            block_size=32,
+            scale_dtype=ScaleDtype.E8M0,
+        )
+    assert kind == "tensorwise", kind
+    return PrimusTurboQuantConfig(granularity=ScalingGranularity.TENSORWISE, format=Format.E4M3)
+
+
+@contextmanager
+def _turbo_precision(kind: str):
+    """Temporarily switch the Turbo low-precision state (TE's own state is left alone)."""
+    mgr = PrimusTurboLowPrecisionGlobalStateManager
+    saved = (mgr.PRIMUS_TURBO_FP8_ENABLED, mgr.PRIMUS_TURBO_FP4_ENABLED, mgr.PRIMUS_TURBO_QUANT_CONFIG)
+    if kind == "bf16":
+        mgr.PRIMUS_TURBO_FP8_ENABLED = False
+        mgr.PRIMUS_TURBO_FP4_ENABLED = False
+    else:
+        mgr.PRIMUS_TURBO_FP8_ENABLED = True
+        mgr.PRIMUS_TURBO_FP4_ENABLED = False
+        mgr.PRIMUS_TURBO_QUANT_CONFIG = _override_quant_config(kind)
+    try:
+        yield
+    finally:
+        mgr.PRIMUS_TURBO_FP8_ENABLED, mgr.PRIMUS_TURBO_FP4_ENABLED, mgr.PRIMUS_TURBO_QUANT_CONFIG = saved
+
+
+def _in_turbo_low_precision() -> bool:
+    mgr = PrimusTurboLowPrecisionGlobalStateManager
+    return mgr.is_turbo_fp8_enabled() or mgr.is_turbo_fp4_enabled()
+
+
+def _dense_precision_context(x: torch.Tensor, weight: torch.Tensor):
+    dense, _, mx_min_mnk, _ = _precision_env()
+    if dense == "inherit" or not _in_turbo_low_precision():
+        return nullcontext()
+    kind = dense
+    if dense == "auto":
+        n, k = weight.shape[0], weight.shape[-1]
+        m = x.numel() // max(x.shape[-1], 1)
+        kind = "mxfp8" if (m * n * k >= mx_min_mnk and k % 32 == 0 and m % 32 == 0) else "bf16"
+    return _turbo_precision(kind)
+
+
+def _grouped_precision_context():
+    _, grouped, _, _ = _precision_env()
+    if grouped == "inherit" or not _in_turbo_low_precision():
+        return nullcontext()
+    return _turbo_precision(grouped)
+
+
+class _TorchLinearMainGrad(torch.autograd.Function):
+    """``y = x @ w^T`` on torch/hipBLASLt; wgrad optionally accumulated into ``w.main_grad`` (beta=1)."""
+
+    @staticmethod
+    def forward(ctx, x, weight, fuse_main_grad):
+        ctx.save_for_backward(x, weight)
+        ctx.main_grad = weight.main_grad if fuse_main_grad else None
+        ctx.weight_shape, ctx.weight_dtype = list(weight.shape), weight.dtype
+        return torch.matmul(x, weight.t())
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, weight = ctx.saved_tensors
+        grad_out = grad_out.contiguous()
+        grad_x = torch.matmul(grad_out, weight)
+        main_grad = ctx.main_grad
+        if main_grad is None:
+            return grad_x, torch.matmul(grad_out.t(), x), None
+        if main_grad.dtype == grad_out.dtype:
+            main_grad.addmm_(grad_out.t(), x)  # hipBLASLt beta=1 epilogue
+        else:
+            main_grad.add_(torch.matmul(grad_out.t(), x))
+        ctx.main_grad = None
+        return grad_x, _get_dummy_wgrad(ctx.weight_shape, ctx.weight_dtype), None
+
+
+def mxfp8_linear(x: torch.Tensor, weight: torch.Tensor, config) -> torch.Tensor:
+    """``x @ weight^T`` through Primus-Turbo MXFP8 (fused wgrad into main_grad when enabled).
+
+    For plain (non-Turbo) linears that should run MXFP8, e.g. the DSv4 output layer.
+    """
+    shape = x.shape
+    x2 = x.reshape(-1, shape[-1])
+    if not x2.is_contiguous():
+        x2 = x2.contiguous()
+    with _turbo_precision("mxfp8"):
+        out = primus_turbo_torch.ops.gemm_fp8(
+            x2,
+            weight,
+            trans_a=False,
+            trans_b=True,
+            out_dtype=None,
+            config=_override_quant_config("mxfp8").data(),
+            fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(config, weight),
+        )
+    return out.view(*shape[:-1], out.shape[-1])
+
+
+def _bf16_dense_gemm(x: torch.Tensor, weight: torch.Tensor, config) -> torch.Tensor:
+    fuse_pattern = _fuse_wgrad_accum_pattern(config, weight)
+    if _precision_env()[3]:
+        if fuse_pattern is not None:
+            # Same contract as Turbo's fused path: main_grad owns this gradient.
+            weight.grad_added_to_main_grad = True
+        return _TorchLinearMainGrad.apply(x, weight, fuse_pattern is not None)
+    return primus_turbo_torch.ops.gemm(
+        x,
+        weight,
+        trans_a=False,
+        trans_b=True,
+        out_dtype=None,
+        fuse_bgrad_accum_pattern=fuse_pattern,
+    )
+
+
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
     """
     Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
@@ -1289,7 +1458,7 @@ class PrimusTurboLinear(TELinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -1415,14 +1584,7 @@ class PrimusTurboLinear(TELinear):
                         fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(
-                    x,
-                    weight,
-                    trans_a=False,
-                    trans_b=True,
-                    out_dtype=None,
-                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
-                )
+                out = _bf16_dense_gemm(x, weight, self.config)
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -1499,7 +1661,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -1630,14 +1792,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(
-                    x,
-                    weight,
-                    trans_a=False,
-                    trans_b=True,
-                    out_dtype=None,
-                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
-                )
+                out = _bf16_dense_gemm(x, weight, self.config)
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -1712,7 +1867,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -1853,14 +2008,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(
-                    x,
-                    weight,
-                    trans_a=False,
-                    trans_b=True,
-                    out_dtype=None,
-                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
-                )
+                out = _bf16_dense_gemm(x, weight, self.config)
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -1940,7 +2088,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -2111,14 +2259,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         fuse_bgrad_accum_pattern=fuse_pattern,
                     )
             else:
-                out = primus_turbo_torch.ops.gemm(
-                    inp,
-                    weight,
-                    trans_a=False,
-                    trans_b=True,
-                    out_dtype=None,
-                    fuse_bgrad_accum_pattern=_fuse_wgrad_accum_pattern(self.config, weight),
-                )
+                out = _bf16_dense_gemm(inp, weight, self.config)
 
         out = out.view(original_shape[0], original_shape[1], -1)
 
@@ -2485,7 +2626,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
-        with quant_context:
+        with quant_context, _grouped_precision_context():
             out = self.forward_internal(x, m_splits)
         return out
 

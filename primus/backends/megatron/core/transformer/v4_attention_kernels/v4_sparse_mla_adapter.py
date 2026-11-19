@@ -47,8 +47,23 @@ def _rope_pad_q(q_bh: torch.Tensor) -> torch.Tensor:
     put the run over a 192 GiB card -- it OOM'd here with 176.11 GiB already live.
     """
     B, H, S, D = q_bh.shape
-    out = q_bh.new_zeros(B, S, H, D + _ROPE_PAD)
+    Dp = D + _ROPE_PAD
+    # The fused query norm+RoPE (``q_norm_rope.QNormRopePadFn``) already writes the query
+    # into a zero-padded [B, S, H, D + _ROPE_PAD] buffer and hands out its [..., :D] view:
+    # use that buffer as-is instead of copying the query into a fresh one.
+    base = q_bh._base
+    if (
+        base is not None
+        and getattr(base, "_v4_rope_pad", 0) == _ROPE_PAD
+        and tuple(base.shape) == (B, S, H, Dp)
+        and base.is_contiguous()
+        and q_bh.data_ptr() == base.data_ptr()
+        and q_bh.stride() == (S * H * Dp, Dp, H * Dp, 1)
+    ):
+        return base.view(B * S, H, Dp)
+    out = q_bh.new_empty(B, S, H, Dp)
     out[..., :D] = q_bh.permute(0, 2, 1, 3)  # strided copy, no contiguous temp
+    out[..., D:].zero_()  # zero only the pad block, not the whole buffer first
     return out.reshape(B * S, H, D + _ROPE_PAD)  # contiguous -> free view
 
 
@@ -62,17 +77,22 @@ def _bshd_slice_to_bhsd(dq_g: torch.Tensor, B: int, S: int, H: int, D: int) -> t
     with CP=8 that is 8.00 GiB each, in the backward pass, which is where the run died.
     Allocating the destination and doing one strided copy through a permuted view of it
     leaves a single 8.00 GiB allocation.
+
+    Returning a permuted VIEW of the padded buffer costs no copy at all: the only consumer
+    is ``q_bh = q.transpose(1, 2)``, whose backward turns this straight back into a
+    row-strided BSHD view, and the fused RoPE backward reads rows through their strides.
+    Materialising BHSD here only made the RoPE backward materialise BSHD again (two
+    transposing copies of the full query gradient that cancel out).
     """
-    out = dq_g.new_empty(B, H, S, D)
-    out.permute(0, 2, 1, 3).copy_(dq_g[:, :, :D].unflatten(0, (B, S)))
-    return out
+    return dq_g[:, :, :D].unflatten(0, (B, S)).permute(0, 2, 1, 3)
 
 
 def _rope_pad_kv(kv512: torch.Tensor) -> torch.Tensor:
     """``[N, 1, D]`` -> ``[N, 1, D + _ROPE_PAD]``, pad block zeroed. See :func:`_rope_pad_q`."""
     N, G, D = kv512.shape
-    out = kv512.new_zeros(N, G, D + _ROPE_PAD)
+    out = kv512.new_empty(N, G, D + _ROPE_PAD)
     out[..., :D] = kv512
+    out[..., D:].zero_()
     return out
 
 

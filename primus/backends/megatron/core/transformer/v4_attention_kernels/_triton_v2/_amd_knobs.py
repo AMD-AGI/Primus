@@ -22,6 +22,7 @@ the whole process, while restoring the knobs on exit leaves every other kernel
 """
 
 import contextlib
+import functools
 
 import triton
 
@@ -42,3 +43,19 @@ def amd_pingpong_disabled():
     finally:
         amd.use_block_pingpong = prev_pp
         amd.use_async_copy = prev_ac
+
+
+@functools.lru_cache(maxsize=None)
+def gpu_arch() -> str:
+    """Lower-cased gfx arch of the current device (e.g. ``gfx1250``); ``""`` if unknown."""
+    try:
+        import torch
+
+        return torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.split(":")[0].lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def is_gfx1250() -> bool:
+    """True on MI455X / gfx1250 (wave32, WMMA, 320 KB LDS, 1024 VGPRs at 1 wave/SIMD)."""
+    return gpu_arch() == "gfx1250"

@@ -114,6 +114,9 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
     fused_rms_norm,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.q_norm_rope import (
+    q_norm_rope_pad,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (
     apply_rope_from_positions,
 )
@@ -389,6 +392,54 @@ def _fp8_grouped_o_a(attn_g: torch.Tensor, wo_a_w: torch.Tensor) -> torch.Tensor
     group_lens = torch.full((G,), B * S, dtype=torch.int64, device=a.device)
     out = pt.ops.grouped_gemm_fp8(a, b, group_lens, trans_b=False, config=cfg)  # [G*BS, r]
     return out.reshape(G, B, S, r).permute(1, 2, 0, 3)  # [B, S, G, r]
+
+
+class _GroupedOAProjFn(torch.autograd.Function):
+    """Grouped-O ``o_a`` down-projection ``[B,S,G,d] x [G,r,d] -> [B,S,G*r]`` without layout copies.
+
+    ``torch.einsum("bsgd,grd->bsgr")`` runs a bmm over ``g`` on permuted views and pays
+    for it in layout copies: the ``[G,BS,r]`` result is materialised as ``[BS,G,r]`` for
+    the ``flatten`` (fwd), the input gradient comes back as ``[G,BS,d]`` and is copied to
+    ``[BS,G,d]`` by ``ViewBackward`` of the ``reshape``, and the weight gradient comes back
+    as ``[G,d,r]`` and is copied to ``[G,r,d]`` by ``ViewBackward`` of ``weight.view`` --
+    three full transposing copies per layer (~0.3 ms/layer on MI455X at S=4096).
+
+    Here every bmm reads and writes through strided batch views (hipBLASLt takes any
+    batch stride with a unit-stride inner dim), so the outputs land directly in the
+    layout the neighbours want: same GEMMs, no copies.
+    """
+
+    @staticmethod
+    def forward(ctx, x, w):  # type: ignore[override]
+        # x: [B, S, G, d] (rows unit-stride), w: [G, r, d]
+        B, S, G, d = x.shape
+        r = w.shape[1]
+        x2 = x.reshape(B * S, G, d)
+        out = x.new_empty(B * S, G, r)
+        torch.bmm(x2.transpose(0, 1), w.transpose(1, 2), out=out.transpose(0, 1))
+        ctx.save_for_backward(x2, w)
+        ctx.x_shape = x.shape
+        return out.view(B, S, G * r)
+
+    @staticmethod
+    def backward(ctx, dout):  # type: ignore[override]
+        x2, w = ctx.saved_tensors
+        BS, G, d = x2.shape
+        r = w.shape[1]
+        do = dout.reshape(BS, G, r).transpose(0, 1)  # [G, BS, r] strided view
+        dx = None
+        if ctx.needs_input_grad[0]:
+            dx = x2.new_empty(BS, G, d)
+            torch.bmm(do, w, out=dx.transpose(0, 1))
+            dx = dx.view(ctx.x_shape)
+        dw = None
+        if ctx.needs_input_grad[1]:
+            dw = torch.bmm(do.transpose(1, 2), x2.transpose(0, 1))  # [G, r, d], contiguous
+        return dx, dw
+
+
+def _grouped_o_a_bmm_enabled() -> bool:
+    return os.environ.get("PRIMUS_V4_GROUPED_OA_BMM", "1") != "0"
 
 
 def _coerce_optional_bool_flag(value: object, *, field_name: str) -> bool:
@@ -1143,6 +1194,30 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         q = _per_head_rms_norm(q, eps=self.norm_eps)
         return q
 
+    def _fused_q_norm_rope_ok(self, hidden: torch.Tensor) -> bool:
+        if os.environ.get("PRIMUS_V4_Q_NORM_ROPE_FUSED", "1") == "0":
+            return False
+        if not (hidden.is_cuda and self.rotary_dim > 0):
+            return False
+        if os.environ.get("PRIMUS_ROPE_TRITON", "1") == "0" or os.environ.get("PRIMUS_RMSNORM_TRITON", "1") == "0":
+            return False
+        hd = int(self.head_dim)
+        return hd >= 2 and (hd & (hd - 1)) == 0 and hidden.dtype in (torch.bfloat16, torch.float16)
+
+    def _apply_q_norm_rope(self, hidden: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """``_apply_q`` + Q RoPE in one fused kernel (same math, see ``q_norm_rope``)."""
+        q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
+        q_compressed = self.q_layernorm(q_compressed)
+        q = _projection_forward(self.linear_q_up_proj, q_compressed)
+        B, S, _ = q.shape
+        q = q.view(B, S, self.num_heads, self.head_dim)
+        rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+        pos_flat = position_ids.broadcast_to((B, S)).reshape(-1)
+        # The triton_v2 sparse-MLA adapter wants the query zero-padded by 64 columns.
+        be = self._csa_backend if self.compress_ratio == 4 else self._attn_backend
+        pad = 64 if (be == "triton_v2" and not (self.compress_ratio == 0 and self._use_core_attention)) else 0
+        return q_norm_rope_pad(q, pos_flat, rope.inv_freq, rotary_dim=self.rotary_dim, eps=self.norm_eps, pad=pad)
+
     def _apply_kv(self, hidden: torch.Tensor) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, 1, head_dim]`` (single-latent K = V)."""
         kv = _projection_forward(self.linear_kv, hidden)
@@ -1395,10 +1470,11 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         else:
             wo_a_w = weight.view(G, self.o_lora_rank, (H * Dh) // G)  # G is local
             if _v4_o_a_fp8_enabled(self.config):
-                o = _fp8_grouped_o_a(attn_g, wo_a_w)  # per-group MXFP8
+                o = _fp8_grouped_o_a(attn_g, wo_a_w).flatten(2)  # per-group MXFP8
+            elif _grouped_o_a_bmm_enabled() and attn_g.stride(-1) == 1 and attn_g.is_cuda:
+                o = _GroupedOAProjFn.apply(attn_g, wo_a_w)  # [B, S, G*r], no layout copies
             else:
-                o = torch.einsum("bsgd,grd->bsgr", attn_g, wo_a_w)
-            o = o.flatten(2)
+                o = torch.einsum("bsgd,grd->bsgr", attn_g, wo_a_w).flatten(2)
         return _projection_forward(self.linear_o_b, o)
 
     def _flat_o_projection(self, attn: torch.Tensor) -> torch.Tensor:
@@ -1754,6 +1830,12 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             k_local_bh, v_local_bh, kv_latent, cp_dwindow, cp_global_start = self._cp_prepend_boundary(
                 kv, B, S
             )
+        elif kv is not None and self._csa_backend == "triton_v2":
+            # Without CP too, hand the triton_v2 adapter the un-broadcast [B, S, 1, D]
+            # latent: its gradient then lands on `kv` directly instead of going through a
+            # zeroed [B, H, S, D] buffer (268 MB memset at S=4096) and the H-fold
+            # ExpandBackward sum (exactly dlatent + 63 zeros, so bit-identical).
+            kv_latent = kv
 
         # 1) Compressed pool with compress-base RoPE.
         pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
@@ -2224,12 +2306,19 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             )
         device, dtype = hidden.device, hidden.dtype
 
-        q = self._apply_q(hidden)  # [B, S, H, head_dim]
-        kv = self._apply_kv(hidden)  # [B, S, 1, head_dim]
+        if self._fused_q_norm_rope_ok(hidden):
+            # One pass for per-head RMSNorm + RoPE on Q, written straight into the
+            # zero-padded buffer the sparse-MLA adapter consumes (no pad copy).
+            q = self._apply_q_norm_rope(hidden, position_ids)  # [B, S, H, head_dim] view
+            kv = self._apply_kv(hidden)  # [B, S, 1, head_dim]
+            kv = self.rope.apply_rope(kv, position_ids=position_ids, compress_ratio=self.compress_ratio)
+        else:
+            q = self._apply_q(hidden)  # [B, S, H, head_dim]
+            kv = self._apply_kv(hidden)  # [B, S, 1, head_dim]
 
-        # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
-        # (V4's single-latent design: K and V share the rope-applied kv).
-        q, kv = self._apply_rope_q_k(q, kv, position_ids)
+            # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
+            # (V4's single-latent design: K and V share the rope-applied kv).
+            q, kv = self._apply_rope_q_k(q, kv, position_ids)
 
         if self.compress_ratio == 0 and self._use_core_attention:
             # Plan-3 P22: dense layer, Turbo / TE flash path.  Causal + SWA

@@ -159,7 +159,8 @@ log_exported_vars "Persistent Cache Layout" \
 
 site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])" 2>/dev/null || echo "")
 if [[ -n "$site_packages" ]]; then
-    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${site_packages}:${PYTHONPATH:-}"
+    # keep the caller PYTHONPATH (mounted Primus-Turbo) ahead of site-packages; otherwise the image primus_turbo shadows it
+    export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${PYTHONPATH:-}:${site_packages}"
 else
     export PYTHONPATH="${PRIMUS_IMPORT_ROOT}:${PYTHONPATH:-}"
 fi

@@ -5,6 +5,7 @@
 ###############################################################################
 
 """Utility functions related to FP8 that are used throughout Megatron core"""
+import os
 from contextlib import nullcontext
 
 import torch
@@ -48,6 +49,19 @@ SCALING_BLOCK_SIZE = 128
 MXFP8_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
+_WARNED_TE_MXFP8_FALLBACK = False
+
+
+def _te_mxfp8_support():
+    """TE's own MXFP8 gate ``(ok, reason)``; (True, "") if TE has no such check."""
+    try:
+        from transformer_engine.pytorch.quantization import check_mxfp8_support
+    except ImportError:
+        try:
+            from transformer_engine.pytorch.fp8 import check_mxfp8_support
+        except ImportError:
+            return True, ""
+    return check_mxfp8_support()
 
 
 if HAVE_TE and HAVE_TURBO:
@@ -111,7 +125,29 @@ if HAVE_TE and HAVE_TURBO:
             elif config.fp8_recipe == Fp8Recipe.blockwise and is_te_min_version("2.3.0.dev0"):
                 fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
             elif config.fp8_recipe == Fp8Recipe.mxfp8:
-                fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+                te_mxfp8_ok, te_mxfp8_reason = _te_mxfp8_support()
+                if te_mxfp8_ok:
+                    fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+                else:
+                    # TE gates MXFP8 off on this GPU (gfx1250: its MXFP8 GEMM is numerically
+                    # wrong). Keep the gate: the Primus-Turbo GEMMs still get MXFP8 through
+                    # get_fp8_quant_config(); any GEMM left to TE runs the fallback recipe
+                    # (PRIMUS_TE_MXFP8_FALLBACK=tensorwise, default, or bf16).
+                    fallback = os.environ.get("PRIMUS_TE_MXFP8_FALLBACK", "tensorwise").lower()
+                    if fallback == "tensorwise" and is_te_min_version("2.2.0.dev0"):
+                        fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling(
+                            fp8_format=fp8_format, fp8_dpa=config.fp8_dot_product_attention
+                        )
+                    else:
+                        fp8_recipe_none_reason = f"TE MXFP8 unavailable ({te_mxfp8_reason}); TE GEMMs run BF16"
+                    global _WARNED_TE_MXFP8_FALLBACK
+                    if not _WARNED_TE_MXFP8_FALLBACK:
+                        warning_rank_0(
+                            f"[fp8] TE MXFP8 unavailable ({te_mxfp8_reason}): TE GEMMs use "
+                            f"{'FP8 tensorwise' if fp8_recipe is not None else 'BF16'}, "
+                            "Primus-Turbo GEMMs keep MXFP8."
+                        )
+                        _WARNED_TE_MXFP8_FALLBACK = True
             else:
                 fp8_recipe_none_reason = "Float8CurrentScaling, MXFP8BlockScaling, Float8BlockwiseScaling and DelayedScaling are the only supported FP8 recipes. Please also make sure you are using a compatible TE version."
         else:

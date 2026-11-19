@@ -335,3 +335,349 @@ def _bwd_dkv_gather_acc(
     tl.store(dKV_acc_ptr + acc_base + offs_v, dkv_acc_lora)
     if HAS_ROPE:
         tl.store(dKV_acc_ptr + acc_base + D_V + offs_r, dkv_acc_rope)
+
+
+@triton.jit
+def _bwd_chunk_dq_dkv_fused(
+    Q_ptr,  # [T, H, D] bf16
+    KV_ptr,  # [T_kv, 1, D] bf16
+    dO_ptr,  # [T, H, D_V] bf16
+    TopK_ptr,  # [T, TOPK] int32
+    LSE_ptr,  # [T, H] fp32
+    Delta_ptr,  # [T, H] fp32 (computed here on the first chunk, read after)
+    O_ptr,  # [T, H, D_V] bf16
+    dQ_ptr,  # [T, H, D] bf16 — read-modify-write across chunks
+    Interm_ptr,  # [T, R_CHUNK, D] bf16 — output, one writer per (q, rank)
+    stride_q_t: tl.int64,
+    stride_q_h: tl.int64,
+    stride_kv_t: tl.int64,
+    stride_do_t: tl.int64,
+    stride_do_h: tl.int64,
+    stride_o_t: tl.int64,
+    stride_o_h: tl.int64,
+    stride_dq_t: tl.int64,
+    stride_dq_h: tl.int64,
+    stride_topk_t: tl.int64,
+    stride_interm_t: tl.int64,
+    stride_interm_k: tl.int64,
+    stride_interm_hg: tl.int64,  # head-group plane stride (0 when one program holds all heads)
+    scale: tl.float32,
+    num_heads: tl.int32,
+    R_START: tl.int32,
+    R_CHUNK: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    TILE_K: tl.constexpr,
+    D_V: tl.constexpr,
+    D_ROPE: tl.constexpr,
+    IS_FIRST_CHUNK: tl.constexpr,
+):
+    """Fused dQ + dKV-intermediate for one rank chunk (V4 zero-rope form only).
+
+    Same math as ``_bwd_chunk_dq_store_ds`` followed by ``_bwd_compute_dkv_intermediate``,
+    but with ALL heads of a token in one program (``BLOCK_H >= num_heads``), so the
+    per-key head reduction ``interm[t, r, :] = dS[:, r]^T @ Q + P[:, r]^T @ dO`` is done
+    right here from the register-resident dS / P / Q / dO tiles. This removes the
+    [T, H, R_CHUNK] dS / P round trip through HBM and the second kernel's Q / dO reload
+    (and its launch). Used on gfx1250, where the larger register file / LDS lets the
+    extra [TILE_K, D_V] accumulator fit. Grid: (total_tokens, num_head_groups).
+
+    With more than one head group (BLOCK_H < num_heads) each program writes a partial
+    (its heads only) intermediate to plane hg (stride_interm_hg); the gather sums the
+    planes. That halves the per-program register footprint (Q / dO / dQ tiles) at the
+    cost of one extra intermediate plane of traffic."""
+    token_idx = tl.program_id(0)
+    hg_idx = tl.program_id(1)
+    offs_h = hg_idx * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask_h = offs_h < num_heads
+    offs_v = tl.arange(0, D_V)
+    offs_r = tl.arange(0, D_ROPE)
+
+    q_base = token_idx * stride_q_t
+    Q_lora = tl.load(
+        Q_ptr + q_base + offs_h[:, None] * stride_q_h + offs_v[None, :], mask=mask_h[:, None], other=0.0
+    )
+    do_base = token_idx * stride_do_t
+    dO_val = tl.load(
+        dO_ptr + do_base + offs_h[:, None] * stride_do_h + offs_v[None, :], mask=mask_h[:, None], other=0.0
+    )
+    lse = tl.load(LSE_ptr + token_idx * num_heads + offs_h, mask=mask_h, other=0.0)
+    if IS_FIRST_CHUNK:
+        O_val = tl.load(
+            O_ptr + token_idx * stride_o_t + offs_h[:, None] * stride_o_h + offs_v[None, :],
+            mask=mask_h[:, None],
+            other=0.0,
+        )
+        delta = tl.sum(O_val.to(tl.float32) * dO_val.to(tl.float32), axis=1)
+        tl.store(Delta_ptr + token_idx * num_heads + offs_h, delta, mask=mask_h)
+    else:
+        delta = tl.load(Delta_ptr + token_idx * num_heads + offs_h, mask=mask_h, other=0.0)
+
+    dq_base = token_idx * stride_dq_t
+    if IS_FIRST_CHUNK:
+        dQ_lora = tl.zeros([BLOCK_H, D_V], dtype=tl.float32)
+    else:
+        dQ_lora = tl.load(
+            dQ_ptr + dq_base + offs_h[:, None] * stride_dq_h + offs_v[None, :],
+            mask=mask_h[:, None],
+            other=0.0,
+        ).to(tl.float32)
+
+    NUM_TILES: tl.constexpr = (R_CHUNK + TILE_K - 1) // TILE_K
+    topk_base = token_idx * stride_topk_t + R_START
+    offs_tile = tl.arange(0, TILE_K)
+    interm_base_t = token_idx * stride_interm_t + hg_idx * stride_interm_hg
+
+    for t in range(NUM_TILES):
+        tile_offs = t * TILE_K + offs_tile
+        valid = tile_offs < R_CHUNK
+        topk_pos = tl.load(TopK_ptr + topk_base + tile_offs, mask=valid, other=-1)
+        valid = valid & (topk_pos != -1)
+        safe_pos = tl.where(valid, topk_pos, 0)
+
+        K_lora_T = tl.load(
+            KV_ptr + safe_pos[None, :] * stride_kv_t + offs_v[:, None], mask=valid[None, :], other=0.0
+        )
+
+        S = tl.dot(Q_lora, K_lora_T)
+        S = tl.where(valid[None, :] & mask_h[:, None], S * scale, float("-inf"))
+        P = tl.exp(S - lse[:, None])
+        P = tl.where(valid[None, :] & mask_h[:, None], P, 0.0)
+        dP = tl.dot(dO_val, K_lora_T)
+        dS = P * (dP - delta[:, None]) * scale
+        dS = tl.where(valid[None, :] & mask_h[:, None], dS, 0.0)
+
+        dS_bf = dS.to(tl.bfloat16)
+        P_bf = P.to(tl.bfloat16)
+        dQ_lora += tl.dot(dS_bf, tl.trans(K_lora_T)).to(tl.float32)
+
+        # dKV intermediate for these TILE_K keys: [TILE_K, D_V] (head-reduced).
+        dKV = tl.dot(tl.trans(dS_bf), Q_lora).to(tl.float32)
+        dKV += tl.dot(tl.trans(P_bf), dO_val).to(tl.float32)
+        tl.store(
+            Interm_ptr + interm_base_t + tile_offs[:, None] * stride_interm_k + offs_v[None, :],
+            dKV.to(tl.bfloat16),
+            mask=(tile_offs < R_CHUNK)[:, None],
+        )
+
+    tl.store(
+        dQ_ptr + dq_base + offs_h[:, None] * stride_dq_h + offs_v[None, :],
+        dQ_lora.to(Q_lora.dtype),
+        mask=mask_h[:, None],
+    )
+    tl.store(
+        dQ_ptr + dq_base + offs_h[:, None] * stride_dq_h + (D_V + offs_r[None, :]),
+        tl.zeros([BLOCK_H, D_ROPE], dtype=Q_lora.dtype),
+        mask=mask_h[:, None],
+    )
+
+
+@triton.jit
+def _bwd_dkv_gather_split(
+    Interm_ptr,  # [T, R_CHUNK, D] bf16 — chunk intermediate
+    InvPtr_ptr,  # [num_kv+1] int32 — CSR row pointers
+    InvData_ptr,  # [T*R_CHUNK] int32 — encoded as q*R_CHUNK + local_r
+    Part_ptr,  # [NSPLIT, num_kv, D_V] fp32 — per-split partial sums (plain stores)
+    stride_interm_r: tl.int64,  # D
+    stride_part_s: tl.int64,
+    stride_part_t: tl.int64,
+    stride_interm_hg: tl.int64,  # head-group plane stride of the intermediate
+    NSPLIT: tl.constexpr,
+    NUM_HG: tl.constexpr,
+    D_V: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    """Load-balanced, deterministic variant of :func:`_bwd_dkv_gather_acc`.
+
+    Grid: (num_kv, NSPLIT). Program (k, s) sums the CSR entries of KV row k in the
+    BLOCK_K-row blocks s, s+NSPLIT, s+2*NSPLIT, ... and stores the fp32 partial
+    (no atomics; fixed summation order). The heavy rows (compressed-pool rows hit by
+    thousands of queries) are thus spread over NSPLIT programs instead of serialising
+    one CTA; the caller sums the NSPLIT partials."""
+    k = tl.program_id(0)
+    s = tl.program_id(1)
+    offs_v = tl.arange(0, D_V)
+    offs_k = tl.arange(0, BLOCK_K)
+    start = tl.load(InvPtr_ptr + k)
+    end = tl.load(InvPtr_ptr + k + 1)
+    acc = tl.zeros([D_V], dtype=tl.float32)
+    for e0 in range(start + s * BLOCK_K, end, NSPLIT * BLOCK_K):
+        e = e0 + offs_k
+        valid = e < end
+        entry = tl.load(InvData_ptr + e, mask=valid, other=0).to(tl.int64)
+        for hg in tl.static_range(NUM_HG):
+            rows = tl.load(
+                Interm_ptr + hg * stride_interm_hg + entry[:, None] * stride_interm_r + offs_v[None, :],
+                mask=valid[:, None],
+                other=0.0,
+            ).to(tl.float32)
+            acc += tl.sum(rows, axis=0)
+    tl.store(Part_ptr + s * stride_part_s + k.to(tl.int64) * stride_part_t + offs_v, acc)
+
+
+@triton.jit
+def _bwd_chunk_dkv_store_ds(
+    Q_ptr,  # [T, H, D] bf16
+    KV_ptr,  # [T_kv, 1, D] bf16
+    dO_ptr,  # [T, H, D_V] bf16
+    TopK_ptr,  # [T, TOPK] int32
+    LSE_ptr,  # [T, H] fp32
+    Delta_ptr,  # [T, H] fp32 (computed here on the first chunk, read after)
+    O_ptr,  # [T, H, D_V] bf16
+    dS_ptr,  # [T, H, R_CHUNK] bf16 — output, consumed by _bwd_dq_from_ds
+    Interm_ptr,  # [T, R_CHUNK, D_V] bf16 — output, one writer per (q, rank)
+    stride_q_t: tl.int64,
+    stride_q_h: tl.int64,
+    stride_kv_t: tl.int64,
+    stride_do_t: tl.int64,
+    stride_do_h: tl.int64,
+    stride_o_t: tl.int64,
+    stride_o_h: tl.int64,
+    stride_topk_t: tl.int64,
+    stride_ds_t: tl.int64,
+    stride_ds_h: tl.int64,
+    stride_interm_t: tl.int64,
+    stride_interm_k: tl.int64,
+    scale: tl.float32,
+    num_heads: tl.int32,
+    R_START: tl.int32,
+    R_CHUNK: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    TILE_K: tl.constexpr,
+    D_V: tl.constexpr,
+    IS_FIRST_CHUNK: tl.constexpr,
+):
+    """dKV intermediate + dS for one rank chunk, all heads of a token per program (gfx1250).
+
+    ``_bwd_chunk_dq_dkv_fused`` minus the dQ accumulation: on gfx1250 the [BLOCK_H, D_V] fp32
+    dQ accumulator (256 VGPRs at 4 waves) is what pushes that kernel to 1024 VGPRs with
+    ~130 spills (ablation: dropping the dQ dot 2.52 -> 1.44 ms, 1022 -> 750 VGPRs, 0 spills).
+    Here dS goes to HBM instead ([T, H, R_CHUNK] bf16, written once, read once) and
+    ``_bwd_dq_from_ds`` forms dQ = dS @ K_gathered with a light, D_V-split accumulator.
+    Grid: (total_tokens,)."""
+    token_idx = tl.program_id(0)
+    offs_h = tl.arange(0, BLOCK_H)
+    mask_h = offs_h < num_heads
+    offs_v = tl.arange(0, D_V)
+
+    q_base = token_idx * stride_q_t
+    Q_lora = tl.load(
+        Q_ptr + q_base + offs_h[:, None] * stride_q_h + offs_v[None, :], mask=mask_h[:, None], other=0.0
+    )
+    do_base = token_idx * stride_do_t
+    dO_val = tl.load(
+        dO_ptr + do_base + offs_h[:, None] * stride_do_h + offs_v[None, :], mask=mask_h[:, None], other=0.0
+    )
+    lse = tl.load(LSE_ptr + token_idx * num_heads + offs_h, mask=mask_h, other=0.0)
+    if IS_FIRST_CHUNK:
+        O_val = tl.load(
+            O_ptr + token_idx * stride_o_t + offs_h[:, None] * stride_o_h + offs_v[None, :],
+            mask=mask_h[:, None],
+            other=0.0,
+        )
+        delta = tl.sum(O_val.to(tl.float32) * dO_val.to(tl.float32), axis=1)
+        tl.store(Delta_ptr + token_idx * num_heads + offs_h, delta, mask=mask_h)
+    else:
+        delta = tl.load(Delta_ptr + token_idx * num_heads + offs_h, mask=mask_h, other=0.0)
+
+    NUM_TILES: tl.constexpr = (R_CHUNK + TILE_K - 1) // TILE_K
+    topk_base = token_idx * stride_topk_t + R_START
+    offs_tile = tl.arange(0, TILE_K)
+    interm_base_t = token_idx * stride_interm_t
+    ds_base = token_idx * stride_ds_t
+
+    for t in range(NUM_TILES):
+        tile_offs = t * TILE_K + offs_tile
+        in_chunk = tile_offs < R_CHUNK
+        topk_pos = tl.load(TopK_ptr + topk_base + tile_offs, mask=in_chunk, other=-1)
+        valid = in_chunk & (topk_pos != -1)
+        safe_pos = tl.where(valid, topk_pos, 0)
+
+        K_lora_T = tl.load(
+            KV_ptr + safe_pos[None, :] * stride_kv_t + offs_v[:, None], mask=valid[None, :], other=0.0
+        )
+        S = tl.dot(Q_lora, K_lora_T)
+        S = tl.where(valid[None, :] & mask_h[:, None], S * scale, float("-inf"))
+        P = tl.exp(S - lse[:, None])
+        P = tl.where(valid[None, :] & mask_h[:, None], P, 0.0)
+        dP = tl.dot(dO_val, K_lora_T)
+        dS = P * (dP - delta[:, None]) * scale
+        dS = tl.where(valid[None, :] & mask_h[:, None], dS, 0.0)
+        dS_bf = dS.to(tl.bfloat16)
+        P_bf = P.to(tl.bfloat16)
+
+        tl.store(
+            dS_ptr + ds_base + offs_h[:, None] * stride_ds_h + tile_offs[None, :],
+            dS_bf,
+            mask=mask_h[:, None] & in_chunk[None, :],
+        )
+        dKV = tl.dot(tl.trans(dS_bf), Q_lora).to(tl.float32)
+        dKV += tl.dot(tl.trans(P_bf), dO_val).to(tl.float32)
+        tl.store(
+            Interm_ptr + interm_base_t + tile_offs[:, None] * stride_interm_k + offs_v[None, :],
+            dKV.to(tl.bfloat16),
+            mask=in_chunk[:, None],
+        )
+
+
+@triton.jit
+def _bwd_dq_from_ds(
+    dS_ptr,  # [T, H, R_CHUNK] bf16 (invalid slots hold 0)
+    KV_ptr,  # [T_kv, 1, D] bf16
+    TopK_ptr,  # [T, TOPK] int32
+    dQ_ptr,  # [T, H, D] bf16 — read-modify-write across chunks
+    stride_ds_t: tl.int64,
+    stride_ds_h: tl.int64,
+    stride_kv_t: tl.int64,
+    stride_topk_t: tl.int64,
+    stride_dq_t: tl.int64,
+    stride_dq_h: tl.int64,
+    num_heads: tl.int32,
+    R_START: tl.int32,
+    R_CHUNK: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    TILE_K: tl.constexpr,
+    D_V: tl.constexpr,
+    D_ROPE: tl.constexpr,
+    IS_FIRST_CHUNK: tl.constexpr,
+):
+    """dQ[t, :, d-block] (+)= dS[t] @ K[topk[t], d-block]. Grid: (total_tokens, D_V // BLOCK_D).
+
+    Only a [BLOCK_H, BLOCK_D] fp32 accumulator is live, so this runs spill-free at several
+    waves per SIMD; the gathered KV rows are L2-resident. The program with d-block 0 also
+    writes the (discarded, zero) rope columns of dQ."""
+    token_idx = tl.program_id(0)
+    d_idx = tl.program_id(1)
+    offs_h = tl.arange(0, BLOCK_H)
+    mask_h = offs_h < num_heads
+    offs_d = d_idx * BLOCK_D + tl.arange(0, BLOCK_D)
+    offs_tile = tl.arange(0, TILE_K)
+    dq_ptrs = dQ_ptr + token_idx * stride_dq_t + offs_h[:, None] * stride_dq_h + offs_d[None, :]
+    if IS_FIRST_CHUNK:
+        acc = tl.zeros([BLOCK_H, BLOCK_D], dtype=tl.float32)
+    else:
+        acc = tl.load(dq_ptrs, mask=mask_h[:, None], other=0.0).to(tl.float32)
+    NUM_TILES: tl.constexpr = (R_CHUNK + TILE_K - 1) // TILE_K
+    topk_base = token_idx * stride_topk_t + R_START
+    ds_base = token_idx * stride_ds_t
+    for t in range(NUM_TILES):
+        tile_offs = t * TILE_K + offs_tile
+        in_chunk = tile_offs < R_CHUNK
+        topk_pos = tl.load(TopK_ptr + topk_base + tile_offs, mask=in_chunk, other=-1)
+        valid = in_chunk & (topk_pos != -1)
+        safe_pos = tl.where(valid, topk_pos, 0)
+        dS_t = tl.load(
+            dS_ptr + ds_base + offs_h[:, None] * stride_ds_h + tile_offs[None, :],
+            mask=mask_h[:, None] & in_chunk[None, :],
+            other=0.0,
+        )
+        K_t = tl.load(KV_ptr + safe_pos[:, None] * stride_kv_t + offs_d[None, :], mask=valid[:, None], other=0.0)
+        acc += tl.dot(dS_t, K_t)
+    tl.store(dq_ptrs, acc.to(dQ_ptr.dtype.element_ty), mask=mask_h[:, None])
+    if d_idx == 0:
+        offs_r = tl.arange(0, D_ROPE)
+        tl.store(
+            dQ_ptr + token_idx * stride_dq_t + offs_h[:, None] * stride_dq_h + (D_V + offs_r[None, :]),
+            tl.zeros([BLOCK_H, D_ROPE], dtype=dQ_ptr.dtype.element_ty),
+            mask=mask_h[:, None],
+        )

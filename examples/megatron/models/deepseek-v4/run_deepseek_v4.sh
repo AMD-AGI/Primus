@@ -412,4 +412,5 @@ fi
   --profile_step_end 7 \
   --profile_step_start 6 \
   --bias_swiglu_fusion "$PRIMUS_BIAS_SWIGLU_FUSION" \
+  ${PRIMUS_EXTRA_TRAIN_ARGS:-} \
   2>&1 | tee "$PRIMUS_OUTPUT_ROOT/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK:-0}.txt"

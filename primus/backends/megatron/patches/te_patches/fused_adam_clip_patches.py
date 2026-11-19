@@ -68,6 +68,15 @@ def _uses_static_bf16_unity_scale(optimizer) -> bool:
     )
 
 
+def _return_grad_norm_enabled() -> bool:
+    """Return the device grad norm (0-dim) for logging; it is read after Adam has been queued."""
+    return os.environ.get("PRIMUS_FUSED_ADAM_RETURN_GRAD_NORM", "1") == "1"
+
+
+def _logged_grad_norm(grad_norm: torch.Tensor):
+    return grad_norm.reshape(()) if _return_grad_norm_enabled() else None
+
+
 def _mcore_master_enabled() -> bool:
     return os.environ.get("PRIMUS_FUSED_ADAM_MCORE_MASTER", "0") == "1"
 
@@ -419,11 +428,11 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
 
     num_zeros_in_grad = optimizer.count_zeros() if optimizer.config.log_num_zeros_in_grad else None
     update_successful = optimizer.step_with_ready_grads()
-    # Returning the device tensor would make Megatron's per-step logger format
-    # it as a Python float, reinstating the synchronization this patch removes.
-    # The norm has already served its training purpose inside Adam, so suppress
-    # the optional logging statistic.
-    return update_successful, None, num_zeros_in_grad
+    # The device norm is returned only for logging (PRIMUS_FUSED_ADAM_RETURN_GRAD_NORM,
+    # default on): Megatron formats it after the step, when the Adam launch is
+    # already queued, so the host read does not stall the optimizer. Set it to 0
+    # to return None and skip that read entirely.
+    return update_successful, _logged_grad_norm(grad_norm), num_zeros_in_grad
 
 
 def _deferred_passthrough_reduce_max(value, *args, **kwargs):
@@ -625,8 +634,8 @@ def _install_patch() -> None:
             )
         inner_optimizer._primus_clip_norm = grad_norm
         inner_optimizer._primus_clip_max_norm = float(clip_grad)
-        # Megatron only uses this return value for optional logging after the
-        # update. Falling through with None avoids a device-to-host synchronization.
+        # Megatron only uses this return value for logging after the update.
+        return _logged_grad_norm(grad_norm)
 
     @torch.no_grad()
     def patched_chained_step(self):

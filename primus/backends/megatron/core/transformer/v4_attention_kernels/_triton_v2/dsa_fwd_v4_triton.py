@@ -27,6 +27,7 @@ import triton
 import triton.language as tl
 
 from ._amd_knobs import amd_pingpong_disabled
+from ._turbo_gfx1250 import sparse_mla_fwd_turbo_gfx1250, turbo_gfx1250_enabled
 
 
 def _get_fwd_configs():
@@ -164,6 +165,8 @@ def sparse_mla_fwd_v4_triton(q, kv, topk_indices, attn_sink=None, kv_lora_rank=5
         sink_ptr = attn_sink
     else:
         sink_ptr = torch.empty(1, dtype=torch.float32, device=q.device)
+    if turbo_gfx1250_enabled(q, num_heads, topk):
+        return sparse_mla_fwd_turbo_gfx1250(q, kv, topk_indices, attn_sink, kv_lora_rank, scale)
 
     o = torch.empty(total_tokens, num_heads, kv_lora_rank, dtype=q.dtype, device=q.device)
     lse = torch.empty(total_tokens, num_heads, dtype=torch.float32, device=q.device)
