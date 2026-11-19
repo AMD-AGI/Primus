@@ -4,6 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
+# Must run before anything imports Megatron-LM (megatron/core/jit.py uses
+# torch.jit.script at import time).
+from primus.core.utils.torch_compat import ensure_torch_jit_script
+
+ensure_torch_jit_script()
+
 from primus.backends.megatron_bridge.megatron_bridge_adapter import (
     MegatronBridgeAdapter,
 )
