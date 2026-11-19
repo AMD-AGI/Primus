@@ -28,9 +28,65 @@ the same Function serves all backends (backward returns ``None`` for them).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import os
+import weakref
 from typing import Callable, Optional
 
 import torch
+
+# Set while a fwd / bwd kernel runs on a "canonical band" top-k map: B == 1, no CP, no
+# packing, the 128-row sliding window [t-127, t] in slot order, plus (HCA) the causal pool
+# kv row Skv' + p visible iff t >= cr * (p + 1) - 1 with cr = S / P. A backend may then
+# use closed-form band kernels that do not read the indices (Turbo gfx1250 use_swa=True).
+_BAND_HINT = contextvars.ContextVar("v4_sparse_mla_band_hint", default=False)
+_SWA_BAND_W = 128
+_mask_ok_cache = weakref.WeakKeyDictionary()
+
+
+def band_hint() -> bool:
+    """True inside a fwd / bwd call whose top-k map is a canonical band (see above)."""
+    return _BAND_HINT.get()
+
+
+@contextlib.contextmanager
+def _band(on: bool):
+    tok = _BAND_HINT.set(bool(on))
+    try:
+        yield
+    finally:
+        _BAND_HINT.reset(tok)
+
+
+def _hca_mask_is_closed_form(mask: torch.Tensor, S: int, P: int) -> bool:
+    """``mask`` ([S, P] additive) == the causal pool mask with ratio S // P. Checked once per
+    mask tensor (one device sync; the model caches its mask, so once per run and layer)."""
+    ent = _mask_ok_cache.get(mask)
+    if ent is not None and ent[0] == mask._version:
+        return ent[1]
+    cr = S // P
+    t = torch.arange(S, device=mask.device).view(S, 1)
+    vis = (torch.arange(P, device=mask.device).view(1, P) + 1) * cr - 1 <= t
+    ok = bool(torch.equal(mask.reshape(S, P) == 0, vis))
+    try:
+        _mask_ok_cache[mask] = (mask._version, ok)
+    except TypeError:
+        pass
+    return ok
+
+
+def _canonical_band(B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, hca_local_seqlen, mask) -> bool:
+    if os.environ.get("PRIMUS_V4_BAND_KERNELS", "1") != "1":
+        return False
+    if B != 1 or W != _SWA_BAND_W or int(cp_dwindow) != 0 or int(cp_global_start) != 0 or seq_starts is not None:
+        return False
+    if hca_local_seqlen > 0 and mask is not None:
+        P = Skv - int(hca_local_seqlen)
+        if int(hca_local_seqlen) != S or P <= 0 or S % P or mask.numel() != S * P:
+            return False
+        return _hca_mask_is_closed_form(mask, S, P)
+    return Skv == S
 
 _ROPE_PAD = 64  # dummy separate-rope block (zeros); the kernels need D_ROPE > 0
 
@@ -365,7 +421,12 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         kv_g = _rope_pad_kv(latent.reshape(B * Skv, 1, D))
 
         sink_arg = sink.float().contiguous() if sink is not None else None
-        o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
+        band = _canonical_band(
+            B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, int(hca_local_seqlen), additive_mask
+        )
+        ctx.band = band
+        with _band(band):
+            o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
         ctx.shapes = (B, H, S, D, Skv)
@@ -388,9 +449,10 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         sink_arg = None if ctx.sink_was_none else sink_saved
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
-        dq_g, dkv_g, dsink = ctx.bwd_fn(
-            q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-        )
+        with _band(ctx.band):
+            dq_g, dkv_g, dsink = ctx.bwd_fn(
+                q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+            )
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv = dkv_g[:, 0, :D].reshape(B, Skv, D)
