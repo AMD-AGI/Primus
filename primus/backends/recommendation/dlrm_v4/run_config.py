@@ -139,6 +139,11 @@ def synthetic_plan(env: Mapping[str, str], world_size: int) -> Dict[str, Any]:
     partial batch). The run must cap its length (NUM_TRAIN_BATCHES); the final
     eval is one batch unless NUM_EVAL_BATCHES says otherwise.
     """
+    if world_size <= 0:
+        raise ValueError(
+            f"synthetic_data needs at least one GPU, not a world size of {world_size}: "
+            "set GPUS_PER_NODE or make a GPU visible"
+        )
     steps = int(env.get("NUM_TRAIN_BATCHES") or 0)
     if steps <= 0:
         raise ValueError(
@@ -149,8 +154,14 @@ def synthetic_plan(env: Mapping[str, str], world_size: int) -> Dict[str, Any]:
         raise ValueError(
             f"synthetic_data supports history_length {DEFAULT_HISTORY_LENGTH} only, not {history}"
         )
-    eval_batches = int(env.get("NUM_EVAL_BATCHES") or 0) or 1
-    global_batch = int(env.get("BATCH_SIZE") or DEFAULT_BATCH_SIZE) * world_size
+    batch_size = int(env.get("BATCH_SIZE") or DEFAULT_BATCH_SIZE)
+    if batch_size <= 0:
+        raise ValueError(f"synthetic_data needs batch_size (BATCH_SIZE) > 0, not {batch_size}")
+    eval_batches = int(env.get("NUM_EVAL_BATCHES") or 0)
+    if eval_batches < 0:
+        raise ValueError(f"synthetic_data needs num_eval_batches (NUM_EVAL_BATCHES) >= 0, not {eval_batches}")
+    eval_batches = eval_batches or 1  # 0 (unset): the final eval is one batch
+    global_batch = batch_size * world_size
     return {
         "train_samples": steps * global_batch + global_batch // 2,
         "eval_samples": eval_batches * global_batch + global_batch // 2,

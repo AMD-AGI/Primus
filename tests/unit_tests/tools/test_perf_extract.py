@@ -19,6 +19,7 @@ Pure CPU; no GPU, no yq, no Primus import required.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2623,3 +2624,84 @@ def test_recommendation_warmup_is_twenty_steps_when_logged_every_step(tmp_path):
     body = "".join(recommendation_perf(s, 8000.0, 1000.0, 2700.0) * 8 for s in range(1, 31))
     result = extract.parse_log_file(str(recommendation_log(tmp_path, body)))
     assert (result["warmup_steps"], result["num_post_warmup"]) == (20, 10)
+
+
+# --------------------------------------------------------------------------
+# DLRMv4 (recommendation) is a single-node benchmark: run_batch_multinode.sh refuses it
+# --------------------------------------------------------------------------
+
+MEGATRON_CONFIG = "modules:\n  pre_trainer:\n    framework: megatron\n"
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "configs,framework,expected",
+    [
+        pytest.param(("recommendation", "megatron"), "recommendation", 0, id="in-a-mixed-batch"),
+        pytest.param(("megatron",), "recommendation", 1, id="absent"),
+        pytest.param(("recommendation",), "diffusion", 1, id="another-framework"),
+        pytest.param((), "recommendation", 1, id="no-configs"),
+    ],
+)
+def test_perf_batch_has_framework(tmp_path, configs, framework, expected):
+    bodies = {"recommendation": RECOMMENDATION_CONFIG, "megatron": MEGATRON_CONFIG}
+    files = []
+    for i, name in enumerate(configs):
+        files.append(tmp_path / f"{i}-{name}.yaml")
+        files[-1].write_text(bodies[name])
+    listed = " ".join(f"'{f}'" for f in files)
+    script = (
+        f"PRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\nNNODES=1\nCONFIG_FILES=({listed})\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        f"perf_batch_has_framework {framework}; echo $?\n"
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().splitlines()[-1] == str(expected)
+
+
+def test_perf_batch_has_diffusion_is_still_the_diffusion_check(tmp_path):
+    if not _mikefarah_yq():
+        pytest.skip("needs mikefarah yq v4")
+    results = {}
+    for name, body in (("diffusion", DIFFUSION_CONFIG % 1), ("recommendation", RECOMMENDATION_CONFIG)):
+        config = tmp_path / f"{name}.yaml"
+        config.write_text(body)
+        script = (
+            f"PRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\nNNODES=1\nCONFIG_FILES=('{config}')\n"
+            f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+            "perf_batch_has_diffusion; echo $?\n"
+        )
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        assert out.returncode == 0, out.stderr
+        results[name] = out.stdout.strip().splitlines()[-1]
+    assert results == {"diffusion": "0", "recommendation": "1"}
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "backend,exit_code",
+    [
+        pytest.param("recommendation", 2, id="refused"),
+        # The same dry run for a backend that does run multi-node, so the refusal is specific.
+        pytest.param("megatron", 0, id="megatron-is-planned"),
+    ],
+)
+def test_multinode_runner_refuses_the_recommendation_configs(tmp_path, backend, exit_code):
+    env = {**os.environ, "DRY_RUN": "1", "NNODES": "2", "GPU": "MI355X", "BACKEND": backend}
+    env["RESULT_DIR"] = str(tmp_path / "results")
+    for name in ("CONFIG_FILE", "CONFIG_DIR", "TRAIN_STEPS", "EXTRA_ENV"):
+        env.pop(name, None)
+    out = subprocess.run(
+        ["bash", str(MODULE_PATH.parent / "run_batch_multinode.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert out.returncode == exit_code, out.stderr
+    if exit_code:
+        assert "recommendation (DLRMv4) configs are single-node benchmarks" in out.stderr
+    else:
+        assert "DRY RUN" in out.stdout

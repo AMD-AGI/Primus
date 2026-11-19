@@ -27,7 +27,8 @@ private_site: ${PRIMUS_RECOMMENDATION_SITE:/opt/primus-recommendation/site-packa
 # dlrm_v4/synthetic_data.py: sequence lengths, users per batch, id repeats),
 # generated for the run's size (num_train_batches is required) under
 # synthetic_data_dir and reused by later runs of that size. The run trains on its
-# one train window and evaluates on the next; data_path is not read.
+# one train window and evaluates on the next; data_path is not read. Single node
+# only (NNODES above 1 is refused: every node would generate into the same directory).
 synthetic_data: false
 # Default: $DATA_PATH/dlrm_v4_synthetic, else <output_dir>/dlrm_v4_synthetic.
 # 11 GB for 200 steps of 8 GPUs at batch 1024, 16 GB for 300.

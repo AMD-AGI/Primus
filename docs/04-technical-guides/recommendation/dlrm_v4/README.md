@@ -180,15 +180,18 @@ sequence lengths, anchors per user (the trainer batches a window user-major),
 the share of each event type, and items replayed from per-user artist
 libraries. Tokens per batch, users per batch and unique items, artists and
 albums per batch come within a few percent of the real day's, and so does the
-throughput: on one MI355X node with `rocm/primus:v26.9`, 8397 samples/s per GPU
-against 8454 on the real day 200 (steps 31-200; TFLOP/s 1013 against 1017).
+throughput: on one MI355X node with `rocm/primus:v26.9`, two 200-step runs gave
+8397 samples/s per GPU (launched with `primus-cli direct`) and 8379 (through
+tools/perf), against 8454 on the real day 200 (harmonic means over steps
+31-200; TFLOP/s 1013 and 1011 against 1017).
 
 The dataset has two daily windows, one to train on and one for the final eval,
 sized from `num_train_batches` (required), `batch_size` and the world size. The
 backend sets `start_ts` 0, `num_train_ts` 1 and the eval window itself.
 Generating it takes about 20 s for 200 steps of one node (11 GB); later runs of
-the same size reuse it, and a shorter run trains on the first batches of a
-longer one's data.
+the same size reuse it, and a run of another size generates its own. It is for
+a single node: `synthetic_data` refuses `NNODES` above 1, as every node would
+generate the dataset into the same directory.
 
 [`examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml`](../../../../examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml)
 is such a run, and the DLRMv4 entry of the Primus perf benchmarks

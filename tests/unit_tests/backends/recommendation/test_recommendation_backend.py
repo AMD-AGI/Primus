@@ -393,6 +393,21 @@ def test_synthetic_plan_sizes_the_windows_for_the_run():
         run_config.synthetic_plan({"NUM_TRAIN_BATCHES": "10", "HISTORY_LENGTH": "2048"}, world_size=8)
 
 
+@pytest.mark.parametrize(
+    "env,world_size,message",
+    [
+        pytest.param({"NUM_TRAIN_BATCHES": "10", "BATCH_SIZE": "0"}, 8, "batch_size", id="zero-batch"),
+        pytest.param({"NUM_TRAIN_BATCHES": "10", "BATCH_SIZE": "-4"}, 8, "batch_size", id="negative-batch"),
+        pytest.param({"NUM_TRAIN_BATCHES": "10"}, 0, "at least one GPU", id="no-gpu"),
+        pytest.param({"NUM_TRAIN_BATCHES": "10", "NUM_EVAL_BATCHES": "-1"}, 8, "num_eval_batches", id="eval"),
+        pytest.param({"NUM_TRAIN_BATCHES": "-3"}, 8, "num_train_batches", id="steps"),
+    ],
+)
+def test_synthetic_plan_names_the_setting_it_refuses(env, world_size, message):
+    with pytest.raises(ValueError, match=message):
+        run_config.synthetic_plan(env, world_size=world_size)
+
+
 def test_synthetic_data_is_in_the_module_preset():
     import yaml
 
@@ -504,8 +519,9 @@ def test_synthetic_data_is_what_the_yambda_loader_reads(tmp_path):
     assert (Path(root) / "synthetic_spec.json").stat().st_mtime_ns == stamp
 
 
-def test_synthetic_users_do_not_depend_on_the_dataset_size():
-    """A shorter run trains on the first batches of a longer one."""
+def test_synthetic_user_attributes_do_not_depend_on_the_dataset_size():
+    """The attributes of user i (anchors, history, event shares, library size) are the
+    same at any size. Its uid is not: the uids are drawn for the whole dataset."""
     import numpy as np
 
     from primus.backends.recommendation.dlrm_v4 import synthetic_data as sd
@@ -518,3 +534,53 @@ def test_synthetic_users_do_not_depend_on_the_dataset_size():
     n = int((plans[0].window == sd.TRAIN_WINDOW).sum()) - 1  # the last user is cut to size
     for key in ("anchors", "prior", "shares", "organic", "library_artists"):
         assert np.array_equal(getattr(plans[0], key)[:n], getattr(plans[1], key)[:n]), key
+
+
+def test_trainer_refuses_synthetic_data_on_several_nodes(tmp_path, monkeypatch):
+    """Every node would generate into the same directory, and the generator's lock is per host."""
+    from primus.backends.recommendation.dlrm_v4 import synthetic_data
+    from primus.backends.recommendation.dlrm_v4 import trainer as T
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("generated a dataset on several nodes")
+
+    monkeypatch.setattr(synthetic_data, "ensure", must_not_run)
+    monkeypatch.setenv("NNODES", "2")
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("NUM_TRAIN_BATCHES", "10")
+    t = T.DlrmV4Trainer(backend_args={"synthetic_data": True})
+    with pytest.raises(ValueError, match="single node only .NNODES=2"):
+        t._use_synthetic_data(tmp_path)
+
+
+def test_synthetic_generation_that_fails_leaves_no_partial_copy(tmp_path, monkeypatch):
+    from primus.backends.recommendation.dlrm_v4 import synthetic_data as sd
+
+    root = str(tmp_path / "yambda5b-synthetic-abc")
+
+    def fails_midway(root, **kwargs):
+        (sd._tmp_dir(root) / "processed_5b").mkdir(parents=True)  # what a killed run leaves too
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sd, "_generate", fails_midway)
+    with pytest.raises(KeyboardInterrupt):
+        sd.generate(root, train_samples=1, eval_samples=1, log=lambda *_: None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ensure_removes_the_partial_copies_of_killed_generations(tmp_path, monkeypatch):
+    from primus.backends.recommendation.dlrm_v4 import synthetic_data as sd
+
+    stale = tmp_path / "yambda5b-synthetic-0123456789ab.tmp.4242"  # left by a SIGKILL
+    stale.mkdir()
+    (stale / "flat_uid.npy").write_bytes(b"x")
+    other = tmp_path / "someone-elses.tmp.1"  # not ours: left alone
+    other.mkdir()
+    done = tmp_path / "yambda5b-synthetic-ffffffffffff"  # a finished dataset: left alone
+    done.mkdir()
+    (done / "synthetic_spec.json").write_text("{}")
+    generated = []
+    monkeypatch.setattr(sd, "generate", lambda root, **kw: generated.append(root))
+    sd.ensure(str(tmp_path), train_samples=8, eval_samples=8, log=lambda *_: None)
+    assert not stale.exists() and other.exists() and done.exists()
+    assert len(generated) == 1

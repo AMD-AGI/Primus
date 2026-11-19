@@ -38,8 +38,8 @@ from them:
 
 The result matches the real window within a few percent on tokens per rank-batch,
 users per batch and unique items, artists and albums per batch, and on MI355X
-(rocm/primus:v26.9) its training throughput within 1% (8397 vs 8454 samples/s
-per GPU, steps 31-200 on 8 GPUs).
+(rocm/primus:v26.9) its training throughput within 1% (two 200-step runs: 8397
+and 8379 vs 8454 samples/s per GPU, harmonic mean over steps 31-200 on 8 GPUs).
 """
 
 from __future__ import annotations
@@ -253,8 +253,9 @@ class Plan:
     ):
         self.seed = seed
         self.history_length = history_length
-        # One stream per attribute, so user i is the same whatever the dataset's size:
-        # a shorter run trains on the first batches of a longer one.
+        # One stream per attribute, so the attributes of user i (anchors, history length,
+        # event shares, library size) do not depend on the dataset's size. The uids and the
+        # eval users do: they are drawn for the whole dataset.
         streams = [np.random.default_rng([seed, 10 + j]) for j in range(9)]
         k_train = self._split(streams[0], train_samples)
         k_eval = self._split(streams[1], eval_samples)
@@ -355,6 +356,11 @@ def _spec(vocab, **kw) -> dict:
     }
 
 
+def _tmp_dir(root: str) -> Path:
+    """Where `generate` builds the dataset of `root` before moving it into place."""
+    return Path(f"{Path(root)}.tmp.{os.getpid()}")
+
+
 def generate(
     root: str,
     *,
@@ -364,7 +370,34 @@ def generate(
     history_length: int = 4086,
     log=print,
 ) -> dict:
-    """Write the dataset to `root` (replaced if present). Returns its spec."""
+    """Write the dataset to `root` (replaced if present). Returns its spec.
+
+    A failed or interrupted run removes its partial copy (a kill cannot: `ensure`
+    sweeps those).
+    """
+    try:
+        return _generate(
+            root,
+            train_samples=train_samples,
+            eval_samples=eval_samples,
+            seed=seed,
+            history_length=history_length,
+            log=log,
+        )
+    except BaseException:
+        shutil.rmtree(_tmp_dir(root), ignore_errors=True)
+        raise
+
+
+def _generate(
+    root: str,
+    *,
+    train_samples: int,
+    eval_samples: int,
+    seed: int,
+    history_length: int,
+    log,
+) -> dict:
     tspec = _load_tspec()
     vocab, _ = tspec.parse_vocab(str(SRC_ROOT / "generative_recommenders" / "dlrm_v4" / "configs.py"))
     t0 = time.time()
@@ -387,7 +420,7 @@ def generate(
     )
 
     root_path = Path(root)
-    tmp = Path(f"{root_path}.tmp.{os.getpid()}")
+    tmp = _tmp_dir(root)
     shutil.rmtree(tmp, ignore_errors=True)
     cache = tmp / "processed_5b" / f"hstu_cache_L{history_length}"
     cache.mkdir(parents=True)
@@ -503,13 +536,18 @@ def ensure(
     """The dataset for these sizes under `parent`, generated on first use.
 
     Datasets are kept per spec (`parent/<hash>`), so later runs of the same shape
-    reuse them; a file lock serializes processes that share `parent`.
+    reuse them; a file lock serializes processes that share `parent`. Under the lock,
+    the partial copies of generations that were killed are removed.
     """
     key = json.dumps([GENERATOR_VERSION, train_samples, eval_samples, seed, history_length])
     root = Path(parent) / f"yambda5b-synthetic-{hashlib.sha256(key.encode()).hexdigest()[:12]}"
     Path(parent).mkdir(parents=True, exist_ok=True)
     with open(Path(parent) / ".lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        # Every generation through `ensure` holds this lock, so none is running now.
+        for stale in Path(parent).glob("yambda5b-synthetic-*.tmp.*"):
+            log(f"[synthetic] removing the partial copy {stale} of an interrupted run")
+            shutil.rmtree(stale, ignore_errors=True)
         if (root / "synthetic_spec.json").exists():
             log(f"[synthetic] reusing {root}")
         else:

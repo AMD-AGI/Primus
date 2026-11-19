@@ -164,12 +164,20 @@ class DlrmV4Trainer(BaseTrainer):
         train on it instead of data_path's dataset (synthetic_data.py)."""
         from primus.backends.recommendation.dlrm_v4 import synthetic_data
 
+        nnodes = int(os.environ.get("NNODES") or 1)
+        if nnodes > 1:
+            # Every node would generate into the same directory (a shared DATA_PATH), and
+            # the generator's file lock does not span hosts.
+            raise ValueError(
+                f"[Primus:dlrm_v4] synthetic_data runs on a single node only (NNODES={nnodes}): "
+                "each node would generate the dataset into the same directory"
+            )
         gpus = int(os.environ.get("GPUS_PER_NODE") or 0)
         if not gpus:  # as the trainer's launcher: every visible GPU
             import torch
 
             gpus = torch.cuda.device_count()
-        world_size = int(os.environ.get("NNODES") or 1) * gpus
+        world_size = nnodes * gpus
         plan = run_config.synthetic_plan(os.environ, world_size)
         parent = self._p("synthetic_data_dir") or os.path.join(
             os.environ.get("DATA_PATH") or str(out), "dlrm_v4_synthetic"

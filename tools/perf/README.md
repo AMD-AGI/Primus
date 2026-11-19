@@ -301,11 +301,14 @@ RESULT_DIR=~/primus-bench/mi355x-v26.9 bash tools/perf/run_batch.sh
   replayed from per-user artist libraries. Tokens per batch, users per batch
   and unique items, artists and albums per batch are within a few percent of
   the real day's, and so is the throughput: with the FP8 config on MI355X
-  (`rocm/primus:v26.9`), 8397 samples/s and 1013 TFLOP/s per GPU against 8454
-  and 1017 on the real day (steps 31-200; see the config's header for how to
-  time a real-data run). The dataset is generated once per GPU count and batch
-  size, in about 20 s, under `$DATA_PATH/dlrm_v4_synthetic` (11 GB at 8 x 1024
-  samples per step), and later runs reuse it.
+  (`rocm/primus:v26.9`), two 200-step runs gave 8397 (`primus-cli direct`) and
+  8379 (the table's row, through `run_batch.sh`) samples/s and 1013 and 1011
+  TFLOP/s per GPU against 8454 and 1017 on the real day (harmonic means over
+  steps 31-200; see the config's header for how to time a real-data run). The
+  dataset is generated once per run shape (GPU count, batch size and number of
+  steps), in about 20 s, under `$DATA_PATH/dlrm_v4_synthetic` (11 GB for 200
+  steps of 8 x 1024 samples; another length gets its own, larger or smaller
+  copy), and later runs of that shape reuse it.
 - **Length.** 200 steps (`num_train_batches`, `${NUM_TRAIN_BATCHES:200}`;
   `EXTRA_ENV="NUM_TRAIN_BATCHES=..."` changes it, and the data is generated
   for that length). `TRAIN_STEPS` is not applied: the length is part of the
