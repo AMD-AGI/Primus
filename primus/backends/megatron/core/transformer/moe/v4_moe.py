@@ -392,8 +392,7 @@ class DeepseekV4MoE(MegatronModule):
         expert flavour for us.
         """
         from primus.backends.megatron.core.extensions.mega_moe import (
-            MegaMoEExperts,
-            MegaMoEFP8Experts,
+            mega_moe_experts_cls,
             mega_moe_precision,
         )
 
@@ -402,7 +401,9 @@ class DeepseekV4MoE(MegatronModule):
             reasons.append(f"MegaMoE is EP-only (TP==1), got TP={self.config.tensor_model_parallel_size}")
         if self.config.params_dtype != torch.bfloat16:
             reasons.append(f"MegaMoE only supports bf16, got params_dtype={self.config.params_dtype}")
-        if self.ep_group is None or self.ep_size <= 1:
+        precision = mega_moe_precision()
+        # EP=1 (one rank holds every expert) is served by the fp8_block stages and the bf16 op
+        if self.ep_group is None:
             reasons.append(f"MegaMoE needs an expert-parallel group, got EP={self.ep_size}")
         if self.num_routed_experts % self.ep_size != 0:
             reasons.append(
@@ -415,8 +416,7 @@ class DeepseekV4MoE(MegatronModule):
                 + "; ".join(reasons)
             )
 
-        precision = mega_moe_precision()
-        experts_cls = MegaMoEFP8Experts if precision == "mxfp8" else MegaMoEExperts
+        experts_cls = mega_moe_experts_cls(precision)
         logger.warning(
             "[DeepSeek-V4] MegaMoE expert path enabled (%s): the fused kernel hardcodes "
             "unclamped SwiGLU, so swiglu_limit=%s is NOT applied to routed experts.",

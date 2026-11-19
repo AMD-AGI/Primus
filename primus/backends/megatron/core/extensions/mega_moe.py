@@ -90,7 +90,7 @@ def mega_moe_precision() -> str:
     """Read ``turbo_mega_moe_precision`` off the Megatron args namespace."""
     from megatron.training import get_args
 
-    supported = ("bf16", "mxfp8")
+    supported = ("bf16", "mxfp8", "fp8_block")
     precision = getattr(get_args(), "turbo_mega_moe_precision", "bf16") or "bf16"
     assert precision in supported, f"turbo_mega_moe_precision must be one of {supported}, got {precision!r}"
     return precision
@@ -329,6 +329,56 @@ class MegaMoEFP8Experts(MegaMoEExperts):
         )
 
 
+class MegaMoEFP8BlockExperts(MegaMoEExperts):
+    """FP8 with the DeepSeek-V3/V4 recipe: E4M3, power-of-two (UE8M0) scales per 1x128 activation tile and
+    128x128 weight block (``turbo_mega_moe_precision=fp8_block``, gfx1250, EP=1).
+
+    The quantized weights live in fixed per-weight buffers that ``refresh_fp8blk_weights()`` rewrites once per
+    optimizer step (the megatron.turbo.mega_moe_fp8blk_weights patch hooks it after ``train_step``), so the
+    forward / backward have no host-side checks or syncs and can be captured in a CUDA graph. The wgrads add into
+    the bf16 ``main_grad`` when the accumulation fusion is on.
+    """
+
+    def __init__(self, config, experts_per_rank, hidden_size, intermediate_size, ep_group) -> None:
+        super().__init__(config, experts_per_rank, hidden_size, intermediate_size, ep_group)
+        assert ep_group is None or ep_group.size() == 1, (
+            "turbo_mega_moe_precision=fp8_block runs the EP=1 stages only (EP>1 dispatch/combine: bf16/mxfp8)"
+        )
+        assert not config.add_bias_linear, "fp8_block MegaMoE experts take no expert biases"
+        self._caches = None
+
+    def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
+        return "megatron" if mega_moe_wgrad_accum_fusion(config) else None
+
+    def forward(self, x, topk_idx, topk_weights):
+        from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import (
+            FP8BlockWeightCache,
+            fused_mega_moe_fp8blk,
+        )
+
+        w1, _ = self.fc1_weight()
+        w2, _ = self.fc2_weight()
+        if self._caches is None or self._caches[0].weight is not w1 or self._caches[1].weight is not w2:
+            self._caches = (FP8BlockWeightCache(w1), FP8BlockWeightCache(w2))
+        return fused_mega_moe_fp8blk(
+            x,
+            topk_idx,
+            topk_weights,
+            w1,
+            w2,
+            *self._caches,
+            activation=self.activation,
+            accumulate_wgrad=self.wgrad_accum_pattern is not None,
+        )
+
+
+_EXPERTS_BY_PRECISION = {"bf16": MegaMoEExperts, "mxfp8": MegaMoEFP8Experts, "fp8_block": MegaMoEFP8BlockExperts}
+
+
+def mega_moe_experts_cls(precision: str):
+    return _EXPERTS_BY_PRECISION[precision]
+
+
 class PrimusTurboMegaMoELayer(MegatronModule):
     """EP MoE layer: Megatron router -> two-stage experts -> shared expert."""
 
@@ -378,7 +428,7 @@ class PrimusTurboMegaMoELayer(MegatronModule):
         )
 
         # separate w1/w2 modules give DDP overlap boundaries
-        experts_cls = MegaMoEFP8Experts if mega_moe_precision() == "mxfp8" else MegaMoEExperts
+        experts_cls = mega_moe_experts_cls(mega_moe_precision())
         self.experts = experts_cls(
             config,
             self.experts_per_rank,
