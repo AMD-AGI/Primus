@@ -483,7 +483,8 @@ def report_op_coverage(
     if report.blocking:
         print(
             f"{prefix} {len(report.blocking)} op(s) above are priced by a built-in fallback, not their own "
-            "model. Bring them up with: python -m primus.agents.tuning_agent.op_bringup --workload <yaml>"
+            "model. Re-run with --op-bringup auto to have the projection agent add them "
+            "(or: python -m primus.agents.projection_agent --workload <yaml>)"
         )
     return report
 

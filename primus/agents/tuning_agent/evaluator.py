@@ -610,7 +610,7 @@ class Evaluator:
         # unmodeled; True means the projection changed and the trial re-runs.
         self.op_gap_handler: Callable[[list[dict]], bool] | None = None
         self.handled_op_gaps: set[str] = set()
-        self.op_bringup = None  # TuningAgentOpBringup, when the CLI enables it
+        self.op_bringup = None  # the ProjectionAgent, when the CLI enables op bring-up
 
     # ── public API ────────────────────────────────────────────────────────
 

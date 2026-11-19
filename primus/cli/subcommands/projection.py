@@ -61,6 +61,14 @@ def run(args, overrides):
     """
     framework = _experiment_framework(args)
 
+    if getattr(args, "op_bringup", "off") != "off":
+        # The projection agent adds models for the ops this workload needs and
+        # the projection does not price yet; the run below then picks them up.
+        from primus.agents.projection_agent.cli import agent_from_args
+
+        agent = agent_from_args(args, gpu_arch=getattr(args, "gpu_arch", None))
+        agent.ensure_ops(args.config)
+
     if args.suite == "memory":
         # Benchmark / both modes need the backend on the import path
         # because they actually run the trainer.  Simulate stays import-free.
@@ -530,6 +538,11 @@ def register_subcommand(subparsers):
     # it should NOT be a memory-load alias here because the orchestrator
     # always runs a fresh bench.
     _add_perf_compute_baseline_arg(both)
+
+    from primus.agents.projection_agent.cli import add_op_bringup_args
+
+    for suite in (memory, performance, both):
+        add_op_bringup_args(suite, default="off")
 
     parser.set_defaults(func=run)
     return parser

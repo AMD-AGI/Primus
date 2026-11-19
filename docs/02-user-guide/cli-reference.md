@@ -169,6 +169,14 @@ These run under `primus/cli/main.py` unless you change `--script` in direct mode
 | `projection performance --config <yaml>` | Performance projection from a merged config. |
 | `projection both --config <yaml>` | Single benchmark → both performance and memory projections (cluster sizing). |
 
+Any `projection` suite accepts `--op-bringup auto` (default `off`): before it
+projects, the projection agent (`primus/agents/projection_agent/`) adds a
+validated analytical model for every op of the model the projection does not
+price yet, so the run uses it instead of a built-in stand-in. `--op-coder-cmd`
+or `--op-llm-model` says who writes the model; without either, the agent only
+writes a context pack per op (`op_bringup/<op_id>/context.md`). See the
+tuning agent's README, "Op bring-up (new ops)", for the flags.
+
 ### Benchmark suites
 
 Implemented in `primus/cli/subcommands/benchmark.py`:

@@ -3,17 +3,22 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Op bring-up: context pack, coder retry on validator feedback, acknowledge path, evaluator hook."""
+"""Projection agent: op bring-up (context pack, coder retry on validator feedback,
+acknowledge path), the agent's preflight / runtime handling, and its callers --
+``primus projection --op-bringup`` and the tuning agent's evaluator hook."""
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("yaml")
 
-from primus.agents.tuning_agent import op_bringup as ob  # noqa: E402
+from primus.agents.projection_agent import ProjectionAgent  # noqa: E402
+from primus.agents.projection_agent import bringup as ob  # noqa: E402
+from primus.agents.projection_agent import cli as pa_cli  # noqa: E402
 from primus.agents.tuning_agent.evaluator import EvalResult, Evaluator  # noqa: E402
 from primus.core.projection.op_models.coverage import OpGap  # noqa: E402
 
@@ -144,3 +149,69 @@ def test_evaluator_reruns_once_after_new_op_models():
     calls.clear()
     ev._with_op_bringup(None, "t1", "simulate")  # same gap again: no second bring-up
     assert calls == ["t1"] and len(handled) == 1
+
+
+# ---------------------------------------------------------------- the agent
+
+
+def test_agent_preflight_finds_the_workload_gaps_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(ob, "fetch_hf_config", lambda *a, **k: None)
+    monkeypatch.setenv("PRIMUS_OP_MODELS", "0")  # hide the shipped Qwen3.5 ops so they are gaps again
+    agent = ProjectionAgent(primus_root=_ROOT, out_dir=tmp_path, policy="report", log=lambda s: None)
+    res = agent.ensure_ops(_WORKLOAD)
+    assert {"gated_delta_net", "attention_output"} <= {r.op_id for r in res}
+    assert all(r.status == "context_only" and Path(r.context_path).is_file() for r in res)
+    assert agent.ensure_ops(_WORKLOAD) == []  # already brought up: nothing repeats
+    assert set(agent.summary()["gaps_seen"]) >= {"gated_delta_net", "attention_output"}
+
+
+def test_agent_runtime_gaps_from_markers(tmp_path, monkeypatch):
+    monkeypatch.setattr(ob, "fetch_hf_config", lambda *a, **k: None)
+    agent = ProjectionAgent(
+        primus_root=_ROOT,
+        out_dir=tmp_path,
+        coder=lambda p, t: "ACKNOWLEDGE fancy_gate: hidden->1 GEMV, <1% of layer",
+        register=False,
+        log=lambda s: None,
+    )
+    gap = {"op_id": "fancy", "severity": "gap", "slot": "mlp", "reason": "r", "keys": {"fancy_gate": True}}
+    assert agent.handle_gaps([gap], _WORKLOAD) is True
+    assert agent.handle_gaps([gap], _WORKLOAD) is False
+    assert [r.status for r in agent.results] == ["acknowledged"]
+
+
+def test_auto_without_a_coder_reports(monkeypatch):
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("PRIMUS_OP_LLM_MODEL", raising=False)
+    monkeypatch.setattr(pa_cli, "_llm_available", lambda args: False)
+    p = argparse.ArgumentParser()
+    pa_cli.add_op_bringup_args(p)
+    agent = pa_cli.agent_from_args(p.parse_args([]))
+    assert agent.policy == "report" and agent.coder is None
+    assert pa_cli.agent_from_args(p.parse_args(["--op-bringup", "off"])) is None
+    agent = pa_cli.agent_from_args(p.parse_args(["--op-coder-cmd", "cp x {target_file}"]))
+    assert agent.policy == "auto" and agent.coder is not None
+
+
+def test_primus_projection_brings_ops_up_before_projecting(monkeypatch):
+    from primus.cli.subcommands import projection as proj_cli
+    from primus.core.projection import performance_projection
+
+    order = []
+    monkeypatch.setattr(
+        ProjectionAgent, "ensure_ops", lambda self, workload, **kw: order.append(("ensure", str(workload)))
+    )
+    monkeypatch.setattr(
+        performance_projection, "launch_projection_from_cli", lambda args, ov: order.append(("project",))
+    )
+    parser = argparse.ArgumentParser()
+    proj_cli.register_subcommand(parser.add_subparsers(dest="command"))
+    argv = ["projection", "performance", "--config", str(_WORKLOAD), "--profiling-mode", "simulate"]
+    args, extra = parser.parse_known_args(argv + ["--op-bringup", "report"])
+    proj_cli.run(args, extra)
+    assert order == [("ensure", str(_WORKLOAD)), ("project",)]
+
+    order.clear()
+    args, extra = parser.parse_known_args(argv)  # default: off
+    proj_cli.run(args, extra)
+    assert order == [("project",)]
