@@ -1120,6 +1120,10 @@ def _limit_layers_for_projection(module_config):
     has_moe = getattr(module_config, "num_experts", None)
     has_moe = has_moe is not None and module_config.num_experts > 0
     original_layers = getattr(module_config, "num_layers", 1) or 1
+    # Op models that run on a share of the layers (hybrid linear attention)
+    # need the full count after the stack is trimmed below.
+    if not getattr(module_config, "projection_full_num_layers", None):
+        module_config.projection_full_num_layers = original_layers
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
 
