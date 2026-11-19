@@ -1,0 +1,148 @@
+name: MI355 unittest (trial)
+
+on:
+  push:
+    branches:
+      - ci/mi355-probe
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: "pytest targets to run instead of the core unit tests and the E2E suites; empty runs all of them"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # Keep in sync with ci.yaml.
+  PRIMUS_TURBO_COMMIT: d04ffd9b4476f1691b67e3f589d257175d1a87a0
+  PRIMUS_TURBO_AITER_COMMIT: 04896172e283ecc389f0dfff6479c3379ed63fa1
+  TRITON_COMMIT: fc8d31a5439ec9842557a284dc7ca61aee69246b
+  # Keep in sync with the origami install in .github/workflows/docker/Dockerfile.
+  ORIGAMI_COMMIT: 223648a26928ebed7f3dd0ccdc044c09f1dccf9b
+  # The runner lives in a long-running dev box, so pinned dependencies are built once per commit.
+  DEPS_DIR: /opt/primus-deps
+  # E2E tokenizers and HF assets, downloaded by the prepare hooks on first use.
+  E2E_DATA_PATH: /shared_nfs/github-runners/_data-primus
+
+jobs:
+  run-unittest-torch-gfx950:
+    runs-on: primus-torch-ut-mi355-v2608 # GitHub runner inside rocm/primus:v26.8 on SaFE (Crusoe MI355X)
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install pinned Triton
+        run: |
+          mkdir -p "$DEPS_DIR"
+          if [ "$(cat "$DEPS_DIR/triton.commit" 2>/dev/null)" = "$TRITON_COMMIT" ]; then echo "triton ${TRITON_COMMIT} already installed"; exit 0; fi
+          rm -rf "$DEPS_DIR/triton" && git clone --filter=blob:none https://github.com/triton-lang/triton.git "$DEPS_DIR/triton"
+          cd "$DEPS_DIR/triton" && git checkout "$TRITON_COMMIT"
+          pip3 install -r python/requirements.txt
+          MAX_JOBS=96 pip3 install --no-build-isolation --force-reinstall --no-deps .
+          TORCH_META=$(python3 -c "import importlib.metadata as m; print(m.distribution('torch')._path / 'METADATA')")
+          TRITON_VER=$(python3 -c "import importlib.metadata as m; print(m.version('triton'))")
+          sed -i -E "s/^Requires-Dist: triton==.*/Requires-Dist: triton==${TRITON_VER}/" "${TORCH_META}"
+          echo "$TRITON_COMMIT" > "$DEPS_DIR/triton.commit"
+      - name: Install pinned AITER
+        run: |
+          if [ "$(cat "$DEPS_DIR/aiter.commit" 2>/dev/null)" = "$PRIMUS_TURBO_AITER_COMMIT" ]; then echo "aiter ${PRIMUS_TURBO_AITER_COMMIT} already installed"; exit 0; fi
+          pip3 uninstall -y aiter amd-aiter || true
+          SITE_PACKAGES=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          rm -rf "${SITE_PACKAGES}/aiter" "${SITE_PACKAGES}/aiter_meta"
+          AITER_USE_SYSTEM_TRITON=1 pip3 install "amd-aiter @ git+https://github.com/ROCm/aiter.git@${PRIMUS_TURBO_AITER_COMMIT}"
+          echo "$PRIMUS_TURBO_AITER_COMMIT" > "$DEPS_DIR/aiter.commit"
+      - name: Install pinned Primus-Turbo
+        run: |
+          if [ "$(cat "$DEPS_DIR/turbo.commit" 2>/dev/null)" = "$PRIMUS_TURBO_COMMIT" ]; then echo "Primus-Turbo ${PRIMUS_TURBO_COMMIT} already installed"; exit 0; fi
+          rm -rf "$DEPS_DIR/Primus-Turbo" && git clone --filter=blob:none https://github.com/AMD-AGI/Primus-Turbo.git "$DEPS_DIR/Primus-Turbo"
+          cd "$DEPS_DIR/Primus-Turbo" && git checkout "$PRIMUS_TURBO_COMMIT"
+          git submodule update --init --recursive --depth 1 --filter=blob:none
+          pip3 install -r requirements.txt
+          GPU_ARCHS="gfx950" PRIMUS_TURBO_FRAMEWORK="PYTORCH" pip3 install --no-build-isolation . -v
+          echo "$PRIMUS_TURBO_COMMIT" > "$DEPS_DIR/turbo.commit"
+      - name: Install pinned origami
+        run: |
+          if [ "$(cat "$DEPS_DIR/origami.commit" 2>/dev/null)" = "$ORIGAMI_COMMIT" ]; then echo "origami ${ORIGAMI_COMMIT} already installed"; exit 0; fi
+          rm -rf "$DEPS_DIR/rocm-libraries" && git clone --filter=blob:none --no-checkout https://github.com/ROCm/rocm-libraries.git "$DEPS_DIR/rocm-libraries"
+          cd "$DEPS_DIR/rocm-libraries" && git sparse-checkout init --cone && git sparse-checkout set shared/origami && git checkout "$ORIGAMI_COMMIT"
+          pip3 uninstall -y origami || true
+          # -Bsymbolic keeps the extension off ROCm 10.1's ABI-incompatible liborigami.so.1.
+          LDFLAGS="-Wl,-Bsymbolic" pip3 install --no-cache-dir ./shared/origami/python
+          echo "$ORIGAMI_COMMIT" > "$DEPS_DIR/origami.commit"
+      - name: Install Primus
+        run: pip install -r requirements.txt
+      - name: Run CLI Shell and Runner Tests
+        run: |
+          bash ./tests/runner/run_all_tests.sh
+          pytest -q ./tests/runner/
+      - name: Run Primus Core Tests
+        if: ${{ !inputs.tests }}
+        env:
+          HSA_NO_SCRATCH_RECLAIM: 1
+          # torch 2.14's native bmm outer-product kernel overflows its index at 2^32 elements.
+          TORCH_DISABLE_NATIVE_JIT: 1
+        run: |
+          pytest -s ./tests/unit_tests/ \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward \
+            --deselect=tests/unit_tests/core/projection/test_performance_projection.py::test_limit_layers_moe_with_dense_keeps_two \
+            --deselect=tests/unit_tests/backends/megatron/diffusion/test_te_vs_local_spec_attention.py::TestTEvsLocalSpecAttention::test_single_pass_te_vs_local
+      - name: Set UT_LOG_PATH
+        if: success() || failure()
+        run: echo "UT_LOG_PATH=${GITHUB_WORKSPACE}/ut_out/run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+      - name: Run selected tests
+        if: ${{ inputs.tests }}
+        env:
+          TESTS: ${{ inputs.tests }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MASTER_PORT: 10009
+          DATA_PATH: ${{ env.E2E_DATA_PATH }}
+          HSA_NO_SCRATCH_RECLAIM: 1
+          TORCH_DISABLE_NATIVE_JIT: 1
+          GPU_ARCHS: gfx950
+        run: |
+          rm -rf "${UT_LOG_PATH}" && mkdir -p "${UT_LOG_PATH}" "${DATA_PATH}"
+          # TESTS is a space-separated list of pytest targets.
+          pytest -s ${TESTS} --junitxml="${GITHUB_WORKSPACE}/test-reports/selected.xml"
+      - name: Run Primus Model Tests -- Megatron-LM
+        if: ${{ !inputs.tests && (success() || failure()) }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MASTER_PORT: 10009
+          DATA_PATH: ${{ env.E2E_DATA_PATH }}
+          HSA_NO_SCRATCH_RECLAIM: 1
+          GPU_ARCHS: gfx950
+        run: |
+          rm -rf "${UT_LOG_PATH}" && mkdir -p "${UT_LOG_PATH}" "${DATA_PATH}"
+          pytest -s ./tests/trainer/test_megatron_trainer.py -m "not weekly" \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_mamba_1B_hybrid \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
+      - name: Run Primus Model Tests -- TorchTitan
+        if: ${{ !inputs.tests && (success() || failure()) }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MASTER_PORT: 10009
+          DATA_PATH: ${{ env.E2E_DATA_PATH }}
+          HSA_NO_SCRATCH_RECLAIM: 1
+        run: |
+          mkdir -p "${UT_LOG_PATH}"
+          pytest -s ./tests/trainer/test_torchtitan_trainer.py -m "not weekly" \
+            --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_671b \
+            --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_16b_fp8 \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ github.run_id }}
+          path: |
+            ${{ env.UT_LOG_PATH }}
+            test-reports/
+          retention-days: 7
