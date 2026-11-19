@@ -51,7 +51,15 @@ def _use_band_kernels() -> bool:
     index-driven kernels when they do not fit."""
     from ..v4_sparse_mla_adapter import band_hint
 
-    return band_hint()
+    return band_hint() is True
+
+
+def _band_pool():
+    """``(window, n_raw, pool)`` when the adapter certified a CSA window + pool map, else None."""
+    from ..v4_sparse_mla_adapter import band_hint
+
+    h = band_hint()
+    return h if isinstance(h, tuple) else None
 
 
 def sparse_mla_fwd_turbo_gfx1250(q, kv, topk_indices, attn_sink, kv_lora_rank, scale):
@@ -80,4 +88,5 @@ def sparse_mla_bwd_turbo_gfx1250(q, kv, o, do, topk_indices, lse, attn_sink, kv_
         kv_lora_rank=kv_lora_rank,
         scale=float(scale),
         use_swa=_use_band_kernels(),
+        **({"band_pool": _band_pool()} if _band_pool() is not None else {}),
     )
