@@ -142,6 +142,32 @@ def install_aiter_deepbind_hook() -> None:
     _install_deepbind_import_hook()
 
 
+_GFX_TO_PLATFORM = {
+    "gfx942": "MI300X",
+    "gfx950": "MI355X",
+}
+
+
+def detect_gpu_platform() -> str:
+    """Map hardware GFX arch to platform config directory: gfx942 → MI300X, gfx950 → MI355X.
+
+    Skips the calling test module when CUDA is unavailable, like ``skip_if_no_cuda``.
+    """
+    skip_if_no_cuda("requires a ROCm GPU (gfx942/gfx950)")
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            props = torch.cuda.get_device_properties(0)
+            arch_raw = getattr(props, "gcnArchName", "") or ""
+            arch = arch_raw.split(":")[0].strip()
+            if arch in _GFX_TO_PLATFORM:
+                return _GFX_TO_PLATFORM[arch]
+    except Exception:
+        pass
+    raise RuntimeError(f"Unable to detect GPU platform. Ensure ROCm GPU (gfx942/gfx950) is available.")
+
+
 class PrimusUT(unittest.TestCase):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

@@ -14,29 +14,12 @@ import unittest
 
 import pytest
 
-from tests.utils import PrimusUT, isolated_torchrun_env, run_training_script
-
-_GFX_TO_PLATFORM = {
-    "gfx942": "MI300X",
-    "gfx950": "MI355X",
-}
-
-
-def detect_gpu_platform() -> str:
-    """Map hardware GFX arch to platform config directory: gfx942 → MI300X, gfx950 → MI355X."""
-    try:
-        import torch
-
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            props = torch.cuda.get_device_properties(0)
-            arch_raw = getattr(props, "gcnArchName", "") or ""
-            arch = arch_raw.split(":")[0].strip()
-            if arch in _GFX_TO_PLATFORM:
-                return _GFX_TO_PLATFORM[arch]
-    except Exception:
-        pass
-    raise RuntimeError(f"Unable to detect GPU platform. Ensure ROCm GPU (gfx942/gfx950) is available.")
-
+from tests.utils import (
+    PrimusUT,
+    detect_gpu_platform,
+    isolated_torchrun_env,
+    run_training_script,
+)
 
 GPU_PLATFORM = detect_gpu_platform()
 
@@ -866,7 +849,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v2_lite_uep",
-            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={"USING_UEP": "1", "REBUILD_UEP": "1"},
             extra_args=[
                 "--num_layers",
