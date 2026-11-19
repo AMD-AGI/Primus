@@ -140,26 +140,26 @@ _HW_PROFILES: Dict[str, GPUHardwareSpec] = {
         n_cu=304,
         n_xcd=8,
     ),
-    "mi350x": GPUHardwareSpec(  # CDNA4 (gfx950) die, same compute profile as MI355X
-        peak_tflops_bf16=2500.0,
-        peak_tflops_fp16=2500.0,
-        peak_tflops_fp8=5000.0,
+    "mi350x": GPUHardwareSpec(  # CDNA4 (gfx950) die at the MI350X 2200 MHz peak clock
+        peak_tflops_bf16=2309.6,
+        peak_tflops_fp16=2309.6,
+        peak_tflops_fp8=4614.0,
         hbm_bandwidth_gbps=8000.0,
         n_cu=256,
         n_xcd=8,
     ),
     "mi355x": GPUHardwareSpec(
-        peak_tflops_bf16=2500.0,
-        peak_tflops_fp16=2500.0,
-        peak_tflops_fp8=5000.0,
+        peak_tflops_bf16=2516.6,
+        peak_tflops_fp16=2516.6,
+        peak_tflops_fp8=5033.2,
         hbm_bandwidth_gbps=8000.0,
         n_cu=256,
         n_xcd=8,
     ),
     "gfx950": GPUHardwareSpec(  # same as MI355X
-        peak_tflops_bf16=2500.0,
-        peak_tflops_fp16=2500.0,
-        peak_tflops_fp8=5000.0,
+        peak_tflops_bf16=2516.6,
+        peak_tflops_fp16=2516.6,
+        peak_tflops_fp8=5033.2,
         hbm_bandwidth_gbps=8000.0,
         n_cu=256,
         n_xcd=8,
@@ -172,9 +172,9 @@ _PROFILE_CLOCK_MHZ: Dict[str, int] = {
     "mi300x": 2100,
     "gfx942": 2100,
     "mi325x": 2100,  # same gfx942 compute die as MI300X
-    "mi350x": 2100,  # same gfx950 compute die as MI355X
-    "mi355x": 2100,
-    "gfx950": 2100,
+    "mi350x": 2200,
+    "mi355x": 2400,
+    "gfx950": 2400,
     "mi300a": 2100,
 }
 
@@ -433,6 +433,108 @@ class SDPASimulator(SDPASimulationBackend):
             dtype,
             bpe,
         )
+
+    def simulate_sparse_mla(
+        self,
+        batch_size: int,
+        num_heads: int,
+        seq_len: int,
+        head_dim: int,
+        keys_per_query: float,
+        head_dim_v: Optional[int] = None,
+        dtype: str = "bf16",
+        heads_per_workgroup: int = 128,
+    ) -> SimulationResult:
+        """Price a sparse-MLA attention core (DeepSeek-V4 SWA / CSA / HCA).
+
+        Every query token gathers its own key set over a single shared KV
+        latent, so a gathered key tile is reused only across that token's
+        heads -- not across 256 query rows as in dense FAv3.  The kernel runs
+        one workgroup per (token, head block):
+
+          Forward per workgroup  (M = heads_per_workgroup, N = keys):
+            QKᵀ: [M, D_qk] × [D_qk, N]      PV: [M, N] × [N, D_v]
+          Backward per workgroup:
+            S recompute [M, N, D_qk], dP [M, N, D_v], dQ [M, D_qk, N],
+            dK/dV partials (head contraction) [N, D_qk, M] and [N, D_v, M]
+          Workgroups = B × S × ⌈H / M⌉
+
+        ``keys_per_query`` is the mean number of *valid* keys a query attends
+        to (window band + selected / pooled entries), already accounting for
+        causality, so no causal factor is applied here.  Softmax is priced on
+        the vector units when the tile backend reports ``vector_flops``, and
+        the result is floored at the chip's matrix peak.  The dK/dV partial
+        reduction into the KV latent is not included; callers price it
+        separately.
+        """
+        assert self._tile_gemm is not None
+        B, H, S = batch_size, num_heads, seq_len
+        D_qk = head_dim
+        D_v = head_dim_v if head_dim_v is not None else head_dim
+        n_keys = max(1, int(round(keys_per_query)))
+        bh = max(1, min(H, int(heads_per_workgroup)))
+        N_CU = getattr(self, "_tile_units", None) or self._hw.n_cu
+
+        n_wgs = B * S * math.ceil(H / bh)
+        waves = math.ceil(n_wgs / N_CU)
+
+        def tile(m, n, k):
+            return self._tile_gemm.simulate_gemm(m=m, n=n, k=k, dtype=dtype).forward_time_ms
+
+        fwd_tile_ms = tile(bh, n_keys, D_qk) + tile(bh, D_v, n_keys)
+        bwd_tile_ms = (
+            tile(bh, n_keys, D_qk)
+            + tile(bh, n_keys, D_v)
+            + tile(bh, D_qk, n_keys)
+            + tile(n_keys, D_qk, bh)
+            + tile(n_keys, D_v, bh)
+        )
+        fwd_matmul_ms = fwd_tile_ms * waves
+        bwd_matmul_ms = bwd_tile_ms * waves
+
+        score_elems = float(B) * H * S * keys_per_query
+        vec = self._tile_gemm.vector_flops() if hasattr(self._tile_gemm, "vector_flops") else None
+        softmax_fwd_ms = softmax_bwd_ms = 0.0
+        if vec:
+            softmax_fwd_ms = 5.0 * score_elems / vec * 1e3
+            softmax_bwd_ms = 5.0 * score_elems / vec * 1e3
+
+        fwd_flops = 2.0 * score_elems * (D_qk + D_v)
+        bwd_flops = 2.0 * score_elems * (3 * D_qk + 2 * D_v)
+        peak = self._peak_flops(dtype)
+        fwd_floor_ms = fwd_flops / peak * 1e3
+        bwd_floor_ms = bwd_flops / peak * 1e3
+
+        fwd_time_ms = max(fwd_matmul_ms + softmax_fwd_ms, fwd_floor_ms)
+        bwd_time_ms = max(bwd_matmul_ms + softmax_bwd_ms, bwd_floor_ms)
+
+        return SimulationResult(
+            forward_time_ms=fwd_time_ms,
+            backward_time_ms=bwd_time_ms,
+            tflops=(fwd_flops / (fwd_time_ms * 1e-3)) / 1e12 if fwd_time_ms > 0 else 0,
+            metadata={
+                "backend": "sdpa_simulator (sparse MLA, per-token tiles)",
+                "keys_per_query": keys_per_query,
+                "heads_per_workgroup": bh,
+                "n_workgroups": n_wgs,
+                "waves": waves,
+                "fwd_matmul_ms": fwd_matmul_ms,
+                "bwd_matmul_ms": bwd_matmul_ms,
+                "fwd_softmax_ms": softmax_fwd_ms,
+                "bwd_softmax_ms": softmax_bwd_ms,
+                "fwd_peak_floor_ms": fwd_floor_ms,
+                "bwd_peak_floor_ms": bwd_floor_ms,
+                "fwd_flops": fwd_flops,
+                "bwd_flops": bwd_flops,
+            },
+        )
+
+    def _peak_flops(self, dtype: str) -> float:
+        tf = {
+            "fp8": self._hw.peak_tflops_fp8,
+            "fp16": self._hw.peak_tflops_fp16,
+        }.get(dtype, self._hw.peak_tflops_bf16)
+        return tf * 1e12
 
     # ------------------------------------------------------------------
     # Tile-level simulation (primary mode — requires Origami)
