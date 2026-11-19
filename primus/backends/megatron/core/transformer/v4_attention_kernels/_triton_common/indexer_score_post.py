@@ -112,29 +112,30 @@ def _indexer_score_post_fwd_kernel(
     p_mask = p_offs < P
 
     acc = tl.zeros((BLOCK_S, BLOCK_P), dtype=tl.float32)
-
-    for h in tl.static_range(0, H):
-        # dot[pid_b, s_offs, h, p_offs] -> [BLOCK_S, BLOCK_P]
-        dot_tile = tl.load(
-            DOT_PTR + pid_b * S * H * P + s_offs[:, None] * H * P + h * P + p_offs[None, :],
-            mask=s_mask[:, None] & p_mask[None, :],
-            other=0.0,
-        ).to(tl.float32)
-        relu_tile = tl.maximum(dot_tile, 0.0)
-
-        # w[pid_b, s_offs, h] -> [BLOCK_S]
-        w_h = tl.load(
-            W_PTR + pid_b * S * H + s_offs * H + h,
-            mask=s_mask,
-            other=0.0,
-        ).to(tl.float32)
-
-        acc += relu_tile * w_h[:, None]
-
-    # Causal mask inline.
     s_arr = s_offs[:, None]
     p_arr = p_offs[None, :]
     allowed = (p_arr + 1) * COMPRESS_RATIO - 1 <= s_arr
+    # g90mem: entries the causal mask discards are never read (half of the [S, H, P] dot), and fully masked
+    # tiles skip the head loop: [4096, 64, 1024] 92 -> 30 us, bit-identical.
+    load_mask = s_mask[:, None] & p_mask[None, :] & allowed
+    if (pid_p * BLOCK_P + 1) * COMPRESS_RATIO - 1 <= pid_s * BLOCK_S + BLOCK_S - 1:
+        for h in tl.static_range(0, H):
+            # dot[pid_b, s_offs, h, p_offs] -> [BLOCK_S, BLOCK_P]
+            dot_tile = tl.load(
+                DOT_PTR + pid_b * S * H * P + s_offs[:, None] * H * P + h * P + p_offs[None, :],
+                mask=load_mask,
+                other=0.0,
+            ).to(tl.float32)
+            relu_tile = tl.maximum(dot_tile, 0.0)
+
+            # w[pid_b, s_offs, h] -> [BLOCK_S]
+            w_h = tl.load(
+                W_PTR + pid_b * S * H + s_offs * H + h,
+                mask=s_mask,
+                other=0.0,
+            ).to(tl.float32)
+
+            acc += relu_tile * w_h[:, None]
     NEG_INF = -float("inf")
     acc = tl.where(allowed, acc, NEG_INF)
 
@@ -337,7 +338,7 @@ class IndexerScorePostFn(torch.autograd.Function):
         device = dot_c.device
         scores = torch.empty((B, S, P), dtype=out_dtype, device=device)
 
-        block_s, block_p = _pick_block(S, P, H)
+        block_s, block_p = 1, min(256, triton.next_power_of_2(P))  # g90mem: row tiles, contiguous 512 B reads
         grid = (B, triton.cdiv(S, block_s), triton.cdiv(P, block_p))
         _indexer_score_post_fwd_kernel[grid](
             dot_c,

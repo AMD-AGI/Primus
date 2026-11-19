@@ -39,6 +39,14 @@ import torch
 import triton
 import triton.language as tl
 
+try:  # explicit-layout backward kernel (gfx1250 WMMA); falls back to the Triton kernel if unavailable
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+
+    _HAVE_GLUON = True
+except Exception:  # pragma: no cover
+    _HAVE_GLUON = False
+
 from .hc_expand import _hc_expand_fwd_kernel
 from .hc_rms_linear import HC_CFG, _block_n, _dot_bf16_x_f32, _dot_f32_x_f32, _hc_rms_linear_fwd_kernel
 
@@ -55,7 +63,24 @@ HCF_CFG = dict(
     main_warps=8,
     main_stages=1,
     main_prec="ieee",
+    # gluon B3 (dx + dW, explicit WMMA layouts); 2026-11-19 lab: 85 us vs 178 us for the Triton kernel
+    gl_bt=32,
+    gl_bc=256,
+    gl_tsplit=8,
+    gl_warps=8,
+    # 2-D streaming tiles for collapse / expand-bwd / dpre (partials over column tiles) + row-math kernels
+    two_d=True,
+    t2_bt=8,
+    t2_bc=256,
+    t2_warps=4,
+    rm_bm=1,  # rows per program in the row-math-only kernels (sweep: bm1/1 warp 11.4 + 15.1 us, bm16/4 19.8 + 28.4)
+    rm_warps=1,
 )
+
+
+def _gluon_b3_enabled() -> bool:
+    return _HAVE_GLUON and os.environ.get("PRIMUS_HC_FUSED_GLUON", "1") != "0"
+
 
 
 def hc_fused_enabled() -> bool:
@@ -102,6 +127,7 @@ def _hc_pre_fwd_kernel(
     N_ITERS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    DO_COLL: tl.constexpr = True,
 ):
     pid = tl.program_id(0)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -165,16 +191,84 @@ def _hc_pre_fwd_kernel(
     tl.store(POST + r2 * K + kk[None, :], post.to(tl.bfloat16), mask=m2)
     tl.store(COMBT + r3 * KK + j3 * K + i3, m.to(tl.bfloat16), mask=m3)  # comb^T for expand
 
-    pre_f = pre_b.to(tl.float32)
-    dd = tl.arange(0, BLOCK_D)
-    for d0 in range(0, D, BLOCK_D):
-        offs = d0 + dd
-        dm = offs < D
-        x3 = tl.load(X + r3 * KD + i3 * D + offs[None, None, :], mask=m3 & dm[None, None, :], other=0.0).to(
-            tl.float32
-        )
-        c = tl.sum(pre_f[:, :, None] * x3, axis=1)
-        tl.store(COLL + r2 * D + offs[None, :], c.to(COLL.dtype.element_ty), mask=m2 & dm[None, :])
+    if DO_COLL:
+        pre_f = pre_b.to(tl.float32)
+        dd = tl.arange(0, BLOCK_D)
+        for d0 in range(0, D, BLOCK_D):
+            offs = d0 + dd
+            dm = offs < D
+            x3 = tl.load(X + r3 * KD + i3 * D + offs[None, None, :], mask=m3 & dm[None, None, :], other=0.0).to(
+                tl.float32
+            )
+            c = tl.sum(pre_f[:, :, None] * x3, axis=1)
+            tl.store(COLL + r2 * D + offs[None, :], c.to(COLL.dtype.element_ty), mask=m2 & dm[None, :])
+
+
+# ------------------------------------------------------------------------------------------------
+# 2-D streaming kernels: one [BT rows x 4 streams x BC cols] tile per program, no loop; the row reductions
+# go to per-column-tile partials [NC, M, ...] that the row-math kernel B2 sums (NC = D / BC).
+# ------------------------------------------------------------------------------------------------
+
+
+@triton.jit
+def _hc_collapse2d_kernel(X, PRE, COLL, M, D, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr):
+    pid_t = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    t = pid_t * BT + tl.arange(0, BT)
+    cc = pid_c * BC + tl.arange(0, BC)
+    kk = tl.arange(0, K)
+    tm = t < M
+    t64 = t.to(tl.int64)
+    x3 = tl.load(X + t64[:, None, None] * (K * D) + kk[None, :, None] * D + cc[None, None, :],
+                 mask=tm[:, None, None], other=0.0).to(tl.float32)
+    p = tl.load(PRE + t64[:, None] * K + kk[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+    c = tl.sum(p[:, :, None] * x3, axis=1)
+    tl.store(COLL + t64[:, None] * D + cc[None, :], c.to(COLL.dtype.element_ty), mask=tm[:, None])
+
+
+@triton.jit
+def _hc_dpre2d_kernel(X, DC, DPREP, M, D, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr):
+    pid_t = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    t = pid_t * BT + tl.arange(0, BT)
+    cc = pid_c * BC + tl.arange(0, BC)
+    kk = tl.arange(0, K)
+    tm = t < M
+    t64 = t.to(tl.int64)
+    x3 = tl.load(X + t64[:, None, None] * (K * D) + kk[None, :, None] * D + cc[None, None, :],
+                 mask=tm[:, None, None], other=0.0).to(tl.float32)
+    dc = tl.load(DC + t64[:, None] * D + cc[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+    dp = tl.sum(x3 * dc[:, None, :], axis=2)
+    tl.store(DPREP + pid_c * M * K + t64[:, None] * K + kk[None, :], dp, mask=tm[:, None])
+
+
+@triton.jit
+def _hc_post_bwd2d_kernel(G, X, OUT, POST, DOUT, DPOSTP, DCOMBTP, M, D,
+                          K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr):
+    """dout = sum_h post_h dnew_h; partials dpost_h = <out, dnew_h>, dcomb^T[h, k] = <dnew_h, x_k> per column tile."""
+    pid_t = tl.program_id(0)
+    pid_c = tl.program_id(1)
+    t = pid_t * BT + tl.arange(0, BT)
+    cc = pid_c * BC + tl.arange(0, BC)
+    kk = tl.arange(0, K)
+    KK: tl.constexpr = K * K
+    tm = t < M
+    t64 = t.to(tl.int64)
+    KD = K * D
+    x3 = tl.load(X + t64[:, None, None] * KD + kk[None, :, None] * D + cc[None, None, :],
+                 mask=tm[:, None, None], other=0.0).to(tl.float32)
+    o = tl.load(OUT + t64[:, None] * D + cc[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+    post = tl.load(POST + t64[:, None] * K + kk[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+    dout = tl.zeros((BT, BC), dtype=tl.float32)
+    pbase = pid_c * M
+    for h in tl.static_range(K):
+        g_h = tl.load(G + t64[:, None] * KD + h * D + cc[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+        post_h = tl.sum(tl.where(kk[None, :] == h, post, 0.0), axis=1)
+        dout += post_h[:, None] * g_h
+        tl.store(DPOSTP + (pbase + t64) * K + h, tl.sum(o * g_h, axis=1), mask=tm)
+        dch = tl.sum(x3 * g_h[:, None, :], axis=2)  # [BT, K(k)]
+        tl.store(DCOMBTP + (pbase + t64[:, None]) * KK + h * K + kk[None, :], dch, mask=tm[:, None])
+    tl.store(DOUT + t64[:, None] * D + cc[None, :], dout.to(DOUT.dtype.element_ty), mask=tm[:, None])
 
 
 # ------------------------------------------------------------------------------------------------
@@ -240,6 +334,16 @@ def _hc_post_bwd_kernel(
 
 
 @triton.jit
+def _st_g(GH, GL, GTH, GTL, off_rm, off_t, v, m):
+    h = v.to(tl.bfloat16)
+    lo = (v - h.to(tl.float32)).to(tl.bfloat16)
+    tl.store(GH + off_rm, h, mask=m)
+    tl.store(GL + off_rm, lo, mask=m)
+    tl.store(GTH + off_t, h, mask=m)
+    tl.store(GTL + off_t, lo, mask=m)
+
+
+@triton.jit
 def _hc_pre_bwd_kernel(
     X,
     DC,
@@ -253,9 +357,16 @@ def _hc_pre_bwd_kernel(
     G,
     COEF,
     PART,
+    GH,
+    GL,
+    GTH,
+    GTL,
+    DPREP,
+    NC,
     M,
     D,
     HAS_POST: tl.constexpr,
+    SPLIT_G: tl.constexpr,
     EPS: tl.constexpr,
     K: tl.constexpr,
     BN: tl.constexpr,
@@ -263,6 +374,7 @@ def _hc_pre_bwd_kernel(
     N_ITERS: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    PARTS: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -280,15 +392,19 @@ def _hc_pre_bwd_kernel(
 
     # dpre_k = <dcollapsed, x_k>
     dpre = tl.zeros((BLOCK_M, K), dtype=tl.float32)
-    dd = tl.arange(0, BLOCK_D)
-    for d0 in range(0, D, BLOCK_D):
-        offs = d0 + dd
-        dm = offs < D
-        x3 = tl.load(X + r3 * KD + i3 * D + offs[None, None, :], mask=m3 & dm[None, None, :], other=0.0).to(
-            tl.float32
-        )
-        dc = tl.load(DC + r2 * D + offs[None, :], mask=m2 & dm[None, :], other=0.0).to(tl.float32)
-        dpre += tl.sum(x3 * dc[:, None, :], axis=2)
+    if PARTS:  # per-column-tile partials from _hc_dpre2d_kernel
+        for c in range(0, NC):
+            dpre += tl.load(DPREP + c * M * K + r2 * K + kk[None, :], mask=m2, other=0.0)
+    else:
+        dd = tl.arange(0, BLOCK_D)
+        for d0 in range(0, D, BLOCK_D):
+            offs = d0 + dd
+            dm = offs < D
+            x3 = tl.load(X + r3 * KD + i3 * D + offs[None, None, :], mask=m3 & dm[None, None, :], other=0.0).to(
+                tl.float32
+            )
+            dc = tl.load(DC + r2 * D + offs[None, :], mask=m2 & dm[None, :], other=0.0).to(tl.float32)
+            dpre += tl.sum(x3 * dc[:, None, :], axis=2)
 
     # recompute the tail
     raw_pre = tl.load(RAW + r2 * BN + kk[None, :], mask=m2, other=0.0)
@@ -311,7 +427,13 @@ def _hc_pre_bwd_kernel(
     cexp = tl.exp(comb_logit - cmax)
     comb_sm = cexp / tl.sum(cexp, axis=2, keep_dims=True)
 
-    if HAS_POST:
+    if HAS_POST and PARTS:
+        dpost = tl.zeros((BLOCK_M, K), dtype=tl.float32)
+        dm_ = tl.zeros((BLOCK_M, K, K), dtype=tl.float32)
+        for c in range(0, NC):
+            dpost += tl.load(DPOST + c * M * K + r2 * K + kk[None, :], mask=m2, other=0.0)
+            dm_ += tl.load(DCOMBT + c * M * KK + r3 * KK + j3 * K + i3, mask=m3, other=0.0)
+    elif HAS_POST:
         dpost = tl.load(DPOST + r2 * K + kk[None, :], mask=m2, other=0.0)
         dm_ = tl.load(DCOMBT + r3 * KK + j3 * K + i3, mask=m3, other=0.0)  # dcomb[i, j] = dcomb^T[j, i]
     else:
@@ -321,7 +443,7 @@ def _hc_pre_bwd_kernel(
     # Sinkhorn VJP (as sinkhorn.py)
     SROW: tl.constexpr = 2 * N_ITERS * KK
     sb = STATES + r3 * SROW + i3 * K + j3
-    for i in range(N_ITERS - 1):
+    for i in tl.static_range(N_ITERS - 1):  # unrolled: the state loads do not depend on dm_
         col_step = 2 * N_ITERS - 1 - 2 * i
         mb = tl.load(sb + (col_step - 1) * KK, mask=m3, other=0.0)
         ma = tl.load(sb + col_step * KK, mask=m3, other=0.0)
@@ -356,17 +478,27 @@ def _hc_pre_bwd_kernel(
     if NPAD > 0:
         pc = tl.arange(0, NPAD)
         tl.store(G + r2 * BN + (2 + K) * K + pc[None, :], tl.zeros((BLOCK_M, NPAD), dtype=tl.float32), mask=m2)
+    if SPLIT_G:  # bf16 hi/lo of g, row-major [M, BN] and transposed [BN, M], for the gluon B3
+        _st_g(GH, GL, GTH, GTL, r2 * BN + kk[None, :], kk[None, :] * M + r2, dl_pre * rstd[:, None], m2)
+        _st_g(GH, GL, GTH, GTL, r2 * BN + K + kk[None, :], (K + kk[None, :]) * M + r2, dl_post * rstd[:, None], m2)
+        _st_g(GH, GL, GTH, GTL, r3 * BN + 2 * K + i3 * K + j3, (2 * K + i3 * K + j3) * M + r3,
+              dl_comb * rstd[:, None, None], m3)
+        if NPAD > 0:
+            pc2 = tl.arange(0, NPAD)
+            _st_g(GH, GL, GTH, GTL, r2 * BN + (2 + K) * K + pc2[None, :], ((2 + K) * K + pc2[None, :]) * M + r2,
+                  tl.zeros((BLOCK_M, NPAD), dtype=tl.float32), m2)
     c = tl.sum(dl_pre * raw_pre, axis=1) + tl.sum(dl_post * raw_post, axis=1) + tl.sum(tl.sum(dl_comb * raw_comb, axis=2), axis=1)
     tl.store(COEF + rows64, rstd * rstd * rstd * c / KD, mask=rmask)
 
     # per-program partials: [ds0, ds1, ds2, dbase(N)]
-    pp = PART + pid * NP
-    tl.store(pp + 0, tl.sum(tl.sum(l_pre * d_pre_l, axis=1), axis=0))
-    tl.store(pp + 1, tl.sum(tl.sum(l_post * d_post_l, axis=1), axis=0))
-    tl.store(pp + 2, tl.sum(tl.sum(tl.sum(l_comb * d_comb_l, axis=2), axis=1), axis=0))
-    tl.store(pp + 3 + kk, tl.sum(d_pre_l, axis=0))
-    tl.store(pp + 3 + K + kk, tl.sum(d_post_l, axis=0))
-    tl.store(pp + 3 + 2 * K + kk[:, None] * K + kk[None, :], tl.sum(d_comb_l, axis=0))
+    NPR = tl.num_programs(0)  # partials are stored transposed: PART[j, pid]
+    pp = PART + pid
+    tl.store(pp + 0 * NPR, tl.sum(tl.sum(l_pre * d_pre_l, axis=1), axis=0))
+    tl.store(pp + 1 * NPR, tl.sum(tl.sum(l_post * d_post_l, axis=1), axis=0))
+    tl.store(pp + 2 * NPR, tl.sum(tl.sum(tl.sum(l_comb * d_comb_l, axis=2), axis=1), axis=0))
+    tl.store(pp + (3 + kk) * NPR, tl.sum(d_pre_l, axis=0))
+    tl.store(pp + (3 + K + kk) * NPR, tl.sum(d_post_l, axis=0))
+    tl.store(pp + (3 + 2 * K + kk[:, None] * K + kk[None, :]) * NPR, tl.sum(d_comb_l, axis=0))
 
 
 # ------------------------------------------------------------------------------------------------
@@ -445,6 +577,158 @@ def _hc_bwd_main_kernel(
     )
 
 
+@triton.jit
+def _hc_wt_split_kernel(W, WTH, WTL, N, KD, BN: tl.constexpr, BLOCK: tl.constexpr):
+    """W [N, KD] fp32 -> W^T hi/lo [KD, BN] bf16 (zero for n >= N)."""
+    c = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    n = tl.arange(0, BN)
+    m = (c[:, None] < KD) & (n[None, :] < N)
+    v = tl.load(W + n[None, :].to(tl.int64) * KD + c[:, None], mask=m, other=0.0)
+    h = v.to(tl.bfloat16)
+    o = c[:, None].to(tl.int64) * BN + n[None, :]
+    om = c[:, None] < KD
+    tl.store(WTH + o, h, mask=om)
+    tl.store(WTL + o, (v - h.to(tl.float32)).to(tl.bfloat16), mask=om)
+
+
+if _HAVE_GLUON:
+
+    @gluon.jit
+    def _hc_b3_gl_kernel(X, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW, DX, DWP, M, D, T_PER, N_D, N_TILES,
+                         BT: gl.constexpr, BC: gl.constexpr, BN: gl.constexpr, HAS_DNEW: gl.constexpr,
+                         WMMA: gl.constexpr, OPA: gl.constexpr, OPB: gl.constexpr, BLK: gl.constexpr,
+                         SMEM: gl.constexpr):
+        """B3 with explicit layouts: one program = one stream k x BC columns x T_PER rows (K = 4).
+
+        dx_k = g @ W_k (bf16 hi/lo WMMA, 3 products) - x_k*coef + pre_k*dcoll + sum_h comb^T[h,k]*dnew_h,
+        dW_k += g^T @ x_k (x_k staged through LDS, read back with ds_load_tr as the B operand).
+        The 4 stream programs of a tile get pids p, p+8, p+16, p+24 (same XCD) so dnew/dcoll hit L2.
+        """
+        pid = gl.program_id(0)
+        u = pid % 8
+        v = pid // 8
+        k = v % 4
+        tile = (v // 4) * 8 + u
+        if tile < N_TILES:
+            pid_d = tile % N_D
+            pid_s = tile // N_D
+            c0 = pid_d * BC
+            KD = 4 * D
+            nb = gl.arange(0, BN, layout=gl.SliceLayout(1, OPB))
+            cb = c0 + gl.arange(0, BC, layout=gl.SliceLayout(0, OPB))
+            woff = gl.expand_dims((k * D + cb) * BN, 0) + gl.expand_dims(nb, 1)
+            wh = gl.load(WTH + woff)
+            wl = gl.load(WTL + woff)
+            na_r = gl.arange(0, BN, layout=gl.SliceLayout(0, OPA))
+            na_c = gl.arange(0, BN, layout=gl.SliceLayout(1, OPA))
+            tb = gl.arange(0, BT, layout=gl.SliceLayout(1, BLK))
+            cr = c0 + gl.arange(0, BC, layout=gl.SliceLayout(0, BLK))
+            accw = gl.zeros([BN, BC], gl.float32, layout=WMMA)
+            xs = gl.allocate_shared_memory(gl.bfloat16, [BT, BC], SMEM)
+            t_lo = pid_s * T_PER
+            for t0 in range(t_lo, t_lo + T_PER, BT):
+                tr = t0 + tb
+                tr64 = tr.to(gl.int64)
+                rowoff = gl.expand_dims(tr64 * KD, 1) + gl.expand_dims(cr, 0)
+                xk = gl.load(X + rowoff + k * D)
+                dcv = gl.load(DC + gl.expand_dims(tr64 * D, 1) + gl.expand_dims(cr, 0)).to(gl.float32)
+                cf = gl.expand_dims(gl.load(COEF + tr), 1)
+                pk = gl.expand_dims(gl.load(PRE + tr * 4 + k).to(gl.float32), 1)
+                if HAS_DNEW:  # issue every streaming load before the WMMA / layout conversion
+                    n0 = gl.load(DNEW + rowoff)
+                    n1 = gl.load(DNEW + rowoff + D)
+                    n2 = gl.load(DNEW + rowoff + 2 * D)
+                    n3 = gl.load(DNEW + rowoff + 3 * D)
+                    q0 = gl.expand_dims(gl.load(COMBT + tr * 16 + 0 + k).to(gl.float32), 1)
+                    q1 = gl.expand_dims(gl.load(COMBT + tr * 16 + 4 + k).to(gl.float32), 1)
+                    q2 = gl.expand_dims(gl.load(COMBT + tr * 16 + 8 + k).to(gl.float32), 1)
+                    q3 = gl.expand_dims(gl.load(COMBT + tr * 16 + 12 + k).to(gl.float32), 1)
+                ta = t0 + gl.arange(0, BT, layout=gl.SliceLayout(1, OPA))
+                goff = gl.expand_dims(ta, 1) * BN + gl.expand_dims(na_r, 0)
+                gh = gl.load(GH + goff)
+                gq = gl.load(GL + goff)
+                acc = gl.zeros([BT, BC], gl.float32, layout=WMMA)
+                acc = gl.amd.gfx1250.wmma(gh, wh, acc)
+                acc = gl.amd.gfx1250.wmma(gh, wl, acc)
+                acc = gl.amd.gfx1250.wmma(gq, wh, acc)
+                out = gl.convert_layout(acc, BLK) - xk.to(gl.float32) * cf + pk * dcv
+                if HAS_DNEW:
+                    out = (out + q0 * n0.to(gl.float32) + q1 * n1.to(gl.float32) + q2 * n2.to(gl.float32)
+                           + q3 * n3.to(gl.float32))
+                gl.store(DX + rowoff + k * D, out.to(gl.bfloat16))
+                tc = t0 + gl.arange(0, BT, layout=gl.SliceLayout(0, OPA))
+                gto = gl.expand_dims(na_c, 1) * M + gl.expand_dims(tc, 0)
+                gth = gl.load(GTH + gto)
+                gtl = gl.load(GTL + gto)
+                gl.barrier()
+                xs.store(xk)
+                gl.barrier()
+                xb = xs.load(OPB)
+                accw = gl.amd.gfx1250.wmma(gth, xb, accw)
+                accw = gl.amd.gfx1250.wmma(gtl, xb, accw)
+            nr = gl.arange(0, BN, layout=gl.SliceLayout(1, WMMA))
+            cw = c0 + gl.arange(0, BC, layout=gl.SliceLayout(0, WMMA))
+            gl.store(DWP + pid_s * BN * KD + gl.expand_dims(nr.to(gl.int64) * KD, 1) + k * D + gl.expand_dims(cw, 0),
+                     accw)
+
+    _GL_LAYOUTS = {}
+
+    def _gl_layouts(bt, bc, nw):
+        key = (bt, bc, nw)
+        if key not in _GL_LAYOUTS:
+            wb = [[0, 1 << i] for i in range(nw.bit_length() - 1)]
+            wm = gl.amd.AMDWMMALayout(version=3, transposed=True, warp_bases=wb, instr_shape=[16, 16, 32])
+            opa = gl.DotOperandLayout(operand_index=0, parent=wm, k_width=8)
+            opb = gl.DotOperandLayout(operand_index=1, parent=wm, k_width=8)
+            tpw = [256 // bc, bc // 8] if bc < 256 else [1, 32]
+            blk = gl.BlockedLayout([1, 8], tpw, [nw, 1], [1, 0])
+            smem = gl.PaddedSharedLayout.with_identity_for([[bc, 16]], [bt, bc], [1, 0])
+            _GL_LAYOUTS[key] = (wm, opa, opb, blk, smem)
+        return _GL_LAYOUTS[key]
+
+
+def _gl_b3_ok(M, D, K):
+    f = HCF_CFG
+    return _gluon_b3_enabled() and K == 4 and D % f["gl_bc"] == 0 and M % (f["gl_tsplit"] * f["gl_bt"]) == 0
+
+
+@triton.jit
+def _hc_reduce_kernel(DWP, DW, PART, PSUM, NS, NTOT, P, N_DW, NP: tl.constexpr, NPP: tl.constexpr,
+                      BLOCK: tl.constexpr, BR: tl.constexpr):
+    """Deterministic reductions in one launch: DW[i] = sum_s DWP[s, i] (first N_DW entries of the [BN, KD] partials)
+    and, in the last program, PSUM[j] = sum_p PART[p, j] (dscale / dbase)."""
+    pid = tl.program_id(0)
+    if pid * BLOCK < N_DW:
+        o = pid * BLOCK + tl.arange(0, BLOCK)
+        m = o < N_DW
+        acc = tl.zeros((BLOCK,), dtype=tl.float32)
+        for s_ in range(0, NS):
+            acc += tl.load(DWP + s_ * NTOT + o, mask=m, other=0.0)
+        tl.store(DW + o, acc, mask=m)
+    else:  # one program per dscale/dbase entry j: PART is [NP, P]
+        j = pid - tl.cdiv(N_DW, BLOCK)
+        acc2 = tl.zeros((BLOCK,), dtype=tl.float32)
+        for p0 in range(0, P, BLOCK):
+            r = p0 + tl.arange(0, BLOCK)
+            acc2 += tl.load(PART + j * P + r, mask=r < P, other=0.0)
+        tl.store(PSUM + j, tl.sum(acc2, axis=0))
+
+
+def _hc_reduce(dw_p, n, part):
+    """-> (dW [n, KD] fp32, psum [NP] fp32) from dw_p [S, BN, KD] and part [P, NP]."""
+    S_, BN_, KD_ = dw_p.shape
+    n_dw = n * KD_
+    dw = torch.empty((n, KD_), dtype=torch.float32, device=dw_p.device)
+    NP_, P_ = part.shape
+    psum = torch.empty((NP_,), dtype=torch.float32, device=dw_p.device)
+    BLOCK = 2048
+    _hc_reduce_kernel[(triton.cdiv(n_dw, BLOCK) + NP_,)](
+        dw_p, dw, part, psum, S_, BN_ * KD_, P_, n_dw, NP=NP_, NPP=triton.next_power_of_2(NP_), BLOCK=BLOCK, BR=64,
+        num_warps=4,
+    )
+    return dw, psum
+
+
 # ------------------------------------------------------------------------------------------------
 # autograd
 # ------------------------------------------------------------------------------------------------
@@ -453,9 +737,10 @@ def _hc_bwd_main_kernel(
 class HCLink:
     """Carries the post-side backward results (dnew, dpost, dcomb^T) to the pre-side backward."""
 
-    __slots__ = ("dnew", "dpost", "dcombt")
+    __slots__ = ("dnew", "dpost", "dcombt", "nc")
 
     def __init__(self):
+        self.nc = 0
         self.dnew = None
         self.dpost = None
         self.dcombt = None
@@ -496,13 +781,25 @@ class HCPreFn(torch.autograd.Function):
         coll = torch.empty(x.shape[:-2] + (D,), dtype=x.dtype, device=dev)
         scale_c = scale.float().contiguous()
         base_c = base.float().contiguous()
-        _hc_pre_fwd_kernel[(triton.cdiv(M, f["row_bm"]),)](
+        two_d = f["two_d"] and D % f["t2_bc"] == 0
+        bm = f["rm_bm"] if two_d else f["row_bm"]
+        _hc_pre_fwd_kernel[(triton.cdiv(M, bm),)](
             x3, p_raw, p_ss, scale_c, base_c, raw, rstd, states, pre, post, combt, coll,
             M, D, n_split, float(eps),
-            EPS=float(eps), K=K, BN=BN, N_ITERS=int(n_iters), BLOCK_M=f["row_bm"], BLOCK_D=f["row_bd"],
-            num_warps=f["row_warps"],
+            EPS=float(eps), K=K, BN=BN, N_ITERS=int(n_iters), BLOCK_M=bm, BLOCK_D=f["row_bd"],
+            DO_COLL=not two_d, num_warps=f["rm_warps"] if two_d else f["row_warps"],
         )
-        ctx.save_for_backward(x3, w, scale_c, base_c, raw, rstd, states, pre, combt)
+        if two_d:
+            _hc_collapse2d_kernel[(triton.cdiv(M, f["t2_bt"]), D // f["t2_bc"])](
+                x3, pre, coll, M, D, K=K, BT=f["t2_bt"], BC=f["t2_bc"], num_warps=f["t2_warps"],
+            )
+        if _gl_b3_ok(M, D, K):
+            wth = torch.empty((KD, BN), dtype=torch.bfloat16, device=dev)
+            wtl = torch.empty((KD, BN), dtype=torch.bfloat16, device=dev)
+            _hc_wt_split_kernel[(triton.cdiv(KD, 256),)](w, wth, wtl, N, KD, BN=BN, BLOCK=256, num_warps=4)
+        else:
+            wth = wtl = w
+        ctx.save_for_backward(x3, w, scale_c, base_c, raw, rstd, states, pre, combt, wth, wtl)
         ctx.link = link
         ctx.eps = float(eps)
         ctx.n_iters = int(n_iters)
@@ -516,7 +813,7 @@ class HCPreFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dcoll, _dpost_unused, _dcombt_unused):  # type: ignore[override]
-        x3, w, scale_c, base_c, raw, rstd, states, pre, combt = ctx.saved_tensors
+        x3, w, scale_c, base_c, raw, rstd, states, pre, combt, wth, wtl = ctx.saved_tensors
         link = ctx.link
         M, K, D = x3.shape
         KD = K * D
@@ -533,14 +830,53 @@ class HCPreFn(torch.autograd.Function):
         coef = torch.empty((M,), dtype=torch.float32, device=dev)
         n_prog = triton.cdiv(M, f["row_bm"])
         NP = 3 + N
-        part = torch.empty((n_prog, NP), dtype=torch.float32, device=dev)
+        part = torch.empty((NP, n_prog), dtype=torch.float32, device=dev)
+        use_gl = wth.dtype == torch.bfloat16
+        if use_gl:
+            gh = torch.empty((M, BN), dtype=torch.bfloat16, device=dev)
+            glo = torch.empty((M, BN), dtype=torch.bfloat16, device=dev)
+            gth = torch.empty((BN, M), dtype=torch.bfloat16, device=dev)
+            gtl = torch.empty((BN, M), dtype=torch.bfloat16, device=dev)
+        else:
+            gh = glo = gth = gtl = g
+        two_d = f["two_d"] and D % f["t2_bc"] == 0 and (not has_post or link.nc > 0)
+        if two_d:
+            nc = D // f["t2_bc"]
+            dprep = torch.empty((nc, M, K), dtype=torch.float32, device=dev)
+            _hc_dpre2d_kernel[(triton.cdiv(M, f["t2_bt"]), nc)](
+                x3, dcoll, dprep, M, D, K=K, BT=f["t2_bt"], BC=f["t2_bc"], num_warps=f["t2_warps"],
+            )
+            n_prog = triton.cdiv(M, f["rm_bm"])
+            part = torch.empty((NP, n_prog), dtype=torch.float32, device=dev)
+        else:
+            nc = 0
+            dprep = g
         _hc_pre_bwd_kernel[(n_prog,)](
             x3, dcoll, raw, rstd, states, scale_c, base_c,
             link.dpost if has_post else g, link.dcombt if has_post else g,
-            g, coef, part, M, D,
-            HAS_POST=has_post, EPS=ctx.eps, K=K, BN=BN, NP=NP, N_ITERS=ctx.n_iters,
-            BLOCK_M=f["row_bm"], BLOCK_D=f["row_bd"], num_warps=f["row_warps"],
+            g, coef, part, gh, glo, gth, gtl, dprep, nc, M, D,
+            HAS_POST=has_post, SPLIT_G=use_gl, PARTS=two_d, EPS=ctx.eps, K=K, BN=BN, NP=NP, N_ITERS=ctx.n_iters,
+            BLOCK_M=f["rm_bm"] if two_d else f["row_bm"], BLOCK_D=f["row_bd"],
+            num_warps=f["rm_warps"] if two_d else f["row_warps"],
         )
+        if use_gl:
+            bt, bc, ts, nw = f["gl_bt"], f["gl_bc"], f["gl_tsplit"], f["gl_warps"]
+            wm, opa, opb, blk, smem = _gl_layouts(bt, bc, nw)
+            n_d = D // bc
+            n_tiles = n_d * ts
+            dx = torch.empty_like(x3)
+            dw_p = torch.empty((ts, BN, KD), dtype=torch.float32, device=dev)
+            _hc_b3_gl_kernel[(triton.cdiv(n_tiles, 8) * 8 * K,)](
+                x3, wth, wtl, gh, glo, gth, gtl, coef, pre, combt, dcoll, dnew if dnew is not None else x3, dx, dw_p,
+                M, D, M // ts, n_d, n_tiles,
+                BT=bt, BC=bc, BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk, SMEM=smem,
+                num_warps=nw,
+            )
+            if link is not None:
+                link.dnew = link.dpost = link.dcombt = None
+            dw, psum = _hc_reduce(dw_p, N, part)
+            return (dx.view(ctx.x_shape), dw.to(ctx.weight_dtype), psum[:3].to(ctx.scale_dtype),
+                    psum[3:].to(ctx.base_dtype), None, None, None)
         BLOCK_T, BLOCK_D, tsplit = f["main_bt"], f["main_bd"], f["main_tsplit"]
         t_per = triton.cdiv(triton.cdiv(M, tsplit), BLOCK_T) * BLOCK_T
         tsplit = triton.cdiv(M, t_per)
@@ -557,7 +893,7 @@ class HCPreFn(torch.autograd.Function):
         if link is not None:
             link.dnew = link.dpost = link.dcombt = None
         dw = dw_p[0, :N] if tsplit == 1 else dw_p.sum(0)[:N]
-        psum = part.sum(0)
+        psum = part.sum(1)
         dscale = psum[:3].to(ctx.scale_dtype)
         dbase = psum[3:].to(ctx.base_dtype)
         return dx.view(ctx.x_shape), dw.to(ctx.weight_dtype), dscale, dbase, None, None, None
@@ -590,14 +926,25 @@ class HCPostFn(torch.autograd.Function):
         dnew = dnew.contiguous().view(M, K, D)
         dev = x3.device
         dout = torch.empty((M, D), dtype=out_c.dtype, device=dev)
-        dpost = torch.empty((M, K), dtype=torch.float32, device=dev)
-        dcombt = torch.empty((M, K, K), dtype=torch.float32, device=dev)
         f = HCF_CFG
-        _hc_post_bwd_kernel[(triton.cdiv(M, f["row_bm"]),)](
-            dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
-            K=K, BLOCK_M=f["row_bm"], BLOCK_D=f["row_bd"], num_warps=f["row_warps"],
-        )
         link = ctx.link
+        if f["two_d"] and D % f["t2_bc"] == 0:
+            nc = D // f["t2_bc"]
+            dpost = torch.empty((nc, M, K), dtype=torch.float32, device=dev)
+            dcombt = torch.empty((nc, M, K, K), dtype=torch.float32, device=dev)
+            _hc_post_bwd2d_kernel[(triton.cdiv(M, f["t2_bt"]), nc)](
+                dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
+                K=K, BT=f["t2_bt"], BC=f["t2_bc"], num_warps=f["t2_warps"],
+            )
+            link.nc = nc
+        else:
+            dpost = torch.empty((M, K), dtype=torch.float32, device=dev)
+            dcombt = torch.empty((M, K, K), dtype=torch.float32, device=dev)
+            _hc_post_bwd_kernel[(triton.cdiv(M, f["row_bm"]),)](
+                dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
+                K=K, BLOCK_M=f["row_bm"], BLOCK_D=f["row_bd"], num_warps=f["row_warps"],
+            )
+            link.nc = 0
         link.dnew, link.dpost, link.dcombt = dnew, dpost, dcombt
         return None, dout.view(ctx.out_shape), None, None, None
 

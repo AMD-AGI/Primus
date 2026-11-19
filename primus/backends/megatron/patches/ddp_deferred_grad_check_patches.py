@@ -29,6 +29,18 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 
+# g90mem: the per-step sum of squares of every grad bucket, kept so the optimizer can take the global grad
+# norm from it instead of re-reading all gradients (PRIMUS_GRAD_NORM_FROM_NAN_CHECK=1, see
+# te_patches/fused_adam_clip_patches.py). None when any bucket used the norm (not sum-of-squares) fallback.
+_LAST_SUMSQ = {"value": None}
+
+
+def pop_last_grad_sumsq():
+    v = _LAST_SUMSQ["value"]
+    _LAST_SUMSQ["value"] = None
+    return v
+
+
 def _enabled(ctx: PatchContext) -> bool:
     if os.environ.get("PRIMUS_DEFERRED_GRAD_NAN_CHECK", "1") == "0":
         return False
@@ -71,7 +83,7 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
 
     original_check = _ParamAndGradBucketGroup.check_grads
     original_finish = DistributedDataParallel.finish_grad_sync
-    state = {"acc": None}
+    state = {"acc": None, "exact": True}
 
     def check_grads(self, check_for_nan_or_inf, check_for_large):
         if check_for_large or not check_for_nan_or_inf:
@@ -88,6 +100,7 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
                 n = grad_sumsq(g)
             else:
                 n = g.norm(p=2).float()
+                state["exact"] = False
             part = n if part is None else part + n
         state["acc"] = part if state["acc"] is None else state["acc"] + part
 
@@ -96,6 +109,8 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
         # (and so check_grads) for every group.
         out = original_finish(self, *args, **kwargs)
         acc, state["acc"] = state["acc"], None
+        _LAST_SUMSQ["value"] = acc if state["exact"] else None
+        state["exact"] = True
         if acc is not None:
             rsm = get_rerun_state_machine()
             msg = "in backward pass (deferred check over all grad buckets of this step)"
