@@ -13,10 +13,23 @@ Patches ``MoEAlltoAllTokenDispatcher._maybe_dtoh_and_synchronize`` so that when
 host. All other splits are still moved to CPU and the stream sync is unchanged.
 """
 
+import os
+
 import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+_SKIP_EMPTY_SYNC = os.environ.get("PRIMUS_MOE_SKIP_EMPTY_D2H_SYNC", "1") != "0"
+
+
+def _moved_to_host(t):
+    """numpy arrays / CPU tensors come from maybe_move_tensor_to_cpu; ints and None need no sync."""
+    if t is None or isinstance(t, int):
+        return False
+    if isinstance(t, torch.Tensor):
+        return t.device.type == "cpu"
+    return True
 
 
 @register_patch(
@@ -70,10 +83,27 @@ def patch_moe_alltoall_dtoh(ctx: PatchContext):
                             self.num_global_tokens_per_local_expert, record_stream=on_side_stream
                         )
                 self.d2h_event = self.cuda_dtoh_stream.record_event()
+                # With EP = TP = 1 and static-size (dropless, unpadded) routing every split
+                # above is None / a Python int and tokens_per_expert stays on the GPU, so
+                # nothing was copied: the host sync below would only drain the GPU queue in
+                # the middle of the forward (one bubble per MoE layer).
+                self._primus_d2h_pending = (not _SKIP_EMPTY_SYNC) or any(
+                    _moved_to_host(t)
+                    for t in (
+                        self.input_splits,
+                        self.output_splits,
+                        self.output_splits_tp,
+                        self.num_out_tokens,
+                        getattr(self, "num_global_tokens_per_local_expert", None)
+                        if self.num_local_experts > 1 and not self.config.moe_permute_fusion
+                        else None,
+                    )
+                )
 
             if point == self.cuda_sync_point:
                 # Synchronize with the DtoH stream at self.cuda_sync_point.
-                self.d2h_event.synchronize()
+                if getattr(self, "_primus_d2h_pending", True):
+                    self.d2h_event.synchronize()
 
         return tokens_per_expert
 

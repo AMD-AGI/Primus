@@ -148,7 +148,17 @@ export FP8_RECIPE=${FP8_RECIPE:-null}
 #   provisions it.
 export OPTIMIZER=${OPTIMIZER:-adam}
 export PRIMUS_OVERLAP_GRAD_REDUCE=${PRIMUS_OVERLAP_GRAD_REDUCE:-True}
-export PRIMUS_OVERLAP_PARAM_GATHER=${PRIMUS_OVERLAP_PARAM_GATHER:-True}
+# With a data-parallel size of 1 there is nothing to all-gather, but overlap_param_gather
+# still installs a forward pre-hook on every module plus a (1-rank) RCCL all-gather per
+# bucket: ~8 ms of host time in the forward of the 1-GPU proxy, which is host-bound there
+# (measured 161.9 -> 154.1 ms/iter). Default it off when DP == 1; an explicit value wins.
+_V4_WORLD=$(( ${GPUS_PER_NODE:-8} * ${NNODES:-1} ))
+_V4_DP=$(( _V4_WORLD / ( ${PRIMUS_TP:-1} * ${PRIMUS_PP:-1} * ${PRIMUS_CP:-1} ) ))
+if [ "$_V4_DP" -le 1 ]; then
+  export PRIMUS_OVERLAP_PARAM_GATHER=${PRIMUS_OVERLAP_PARAM_GATHER:-False}
+else
+  export PRIMUS_OVERLAP_PARAM_GATHER=${PRIMUS_OVERLAP_PARAM_GATHER:-True}
+fi
 OPTIMIZER_CLI_ARGS=()
 if [ "$OPTIMIZER" = "muon" ] || [ "$OPTIMIZER" = "dist_muon" ]; then
   export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=${PRIMUS_INSTALL_EMERGING_OPTIMIZERS:-1}
@@ -412,5 +422,5 @@ fi
   --profile_step_end 7 \
   --profile_step_start 6 \
   --bias_swiglu_fusion "$PRIMUS_BIAS_SWIGLU_FUSION" \
-  ${PRIMUS_EXTRA_TRAIN_ARGS:-} \
+  ${PRIMUS_EXTRA_TRAIN_ARGS:+${PRIMUS_EXTRA_TRAIN_ARGS//,/ }} \
   2>&1 | tee "$PRIMUS_OUTPUT_ROOT/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK:-0}.txt"

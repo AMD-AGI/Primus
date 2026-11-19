@@ -47,6 +47,10 @@ def print_rank_last(msg):
 
 def _get_sync_free_moe_options(args) -> dict:
     stage = args.turbo_sync_free_moe_stage
+    # FP8/FP4 grouped GEMMs need 16-aligned expert segments -- unless the Turbo grouped GEMM
+    # runs its no-padding path, which takes arbitrary group sizes. Forcing the padding there
+    # makes num_out_tokens data-dependent, i.e. one device->host sync per MoE layer.
+    pad_for_quant = bool(args.fp8 or args.fp4) and not getattr(args, "turbo_grouped_gemm_without_padding", False)
 
     if stage > 3 or stage < 0:
         raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
@@ -55,21 +59,21 @@ def _get_sync_free_moe_options(args) -> dict:
         1: {
             "moe_use_fused_router_with_aux_score": True,
             "moe_permute_fusion": True,
-            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
+            "moe_router_padding_for_quantization": pad_for_quant,
         },
         2: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_gemm": True,
-            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
+            "moe_router_padding_for_quantization": pad_for_quant,
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_gemm": True,
-            "moe_router_padding_for_quantization": True if args.fp8 or args.fp4 else False,
+            "moe_router_padding_for_quantization": pad_for_quant,
             "use_turbo_fused_act_with_probs": True,
         },
     }

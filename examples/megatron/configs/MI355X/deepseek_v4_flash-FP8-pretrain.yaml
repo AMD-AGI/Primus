@@ -66,6 +66,10 @@ modules:
       # sparse-MLA index matrix), so do not build it on the host and copy it to the GPU per step
       # (16 MiB pageable HtoD at S=4096 inside the training step).
       create_attention_mask_in_dataloader: false
+      # Turbo grouped GEMM no-padding path: static MoE permute size, so the dispatcher's
+      # per-layer device->host sync disappears (1-GPU proxy: -5.6 ms/iter, losses identical).
+      turbo_grouped_gemm_without_padding: true
+      moe_router_padding_for_quantization: false
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
