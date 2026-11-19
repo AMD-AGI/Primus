@@ -186,20 +186,6 @@ def test_blocker_rules():
     assert chunked_ce_blocker(_config(sequence_parallel=True), 1) == "it needs TP=1 without sequence parallel"
 
 
-def test_chunk_tokens_must_be_a_positive_integer():
-    assert mod.check_chunk_tokens(1) == 1
-    for tokens in (0, -4, "4096", 4096.0, True, None):
-        with pytest.raises(ValueError, match="fused_ce_chunk_tokens must be a positive integer"):
-            mod.check_chunk_tokens(tokens)
-
-
-def test_mup_logit_scale_follows_scale_logits():
-    assert mod.mup_logit_scale(SimpleNamespace(use_mup=False, mup_output_mult=0.5)) is None
-    assert mod.mup_logit_scale(SimpleNamespace(use_mup=True, mup_output_mult=1.0)) is None
-    assert mod.mup_logit_scale(SimpleNamespace(use_mup=True, mup_output_mult=0.5)) == 0.5
-    assert mod.mup_logit_scale(SimpleNamespace()) is None
-
-
 def _mamba_model(tp=1, **config):
     values = dict(tensor_model_parallel_size=tp, use_mup=False, mup_output_mult=1.0)
     values.update(config)

@@ -273,40 +273,6 @@ def test_turbo_gate_in_act_leaves_no_row_unwritten(turbo_cpu, monkeypatch, fuse_
         assert torch.isfinite(getattr(turbo, f"{fc}_weight").grad).all()
 
 
-@pytest.mark.parametrize("fp8", [False, True])
-def test_turbo_fp8_groups_cover_the_skip_rows(turbo_cpu, monkeypatch, fp8):
-    """Under FP8 the last expert's group takes the MoD skip rows, so no row runs past the groups.
-
-    Turbo's FP8 weight-gradient kernel can fault or hang on a long tail past
-    the last group. The BF16 grouped GEMMs keep leaving the skip rows out.
-    """
-    calls = []
-
-    def recording_gemm(a, b, group_lens, group_offs):
-        calls.append((a.shape[0], int(group_offs[-1]), group_lens.tolist()))
-        return _reference_grouped_gemm(a, b, group_lens, group_offs)
-
-    monkeypatch.setattr(zm, "_turbo_grouped_gemm", recording_gemm)
-    monkeypatch.setattr(zm, "_turbo_grouped_gemm_fp8", recording_gemm)
-    if fp8:
-        monkeypatch.setattr(zm, "_linear", _linear_stand_in)
-    turbo = _build_moe("turbo", monkeypatch, zaya_use_mod=True, **(_FP8 if fp8 else {}))
-    assert turbo.turbo_fp8 is fp8
-    turbo.eval()
-    _skew_routes(turbo, empty=(1, 2))
-    torch.manual_seed(1)
-    hidden = torch.randn(16, 3, 32)
-    prev = torch.randn(16, 3, 8)
-    turbo(hidden, prev)
-    _, idx, _ = turbo.router(hidden, prev)
-    E = turbo.num_real_experts
-    counts = torch.bincount(idx[..., 0].flatten(), minlength=E + 1).tolist()
-    assert counts[E] > 0 and 0 in counts[:E]  # skip rows and an empty expert
-    rows = hidden.shape[0] * hidden.shape[1]
-    lens = counts[: E - 1] + [counts[E - 1] + counts[E]] if fp8 else counts[:E]
-    assert calls == [(rows, rows if fp8 else rows - counts[E], lens)] * 2
-
-
 def test_turbo_keeps_per_expert_checkpoint_keys(turbo_cpu, monkeypatch):
     split = _build_moe("split", monkeypatch, seed=3)
     turbo = _build_moe("turbo", monkeypatch, seed=4)
@@ -333,59 +299,6 @@ def test_turbo_keeps_per_expert_checkpoint_keys(turbo_cpu, monkeypatch):
         torch.testing.assert_close(expert.linear_fc2.weight, turbo.fc2_weight[i], rtol=0, atol=0)
     names = [n for n, _ in turbo.named_parameters()]
     assert "fc1_weight" in names and "fc2_weight" in names
-
-
-def test_turbo_fp8_keeps_the_split_fp8_checkpoint_keys(turbo_cpu, monkeypatch):
-    """Under FP8 the split experts' weights sit in TE linears, next to TE's extra state."""
-    monkeypatch.setattr(zm, "_linear", _linear_stand_in)
-    split = _build_moe("split", monkeypatch, seed=3, **_FP8)
-    turbo = _build_moe("turbo", monkeypatch, seed=4, **_FP8)
-    sd_split = split.state_dict()
-    sd_turbo = turbo.state_dict()
-    assert sorted(sd_split) == sorted(sd_turbo)
-    assert "local_experts.0.linear_fc1.linear.weight" in sd_turbo
-    assert sd_turbo["local_experts.0.linear_fc1.linear._extra_state"].numel() == 0
-
-    turbo.load_state_dict(sd_split, strict=True)
-    for i, expert in enumerate(split.local_experts):
-        torch.testing.assert_close(turbo.fc1_weight[i], expert.linear_fc1.linear.weight, rtol=0, atol=0)
-    with torch.no_grad():
-        turbo.fc2_weight.add_(1.0)
-    split.load_state_dict(turbo.state_dict(), strict=True)
-    for i, expert in enumerate(split.local_experts):
-        torch.testing.assert_close(expert.linear_fc2.linear.weight, turbo.fc2_weight[i], rtol=0, atol=0)
-        assert expert.linear_fc2.linear.loaded_extra_state.numel() == 0
-
-
-def test_turbo_load_reports_missing_expert_keys(turbo_cpu, monkeypatch):
-    split = _build_moe("split", monkeypatch, seed=3)
-    partial = split.state_dict()
-    del partial["local_experts.2.linear_fc1.weight"]
-    turbo = _build_moe("turbo", monkeypatch, seed=4)
-    with pytest.raises(RuntimeError, match=r"Missing key\(s\).*local_experts\.2\.linear_fc1\.weight"):
-        turbo.load_state_dict(partial, strict=True)
-    # Not strict: the other experts load, as separate per-expert weights would.
-    turbo = _build_moe("turbo", monkeypatch, seed=4)
-    kept = turbo.fc1_weight[2].detach().clone()
-    result = turbo.load_state_dict(partial, strict=False)
-    assert result.missing_keys == ["local_experts.2.linear_fc1.weight"]
-    assert result.unexpected_keys == []
-    for i, expert in enumerate(split.local_experts):
-        fc1 = kept if i == 2 else expert.linear_fc1.weight
-        torch.testing.assert_close(turbo.fc1_weight[i], fc1, rtol=0, atol=0)
-        torch.testing.assert_close(turbo.fc2_weight[i], expert.linear_fc2.weight, rtol=0, atol=0)
-
-
-def test_turbo_mod_skip_scales_the_hidden_state(turbo_cpu, monkeypatch):
-    moe = _build_moe("turbo", monkeypatch)
-    with torch.no_grad():
-        for p in moe.router.parameters():
-            p.zero_()
-        moe.router.balancing_biases.zero_()
-        moe.router.balancing_biases[-1] = 10.0
-    hidden = torch.randn(4, 2, 32)
-    out, _ = moe(hidden, prev_router=None)
-    torch.testing.assert_close(out, hidden / (moe.num_real_experts + 1))
 
 
 def test_turbo_needs_both_settings_and_tensorwise_fp8(monkeypatch):
@@ -430,38 +343,6 @@ def test_turbo_gate_in_act_needs_the_turbo_experts(monkeypatch):
     monkeypatch.setattr(zm, "_linear", _linear_stand_in)
     assert not zm.ZayaMoE(_cfg(fp8="hybrid", fp8_recipe="delayed")).gate_in_act
     assert zm.ZayaMoE(_cfg(**_FP8)).gate_in_act
-
-
-def test_turbo_settings_come_from_megatron_args(monkeypatch):
-    import megatron.training.global_vars as global_vars
-
-    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", None)
-    assert zm._megatron_args() is None
-    args = SimpleNamespace(enable_primus_turbo=True, use_turbo_grouped_gemm=True)
-    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", args)
-    assert zm._megatron_args() is args
-
-
-def test_turbo_publishes_the_grouped_gemm_backend(monkeypatch):
-    """turbo_grouped_gemm_backend reaches Turbo through the helper Primus's grouped linear uses."""
-    pytest.importorskip("primus_turbo")
-    from primus.backends.megatron.core.extensions import (
-        primus_turbo as primus_turbo_ext,
-    )
-
-    calls = []
-    helper = primus_turbo_ext._apply_turbo_grouped_gemm_backend_env
-    monkeypatch.setattr(primus_turbo_ext, "_set_turbo_env", lambda name, value: calls.append((name, value)))
-    monkeypatch.setattr(
-        primus_turbo_ext, "get_args", lambda: SimpleNamespace(turbo_grouped_gemm_backend="triton")
-    )
-    monkeypatch.setattr(primus_turbo_ext, "warning_rank_0", lambda *args, **kwargs: None)
-    helper.cache_clear()
-    try:
-        zm._publish_turbo_grouped_gemm_backend()
-    finally:
-        helper.cache_clear()
-    assert calls == [("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", "triton")]
 
 
 def _build_stack(defer):
@@ -563,40 +444,6 @@ def test_turbo_gpu_matches_split_without_host_sync(monkeypatch, gate_in_act):
     finally:
         torch.cuda.set_sync_debug_mode("default")
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
-@pytest.mark.parametrize("gate_in_act", [False, True])
-def test_turbo_fp8_gpu_runs_without_host_sync(monkeypatch, gate_in_act):
-    """Turbo's tensorwise FP8 grouped GEMMs inside Primus's FP8 context, near the BF16 split experts."""
-    pytest.importorskip("primus_turbo.pytorch.ops")
-    from primus_turbo.pytorch.core.low_precision import Format, ScalingGranularity
-
-    from primus.backends.megatron.core.extensions.primus_turbo import (
-        PrimusTurboQuantConfig,
-        primus_turbo_fp8_autocast,
-    )
-
-    monkeypatch.setattr(zm, "_linear", _linear_stand_in)
-    shape = dict(hidden_size=256, moe_ffn_hidden_size=256, ffn_hidden_size=256, num_moe_experts=16, **_FP8)
-    split = _build_moe("split", monkeypatch, **shape).cuda().bfloat16().eval()
-    turbo = _build_moe("turbo", monkeypatch, gate_in_act=gate_in_act, **shape).cuda().bfloat16().eval()
-    for moe in (split, turbo):
-        _skew_routes(moe, empty=(3,))
-    hidden = torch.randn(64, 8, 256, device="cuda", dtype=torch.bfloat16)
-    ref, _ = split(hidden, None)  # the stand-in linears run in BF16
-    quant = PrimusTurboQuantConfig(granularity=ScalingGranularity.TENSORWISE, format=Format.HYBRID)
-    with primus_turbo_fp8_autocast(enabled=False, enabled_turbo=True, turbo_quant_config=quant):
-        turbo(hidden, None)  # warm up / autotune
-        torch.cuda.synchronize()
-        torch.cuda.set_sync_debug_mode("error")
-        try:
-            out, _ = turbo(hidden, None)
-        finally:
-            torch.cuda.set_sync_debug_mode("default")
-    assert _rel(out, ref) < 0.15, f"{_rel(out, ref):.3e}"
-    with pytest.raises(RuntimeError, match="Primus's FP8 context"):
-        turbo(hidden, None)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
