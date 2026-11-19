@@ -48,7 +48,14 @@ except Exception:  # pragma: no cover
     _HAVE_GLUON = False
 
 from .hc_expand import _hc_expand_fwd_kernel
-from .hc_rms_linear import HC_CFG, _block_n, _dot_bf16_x_f32, _dot_f32_x_f32, _hc_rms_linear_fwd_kernel
+from .hc_rms_linear import (
+    HC_CFG,
+    _block_n,
+    _dot_bf16_x_f32,
+    _dot_f32_x_f32,
+    _hc_fwd_wmma3_kernel,
+    _hc_rms_linear_fwd_kernel,
+)
 
 HCF_CFG = dict(
     row_bm=4,  # rows per program for the row kernels (F2, B1, B2)
@@ -69,6 +76,14 @@ HCF_CFG = dict(
     gl_tsplit=8,
     gl_warps=8,
     # fold the next HC's rms-linear partials (F1) into this HC's expand (g90mem round 3)
+    # F1 on bf16 operands: x fed to WMMA as bf16, W pre-split into 3 bf16 parts (g90mem round 5: ATT showed the
+    # fp32-ieee kernel LDS/VALU bound; 37.6 -> 23.5 us, same accuracy 5.4e-6)
+    f1_wmma3=True,
+    f1_bt=128,
+    f1_bk=128,
+    f1_chunk=1024,
+    f1_warps=4,
+    f1_stages=3,
     fuse_next_rms=False,  # untested on GPU (TDM hang stopped the GPU before the chain test ran)
     xr_bm=16,
     xr_bd=256,
@@ -583,8 +598,9 @@ def _hc_bwd_main_kernel(
 
 
 @triton.jit
-def _hc_wt_split_kernel(W, WTH, WTL, N, KD, BN: tl.constexpr, BLOCK: tl.constexpr):
-    """W [N, KD] fp32 -> W^T hi/lo [KD, BN] bf16 (zero for n >= N)."""
+def _hc_wt_split_kernel(W, WTH, WTL, N, KD, BN: tl.constexpr, BLOCK: tl.constexpr, W3=None,
+                        WRITE_W3: tl.constexpr = False):
+    """W [N, KD] fp32 -> W^T hi/lo [KD, BN] bf16 (zero for n >= N); optionally W3 [3, BN, KD] bf16 hi/mid/lo (F1)."""
     c = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     n = tl.arange(0, BN)
     m = (c[:, None] < KD) & (n[None, :] < N)
@@ -592,8 +608,17 @@ def _hc_wt_split_kernel(W, WTH, WTL, N, KD, BN: tl.constexpr, BLOCK: tl.constexp
     h = v.to(tl.bfloat16)
     o = c[:, None].to(tl.int64) * BN + n[None, :]
     om = c[:, None] < KD
+    r = v - h.to(tl.float32)
     tl.store(WTH + o, h, mask=om)
-    tl.store(WTL + o, (v - h.to(tl.float32)).to(tl.bfloat16), mask=om)
+    tl.store(WTL + o, r.to(tl.bfloat16), mask=om)
+    if WRITE_W3:
+        mid = r.to(tl.bfloat16)
+        lo = (r - mid.to(tl.float32)).to(tl.bfloat16)
+        o3 = n[None, :].to(tl.int64) * KD + c[:, None]
+        PART = BN * KD
+        tl.store(W3 + o3, h, mask=om)
+        tl.store(W3 + PART + o3, mid, mask=om)
+        tl.store(W3 + 2 * PART + o3, lo, mask=om)
 
 
 if _HAVE_GLUON:
@@ -807,6 +832,22 @@ class HCPreFn(torch.autograd.Function):
                 stash = None
         if stash is not None:
             _, _, wth_s, wtl_s, p_raw, p_ss, n_split = stash
+        elif HCF_CFG["f1_wmma3"] and x.dtype == torch.bfloat16 and _gl_b3_ok(M, D, K):
+            f1 = HCF_CFG
+            wth_s = torch.empty((KD, BN), dtype=torch.bfloat16, device=dev)
+            wtl_s = torch.empty((KD, BN), dtype=torch.bfloat16, device=dev)
+            w3 = torch.empty((3, BN, KD), dtype=torch.bfloat16, device=dev)
+            _hc_wt_split_kernel[(triton.cdiv(KD, 256),)](w, wth_s, wtl_s, N, KD, BN=BN, BLOCK=256, W3=w3, WRITE_W3=True,
+                                                         num_warps=4)
+            chunk = f1["f1_chunk"]
+            n_split = triton.cdiv(KD, chunk)
+            p_raw = torch.empty((n_split, M, BN), dtype=torch.float32, device=dev)
+            p_ss = torch.empty((n_split, M), dtype=torch.float32, device=dev)
+            _hc_fwd_wmma3_kernel[(triton.cdiv(M, f1["f1_bt"]), n_split)](
+                x2d, w3, p_raw, p_ss, M, KD, KD, chunk,
+                BLOCK_T=f1["f1_bt"], BLOCK_K=f1["f1_bk"], BLOCK_N=BN, num_warps=f1["f1_warps"], num_stages=f1["f1_stages"],
+            )
+            stash = (weight, weight._version, wth_s, wtl_s, p_raw, p_ss, n_split)  # reuse the W^T split below
         else:
             c = HC_CFG
             BLOCK_T, BLOCK_K, chunk_cfg = c["fwd_bt"], c["fwd_bk"], c["fwd_chunk"]
