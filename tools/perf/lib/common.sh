@@ -275,15 +275,15 @@ perf_select_from_catalog() {
 
     # BACKEND is required rather than defaulting to every backend, because each
     # training image carries one framework stack only:
-    #   primus_the_rock_ci_* (PyTorch) -> megatron, torchtitan, megatron_bridge, diffusion
+    #   primus_the_rock_ci_* (PyTorch) -> megatron, torchtitan, megatron_bridge, diffusion, recommendation
     #   jax_the_rock_ci_*    (JAX)     -> maxtext, maxdiffusion
     # There is no image for which "all" is correct, so a default would only
     # ever queue runs with no framework to execute them.
-    # diffusion and diffusion_dlrm are offered by the single-node runner only.
+    # diffusion, recommendation and diffusion_dlrm are offered by the single-node runner only.
     local extra_backend="" pytorch_backends="megatron,torchtitan,megatron_bridge"
     if [ "${PERF_MULTINODE:-0}" != 1 ]; then
         extra_backend="$PERF_DIFFUSION_DLRM_BACKEND"
-        pytorch_backends+=",diffusion,$PERF_DIFFUSION_DLRM_BACKEND"
+        pytorch_backends+=",diffusion,recommendation,$PERF_DIFFUSION_DLRM_BACKEND"
     fi
 
     if [ -z "${BACKEND:-}" ]; then
