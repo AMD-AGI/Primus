@@ -42,7 +42,9 @@ import torch
 # use closed-form band kernels that do not read the indices (Turbo gfx1250 use_swa=True).
 _BAND_HINT = contextvars.ContextVar("v4_sparse_mla_band_hint", default=False)
 _SWA_BAND_W = 128
-_mask_ok_cache = weakref.WeakKeyDictionary()
+# id(mask) -> (weakref to mask, mask._version, ok). Not a WeakKeyDictionary: tensor keys
+# compare with the elementwise __eq__.
+_mask_ok_cache = {}
 
 
 def band_hint() -> bool:
@@ -62,17 +64,16 @@ def _band(on: bool):
 def _hca_mask_is_closed_form(mask: torch.Tensor, S: int, P: int) -> bool:
     """``mask`` ([S, P] additive) == the causal pool mask with ratio S // P. Checked once per
     mask tensor (one device sync; the model caches its mask, so once per run and layer)."""
-    ent = _mask_ok_cache.get(mask)
-    if ent is not None and ent[0] == mask._version:
-        return ent[1]
+    ent = _mask_ok_cache.get(id(mask))
+    if ent is not None and ent[0]() is mask and ent[1] == mask._version:
+        return ent[2]
     cr = S // P
     t = torch.arange(S, device=mask.device).view(S, 1)
     vis = (torch.arange(P, device=mask.device).view(1, P) + 1) * cr - 1 <= t
     ok = bool(torch.equal(mask.reshape(S, P) == 0, vis))
-    try:
-        _mask_ok_cache[mask] = (mask._version, ok)
-    except TypeError:
-        pass
+    if len(_mask_ok_cache) > 64:
+        _mask_ok_cache.clear()
+    _mask_ok_cache[id(mask)] = (weakref.ref(mask), mask._version, ok)
     return ok
 
 
