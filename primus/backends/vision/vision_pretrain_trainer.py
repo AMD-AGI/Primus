@@ -25,6 +25,25 @@ def _as_dict(value: Any) -> dict:
     return nested_namespace_to_dict(value)
 
 
+def _seed_everything(seed: int) -> None:
+    """Seed Python, NumPy, and torch the way Lightning's ``seed_everything`` does.
+
+    Every rank gets the same seed. The model is built after this call, so the
+    random draws made while building it match the WorldMirror trainer's order.
+    """
+    import random
+
+    import numpy as np
+    import torch
+
+    os.environ["PL_GLOBAL_SEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def ensure_distributed(local_rank: int) -> None:
     """Join the torchrun process group before data samplers are built."""
     import torch
@@ -64,9 +83,14 @@ class VisionPretrainTrainer(BaseTrainer):
         trainer_args = trainer_cfg["args"]
         seed = trainer_args.get("seed")
         if seed is not None:
-            torch.manual_seed(int(seed))
+            _seed_everything(int(seed))
 
         ensure_distributed(self.local_rank)
+        # WorldMirror's logger reads Lightning's rank. Primus does not start a Lightning Trainer.
+        from lightning_utilities.core.rank_zero import rank_zero_only
+
+        if getattr(rank_zero_only, "rank", None) is None:
+            rank_zero_only.rank = int(os.environ.get("RANK", "0"))
         model_name = model_cfg["name"]
         dataset_name = dataset_cfg["name"]
         trainer_name = trainer_cfg["name"]

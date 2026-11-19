@@ -1,0 +1,56 @@
+work_group: ${PRIMUS_TEAM:local}
+user_name: ${PRIMUS_USER:local}
+exp_name: ${PRIMUS_EXP_NAME:worldmirror-stage2}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+platform:
+  config: platform_local.yaml
+
+modules:
+  post_trainer:
+    framework: vision
+    config: post_trainer.yaml
+    model: worldmirror_stage2.yaml
+    overrides:
+      sink_level: null
+      file_sink_level: INFO
+      stderr_sink_level: INFO
+
+      model:
+        config:
+          pretrained: ${PRETRAINED_CKPT:}
+
+      training:
+        steps: ${MAX_STEPS:100000}
+        gradient_accumulation_steps: 1
+        output_dir: ${OUTPUT_DIR:./output/vision-worldmirror-stage2}
+        save_steps: ${SAVE_STEPS:1000}
+        run_name: vision-worldmirror-stage2
+
+      # Same dynamic sampler as training/configs/train/stage2_align.yaml.
+      data:
+        hypersim_dir: ${HYPERSIM_DIR:/shared_nfs/3dwm/hywm-3dwm-sub20/hypersim}
+        max_images_per_gpu: 24
+        min_num_of_views: 2
+        num_workers: 0
+        aspect_ratios: [0.5, 2.0]
+        num_pixels_range: [100000, 250000]
+        augment: false
+        seed: 42
+
+      parallelism:
+        mode: ${PARALLELISM_MODE:ddp}
+
+      optimizer:
+        max_grad_norm: 0
+
+      lr_scheduler:
+        lr_scheduler_type: worldmirror_cosine
+        warmup_steps: 0
+        eta_min_ratio: 0.1
+
+      runtime:
+        attention_backend: ${ATTENTION_BACKEND:aiter}
+        bf16: true
+        allow_tf32: false
+        seed: ${SEED:42}

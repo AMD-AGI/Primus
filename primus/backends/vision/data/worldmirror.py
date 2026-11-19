@@ -10,10 +10,20 @@ from __future__ import annotations
 
 import os
 
-_TRANSFORM = (
-    "ImageAugmentation(apply_aug=True, color_jitter={'brightness': 0.5, 'contrast': 0.5, "
-    "'saturation': 0.5, 'hue': 0.1, 'p': 0.9}, gray_scale=True, gau_blur=False)"
-)
+def _transform(dataset_config: dict) -> str:
+    # WM_AUG=0 turns augmentation off so a loss comparison sees the same pixels as the
+    # official trainer. The default keeps the WorldMirror color jitter.
+    enabled = str(dataset_config.get("augment", os.environ.get("WM_AUG", "1"))).lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+    return (
+        "ImageAugmentation(apply_aug="
+        + ("True" if enabled else "False")
+        + ", color_jitter={'brightness': 0.5, 'contrast': 0.5, "
+        "'saturation': 0.5, 'hue': 0.1, 'p': 0.9}, gray_scale=True, gau_blur=False)"
+    )
 
 
 def _train_expression(dataset_config: dict) -> str:
@@ -26,9 +36,14 @@ def _train_expression(dataset_config: dict) -> str:
     if not root:
         raise ValueError("Set HYPERSIM_DIR or data.hypersim_dir for WorldMirror.")
     views = int(dataset_config.get("max_images_per_gpu", 24))
+    # DATA_SEED makes the frame choice inside a scene depend on the sample index
+    # (seed + index) instead of whichever worker happens to load it.
+    seed = dataset_config.get("seed", os.environ.get("DATA_SEED") or None)
+    seed_arg = f", seed={int(seed)}" if seed not in (None, "") else ""
     return (
         "400 @ HyperSim_Multi(split='train', "
-        f"num_views={views}, aug_crop=0.77, transform={_TRANSFORM}, ROOT={root!r})"
+        f"num_views={views}, aug_crop=0.77, transform={_transform(dataset_config)}, "
+        f"ROOT={root!r}{seed_arg})"
     )
 
 
