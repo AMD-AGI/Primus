@@ -13,11 +13,10 @@
           <p class="eyebrow">Primus Engineering</p>
           <h1>Primus Dashboard</h1>
           <p class="hero__summary">
-            Engineering reports on a weekly and monthly cadence &mdash; each cycle
-            captures merged work on Primus main, upstream backend drift, and the
-            sync recommendations that need attention.
+            Monthly engineering reports &mdash; each cycle captures merged work on
+            Primus main, upstream backend drift, and the sync recommendations that
+            need attention.
           </p>
-          <div class="hero__chips" id="hero-chips"></div>
           <nav class="hero__nav" id="hero-nav" aria-label="Other Primus sites" hidden>
             <span class="hero__nav-label">Explore</span>
             <div class="hero__nav-links" id="hero-nav-links"></div>
@@ -27,15 +26,20 @@
     </header>
 
     <main class="layout">
-      <!-- ========== WEEKLY REPORTS SECTION ========== -->
+      <!-- ========== LATEST REPORT SECTION ========== -->
       <section class="section section--lead" aria-label="Latest engineering update">
         <div class="section-heading">
           <p class="section-heading__eyebrow">Engineering update</p>
           <h2>Latest engineering snapshot</h2>
           <p>
-            Start here for the current status of main: merged work, drift posture,
-            and recommendations that need attention. The lead snapshot is the most
-            recent report, whether weekly or monthly.
+            Start here for the current status of main: merged work, whether each
+            pinned dependency is on its newest stable upstream release, and the sync
+            recommendation for it. Click a month in the trend or a report in the
+            archive to load it here.
+          </p>
+          <p class="selection-note" id="selection-note" hidden>
+            <span id="selection-note-text"></span>
+            <button type="button" class="button button--small" id="selection-reset">Back to latest</button>
           </p>
         </div>
 
@@ -44,7 +48,7 @@
         <article class="featured-panel" id="weekly-featured" hidden>
           <header class="featured-panel__header">
             <div>
-              <p class="featured-panel__eyebrow">Latest report</p>
+              <p class="featured-panel__eyebrow" id="weekly-featured-eyebrow">Latest report</p>
               <h2 id="weekly-featured-title">-</h2>
               <p class="featured-panel__window" id="weekly-featured-window">-</p>
             </div>
@@ -57,19 +61,175 @@
               <ul class="findings-list" id="weekly-featured-findings"></ul>
             </section>
 
-            <section class="featured-panel__card">
-              <h3>Merged PRs</h3>
-              <p class="featured-panel__kpi" id="weekly-featured-prs">-</p>
-              <ul class="chip-list" id="weekly-featured-categories"></ul>
+            <section class="featured-panel__card featured-panel__card--wide" id="areas-card" hidden>
+              <h3>Where the work landed</h3>
+              <p class="featured-panel__hint">
+                PRs touching each area (a PR can touch several). Click an area to
+                filter the PR list.
+              </p>
+              <ul class="bar-list" id="weekly-featured-areas"></ul>
             </section>
 
-            <section class="featured-panel__card">
-              <h3>Drift recommendations</h3>
-              <ul class="recommendation-list" id="weekly-featured-recommendations"></ul>
+            <section class="featured-panel__card featured-panel__card--wide">
+              <h3>PR categories</h3>
+              <ul class="chip-list" id="weekly-featured-categories"></ul>
             </section>
 
           </div>
         </article>
+
+        <article class="data-panel" id="prs-panel" hidden>
+          <header class="data-panel__header">
+            <div>
+              <h3>Merged PRs</h3>
+              <p id="pr-count">-</p>
+            </div>
+            <div class="data-panel__filters">
+              <label class="field">
+                <span>Area</span>
+                <select id="pr-area-filter"></select>
+              </label>
+              <label class="field">
+                <span>Category</span>
+                <select id="pr-category-filter"></select>
+              </label>
+              <label class="field field--search">
+                <span>Search</span>
+                <input id="pr-search" type="search" placeholder="Title, #number, author..." />
+              </label>
+            </div>
+          </header>
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>PR</th>
+                  <th>Merged (GMT+8)</th>
+                  <th>Category</th>
+                  <th>Area</th>
+                  <th>Title</th>
+                  <th class="num">Lines</th>
+                </tr>
+              </thead>
+              <tbody id="pr-rows"></tbody>
+            </table>
+          </div>
+          <button type="button" class="button button--small" id="pr-more" hidden>Show all</button>
+        </article>
+
+        <article class="trend-panel" id="trend-panel" hidden>
+          <header class="trend-panel__header">
+            <h3>Monthly trend</h3>
+            <p>
+              One point per monthly report; click one to load it above, hover for
+              details. Rates are per week so windows of different length compare;
+              faded points cover under two weeks and say little.
+            </p>
+          </header>
+          <div class="trend-panel__grid">
+            <figure class="trend-chart">
+              <figcaption>Throughput: merged PRs per week and contributors</figcaption>
+              <div id="trend-prs"></div>
+              <ul class="trend-legend" id="trend-prs-legend"></ul>
+            </figure>
+            <figure class="trend-chart">
+              <figcaption>Time to merge, PR opened → merged (days)</figcaption>
+              <div id="trend-ttm"></div>
+              <ul class="trend-legend" id="trend-ttm-legend"></ul>
+            </figure>
+            <figure class="trend-chart">
+              <figcaption>Age of the pinned upstream code (days)</figcaption>
+              <div id="trend-gap"></div>
+              <ul class="trend-legend" id="trend-gap-legend"></ul>
+            </figure>
+          </div>
+          <p class="trend-panel__note">
+            Pin age rises while a pin sits still and drops when Primus bumps it
+            (ringed points). A bump to an old release can still leave it high.
+          </p>
+        </article>
+      </section>
+
+      <!-- ========== PINNED DEPENDENCIES SECTION ========== -->
+      <section class="section" aria-label="Pinned dependencies" id="deps-section" hidden>
+        <div class="section-heading">
+          <p class="section-heading__eyebrow">Dependencies</p>
+          <h2>Every pinned upstream, against its latest release</h2>
+          <p id="deps-summary"></p>
+          <p class="as-of" id="deps-as-of"></p>
+        </div>
+        <div class="data-panel">
+          <div class="table-scroll">
+            <table class="data-table data-table--deps">
+              <thead>
+                <tr>
+                  <th>Dependency</th>
+                  <th>Primus pin</th>
+                  <th>Pin age</th>
+                  <th>Latest stable release</th>
+                  <th>Standing</th>
+                  <th>Last bumped in Primus</th>
+                </tr>
+              </thead>
+              <tbody id="deps-rows"></tbody>
+            </table>
+          </div>
+          <p class="data-panel__note">
+            Pin age is measured at the end of the report window; "+N commits" under
+            a release is how many commits it has that the pin lacks. For a pin that
+            is not itself a release tag, "behind" counts stable releases published
+            after the pinned commit. Dependencies without GitHub releases are
+            compared by pin age only.
+          </p>
+        </div>
+      </section>
+
+      <!-- ========== CI HEALTH SECTION ========== -->
+      <section class="section" aria-label="CI health" id="ci-section" hidden>
+        <div class="section-heading">
+          <p class="section-heading__eyebrow">CI health</p>
+          <h2>Primus CI on main</h2>
+          <p>
+            The numbers from each run's Actions summary, collected in one place.
+            Cancelled runs were superseded by a newer push and are left out of the
+            pass rate.
+          </p>
+          <p class="as-of" id="ci-as-of"></p>
+        </div>
+
+        <div class="stat-row" id="ci-stat-row"></div>
+
+        <div class="data-panel">
+          <header class="data-panel__header">
+            <div>
+              <h3>Runs on main</h3>
+              <p id="ci-strip-caption"></p>
+            </div>
+            <ul class="ci-legend">
+              <li><span class="ci-cell ci-cell--success"></span>passed</li>
+              <li><span class="ci-cell ci-cell--failure"></span>failed</li>
+              <li><span class="ci-cell ci-cell--cancelled"></span>cancelled</li>
+              <li><span class="ci-cell ci-cell--weekly"></span>weekly full run</li>
+            </ul>
+          </header>
+          <div class="ci-strip" id="ci-strip"></div>
+        </div>
+
+        <div class="data-panel" id="ci-coverage-panel" hidden>
+          <header class="data-panel__header">
+            <div>
+              <h3>Coverage by module (Unit + E2E)</h3>
+              <p id="ci-coverage-caption"></p>
+            </div>
+          </header>
+          <ul class="bar-list bar-list--coverage" id="ci-coverage-list"></ul>
+          <p class="data-panel__note">
+            Same grouping as the CI coverage summary (<code>tools/ci/coverage_summary.py</code>):
+            line coverage of unit tests plus the E2E training runs. The solid part of
+            a bar is unit tests alone; the faint extension is what E2E adds.
+            <code>tools</code> and <code>platforms</code> are excluded.
+          </p>
+        </div>
       </section>
 
       <!-- ========== BACKEND DEEP DIVES SECTION ========== -->
@@ -80,13 +240,11 @@
             <h2>Detailed backend drift reviews</h2>
             <p>
               Backend-specific PDF reports generated from structured comparisons.
-              New backends appear here automatically when their metadata is added.
+              The release status at the top of each card comes from the latest
+              monthly report; the analysis below it is a snapshot from its own date.
             </p>
           </div>
-          <div class="section-heading__meta" id="gap-result-count">0 reports</div>
         </div>
-
-        <div class="stat-row" id="gap-stat-row"></div>
 
         <div class="filter-row filter-row--compact" id="gap-filter-row">
           <label class="field">
@@ -118,7 +276,8 @@
           <div class="panel__header">
             <h2>Engineering report archive</h2>
             <p class="panel__subtitle">
-              Weekly and monthly Markdown reports. Newest first.
+              Monthly reports, newest first; "Show" loads one into the snapshot
+              above. Weekly reports (Apr&ndash;May 2026) are kept as an archive.
             </p>
           </div>
 
@@ -126,18 +285,9 @@
             <label class="field">
               <span>Cadence</span>
               <select id="weekly-cadence-filter">
+                <option value="monthly" selected>Monthly</option>
+                <option value="weekly">Weekly (archived)</option>
                 <option value="all">All cadences</option>
-                <option value="monthly">Monthly</option>
-                <option value="weekly">Weekly</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>Status</span>
-              <select id="weekly-recommendation-filter">
-                <option value="all">Any recommendation</option>
-                <option value="urgent sync">Urgent sync</option>
-                <option value="plan sync">Plan sync</option>
-                <option value="monitor">Monitor</option>
               </select>
             </label>
             <label class="field field--search">
@@ -145,7 +295,7 @@
               <input
                 id="weekly-search-filter"
                 type="search"
-                placeholder="Search report id, finding, recommendation..."
+                placeholder="Search report id or finding..."
               />
             </label>
             <div class="filter-row__summary">
@@ -156,7 +306,20 @@
           <div id="weekly-loading-state" class="state">Loading engineering reports...</div>
           <div id="weekly-error-state" class="state state--error" hidden></div>
           <div id="weekly-empty-state" class="state" hidden>No reports match.</div>
-          <div id="weekly-list" class="card-list" hidden></div>
+          <div class="table-scroll" id="weekly-list" hidden>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Report</th>
+                  <th>Covers</th>
+                  <th class="num">PRs</th>
+                  <th>Pins moved</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="weekly-rows"></tbody>
+            </table>
+          </div>
         </section>
       </section>
     </main>
@@ -164,10 +327,8 @@
     <footer class="site-footer">
       <p>
         Generated from
-        <code>tools/backend_gap_report/</code>. Engineering report data comes from
-        <code>docs/weekly_reports/dashboard-data/</code> and
-        <code>docs/monthly_reports/dashboard-data/</code>; backend gap data from
-        <code>docs/backend-gap/dashboard-data/</code>.
+        <code>tools/backend_gap_report/</code> on <code>main</code>; report data
+        lives on the <code>dashboard-data</code> branch.
       </p>
     </footer>
 

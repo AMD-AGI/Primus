@@ -29,9 +29,15 @@ single generic path (cadence is just a data field).
   periodic-report index, build the standalone publishable bundle (site shell +
   data), generate PDF artifacts for backend-gap reports, and run structural
   validation.
+- `collect_live_status.py`: read-only GitHub collector. `live` writes the
+  dependency matrix (every pinned upstream vs its latest stable release) and CI
+  health on `main` (runs, weekly full run, coverage via
+  `tools/ci/coverage_summary.py`) for the deploy; `prs` lists a window's merged
+  PRs with the areas they changed, for the monthly report. Run it from a `main`
+  checkout with `GH_TOKEN` set.
 - `templates/pdf-report.css`: shared PDF export stylesheet (backend-gap only).
-- `site/`: shared static dashboard source templates (one site, three sections:
-  latest snapshot, backend deep dives, report archive).
+- `site/`: shared static dashboard source templates (latest snapshot with
+  trends, dependency matrix, CI health, backend deep dives, report archive).
 
 ## Current Model
 
@@ -73,6 +79,10 @@ directory:
 - `reports-data/index.json` — combined weekly + monthly periodic-report index,
   assembled from `docs/weekly_reports/dashboard-data/` and
   `docs/monthly_reports/dashboard-data/`
+- `live-data/index.json` — written by the deploy workflow after the bundle
+  build (`collect_live_status.py live`); refreshed weekly and when
+  `primus/_thirdparty.lock` changes. Optional: the dashboard hides its panels
+  when it is missing.
 
 ## Typical Flows
 
