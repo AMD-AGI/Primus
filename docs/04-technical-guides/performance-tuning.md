@@ -95,6 +95,7 @@ Defaults in `primus/configs/modules/megatron/primus_turbo.yaml` are mostly `fals
 | `use_turbo_attention` | Optimized attention kernels. |
 | `use_turbo_parallel_linear` | Optimized tensor-parallel linear layers. |
 | `use_turbo_grouped_gemm` | Optimized grouped GEMM for MoE. |
+| `turbo_grouped_gemm_schedule` | `work_steal` keeps the BF16 grouped GEMM fast while DeepEP kernels share the GPU (`overlap_moe_expert_parallel_comm: true`); default `static`. |
 | `use_turbo_grouped_mlp` | Removed—use `use_turbo_grouped_gemm` (passing this key now raises an error). |
 | `use_turbo_rms_norm` | Optimized RMSNorm. |
 | `moe_use_fused_router_with_aux_score` | Fused MoE router (requires Primus-Turbo backend; see [Backend Patch Notes](../06-developer-guide/backend-patch-notes.md)). |

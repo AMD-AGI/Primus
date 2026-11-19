@@ -13,6 +13,7 @@ from primus.backends.megatron.patches.args.rocm_arg_validation import (
     ALLOC_CONF_ENVS,
     validate_cross_entropy_exclusivity,
     validate_turbo_fp8_permute,
+    validate_turbo_grouped_gemm_schedule,
     validate_turbo_grouped_gemm_with_muon,
     validate_turbo_grouped_gemm_without_padding,
     warn_turbo_grouped_gemm_without_expandable_segments,
@@ -82,6 +83,21 @@ def test_turbo_grouped_gemm_without_padding_disabled_is_noop():
 def test_turbo_grouped_gemm_without_padding_rejects_unsupported_config(overrides, message):
     with pytest.raises(ValueError, match=message):
         validate_turbo_grouped_gemm_without_padding(_no_padding_args(**overrides))
+
+
+@pytest.mark.parametrize("schedule", ["static", "work_steal"])
+def test_turbo_grouped_gemm_schedule_accepts_turbo_schedules(schedule):
+    validate_turbo_grouped_gemm_schedule(SimpleNamespace(turbo_grouped_gemm_schedule=schedule))
+
+
+def test_turbo_grouped_gemm_schedule_defaults_to_static():
+    validate_turbo_grouped_gemm_schedule(SimpleNamespace())
+
+
+@pytest.mark.parametrize("schedule", ["worksteal", "dynamic", ""])
+def test_turbo_grouped_gemm_schedule_rejects_unknown(schedule):
+    with pytest.raises(ValueError, match="turbo_grouped_gemm_schedule must be one of"):
+        validate_turbo_grouped_gemm_schedule(SimpleNamespace(turbo_grouped_gemm_schedule=schedule))
 
 
 def _muon_args(**overrides):

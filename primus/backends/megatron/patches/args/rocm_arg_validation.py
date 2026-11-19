@@ -139,6 +139,19 @@ def _has_moe_layers(args) -> bool:
     return any(freq)
 
 
+TURBO_GROUPED_GEMM_SCHEDULES = ("static", "work_steal")
+
+
+def validate_turbo_grouped_gemm_schedule(args) -> None:
+    """Reject a schedule Turbo does not have: its backend registry would only report that no
+    grouped GEMM backend accepts the call, on the first forward."""
+    schedule = getattr(args, "turbo_grouped_gemm_schedule", "static")
+    if schedule not in TURBO_GROUPED_GEMM_SCHEDULES:
+        raise ValueError(
+            f"turbo_grouped_gemm_schedule must be one of {TURBO_GROUPED_GEMM_SCHEDULES}, got {schedule!r}."
+        )
+
+
 def validate_turbo_grouped_gemm_with_muon(args) -> None:
     """Muon orthogonalizes only 2-D weights and hands the rest to its scalar optimizer.
 
@@ -318,6 +331,7 @@ def validate_args_on_rocm(args):
         )
 
     validate_turbo_grouped_gemm_without_padding(args)
+    validate_turbo_grouped_gemm_schedule(args)
     validate_turbo_grouped_gemm_with_muon(args)
     validate_turbo_fp8_permute(args)
     # After sync-free MoE, which may auto-enable use_turbo_grouped_gemm.

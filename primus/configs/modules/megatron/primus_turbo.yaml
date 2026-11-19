@@ -78,6 +78,11 @@ turbo_fp8_permute: false
 # let Turbo grouped GEMMs consume non-aligned expert token counts directly,
 # without TE Fp8Padding/Fp8Unpadding
 turbo_grouped_gemm_without_padding: false
+# persistent-loop scheduling of the BF16 Turbo grouped GEMM: static | work_steal.
+# work_steal lets workgroups take tiles from a shared counter, so a GEMM that shares the GPU with
+# a communication kernel (overlap_moe_expert_parallel_comm with use_turbo_deepep) does not wait
+# for the workgroups that started late. Triton or CK backend only; FP8 / FP4 grouped GEMMs ignore it.
+turbo_grouped_gemm_schedule: static
 # fused activation_with_probs to reduce redundant computation
 use_turbo_fused_act_with_probs: false
 

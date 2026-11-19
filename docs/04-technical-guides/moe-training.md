@@ -114,7 +114,7 @@ Practical guidance from the run scripts:
 - **1F1B A2A overlap**—interleaves micro-batch N's expert communication with micro-batch N-1's backward compute on top of interleaved-1F1B pipeline parallelism, hiding A2A behind compute while preserving the bubble rate and roughly the same peak memory.
 - **Arbitrary pipeline partition**—manual stage layout instead of automatic even splits, to balance per-stage memory/compute. Use the Megatron-core `--pipeline_model_parallel_layout` flag (as the DeepSeek-V3 script does) or the Primus `decoder_pipeline_manual_split_list` config key (`primus/configs/modules/megatron/primus_megatron_module.yaml`).
 - **Selective layer recompute**—recompute specific transformer layers with `--recompute_layer_ids 0,1,2,3` (keep `RECOMPUTE_LAYERS=0` so this is the only recompute control), or full block recompute via `--recompute_granularity full --recompute_method block --recompute_num_layers N`.
-- **MoE expert-parallel comm overlap**—`overlap_moe_expert_parallel_comm: true` (`trainer_base.yaml`).
+- **MoE expert-parallel comm overlap**—`overlap_moe_expert_parallel_comm: true` (`trainer_base.yaml`). With Turbo DeepEP and the BF16 Turbo grouped GEMM, also set `turbo_grouped_gemm_schedule: work_steal`: the default static schedule waits for the CUs DeepEP holds and gives back most of the overlap.
 
 See [Performance tuning](./performance-tuning.md) for the full Primus-Turbo flag reference.
 
