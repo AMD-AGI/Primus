@@ -33,5 +33,11 @@ LOG_INFO_RANK0 "Loading MI355X-specific optimizations..."
 # Disable RCCL warp-speed auto-tuning on gfx950 (MI355X)
 export RCCL_WARP_SPEED_AUTO=${RCCL_WARP_SPEED_AUTO:-0}
 
+# The CK v3 forward is not run-to-run stable for MLA head dims (qk 192 / v 128) on gfx950.
+if [[ "${PRIMUS_DETERMINISTIC:-0}" == "1" ]]; then
+    export NVTE_CK_USES_FWD_V3=0
+    log_exported_vars "MI355X deterministic overrides" NVTE_CK_USES_FWD_V3
+fi
+
 # log_exported_vars "MI355X-specific optimizations" \
 #     HSA_XNACK HSA_ENABLE_INTERRUPT GPU_MAX_HEAP_SIZE HSA_KERNARG_POOL_SIZE RCCL_WARP_SPEED_AUTO
