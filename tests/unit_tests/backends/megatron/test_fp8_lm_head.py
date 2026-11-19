@@ -110,6 +110,10 @@ def test_constructor_patches_only_enabled_output_stages(rocm_parallel_state, mon
         params_dtype=torch.bfloat16,
         gradient_accumulation_fusion=False,
     )
+    # GPTModel selects the TE backend from its config. Isolate the test from a
+    # launcher's environment and restore it after each backend is constructed.
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.delenv(name, raising=False)
     model_parallel_cuda_manual_seed(7331)
     spec = gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec()
     model_args = dict(config=config, transformer_layer_spec=spec, vocab_size=1024, max_sequence_length=128)
