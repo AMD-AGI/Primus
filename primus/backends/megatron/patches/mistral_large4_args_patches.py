@@ -33,6 +33,9 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     moe_layer_freq_list,
     text_config,
 )
+from primus.backends.megatron.patches.te_patches.gemm_workspace_size_patches import (
+    enlarge_te_gemm_workspace,
+)
 from primus.core.config.preset_loader import PresetLoader
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_kv_rank_0, log_rank_0
@@ -527,7 +530,7 @@ def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
         return True  # PrimusTurboGroupedLinear asserts expert-TP 1
     # only when a sharded checkpoint is saved or loaded (a run that does neither keeps Turbo);
     # an unset ckpt_format is Megatron's default, torch_dist
-    sharded_ckpt = str(getattr(args, "ckpt_format", None) or "torch_dist") != "torch"
+    sharded_ckpt = getattr(args, "ckpt_format", None) != "torch"
     uses_ckpt = bool(
         getattr(args, "save", None)
         or getattr(args, "load", None)
@@ -555,9 +558,11 @@ def patch_mistral_large4_turbo_grouped_gemm_fallback(ctx: PatchContext):
     )
 
 
-def _experts_on_te_gemms(args) -> bool:
+def _experts_on_te_gemms(ctx: PatchContext) -> bool:
     """A Mistral Large 4 run (args.model_type) whose routed experts are not on Primus-Turbo's
     grouped GEMM (``experts_on_turbo_grouped_gemm``, the layer specs' rule)."""
+    args = get_args(ctx)
+    # this model only: args.model_type (is_mistral_large4_args)
     return is_mistral_large4_args(args) and not experts_on_turbo_grouped_gemm(args)
 
 
@@ -567,7 +572,7 @@ def _experts_on_te_gemms(args) -> bool:
     phase="before_train",
     description="Mistral Large 4: enlarge the TE hipBLASLt GEMM workspace when the experts run on TE GEMMs "
     "(not on Primus-Turbo's grouped GEMM)",
-    condition=lambda ctx: _experts_on_te_gemms(get_args(ctx)),
+    condition=_experts_on_te_gemms,
 )
 def patch_mistral_large4_te_gemm_workspace(ctx: PatchContext):
     """Runs for every Mistral Large 4 run whose experts are not on Primus-Turbo's grouped GEMM
@@ -592,9 +597,4 @@ def patch_mistral_large4_te_gemm_workspace(ctx: PatchContext):
             "(hipBLASLt error 6 with TE's default workspace); use_turbo_grouped_gemm, or moe_grouped_gemm "
             "false (SequentialMLP), are the tested paths"
         )
-    # imported where it is used, as in the GLM-5.3 patch
-    from primus.backends.megatron.patches.te_patches.gemm_workspace_size_patches import (
-        enlarge_te_gemm_workspace,
-    )
-
     enlarge_te_gemm_workspace("megatron.mistral_large4.te_gemm_workspace")

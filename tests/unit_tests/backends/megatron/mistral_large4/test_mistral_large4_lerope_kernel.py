@@ -72,7 +72,9 @@ def test_positions_must_match_the_rows():
 @pytest.mark.skipif(not GPU, reason="the fused kernel runs on a GPU")
 @pytest.mark.parametrize("dtype,tol", [(torch.float32, 1e-5), (torch.bfloat16, 2e-2)])
 @pytest.mark.parametrize("shape", [(64, 2, 16, 64), (37, 1, 33, 64), (1, 1, 1, 64), (19, 3, 1, 64)])
-def test_kernel_matches_reference_forward_and_backward(shape, dtype, tol):
+# alpha frozen (the model's buffer: the kernel's NEED_DINV=False path, dx only) or trainable
+@pytest.mark.parametrize("alpha_grad", [False, True])
+def test_kernel_matches_reference_forward_and_backward(shape, dtype, tol, alpha_grad):
     s, b, h, dim = shape
     x, pos, alpha = _inputs(s, b, h, dim, dtype, "cuda", seed=s + h)
     # the comparison is only meaningful if lerope_rotary takes the fused kernel (Triton present)
@@ -81,11 +83,16 @@ def test_kernel_matches_reference_forward_and_backward(shape, dtype, tol):
     outs = []
     for fn in (lerope_rotary, lerope_rotary_reference):
         xx = x.clone().requires_grad_(True)
-        aa = alpha.clone().requires_grad_(True)
+        aa = alpha.clone().requires_grad_(alpha_grad)
         xr = xx if fn is lerope_rotary else xx.float()  # reference in fp32, as an L2 spec runs it
         y = fn(xr, pos, _inv(aa))
         (y.float() * dy.float()).sum().backward()
-        outs.append((y.float(), xx.grad.float(), aa.grad.float()))
+        out = (y.float(), xx.grad.float())
+        if alpha_grad:
+            out += (aa.grad.float(),)
+        else:
+            assert aa.grad is None
+        outs.append(out)
     for got, ref in zip(outs[0], outs[1]):
         scale = ref.abs().max().clamp_min(1e-12)
         assert float((got - ref).abs().max() / scale) <= tol

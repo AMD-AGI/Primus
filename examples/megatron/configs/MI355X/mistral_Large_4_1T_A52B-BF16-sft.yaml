@@ -13,10 +13,24 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #   with the native converter (native_loader_mistral_large4_text: Mistral consolidated names,
 #   block-FP8 dequantised) in one process to a torch_dist checkpoint, which Megatron reshards to
 #   this layout when it loads it.
-#   Defaults: the released model as-is: all 72 layers (num_layers from the preset) in the
-#   multi-node full-model layout TP8 x PP3 x EP32 (ETP1, sequence parallel on, CP1) on 12 nodes x 8 GPUs (NNODES=12),
-#   all parameters trainable, inter-node DeepEP (<= 32 CUs, rocm_arg_validation), GBS 64. PP3 starts
-#   every stage on a full-indexer layer (indexer_types), as index sharing requires.
+#   Defaults: the released model as-is: all 72 layers (num_layers from the preset), all
+#   parameters trainable, GBS 96, on NNODES=24.
+#   Layout: TP8 x PP6 x EP8 x expert-TP 1 (sequence parallel on, CP1) = 192 GPUs, 24 nodes x 8
+#   GPUs (data parallel 4, expert data parallel 4). EP x expert-TP = 8 = the GPUs of one node,
+#   so the expert-parallel group stays in a node and Primus-Turbo's DeepEP runs intra-node (the
+#   release image's DeepEP takes no RDMA ranks: an EP group across nodes fails at start).
+#   Per GPU, with the distributed optimizer: routed experts 1018B / (PP6 x EP8 = 48) = 21.2B and
+#   the rest 35B / (TP8 x PP6) = 0.7B -> bf16 weights 44 GB + fp32 grads 88 GB + fp32 master and
+#   Adam state (12 bytes, sharded over expert-DP 4 / DP 4) 66 GB = ~197 GB of the MI355X's 288
+#   GB before activations.
+#   PP6 puts 12 layers on each stage (starts 0, 12, 24, 36, 48, 60): every stage starts on a
+#   full-indexer layer (indexer_types), as index sharing requires; layer 35's shared KV latent
+#   crosses from stage 2 to stages 3-5.
+#   Alternative where EP8 does not fit (fewer nodes): EP32 with DeepEP off (alltoall), e.g.
+#   PRIMUS_EP=32 PRIMUS_TURBO_DEEPEP=false PRIMUS_PP=3 PRIMUS_GBS=64 on 12 nodes (~202 GB per
+#   GPU: experts 1018B / (PP3 x EP32) = 10.6B, the rest 1.5B). Another PP size must start every
+#   stage on a full-indexer layer. MoE with TP > 1 needs sequence_parallel (Megatron), so keep
+#   PRIMUS_SP true whenever PRIMUS_TP > 1.
 #   One-node reduced recipe (a 16-of-72-layer cut on 8 GPUs, routed experts frozen): its own file,
 #   mistral_Large_4_1T_A52B-BF16-sft-reduced.yaml beside this one (the full model does not fit one node).
 
@@ -42,7 +56,7 @@ modules:
       # hyper parameters
       train_iters: ${PRIMUS_TRAIN_ITERS:20}
       micro_batch_size: 1
-      global_batch_size: ${PRIMUS_GBS:64}
+      global_batch_size: ${PRIMUS_GBS:96}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
       lr: 1.0e-5
       min_lr: 0.0
@@ -56,8 +70,8 @@ modules:
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:8}
-      pipeline_model_parallel_size: ${PRIMUS_PP:3}
-      expert_model_parallel_size: ${PRIMUS_EP:32}
+      pipeline_model_parallel_size: ${PRIMUS_PP:6}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
       expert_tensor_parallel_size: 1
       context_parallel_size: 1
       sequence_parallel: ${PRIMUS_SP:true}
@@ -103,8 +117,9 @@ modules:
       cross_entropy_loss_fusion: true
       cross_entropy_fusion_impl: "te"
       use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:true}
-      # rocm_arg_validation: <= 32 CUs for inter-node DeepEP (ep_size >= 16, the default EP32)
-      turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:32}
+      # EP8 in one node (intra-node DeepEP): 64 CUs for dispatch / combine. With PRIMUS_EP >= 16 and
+      # DeepEP on, rocm_arg_validation allows <= 32 CUs (set PRIMUS_TURBO_DEEPEP_NUM_CU=32)
+      turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:64}
       # not set: use_turbo_fused_act_with_probs (this image's Primus-Turbo swiglu_with_probs takes no
       # clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
       # release renormalises a softmax over all 128 experts on the top-4, which that op does not take).

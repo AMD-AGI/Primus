@@ -31,14 +31,14 @@ from primus.core.utils.module_utils import log_rank_0
 # schedule); its value names the model (MODEL_TYPE): it tells ours from another model's, and a patch
 # that also changes the PP wire shape can set it on its wrappers so each refuses the other
 WIRE_OWNER_ATTR = "_primus_pp_wire_owner"
-# attributes other models' PP shape patches set on their wrappers: Kimi K3's get_tensor_shapes
-# (kimi_k3_pp_shape_patches.py) and DeepSeek-V4's get_tensor_shapes / interleaved schedule
-# (deepseek_v4_pp_shape_patches.py). A wrapper with none of them and no WIRE_OWNER_ATTR (profiling,
-# NVTX, a functools.wraps decorator) does not change the shape
 # the values a wrapper of this patch was built with (and ``__wrapped__``, set by functools.wraps,
 # is the function it wraps): a second application with other values rebuilds the wrapper from
 # the unwrapped function instead of keeping the stale values
 WIRE_PARAMS_ATTR = "_primus_mistral_large4_wire_params"
+# attributes other models' PP shape patches set on their wrappers: Kimi K3's get_tensor_shapes
+# (kimi_k3_pp_shape_patches.py) and DeepSeek-V4's get_tensor_shapes / interleaved schedule
+# (deepseek_v4_pp_shape_patches.py). A wrapper with none of them and no WIRE_OWNER_ATTR (profiling,
+# NVTX, a functools.wraps decorator) does not change the shape
 _FOREIGN_WIRE_ATTRS = ("_k3_pp_seq_mult", "_v4_pp_shape_patched", "_v4_pp_interleaved_patched")
 
 
@@ -144,7 +144,7 @@ def make_interleaved_schedule(original, kv_lora_rank: int, hidden_size: int, seq
     def schedule(*args, **kwargs):
         if kwargs.get("seq_length") is None:
             raise TypeError(
-                "Mistral Large 4 PP carrier: the interleaved schedule was called without seq_length as a "
+                "Mistral Large 4 PP wire: the interleaved schedule was called without seq_length as a "
                 "keyword; its P2P shape cannot be sized for the shared KV latent"
             )
         cp, tp = _cp_tp(kwargs)
@@ -233,24 +233,25 @@ def patch_mistral_large4_pp_tensor_shape(ctx: PatchContext):
             fn, p["kv_lora_rank"], p["hidden_size"], p["sequence_parallel"]
         ),
     }
-    if all(
-        st == "ours" and _wire_params(getattr(schedules_module, n)) == wanted[n] for n, st in states.items()
-    ):
-        log_rank_0("[Patch:megatron.mistral_large4.pp_tensor_shape] PP wire already sized; skipping")
-        return
+    changed = False
     for n in names:
         fn = getattr(schedules_module, n)
         if states[n] == "ours":
-            if _wire_params(fn) == wanted[n]:
+            params = _wire_params(fn)
+            if params == wanted[n]:
                 continue
             if not _is_our_wrapper(fn):
                 # ours is under another wrapper: it cannot be rebuilt without dropping that wrapper
                 raise RuntimeError(
-                    f"Mistral Large 4 PP wire: {n} was sized with {_wire_params(fn)} under another wrapper; "
+                    f"Mistral Large 4 PP wire: {n} was sized with {params} under another wrapper; "
                     f"this run needs {wanted[n]}"
                 )
             fn = fn.__wrapped__  # rebuild from the unwrapped function with this run's values
         setattr(schedules_module, n, makers[n](fn, wanted[n]))
+        changed = True
+    if not changed:
+        log_rank_0("[Patch:megatron.mistral_large4.pp_tensor_shape] PP wire already sized; skipping")
+        return
     log_rank_0(
         "[Patch:megatron.mistral_large4.pp_tensor_shape] PP wire seq_len + ceil(seq_len * "
         f"{kv_lora_rank} / {hidden_size}) rows (hidden + shared KV latent)"

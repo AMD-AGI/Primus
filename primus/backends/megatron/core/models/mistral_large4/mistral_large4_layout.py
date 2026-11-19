@@ -178,7 +178,9 @@ def normalize_layer_list(value, num_layers: int, name: str, kind=int, default=No
     layers); a shorter one, or anything that is not a list or tuple, raises ValueError naming
     ``name``."""
     if value is None:
-        return [default(i) if callable(default) else default for i in range(num_layers)]
+        if default is None:
+            raise ValueError(f"{name}: not given and no default per layer")
+        value = [default(i) if callable(default) else default for i in range(num_layers)]
     if isinstance(value, str):
         try:
             value = ast.literal_eval(value)

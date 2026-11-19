@@ -532,6 +532,10 @@ class MistralLarge4Attention(MLASelfAttention):
             self.linear_kv_down_proj.backward_dw()
 
     def set_for_recompute_input_layernorm(self):
+        """fp8 / fp4 only (TransformerLayer calls it then). As Megatron's MLA with q_lora_rank None,
+        only ``linear_kv_down_proj`` is marked to save its original input; a layer that consumes
+        another layer's latent has no such projection, so nothing is marked (``linear_q_proj`` is
+        not marked in Megatron's MLA either)."""
         if not self.consumes_kv:
             super().set_for_recompute_input_layernorm()
 

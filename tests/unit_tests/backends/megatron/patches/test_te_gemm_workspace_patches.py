@@ -87,6 +87,9 @@ def test_helper_rocm_only_and_never_lowers(te_gemm, monkeypatch, capsys):
     assert ws.enlarge_te_gemm_workspace() == 1024 << 20
     assert allocated() == 1024 << 20
 
+    # empty (an unset template such as ${PRIMUS_TE_GEMM_WORKSPACE_MB:}) is the default, not an error
+    monkeypatch.setenv("PRIMUS_TE_GEMM_WORKSPACE_MB", " ")
+    assert ws.workspace_mb_from_env() == ws.DEFAULT_WORKSPACE_MB
     # a value that is not an integer names the variable
     monkeypatch.setenv("PRIMUS_TE_GEMM_WORKSPACE_MB", "512MB")
     with pytest.raises(ValueError, match="PRIMUS_TE_GEMM_WORKSPACE_MB"):
@@ -134,13 +137,9 @@ def test_model_patches_use_the_helper(te_gemm, monkeypatch, module, patch_fn, mo
 
     # the patch goes through the shared helper (one owner of the env var and default)
     calls = []
-    # both patches import the helper in their body: replace it where they look it up
-    from primus.backends.megatron.patches.te_patches import (
-        gemm_workspace_size_patches as ws,
-    )
-
+    # both patch modules import the helper at module level: replace it where they look it up
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(ws, "enlarge_te_gemm_workspace", lambda tag="": calls.append(tag))
+        mp.setattr(mod, "enlarge_te_gemm_workspace", lambda tag="": calls.append(tag))
         getattr(mod, patch_fn)(_ctx(model_type))
     assert calls == [
         f"megatron.{'glm5_next' if model_type == 'glm5_next' else 'mistral_large4'}.te_gemm_workspace"
@@ -339,9 +338,35 @@ def test_helper_enlarges_both_layouts_when_te_has_both(te_gemm, monkeypatch):
     monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.module", types.ModuleType("m"))
     monkeypatch.setitem(sys.modules, base.__name__, base)
     monkeypatch.setattr(torch.version, "hip", "6.4")
+    monkeypatch.delenv("PRIMUS_TE_GEMM_WORKSPACE_MB", raising=False)
+    assert te_gemm.get_cublas_workspace(0, False, False).numel() == 64 << 20
+    assert base.get_workspace().numel() == 64 << 20
     assert ws.enlarge_te_gemm_workspace() == 512 << 20
+    # both layouts were enlarged
     assert te_gemm.get_cublas_workspace(0, False, False).numel() == 512 << 20
     assert base.get_workspace().numel() == 512 << 20
+
+
+def test_helper_returns_the_smaller_size_when_one_layout_is_larger(te_gemm, monkeypatch):
+    """A TE with both layouts where module.base is already above the target: it is never lowered,
+    cpp_extensions.gemm is enlarged, and the smaller effective size (512 MiB) is returned."""
+    from primus.backends.megatron.patches.te_patches import (
+        gemm_workspace_size_patches as ws,
+    )
+
+    base = types.ModuleType("transformer_engine.pytorch.module.base")
+    base.get_cublas_workspace_size_bytes = lambda: 1024 << 20
+    base._cublas_workspace = None
+    base.get_workspace = lambda: torch.empty(
+        base.get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="meta"
+    )
+    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.module", types.ModuleType("m"))
+    monkeypatch.setitem(sys.modules, base.__name__, base)
+    monkeypatch.setattr(torch.version, "hip", "6.4")
+    monkeypatch.delenv("PRIMUS_TE_GEMM_WORKSPACE_MB", raising=False)
+    assert ws.enlarge_te_gemm_workspace() == 512 << 20
+    assert te_gemm.get_cublas_workspace(0, False, False).numel() == 512 << 20
+    assert base.get_workspace().numel() == 1024 << 20  # never lowered
 
 
 def test_helper_refuses_unknown_te_layout(monkeypatch):
@@ -386,8 +411,10 @@ def test_helper_raises_on_broken_te(monkeypatch):
         monkeypatch.setitem(sys.modules, name, None)
     monkeypatch.setattr(torch.version, "hip", "6.4")
     monkeypatch.delenv("PRIMUS_TE_GEMM_WORKSPACE_MB", raising=False)
-    with pytest.raises(RuntimeError, match="PRIMUS_TE_GEMM_WORKSPACE_MB=0"):
+    with pytest.raises(RuntimeError, match="PRIMUS_TE_GEMM_WORKSPACE_MB=0") as raised:
         ws.enlarge_te_gemm_workspace()
+    # the cause is named: a TE without its PyTorch bindings (e.g. a JAX-only build)
+    assert "without its PyTorch bindings" in str(raised.value)
 
 
 def test_helper_keeps_a_broken_te_import_error(monkeypatch):
@@ -398,6 +425,9 @@ def test_helper_keeps_a_broken_te_import_error(monkeypatch):
 
     from primus.backends.megatron.patches.te_patches import (
         gemm_workspace_size_patches as ws,
+    )
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as hw,
     )
 
     monkeypatch.setitem(sys.modules, "transformer_engine", types.ModuleType("transformer_engine"))
@@ -411,7 +441,7 @@ def test_helper_keeps_a_broken_te_import_error(monkeypatch):
             raise ImportError("libtransformer_engine.so: undefined symbol: nvte_cublas_gemm")
         return real_import(name, *a, **k)
 
-    monkeypatch.setattr(ws.importlib, "import_module", broken)
+    monkeypatch.setattr(hw.importlib, "import_module", broken)
     with pytest.raises(ImportError, match="undefined symbol"):
         ws.enlarge_te_gemm_workspace()
 
@@ -421,7 +451,7 @@ def test_helper_keeps_a_broken_te_import_error(monkeypatch):
             raise ModuleNotFoundError("No module named 'some_dep'", name="some_dep")
         return real_import(name, *a, **k)
 
-    monkeypatch.setattr(ws.importlib, "import_module", missing_dep)
+    monkeypatch.setattr(hw.importlib, "import_module", missing_dep)
     with pytest.raises(ModuleNotFoundError, match="some_dep"):
         ws.enlarge_te_gemm_workspace()
 
@@ -430,11 +460,11 @@ def test_already_allocated_warning_on_every_rank(monkeypatch, capsys):
     """A workspace allocated before the helper runs is warned about on stderr, on any rank (not
     only rank 0), with the rank in the message."""
     from primus.backends.megatron.patches.te_patches import (
-        gemm_workspace_size_patches as ws,
+        hipblaslt_workspace_patches as hw,
     )
 
     monkeypatch.setenv("RANK", "5")
-    ws._warn_allocated("tag")
+    hw.warn_allocated("tag")
     err = capsys.readouterr().err
     assert "rank 5" in err and "already allocated" in err and "[Patch:tag]" in err
 
@@ -449,3 +479,62 @@ def test_container_allowlist_forwards_the_variable():
     root = Path(__file__).resolve().parents[5]
     cfg = yaml.safe_load((root / "runner" / ".primus.yaml").read_text())
     assert "PRIMUS_TE_GEMM_WORKSPACE_MB" in cfg["container"]["options"]["env"]
+
+
+def test_both_variables_share_one_resize(te_gemm, monkeypatch):
+    """PRIMUS_TE_GEMM_WORKSPACE_MB (this helper) and PRIMUS_TE_GEMM_WORKSPACE_MIB (patch
+    megatron.te.hipblaslt_gemm_workspace) go through hipblaslt_workspace_patches.resize_te_gemm_workspace."""
+    from primus.backends.megatron.patches.te_patches import (
+        gemm_workspace_size_patches as ws,
+    )
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as hw,
+    )
+
+    calls = []
+    real = hw.resize_te_gemm_workspace
+
+    def spy(size, tag, **k):
+        calls.append((size >> 20, tag))
+        return real(size, tag, **k)
+
+    monkeypatch.setattr(torch.version, "hip", "6.4")
+    monkeypatch.setattr(ws, "resize_te_gemm_workspace", spy)
+    monkeypatch.setattr(hw, "resize_te_gemm_workspace", spy)
+    monkeypatch.setenv(hw.ENV_VAR, "128")
+    hw.patch_te_gemm_workspace_size(None)
+    assert te_gemm.get_cublas_workspace(0, False, False).numel() == 128 << 20
+    assert ws.enlarge_te_gemm_workspace("t") == 512 << 20
+    assert calls == [(128, "megatron.te.hipblaslt_gemm_workspace"), (512, "t")]
+    hw.patch_te_gemm_workspace_size(None)  # PRIMUS_TE_GEMM_WORKSPACE_MIB 128 does not lower 512
+    assert te_gemm.get_cublas_workspace(0, False, False).numel() == 512 << 20
+
+
+def test_mib_patch_handles_the_te28_module_base_layout(monkeypatch):
+    """The opt-in PRIMUS_TE_GEMM_WORKSPACE_MIB patch now also applies (and resizes) on a TE with only
+    the TE 2.8 module.base layout, where it used to do nothing."""
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as hw,
+    )
+
+    gemm = types.ModuleType("transformer_engine.pytorch.cpp_extensions.gemm")
+    base = types.ModuleType("transformer_engine.pytorch.module.base")
+    base.get_cublas_workspace_size_bytes = lambda: 64 << 20
+    base._cublas_workspace = None
+    base._multi_stream_cublas_workspace = []
+    base.get_workspace = lambda: torch.empty(
+        base.get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="meta"
+    )
+    for name in (
+        "transformer_engine",
+        "transformer_engine.pytorch",
+        "transformer_engine.pytorch.cpp_extensions",
+        "transformer_engine.pytorch.module",
+    ):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, gemm.__name__, gemm)
+    monkeypatch.setitem(sys.modules, base.__name__, base)
+    monkeypatch.setenv(hw.ENV_VAR, "128")
+    assert hw._needs_te_gemm_workspace_patch(None)
+    hw.patch_te_gemm_workspace_size(None)
+    assert base.get_workspace().numel() == 128 << 20

@@ -28,16 +28,36 @@ import sys
 
 import torch
 
+from primus.backends.megatron.patches.te_patches.hipblaslt_workspace_patches import (
+    import_or_none,
+    resize_te_gemm_workspace,
+    te_cpp_extensions_gemm_layout_supported,
+    te_module_base_layout_supported,
+    te_workspace_modules,
+)
 from primus.core.utils.module_utils import log_rank_0
 
+# PRIMUS_TE_GEMM_WORKSPACE_MB is GLM-5.3's variable (main's glm5_next patch read it, in MiB despite
+# its name) and keeps its name so GLM-5.3 runs see no rename. The resize itself is the one in
+# hipblaslt_workspace_patches.py, also used by PRIMUS_TE_GEMM_WORKSPACE_MIB (opt-in, any model,
+# unset by default). Both only ever enlarge the workspace: with both set the larger value applies.
 DEFAULT_WORKSPACE_MB = 512
+
+__all__ = [
+    "DEFAULT_WORKSPACE_MB",
+    "enlarge_te_gemm_workspace",
+    "te_cpp_extensions_gemm_layout_supported",
+    "te_module_base_layout_supported",
+    "workspace_mb_from_env",
+]
 
 
 def workspace_mb_from_env() -> int:
-    """``PRIMUS_TE_GEMM_WORKSPACE_MB`` (default ``DEFAULT_WORKSPACE_MB``) as an integer. A value of
-    0 or below means "keep TE's default"; a value that is not an integer raises ``ValueError``
-    naming the variable."""
-    raw = os.environ.get("PRIMUS_TE_GEMM_WORKSPACE_MB", str(DEFAULT_WORKSPACE_MB)).strip()
+    """``PRIMUS_TE_GEMM_WORKSPACE_MB`` in MiB (unset or empty: ``DEFAULT_WORKSPACE_MB``) as an
+    integer. A value of 0 or below means "keep TE's default"; a value that is not an integer raises
+    ``ValueError`` naming the variable."""
+    # unset or empty (an unset template such as ${PRIMUS_TE_GEMM_WORKSPACE_MB:}): the default
+    raw = os.environ.get("PRIMUS_TE_GEMM_WORKSPACE_MB", "").strip() or str(DEFAULT_WORKSPACE_MB)
     try:
         return int(raw)
     except ValueError:
@@ -46,48 +66,12 @@ def workspace_mb_from_env() -> int:
         ) from None
 
 
-def te_cpp_extensions_gemm_layout_supported(te_gemm) -> bool:
-    """Whether ``transformer_engine.pytorch.cpp_extensions.gemm`` has the layout this helper
-    changes first (TE 2.17 ROCm build, the project image): the size function
-    ``get_cublas_workspace_size_bytes()`` and the ``lru_cache``'d ``get_cublas_workspace(device,
-    ub, grouped_gemm)`` that allocates the buffer ``general_gemm`` passes to hipBLASLt."""
-    return callable(getattr(te_gemm, "get_cublas_workspace_size_bytes", None)) and hasattr(
-        getattr(te_gemm, "get_cublas_workspace", None), "cache_clear"
-    )
-
-
-def te_module_base_layout_supported(te_base) -> bool:
-    """Whether ``transformer_engine.pytorch.module.base`` has the older layout (TE 2.8 ROCm): the
-    size function ``get_cublas_workspace_size_bytes()`` read at allocation time by ``get_workspace()``
-    and ``get_multi_stream_cublas_workspace()``, which cache the buffers in the module globals
-    ``_cublas_workspace`` and ``_multi_stream_cublas_workspace``."""
-    return (
-        callable(getattr(te_base, "get_cublas_workspace_size_bytes", None))
-        and callable(getattr(te_base, "get_workspace", None))
-        and hasattr(te_base, "_cublas_workspace")
-    )
-
-
 def _te_installed() -> bool:
     """Whether Transformer Engine is installed (found by the import system; not imported)."""
     try:
         return importlib.util.find_spec("transformer_engine") is not None
     except ValueError:  # loaded with no __spec__ (e.g. a module set in sys.modules): it exists
         return sys.modules.get("transformer_engine") is not None
-
-
-def _import_or_none(name):
-    """The module, or None when it does not exist: a ``ModuleNotFoundError`` for ``name`` itself or
-    one of its parent packages (a TE without that submodule). Any other failure (a broken install:
-    an undefined symbol or missing ``.so``, a missing dependency of the module) raises, with its
-    original traceback."""
-    try:
-        return importlib.import_module(name)
-    except ModuleNotFoundError as e:
-        missing = e.name or ""
-        if missing and (name == missing or name.startswith(missing + ".")):
-            return None
-        raise
 
 
 def enlarge_te_gemm_workspace(log_tag: str = "te_gemm_workspace") -> int:
@@ -111,7 +95,8 @@ def enlarge_te_gemm_workspace(log_tag: str = "te_gemm_workspace") -> int:
             f"[Patch:{log_tag}] PRIMUS_TE_GEMM_WORKSPACE_MB <= 0: TE GEMM workspace left at its default"
         )
         return 0
-    # TE is heavy and optional: imported only here (by name, from sys.modules when loaded)
+    # TE is optional: check it is installed without importing it; its submodules are imported
+    # below only when present
     if not _te_installed():
         log_rank_0(
             f"[Patch:{log_tag}] WARNING: Transformer Engine not installed; TE GEMM workspace not changed"
@@ -119,13 +104,15 @@ def enlarge_te_gemm_workspace(log_tag: str = "te_gemm_workspace") -> int:
         return 0
     # every layout this TE has is enlarged: a build with both would otherwise keep the old size for
     # the buffers allocated through the other one
-    te_gemm = _import_or_none("transformer_engine.pytorch.cpp_extensions.gemm")
-    te_base = _import_or_none("transformer_engine.pytorch.module.base")
-    sizes = []
-    if te_cpp_extensions_gemm_layout_supported(te_gemm):  # False for None too
-        sizes.append(_enlarge_cpp_extensions_gemm_workspace(te_gemm, size, log_tag))
-    if te_module_base_layout_supported(te_base):  # False for None too
-        sizes.append(_enlarge_module_base_workspace(te_base, size, log_tag))
+    te_gemm, te_base = te_workspace_modules()
+    if te_gemm is None and te_base is None and import_or_none("transformer_engine.pytorch") is None:
+        raise RuntimeError(
+            f"[Patch:{log_tag}] Transformer Engine is installed without its PyTorch bindings "
+            "(transformer_engine.pytorch), so the TE GEMM workspace cannot be raised to "
+            f"{size >> 20} MiB. Install TE's PyTorch build, or set PRIMUS_TE_GEMM_WORKSPACE_MB=0."
+        )
+    # the one resize both workspace variables use (hipblaslt_workspace_patches.py)
+    sizes = resize_te_gemm_workspace(size, log_tag, te_gemm=te_gemm, te_base=te_base)
     if sizes:
         return min(sizes)
     # the model asked for the larger workspace because its GEMMs fail without it: going on with
@@ -137,50 +124,3 @@ def enlarge_te_gemm_workspace(log_tag: str = "te_gemm_workspace") -> int:
         f"raised to {size >> 20} MiB. Use a TE with one of those layouts (TE 2.8 or 2.17 ROCm), "
         "or set PRIMUS_TE_GEMM_WORKSPACE_MB=0 to keep TE's default workspace."
     )
-
-
-def _warn_allocated(log_tag: str) -> None:
-    # buffers already handed out (e.g. kept by comm-overlap code) keep their old size: the helper
-    # must run before the first GEMM (the before_train patches do). Logged on every rank (the rank
-    # that holds such a reference may not be rank 0), with the rank in the message.
-    rank = os.environ.get("RANK", "?")
-    print(
-        f"[Patch:{log_tag}] WARNING (rank {rank}): TE GEMM workspace already allocated; references to it "
-        "taken before this call keep the old size, and the old buffer stays alive while they do",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
-def _enlarge_cpp_extensions_gemm_workspace(te_gemm, size: int, log_tag: str) -> int:
-    """The TE 2.17 layout: replace ``cpp_extensions.gemm.get_cublas_workspace_size_bytes`` and
-    clear the ``get_cublas_workspace`` cache so the next GEMM allocates at the new size."""
-    current = te_gemm.get_cublas_workspace_size_bytes()
-    if current >= size:
-        return current
-    info = getattr(te_gemm.get_cublas_workspace, "cache_info", None)
-    if callable(info) and info().currsize > 0:
-        _warn_allocated(log_tag)
-    te_gemm.get_cublas_workspace_size_bytes = lambda: size
-    te_gemm.get_cublas_workspace.cache_clear()
-    log_rank_0(f"[Patch:{log_tag}] TE GEMM workspace -> {size >> 20} MiB")
-    return size
-
-
-def _enlarge_module_base_workspace(te_base, size: int, log_tag: str) -> int:
-    """The TE 2.8 layout: replace ``module.base.get_cublas_workspace_size_bytes`` (looked up in the
-    module globals when ``get_workspace`` / ``get_multi_stream_cublas_workspace`` allocate) and drop
-    the cached buffers so the next GEMM allocates them at the new size."""
-    current = te_base.get_cublas_workspace_size_bytes()
-    if current >= size:
-        return current
-    if getattr(te_base, "_cublas_workspace", None) is not None or bool(
-        getattr(te_base, "_multi_stream_cublas_workspace", None)
-    ):
-        _warn_allocated(log_tag)
-    te_base.get_cublas_workspace_size_bytes = lambda: size
-    te_base._cublas_workspace = None
-    if hasattr(te_base, "_multi_stream_cublas_workspace"):
-        te_base._multi_stream_cublas_workspace = []
-    log_rank_0(f"[Patch:{log_tag}] TE GEMM workspace -> {size >> 20} MiB (module.base layout)")
-    return size

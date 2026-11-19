@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Mistral Large 4 rotary embedding (YaRN + learned LeRoPE) and SSMax query scaling.
+"""Mistral Large 4 rotary embedding (YaRN + LeRoPE, learned in pretraining, frozen here) and SSMax query scaling.
 
 * YaRN inverse frequencies exactly as Megatron's ``YarnRotaryEmbedding`` builds them
   (same correction range and ramp helpers), with no concentration factor (the checkpoint's
@@ -64,8 +64,9 @@ class MistralLarge4RotaryEmbedding(nn.Module):
         device = None if config.use_cpu_initialization else torch.cuda.current_device()
         # a plain fp32 tensor (not a buffer): Float16Module's bf16 cast must not round it
         self._inv_freq = inv
-        # LeRoPE: learned per-frequency log-multiplier (checkpoint ``lerope.alpha``); 0 = plain YaRN.
-        # a persistent buffer, as in the reference (not trained; outside the optimizer and FSDP sharding)
+        # LeRoPE per-frequency log-multiplier, learned in pretraining and loaded from the checkpoint
+        # (lerope.alpha); frozen here (persistent buffer, not trained; outside the optimizer and FSDP
+        # sharding). 0 = plain YaRN.
         self.register_buffer("alpha", torch.zeros(self.dim // 2, dtype=torch.float32, device=device))
 
     def _apply(self, fn, *args, **kwargs):  # keep alpha fp32 (unrounded) through Float16Module's cast

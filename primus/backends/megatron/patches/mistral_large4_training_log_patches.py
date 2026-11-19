@@ -117,7 +117,7 @@ def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
         # arguments it needs, so it is not installed (instead of installing a silent no-op)
         log_rank_0(
             "[Patch:megatron.mistral_large4.first_iteration_log] WARNING: training_log has no "
-            f"parameter(s) {missing}; not wrapped (after a resume, the second log line may average two iterations)"
+            f"parameter(s) {missing}; not wrapped (with log_interval 1 or after a resume, the next log line may average two iterations)"
         )
         return
 

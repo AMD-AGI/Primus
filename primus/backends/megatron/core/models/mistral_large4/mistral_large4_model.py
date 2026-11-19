@@ -56,8 +56,13 @@ class MistralLarge4Model(LanguageModule):
         share_embeddings_and_output_weights: bool = False,
         pg_collection=None,
         vp_stage: Optional[int] = None,
-        **_unused,
+        **unsupported,
     ) -> None:
+        # GPTModel-style arguments this model does not take (rope settings live in the config,
+        # there is no MTP block): refused when given a value, rather than dropped
+        given = sorted(k for k, v in unsupported.items() if v is not None)
+        if given:
+            raise TypeError(f"MistralLarge4Model does not take {given}")
         super().__init__(config=config, pg_collection=pg_collection)
         self.transformer_layer_spec = transformer_layer_spec
         self.vocab_size = vocab_size
@@ -123,6 +128,11 @@ class MistralLarge4Model(LanguageModule):
         padding_mask: Optional[Tensor] = None,
         **kwargs,
     ):
+        given = sorted(k for k, v in kwargs.items() if v is not None)
+        if given:
+            # e.g. inference_context / inference_params: there is no KV-cache inference path, and a
+            # forward without the cache would decode wrongly instead of failing
+            raise NotImplementedError(f"MistralLarge4Model.forward does not support {given}")
         if decoder_input is None and self.pre_process:
             decoder_input = self.embedding(input_ids=input_ids, position_ids=None)
         hidden_states = self.decoder(

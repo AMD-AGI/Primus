@@ -44,6 +44,9 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_transformer_config import (
     kv_carrier_needed,
 )
+from primus.backends.megatron.core.transformer.mistral_large4.lerope_kernel import (
+    fused_lerope_available,
+)
 from primus.backends.megatron.core.transformer.mistral_large4.rotary import (
     MistralLarge4RotaryEmbedding,
     positions_for,
@@ -288,11 +291,13 @@ class MistralLarge4TransformerBlock(TransformerBlock):
             self._check_position_ids(position_ids, pos)
             self._checked_positions = True
         # YaRN x exp(alpha), computed once: the eager table and the fused LeRoPE kernel
-        # (config.fused_lerope, which computes the angles itself) use the same values
+        # (config.fused_lerope, which computes the angles itself) use the same values. The eager
+        # table is built only when attention._rope reads it (not on the fused kernel's path)
         inv_freq = freqs = None
         if self.rotary.dim:
             inv_freq = self.rotary.scaled_inv_freq()
-            freqs = self.rotary.freqs(pos, inv_freq)
+            if not (cfg.fused_lerope and fused_lerope_available(hidden_states)):
+                freqs = self.rotary.freqs(pos, inv_freq)
         total = full * cp.size()
         if packed_seq_params is not None and getattr(packed_seq_params, "max_seqlen_q", None):
             # THD: each document attends only to itself, so the longest document decides

@@ -68,6 +68,9 @@ def te_gemm(monkeypatch):
     package.gemm = module
     monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.cpp_extensions", package)
     monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.cpp_extensions.gemm", module)
+    # no TE 2.8 module.base layout here: an installed real TE must not be reached
+    for name in ("transformer_engine.pytorch.module", "transformer_engine.pytorch.module.base"):
+        monkeypatch.setitem(sys.modules, name, None)
     monkeypatch.setattr(patches, "log_rank_0", lambda *a, **k: None)
     return module
 

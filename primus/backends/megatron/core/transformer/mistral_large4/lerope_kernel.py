@@ -169,8 +169,9 @@ class _LeRoPEFn(torch.autograd.Function):
         dx = torch.empty_like(xc)
         block_f = triton.next_power_of_2(F)
         n_rb = triton.cdiv(rows, BLOCK_ROWS)
-        # one partial row per program, summed in a fixed order below (no atomics: deterministic)
-        part = torch.zeros((s * n_rb if need_dinv else 1, block_f), device=xc.device, dtype=torch.float32)
+        # one partial row per program, summed in a fixed order below (no atomics: deterministic);
+        # every program writes its row for f < F, and columns >= F are dropped by [:F]: no fill
+        part = torch.empty((s * n_rb if need_dinv else 1, block_f), device=xc.device, dtype=torch.float32)
         _lerope_bwd_kernel[(s, n_rb)](
             dyc,
             xc,

@@ -96,6 +96,8 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
         # a string from an env-substituted override ('no', 'off', '0') is read strictly, not by
         # truthiness: the frozen-indexer check (MistralLarge4Attention) reads this bool
         self.allow_untrained_indexer = parse_flag(self.allow_untrained_indexer, "allow_untrained_indexer")
+        # the same for the rope kernel switch (attention._rope and the block read it as a bool)
+        self.fused_lerope = parse_flag(self.fused_lerope, "fused_lerope")
         n = int(self.num_layers)
         self.no_rope_layers = normalize_layer_list(self.no_rope_layers, n, "no_rope_layers", int, 1)
         self.indexer_types = normalize_layer_list(self.indexer_types, n, "indexer_types", str, "full")

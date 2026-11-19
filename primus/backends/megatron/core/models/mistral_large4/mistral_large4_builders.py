@@ -7,7 +7,6 @@
 """Mistral Large 4 (``mistral_large4_text``) builder and ``model_provider``."""
 
 import copy
-from typing import Optional
 
 from megatron.core.transformer.spec_utils import import_module
 
@@ -125,17 +124,10 @@ def mistral_large4_builder(args, pre_process, post_process, vp_stage=None, confi
     check_stage_starts(model, args)
     if _experts_on_expert_groups(args):
         mark_experts_expert_parallel(model)
-    if _flag(getattr(args, "freeze_routed_experts", False), "freeze_routed_experts"):
+    if parse_flag(getattr(args, "freeze_routed_experts", False), "freeze_routed_experts"):
         n = freeze_routed_experts(model)
         print_rank_0(f"[Primus:Mistral-Large-4] freeze_routed_experts: {n} routed-expert tensors frozen")
     return model
-
-
-def _flag(value, name: str) -> bool:
-    """A yes/no setting, read strictly (``mistral_large4_layout.parse_flag``): a bool, 0/1, or
-    true/false/yes/no/on/off/1/0 in any case; None and an empty or blank string read as False;
-    anything else raises ValueError."""
-    return parse_flag(value, name)
 
 
 # the parameter-name part of the routed experts (MoELayer.experts; the shared expert is
@@ -215,7 +207,7 @@ def check_indexer_source(args, cfg) -> None:
             "sparse attention (checked at the first sparse forward)"
         )
         return
-    if _flag(getattr(args, "allow_untrained_indexer", False), "allow_untrained_indexer"):
+    if parse_flag(getattr(args, "allow_untrained_indexer", False), "allow_untrained_indexer"):
         from megatron.training import print_rank_0
 
         print_rank_0(
@@ -271,17 +263,12 @@ def mark_experts_expert_parallel(model) -> int:
     return n
 
 
-def model_provider(
-    model_builder=None,
-    pre_process: bool = True,
-    post_process: bool = True,
-    vp_stage: Optional[int] = None,
-    config=None,
-    pg_collection=None,
-):
-    from megatron.training import get_args  # see mistral_large4_config_from_args
+# The provider a family package exports (registry.py, builder.family_model_provider): the
+# shared Primus model_provider, defaulting to this model's builder
+def model_provider(*a, **k):
+    from primus.backends.megatron.core.models.builder import family_model_provider
 
-    model_builder = model_builder or mistral_large4_builder
-    return model_builder(
-        get_args(), pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
-    )
+    return family_model_provider(mistral_large4_builder)(*a, **k)
+
+
+model_provider.default_builder = mistral_large4_builder

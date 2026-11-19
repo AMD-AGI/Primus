@@ -55,7 +55,7 @@ def test_moe_layer_freq_list(k, n, experts, want):
     assert moe_layer_freq_list(k, n, experts) == want
 
 
-@pytest.mark.parametrize("value", ["3", 3, "[1, ", "[None, 1]", [], [1.7, 0.2], [True, False]])
+@pytest.mark.parametrize("value", [None, "3", 3, "[1, ", "[None, 1]", [], [1.7, 0.2], [True, False]])
 def test_normalize_layer_list_refuses(value):
     from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
         normalize_layer_list,
@@ -581,6 +581,20 @@ def test_kv_source_validation(srcs, rope, exc, match):
         _cfg(kv_source_layers=srcs, no_rope_layers=rope)
 
 
+@pytest.mark.parametrize(
+    "value,expected",
+    [(True, True), (False, False), ("off", False), ("no", False), ("0", False), ("yes", True)],
+)
+def test_fused_lerope_read_strictly(value, expected):
+    """An env-substituted 'off' / 'no' / '0' turns the fused LeRoPE kernel off (not truthy)."""
+    assert _cfg(fused_lerope=value).fused_lerope is expected
+
+
+def test_fused_lerope_refuses_other_values():
+    with pytest.raises(ValueError, match="fused_lerope"):
+        _cfg(fused_lerope="maybe")
+
+
 def test_single_kv_source():
     cfg = _cfg(kv_source_layers=[0, 1, 2, 1], no_rope_layers=[1, 0, 1, 0])
     assert cfg.kv_source_layer == 1 and cfg.stores_kv(1) and cfg.multi_latent_attention
@@ -707,13 +721,16 @@ def test_hook_dispatches_to_the_mistral_loader(tmp_path, monkeypatch):
 
 
 def test_model_provider_registration():
+    from primus.backends.megatron.core.models.builder import model_provider
     from primus.backends.megatron.core.models.mistral_large4 import (
         mistral_large4_builders as b,
     )
     from primus.core.utils.import_utils import get_model_provider
 
     provider = get_model_provider("mistral_large4")
-    assert provider.func is b.model_provider and provider.args == (b.mistral_large4_builder,)
+    # registry.py: the shared Primus provider bound to this model's own builder
+    assert provider.func is model_provider and provider.args == (b.mistral_large4_builder,)
+    assert b.model_provider.default_builder is b.mistral_large4_builder
 
 
 @pytest.mark.parametrize(
@@ -809,41 +826,61 @@ def test_freeze_routed_experts():
     assert all(p.requires_grad for n, p in model.named_parameters() if ".router." in n)
 
 
+def _tiny_moe_model():
+    model = torch.nn.Module()
+    model.decoder = torch.nn.Module()
+    layer = torch.nn.Module()
+    layer.mlp = torch.nn.Module()
+    layer.mlp.experts = torch.nn.Linear(2, 2, bias=False)
+    layer.mlp.shared_experts = torch.nn.Linear(2, 2, bias=False)
+    layer.mlp.router = torch.nn.Linear(2, 2, bias=False)
+    model.decoder.layers = torch.nn.ModuleList([layer])
+    return model
+
+
 @pytest.mark.parametrize(
-    "value,expected",
-    [
-        (True, True),
-        (False, False),
-        (None, False),
-        (0, False),
-        (1, True),
-        ("true", True),
-        ("Yes", True),
-        ("on", True),
-        ("1", True),
-        ("false", False),
-        ("no", False),
-        ("OFF", False),
-        ("0", False),
-    ],
+    "freeze,frozen",
+    [(True, True), (False, False), (None, False), ("yes", True), ("off", False), ("0", False)],
 )
-def test_freeze_routed_experts_flag(value, expected):
-    """An environment value such as 'no' or 'off' is read as false, not as a non-empty string."""
+@pytest.mark.parametrize("distributed_optimizer", [True, False])
+def test_builder_applies_freeze_and_expert_marks(monkeypatch, freeze, frozen, distributed_optimizer):
+    """mistral_large4_builder reads args.freeze_routed_experts strictly (an env value such as 'off' is
+    false) and freezes the routed experts, and marks them expert-parallel with the plain optimizer."""
+    import sys
+    import types
+
     from primus.backends.megatron.core.models.mistral_large4 import (
         mistral_large4_builders as b,
     )
 
-    assert b._flag(value, "freeze_routed_experts") is expected
-
-
-@pytest.mark.parametrize("value", ["maybe", 2, 0.5])
-def test_freeze_routed_experts_flag_refuses_other_values(value):
-    from primus.backends.megatron.core.models.mistral_large4 import (
-        mistral_large4_builders as b,
+    training = types.ModuleType("megatron.training")
+    training.print_rank_0 = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "megatron.training", training)
+    model = _tiny_moe_model()
+    cfg = b.MistralLarge4TransformerConfig.__new__(b.MistralLarge4TransformerConfig)
+    cfg.no_rope_layers, cfg.indexer_types, cfg.kv_source_layers = [1], ["full"], [0]
+    monkeypatch.setattr(b, "build_mistral_large4_model", lambda config, **k: model)
+    monkeypatch.setattr(b, "check_indexer_source", lambda args, config: None)
+    args = SimpleNamespace(
+        padded_vocab_size=8,
+        max_position_embeddings=8,
+        untie_embeddings_and_output_weights=True,
+        spec=None,
+        seq_length=8,
+        freeze_routed_experts=freeze,
+        use_distributed_optimizer=distributed_optimizer,
     )
+    assert b.mistral_large4_builder(args, True, True, config=cfg) is model
+    experts = model.decoder.layers[0].mlp.experts.weight
+    assert experts.requires_grad is (not frozen)
+    assert model.decoder.layers[0].mlp.shared_experts.weight.requires_grad
+    assert model.decoder.layers[0].mlp.router.weight.requires_grad
+    assert getattr(experts, "allreduce", True) is distributed_optimizer
+    assert getattr(model.decoder.layers[0].mlp.shared_experts.weight, "allreduce", True)
 
+    args.freeze_routed_experts = "maybe"
     with pytest.raises(ValueError, match="freeze_routed_experts"):
-        b._flag(value, "freeze_routed_experts")
+        b.mistral_large4_builder(args, True, True, config=cfg)
 
 
 @pytest.mark.parametrize(
@@ -1504,8 +1541,9 @@ def test_layer_lists_from_checkpoint(tmp_path, monkeypatch):
     with pytest.raises(ValueError):  # the checkpoint has 4 layers
         mistral_large4_args_patches.patch_mistral_large4_layer_lists_from_checkpoint(ctx)
     # no local config.json (a Hub id, or no hf_path): the preset's lists stay
+    # stage sft: only the local-config clause makes the condition false
     assert not patch.condition(
-        _ctx("build_args", args, SimpleNamespace(model_type="mistral_large4", hf_path="org/x"))
+        _ctx("build_args", args, SimpleNamespace(model_type="mistral_large4", stage="sft", hf_path="org/x"))
     )
     assert not patch.condition(
         _ctx(

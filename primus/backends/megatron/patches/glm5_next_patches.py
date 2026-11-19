@@ -36,6 +36,9 @@ import json
 import os
 import sys
 
+from primus.backends.megatron.patches.te_patches.gemm_workspace_size_patches import (
+    enlarge_te_gemm_workspace,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -181,13 +184,7 @@ def patch_glm5_next_hf_load(ctx: PatchContext):
 def patch_glm5_next_te_gemm_workspace(ctx: PatchContext):
     # On gfx950, hipBLASLt picks split-K algorithms for large-K / small-N GEMMs
     # (e.g. KDA o_proj 8192->4096 at 960..1280 tokens) whose workspace exceeds
-    # TE's 64 MiB default and fails with "HIPBLASLT Error: 6". The shared TE helper
-    # (PRIMUS_TE_GEMM_WORKSPACE_MB, default 512; ROCm only; never lowers it) does it.
+    # TE's 64 MiB default and fails with "HIPBLASLT Error: 6".
+    # enlarge_te_gemm_workspace raises it to PRIMUS_TE_GEMM_WORKSPACE_MB (default 512 MiB, ROCm only).
     del ctx
-    # imported where it is used, as the inline torch / TE imports were (the helper module itself is
-    # also imported at registration by the *_patches auto-import, which imports torch anyway)
-    from primus.backends.megatron.patches.te_patches.gemm_workspace_size_patches import (
-        enlarge_te_gemm_workspace,
-    )
-
     enlarge_te_gemm_workspace("megatron.glm5_next.te_gemm_workspace")

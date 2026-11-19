@@ -46,6 +46,7 @@ model is held on the host in params_dtype: the 16-layer cut needs ~420 GiB in bf
 import argparse
 import errno
 import faulthandler
+import functools
 import json
 import logging
 import math
@@ -98,9 +99,8 @@ def _retryable_write_failure(e) -> bool:
     ...')``; False when any exception of the chain is a full disk or quota (ENOSPC / EDQUOT, or
     its text), which a rewrite of the whole checkpoint would hit again.
 
-    This is ``common._ran_out_of_space`` without its "unexpected pos" text (retried here); the
-    shared helper takes no list of texts, and native_convert_common.py is core code this port
-    does not change."""
+    Like ``common._ran_out_of_space`` but without its "unexpected pos" text, which is retried here
+    (the shared helper takes no text list)."""
     chain = list(_exception_chain(e))
     for x in chain:
         if isinstance(x, OSError) and x.errno in (errno.ENOSPC, errno.EDQUOT):
@@ -205,6 +205,10 @@ def dequant_block_fp8(w: torch.Tensor, scale: torch.Tensor, block: int = FP8_BLO
     return w.float() * s
 
 
+# the release's weight index when config.json names none (transformers_weights)
+DEFAULT_INDEX = "consolidated.safetensors.index.json"
+
+
 class ConsolidatedStore(common.SafetensorsStore):
     """``SafetensorsStore`` over the index config.json names in ``transformers_weights``
     (``consolidated.safetensors.index.json``; the base store reads only
@@ -214,13 +218,14 @@ class ConsolidatedStore(common.SafetensorsStore):
 
     def __init__(self, hf_dir: str):
         cfg = common.read_hf_config(hf_dir)
-        name = cfg.get("transformers_weights") or "consolidated.safetensors.index.json"
+        configured = cfg.get("transformers_weights")
+        name = configured or DEFAULT_INDEX
         index = os.path.join(hf_dir, name)
         if not os.path.isfile(index):
             # the converter maps Mistral-native names (layers.N.attention.wq.weight, ...); an
             # HF-layout copy (model.layers.N.self_attn...) has none of them, so it is refused here
             # instead of failing on the first missing key
-            how = "config.json's transformers_weights" if cfg.get("transformers_weights") else "the default"
+            how = "config.json's transformers_weights" if configured else "the default"
             raise FileNotFoundError(
                 f"Mistral Large 4 converter: {index} ({how}) is missing. It reads the release's Mistral "
                 "consolidated layout (consolidated-*.safetensors and their index); an HF-layout copy "
@@ -671,6 +676,14 @@ def build_mcore_state_dict(model, store, margs, fields, log):
     sd["output_layer.weight"] = common.pad_vocab(get("output.weight"), padded_vocab)
     sd["decoder.rotary.alpha"] = get("lerope.alpha")
 
+    def expert(p, h, e):
+        """Routed expert ``e`` of the layer with Megatron prefix ``p`` and release prefix ``h``."""
+        he = h + f"experts.{e}."
+        fc1 = torch.cat([get(he + "w1.weight"), get(he + "w3.weight")], dim=0)
+        fc2 = get(he + "w2.weight")
+        sd[p + f"mlp.experts.local_experts.{e}.linear_fc1.weight"] = fc1  # SequentialMLP
+        sd[p + f"mlp.experts.local_experts.{e}.linear_fc2.weight"] = fc2
+
     # one pool reads every MoE layer's experts (created once, not per layer)
     expert_ids = range(int(margs.num_experts))
     has_shared = bool(fields.get("_num_shared_experts"))
@@ -714,17 +727,9 @@ def build_mcore_state_dict(model, store, margs, fields, log):
                 sd[p + "mlp.linear_fc2.weight"] = get(h + "feed_forward.w2.weight")
             else:
                 sd[p + "mlp.router.weight"] = get(h + "gate.weight")
-
-                def expert(e, p=p, h=h):
-                    he = h + f"experts.{e}."
-                    fc1 = torch.cat([get(he + "w1.weight"), get(he + "w3.weight")], dim=0)
-                    fc2 = get(he + "w2.weight")
-                    sd[p + f"mlp.experts.local_experts.{e}.linear_fc1.weight"] = fc1  # SequentialMLP
-                    sd[p + f"mlp.experts.local_experts.{e}.linear_fc2.weight"] = fc2
-
                 # the experts are ~97% of the bytes: read and dequantised in parallel (each writes its
                 # own model tensors; torch's CPU ops and the file reads release the GIL)
-                list(pool.map(expert, expert_ids))
+                list(pool.map(functools.partial(expert, p, h), expert_ids))
                 if has_shared:
                     sd[p + "mlp.shared_experts.linear_fc1.weight"] = torch.cat(
                         [get(h + "shared_experts.w1.weight"), get(h + "shared_experts.w3.weight")], dim=0
