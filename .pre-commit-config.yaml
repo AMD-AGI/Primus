@@ -18,6 +18,8 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
+        # Canonical 800-conversation smoke fixture, pinned by SHA-256.
+        exclude: ^tests/trainer/fixtures/specforge/sharegpt_800\.jsonl$
       - id: check-merge-conflict
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2

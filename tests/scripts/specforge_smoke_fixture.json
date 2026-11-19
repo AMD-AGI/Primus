@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "repository": "Aeala/ShareGPT_Vicuna_unfiltered",
+    "revision": "8b0048ad6ae8c22f46a78c15559dec98feef5539",
+    "file": "ShareGPT_V4.3_unfiltered_cleaned_split.json",
+    "source_sha256": "dd5828821b7e707ca3dc4d0de07e2502c3ce278fcf1a74b81a3464f26006371e",
+    "license_on_dataset_card": "apache-2.0",
+    "rows": 800,
+    "selection": "Source IDs and row order are embedded in the checked-in JSONL; unchanged conversation text; common contact, credential and infrastructure patterns excluded before freezing",
+    "fixture_sha256": "f4a71e44e0d71b0c9471a69fc5095264975f58f74b2ef655b0878975425447c7",
+    "fixture_path": "tests/trainer/fixtures/specforge/sharegpt_800.jsonl"
+  },
+  "model": {
+    "repository": "Qwen/Qwen3.5-4B",
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "tokenizer_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+  },
+  "training": {
+    "steps": 100,
+    "seed": 42,
+    "prompt_seed": 42,
+    "log_interval": 5,
+    "batch_size": 2,
+    "accumulation_steps": 4
+  },
+  "hardware": "AMD Instinct MI355X"
+}
