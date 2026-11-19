@@ -473,9 +473,9 @@ def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
     runtime_config = update_config_from_args(RuntimeConfig(), args)
     model_parallel_config = update_config_from_args(ModelParallelConfig(), args)
 
-    from primus.core.projection.op_models.coverage import report_op_coverage
+    from primus.core.projection.op_models.coverage import report_model_coverage
 
-    report_op_coverage(model_config.extra_args)
+    report_model_coverage(model_config)
 
     training_config = TrainingConfig(
         model_config=model_config,
