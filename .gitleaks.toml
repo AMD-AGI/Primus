@@ -1,0 +1,38 @@
+# Gitleaks configuration for Primus.
+#
+# This file only ADDS allowlists. `[extend] useDefault = true` keeps the whole
+# default rule set; without it a custom config REPLACES the defaults, which
+# would silently weaken scanning across the repository.
+#
+# Prefer this over `.gitleaksignore` for anything long-lived. Ignore entries are
+# `file:rule:line` fingerprints, so an unrelated edit that shifts a line breaks
+# them — and a broken entry stops suppressing silently, surfacing later as a
+# confusing hook failure on somebody else's commit.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+Primus identifiers whose NAME contains KEY or TOKEN but whose VALUE is not a
+credential. The generic-api-key rule matches on the assignment rather than on
+the value's shape, so a constant called _PATCH_KEY trips it.
+
+Matched on the VALUE, not on a path or a line number, so these survive both
+refactors and file moves. If one of these values is ever renamed the regex
+stops matching and gitleaks flags it — loud, which is the correct direction
+for a secret scanner to fail.
+
+Scoped to generic-api-key alone: every other rule (aws-access-token,
+private-key, databricks-api-token, and the rest) still applies in full to
+these files.
+"""
+targetRules = ["generic-api-key"]
+regexes = [
+  # _PATCH_KEY in the Primus patch registry, e.g. "megatron.mlp.turbo_dense_mlp_fp4"
+  '''^megatron\.[a-z0-9_.]+$''',
+  # _MLPERF_MODEL_TOKEN naming an MLPerf model variant
+  '''^llama2_70b_lora_mxfp4$''',
+  # Prose in tools/perf: "no tokens field, warmup/compile TFLOPs". The rule
+  # keys off the word `tokens` nearby and treats `warmup/compile` as the value.
+  '''^warmup/compile$''',
+]

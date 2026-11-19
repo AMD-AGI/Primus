@@ -19,6 +19,17 @@ repos:
       - id: check-yaml
       - id: check-added-large-files
       - id: check-merge-conflict
+  # Block credentials before they reach a commit. Scans the staged diff only
+  # (`gitleaks git --staged`), so it costs nothing on an ordinary commit and
+  # never rewrites files. --redact keeps the finding out of the hook output.
+  # NOTE: because the hook scans the *staged* diff, the `pre-commit run
+  # --all-files` pass in CI is a no-op for it -- it protects the commit path,
+  # not the existing tree. A repo-wide sweep needs `gitleaks dir` as its own
+  # CI step.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
   - repo: https://github.com/pycqa/isort
     rev: 5.13.2
     hooks:
