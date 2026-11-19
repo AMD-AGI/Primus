@@ -1227,7 +1227,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             ),
             qkv_format="sbhd",
             attn_mask_type=attn_mask_type.name,
-            window_size=None,
+            # TE's forward never runs; its ``window_size`` attribute then reports the window
+            # this layer attends with ((-1, 0) for a causal layer without one).
+            window_size=self.layer_window_size,
             sequence_parallel=self.config.sequence_parallel,
             tp_size=self.config.tensor_model_parallel_size,
             get_rng_state_tracker=None,

@@ -14,9 +14,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #     as torch.compile graphs (359 -> 331 ms with TE attention).
 #   - use_turbo_attention: Primus-Turbo FlyDSL attention for head dim 64 with the causal
 #     sliding window (2047, 0) on the sliding layers (331 -> ~326 ms). Needs a
-#     Primus-Turbo with the gfx1250 head-dim-64 / sliding-window FlyDSL kernels
-#     (lhzhang333/Primus-Turbo dev/lhz/muse_spark_swa, d2c0dab); with an older
-#     Primus-Turbo the dispatcher falls back to AITER, which fails on gfx1250.
+#     Primus-Turbo whose gfx1250 FlyDSL attention takes head dim 64 and the sliding
+#     window (primus_turbo/flydsl/attention/gfx1250); with an older Primus-Turbo
+#     the dispatcher falls back to AITER, which fails on gfx1250.
 #     Primus's launcher resets PYTHONPATH, so install that Primus-Turbo in the image's
 #     site-packages rather than putting a checkout on PYTHONPATH.
 #   - env PRIMUS_FUSED_ADAM_*: Primus's HIP Adam applies the gradient-clip coefficient
