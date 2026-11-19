@@ -7,6 +7,7 @@ from functools import wraps
 
 import torch
 
+from primus.core.patches import PatchContext, get_param, register_patch
 from primus.core.utils.module_utils import log_rank_0, log_rank_last
 
 _NATIVE_HEAD_ARGUMENTS = {
@@ -69,8 +70,8 @@ def _install_on_head(head, config):
     head._forward_impl = forward_impl
 
 
-def configure_fp8_lm_head(args) -> None:
-    """Enable the requested projection during Megatron argument validation."""
+def validate_fp8_lm_head(args) -> None:
+    """Reject incompatible opt-ins before model construction or a training step."""
     recipe = getattr(args.fp8_recipe, "value", args.fp8_recipe)
     if not (
         args.enable_primus_turbo
@@ -86,13 +87,7 @@ def configure_fp8_lm_head(args) -> None:
             "gradient_accumulation_fusion=false and defer_embedding_wgrad_compute=false."
         )
     from megatron.core.models.gpt.gpt_model import GPTModel
-    from megatron.core.tensor_parallel.layers import ColumnParallelLinear
-    from megatron.training import get_args
-    from primus_turbo.pytorch.core.low_precision import (
-        Float8QuantConfig,
-        Format,
-        check_fp8_support,
-    )
+    from primus_turbo.pytorch.core.low_precision import check_fp8_support
     from primus_turbo.pytorch.ops import gemm_fp8
 
     if not callable(gemm_fp8):
@@ -100,6 +95,23 @@ def configure_fp8_lm_head(args) -> None:
     supported, reason = check_fp8_support()
     if not supported:
         raise ValueError(reason)
+    if not getattr(GPTModel.__init__, "_primus_fp8_lm_head", False):
+        raise RuntimeError("turbo_fp8_lm_head is enabled but its GPT constructor patch was not installed.")
+
+
+@register_patch(
+    "megatron.turbo.fp8_lm_head",
+    backend="megatron",
+    phase="before_train",
+    condition=lambda ctx: bool(get_param(ctx, "turbo_fp8_lm_head", False)),
+    description="Use a hybrid tensorwise FP8 training vocabulary projection at TP1",
+)
+def patch_fp8_lm_head(_ctx: PatchContext) -> None:
+    from megatron.core.models.gpt.gpt_model import GPTModel
+    from megatron.core.tensor_parallel.layers import ColumnParallelLinear
+    from megatron.training import get_args
+    from primus_turbo.pytorch.core.low_precision import Float8QuantConfig, Format
+
     original = GPTModel.__init__
     if getattr(original, "_primus_fp8_lm_head", False):
         return

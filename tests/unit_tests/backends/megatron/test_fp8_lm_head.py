@@ -8,26 +8,24 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from tests.utils import skip_if_no_cuda
-
-skip_if_no_cuda()
-if torch.version.hip is None:
-    pytest.skip("the Turbo FP8 head requires ROCm", allow_module_level=True)
-
-from megatron.core.model_parallel_config import ModelParallelConfig
-from megatron.core.tensor_parallel.layers import ColumnParallelLinear
-from primus_turbo.pytorch.core.low_precision import (
-    Float8QuantConfig,
-    Format,
-    check_fp8_support,
-)
-
 from primus.backends.megatron.patches.turbo import (
     gpt_output_layer_patches as head_patch,
 )
 
 
-def test_requested_head_rejects_unsupported_parallelism():
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("enable_primus_turbo", False),
+        ("bf16", False),
+        ("fp8", "e4m3"),
+        ("fp8_recipe", "mxfp8"),
+        ("tensor_model_parallel_size", 2),
+        ("gradient_accumulation_fusion", True),
+        ("defer_embedding_wgrad_compute", True),
+    ],
+)
+def test_requested_head_rejects_unsupported_configuration(name, value):
     from primus.backends.megatron.patches.args.rocm_arg_validation import (
         validate_args_on_rocm,
     )
@@ -38,21 +36,26 @@ def test_requested_head_rejects_unsupported_parallelism():
         bf16=True,
         fp8="hybrid",
         fp8_recipe="tensorwise",
-        tensor_model_parallel_size=2,
+        tensor_model_parallel_size=1,
         gradient_accumulation_fusion=False,
         defer_embedding_wgrad_compute=False,
     )
+    setattr(args, name, value)
     with pytest.raises(ValueError, match="turbo_fp8_lm_head requires .*TP1"):
         validate_args_on_rocm(args)
 
 
-def test_unknown_native_argument_is_forwarded():
+@pytest.mark.parametrize("unknown", [True, False])
+def test_unrecognized_native_signature_is_forwarded(unknown):
     original = Mock()
     head = SimpleNamespace(_forward_impl=original, training=True)
     head_patch._install_on_head(head, None)
     x, weight = object(), object()
     kwargs = dict.fromkeys(head_patch._NATIVE_HEAD_ARGUMENTS)
-    kwargs["future_option"] = True
+    if unknown:
+        kwargs["future_option"] = True
+    else:
+        del kwargs["gtp_remat_size"]
     assert head._forward_impl(x, weight, **kwargs) is original.return_value
     original.assert_called_once_with(x, weight, **kwargs)
 
@@ -63,11 +66,81 @@ def _assert_relative_error(actual, reference, threshold):
     assert (actual - reference).norm() < threshold * reference.norm()
 
 
-@pytest.mark.parametrize("tied", [True, False])
-def test_native_head_gradients_and_eval(init_parallel_state, monkeypatch, tied):
+@pytest.fixture
+def rocm_parallel_state(request):
+    if torch.version.hip is None or not torch.cuda.is_available():
+        pytest.skip("the Turbo FP8 head requires a ROCm device")
+
+    from primus_turbo.pytorch.core.low_precision import check_fp8_support
+
     supported, reason = check_fp8_support()
     if not supported:
         pytest.skip(reason)
+    request.getfixturevalue("init_parallel_state")
+
+
+def test_constructor_patches_only_enabled_output_stages(rocm_parallel_state, monkeypatch):
+    import megatron.training
+    from megatron.core.models.gpt import GPTModel, gpt_layer_specs
+    from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
+    from megatron.core.transformer import TransformerConfig
+
+    from primus.core.patches import PatchContext, PatchRegistry
+
+    args = SimpleNamespace(turbo_fp8_lm_head=False)
+    ctx = PatchContext(
+        backend="megatron", phase="before_train", extra={"module_config": SimpleNamespace(params=args)}
+    )
+    patch = PatchRegistry.get("megatron.turbo.fp8_lm_head")
+    assert patch is not None and not patch.condition(ctx)
+    args.turbo_fp8_lm_head = True
+    assert patch.condition(ctx)
+    monkeypatch.setattr(megatron.training, "get_args", lambda: args)
+    monkeypatch.setattr(GPTModel, "__init__", GPTModel.__init__)
+    patch.handler(ctx)
+    installed = GPTModel.__init__
+    patch.handler(ctx)
+    assert GPTModel.__init__ is installed
+
+    config = TransformerConfig(
+        num_layers=1,
+        num_attention_heads=4,
+        hidden_size=256,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+        gradient_accumulation_fusion=False,
+    )
+    model_parallel_cuda_manual_seed(7331)
+    spec = gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec()
+    model_args = dict(config=config, transformer_layer_spec=spec, vocab_size=1024, max_sequence_length=128)
+    first_stage = GPTModel(**model_args, post_process=False)
+    assert not getattr(first_stage, "output_layer", None)
+    model = GPTModel(**model_args, share_embeddings_and_output_weights=False)
+    hidden = torch.randn(128, 2, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    marker = Mock()
+    monkeypatch.setattr(head_patch, "log_rank_last", marker)
+    for _ in range(2):
+        logits, _ = model.output_layer(hidden)
+        logits.float().mean().backward()
+    marker.assert_called_once()
+    assert "[FP8 LM head active]" in marker.call_args.args[0]
+    assert model.output_layer.weight.grad is not None
+
+    args.turbo_fp8_lm_head = False
+    disabled = GPTModel(**model_args, share_embeddings_and_output_weights=False)
+    monkeypatch.setattr(
+        head_patch, "_fp8_projection", Mock(side_effect=AssertionError("unexpected FP8 head"))
+    )
+    logits, _ = disabled.output_layer(hidden)
+    torch.testing.assert_close(logits, F.linear(hidden, disabled.output_layer.weight), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("tied", [True, False])
+def test_native_head_gradients_and_eval(rocm_parallel_state, monkeypatch, tied):
+    from megatron.core.model_parallel_config import ModelParallelConfig
+    from megatron.core.tensor_parallel.layers import ColumnParallelLinear
+    from primus_turbo.pytorch.core.low_precision import Float8QuantConfig, Format
+
     torch.manual_seed(7331)
     config = ModelParallelConfig(params_dtype=torch.bfloat16, perform_initialization=False)
     head = ColumnParallelLinear(
