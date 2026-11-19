@@ -68,6 +68,11 @@ HCF_CFG = dict(
     gl_bc=256,
     gl_tsplit=8,
     gl_warps=8,
+    # fold the next HC's rms-linear partials (F1) into this HC's expand (g90mem round 3)
+    fuse_next_rms=False,  # untested on GPU (TDM hang stopped the GPU before the chain test ran)
+    xr_bm=16,
+    xr_bd=256,
+    xr_warps=4,
     # 2-D streaming tiles for collapse / expand-bwd / dpre (partials over column tiles) + row-math kernels
     two_d=True,
     t2_bt=8,
@@ -729,6 +734,42 @@ def _hc_reduce(dw_p, n, part):
     return dw, psum
 
 
+@triton.jit
+def _hc_expand_rms_fwd_kernel(X, OUT, POST, COMBT, NEW, WTH, WTL, P_RAW, P_SS, M, D,
+                              K: tl.constexpr, BN: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_D: tl.constexpr):
+    """expand (new_h = post_h*out + sum_k comb^T[h,k] x_k) + the NEXT HyperMixer's rms-linear partials on the
+    bf16 new tile: P_RAW[pid_d] = new @ W_next^T (bf16 hi/lo WMMA), P_SS[pid_d] = sum(new^2).
+    Removes the next HC's separate 128 MB read of x (g90mem round 3)."""
+    pid_m = tl.program_id(0)
+    pid_d = tl.program_id(1)
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rd = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    k_ax = tl.arange(0, K)
+    ncol = tl.arange(0, BN)
+    mask_m = rm < M
+    rm64 = rm.to(tl.int64)
+    KD = K * D
+    KK: tl.constexpr = K * K
+    x3 = tl.load(X + rm64[:, None, None] * KD + k_ax[None, :, None] * D + rd[None, None, :],
+                 mask=mask_m[:, None, None], other=0.0).to(tl.float32)
+    out_tile = tl.load(OUT + rm64[:, None] * D + rd[None, :], mask=mask_m[:, None], other=0.0).to(tl.float32)
+    acc = tl.zeros((BLOCK_M, BN), dtype=tl.float32)
+    ss = tl.zeros((BLOCK_M,), dtype=tl.float32)
+    for h in tl.static_range(K):
+        comb_h = tl.load(COMBT + rm64[:, None] * KK + h * K + k_ax[None, :], mask=mask_m[:, None], other=0.0).to(
+            tl.float32)
+        post_h = tl.load(POST + rm64 * K + h, mask=mask_m, other=0.0).to(tl.float32)
+        new_h = (post_h[:, None] * out_tile + tl.sum(comb_h[:, :, None] * x3, axis=1)).to(NEW.dtype.element_ty)
+        tl.store(NEW + rm64[:, None] * KD + h * D + rd[None, :], new_h, mask=mask_m[:, None])
+        wo = (h * D + rd)[:, None].to(tl.int64) * BN + ncol[None, :]
+        acc = tl.dot(new_h, tl.load(WTH + wo), acc)
+        acc = tl.dot(new_h, tl.load(WTL + wo), acc)
+        nf = new_h.to(tl.float32)
+        ss += tl.sum(nf * nf, axis=1)
+    tl.store(P_RAW + (pid_d * M + rm64[:, None]) * BN + ncol[None, :], acc, mask=mask_m[:, None])
+    tl.store(P_SS + pid_d * M + rm64, ss, mask=mask_m)
+
+
 # ------------------------------------------------------------------------------------------------
 # autograd
 # ------------------------------------------------------------------------------------------------
@@ -758,19 +799,27 @@ class HCPreFn(torch.autograd.Function):
         N = w.shape[0]
         BN = _block_n(N)
         assert N == (2 + K) * K
-        c = HC_CFG
-        BLOCK_T, BLOCK_K, chunk_cfg = c["fwd_bt"], c["fwd_bk"], c["fwd_chunk"]
-        n_split = max(1, triton.cdiv(KD, chunk_cfg))
-        chunk = triton.cdiv(triton.cdiv(KD, n_split), BLOCK_K) * BLOCK_K
-        n_split = triton.cdiv(KD, chunk)
         dev = x.device
-        p_raw = torch.empty((n_split, M, BN), dtype=torch.float32, device=dev)
-        p_ss = torch.empty((n_split, M), dtype=torch.float32, device=dev)
-        _hc_rms_linear_fwd_kernel[(triton.cdiv(M, BLOCK_T), n_split)](
-            x2d, w, p_raw, p_ss, M, KD, N, KD, chunk, 1, KD,
-            BLOCK_T=BLOCK_T, BLOCK_K=BLOCK_K, BLOCK_N=BN, PREC="ieee",
-            num_warps=c["fwd_warps"], num_stages=c["fwd_stages"],
-        )
+        stash = getattr(x, "_hc_stash", None)  # rms-linear partials computed by the previous HC's expand
+        if stash is not None:
+            x._hc_stash = None
+            if not (stash[0] is weight and stash[1] == weight._version):
+                stash = None
+        if stash is not None:
+            _, _, wth_s, wtl_s, p_raw, p_ss, n_split = stash
+        else:
+            c = HC_CFG
+            BLOCK_T, BLOCK_K, chunk_cfg = c["fwd_bt"], c["fwd_bk"], c["fwd_chunk"]
+            n_split = max(1, triton.cdiv(KD, chunk_cfg))
+            chunk = triton.cdiv(triton.cdiv(KD, n_split), BLOCK_K) * BLOCK_K
+            n_split = triton.cdiv(KD, chunk)
+            p_raw = torch.empty((n_split, M, BN), dtype=torch.float32, device=dev)
+            p_ss = torch.empty((n_split, M), dtype=torch.float32, device=dev)
+            _hc_rms_linear_fwd_kernel[(triton.cdiv(M, BLOCK_T), n_split)](
+                x2d, w, p_raw, p_ss, M, KD, N, KD, chunk, 1, KD,
+                BLOCK_T=BLOCK_T, BLOCK_K=BLOCK_K, BLOCK_N=BN, PREC="ieee",
+                num_warps=c["fwd_warps"], num_stages=c["fwd_stages"],
+            )
         f = HCF_CFG
         raw = torch.empty((M, BN), dtype=torch.float32, device=dev)
         rstd = torch.empty((M,), dtype=torch.float32, device=dev)
@@ -793,7 +842,9 @@ class HCPreFn(torch.autograd.Function):
             _hc_collapse2d_kernel[(triton.cdiv(M, f["t2_bt"]), D // f["t2_bc"])](
                 x3, pre, coll, M, D, K=K, BT=f["t2_bt"], BC=f["t2_bc"], num_warps=f["t2_warps"],
             )
-        if _gl_b3_ok(M, D, K):
+        if stash is not None and _gl_b3_ok(M, D, K):
+            wth, wtl = wth_s, wtl_s
+        elif _gl_b3_ok(M, D, K):
             wth = torch.empty((KD, BN), dtype=torch.bfloat16, device=dev)
             wtl = torch.empty((KD, BN), dtype=torch.bfloat16, device=dev)
             _hc_wt_split_kernel[(triton.cdiv(KD, 256),)](w, wth, wtl, N, KD, BN=BN, BLOCK=256, num_warps=4)
@@ -901,7 +952,7 @@ class HCPreFn(torch.autograd.Function):
 
 class HCPostFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, out, post, combt, link):  # type: ignore[override]
+    def forward(ctx, x, out, post, combt, link, next_w=None):  # type: ignore[override]
         K, D = x.shape[-2], x.shape[-1]
         x3 = x.reshape(-1, K, D)
         M = x3.shape[0]
@@ -910,14 +961,36 @@ class HCPostFn(torch.autograd.Function):
         combt_c = combt.reshape(M, K, K)
         new = torch.empty_like(x3)
         f = HCF_CFG
-        _hc_expand_fwd_kernel[(triton.cdiv(M, f["exp_bm"]), triton.cdiv(D, f["exp_bd"]))](
-            x3, out_c, post_c, combt_c, new, M, D,
-            K=K, BLOCK_M=f["exp_bm"], BLOCK_D=f["exp_bd"], num_warps=f["exp_warps"],
-        )
+        stash = None
+        if (next_w is not None and f["fuse_next_rms"] and K == 4 and D % f["xr_bd"] == 0
+                and next_w.shape[0] == (2 + K) * K and _gl_b3_ok(M, D, K)):
+            KD = K * D
+            N = next_w.shape[0]
+            BN = _block_n(N)
+            wn = next_w.float().contiguous()
+            wth = torch.empty((KD, BN), dtype=torch.bfloat16, device=x.device)
+            wtl = torch.empty((KD, BN), dtype=torch.bfloat16, device=x.device)
+            _hc_wt_split_kernel[(triton.cdiv(KD, 256),)](wn, wth, wtl, N, KD, BN=BN, BLOCK=256, num_warps=4)
+            n_d = D // f["xr_bd"]
+            p_raw = torch.empty((n_d, M, BN), dtype=torch.float32, device=x.device)
+            p_ss = torch.empty((n_d, M), dtype=torch.float32, device=x.device)
+            _hc_expand_rms_fwd_kernel[(triton.cdiv(M, f["xr_bm"]), n_d)](
+                x3, out_c, post_c, combt_c, new, wth, wtl, p_raw, p_ss, M, D,
+                K=K, BN=BN, BLOCK_M=f["xr_bm"], BLOCK_D=f["xr_bd"], num_warps=f["xr_warps"],
+            )
+            stash = (next_w, next_w._version, wth, wtl, p_raw, p_ss, n_d)
+        else:
+            _hc_expand_fwd_kernel[(triton.cdiv(M, f["exp_bm"]), triton.cdiv(D, f["exp_bd"]))](
+                x3, out_c, post_c, combt_c, new, M, D,
+                K=K, BLOCK_M=f["exp_bm"], BLOCK_D=f["exp_bd"], num_warps=f["exp_warps"],
+            )
         ctx.save_for_backward(x3, out_c, post_c)
         ctx.link = link
         ctx.out_shape = out.shape
-        return new.view(x.shape)
+        res = new.view(x.shape)
+        if stash is not None:
+            res._hc_stash = stash
+        return res
 
     @staticmethod
     def backward(ctx, dnew):  # type: ignore[override]
@@ -946,7 +1019,7 @@ class HCPostFn(torch.autograd.Function):
             )
             link.nc = 0
         link.dnew, link.dpost, link.dcombt = dnew, dpost, dcombt
-        return None, dout.view(ctx.out_shape), None, None, None
+        return None, dout.view(ctx.out_shape), None, None, None, None
 
 
 def hc_fused_pre(x, weight, scale, base, eps, n_iters):
@@ -956,9 +1029,11 @@ def hc_fused_pre(x, weight, scale, base, eps, n_iters):
     return coll, post, combt, link
 
 
-def hc_fused_post(x, out, post, combt, link):
-    """new[..., h, :] = post_h * out + sum_k comb[k, h] x_k  (comb^T passed)."""
-    return HCPostFn.apply(x, out, post, combt, link)
+def hc_fused_post(x, out, post, combt, link, next_w=None):
+    """new[..., h, :] = post_h * out + sum_k comb[k, h] x_k  (comb^T passed). With ``next_w`` (the next
+    HyperMixer's fn.weight) the expand also produces that mixer's rms-linear partials, picked up by its
+    ``hc_fused_pre`` through an attribute on the returned tensor."""
+    return HCPostFn.apply(x, out, post, combt, link, next_w)
 
 
 __all__ = ["hc_fused_enabled", "hc_fused_supported", "hc_fused_pre", "hc_fused_post", "HCF_CFG"]
