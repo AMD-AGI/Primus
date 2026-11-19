@@ -50,11 +50,14 @@ def _load_checkpoint(model, path: str) -> None:
         raise ValueError(f"Unsupported WorldMirror checkpoint format: {path}")
 
     current = model.state_dict()
+    matched = 0
     for key, value in current.items():
         loaded = incoming.get(key)
         if loaded is not None and loaded.shape == value.shape:
             current[key] = loaded
+            matched += 1
     model.load_state_dict(current, strict=False)
+    print(f"[Primus:Vision] loaded {matched}/{len(current)} WorldMirror tensors from {path}", flush=True)
     del incoming, current
     gc.collect()
 
@@ -116,14 +119,22 @@ class WorldMirrorForTraining(VisionModelForTraining):
             self.wm = _construct_worldmirror(WorldMirror, flags)
             _load_hub_weights(self.wm, pretrained)
 
-        losses = [
-            CameraLoss(),
-            PointLoss(gamma=1.0, alpha=0.2, gradient_loss_fn="normal", valid_range=0.98),
-            DepthLoss(gamma=1.0, alpha=0.2, gradient_loss_fn="grad", valid_range=0.98),
-            NormalLoss(loss_type="AL", real_weight=1.0, pseudo_weight=1.0, ignore_datasets=[]),
-        ]
-        weights = [5.0, 1.0, 1.0, 1.0]
-        if enable_gs:
+        # Official stage 2 replaces the criterion with the four render losses.
+        # Stage 1 keeps camera, point, depth, and normal, and drops the render terms.
+        loss_preset = str(config.get("loss_preset") or ("render" if enable_gs else "geometry")).strip().lower()
+        losses = []
+        weights = []
+        if loss_preset != "render":
+            losses.extend(
+                [
+                    CameraLoss(),
+                    PointLoss(gamma=1.0, alpha=0.2, gradient_loss_fn="normal", valid_range=0.98),
+                    DepthLoss(gamma=1.0, alpha=0.2, gradient_loss_fn="grad", valid_range=0.98),
+                    NormalLoss(loss_type="AL", real_weight=1.0, pseudo_weight=1.0, ignore_datasets=[]),
+                ]
+            )
+            weights.extend([5.0, 1.0, 1.0, 1.0])
+        if loss_preset != "geometry":
             from primus.backends.vision.worldmirror.training.losses.render import (
                 GSDepthLoss,
                 RenderDepthLoss,

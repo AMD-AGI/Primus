@@ -245,6 +245,7 @@ class RenderDepthLoss(BaseLoss):
                 if name in self.norender_datatsets:
                     weight[i] *= 0.
             dataset_mask = weight > 0
+            # depth_conf is float. This ROCm build has no bitwise_and for Float, so the mask is boolean.
             valid_mask = (valid_mask > 0) & dataset_mask.expand_as(valid_mask)
             
             loss_conf, loss_grad, loss_reg = regression_loss(

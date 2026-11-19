@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,28 @@ def _rank() -> int:
     return 0
 
 
+def _sync_device() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _images_per_gpu(batch: Any) -> int:
+    """Count images on this rank the way the WorldMirror step callback does."""
+    if isinstance(batch, (list, tuple)) and batch and isinstance(batch[0], dict):
+        image = batch[0].get("img", batch[0].get("images"))
+        if torch.is_tensor(image) and image.ndim >= 4:
+            return int(image.shape[0]) * len(batch)
+        if torch.is_tensor(image):
+            return len(batch)
+    if isinstance(batch, dict):
+        image = batch.get("img", batch.get("images"))
+        if torch.is_tensor(image) and image.ndim == 5:
+            return int(image.shape[0] * image.shape[1])
+        if torch.is_tensor(image) and image.ndim == 4:
+            return int(image.shape[0])
+    return 0
+
+
 def _unwrap(model: torch.nn.Module) -> torch.nn.Module:
     return model.module if isinstance(model, DDP) else model
 
@@ -50,7 +73,7 @@ def _plain_state(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     for key, value in state.items():
         tensor = value.full_tensor() if hasattr(value, "full_tensor") else value
         plain[key] = tensor.detach().to("cpu").contiguous().clone()
-        return plain
+    return plain
 
 
 class VisionFSDP2Trainer:
@@ -80,11 +103,11 @@ class VisionFSDP2Trainer:
     def train(self) -> None:
         args = self.args
         device = self._device()
-        seed = int(args.get("seed", 42))
-        torch.manual_seed(seed + _rank())
+        # Seeding happens once in VisionPretrainTrainer.init(), before the model is built,
+        # with the same seed on every rank. Reseeding here would change the random draws
+        # the data workers see.
         if device.type == "cuda":
-            torch.cuda.manual_seed_all(seed + _rank())
-            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cuda.matmul.allow_tf32 = bool(args.get("allow_tf32", True))
 
         model = self.model.to(device)
         if bool(args.get("gradient_checkpointing", False)):
@@ -122,11 +145,19 @@ class VisionFSDP2Trainer:
         self.optimizer.zero_grad(set_to_none=True)
         epoch = 0
         pending = 0
+        # Same clock as the WorldMirror step callback: wall time from the end of
+        # the previous optimizer step, after a device sync, including the loader.
+        step_started = time.perf_counter()
+        step_images = 0
+        if _rank() == 0:
+            _sync_device()
+            step_started = time.perf_counter()
         while self.steps < max_steps and epoch < max_epochs:
             loader = self._loader(epoch)
             saw_batch = False
             for batch in loader:
                 saw_batch = True
+                step_images += _images_per_gpu(batch)
                 sync = pending + 1 >= accum_steps
                 loss_value = self._forward_backward(model, batch, device, use_autocast, sync, accum_steps)
                 if loss_value is None:
@@ -134,6 +165,10 @@ class VisionFSDP2Trainer:
                     pending = 0
                     self.skipped_steps += 1
                     self.steps += 1
+                    step_images = 0
+                    if _rank() == 0:
+                        _sync_device()
+                        step_started = time.perf_counter()
                     if self.steps >= max_steps:
                         break
                     continue
@@ -148,8 +183,15 @@ class VisionFSDP2Trainer:
                 self.steps += 1
                 if profiler is not None:
                     profiler.step()
+                step_time = 0.0
+                if _rank() == 0:
+                    _sync_device()
+                    finished = time.perf_counter()
+                    step_time = finished - step_started
+                    step_started = finished
                 if self.steps % log_every == 0:
-                    self._log_step(loss_value, batch, max_steps)
+                    self._log_step(loss_value, batch, max_steps, step_time, step_images)
+                step_images = 0
                 if save_every > 0 and self.steps % save_every == 0:
                     self._save_checkpoint(output_dir / f"step_{self.steps}.pt")
                 if self.steps >= max_steps:
@@ -296,7 +338,14 @@ class VisionFSDP2Trainer:
             return
         torch.nn.utils.clip_grad_norm_(_unwrap(self.model).parameters(), max_norm)
 
-    def _log_step(self, loss_value: float, batch: Any, max_steps: int) -> None:
+    def _log_step(
+        self,
+        loss_value: float,
+        batch: Any,
+        max_steps: int,
+        step_time_s: float,
+        images_per_gpu: int,
+    ) -> None:
         module = _unwrap(self.model)
         metrics = {}
         for key, value in getattr(module, "last_metrics", {}).items():
@@ -305,17 +354,26 @@ class VisionFSDP2Trainer:
                     metrics[key] = float(value.detach().float().cpu())
             elif isinstance(value, (int, float)):
                 metrics[key] = float(value)
+        # WorldMirror's training_step logs this same weighted total as train/loss_all.
+        loss_all = metrics.get("total_loss", metrics.get("objective", loss_value))
+        world = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+        if images_per_gpu <= 0 and "num_images" in metrics:
+            images_per_gpu = int(metrics["num_images"])
+        images_per_s = (images_per_gpu * world) / step_time_s if step_time_s > 0 else 0.0
+        images_per_s_per_gpu = images_per_gpu / step_time_s if step_time_s > 0 else 0.0
         learning_rate = self.optimizer.param_groups[0]["lr"]
         parts = [
             f"step={self.steps}/{max_steps}",
-            f"loss={loss_value:.6f}",
+            f"loss_all={loss_all:.6f}",
+            f"step_time_s={step_time_s:.3f}",
+            f"images_per_s={images_per_s:.2f}",
+            f"images_per_s_per_gpu={images_per_s_per_gpu:.2f}",
+            f"images_per_gpu={images_per_gpu}",
             f"lr={learning_rate:.3e}",
             f"skipped={self.skipped_steps}",
         ]
-        if "num_images" in metrics:
-            parts.append(f"images={int(metrics['num_images'])}")
         for key in sorted(metrics):
-            if key in {"loss", "num_images", "objective"}:
+            if key in {"loss", "num_images", "objective", "total_loss"}:
                 continue
             parts.append(f"{key}={metrics[key]:.4f}")
         _log("[Primus:Vision] " + " ".join(parts))

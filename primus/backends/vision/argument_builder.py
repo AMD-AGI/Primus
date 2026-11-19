@@ -31,6 +31,7 @@ _TRAINER_ARGS: dict[str, Any] = {
     "attention_backend": "aiter",
     "seed": 42,
     "bf16": True,
+    "allow_tf32": True,
     "gradient_checkpointing": False,
     "compile_transformer_blocks": False,
     "logging_steps": 1,
@@ -84,6 +85,7 @@ _DATASETS: dict[str, dict[str, Any]] = {
 
 _BOOL_TRAINER_KEYS = {
     "bf16",
+    "allow_tf32",
     "gradient_checkpointing",
     "compile_transformer_blocks",
     "profile",
@@ -227,6 +229,8 @@ class VisionArgBuilder:
             "aspect_ratios",
             "num_pixels_range",
             "train_datasets",
+            "seed",
+            "augment",
             "length",
             "views",
             "image_size",
@@ -269,6 +273,7 @@ class VisionArgBuilder:
             "attention_backend": "attention_backend",
             "seed": "seed",
             "bf16": "bf16",
+            "allow_tf32": "allow_tf32",
             "gradient_checkpointing": "gradient_checkpointing",
             "compile_transformer_blocks": "compile_transformer_blocks",
             "profile": "profile",

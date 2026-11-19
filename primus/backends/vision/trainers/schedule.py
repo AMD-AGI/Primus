@@ -29,6 +29,20 @@ def lr_factor(
     kind = (scheduler_type or "cosine").strip().lower()
     if kind == "constant":
         return 1.0
+    if kind == "worldmirror_cosine":
+        # WorldMirror's MultiLinearWarmupCosineAnnealingLR reads `last_step + 1` after it
+        # has already advanced, so update 1 uses the base rate and every later update k
+        # uses progress k / total. Reproduce that so the rates match step for step.
+        if step == 0:
+            return 1.0
+        position = step + 1
+        floor = float(eta_min_ratio)
+        if warmup_steps > 0 and position <= warmup_steps:
+            return float(position) / float(warmup_steps)
+        if position < total_steps:
+            progress = (position - warmup_steps) / max(total_steps - warmup_steps, 1)
+            return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        return floor
     if warmup_steps > 0 and step < warmup_steps:
         return float(step + 1) / float(warmup_steps)
     if kind == "constant_with_warmup":
