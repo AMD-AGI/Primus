@@ -4,14 +4,13 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 
-: "${DATA_ROOT:?Set DATA_ROOT to the directory containing the MLPerf datasets}"
-: "${OUTPUT_ROOT:?Set OUTPUT_ROOT to the output directory}"
-
 export FLUX_CONFIG=${FLUX_CONFIG:-config_1n_gbs256_a6w4.sh}
 [[ -f "$SCRIPT_DIR/$FLUX_CONFIG" ]] || { echo "Unknown FLUX_CONFIG: $FLUX_CONFIG" >&2; exit 2; }
 # The profile is selected and checked at runtime.
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/$FLUX_CONFIG"
+: "${DATA_ROOT:?Set DATA_ROOT to the directory containing the MLPerf datasets}"
+: "${OUTPUT_ROOT:?Set OUTPUT_ROOT to the output directory}"
 export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-$LOCAL_BATCH_SIZE}
 
 # Verified AMD runtime; Primus is supplied by the checkout bind mount.
@@ -98,7 +97,7 @@ env_names+=("${current_flux_env[@]}")
 env_names+=(
     FLUX_CONFIG LAUNCH_MODE NODE_RANK MASTER_ADDR MASTER_PORT CONFIG
     PRIMUS_WORKSPACE PRIMUS_SKIP_PIP PRIMUS_AUTO_INSTALL PRIMUS_AUTO_DEPS_SYNC
-    DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR
+    DATASET_PATH EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR HF_HUB_CACHE
     MLLOG_OUTPUT_FILE EVAL_BATCH_SIZE PROFILE_OUTPUT_DIR TORCHINDUCTOR_CACHE_DIR
     TORCHINDUCTOR_CACHE_SEED TORCHINDUCTOR_CACHE_EXPORT NCCL_IB_DISABLE NCCL_IB_TC
     NCCL_IB_FIFO_TC NCCL_IB_ROCE_VERSION_NUM NCCL_IB_USE_INLINE NCCL_IB_QPS_PER_CONNECTION
@@ -121,6 +120,14 @@ rdma_args=()
 libionic_args=()
 [[ -e /dev/infiniband ]] && rdma_args=(--device=/dev/infiniband)
 [[ -n "${LIBIONIC_ABI4_PATH:-}" ]] && libionic_args=(-v "$LIBIONIC_ABI4_PATH:/usr/lib/x86_64-linux-gnu/libionic.so.1:ro")
+# Protect the original data path too when the broad shared mount exposes it.
+data_alias_args=()
+[[ "$DATA_ROOT" == /shared_nfs/* ]] && data_alias_args=(-v "$DATA_ROOT:$DATA_ROOT:ro")
+hf_cache_args=()
+if [[ -n "${HF_HUB_CACHE:-}" ]]; then
+    [[ -d "$HF_HUB_CACHE" ]] || { echo "Missing HF_HUB_CACHE: $HF_HUB_CACHE" >&2; exit 2; }
+    hf_cache_args=(-v "$HF_HUB_CACHE:$HF_HUB_CACHE:ro")
+fi
 mkdir -p "$OUTPUT_ROOT"
 case "${DOCKER_PRIVILEGED:-1}" in
     1) privileged_args=(--privileged) ;;
@@ -135,10 +142,10 @@ exec docker run --rm --init "${privileged_args[@]}" \
     --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
     --ipc=host --network=host --shm-size=20G \
     -v "$REPO_ROOT:/workspace/Primus" \
-    -v "$DATA_ROOT:/data" \
+    -v "$DATA_ROOT:/data:ro" \
     -v "$OUTPUT_ROOT:/output" \
     -v /shared_nfs:/shared_nfs \
-    "${libionic_args[@]}" \
+    "${libionic_args[@]}" "${data_alias_args[@]}" "${hf_cache_args[@]}" \
     -w /workspace/Primus \
     "${docker_env_args[@]}" \
     "$DOCKER_IMAGE" bash -lc '

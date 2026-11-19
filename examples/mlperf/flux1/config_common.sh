@@ -11,6 +11,9 @@ case "$FLUX_CLUSTER" in
         export DATALOADER_NUM_WORKERS=${DATALOADER_NUM_WORKERS:-4}
         ;;
     crusoe)
+        export DATA_ROOT=${DATA_ROOT:-/shared_nfs/datasets/mlperf_flux1_arrow}
+        # The public cache stores models--* directly, not under a hub/ child.
+        export HF_HUB_CACHE=${HF_HUB_CACHE:-/mnt/hf_cache}
         export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-ens3}
         export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-ens3}
         # The requested plugin is absent in the image, selecting regular IB

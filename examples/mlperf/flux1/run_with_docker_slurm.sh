@@ -5,14 +5,13 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 : "${SLURM_JOB_ID:?Run inside a Slurm/Spur allocation}"
 : "${SLURM_NNODES:?Missing SLURM_NNODES}"
-: "${DATA_ROOT:?Set DATA_ROOT}"
-: "${OUTPUT_ROOT:?Set OUTPUT_ROOT}"
-
 export FLUX_CONFIG=${FLUX_CONFIG:-config_1n_gbs256_a6w4.sh}
 [[ -f "$SCRIPT_DIR/$FLUX_CONFIG" ]] || { echo "Unknown FLUX_CONFIG: $FLUX_CONFIG" >&2; exit 2; }
 # The profile is selected and checked at runtime.
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/$FLUX_CONFIG"
+: "${DATA_ROOT:?Set DATA_ROOT}"
+: "${OUTPUT_ROOT:?Set OUTPUT_ROOT}"
 [[ "$NNODES" == "$SLURM_NNODES" ]] || {
     echo "$FLUX_CONFIG requires $NNODES nodes; allocation has $SLURM_NNODES" >&2
     exit 2
@@ -47,7 +46,7 @@ mapfile -t current_flux_env < <(compgen -e | grep '^FLUX_' || true)
 forward_vars+=("${current_flux_env[@]}")
 forward_vars+=(
     FLUX_CONFIG LAUNCH_MODE DOCKER_IMAGE CONFIG PRIMUS_WORKSPACE DATASET_PATH
-    EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR MLLOG_OUTPUT_FILE EVAL_BATCH_SIZE
+    EVAL_DATASET_PATH EMPTY_ENCODINGS_PATH OUTPUT_DIR MLLOG_OUTPUT_FILE EVAL_BATCH_SIZE HF_HUB_CACHE
     PROFILE_OUTPUT_DIR TORCHINDUCTOR_CACHE_DIR TORCHINDUCTOR_CACHE_SEED
     TORCHINDUCTOR_CACHE_EXPORT FSDP2_HSDP_FP8_ALL_REDUCE FSDP2_HSDP_FP8_BLOCK_SIZE
 )

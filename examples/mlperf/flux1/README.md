@@ -63,6 +63,18 @@ bash <(curl -s https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/he
 `DATA_ROOT` must contain `cc12m_preprocessed/`, `coco_preprocessed/` and
 `empty_encodings/`. See the [MLPerf preprocessing instructions](https://github.com/mlcommons/training/tree/master/text_to_image#preprocessing).
 
+On CRS, `FLUX_CLUSTER=crusoe` defaults `DATA_ROOT` to
+`/shared_nfs/datasets/mlperf_flux1_arrow` and `HF_HUB_CACHE` to `/mnt/hf_cache`.
+The public model cache stores `models--*` directly, without a `hub/` child.
+The Docker launcher mounts data and the configured model cache read-only; both
+paths remain overridable. DCCS and other sites still require their own data root.
+Precomputed FLUX pretraining uses the supplied encodings and initializes the DiT
+from scratch: do not set `PRETRAINED_PATH` or load T5/CLIP/VAE merely to use this
+recipe. Optional raw-data/pretrained experiments can use the public model cache.
+For bare-metal `primus-cli direct`, set `DATASET_PATH`, `EVAL_DATASET_PATH` and
+`EMPTY_ENCODINGS_PATH` under the public data root explicitly (there is no `/data`
+Docker mount).
+
 ## Profiles and launch
 
 Run from the Primus repository root inside an allocation owning all GPUs.
@@ -86,7 +98,7 @@ Single-node Crusoe launch:
 
 ```bash
 FLUX_CLUSTER=crusoe \
-DATA_ROOT=/path/to/data OUTPUT_ROOT=/path/to/unique-output \
+OUTPUT_ROOT=/path/to/unique-output \
 bash examples/mlperf/flux1/run_with_docker.sh
 ```
 

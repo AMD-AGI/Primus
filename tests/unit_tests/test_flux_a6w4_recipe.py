@@ -224,6 +224,18 @@ def test_cluster_network_profiles():
     }
 
 
+def test_crusoe_public_paths_preserve_overrides_and_other_sites():
+    env = _profile_env("crusoe", profile="config_1n_gbs256_a6w4.sh")
+    assert env["DATA_ROOT"] == "/shared_nfs/datasets/mlperf_flux1_arrow"
+    assert env["HF_HUB_CACHE"] == "/mnt/hf_cache"
+    overrides = {"DATA_ROOT": "/custom/data", "HF_HUB_CACHE": "/custom/cache"}
+    env = _profile_env("crusoe", extra_env=overrides)
+    assert {key: env[key] for key in overrides} == overrides
+    for site in ("", "dccs"):
+        env = _profile_env(site)
+        assert "DATA_ROOT" not in env and "HF_HUB_CACHE" not in env
+
+
 def test_runtime_image_pin_agrees_with_documentation():
     for name in ("README.md", "run_with_docker.sh"):
         assert IMAGE in (RECIPE / name).read_text()
@@ -242,6 +254,8 @@ def _fake_launcher(
     bin_dir = tmp_path / "bin"
     data.mkdir()
     output.mkdir()
+    cache = tmp_path / "hf-cache"
+    cache.mkdir()
     bin_dir.mkdir()
     # Keep scheduler discovery deterministic and never invoke host schedulers.
     for name in ("bash", "dirname", "readlink", "basename", "sed", "env", "grep", "mkdir"):
@@ -268,6 +282,7 @@ def _fake_launcher(
         "PATH": str(bin_dir),
         "DATA_ROOT": str(data),
         "OUTPUT_ROOT": str(output),
+        "HF_HUB_CACHE": str(cache),
         "FLUX_CLUSTER": "crusoe",
         "FLUX_CONFIG": profile,
         "DOCKER_IMAGE": image,
@@ -301,6 +316,26 @@ def test_launchers_forward_conditional_flux_vars_but_not_path(script, tmp_path):
     for name in ("NCCL_NET_PLUGIN", "NCCL_RMA_DISABLE", "NCCL_IB_HCA", "TORCH_DIST_USE_NCCL2"):
         assert any(arg == name or arg.startswith(f"{name}=") for arg in args)
     assert IMAGE in args or f"DOCKER_IMAGE={IMAGE}" in args
+
+
+@pytest.mark.parametrize("script", ["run_with_docker.sh", "run_with_docker_slurm.sh"])
+def test_launchers_use_public_data_and_forward_model_cache(script, tmp_path):
+    args = _fake_launcher(script, tmp_path, extra_env={"DATA_ROOT": ""})
+    cache = str(tmp_path / "hf-cache")
+    assert f"ENV:HF_HUB_CACHE={cache}" in args
+    if script == "run_with_docker.sh":
+        assert "/shared_nfs/datasets/mlperf_flux1_arrow:/data:ro" in args
+        assert "/shared_nfs/datasets/mlperf_flux1_arrow:/shared_nfs/datasets/mlperf_flux1_arrow:ro" in args
+        assert f"{cache}:{cache}:ro" in args
+    else:
+        assert "DATA_ROOT=/shared_nfs/datasets/mlperf_flux1_arrow" in args
+
+
+def test_launcher_rejects_missing_model_cache(tmp_path):
+    with pytest.raises(subprocess.CalledProcessError) as error:
+        _fake_launcher("run_with_docker.sh", tmp_path, extra_env={"HF_HUB_CACHE": "/missing/cache"})
+    assert "Missing HF_HUB_CACHE" in error.value.stderr
+    assert "ENV:" not in error.value.stdout
 
 
 def test_libionic_mount_uses_version_independent_soname(tmp_path):
