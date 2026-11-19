@@ -764,7 +764,7 @@ jobs:
       # markers together with the environment.
       DEPS_DIR: /opt/primus-deps
       # E2E tokenizers and HF assets, downloaded by the prepare hooks on first use.
-      E2E_DATA_PATH: /shared_nfs/users/f95e10815db72d062ca0da826d4f52c9/primus-ci-data
+      E2E_DATA_PATH: /shared_nfs/github-runners/_data-primus
       # No shared log dir on this runner; failed runs upload the logs instead.
       UT_LOG_PATH: ${{ github.workspace }}/ut_out
     needs: [code-lint]
