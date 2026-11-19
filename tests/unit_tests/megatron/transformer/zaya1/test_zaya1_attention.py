@@ -167,6 +167,9 @@ def test_flash_attention_matches_the_dense_mask_path():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU and primus_turbo")
 def test_turbo_attention_matches_the_dense_mask_path():
     pytest.importorskip("primus_turbo.pytorch.ops")
-    runs = _attention_runs(((True, True, None), (False, False, _causal(128).cuda())))
+    # Over 256 keys: the CI image's GPU_ARCHS="gfx942;gfx950" makes AITER take its MI300X runner for
+    # gfx950, and AITER's gfx950 rule for <= 256 keys picks a backward kernel that gives NaN dk on gfx942.
+    seq = 512
+    runs = _attention_runs(((True, True, None), (False, False, _causal(seq).cuda())), seq=seq)
     assert runs[0][0].is_contiguous()  # the output came back [s, b, h, d] without a copy
     _assert_close_runs(runs)
