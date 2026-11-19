@@ -171,4 +171,3 @@ modules:
       # "fp8 on all weight GEMMs". Without this the projections stay bf16.
       use_turbo_gemm: true
 
-      moe_router_padding_for_quantization: true
