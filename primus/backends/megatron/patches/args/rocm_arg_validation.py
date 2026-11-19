@@ -210,6 +210,13 @@ def warn_turbo_grouped_gemm_without_expandable_segments(args) -> None:
 
 
 def validate_args_on_rocm(args):
+    if getattr(args, "turbo_fp8_lm_head", False):
+        from primus.backends.megatron.patches.turbo.gpt_output_layer_patches import (
+            configure_fp8_lm_head,
+        )
+
+        configure_fp8_lm_head(args)
+
     # Primus-Turbo auto-tuning
     use_turbo_autotune = getattr(args, "use_turbo_autotune", False)
     if use_turbo_autotune:
