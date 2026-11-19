@@ -53,10 +53,22 @@ _fp8_input_store_cases = [
 ]
 
 
+def _clamp_ref(x: torch.Tensor, min=None, max=None) -> torch.Tensor:
+    """``torch.clamp`` that keeps the gradient at ``x == bound``, as the fused kernel does.
+
+    torch>=2.14 zeroes the ``torch.clamp`` gradient at a scalar bound (pytorch/pytorch#185831).
+    """
+    if max is not None:
+        x = torch.where(x > max, max, x)
+    if min is not None:
+        x = torch.where(x < min, min, x)
+    return x
+
+
 def _eager_clamped_swiglu(y: torch.Tensor, alpha: float) -> torch.Tensor:
     half = y.shape[-1] // 2
     gate, up = y[..., :half], y[..., half:]
-    return F.silu(torch.clamp(gate, max=alpha)) * torch.clamp(up, min=-alpha, max=alpha)
+    return F.silu(_clamp_ref(gate, max=alpha)) * _clamp_ref(up, min=-alpha, max=alpha)
 
 
 def _eager_clamped_weighted_swiglu(y: torch.Tensor, weights: torch.Tensor, alpha: float) -> torch.Tensor:

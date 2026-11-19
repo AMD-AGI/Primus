@@ -117,6 +117,7 @@ def _forward_layer(*, overlap: bool):
     """A layer stub exercising only the production branch of ``forward``."""
     layer = DeepseekV4MoE.__new__(DeepseekV4MoE)
     layer.local_experts = None
+    layer.mega_moe_experts = None
     layer.hidden_size = 4
     layer.shared_expert_overlap = overlap
     layer.shared_expert = lambda x: torch.ones_like(x)
