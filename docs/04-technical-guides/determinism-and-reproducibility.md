@@ -28,6 +28,8 @@ export TORCH_COMPILE_DISABLE=1             # avoid torch.compile/Triton race con
 export PRIMUS_TURBO_AUTO_TUNE=0            # disable Primus-Turbo autotuning (stable kernel choice)
 ```
 
+> On gfx950 (MI355X/MI350X), `runner/helpers/envs/MI355X.sh` and `MI350X.sh` also export `NVTE_CK_USES_FWD_V3=0` in deterministic mode: Transformer Engine's CK v3 attention forward is not run-to-run stable there for MLA head dims (qk 192 / v 128).
+
 > `PRIMUS_TURBO_AUTO_TUNE` also defaults to `0` in `runner/helpers/envs/base_env.sh`, which the hook relies on rather than re-exporting.
 
 Additionally, **HipBLASLt autotuning is disabled** in deterministic mode: tuning only runs when `PRIMUS_DETERMINISTIC != 1` *and* `PRIMUS_HIPBLASLT_TUNING=1` (`runner/helpers/hooks/train/pretrain/prepare_experiment.sh`). This prevents run-to-run kernel-selection differences. See [Performance tuning](./performance-tuning.md).
@@ -129,6 +131,7 @@ Determinism is not free:
 | `NCCL_ALGO=Ring` | Forgoes faster topology-aware collective algorithms. |
 | `ROCBLAS_DEFAULT_ATOMICS_MODE=0` | Disables atomic reductions—slower GEMMs. |
 | `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` | Restricts TE to deterministic (often slower) kernels. |
+| `NVTE_CK_USES_FWD_V3=0` (gfx950 only) | TE's CK attention forward falls back from the faster v3 kernels. |
 | `TORCH_COMPILE_DISABLE=1` | No `torch.compile` fusion/codegen speedups. |
 | `PRIMUS_TURBO_AUTO_TUNE=0` | No Primus-Turbo kernel autotuning. |
 | HipBLASLt tuning disabled | No autotuned GEMM kernels. |
