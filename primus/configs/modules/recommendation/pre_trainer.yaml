@@ -22,6 +22,17 @@ trainer_src: null
 # installed there by the recommendation install hook; put first on the trainer's path.
 private_site: ${PRIMUS_RECOMMENDATION_SITE:/opt/primus-recommendation/site-packages}
 
+# Synthetic data, for throughput runs without the dataset: a small yambda-5b
+# dataset with the statistics of the real one (primus/backends/recommendation/
+# dlrm_v4/synthetic_data.py: sequence lengths, users per batch, id repeats),
+# generated for the run's size (num_train_batches is required) under
+# synthetic_data_dir and reused by later runs of that size. The run trains on its
+# one train window and evaluates on the next; data_path is not read.
+synthetic_data: false
+# Default: $DATA_PATH/dlrm_v4_synthetic, else <output_dir>/dlrm_v4_synthetic.
+# 11 GB for 200 steps of 8 GPUs at batch 1024, 16 GB for 300.
+synthetic_data_dir: null
+
 # Run shape. null keeps the gin file's value; each maps to the environment
 # variable in primus/backends/recommendation/dlrm_v4/run_config.py (ENV_PARAMS).
 seed: null                  # -1 in the gin file: a fresh random seed

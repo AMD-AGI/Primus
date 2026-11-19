@@ -127,6 +127,42 @@ def missing_data(data_path: Optional[str], history_length: Optional[int]) -> Lis
     return [str(p) for p in needed if not p.exists()]
 
 
+# The trainer's gin defaults for the run shape that sizes a synthetic dataset.
+DEFAULT_BATCH_SIZE = 1024
+
+
+def synthetic_plan(env: Mapping[str, str], world_size: int) -> Dict[str, Any]:
+    """Size of the synthetic dataset for a run, and the environment that points the
+    run at its windows (window 0 trains, window 1 evaluates).
+
+    Each window holds its batches plus half a global batch (the trainer drops the
+    partial batch). The run must cap its length (NUM_TRAIN_BATCHES); the final
+    eval is one batch unless NUM_EVAL_BATCHES says otherwise.
+    """
+    steps = int(env.get("NUM_TRAIN_BATCHES") or 0)
+    if steps <= 0:
+        raise ValueError(
+            "synthetic_data needs num_train_batches (NUM_TRAIN_BATCHES) > 0: it sizes the dataset"
+        )
+    history = int(env.get("HISTORY_LENGTH") or DEFAULT_HISTORY_LENGTH)
+    if history != DEFAULT_HISTORY_LENGTH:
+        raise ValueError(
+            f"synthetic_data supports history_length {DEFAULT_HISTORY_LENGTH} only, not {history}"
+        )
+    eval_batches = int(env.get("NUM_EVAL_BATCHES") or 0) or 1
+    global_batch = int(env.get("BATCH_SIZE") or DEFAULT_BATCH_SIZE) * world_size
+    return {
+        "train_samples": steps * global_batch + global_batch // 2,
+        "eval_samples": eval_batches * global_batch + global_batch // 2,
+        "env": {
+            "START_TS": "0",
+            "NUM_TRAIN_TS": "1",
+            "EVAL_HOLDOUT_TS": "-1",
+            "NUM_EVAL_BATCHES": str(eval_batches),
+        },
+    }
+
+
 def run_summary(log_path: str) -> Dict[str, Any]:
     """Time to train, status and evals from an MLPerf log (empty if absent)."""
     import json

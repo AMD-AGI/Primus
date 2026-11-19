@@ -372,3 +372,149 @@ def test_trainer_refuses_missing_data(tmp_path, monkeypatch):
             t.setup()
     finally:
         sys.path[:] = saved
+
+
+def test_synthetic_plan_sizes_the_windows_for_the_run():
+    plan = run_config.synthetic_plan({"NUM_TRAIN_BATCHES": "200", "BATCH_SIZE": "512"}, world_size=16)
+    gb = 512 * 16
+    assert plan["train_samples"] == 200 * gb + gb // 2
+    assert plan["eval_samples"] == gb + gb // 2  # one eval batch by default
+    assert plan["env"] == {
+        "START_TS": "0",
+        "NUM_TRAIN_TS": "1",
+        "EVAL_HOLDOUT_TS": "-1",
+        "NUM_EVAL_BATCHES": "1",
+    }
+    plan = run_config.synthetic_plan({"NUM_TRAIN_BATCHES": "10", "NUM_EVAL_BATCHES": "3"}, world_size=8)
+    assert plan["eval_samples"] == 3 * 8192 + 4096 and plan["env"]["NUM_EVAL_BATCHES"] == "3"
+    with pytest.raises(ValueError, match="num_train_batches"):
+        run_config.synthetic_plan({}, world_size=8)
+    with pytest.raises(ValueError, match="history_length"):
+        run_config.synthetic_plan({"NUM_TRAIN_BATCHES": "10", "HISTORY_LENGTH": "2048"}, world_size=8)
+
+
+def test_synthetic_data_is_in_the_module_preset():
+    import yaml
+
+    preset = yaml.safe_load(
+        (PRIMUS_ROOT / "primus/configs/modules/recommendation/pre_trainer.yaml").read_text()
+    )
+    assert preset["synthetic_data"] is False and "synthetic_data_dir" in preset
+
+
+def test_trainer_runs_a_synthetic_run_on_its_generated_data(tmp_path, monkeypatch):
+    from primus.backends.recommendation.dlrm_v4 import synthetic_data
+    from primus.backends.recommendation.dlrm_v4 import trainer as T
+
+    src, data = _fake_trainer_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(T.os.path, "exists", lambda p, e=os.path.exists: p == "/opt/rocm/bin/hipcc" or e(p))
+    for name in (
+        "DLRM_DATA_PATH",
+        "START_TS",
+        "NUM_TRAIN_TS",
+        "EVAL_HOLDOUT_TS",
+        "NUM_EVAL_BATCHES",
+        "PYTHONPATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("GPUS_PER_NODE", "8")
+    monkeypatch.setenv("NNODES", "1")
+    monkeypatch.setenv("DATA_PATH", str(tmp_path / "perf_data"))
+    calls = []
+
+    def fake_ensure(parent, **kw):
+        calls.append((parent, kw["train_samples"], kw["eval_samples"]))
+        return str(data)
+
+    monkeypatch.setattr(synthetic_data, "ensure", fake_ensure)
+    params = {
+        "trainer_src": str(src),
+        "data_path": str(tmp_path / "not_read"),
+        "synthetic_data": True,
+        "num_train_batches": 50,
+        "num_train_ts": 7,
+        "mlperf_logging": False,
+        "output_dir": str(tmp_path / "out"),
+    }
+    saved = list(sys.path)
+    try:
+        T.DlrmV4Trainer(backend_args=params).setup()
+        assert calls == [(str(tmp_path / "perf_data" / "dlrm_v4_synthetic"), 50 * 8192 + 4096, 8192 + 4096)]
+        assert os.environ["DLRM_DATA_PATH"] == str(data)
+        assert (os.environ["START_TS"], os.environ["NUM_TRAIN_TS"], os.environ["EVAL_HOLDOUT_TS"]) == (
+            "0",
+            "1",
+            "-1",
+        )
+    finally:
+        sys.path[:] = saved
+        os.chdir(tmp_path)
+
+
+def _parquet_writer_available() -> bool:
+    import importlib.util
+
+    return any(importlib.util.find_spec(m) for m in ("polars", "pyarrow"))
+
+
+@pytest.mark.skipif(not _parquet_writer_available(), reason="needs polars or pyarrow")
+def test_synthetic_data_is_what_the_yambda_loader_reads(tmp_path):
+    """The generated cache follows DLRMv4YambdaDataset's formulas, and the two
+    windows hold exactly the planned anchors."""
+    import numpy as np
+
+    from primus.backends.recommendation.dlrm_v4 import synthetic_data as sd
+
+    gb = 8 * 1024
+    train, ev = 2 * gb + gb // 2, gb + gb // 2
+    root = sd.ensure(str(tmp_path), train_samples=train, eval_samples=ev, log=lambda *_: None)
+    assert run_config.missing_data(root, None) == []
+    c = Path(root) / "processed_5b" / "hstu_cache_L4086"
+    L = lambda n: np.load(c / f"{n}.npy", mmap_mode="r")  # noqa: E731
+    fu, et, pr, ts = L("flat_uid"), L("flat_event_types"), L("flat_played_ratio"), L("flat_timestamps")
+    us, ue, uu = L("user_start"), L("user_end"), L("unique_uids")
+    meta = json.loads((c / "store_meta.json").read_text())
+    assert meta == {"num_users": len(uu), "total_events": len(fu)} and (c / "_READY").exists()
+    # the user index of a uid-sorted event store
+    assert np.all(np.diff(fu) >= 0)
+    starts = np.concatenate([[0], np.flatnonzero(np.diff(fu)) + 1])
+    assert np.array_equal(fu[starts], uu) and np.array_equal(us[uu], starts)
+    assert np.array_equal(ue[uu], np.concatenate([starts[1:], [len(fu)]]))
+    # the pool flags, as _ensure_cache_built derives them
+    listen = et == 0
+    assert np.array_equal(L("flat_is_listen_plus"), listen & (pr >= 50))
+    assert np.array_equal(L("flat_is_skip"), listen & (pr < 50))
+    assert np.array_equal(L("flat_is_like"), et == 1)
+    # time order within each user
+    assert np.all(np.diff(ts)[np.diff(fu) == 0] >= 0)
+    # anchors: listens with >= 4086 earlier events, in the two windows
+    pos = L("positions_L4086")
+    assert np.all(listen[pos]) and np.all(pos - us[fu[pos]] >= 4086)
+    anchor_ts = L("anchor_ts_L4086")
+    assert np.array_equal(anchor_ts, ts[pos]) and int(anchor_ts.min()) == sd.T0
+    offsets, indices = L("ts_offsets_L4086_W86400"), L("ts_indices_L4086_W86400")
+    assert offsets.tolist() == [0, train, train + ev] and np.array_equal(indices, np.arange(len(pos)))
+    # ids fit the embedding tables
+    spec = json.loads((Path(root) / "synthetic_spec.json").read_text())
+    assert int(L("flat_item_ids").max()) < spec["vocab"]["item_id"] and int(uu.max()) < spec["vocab"]["uid"]
+    # a second run of the same size reuses it
+    stamp = (Path(root) / "synthetic_spec.json").stat().st_mtime_ns
+    assert sd.ensure(str(tmp_path), train_samples=train, eval_samples=ev, log=lambda *_: None) == root
+    assert (Path(root) / "synthetic_spec.json").stat().st_mtime_ns == stamp
+
+
+def test_synthetic_users_do_not_depend_on_the_dataset_size():
+    """A shorter run trains on the first batches of a longer one."""
+    import numpy as np
+
+    from primus.backends.recommendation.dlrm_v4 import synthetic_data as sd
+
+    vocab, _ = sd._load_tspec().parse_vocab(str(SRC_ROOT / "generative_recommenders/dlrm_v4/configs.py"))
+    plans = [
+        sd.Plan(train_samples=steps * 8192, eval_samples=8192, seed=1, vocab=vocab, history_length=4086)
+        for steps in (20, 30)
+    ]
+    n = int((plans[0].window == sd.TRAIN_WINDOW).sum()) - 1  # the last user is cut to size
+    for key in ("anchors", "prior", "shares", "organic", "library_artists"):
+        assert np.array_equal(getattr(plans[0], key)[:n], getattr(plans[1], key)[:n]), key

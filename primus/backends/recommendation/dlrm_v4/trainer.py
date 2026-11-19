@@ -123,6 +123,8 @@ class DlrmV4Trainer(BaseTrainer):
             self.run_start_marker = str(out / f"run_start.node{os.environ.get('NODE_RANK', '0')}")
             os.environ["DLRM_RUN_START_MARKER"] = self.run_start_marker
 
+        if self._p("synthetic_data", False):
+            self._use_synthetic_data(out)
         missing = run_config.missing_data(os.environ.get("DLRM_DATA_PATH"), self._p("history_length"))
         if missing:
             raise FileNotFoundError(
@@ -156,6 +158,33 @@ class DlrmV4Trainer(BaseTrainer):
         log_rank_0(
             f"[Primus:dlrm_v4] PYTHONPATH front: {front}; flydsl from {flydsl.origin if flydsl else None}"
         )
+
+    def _use_synthetic_data(self, out: Path) -> None:
+        """Generate (or reuse) a synthetic yambda-5b dataset sized for this run and
+        train on it instead of data_path's dataset (synthetic_data.py)."""
+        from primus.backends.recommendation.dlrm_v4 import synthetic_data
+
+        gpus = int(os.environ.get("GPUS_PER_NODE") or 0)
+        if not gpus:  # as the trainer's launcher: every visible GPU
+            import torch
+
+            gpus = torch.cuda.device_count()
+        world_size = int(os.environ.get("NNODES") or 1) * gpus
+        plan = run_config.synthetic_plan(os.environ, world_size)
+        parent = self._p("synthetic_data_dir") or os.path.join(
+            os.environ.get("DATA_PATH") or str(out), "dlrm_v4_synthetic"
+        )
+        root = synthetic_data.ensure(
+            parent,
+            train_samples=plan["train_samples"],
+            eval_samples=plan["eval_samples"],
+            log=log_rank_0,
+        )
+        os.environ["DLRM_DATA_PATH"] = root
+        log_rank_0(f"[Primus:dlrm_v4] synthetic data: DLRM_DATA_PATH={root}")
+        for name, value in plan["env"].items():
+            os.environ[name] = value
+            log_rank_0(f"[Primus:dlrm_v4] {name}={value}")
 
     def init(self):
         assert self.root is not None, "setup() must run first"

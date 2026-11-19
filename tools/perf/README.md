@@ -1,8 +1,9 @@
 # Primus Perf Batch Runner
 
 Batch-runs Primus training benchmarks across Megatron, Megatron-Bridge,
-TorchTitan, MaxText, MaxDiffusion and the in-tree diffusion backend (the
-AMDiffusionBenchmark workloads), plus the DLRM benchmarks of
+TorchTitan, MaxText, MaxDiffusion, the in-tree diffusion backend (the
+AMDiffusionBenchmark workloads) and the recommendation backend (DLRMv4, the
+MLPerf `dlrmv4` model), plus the DLRM benchmarks of
 [`diffusion_bench/`](./diffusion_bench/), and extracts the results into
 `results.csv` / `results.json`, which record not just the throughput but the
 settings that produced it and, for a run that failed, why.
@@ -261,6 +262,76 @@ RESULT_DIR=~/primus-bench/mi355x-v26.9 bash tools/perf/run_batch.sh
   without a new log line: raise `MAX_IDLE_SECONDS` on a slow network.
 - Single node only: `run_batch_multinode.sh` refuses the diffusion configs.
 
+### Recommendation (`recommendation`)
+
+DLRMv4, the HSTU ranker of MLPerf Training `dlrmv4`, runs on Primus'
+recommendation backend from the catalog's `recommendation` entries
+(`examples/recommendation/configs/<GPU>/dlrm_v4-*-pretrain.yaml`). It measures
+throughput, not time to train: no periodic eval, MLPerf logging off, and a
+fixed number of steps.
+
+| GPU | Config | Kernels and precision | Batch per GPU | Samples/s, TFLOP/s per GPU |
+|---|---|---|---|---|
+| MI355X | `dlrm_v4-FP8-pretrain.yaml` | The MLPerf recipe's: FlyDSL attention, bf16 with FP8 (and MXFP6) HSTU GEMMs | 1024 | 8379, 1011 |
+| MI355X | `dlrm_v4-BF16-pretrain.yaml` | Triton attention, bf16 (as MI300X / MI325X) | 1024 | 2025, 340 |
+| MI325X | `dlrm_v4-BF16-pretrain.yaml` | Triton attention, bf16 | 1024 | 1207, 203 |
+| MI300X | `dlrm_v4-BF16-pretrain.yaml` | Triton attention, bf16 | 512 (1024 runs out of its 192 GB) | 1052, 178 |
+
+(`rocm/primus:v26.9`, 200 steps, through `run_batch.sh`.) The recipe's FlyDSL attention and FP8 /
+MXFP6 paths are gfx950-only and stop a run on gfx942, so the BF16 configs turn
+them off in their `env:` block, together with the targets-only last HSTU layer
+(it needs a gfx950-only LayerNorm dropout kernel; the last layer then runs at
+full length), and the MI300X / MI325X ones lower the embedding placement cap
+(`hbm_cap_gb`) below the trainer's 260 GB. The BF16 configs compare the GPUs
+on the same model and settings; the FP8 one measures the MLPerf recipe. The
+trainer's Triton kernel configurations are tuned on MI350X (see the
+[DLRMv4 guide](../../docs/04-technical-guides/recommendation/dlrm_v4/README.md#mi300x-and-mi325x-bf16)).
+
+```bash
+GPU=MI355X BACKEND=recommendation DOCKER_IMAGE=rocm/primus:v26.9 \
+RESULT_DIR=~/primus-bench/mi355x-v26.9 bash tools/perf/run_batch.sh
+```
+
+- **Synthetic data.** The MLPerf dataset is 227 GB. Instead, the trainer
+  generates a small dataset in its layout (`synthetic_data: true`,
+  [`synthetic_data.py`](../../primus/backends/recommendation/dlrm_v4/synthetic_data.py))
+  and reads it with the unchanged yambda-5b data loader. Its users are drawn
+  from the statistics of a steady-state day of the real data (window 200):
+  sequence lengths, anchors per user, the share of each event type, and items
+  replayed from per-user artist libraries. Tokens per batch, users per batch
+  and unique items, artists and albums per batch are within a few percent of
+  the real day's, and so is the throughput: with the FP8 config on MI355X
+  (`rocm/primus:v26.9`), 8397 samples/s and 1013 TFLOP/s per GPU against 8454
+  and 1017 on the real day (steps 31-200; see the config's header for how to
+  time a real-data run). The dataset is generated once per GPU count and batch
+  size, in about 20 s, under `$DATA_PATH/dlrm_v4_synthetic` (11 GB at 8 x 1024
+  samples per step), and later runs reuse it.
+- **Length.** 200 steps (`num_train_batches`, `${NUM_TRAIN_BATCHES:200}`;
+  `EXTRA_ENV="NUM_TRAIN_BATCHES=..."` changes it, and the data is generated
+  for that length). `TRAIN_STEPS` is not applied: the length is part of the
+  benchmark. Each run in a fresh container spends about 3 minutes on kernel
+  builds and compiles up to step 10. The 200 steps then take about 25 s on
+  MI355X (FP8, 120 ms per step) and about 3 minutes on MI325X / MI300X (bf16,
+  850 / 480 ms per step), so a run takes about 4 to 4.5 minutes on MI355X and
+  6 minutes on MI325X / MI300X. The throughput leaves out the first 20 steps
+  (and, as for every backend, at least the first three logged steps: steps up
+  to 30 at the config's `METRIC_LOG_FREQ` of 10). Repetitions differ by about
+  0.1%.
+- **Results.** Samples/s per GPU, and two TFLOP/s per GPU, both from the
+  trainer's perf lines (means over the eight ranks' lines of a step, then the
+  harmonic mean over steps): TFLOP/s counts the FLOPs of each batch's
+  sequences as they are (`tflops_real`; their average length is about 52% of
+  the 4096-token maximum); nominal TFLOP/s prices every sample at the full
+  4096 tokens (`tflops_algo`, the yardstick of the trainer's MFU, which it puts
+  above 100% on MI355X). See "Extracting results".
+- **Image.** The image needs the trainer's stack (`rocm/primus:v26.9` or the PyTorch CI
+  image); the backend's install hook adds `polars-u64-idx`, `gin-config`, the
+  MLPerf logging package and FlyDSL 0.2.4 at the first launch in a container,
+  so it needs network access to PyPI and GitHub.
+- Single node only: `run_batch_multinode.sh` refuses the recommendation configs.
+  The MLPerf benchmark itself (time to the AUC target, 1 to 4 nodes) is
+  [examples/mlperf/dlrm_v4](../../examples/mlperf/dlrm_v4/README.md).
+
 ### Diffusion and DLRM (`diffusion_dlrm`)
 
 `diffusion_dlrm` is a backend outside the catalog. Adding it to `BACKEND`
@@ -344,7 +415,7 @@ bash tools/perf/run_batch.sh
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
 | `NUM_REPS` | `1` | Repetitions per config. |
-| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion`, whose `training.steps` is part of the benchmark, nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. A Megatron config for which it is not longer than the warmup is not run (see "Before each run"). |
+| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion`, whose `training.steps` is part of the benchmark, nor to `recommendation`, whose `num_train_batches` is part of the benchmark (its synthetic data is generated for it), nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. A Megatron config for which it is not longer than the warmup is not run (see "Before each run"). |
 | `CHECK_TRAIN_STEPS` | `1` | `0` runs a Megatron config even when `TRAIN_STEPS` is not longer than its warmup. |
 | `EXTRA_ENV` | — | Space-separated `KEY=VALUE` pairs forwarded into the container as `--env`. See below. |
 | `DATA_PATH` | `<checkout>/data` | Where Primus keeps its Hugging Face downloads (models, datasets). Set it to keep them out of the checkout; the runner creates it, mounts it and passes it into the container. See below. |
@@ -368,7 +439,7 @@ Training runs on one of two images, and each carries only one framework stack:
 So `BACKEND=megatron,torchtitan` and `BACKEND=maxtext,maxdiffusion` are the
 two valid groupings. Mixing across the split — `BACKEND=megatron,maxtext` —
 cannot work whichever image you pick, because half the runs have no framework
-to execute. `megatron_bridge`, `diffusion` and `diffusion_dlrm` go with the PyTorch side,
+to execute. `megatron_bridge`, `diffusion`, `recommendation` and `diffusion_dlrm` go with the PyTorch side,
 on an image that carries them, such as `rocm/primus:v26.8`.
 
 This is why `BACKEND` is required rather than defaulting to every backend
@@ -893,14 +964,14 @@ files keep working:
 | `parser_version` | Bumped when columns change. |
 | `image_id`, `container_rocm_version`, `container_hip_version` | Exact image and the user-space ROCm/HIP inside it. |
 | `cpu_governor`, `numa_balancing`, `transparent_hugepages`, `iommu`, `amdgpu_version` | Host settings of the node that ran the batch. |
-| `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). |
+| `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). DLRMv4 (`recommendation`) rows report samples/s instead (`hmean_samples_per_gpu`). |
 | `step_log` | For `diffusion` / `dlrm` rows, the diffusion_bench step log, relative to the result directory; empty for a step that never ran. |
 | `system_description` | The one-line platform description (see "Provenance"). |
 | `host_check` | Multi-node: whether every node reported the same platform. |
 | `server`, `bios`, `os`, `kernel`, `kernel_cmdline` | Server vendor and model, BIOS version (date, vendor), OS, kernel and its command line. |
 | `cpu_model`, `cpu_topology`, `cpu_frequency`, `cpu_idle`, `host_memory` | CPU model; sockets, cores, threads and NUMA nodes; frequency driver, boost, max clock and EPP; idle states; usable and installed memory and DIMMs. |
 | `gpu_vram`, `gpu_power_cap`, `gpu_partition`, `gpu_clocks`, `gpu_vbios`, `gpu_driver`, `rdma_nics` | Per-GPU memory, power cap, compute/memory partition, perf level and max clock, VBIOS, the host GPU driver release, and the active RDMA ports. |
-| `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). |
+| `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). DLRMv4: its `tflops_algo` (every sample at the full sequence length), next to `hmean_tflops`. |
 | `failed_at` | For a training run that failed, was interrupted or is incomplete: `setup` when it logged no training step, otherwise `after step N`, the last step it logged, numbered as the backend numbers them (MaxText from 0). Empty for `no_metrics`, which finished. Empty for `diffusion_dlrm` runs and their `diffusion` / `dlrm` rows. |
 | `failing_rank`, `failing_host` | The rank torchrun named as the first to fail, and its node, when the log has its section (see "Time limits and failure reasons"). |
 
@@ -929,6 +1000,16 @@ backend `diffusion`: samples/s and TFLOP/s per GPU are the harmonic means
 over the steps after the first five (AMDiffusionBenchmark's warmup, not the
 learning-rate schedule's `warmup_steps`), and the memory is the backend's
 peak in GB. `tps_per_gpu` and `seq_len` stay empty.
+
+A `recommendation` (DLRMv4) config is a row with backend `recommendation`.
+Every rank prints its own perf line every `METRIC_LOG_FREQ` steps, covering
+the steps since the previous one; a step's values are the means over its
+lines, and the row's the harmonic means over the steps after the first 20
+(at least three logged steps). `hmean_samples_per_gpu` is samples (one
+candidate each) per second per GPU, `hmean_tflops` the trainer's
+`tflops_real/gpu` and `hmean_nominal_tflops` its `tflops_algo/gpu`, which
+`throughput_note` explains (see "Recommendation"). No memory is logged;
+`tps_per_gpu` and `seq_len` stay empty.
 
 A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
 precision, with backend `diffusion` or `dlrm` (a diffusion row of this kind
