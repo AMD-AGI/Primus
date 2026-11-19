@@ -23,8 +23,8 @@
 #                        (stage-1 + stage-2 reduce into the final O).
 #                        NHEAD < BLOCK_H masks OOB heads on Q load and O store.
 #
-# The bh16 regimes support num_iter in {1, 2, ...} (no gl.assume(num_iter>=3));
-# only bh64 assumes >= 3. See epilogue-1 handling below.
+# Every regime supports num_iter in {1, 2, ...}: sparse-MLA rows (the first tokens of a
+# sequence) can be shorter than 3 * BLOCK_N. See epilogue-1 handling below.
 #
 # Wrapper dispatch: nhead in {64,128} -> bh64; nhead <= 16 routes by KV dtype
 # (bf16 -> bh16bn64, fp8 -> bh16bn128).
@@ -135,8 +135,9 @@ def _mla_gluon(
     # NEW: floor per_split with the last split absorbing the remainder
     # (remainder = seq mod NUM_KV_SPLITS, in [0, NUM_KV_SPLITS)). Combined with
     # the wrapper bound min_kv_seq_len >= NUM_KV_SPLITS this guarantees every
-    # split is non-empty (split_len >= floor >= 1, hence num_iter >= 1); bh64
-    # additionally bounds min_kv_seq_len so num_iter >= 3 for its gl.assume.
+    # split is non-empty (split_len >= floor >= 1, hence num_iter >= 1). bh64 has
+    # no such bound: a split of a shorter row is empty and returns early below,
+    # and the reduce kernel rederives and skips it.
     # Trade-off: at seqs just above the wrapper minimum the last CU does up to
     # ~(floor + NUM_KV_SPLITS - 1)/floor more work than the others.
     kv_len_per_split = cur_batch_seq_len // NUM_KV_SPLITS
@@ -449,10 +450,6 @@ def _mla_gluon(
         gl.amd.cdna4.async_copy.global_load_to_shared(bufs_kv1, Kv_c_cache + offs_k_c1)
     gl.amd.cdna4.async_copy.commit_group()
 
-    if REGIME == 'bh64':
-        # bh64 guarantees >= 3 iters/split; this constant-folds the
-        # `if num_iter >= 2` epilogue-1 guard below so its codegen is unchanged.
-        gl.assume(num_iter >= 3)
     buf_idx = 0
     ################ loop
     for i in range(num_iter - 2):
@@ -548,9 +545,7 @@ def _mla_gluon(
     LOG2E: gl.constexpr = 1.4426950408889634
 
     ################ epilogue 1
-    # Skip when num_iter < 2 (possible for bh16bn64 / bh16bn128 in either mode).
-    # bh64 has gl.assume(num_iter >= 3) above so the compiler folds this branch
-    # out there; for the bh16 regimes it stays a runtime branch.
+    # Skip when num_iter < 2 (possible in every regime).
     if num_iter >= 2:
         async_idx = (buf_idx + 1) % 2
 
@@ -650,6 +645,9 @@ def _mla_gluon(
             sink = gl.load(Attn_sink + cur_head_o, mask=cur_head_o < NHEAD, other=float("-inf")).to(gl.float32)
         else:
             sink = gl.load(Attn_sink + cur_head_o).to(gl.float32)
+        # The reduce merges the split softmaxes, so only one split may count the sink. The
+        # last split is the one that is never empty.
+        sink = gl.where(split_kv_id == NUM_KV_SPLITS - 1, sink, float("-inf"))
         n_e_max = gl.maximum(e_max, sink)
         re_scale = gl.exp2((e_max - n_e_max) * LOG2E)
         acc *= re_scale[:, None]
@@ -845,13 +843,6 @@ def mla_gluon(
         NUM_KV_SPLITS = max(1, triton.next_power_of_2(triton.cdiv(256, base_grid)))
 
         assert batch_size % 64 == 0, f"mla_gluon[bh64] requires batch_size divisible by 64, got {batch_size}"
-        # gl.assume(num_iter > 3) inside the kernel requires every split to have
-        # > 3*BLOCK_N tokens. Smallest split (last) for batch length s is
-        # s - (k-1)*ceil(s/k); a sufficient bound is min_kv_seq_len > k*(3*BLOCK_N + k).
-        min_kv_seq_len_required = NUM_KV_SPLITS * (3 * BLOCK_N + NUM_KV_SPLITS)
-        assert (
-            min_kv_seq_len > min_kv_seq_len_required
-        ), f"mla_gluon[bh64] requires min_kv_seq_len > {min_kv_seq_len_required} (NUM_KV_SPLITS={NUM_KV_SPLITS}), got {min_kv_seq_len}"
         assert (
             q_nope.dtype == torch.bfloat16 and q_pe.dtype == torch.bfloat16
         ), f"q_nope/q_pe must be bf16, got {q_nope.dtype}/{q_pe.dtype}"
@@ -863,10 +854,9 @@ def mla_gluon(
         BLOCK_N = 128 if REGIME == "bh16bn128" else 64
         kv_dtype = torch.float8_e4m3fn if REGIME == "bh16bn128" else torch.bfloat16
         NUM_XCDS = 1  # unused by 2-D split grid mapping
-        # 2-D grid (batch, split). Both bh16 regimes support num_iter in {1, 2, ...}
-        # (no gl.assume(num_iter >= 3) in the kernel); the only correctness need is
-        # that every split is non-empty (floor split size = min_kv_seq_len //
-        # NUM_KV_SPLITS >= 1). Each clamp below keeps NUM_KV_SPLITS <= min_kv_seq_len,
+        # 2-D grid (batch, split). Only the bh16 regimes read min_kv_seq_len (bh64
+        # handles empty splits): each clamp below keeps NUM_KV_SPLITS <= min_kv_seq_len,
+        # so every split is non-empty (floor split size = min_kv_seq_len // NUM_KV_SPLITS >= 1).
         if REGIME == "bh16bn128":
             assert batch_size == 1, f"mla_gluon[bh16bn128] requires batch_size=1, got {batch_size}"
             NUM_KV_SPLITS = max(1, min(256 // batch_size, min_kv_seq_len))
