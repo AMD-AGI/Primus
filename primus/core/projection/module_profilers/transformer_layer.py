@@ -10,6 +10,7 @@ from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import LAYER
+from primus.core.projection.op_models.integration import apply_layer_op_models
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
@@ -344,6 +345,16 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
         mlp_fwd = self.sub_profilers["mlp"].measured_forward_time(batch_size, seq_len)
         mlp_bwd = self.sub_profilers["mlp"].measured_backward_time(batch_size, seq_len)
+        mlp_fwd, mlp_bwd, op_fwd, op_bwd = apply_layer_op_models(
+            self.config,
+            batch_size,
+            seq_len,
+            self._gemm_backend,
+            self._sdpa_backend,
+            mlp_fwd,
+            mlp_bwd,
+            "dense",
+        )
 
         # Add TP AllReduce communication overhead (simulation only).
         # Each transformer layer has 2 AllReduces per direction:
@@ -358,8 +369,8 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms + op_fwd
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms + op_bwd
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd
@@ -476,6 +487,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
         mlp_fwd = self.sub_profilers["mlp"].measured_forward_time(batch_size, seq_len)
         mlp_bwd = self.sub_profilers["mlp"].measured_backward_time(batch_size, seq_len)
+        mlp_fwd, mlp_bwd, op_fwd, op_bwd = apply_layer_op_models(
+            self.config, batch_size, seq_len, self._gemm_backend, self._sdpa_backend, mlp_fwd, mlp_bwd, "moe"
+        )
 
         # Add TP AllReduce communication overhead (simulation only).
         # Each transformer layer has 2 AllReduces per direction:
@@ -506,8 +520,8 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             self.config, batch_size, seq_len, self._gemm_backend
         )
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_fwd_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_bwd_ms + ln_res_bwd_ms
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_fwd_ms + ln_res_fwd_ms + op_fwd
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_bwd_ms + ln_res_bwd_ms + op_bwd
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd

@@ -284,6 +284,11 @@ class ModelConfig:
     dlrm_glue_bytes_per_token: float = 0.0
     dlrm_glue_hbm_fraction: float = 0.6  # streaming efficiency for the glue traffic
 
+    # Every other scalar / list key of the source args. A new op's parameters
+    # are not fields here, and op models (primus.core.projection.op_models)
+    # read them from this instead of having them dropped.
+    extra_args: dict = None
+
 
 @dataclass
 class TrainingConfig:
@@ -319,6 +324,21 @@ def update_config_from_args(config, args):
         if hasattr(args, field.name):
             setattr(config, field.name, getattr(args, field.name))
     return config
+
+
+def _extra_model_args(args, model_config) -> dict:
+    """Scalar / list args that are not ``ModelConfig`` fields (op-model inputs)."""
+    known = {f.name for f in fields(model_config)}
+    raw = args if isinstance(args, dict) else getattr(args, "__dict__", {})
+    out = {}
+    for key, val in raw.items():
+        if key.startswith("_") or key in known:
+            continue
+        if val is None or isinstance(val, (bool, int, float, str)):
+            out[key] = val
+        elif isinstance(val, (list, tuple)) and all(isinstance(x, (bool, int, float, str)) for x in val):
+            out[key] = list(val)
+    return out
 
 
 def megatron_derive_default_args(args):
@@ -449,8 +469,13 @@ def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
     args = resolve_config_adapter(fw)(args)
 
     model_config = update_config_from_args(ModelConfig(), args)
+    model_config.extra_args = _extra_model_args(args, model_config)
     runtime_config = update_config_from_args(RuntimeConfig(), args)
     model_parallel_config = update_config_from_args(ModelParallelConfig(), args)
+
+    from primus.core.projection.op_models.coverage import report_op_coverage
+
+    report_op_coverage(model_config.extra_args)
 
     training_config = TrainingConfig(
         model_config=model_config,

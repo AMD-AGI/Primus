@@ -121,9 +121,47 @@ trials/*.yaml      one workload-overlay YAML per trial (re-runnable)
   - `evaluate_memory_only(config_json)` — cheap pre-filter
   - `evaluate_with_benchmark(config_json)` — only if `has_gpu=true`
   - `get_history`, `get_best`, `get_legal_axes`, `get_architecture`,
-    `get_cluster`, `get_budget_status`
+    `get_op_coverage`, `get_cluster`, `get_budget_status`
   - `note_to_scratchpad`, `read_scratchpad`
   - `query_llm(prompt, system?)` — extra "LLM-inside-LLM" tool
+
+## Op bring-up (new ops)
+
+A new model often ships an op the projection does not model: a linear-attention
+layer, a gate, a short convolution. The projection prices such an op as the
+built-in block it resembles and prints a `PRIMUS_OP_GAP` line for it. Before
+seeding, the agent checks the workload for these ops, and again after every
+trial. For each one it runs the op bring-up stage (`op_bringup.py`):
+
+1. **Context.** It writes `op_bringup/<op_id>/context.md`, which contains:
+   - the gap's keys and the model YAML chain;
+   - the HF `config.json`, fetched from `tokenizer_model` or `--hf-config`;
+   - any `--op-paper` text;
+   - the op-model API and the existing op models and profilers closest to the gap.
+2. **Create.** A coder writes one op model:
+   - `--op-coder-cmd` runs an external coding agent;
+   - otherwise the agent's own LLM writes it.
+
+   Attention-like ops are priced on the FAv3 or 1-CU tile simulator; everything else analytically.
+3. **Validate.** The validator (`primus.core.projection.op_models.validate`) checks:
+   - the roofline floor;
+   - FLOPs against the paper's closed form;
+   - the bwd/fwd ratio and monotonicity;
+   - that every gap key is covered.
+
+   Failures go back to the coder, up to 3 attempts.
+4. **Register.** The model is copied into `primus/core/projection/op_models/generated/` with a regression test, and the trial is re-run. An op the coder judges negligible is acknowledged in `generated/acknowledged.yaml` instead.
+
+| flag | meaning |
+|---|---|
+| `--op-bringup auto\|report\|off` | `auto` (default) writes models. It falls back to `report` (context packs only) when no coder is available. |
+| `--op-coder auto\|dspy\|command\|none` | Who writes the model. |
+| `--op-coder-cmd '...{prompt_file}...{target_file}...'` | Shell template for an external coding agent. |
+| `--op-paper FILE\|URL\|TEXT` | Paper text for the new op. Repeatable. |
+| `--hf-config PATH\|URL\|REPO` | HF config, if the YAML has no `tokenizer_model`. |
+
+To run the stage on its own, use `python -m primus.agents.tuning_agent.op_bringup --workload <yaml>`. The
+`projection-op-bringup` skill covers doing the same work by hand.
 
 ## Two-stage flow
 

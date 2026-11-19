@@ -9,6 +9,11 @@ from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import ATTENTION
+from primus.core.projection.op_models.integration import (
+    attention_op_models,
+    blended_memory_term,
+    simulate_attention_with_op_models,
+)
 from primus.core.projection.training_config import gemm_dtype_from_config
 
 from .utils import benchmark_layer
@@ -57,6 +62,20 @@ class AttentionProfiler(BaseModuleProfiler):
         self._cache_key = None
 
     def estimated_num_params(self, rank: Optional[int] = None) -> int:
+        built_in = self._built_in_num_params(rank)
+        ops = attention_op_models(self.config.model_config)
+        if not ops:
+            return built_in
+        return int(blended_memory_term(ops, self.config, 1, 1, built_in, "num_params"))
+
+    def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        built_in = self._built_in_activation_memory(batch_size, seq_len)
+        ops = attention_op_models(self.config.model_config)
+        if not ops:
+            return built_in
+        return int(blended_memory_term(ops, self.config, batch_size, seq_len, built_in, "activation_bytes"))
+
+    def _built_in_num_params(self, rank: Optional[int] = None) -> int:
         args = self.config.model_config
         # Group-query & multi-latent attention support.
         # If GQA not enabled, fall back to per-head queries.
@@ -103,7 +122,7 @@ class AttentionProfiler(BaseModuleProfiler):
             * ((1 + (num_query_groups / args.num_attention_heads)) * query_proj_to_hidden)
         )
 
-    def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
+    def _built_in_activation_memory(self, batch_size: int, seq_len: int) -> int:
         args = self.config.model_config
         mp = self.config.model_parallel_config
 
@@ -775,7 +794,26 @@ class AttentionProfiler(BaseModuleProfiler):
         return norm_ms, mhc_ms, misc_ms
 
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
-        """Get simulated results from GEMM + SDPA simulation backends."""
+        """Get simulated results from GEMM + SDPA simulation backends.
+
+        Registered op models (``primus.core.projection.op_models``) for the
+        attention slot are blended in on the share of layers they run on.
+        """
+        ops = attention_op_models(self.config.model_config)
+        if not ops:
+            return self._get_built_in_simulated_results(batch_size, seq_len)
+        fwd, bwd = simulate_attention_with_op_models(
+            ops,
+            self.config,
+            batch_size,
+            seq_len,
+            self._gemm_backend,
+            self._sdpa_backend,
+            lambda: self._get_built_in_simulated_results(batch_size, seq_len)[:2],
+        )
+        return fwd, bwd, self.estimated_activation_memory(batch_size, seq_len)
+
+    def _get_built_in_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         if self._is_v4_attention():
             return self._get_v4_simulated_results(batch_size, seq_len)
 

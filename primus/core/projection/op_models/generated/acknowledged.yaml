@@ -1,0 +1,7 @@
+# Config keys of ops that are deliberately not modeled, with the reason.
+# The coverage check treats them as covered. The op bring-up stage appends
+# here when it judges an op negligible; keep the estimate in the reason.
+
+moe_shared_expert_gate: >-
+  sigmoid(x W_g) scale on the shared expert: one hidden->1 GEMV and an elementwise
+  multiply per token, ~0.07 ms on a 9.6 ms Qwen3.5-35B-A3B MoE layer (<1%)

@@ -26,7 +26,7 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -61,6 +61,8 @@ class EvalResult:
     cmd: list[str] = field(default_factory=list)
     config: dict = field(default_factory=dict)
     derived_dp: int = 0
+    # Ops the projection had no model for and priced as a built-in stand-in.
+    op_gaps: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -348,7 +350,20 @@ def _parse_metrics(stdout: str) -> dict:
         out["tflops_per_s_per_gpu"] = _to_float(m.group(1))
     if m := _RE_MFU.search(stdout):
         out["mfu"] = _to_float(m.group(1))
+    if gaps := _parse_op_gaps(stdout):
+        out["op_gaps"] = gaps
     return out
+
+
+def _parse_op_gaps(stdout: str) -> list[dict]:
+    """``PRIMUS_OP_GAP`` markers: ops the projection priced with a stand-in."""
+    if "PRIMUS_OP_GAP" not in (stdout or ""):
+        return []
+    try:
+        from primus.core.projection.op_models.coverage import parse_gap_markers
+    except ImportError:
+        return []
+    return [asdict(g) for g in parse_gap_markers(stdout)]
 
 
 def _python_invoker(
@@ -591,14 +606,19 @@ class Evaluator:
         self.n_memory_calls = 0
         self.n_simulate_calls = 0
         self.n_benchmark_calls = 0
+        # ``op_gap_handler(gaps) -> bool`` brings up ops a run reports as
+        # unmodeled; True means the projection changed and the trial re-runs.
+        self.op_gap_handler: Callable[[list[dict]], bool] | None = None
+        self.handled_op_gaps: set[str] = set()
+        self.op_bringup = None  # TuningAgentOpBringup, when the CLI enables it
 
     # ── public API ────────────────────────────────────────────────────────
 
     def evaluate_memory_only(self, cfg: TrialConfig, tag: str) -> EvalResult:
-        return self._evaluate(cfg, tag, mode="memory_only")
+        return self._with_op_bringup(cfg, tag, mode="memory_only")
 
     def evaluate_simulate(self, cfg: TrialConfig, tag: str) -> EvalResult:
-        return self._evaluate(cfg, tag, mode="simulate")
+        return self._with_op_bringup(cfg, tag, mode="simulate")
 
     def evaluate_benchmark(self, cfg: TrialConfig, tag: str) -> EvalResult:
         if not self.cfg.benchmark_host.has_gpu:
@@ -608,9 +628,29 @@ class Evaluator:
                 source="benchmark",
                 config=cfg.as_dict(),
             )
-        return self._evaluate(cfg, tag, mode="benchmark")
+        return self._with_op_bringup(cfg, tag, mode="benchmark")
 
     # ── internal ──────────────────────────────────────────────────────────
+
+    def _with_op_bringup(self, cfg: TrialConfig, tag: str, mode: str) -> EvalResult:
+        result = self._evaluate(cfg, tag, mode=mode)
+        new = [
+            g
+            for g in result.op_gaps
+            if g.get("severity") == "gap" and g.get("op_id") not in self.handled_op_gaps
+        ]
+        if not new or self.op_gap_handler is None:
+            return result
+        self.handled_op_gaps.update(g["op_id"] for g in new)
+        try:
+            changed = bool(self.op_gap_handler(new))
+        except Exception as exc:  # bring-up must never sink the search
+            print(f"[tuning-agent] op bring-up failed: {exc}")
+            return result
+        if not changed:
+            return result
+        print(f"[tuning-agent] op models added for {[g['op_id'] for g in new]}; re-evaluating {tag}")
+        return self._evaluate(cfg, f"{tag}_ops", mode=mode)
 
     def _evaluate(self, cfg: TrialConfig, tag: str, mode: str) -> EvalResult:
         from .legality import derive_legality
