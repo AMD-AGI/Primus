@@ -28,7 +28,7 @@ import triton
 # helpers; reuse them. The compute kernels are owned locally (dsa_bwd_kernels)
 # so this backend can be tuned independently of the gluon path.
 from .._gluon_dsa._dsa_bwd_gather import _build_inverted_topk_slice
-from ._amd_knobs import amd_pingpong_disabled, is_gfx1250
+from ._amd_knobs import amd_pingpong_disabled, is_gfx1250, log_attention_path
 from ._turbo_gfx1250 import sparse_mla_bwd_turbo_gfx1250, turbo_gfx1250_enabled
 from .dsa_bwd_kernels import (
     _bwd_chunk_dkv_store_ds,
@@ -98,6 +98,7 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
         assert attn_sink.dtype == torch.float32 and attn_sink.shape == (num_heads,)
 
     if turbo_gfx1250_enabled(q, num_heads, topk):
+        log_attention_path("bwd", "turbo_gfx1250", topk)
         return sparse_mla_bwd_turbo_gfx1250(q, kv, o, do, topk_indices, lse, attn_sink, kv_lora_rank, scale)
     if (
         _gfx1250_tuned()
@@ -105,7 +106,15 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
         and kv_lora_rank % 16 == 0
         and os.environ.get("PRIMUS_DSA_BWD_GFX1250_FUSED", "1") == "1"
     ):
+        log_attention_path(
+            "bwd",
+            "gfx1250_split_dq"
+            if os.environ.get("PRIMUS_DSA_BWD_SPLIT_DQ", _GFX1250_SPLIT_DQ_DEFAULT) == "1"
+            else "gfx1250_fused",
+            topk,
+        )
         return _sparse_mla_bwd_gfx1250_fused(q, kv, o, do, topk_indices, lse, attn_sink, kv_lora_rank, scale)
+    log_attention_path("bwd", "original_3kernel" + ("_gfx1250cfg" if _gfx1250_tuned() else ""), topk)
 
     # Delta = rowsum(O*dO) is fused into the first dQ chunk (no preprocess kernel).
     delta = torch.empty(total_tokens, num_heads, dtype=torch.float32, device=q.device)

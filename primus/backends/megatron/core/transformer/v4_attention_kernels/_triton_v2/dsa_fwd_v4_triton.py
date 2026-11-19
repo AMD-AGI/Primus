@@ -26,7 +26,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ._amd_knobs import amd_pingpong_disabled
+from ._amd_knobs import amd_pingpong_disabled, is_gfx1250, log_attention_path
 from ._turbo_gfx1250 import sparse_mla_fwd_turbo_gfx1250, turbo_gfx1250_enabled
 
 
@@ -43,7 +43,30 @@ def _get_fwd_configs():
     ]
 
 
-@triton.autotune(configs=_get_fwd_configs(), key=["num_heads", "TOPK", "D_V", "D_ROPE", "HAS_ROPE"])
+def _prune_fwd_configs(configs, named_args, **kwargs):
+    """On gfx1250 pin one config (no timing-dependent autotune choice, so runs are reproducible
+    by construction). BH=64 / TK=32 won every gfx1250 autotune run at the V4-Flash shapes; the
+    winners only differed in num_stages / waves_per_eu, which do not change the arithmetic.
+    PRIMUS_DSA_FWD_GFX1250_PIN=0 restores the full autotune."""
+    if is_gfx1250() and os.environ.get("PRIMUS_DSA_FWD_GFX1250_PIN", "1") == "1":
+        pinned = [
+            c
+            for c in configs
+            if c.kwargs.get("BLOCK_H") == 64
+            and c.kwargs.get("TILE_K") == 32
+            and c.kwargs.get("waves_per_eu") == 0
+            and c.num_stages == 2
+        ]
+        if pinned:
+            return pinned
+    return configs
+
+
+@triton.autotune(
+    configs=_get_fwd_configs(),
+    key=["num_heads", "TOPK", "D_V", "D_ROPE", "HAS_ROPE"],
+    prune_configs_by={"early_config_prune": _prune_fwd_configs},
+)
 @triton.jit
 def _sparse_mla_fwd_tr_kernel(
     Q_ptr,  # [total_tokens, num_heads, D_QK] bf16
@@ -166,7 +189,9 @@ def sparse_mla_fwd_v4_triton(q, kv, topk_indices, attn_sink=None, kv_lora_rank=5
     else:
         sink_ptr = torch.empty(1, dtype=torch.float32, device=q.device)
     if turbo_gfx1250_enabled(q, num_heads, topk):
+        log_attention_path("fwd", "turbo_gfx1250", topk)
         return sparse_mla_fwd_turbo_gfx1250(q, kv, topk_indices, attn_sink, kv_lora_rank, scale)
+    log_attention_path("fwd", "triton_v2", topk)
 
     o = torch.empty(total_tokens, num_heads, kv_lora_rank, dtype=q.dtype, device=q.device)
     lse = torch.empty(total_tokens, num_heads, dtype=torch.float32, device=q.device)

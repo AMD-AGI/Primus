@@ -23,6 +23,7 @@ the whole process, while restoring the knobs on exit leaves every other kernel
 
 import contextlib
 import functools
+import os
 
 import triton
 
@@ -59,3 +60,24 @@ def gpu_arch() -> str:
 def is_gfx1250() -> bool:
     """True on MI455X / gfx1250 (wave32, WMMA, 320 KB LDS, 1024 VGPRs at 1 wave/SIMD)."""
     return gpu_arch() == "gfx1250"
+
+
+_LOGGED_PATHS = set()
+
+
+def log_attention_path(direction: str, path: str, topk: int) -> None:
+    """Debug aid: when PRIMUS_DSA_PATH_LOG=<file> is set, append one line per distinct
+    (direction, path, topk) with the kernel path taken and the primus_turbo module in use
+    (the primus_turbo logger is silenced inside training). No-op otherwise."""
+    log_file = os.environ.get("PRIMUS_DSA_PATH_LOG")
+    if not log_file or (direction, path, topk) in _LOGGED_PATHS:
+        return
+    _LOGGED_PATHS.add((direction, path, topk))
+    import sys
+
+    turbo = sys.modules.get("primus_turbo")
+    with open(log_file, "a") as fh:
+        fh.write(
+            "pid=%d %s path=%s topk=%d arch=%s primus_turbo=%s\n"
+            % (os.getpid(), direction, path, topk, gpu_arch(), getattr(turbo, "__file__", None))
+        )
