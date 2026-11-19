@@ -1,12 +1,20 @@
+# Single-node training (8 GPUs):
+#   GPUS_PER_NODE=8 ./primus-cli direct --numa -- train pretrain \
+#     --config examples/megatron/configs/MI355X/zaya1_8B-FP8-pretrain.yaml
+# --numa binds each rank's CPUs and memory to its GPU's NUMA node with
+# numactl, which made FP8 steps faster; BF16 gained under 0.1%. It is a
+# launcher option, not a config key; a runner config with direct: numa: true
+# does the same.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-fp8-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 # The runner enables Transformer Engine's Triton FP8 cast-transpose, which
-# autotunes once per new tensor shape. Expert token counts change every step,
-# so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
-# per-shape cost.
+# autotunes once per new tensor shape. Split experts' token counts change
+# every step, so it keeps retuning and FP8 steps stall. The HIP cast kernel
+# has no per-shape cost.
 env:
   NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
 
@@ -26,11 +34,13 @@ modules:
 
       # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
       # weights and adds cached FP8 weight copies, so it fits fewer samples
-      # than BF16. micro_batch_size 208 is the largest multiple of 8 that
-      # completes on MI355X with rocm/primus:v26.8: it peaks at 284 of 288 GB
-      # per GPU, and 216 runs out of memory. On fewer GPUs, lower
-      # micro_batch_size or num_layers (keep it even). Do not edit the model
-      # yaml to shrink the architecture.
+      # than BF16. micro_batch_size 208 was sized before the ZAYA1 kernel
+      # changes as the largest multiple of 8 that completed on MI355X with
+      # rocm/primus:v26.8 (284 of 288 GB per GPU; 216 ran out of memory). It
+      # now peaks at 238 GB on rocm/primus:v26.9, including the fp32 copy of
+      # the logits that Megatron's cross-entropy keeps. Larger micro batches
+      # were not tried. On fewer GPUs, lower micro_batch_size or num_layers
+      # (keep it even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
       micro_batch_size: 208
       # One micro batch per GPU per step at DP=8.
@@ -61,9 +71,30 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
+      # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
+      # elementwise chains, CCA's convolutions as GEMMs, and the split
+      # experts' sort-based dispatch.
+      # zaya_router_defer_ar stays off: it gained under 1% here. The chunked
+      # linear cross-entropy (fused_ce_mode: 3) stays off too: it rounds each
+      # chunk's output-layer weight gradient to bf16 before summing, below
+      # Megatron's own fp32 cross-entropy.
+      zaya_attn_flash: true
+      zaya_fuse_norm: true
+      zaya_fuse_cca: true
+      zaya_conv_gemm: true
+      zaya_fuse_moe: true
+      zaya_sort_dispatch: true
+
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.
       mock_data: true
+      # No attention mask from the dataloader. With reset_attention_mask false
+      # it would be plain causal, which ZAYA1's attention applies without one,
+      # and the model would check it on the GPU and wait on the host for the
+      # answer every forward. Leaving it out made FP8 steps faster with
+      # identical losses; BF16 gained under 0.3% and keeps the mask.
+      create_attention_mask_in_dataloader: false
       train_data_path: null
       valid_data_path: null
       test_data_path: null
@@ -82,6 +113,14 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
+      # Turbo stays off, so the experts run split as TE FP8 linears. Turbo's
+      # tensorwise FP8 grouped GEMMs (enable_primus_turbo and
+      # use_turbo_grouped_gemm) make this recipe about 43% faster, but they
+      # quantize all 16 experts with one scale where TE takes one per expert,
+      # and in training their losses drift further from main's than the split
+      # experts' do. Turning them on also needs turbo_grouped_gemm_backend:
+      # fp8:triton: Turbo's default backend on MI355X, FlyDSL, can stall the
+      # GPUs for many minutes in its FP8 weight-gradient kernel.
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_gemm: false

@@ -128,6 +128,7 @@ MODEL_FAMILIES = {
         model_class="zaya1_model:Zaya1Model",
         prepare_args="zaya1_builders:prepare_zaya1_args",
         model_kwargs="zaya1_builders:zaya1_model_kwargs",
+        check_model="zaya1_builders:check_zaya1_model",
     ),
 }
 
