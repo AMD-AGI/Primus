@@ -167,7 +167,7 @@ def _build_csa_topk(
     # int32 throughout -- see the note in _V4SparseMLAAttnFn.forward. The result is cast
     # to int32 regardless, so int64 intermediates only double the transient peak.
     idx_dtype = torch.int32
-    neg1 = torch.tensor(-1, device=device, dtype=idx_dtype)
+    neg1 = -1  # Python scalar: torch.tensor(-1, device=cuda) was a pageable H2D copy (host sync, not graph-capturable)
     base = (torch.arange(B, device=device, dtype=idx_dtype) * (Skv + P)).view(B, 1, 1)
 
     win_idx = _window_indices(S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device)
@@ -336,7 +336,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         # range. Building it in torch's default int64 doubled every intermediate below,
         # which at 1M is ~8.6 GiB apiece.
         idx_dtype = torch.int32
-        neg1 = torch.tensor(-1, device=device, dtype=idx_dtype)
+        neg1 = -1  # Python scalar: torch.tensor(-1, device=cuda) was a pageable H2D copy (host sync, not graph-capturable)
         base = (torch.arange(B, device=device, dtype=idx_dtype) * Skv).view(B, 1, 1)
         # Context parallel: this rank owns global rows [cp_global_start, +S), and its KV
         # buffer is [boundary ++ local] with `cp_dwindow` boundary rows received from the
