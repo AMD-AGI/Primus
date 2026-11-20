@@ -3091,4 +3091,11 @@ class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
             # uniform value, gradients ~0). The fused-residual path does the
             # same thing -- see fused_residual_rmsnorm.py.
             weight = weight + 1
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm_g90 import (
+            rmsnorm_g90,
+            rmsnorm_g90_enabled,
+        )
+
+        if rmsnorm_g90_enabled() and x.is_cuda and x.dtype in (torch.bfloat16, torch.float16):
+            return rmsnorm_g90(x, weight, self.eps)  # g90mem: 1.5-1.6x faster fwd+bwd than the Turbo op
         return rmsnorm(x, weight, self.eps)

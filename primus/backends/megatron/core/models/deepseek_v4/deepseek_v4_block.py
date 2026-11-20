@@ -97,6 +97,11 @@ from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
 )
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_fused import (
+    hc_fused_enabled,
+    hc_fused_post,
+    hc_fused_supported,
+)
 from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
@@ -722,6 +727,13 @@ class DeepseekV4HybridLayer(TransformerLayer):
             out = sub_block(x, *args)
             return x + out
 
+        if hc_fused_enabled() and hasattr(mixer, "fused_pre") and hc_fused_supported(x, mixer.hc_mult):
+            # g90mem: 3 fwd + 4 bwd launches per HC application, one dx write (opt-in: PRIMUS_HC_FUSED=1).
+            collapsed, post, combt, link = mixer.fused_pre(x)
+            out = sub_block(collapsed, *args)
+            nxt = getattr(mixer, "_hc_next", None)
+            return hc_fused_post(x, out, post, combt, link, nxt.fn.weight if nxt is not None else None)
+
         pre, post, comb = mixer.compute_weights(x)  # [..., K], [..., K], [..., K, K]
         collapsed = HyperMixer.collapse(x, pre)  # [B, S, D]
         out = sub_block(collapsed, *args)  # sub-block first positional = collapsed
@@ -1212,6 +1224,14 @@ class DeepseekV4TransformerBlock(TransformerBlock):
 
         # Run the layers. Each V4 layer returns ``(hidden, None)`` for
         # upstream-tuple compatibility (see DeepseekV4HybridLayer.forward).
+        if not getattr(self, "_hc_next_wired", False):
+            # g90mem: each HyperMixer learns the next one so its fused expand can produce the next rms-linear
+            # partials (plain attribute, not a submodule: no parameter duplication).
+            mixers = [m for layer in self.layers for m in (getattr(layer, "attn_hc", None), getattr(layer, "ffn_hc", None))
+                      if m is not None]
+            for a_, b_ in zip(mixers[:-1], mixers[1:]):
+                object.__setattr__(a_, "_hc_next", b_)
+            self._hc_next_wired = True
         recompute_local = self._recompute_local_layer_indices()
         for local_idx, layer in enumerate(self.layers):
             global_idx = self.global_layer_indices[local_idx]

@@ -151,6 +151,68 @@ def _q_norm_rope_bwd_kernel(
     )
 
 
+@triton.jit
+def _pair_cs(pos, INVFREQ_PTR, HALF: tl.constexpr, NOPE: tl.constexpr):
+    p = tl.arange(0, HALF)
+    fi = p - NOPE // 2
+    is_rope = fi >= 0
+    ang = pos * tl.load(INVFREQ_PTR + fi, mask=is_rope, other=0.0).to(tl.float32)
+    return tl.where(is_rope, tl.cos(ang), 1.0), tl.where(is_rope, tl.sin(ang), 0.0)
+
+
+@triton.jit
+def _q_norm_rope_fwd2_kernel(X_PTR, POS_PTR, INVFREQ_PTR, OUT_PTR, RSTD_PTR, H, EPS: tl.constexpr, D: tl.constexpr,
+                             NOPE: tl.constexpr, PAD: tl.constexpr, BLOCK_PAD: tl.constexpr, BLOCK_H: tl.constexpr):
+    """Pair-split variant (g90mem): rotation on (even, odd) pairs from ``tl.split`` in fp32, one rounding;
+    [4096, 64, 512] + pad 64: 67.0 -> 44.9 us (75% of HBM floor)."""
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    HALF: tl.constexpr = D // 2
+    h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    hm = h < H
+    d = tl.arange(0, D)
+    DP: tl.constexpr = D + PAD
+    x = tl.load(X_PTR + pid_n.to(tl.int64) * H * D + h[:, None].to(tl.int64) * D + d[None, :], mask=hm[:, None],
+                other=0.0).to(tl.float32)
+    rstd = 1.0 / tl.sqrt(tl.sum(x * x, axis=1) / D + EPS)
+    tl.store(RSTD_PTR + pid_n.to(tl.int64) * H + h, rstd, mask=hm)
+    c, s = _pair_cs(tl.load(POS_PTR + pid_n).to(tl.float32), INVFREQ_PTR, HALF, NOPE)
+    a, b = tl.split(tl.reshape(x * rstd[:, None], (BLOCK_H, HALF, 2)))
+    o = tl.reshape(tl.join(a * c[None, :] - b * s[None, :], a * s[None, :] + b * c[None, :]), (BLOCK_H, D))
+    orow = OUT_PTR + pid_n.to(tl.int64) * H * DP + h[:, None].to(tl.int64) * DP
+    tl.store(orow + d[None, :], o.to(OUT_PTR.dtype.element_ty), mask=hm[:, None])
+    if PAD > 0:
+        p = tl.arange(0, BLOCK_PAD)
+        tl.store(orow + D + p[None, :], tl.zeros((BLOCK_H, BLOCK_PAD), dtype=OUT_PTR.dtype.element_ty),
+                 mask=hm[:, None] & (p[None, :] < PAD))
+
+
+@triton.jit
+def _q_norm_rope_bwd2_kernel(DQ_PTR, X_PTR, RSTD_PTR, POS_PTR, INVFREQ_PTR, DX_PTR, H, SN, SH, D: tl.constexpr,
+                             NOPE: tl.constexpr, BLOCK_H: tl.constexpr):
+    """Pair-split backward (g90mem): 69.3 -> 54.9 us (84% of HBM floor)."""
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    HALF: tl.constexpr = D // 2
+    h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    hm = h < H
+    d = tl.arange(0, D)
+    g = tl.load(DQ_PTR + pid_n.to(tl.int64) * SN + h[:, None].to(tl.int64) * SH + d[None, :], mask=hm[:, None],
+                other=0.0).to(tl.float32)
+    c, s = _pair_cs(tl.load(POS_PTR + pid_n).to(tl.float32), INVFREQ_PTR, HALF, NOPE)
+    ga, gb = tl.split(tl.reshape(g, (BLOCK_H, HALF, 2)))
+    dy = tl.reshape(tl.join(ga * c[None, :] + gb * s[None, :], gb * c[None, :] - ga * s[None, :]), (BLOCK_H, D))
+    xrow = pid_n.to(tl.int64) * H * D + h[:, None].to(tl.int64) * D + d[None, :]
+    x = tl.load(X_PTR + xrow, mask=hm[:, None], other=0.0).to(tl.float32)
+    rstd = tl.load(RSTD_PTR + pid_n.to(tl.int64) * H + h, mask=hm, other=0.0)
+    coef = rstd * rstd * rstd * tl.sum(dy * x, axis=1) / D
+    tl.store(DX_PTR + xrow, (rstd[:, None] * dy - x * coef[:, None]).to(DX_PTR.dtype.element_ty), mask=hm[:, None])
+
+
+def _split_ok() -> bool:
+    return os.environ.get("PRIMUS_V4_QNR_SPLIT", "1") != "0"
+
+
 def _block_h(H: int) -> int:
     return min(triton.next_power_of_2(max(H, 1)), int(os.environ.get("PRIMUS_V4_QNR_BLOCK_H", "8")))
 
@@ -168,7 +230,14 @@ class QNormRopePadFn(torch.autograd.Function):
         buf = torch.empty((B, S, H, D + pad), dtype=x.dtype, device=x.device)
         rstd = torch.empty((N, H), dtype=torch.float32, device=x.device)
         bh = _block_h(H)
-        _q_norm_rope_fwd_kernel[(N, triton.cdiv(H, bh))](
+        if _split_ok():
+            bh2 = min(16, triton.next_power_of_2(max(H, 1)))
+            _q_norm_rope_fwd2_kernel[(N, triton.cdiv(H, bh2))](
+                x3, pos_c, inv_c, buf, rstd, H, EPS=float(eps), D=D, NOPE=D - rotary_dim, PAD=pad,
+                BLOCK_PAD=max(triton.next_power_of_2(max(pad, 1)), 1), BLOCK_H=bh2, num_warps=8 if bh2 >= 16 else 4,
+            )
+        else:
+          _q_norm_rope_fwd_kernel[(N, triton.cdiv(H, bh))](
             x3,
             pos_c,
             inv_c,
@@ -203,7 +272,14 @@ class QNormRopePadFn(torch.autograd.Function):
             dq3 = dq3.contiguous()
         dx = torch.empty((B, S, H, D), dtype=dtype, device=dq.device)
         bh = _block_h(H)
-        _q_norm_rope_bwd_kernel[(N, triton.cdiv(H, bh))](
+        if _split_ok():
+            bh2 = min(8, triton.next_power_of_2(max(H, 1)))
+            _q_norm_rope_bwd2_kernel[(N, triton.cdiv(H, bh2))](
+                dq3, x3, rstd, pos_c, inv_c, dx, H, dq3.stride(0), dq3.stride(1), D=D, NOPE=D - rotary_dim,
+                BLOCK_H=bh2, num_warps=4,
+            )
+        else:
+          _q_norm_rope_bwd_kernel[(N, triton.cdiv(H, bh))](
             dq3,
             x3,
             rstd,
