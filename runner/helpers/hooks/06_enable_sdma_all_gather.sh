@@ -80,6 +80,18 @@ if (( kernel_major < 6 || (kernel_major == 6 && kernel_minor < 8) )); then
     exit 2
 fi
 
+# Across nodes RCCL's copy-engine AllGather is hierarchical: it needs RCCL's RMA
+# proxy, which RCCL only enables when cross-NIC traffic is allowed. base_env.sh
+# defaults NCCL_CROSS_NIC to 0, so a multi-node run silently keeps the AllGather
+# on RCCL kernels. 0 is still required on rail-isolated fabrics, and the default
+# cannot be told apart from an explicit 0 here, so warn instead of overriding it.
+if (( ${NNODES:-1} > 1 )) && [[ "${NCCL_CROSS_NIC:-}" == "0" ]] && \
+   [[ "${fsdp_backend}" == "rccl_sdma" || "${megatron_backend}" == "rccl_sdma" ]]; then
+    echo "[WARN] RCCL-SDMA: NNODES=${NNODES} with NCCL_CROSS_NIC=0 disables RCCL's RMA" \
+         "proxy, so the multi-node AllGather runs on RCCL kernels, not the copy engines." \
+         "Set NCCL_CROSS_NIC=2 (RCCL's default) if the fabric routes between rails." >&2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 1) Common cuMem and allocator prerequisites for the RCCL copy-engine path.
