@@ -31,7 +31,8 @@ def _is_turbo_mega_moe_can_patch(ctx: PatchContext) -> bool:
       - primus_turbo package is installed
       - enable_primus_turbo == True
       - use_turbo_mega_moe == True
-      - 1 < expert_model_parallel_size <= 8
+      - 1 <= expert_model_parallel_size <= 8 (EP=1: one rank holds every expert; the dispatch/combine
+        stay the same kernels with the peer set reduced to itself)
     """
     args = get_args(ctx)
     use_turbo_mega_moe = bool(getattr(args, "use_turbo_mega_moe", False))
@@ -39,7 +40,7 @@ def _is_turbo_mega_moe_can_patch(ctx: PatchContext) -> bool:
     # The fused all-to-all rides intra-node peer transfers, so the EP group has to fit in one node.
     ep_size = int(getattr(args, "expert_model_parallel_size", 1))
 
-    return use_turbo_mega_moe and bf16 and 1 < ep_size <= 8 and is_primus_turbo_can_patch(ctx)
+    return use_turbo_mega_moe and bf16 and 1 <= ep_size <= 8 and is_primus_turbo_can_patch(ctx)
 
 
 def _is_turbo_mega_moe_mxfp8(ctx: PatchContext) -> bool:
@@ -119,4 +120,41 @@ def patch_mega_moe_weight_generation(ctx: PatchContext):
     log_rank_0(
         "[Patch:megatron.turbo.mega_moe_weight_generation] "
         "Patched train_step to advance the MegaMoE mxfp8 weight generation after optimizer.step()"
+    )
+
+
+def _is_turbo_mega_moe_fp8_block(ctx: PatchContext) -> bool:
+    """MegaMoE with 128-block FP8 (UE8M0) experts: quantized weights in fixed buffers."""
+    precision = getattr(get_args(ctx), "turbo_mega_moe_precision", "bf16")
+    return precision == "fp8_block" and _is_turbo_mega_moe_can_patch(ctx)
+
+
+@register_patch(
+    "megatron.turbo.mega_moe_fp8blk_weights",
+    backend="megatron",
+    phase="before_train",
+    description="Re-quantize the MegaMoE fp8_block expert weights after every optimizer step",
+    condition=_is_turbo_mega_moe_fp8_block,
+)
+def patch_mega_moe_fp8blk_weights(ctx: PatchContext):
+    """Refresh the 128x128-block FP8 copies (+ transposed) of every MegaMoE expert weight after each step.
+
+    The forward reads fixed buffers and never checks weight versions on the host (CUDA-graph capturable), so
+    the refresh has to follow the optimizer step itself.
+    """
+    import megatron.training.training as megatron_training
+    from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import refresh_fp8blk_weights
+
+    _original_train_step = megatron_training.train_step
+
+    @functools.wraps(_original_train_step)
+    def _patched_train_step(*args, **kwargs):
+        result = _original_train_step(*args, **kwargs)
+        refresh_fp8blk_weights()
+        return result
+
+    megatron_training.train_step = _patched_train_step
+    log_rank_0(
+        "[Patch:megatron.turbo.mega_moe_fp8blk_weights] "
+        "Patched train_step to re-quantize the MegaMoE fp8_block expert weights after optimizer.step()"
     )
