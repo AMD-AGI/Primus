@@ -251,7 +251,7 @@ Pretrain Llama 3 8B on **MI355X**, from your Primus checkout on the host:
 export RCCL_WARP_SPEED_AUTO=0
 ./runner/primus-cli container --image rocm/jax-training:maxtext-v26.10 \
   -- train pretrain \
-  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
 ```
 
 If you already have a shell inside the MaxText container, use `direct` instead — no `--image` needed:
@@ -260,7 +260,7 @@ If you already have a shell inside the MaxText container, use `direct` instead �
 export RCCL_WARP_SPEED_AUTO=0
 ./runner/primus-cli direct \
   -- train pretrain \
-  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
 ```
 
 Slurm mode — supply the image (and any environment variables) via a config file:
@@ -268,7 +268,7 @@ Slurm mode — supply the image (and any environment variables) via a config fil
 ```bash
 ./runner/primus-cli --config my_maxtext_config.yaml slurm srun -N 8 \
   -- train pretrain \
-  --config examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml
 ```
 
 MaxText parallelism is set with `ici_*` (intra-node) and `dcn_*` (inter-node) fields — see the [MaxText config table](pretraining.md#maxtext-jax-pretraining) and [MaxText parameters](../03-configuration-reference/maxtext-parameters.md).
