@@ -38,18 +38,6 @@ class Rasterizer:
         height: int,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        def _f32(value):
-            if torch.is_tensor(value) and value.is_floating_point():
-                return value.float()
-            return value
-
-        means = _f32(means)
-        quats = _f32(quats)
-        scales = _f32(scales)
-        opacities = _f32(opacities)
-        colors = _f32(colors)
-        camtoworlds = _f32(camtoworlds)
-        Ks = _f32(Ks)
         render_colors, render_alphas, _ = rasterization(
             means=means,
             quats=quats,
