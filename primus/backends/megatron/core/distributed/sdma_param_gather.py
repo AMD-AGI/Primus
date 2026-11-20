@@ -58,6 +58,16 @@ class _WaitableHandle:
         return True
 
 
+_FALLBACK_REASONS_WARNED: set = set()
+
+
+def _warn_fallback_once(reason: str) -> None:
+    """Warn once per reason that an SDMA all-gather ran on RCCL kernels instead."""
+    if reason not in _FALLBACK_REASONS_WARNED:
+        _FALLBACK_REASONS_WARNED.add(reason)
+        warnings.warn(f"SDMA all-gather is using torch.distributed.all_gather_into_tensor: {reason}")
+
+
 def _all_gather_into_tensor_waitable_fallback(
     output_tensor: torch.Tensor,
     input_tensor: torch.Tensor,
@@ -160,6 +170,7 @@ def all_gather_into_tensor_sdma(
         or output_tensor.device.index != torch.cuda.current_device()
         or not output_tensor.is_contiguous()
     ):
+        _warn_fallback_once("tensors are not contiguous CUDA tensors on the current device")
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
         )
@@ -171,13 +182,15 @@ def all_gather_into_tensor_sdma(
         get_symm_mem_workspace = symm_mem_module.get_symm_mem_workspace
         hip_runtime = hip_runtime_module.get_hip_runtime_lib()
         memcpy_comm_kind = hip_runtime_module.hipMemcpyKindEnum.hipMemcpyDeviceToDeviceNoCU
-    except Exception:
+    except Exception as error:
+        _warn_fallback_once(f"Primus-Turbo symmetric memory / HIP runtime unavailable ({error})")
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
         )
 
     group_name = getattr(group, "group_name", None)
     if group_name is None:
+        _warn_fallback_once("the process group has no name")
         return _all_gather_into_tensor_waitable_fallback(
             output_tensor, input_tensor, group=group, async_op=async_op
         )
