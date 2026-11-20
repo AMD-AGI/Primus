@@ -57,8 +57,12 @@ try:  # Gluon CDNA5 API is only in recent Triton (main / 3.9+).
     from triton.experimental.gluon.language.amd.cdna5 import tdm as _tdm  # noqa: F401
 
     _HAS_GLUON_CDNA5 = hasattr(ttgl.amd.cdna5, "make_partitioned_dot_layouts")
+    # The image's Triton 3.8 exposes the same API but did not finish compiling this kernel
+    # for gfx1250 in >20 CPU-min (Triton main: ~1 min); require 3.9+ unless overridden.
+    _TRITON_OK = tuple(int(x) for x in triton.__version__.split(".")[:2]) >= (3, 9) or         os.environ.get("PRIMUS_INDEXER_GLUON_ALLOW_OLD_TRITON", "0") == "1"
 except Exception:  # pragma: no cover - depends on the installed Triton
     _HAS_GLUON_CDNA5 = False
+    _TRITON_OK = False
 
 
 NUM_WARPS = 8
@@ -401,7 +405,7 @@ def _device_is_gfx1250(index: int) -> bool:
 
 
 def is_gluon_kernel_supported(q_i: torch.Tensor, k_icomp: torch.Tensor, w_i: torch.Tensor) -> bool:
-    if not _HAS_GLUON_CDNA5 or not q_i.is_cuda:
+    if not _HAS_GLUON_CDNA5 or not _TRITON_OK or not q_i.is_cuda:
         return False
     if q_i.dim() != 4 or k_icomp.dim() != 3 or w_i.dim() != 3:
         return False
