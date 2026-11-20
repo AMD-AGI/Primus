@@ -379,12 +379,14 @@ class HyperMixer(nn.Module):
         # Cast back to the activation dtype to match downstream block compute.
         return pre.to(out_dtype), post.to(out_dtype), comb.to(out_dtype)
 
-    def fused_pre(self, x: torch.Tensor):
+    def fused_pre(self, x: torch.Tensor, norm_weight=None, norm_eps: float = 1e-6):
         """Fused weights + collapse (g90mem): ``(collapsed, post, comb^T, link)`` for :func:`hc_fused_post`.
 
-        Same math as ``compute_weights`` + ``collapse``; see ``_triton_common/hc_fused.py``.
+        Same math as ``compute_weights`` + ``collapse``; see ``_triton_common/hc_fused.py``. With ``norm_weight``
+        (opt3-mem) the first output is ``rmsnorm(collapsed, norm_eps) * norm_weight``.
         """
-        return hc_fused_pre(x, self.fn.weight, self.scale, self.base, self.eps, self.sinkhorn_iters)
+        return hc_fused_pre(x, self.fn.weight, self.scale, self.base, self.eps, self.sinkhorn_iters,
+                            norm_weight, norm_eps)
 
     @staticmethod
     def collapse(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:

@@ -121,7 +121,7 @@ class PrimusCrossEntropyFn(torch.autograd.Function):
 
 
 def primus_ce_enabled() -> bool:
-    return os.environ.get("PRIMUS_FUSED_CE", "0") == "1"
+    return os.environ.get("PRIMUS_V4_FUSED_CE", "0") == "1"  # PRIMUS_FUSED_CE is the Mamba/FLA knob
 
 
 def primus_parallel_cross_entropy(inp, target, label_smoothing=0.0, reduce_loss=False, dist_process_group=None,

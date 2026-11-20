@@ -36,9 +36,17 @@ _LAST_SUMSQ = {"value": None}
 
 
 def pop_last_grad_sumsq():
+    """Sum of squares of this step's grads (None if not available). A value produced while a CUDA graph was
+    being captured (full-iteration graph) is a static graph-pool tensor that every replay rewrites in place,
+    and the Python code that produced it never runs again on replay, so it is kept instead of cleared."""
     v = _LAST_SUMSQ["value"]
-    _LAST_SUMSQ["value"] = None
+    if not _LAST_SUMSQ.get("static", False):
+        _LAST_SUMSQ["value"] = None
     return v
+
+
+def _norm_reuse_requested() -> bool:
+    return os.environ.get("PRIMUS_GRAD_NORM_FROM_NAN_CHECK", "0") == "1"
 
 
 def _enabled(ctx: PatchContext) -> bool:
@@ -104,14 +112,37 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
             part = n if part is None else part + n
         state["acc"] = part if state["acc"] is None else state["acc"] + part
 
+    def _sumsq_all_buckets(ddp):
+        # opt3-mem: with the NaN check off (e.g. --check_for_nan_in_loss_and_grad False under the
+        # full-iteration graph) check_grads is never called; the clip norm still wants the sum of squares,
+        # so take it here, once, over every bucket (the same reduction the l2norm would do).
+        if not use_triton:
+            return None
+        acc = None
+        for bg in list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", [])):
+            for b in bg.buckets:
+                g = b.grad_data
+                if g is None or g.numel() == 0:
+                    continue
+                if not (g.is_cuda and g.is_contiguous()):
+                    return None
+                n = grad_sumsq(g)
+                acc = n if acc is None else acc + n
+        return acc
+
     def finish_grad_sync(self, *args, **kwargs):
         # Run upstream first: without overlap_grad_reduce it is what calls start_grad_sync
         # (and so check_grads) for every group.
         out = original_finish(self, *args, **kwargs)
         acc, state["acc"] = state["acc"], None
+        checked = acc is not None
+        if acc is None and _norm_reuse_requested():
+            acc = _sumsq_all_buckets(self)
+            state["exact"] = acc is not None
         _LAST_SUMSQ["value"] = acc if state["exact"] else None
+        _LAST_SUMSQ["static"] = bool(acc is not None and torch.cuda.is_current_stream_capturing())
         state["exact"] = True
-        if acc is not None:
+        if checked:
             rsm = get_rerun_state_machine()
             msg = "in backward pass (deferred check over all grad buckets of this step)"
             rsm.validate_result(

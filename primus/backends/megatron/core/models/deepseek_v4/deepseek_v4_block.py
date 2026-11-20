@@ -73,6 +73,8 @@ except ImportError:  # pragma: no cover
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Union
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -98,6 +100,7 @@ from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
 )
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_fused import (
+    hc_fold_supported,
     hc_fused_enabled,
     hc_fused_post,
     hc_fused_supported,
@@ -715,13 +718,38 @@ class DeepseekV4HybridLayer(TransformerLayer):
 
     # ------------------------------------------------------------------
 
-    def _hc_apply(self, mixer: Optional[HyperMixer], x: torch.Tensor, sub_block, *args):
+    @staticmethod
+    def _foldable_norm(norm, D: int):
+        """(gamma, eps) when ``norm`` can be folded into the fused HC kernels (opt3-mem, PRIMUS_HC_FOLD_NORM=1):
+        a PrimusTurboRMSNorm running the rmsnorm_g90 kernels (same math as the folded kernels), no SP."""
+        if norm is None or os.environ.get("PRIMUS_HC_FOLD_NORM", "0") != "1" or not hc_fold_supported(D):
+            return None
+        if type(norm).__name__ != "PrimusTurboRMSNorm" or getattr(norm, "sequence_parallel", False):
+            return None
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm_g90 import (
+            rmsnorm_g90_enabled,
+        )
+
+        w = getattr(norm, "weight", None)
+        if not rmsnorm_g90_enabled() or w is None or w.numel() != D or getattr(norm, "bias", None) is not None:
+            return None
+        gamma = w + 1 if getattr(norm, "zero_centered_gamma", False) else w
+        return gamma, float(norm.eps)
+
+    def _hc_apply(self, mixer: Optional[HyperMixer], x: torch.Tensor, sub_block, *args, norm=None):
         """Run a sub-block under HC.
 
         ``x`` shape: ``[B, S, K, D]`` if ``hc_mult > 1``, else ``[B, S, D]``.
         ``sub_block`` is ``Callable[[Tensor, *Any], Tensor]`` whose first
-        positional arg is the (collapsed) hidden in ``[B, S, D]``.
+        positional arg is the (collapsed) hidden in ``[B, S, D]``, after ``norm``
+        when one is given (``norm`` may then be folded into the HC kernels).
         """
+        if norm is not None:
+            inner = sub_block
+
+            def sub_block(h, *a):  # noqa: F811
+                return inner(norm(h), *a)
+
         if mixer is None:
             # Single-stream: classic residual; x already has shape [B, S, D].
             out = sub_block(x, *args)
@@ -729,8 +757,14 @@ class DeepseekV4HybridLayer(TransformerLayer):
 
         if hc_fused_enabled() and hasattr(mixer, "fused_pre") and hc_fused_supported(x, mixer.hc_mult):
             # g90mem: 3 fwd + 4 bwd launches per HC application, one dx write (opt-in: PRIMUS_HC_FUSED=1).
-            collapsed, post, combt, link = mixer.fused_pre(x)
-            out = sub_block(collapsed, *args)
+            fold = self._foldable_norm(norm, x.shape[-1])
+            if fold is not None:
+                # opt3-mem: norm folded into the collapse (fwd) and dpre (bwd) kernels
+                normed, post, combt, link = mixer.fused_pre(x, norm_weight=fold[0], norm_eps=fold[1])
+                out = inner(normed, *args)
+            else:
+                collapsed, post, combt, link = mixer.fused_pre(x)
+                out = sub_block(collapsed, *args)
             nxt = getattr(mixer, "_hc_next", None)
             return hc_fused_post(x, out, post, combt, link, nxt.fn.weight if nxt is not None else None)
 
@@ -794,26 +828,24 @@ class DeepseekV4HybridLayer(TransformerLayer):
 
         # Attention sub-block. The collapse passes a [B, S, D] hidden, then
         # the attention runs and returns [B, S, D]; HC expand writes back.
-        def _attn_sub(collapsed: torch.Tensor) -> torch.Tensor:
-            return self.self_attention(
-                self.input_layernorm(collapsed), position_ids, packed_seq_params=packed_seq_params
-            )
+        def _attn_sub(normed: torch.Tensor) -> torch.Tensor:
+            return self.self_attention(normed, position_ids, packed_seq_params=packed_seq_params)
 
-        x = self._hc_apply(self.attn_hc, hidden_states, _attn_sub)
+        x = self._hc_apply(self.attn_hc, hidden_states, _attn_sub, norm=self.input_layernorm)
 
         # MLP / MoE sub-block. MoE needs token_ids when the layer is
         # hash-routed; plain SwiGLU ignores it.
         if self.is_moe:
 
-            def _ffn_sub(collapsed: torch.Tensor) -> torch.Tensor:
-                return self.mlp(self.pre_mlp_layernorm(collapsed), token_ids=token_ids)
+            def _ffn_sub(normed: torch.Tensor) -> torch.Tensor:
+                return self.mlp(normed, token_ids=token_ids)
 
         else:
 
-            def _ffn_sub(collapsed: torch.Tensor) -> torch.Tensor:
-                return self.mlp(self.pre_mlp_layernorm(collapsed))
+            def _ffn_sub(normed: torch.Tensor) -> torch.Tensor:
+                return self.mlp(normed)
 
-        x = self._hc_apply(self.ffn_hc, x, _ffn_sub)
+        x = self._hc_apply(self.ffn_hc, x, _ffn_sub, norm=self.pre_mlp_layernorm)
         return x, None
 
 
