@@ -150,6 +150,22 @@ moe_extended_tp: false
 moe_use_upcycling: false
 moe_permute_fusion: false
 delay_wgrad_compute: false
+# Dynamic expert replication: copy hot experts into replica slots on lightly loaded EP ranks for the
+# current routing; the copies' weight gradients go back to the owners. Turbo DeepEP and the BF16 Turbo
+# grouped GEMM only, with a Primus-Turbo whose grouped_gemm takes weight segments. null: off.
+moe_replica_planner: null # str: ultraep, moonep
+# per_step: plan at the first micro-batch of a step and keep the slots for the step;
+# per_microbatch: plan every micro-batch.
+moe_replica_placement: per_step
+moe_replica_slots: 4 # int, replica slots per rank; moonep needs at least num_experts / EP
+moe_replica_min_rows: 1024 # int, ultraep: rows a new replica must take
+moe_replica_min_gain: 0.1 # float, ultraep: replicate only if the busiest rank drops by this fraction of the mean load
+moe_replica_cost: 0 # int, ultraep: rows a new replica costs its rank
+moe_replica_block: 1 # int, ultraep: quotas in multiples of this many rows
+# per_microbatch: keep the slots while the busiest rank stays within this multiple of the mean load; 0: plan anew
+moe_replica_replan_above: 0.0
+moe_replica_async_comm: true # push slot weights right after planning, return slot gradients overlapped
+moe_replica_log_interval: 0 # int, log the busiest rank's load before / after planning every N plans; 0: off
 
 # Model parallelism
 model_parallel_size: null
