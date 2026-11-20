@@ -10,7 +10,7 @@ AMD provides a ready-to-use Docker image for AMD Instinct MI300X and MI355X GPUs
 
 For the full software stack of this image (ROCm, JAX, Transformer Engine, hipBLASLt, RCCL, TensorFlow, and the rest), see [Release notes → `rocm/jax-training:maxtext-v26.10`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v2610). The release notes are the single source of truth for image contents.
 
-> **Primus source:** The v26.10 image bundles Primus at its build commit `db1a4160` (`/workspace/Primus`). Use a `release/v26.10` checkout all the same—`primus-cli container` mounts it into the image for you. See [Release notes → Primus source for v26.10](../01-getting-started/release-notes.md#primus-source-for-v2610).
+> **Primus source:** The v26.10 image bundles Primus at its build commit `31128a29` (`/workspace/Primus`). `release/v26.10` has moved on since the build, so use a checkout of the branch—`primus-cli container` mounts it into the image for you. See [Release notes → Primus source for v26.10](../01-getting-started/release-notes.md#primus-source-for-v2610).
 
 ---
 
@@ -20,25 +20,19 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Required settings
 
-**MoE recipes on the development branch need a newer stack.** On `main`, the default recipes for Qwen3 30B-A3B, DeepSeek-V2-lite (16B) and Gemma4 26B are dropless and run on the Primus-Turbo grouped GEMM; they need MaxText `release/v26.10` and Primus-Turbo with the JAX grouped GEMM backends, not the v26.9 image. On the v26.9 image, use their `-token_dropping-` recipes. See [Dropless MoE recipes](#dropless-moe-recipes-primus-turbo-grouped-gemm).
+**Use the `release/v26.10` branch.** It is the Primus branch matching the `rocm/jax-training:maxtext-v26.10` image. The image bundles Primus at its build commit `31128a29` on that branch, with MaxText `release/v26.10` (`2fb48f50`) in `/workspace/maxtext` and Primus-Turbo for JAX in `/workspace/Primus-Turbo`. The branch has moved on since the build, mainly with PyTorch-family fixes and recipes; `primus-cli container` mounts your checkout into the image and runs it, so a checkout picks those up. See [Release notes → Primus source for v26.10](../01-getting-started/release-notes.md#primus-source-for-v2610). The branch carries the Primus-managed MaxText environment defaults: CUB radix sort is turned off for MoE top-k (`--xla_gpu_enable_cub_radix_sort=false`), stream priority is honored (`DEBUG_HIP_IGNORE_STREAM_PRIORITY=0`) so collectives overlap compute, and dynamic-slice fusion is turned off (`--xla_gpu_enable_dynamic_slice_fusion=false`) ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)). A config's own `env:` block or `XLA_FLAGS_APPEND` can still override them.
 
-**Use the `release/v26.9` branch.** It is the Primus branch matching the `rocm/jax-training:maxtext-v26.10` image. The image bundles Primus again, at its build commit `db1a4160` on that branch, with MaxText `release/v26.9` (`8d1d43c0`) in `/workspace/maxtext`. `primus-cli container` mounts your checkout into the image and runs it, so a checkout keeps you current if later commits land on the branch. The branch carries the Primus-managed MaxText environment defaults: CUB radix sort is turned off for MoE top-k (`--xla_gpu_enable_cub_radix_sort=false`), stream priority is honored (`DEBUG_HIP_IGNORE_STREAM_PRIORITY=0`) so collectives overlap compute, and dynamic-slice fusion is turned off (`--xla_gpu_enable_dynamic_slice_fusion=false`) ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)). A config's own `env:` block or `XLA_FLAGS_APPEND` can still override them.
-
-**XLA autotuning now defaults to level 3.** Level 4, the previous Primus default, adds the autotuner's correctness checks, which intermittently aborted compilation of the train step on GPU 0 with `Mismatched results with host and device comparison` (`redzone_allocator.cc`) or `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`. It shows up most under `primus-cli container`, where every run compiles from scratch; a warm JAX compilation cache in a long-lived container hides it. Level 3 keeps autotuning and drops only those checks ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)). The change was checked for finite losses on the MI325X `nanoo_fp8` MoE recipes; if a plain `fp8` MoE run on MI355X produces NaN losses, set `XLA_GPU_AUTOTUNE_LEVEL=4`, which also restores the old default.
+**XLA autotuning defaults to level 3.** Level 4 adds the autotuner's correctness checks, which intermittently abort compilation of the train step on GPU 0 with `Mismatched results with host and device comparison` (`redzone_allocator.cc`) or `HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`; level 3 keeps autotuning and drops only those checks ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)). If an `fp8` MoE run with MaxText's `quantization: fp8` on MI355X (Mixtral 8x7B `fp8` or the `-fp8-token_dropping-` recipes) produces NaN losses, set `XLA_GPU_AUTOTUNE_LEVEL=4`. The dropless MoE recipes set their own level in their `env:` block; see [Dropless MoE recipes](#dropless-moe-recipes-primus-turbo-grouped-gemm).
 
 **Keep Shardy on.** Shardy is the partitioning system in JAX, and the JAX in this image uses it. Primus enables it by default (`shardy: true` in its MaxText module config), so you only need to act if you have turned it off. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
 
 ### Changes you may need to act on
 
-**MaxText moves to `release/v26.10`.** Upstream drops the `retry_when_tokens_dropped` config key and renames the `cosmos3-*-reasoner` model configs to `weaver-max` / `weaver-mini` ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)). Nothing in Primus uses either, but remove the key from local configs, since the MaxText config schema rejects unknown keys.
+**Dropless MoE recipes are the default for Qwen3 30B-A3B, DeepSeek-V2-lite (16B) and Gemma4 26B.** On MI300X, MI325X and MI355X, `<model>-bf16-pretrain.yaml` (and `<model>-fp8-pretrain.yaml` on MI355X) now drop no tokens and run the expert matmuls on the Primus-Turbo grouped GEMM, which this image provides. The previous recipes are kept, unchanged, as `<model>-bf16-token_dropping-pretrain.yaml` (and `<model>-fp8-token_dropping-pretrain.yaml` on MI355X). Scripts and benchmarks that name the default file now run the dropless recipe, so their results are not comparable with v26.9 runs of the same file name; point them at the `-token_dropping-` file to keep the old recipe ([#1450](https://github.com/AMD-AGI/Primus/pull/1450)). The Mixtral and `nanoo_fp8` recipes are unchanged. See [Dropless MoE recipes](#dropless-moe-recipes-primus-turbo-grouped-gemm).
 
-**A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so a job restricted to particular GPUs could land on another user's GPU on a shared node. It now keeps the value you or your scheduler set, and warns when it lists a different number of GPUs than `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
+**Keep the first-collective timeout in configs derived from the dropless recipes.** They set `--xla_gpu_first_collective_call_terminate_timeout_seconds=900` in `XLA_FLAGS_APPEND`: the first collective of a run can start more than 40 s late on one GPU, and XLA's default 40 s limit for it then aborts the run ([#1450](https://github.com/AMD-AGI/Primus/pull/1450)).
 
-If you are moving from v26.7 or earlier:
-
-**Drop `pure_nnx_decoder` from local configs.** MaxText `release/v26.8` removed the Linen modules and the `pure_nnx_decoder` key with them, and its config schema rejects unknown keys, so a config that still sets it fails validation. The three MI325X `nanoo_fp8` recipes that set it (DeepSeek-V2-16B, Mixtral-8x7B, Qwen3-30B-A3B) were fixed in v26.8 ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
-
-**`XLA_FLAGS` in a config now takes precedence** over the Primus-managed defaults, as it always should have; use `XLA_FLAGS_APPEND` to add flags without replacing them ([#1054](https://github.com/AMD-AGI/Primus/pull/1054)). If you relied on the old behaviour, check the effective flags in the launch log.
+**MaxText moves to `release/v26.10`** (`2fb48f50`). It adds the Primus-Turbo grouped GEMM path for MoE and three config keys for it, `use_turbo_grouped_gemm` (default `false`), `turbo_grouped_gemm_backend` (default `ck`) and `turbo_grouped_gemm_quant` (default `bf16`). The keys are additive and none is removed or renamed, so local configs that validated on v26.9 still validate ([#1443](https://github.com/AMD-AGI/Primus/pull/1443)).
 
 ### Architecture-specific settings
 
@@ -52,17 +46,15 @@ This variable is a no-op on MI300X (gfx942).
 
 ### Known issues
 
-The v26.9 QA runs found no MaxText issues. They covered the MaxText recipes on MI300X and MI355X; the MI325X recipes were not re-run on this image.
+The v26.10 QA runs found no MaxText issues. They covered the MaxText recipes on MI300X, MI325X and MI355X; the Llama 3.1 405B and Grok-1 recipes were not part of them.
 
-**v26.9 runs on a ROCm nightly.** The image takes ROCm `10.3.0a20261026` and a Transformer Engine 2.19 development build. Re-check convergence on your own hardware before relying on a recipe for a long run.
+**v26.10 runs on a ROCm nightly.** The image takes ROCm `10.3.0a20261109` and a Transformer Engine 2.21 development build. Re-check convergence on your own hardware before relying on a recipe for a long run.
 
 **Loss curve discrepancy with `packing=false`.** With `packing=false` the loss converges at a slightly higher value than in earlier images. To reproduce the earlier convergence, set `NVTE_CK_USES_FWD_V3=0`, which uses Flash Attention v2 for the forward pass instead of v3. This is being tracked for a future release.
 
-**Fixed in v26.9:**
+**Fixed in v26.10:**
 
-- The MI355X Mixtral-8x7B `fp8` recipe ran out of memory on this image; the recipe is fixed ([#1338](https://github.com/AMD-AGI/Primus/pull/1338)).
-- Runs that start grain worker processes (`grain_worker_count` above 0; MaxText's default is 1) trained zero steps and still exited 0, because grain read absl flags that Primus had left unparsed. Synthetic-data runs were not affected ([#1229](https://github.com/AMD-AGI/Primus/pull/1229)).
-- Transformer Engine printed a `return_max_logit` warning on every backward attention call, filling most of a training log. A Primus patch passes the value TE was already falling back to, so the warning is gone and numerics are unchanged ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)).
+- The MI325X Llama 2 7B and 70B `nanoo_fp8` recipes ran out of memory at the first training step on this image. Their per-device batch sizes are lowered so they fit in HBM ([#1453](https://github.com/AMD-AGI/Primus/pull/1453)).
 
 ---
 
@@ -95,25 +87,21 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 | Qwen3 14B | `qwen3_14B` | `bf16`, `nanoo_fp8` | `bf16`, `fp8` |
 | Qwen3 30B-A3B | `qwen3_30B_A3B` | `bf16`, `nanoo_fp8` | `bf16`, `fp8` |
 
+For DeepSeek-V2-lite (16B), Gemma4 26B and Qwen3 30B-A3B, the `bf16` recipes (and the `fp8` recipes on MI355X) are dropless, and each also ships as a `<prefix>-<precision>-token_dropping-pretrain.yaml` variant; see [Dropless MoE recipes](#dropless-moe-recipes-primus-turbo-grouped-gemm).
+
 Browse `examples/maxtext/configs/` for the authoritative list — it tracks whatever configs ship in your checkout.
 
 ### Dropless MoE recipes (Primus-Turbo grouped GEMM)
 
 For Qwen3 30B-A3B, DeepSeek-V2-lite (16B) and Gemma4 26B, the default `bf16` recipes (and the `fp8` recipes on MI355X) are dropless: every token reaches every expert it is routed to (`capacity_factor: -1`), and the expert matmuls run as one grouped GEMM on Primus-Turbo (`sparse_matmul: true`, `megablox: false`, `use_turbo_grouped_gemm: true`) with FSDP 8 instead of expert parallelism. The grouped GEMM backend is `hipblaslt` on MI300X/MI325X and `flydsl` on MI355X.
 
-**Requirements.** These recipes need MaxText `release/v26.10` or later and Primus-Turbo built for JAX with the hipBLASLt and FlyDSL grouped GEMM backends (FlyDSL 0.3.4.1 on MI355X), as in the JAX CI image. The `rocm/jax-training:maxtext-v26.10` image described in the rest of this page does not have them: there, MaxText rejects the recipes at startup. Use the `<model>-bf16-token_dropping-pretrain.yaml` recipes on that image.
+**Requirements.** These recipes need MaxText `release/v26.10` or later and Primus-Turbo built for JAX with the hipBLASLt and FlyDSL grouped GEMM backends (FlyDSL 0.3.4.1 on MI355X). The `rocm/jax-training:maxtext-v26.10` image described in this page has all of them (see [Release notes → `rocm/jax-training:maxtext-v26.10`](../01-getting-started/release-notes.md#rocmjax-trainingmaxtext-v2610)). On older images MaxText rejects the recipes at startup; use the `<model>-bf16-token_dropping-pretrain.yaml` recipes there.
 
 **fp8 on MI355X.** The dropless `fp8` recipes set `turbo_grouped_gemm_quant: fp8` instead of MaxText's `quantization: fp8`: the routed-expert matmuls run in fp8 (per-tensor e4m3, forward and both gradients), while attention and the other dense layers run in bf16. MaxText's `quantization` cannot be combined with the Turbo grouped GEMM.
 
-| Model | MI300X `bf16` | MI325X `bf16` | MI355X `bf16` | MI355X `fp8` |
-| ----- | ------------- | ------------- | ------------- | ------------ |
-| Qwen3 30B-A3B | 9,484 (5,656) | 11,221 (7,455) | 20,232 (10,038) | 21,059 (12,606) |
-| DeepSeek-V2-lite (16B) | 15,384 (10,056) | 18,558 (12,416) | 36,158 (20,633) | 38,943 (25,921) |
-| Gemma4 26B | 8,268 (5,510) | 10,112 (6,478) | 16,770 (11,445) | 17,505 (13,750) |
+For each of the three models, the dropless recipe is faster than the token-dropping recipe it replaces on every GPU and precision. The MI300X recipes (192 GB HBM) use smaller per-device batches than the MI325X ones (256 GB).
 
-Tokens/s/device on 8 GPUs, synthetic data, 20 steps; in parentheses, the previous token-dropping recipe. The MI300X recipes (192 GB HBM) use smaller per-device batches than the MI325X ones (256 GB).
-
-The previous token-dropping recipes (8-way expert parallelism, dense dispatch, a capacity factor of 1 or 1.25) are kept as `<model>-bf16-token_dropping-pretrain.yaml` (and `<model>-fp8-token_dropping-pretrain.yaml` on MI355X). The `nanoo_fp8` recipes on MI300X/MI325X and the Mixtral recipes are unchanged: for Mixtral the token-dropping recipes are as fast as the dropless ones (Mixtral 8x7B `fp8` on MI355X: 15,864 tokens/s/device token-dropping, 15,451 dropless).
+The previous token-dropping recipes (8-way expert parallelism, dense dispatch, a capacity factor of 1 or 1.25) are kept as `<model>-bf16-token_dropping-pretrain.yaml` (and `<model>-fp8-token_dropping-pretrain.yaml` on MI355X). The `nanoo_fp8` recipes on MI300X/MI325X and the Mixtral recipes are unchanged: for Mixtral the token-dropping recipes are as fast as the dropless ones.
 
 **Environment set by the recipes.** The dropless recipes set `XLA_GPU_AUTOTUNE_LEVEL: "1"` (the level they were tuned and measured at) and their own `XLA_FLAGS_APPEND` in their `env:` block; these take precedence over values exported in the shell or passed with `primus-cli --env`, so change them in the recipe. The flags lower the collective combine thresholds (256 MiB on MI300X/MI325X, 1 GiB with pipelined collectives on MI355X) so FSDP collectives overlap with compute, and set `--xla_gpu_first_collective_call_terminate_timeout_seconds=900`: the first collective of a run can start more than 40 s late on one GPU, and XLA's default 40 s limit for it would abort the run.
 
