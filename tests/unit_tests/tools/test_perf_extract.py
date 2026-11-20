@@ -1493,6 +1493,44 @@ def test_train_steps_that_megatrons_schedule_rejects(tmp_path, framework, overri
         assert why.startswith(f"TRAIN_STEPS={train_steps} is not more than lr_warmup_iters={warmup},")
 
 
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "env,mbs,gbs",
+    [
+        pytest.param("", "1", "64", id="defaults"),
+        pytest.param("PRIMUS_MBS=2", "2", "64", id="forwarded-PRIMUS-value"),
+    ],
+)
+def test_placeholder_batch_sizes_resolve_and_make_a_valid_log_name(tmp_path, env, mbs, gbs):
+    """inkling_large_6L (MI355X) writes `${PRIMUS_MBS:1}` / `${PRIMUS_GBS:64}`: the run uses the resolved values,
+    and the log name must not carry the placeholder, whose ':' some NFS servers refuse (EINVAL), leaving the
+    run with no log at all (killed by SIGPIPE in 1 s)."""
+    config = tmp_path / "inkling-pretrain.yaml"
+    config.write_text(
+        "modules:\n  pre_trainer:\n    framework: megatron\n    config: pre_trainer.yaml\n    overrides:\n"
+        "      micro_batch_size: ${PRIMUS_MBS:1}\n      global_batch_size: ${PRIMUS_GBS:64}\n"
+        "      train_iters: ${PRIMUS_TRAIN_ITERS:50}\n"
+    )
+    script = (
+        f"set -uo pipefail\n{env}\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\nTRAIN_STEPS=20\nRESULT_DIR=/r\nBATCH_TS=t\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        f"source {MODULE_PATH.parent}/lib/run.sh\n"
+        f'prepare_config {config}; echo "$MBS|$GBS|$YAML_STEPS"; run_log_name 1\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    values, name = out.stdout.strip().splitlines()[-2:]
+    assert values == f"{mbs}|{gbs}|50"
+    assert name.startswith("/r/megatron-inkling-pretrain-") and f"-MBS{mbs}-GBS{gbs}-rep1_t.log" in name
+    assert not set("${}:") & set(name)
+
+
+def test_sanitize_keeps_only_filename_safe_characters():
+    script = f'source {MODULE_PATH.parent}/lib/run.sh; sanitize "a b/c:d\\${{X:1}}*e.f_g-h+i"'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.stdout.strip() == "a_b_c_d__X_1__e.f_g-h+i"  # bash takes the backslash: d${X:1}*e
+
+
 def _volume_yaml(volume):
     return f'\n      - "{volume}"' if volume else " []"
 
