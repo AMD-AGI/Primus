@@ -87,6 +87,7 @@ if _HAS_GLUON_CDNA5:
         k_ptr,  # [B*P, D]
         w_ptr,  # [B*S, H]    any float dtype (already scaled by score_scale)
         out_ptr,  # [B*S, P]  out dtype
+        dot_ptr,  # [B*S, H, P] q.k in q dtype (only written when WRITE_DOT)
         S,
         P,
         QROWS,  # B*S
@@ -102,6 +103,7 @@ if _HAS_GLUON_CDNA5:
         NQ: ttgl.constexpr,
         ROUND_DOT: ttgl.constexpr,
         NUM_XCDS: ttgl.constexpr,
+        WRITE_DOT: ttgl.constexpr,
         SHARED_Q: ttgl.constexpr,
         SHARED_K: ttgl.constexpr,
         WMMA: ttgl.constexpr,
@@ -112,6 +114,9 @@ if _HAS_GLUON_CDNA5:
         DOT_B: ttgl.constexpr = ttgl.DotOperandLayout(1, WMMA, 8)
         ROW_L: ttgl.constexpr = ttgl.SliceLayout(1, WMMA)
         COL_L: ttgl.constexpr = ttgl.SliceLayout(0, WMMA)
+        # 16-byte row-contiguous store layout for the optional dot write.
+        TPW_N: ttgl.constexpr = BN // 8
+        DOT_ST: ttgl.constexpr = ttgl.BlockedLayout([1, 8], [32 // TPW_N, TPW_N], [8, 1], [1, 0])
 
         pid = ttgl.program_id(0)
         b = ttgl.program_id(1)
@@ -155,6 +160,11 @@ if _HAS_GLUON_CDNA5:
         out = ttgl.zeros((BM, BN), dtype=ttgl.float32, layout=WMMA)
         zero = ttgl.zeros((BM, BN), dtype=ttgl.float32, layout=WMMA)
         w_nxt = ttgl.load(w_row_ptr)  # head 0; head h+1 is prefetched during head h
+        if WRITE_DOT:
+            d_rows = s0 + ttgl.arange(0, BM, layout=ttgl.SliceLayout(1, DOT_ST))
+            d_cols = p0 + ttgl.arange(0, BN, layout=ttgl.SliceLayout(0, DOT_ST))
+            d_row_off = (b * S + d_rows).to(ttgl.int64)[:, None] * (H * P) + d_cols[None, :]
+            d_mask = (d_rows < S)[:, None] & (d_cols < P)[None, :]
         for h in range(n_iter):
             _tdm.async_wait(NQ - 2)  # q_h landed for this wave
             ttgl.barrier()  # all waves: q_h visible, slot (h-1)%NQ no longer read
@@ -164,9 +174,19 @@ if _HAS_GLUON_CDNA5:
             w_nxt = ttgl.load(w_row_ptr + min(h + 1, H - 1))
             a = q_buf.index(h % NQ).load(layout=DOT_A)
             acc = ttgl.amd.cdna5.wmma(a, kb, zero)
-            if ROUND_DOT:  # the einsum hands the post kernel a bf16/fp16 dot
-                acc = acc.to(q_ptr.type.element_ty).to(ttgl.float32)
+            if ROUND_DOT or WRITE_DOT:  # the einsum hands the post kernel a bf16/fp16 dot
+                acc_lp = acc.to(q_ptr.type.element_ty)
+                if WRITE_DOT:  # saved for the existing tail backward (replaces the einsum output)
+                    ttgl.store(dot_ptr + (d_row_off + h * P), ttgl.convert_layout(acc_lp, DOT_ST), mask=d_mask)
+                if ROUND_DOT:
+                    acc = acc_lp.to(ttgl.float32)
             out = ttgl.fma(ttgl.maximum(acc, 0.0), w_h[:, None], out)
+        if WRITE_DOT:
+            # Dead tiles: the tail backward reads relu(dot) * 0 here, so the bytes
+            # must be finite -> write zeros (store only, no GEMM).
+            zlp = ttgl.zeros((BM, BN), dtype=q_ptr.type.element_ty, layout=DOT_ST)
+            for h in range(H - n_iter):
+                ttgl.store(dot_ptr + (d_row_off + h * P), zlp, mask=d_mask)
         _tdm.async_wait(0)
 
         allowed = (cols[None, :] + 1) * RATIO - 1 <= rows[:, None] + q_offset
@@ -191,7 +211,7 @@ def _num_xcds() -> int:
 
 
 def launch_args(B, S, P, H, D, compress_ratio, q_offset, BM=_DEF_BM, BN=_DEF_BN, NQ=_DEF_NQ, round_dot=True,
-                num_xcds=None):
+                num_xcds=None, write_dot=False):
     """Grid + scalar/constexpr kwargs (shared by the runtime launch and compile-only checks)."""
     shared_q, shared_k, wmma = _layouts(BM, BN, D)
     n_tiles_p = -(-P // BN)
@@ -199,23 +219,37 @@ def launch_args(B, S, P, H, D, compress_ratio, q_offset, BM=_DEF_BM, BN=_DEF_BN,
     grid = (n_tiles, B)
     kw = dict(S=S, P=P, QROWS=B * S, KROWS=B * P, q_offset=int(q_offset), n_tiles_p=n_tiles_p, n_tiles=n_tiles, H=H,
               D=D, RATIO=int(compress_ratio), BM=BM, BN=BN, NQ=NQ, ROUND_DOT=bool(round_dot),
-              NUM_XCDS=_num_xcds() if num_xcds is None else num_xcds, SHARED_Q=shared_q, SHARED_K=shared_k,
-              WMMA=wmma)
+              NUM_XCDS=_num_xcds() if num_xcds is None else num_xcds, WRITE_DOT=bool(write_dot),
+              SHARED_Q=shared_q, SHARED_K=shared_k, WMMA=wmma)
     return grid, kw
 
 
+def _tile_cfg():
+    bm = int(os.environ.get("PRIMUS_INDEXER_GLUON_BM", _DEF_BM))
+    bn = int(os.environ.get("PRIMUS_INDEXER_GLUON_BN", _DEF_BN))
+    nq = int(os.environ.get("PRIMUS_INDEXER_GLUON_NQ", _DEF_NQ))
+    return bm, bn, nq
+
+
 def indexer_score_fwd_gluon(q_i, k_icomp, w_i, *, compress_ratio: int, out_dtype: torch.dtype, q_offset: int = 0,
-                            round_dot: bool = True) -> torch.Tensor:
-    """Launch the fused kernel. q_i [B,S,H,D], k_icomp [B,P,D], w_i [B,S,H] -> scores [B,S,P]."""
+                            round_dot: bool = True, write_dot: bool = False):
+    """Launch the fused kernel. q_i [B,S,H,D], k_icomp [B,P,D], w_i [B,S,H] -> scores [B,S,P].
+
+    write_dot=True also returns ``dot [B,S,H,P]`` (q dtype, zeros in causally dead tiles),
+    i.e. the tensor the einsum would have produced, for the existing tail backward.
+    """
     B, S, H, D = q_i.shape
     P = k_icomp.shape[1]
     q = q_i.contiguous()
     k = k_icomp.contiguous()
     w = w_i.contiguous()
     out = torch.empty((B, S, P), dtype=out_dtype, device=q.device)
-    grid, kw = launch_args(B, S, P, H, D, compress_ratio, q_offset, round_dot=round_dot)
-    _indexer_score_fwd_gluon_kernel[grid](q, k, w, out, **kw, num_warps=NUM_WARPS, waves_per_eu=2)
-    return out
+    dot = torch.empty((B, S, H, P), dtype=q.dtype, device=q.device) if write_dot else out
+    BM, BN, NQ = _tile_cfg()
+    grid, kw = launch_args(B, S, P, H, D, compress_ratio, q_offset, BM=BM, BN=BN, NQ=NQ, round_dot=round_dot,
+                           write_dot=write_dot)
+    _indexer_score_fwd_gluon_kernel[grid](q, k, w, out, dot, **kw, num_warps=NUM_WARPS, waves_per_eu=2)
+    return (out, dot) if write_dot else out
 
 
 # ---------------------------------------------------------------------------
@@ -225,11 +259,12 @@ def indexer_score_fwd_gluon(q_i, k_icomp, w_i, *, compress_ratio: int, out_dtype
 
 def indexer_score_fwd_tiled_reference(q_i, k_icomp, w_i, *, compress_ratio: int, out_dtype: torch.dtype,
                                       q_offset: int = 0, BM: int = _DEF_BM, BN: int = _DEF_BN,
-                                      round_dot: bool = True, return_live: bool = False):
+                                      round_dot: bool = True, return_live: bool = False, write_dot: bool = False):
     """Same tile loop, dead-tile skip, bf16 rounding, head order and epilogue as the kernel."""
     B, S, H, D = q_i.shape
     P = k_icomp.shape[1]
     out = torch.empty((B, S, P), dtype=out_dtype, device=q_i.device)
+    dot = torch.zeros((B, S, H, P), dtype=q_i.dtype, device=q_i.device) if write_dot else None
     n_live = 0
     for b in range(B):
         for s0 in range(0, S, BM):
@@ -245,13 +280,16 @@ def indexer_score_fwd_tiled_reference(q_i, k_icomp, w_i, *, compress_ratio: int,
                     kt = k_icomp[b, p0:p1].float()
                     for h in range(H):
                         acc = q_i[b, s0:s1, h].float() @ kt.t()
+                        if write_dot:
+                            dot[b, s0:s1, h, p0:p1] = acc.to(q_i.dtype)
                         if round_dot:
                             acc = acc.to(q_i.dtype).float()
                         acc_out += acc.clamp_min(0.0) * w_i[b, s0:s1, h].float()[:, None]
                 allowed = (cols[None, :] + 1) * compress_ratio - 1 <= rows[:, None] + q_offset
                 out[b, s0:s1, p0:p1] = torch.where(allowed, acc_out, torch.full_like(acc_out,
                                                                                      float("-inf"))).to(out_dtype)
-    return (out, n_live) if return_live else out
+    res = (out, dot) if write_dot else out
+    return (res, n_live) if return_live else res
 
 
 # ---------------------------------------------------------------------------
@@ -284,27 +322,50 @@ def _post_bwd(dot, w, d_scores, compress_ratio: int, q_offset: int):
     return d_dot.to(dot.dtype), d_w.to(w.dtype)
 
 
+def _save_dot_enabled() -> bool:
+    """PRIMUS_INDEXER_GLUON_SAVE_DOT (default 1): the kernel also writes the bf16 dot for the
+    backward (same memory as today's einsum output, no extra GEMM). 0: save nothing and recompute
+    the einsum in the backward (saves B*S*H*P*2 bytes of activation memory per layer)."""
+    return os.environ.get("PRIMUS_INDEXER_GLUON_SAVE_DOT", "1") != "0"
+
+
 class IndexerScoreGluonFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q_i, k_icomp, w_i, compress_ratio: int, out_dtype: torch.dtype, q_offset: int):  # type: ignore
         q = q_i.contiguous()
         k = k_icomp.contiguous()
         w = w_i.contiguous()
+        need_grad = any(ctx.needs_input_grad[:3])
+        save_dot = need_grad and _save_dot_enabled()
         if q.is_cuda:
-            scores = indexer_score_fwd_gluon(q, k, w, compress_ratio=compress_ratio, out_dtype=out_dtype,
-                                             q_offset=q_offset)
+            res = indexer_score_fwd_gluon(q, k, w, compress_ratio=compress_ratio, out_dtype=out_dtype,
+                                          q_offset=q_offset, write_dot=save_dot)
         else:
-            scores = indexer_score_fwd_tiled_reference(q, k, w, compress_ratio=compress_ratio, out_dtype=out_dtype,
-                                                       q_offset=q_offset)
-        ctx.save_for_backward(q, k, w)
+            res = indexer_score_fwd_tiled_reference(q, k, w, compress_ratio=compress_ratio, out_dtype=out_dtype,
+                                                    q_offset=q_offset, write_dot=save_dot)
+        scores, dot = res if save_dot else (res, None)
+        if need_grad:
+            if save_dot:
+                ctx.save_for_backward(q, k, w, dot)
+            else:
+                ctx.save_for_backward(q, k, w)
+        ctx.save_dot = save_dot
         ctx.compress_ratio = int(compress_ratio)
         ctx.q_offset = int(q_offset)
         return scores
 
     @staticmethod
     def backward(ctx, d_scores):  # type: ignore[override]
-        q, k, w = ctx.saved_tensors
         need_q, need_k, need_w = ctx.needs_input_grad[:3]
+        if ctx.save_dot:
+            # Existing path without the forward einsum: tail bwd on the kernel-written dot,
+            # then the two einsum-backward GEMMs.
+            q, k, w, dot = ctx.saved_tensors
+            d_dot, d_w = _post_bwd(dot, w, d_scores.contiguous(), ctx.compress_ratio, ctx.q_offset)
+            dq = torch.einsum("bshp,bpd->bshd", d_dot, k) if need_q else None
+            dk = torch.einsum("bshp,bshd->bpd", d_dot, q) if need_k else None
+            return dq, dk, (d_w if need_w else None), None, None, None
+        q, k, w = ctx.saved_tensors
         with torch.enable_grad():
             q_ = q.detach().requires_grad_(need_q)
             k_ = k.detach().requires_grad_(need_k)
