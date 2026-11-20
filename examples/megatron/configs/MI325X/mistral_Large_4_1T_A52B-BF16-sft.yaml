@@ -1,0 +1,136 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mistral_Large_4_1T_A52B-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# Mistral Large 4 1T-A52B (text decoder) SFT on MI325X, from the released checkpoint.
+#   model: primus/configs/models/megatron/mistral_Large_4_1T_A52B.yaml
+#   `primus-cli direct -- train posttrain --config <this file> --hf_path <local snapshot>`: hf_path
+#   must be a local directory with the release's config.json (the hook detects the family from it;
+#   a Hub id has no local config.json and would take the Megatron-Bridge path, which does not
+#   support this model; the preset sets no hf_path; download it first, e.g. `hf download mistralai/Mistral-Large-4-1T-A52B`): the posttrain hook
+#   (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py) converts `hf_path`
+#   with the native converter (native_loader_mistral_large4_text: Mistral consolidated names,
+#   block-FP8 dequantised) in one process to a torch_dist checkpoint, which Megatron reshards to
+#   this layout when it loads it.
+#   Defaults: the released model as-is: all 72 layers (num_layers from the preset), all
+#   parameters trainable, GBS 64, on NNODES=12.
+#   Layout: TP8 x PP3 x EP32 x expert-TP 1 (sequence parallel on, CP1) = 96 GPUs, 12 nodes x 8
+#   GPUs (data parallel 4, expert data parallel 1), token dispatch by Megatron's alltoall
+#   (use_turbo_deepep false), the MI355X layout. PP3 puts 24 layers on each stage (starts 0, 24,
+#   48): every stage starts on a full-indexer layer (indexer_types), as index sharing requires;
+#   layer 35's shared KV latent crosses from stage 1 to stage 2.
+#   Not measured on MI325X: the full-scale timing that chose this layout was taken on MI355X;
+#   on MI325X only the depth-reduced one-node runs are checked. Memory is an estimate. Per GPU,
+#   with the distributed optimizer: routed experts 1018B / (PP3 x EP32 = 96) = 10.6B and the rest
+#   35B / (TP8 x PP3) = 1.5B -> bf16 weights 24 GB + fp32 grads 48 GB + fp32 master and Adam state
+#   130 GB = ~202 GB of the MI325X's 256 GB, which leaves ~54 GB for activations, the logits and
+#   communication buffers. At seq 2048, MBS 1, TP8 + SP: an MoE layer keeps ~0.15 GB of
+#   activations per micro-batch and the first stage holds at most PP = 3 micro-batches of its 24
+#   layers in 1F1B (~11 GB); the last stage's fp32 logits are 2048 x 204800 / TP8 x 4 B = ~0.2 GB
+#   per micro-batch; RCCL buffers take a few GB. For longer sequences, or if it does not fit, set
+#   recompute_granularity full or PRIMUS_PP=6 PRIMUS_GBS=96 on 24 nodes (~101 GB per GPU: experts
+#   1018B / (PP6 x EP32) = 5.3B, the rest 0.7B; stages start 0, 12, 24, 36, 48, 60).
+#   EP8 with Primus-Turbo DeepEP inside a node needs these overrides together:
+#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=6 PRIMUS_GBS=96 on 24 nodes (~197 GB per GPU:
+#   experts 1018B / (PP6 x EP8) = 21.2B, the rest 0.7B; stages start 0, 12, 24, 36, 48, 60).
+#   DeepEP across nodes (EP above 8, e.g. PRIMUS_EP=32 PRIMUS_TURBO_DEEPEP=true) needs an image
+#   whose Primus-Turbo is built with rocSHMEM; at EP >= 16 rocm_arg_validation also requires
+#   turbo_deepep_num_cu <= 32 (the default here). Another PP size must start every stage on a
+#   full-indexer layer. MoE with TP > 1 needs sequence_parallel (Megatron), so keep PRIMUS_SP
+#   true whenever PRIMUS_TP > 1.
+#   One-node reduced recipe (a 16-of-72-layer cut on 8 GPUs, routed experts frozen): its own file,
+#   mistral_Large_4_1T_A52B-BF16-sft-reduced.yaml beside this one (the full model does not fit one node).
+
+modules:
+  post_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: mistral_Large_4_1T_A52B.yaml
+    overrides:
+      stage: sft
+      sft_dataset_name: "tatsu-lab/alpaca"
+      sft_conversation_format: "alpaca"
+
+      # log
+      wandb_project: "Primus_Mistral_Large_4_SFT"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 0
+      log_avg_reset_interval: 10
+
+      # num_layers: the preset's (the released model's 72); the one-node 16-layer cut is
+      # mistral_Large_4_1T_A52B-BF16-sft-reduced.yaml
+
+      # hyper parameters
+      train_iters: ${PRIMUS_TRAIN_ITERS:20}
+      micro_batch_size: 1
+      global_batch_size: ${PRIMUS_GBS:64}
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 0
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: false
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:8}
+      pipeline_model_parallel_size: ${PRIMUS_PP:3}
+      expert_model_parallel_size: ${PRIMUS_EP:32}
+      expert_tensor_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: ${PRIMUS_SP:true}
+      use_distributed_optimizer: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+      freeze_routed_experts: ${PRIMUS_FREEZE_ROUTED_EXPERTS:false}
+
+      # data
+      mock_data: false
+      create_attention_mask_in_dataloader: false
+
+      # checkpoint: the hook's conversion (pretrained_checkpoint), nothing saved by default
+      finetune: true
+      load: null
+      save: null
+      save_interval: 20000
+      eval_interval: 20000
+      eval_iters: 0
+      no_save_optim: true
+      no_save_rng: true
+      disable_last_saving: true
+      ckpt_format: torch_dist
+      # strict load: a model tensor the converted checkpoint does not hold fails the load instead of
+      # keeping its random init (checkpoint layers past num_layers are not read, so not raise_all)
+      dist_ckpt_strictness: raise_unexpected
+      auto_detect_ckpt_format: true
+
+      bf16: true
+
+      # Primus-Turbo: grouped GEMM experts; DeepEP dispatch only with PRIMUS_TURBO_DEEPEP=true
+      enable_primus_turbo: true
+      # TE core attention: the native converter (one process, no Primus-Turbo kernels) writes the
+      # checkpoint with TE's core-attention state; Primus-Turbo attention expects other
+      # core_attention._extra_state keys and the torch_dist load fails ("Missing key in checkpoint
+      # state_dict: decoder.layers.0.self_attention.core_attention._extra_state"). The pretrain
+      # experiments use Primus-Turbo attention at CP1.
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: true
+      use_turbo_rms_norm: true
+      # fused cross-entropy over the 204,800-entry vocabulary, as the pretrain experiments
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      # DeepEP off: the preset's moe_token_dispatcher_type alltoall (see the header).
+      # PRIMUS_TURBO_DEEPEP=true switches to Primus-Turbo DeepEP (its patch sets the dispatcher to
+      # flex); across nodes (EP above 8) that needs a Primus-Turbo built with rocSHMEM.
+      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
+      # rocm_arg_validation: <= 32 CUs for DeepEP at ep_size >= 16 (EP32); 32 also serves EP8
+      turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:32}
+      # not set: use_turbo_fused_act_with_probs (this image's Primus-Turbo swiglu_with_probs takes no
+      # clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
+      # release renormalises a softmax over all 128 experts on the top-4, which that op does not take).
+      # moe_router_dtype fp32, moe_permute_fusion and moe_shared_expert_overlap come from mistral_base.yaml

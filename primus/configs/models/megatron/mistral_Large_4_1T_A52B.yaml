@@ -1,0 +1,66 @@
+###############################################################################
+# Mistral Large 4 1T-A52B text decoder (mistralai/Mistral-Large-4-1T-A52B).
+#
+# 72 layers: dense layer 0, then 128-expert top-4 MoE with one shared expert; NoPE every
+# 4th layer, index sharing and KV sharing as the release's per-layer lists say. The vision
+# tower, projector and DSpark draft head are not built.
+#
+# MLA without Q-LoRA (64 nope + 64 rope qk, 128 v, latent 512), YaRN + learned LeRoPE rope
+# applied interleaved, SSMax query scaling, DSA lightning indexer (top-2048) with index
+# sharing, cross-layer latent KV sharing, softmax top-k MoE with a shared expert, untied head
+# with a tanh logit softcap. Model code: primus/backends/megatron/core/models/mistral_large4/.
+###############################################################################
+
+extends:
+  - mistral_base.yaml
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: mistralai/Mistral-Large-4-1T-A52B
+# the released checkpoint: no default. To fine-tune, pass hf_path as a local snapshot of
+# mistralai/Mistral-Large-4-1T-A52B (a directory with its config.json): the posttrain hook
+# (01_convert_checkpoints.py) detects the native family from that file and converts it. A Hub id has
+# no local config.json, so the hook would take the Megatron-Bridge path, which does not support this
+# model. Pretraining needs no checkpoint.
+hf_path: null
+vocab_size: 204800
+
+num_layers: 72
+hidden_size: 6144
+ffn_hidden_size: 24576
+num_attention_heads: 64
+max_position_embeddings: 1048576
+
+# MLA without Q-LoRA: 64 nope + 64 rope qk dims, 128 v dims, latent 512
+q_lora_rank: null
+kv_lora_rank: 512
+qk_head_dim: 64
+qk_pos_emb_head_dim: 64
+v_head_dim: 128
+# config.json head_dim (the rope slice); MLA sizes its heads from qk_head_dim / v_head_dim
+kv_channels: 64
+# YaRN over 512 original positions, factor 2048 (1M context)
+rotary_scaling_factor: 2048.0
+original_max_position_embeddings: 512
+
+# DSA lightning indexer
+index_n_heads: 32
+index_head_dim: 128
+index_topk: 2048
+
+# head: tanh logit softcap
+final_logit_softcapping: 30.0
+
+num_experts: 128
+moe_router_topk: 4
+moe_ffn_hidden_size: 6144
+moe_shared_expert_intermediate_size: 6144
+first_k_dense_replace: 1
+moe_token_dispatcher_type: alltoall
+# moe_layer_freq stays at its default (1). The dense / MoE layout is set by first_k_dense_replace
+# alone: mistral_large4_args_patches derives [0]*k + [1]*(num_layers - k) for any depth and refuses
+# a user-set per-layer list that disagrees with it
+
+# per-layer patterns (cut to num_layers for depth-reduced runs)
+no_rope_layers: "[1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0]"
+indexer_types: '["full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full", "full", "shared", "shared", "full"]'
+kv_source_layers: "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 35, 40, 41, 42, 35, 44, 45, 46, 35, 48, 49, 50, 35, 52, 53, 54, 35, 56, 57, 58, 35, 60, 61, 62, 35, 64, 65, 66, 35, 68, 69, 70, 35]"

@@ -114,6 +114,11 @@ MODEL_FAMILIES = {
         model_kwargs="kimi_k3_builders:kimi_k3_model_kwargs",
         check_model="kimi_k3_builders:check_kimi_k3_model",
     ),
+    "mistral_large4": ModelFamily(
+        package="primus.backends.megatron.core.models.mistral_large4",
+        builder="mistral_large4_builders:mistral_large4_builder",
+        config_class="mistral_large4_transformer_config:MistralLarge4TransformerConfig",
+    ),
     "muse_spark": ModelFamily(
         package="primus.backends.megatron.core.models.muse_spark",
         config_class="muse_spark_transformer_config:MuseSparkTransformerConfig",

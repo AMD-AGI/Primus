@@ -71,6 +71,11 @@ def get_model_provider(model_type="gpt"):
             f"registered: {', '.join(sorted(MODEL_FAMILIES))}."
         )
 
+    if model_type == "mistral_large4":
+        # Mistral Large 4 text decoder; built from its MODEL_FAMILIES entry in registry.py like
+        # every family (this branch only logs)
+        log_rank_0(f"{log_prefix} model_type {model_type!r}: Mistral Large 4 text decoder")
+
     if family.package:
         builder_module = importlib.import_module("primus.backends.megatron.core.models.builder")
         if family.builder:
