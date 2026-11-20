@@ -10,7 +10,7 @@
 #
 # Backend selectors:
 #
-#   export FSDP_ALL_GATHER_BACKEND=rccl_sdma
+#   export FSDP_ALL_GATHER_BACKEND=rccl_sdma         # or SDMA_ALL_GATHER=1
 #   export MEGATRON_PARAM_GATHER_BACKEND=rccl_sdma  # direct symmetric buffers
 #   export MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma   # optional CE ReduceScatter
 #   primus-cli direct -- train pretrain --config <any existing yaml>
@@ -40,6 +40,10 @@
 set -euo pipefail
 
 fsdp_backend="${FSDP_ALL_GATHER_BACKEND:-}"
+# SDMA_ALL_GATHER=1 is the older name for the FSDP selector.
+if [[ -z "${fsdp_backend}" && "${SDMA_ALL_GATHER:-0}" == "1" ]]; then
+    fsdp_backend=rccl_sdma
+fi
 megatron_backend="${MEGATRON_PARAM_GATHER_BACKEND:-}"
 megatron_grad_backend="${MEGATRON_GRAD_REDUCE_BACKEND:-}"
 
