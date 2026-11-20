@@ -20,6 +20,16 @@ from .planner import (
     slots_from_alloc,
 )
 from .remap import physical_counts, remap_topk, slot_lookup
+from .scheduler import (
+    ReplicaConfig,
+    ReplicaScheduler,
+    ReplicaSlots,
+    allocate_slots,
+    attach,
+    end_step_all,
+)
+from .storage import LayerwiseStorage, SlotStorage
+from .transport import NcclTransport, Pending, SlotTransport
 
 __all__ = [
     "ReplicaPlan",
@@ -35,4 +45,15 @@ __all__ = [
     "physical_counts",
     "remap_topk",
     "slot_lookup",
+    "ReplicaConfig",
+    "ReplicaScheduler",
+    "ReplicaSlots",
+    "allocate_slots",
+    "attach",
+    "end_step_all",
+    "LayerwiseStorage",
+    "SlotStorage",
+    "NcclTransport",
+    "Pending",
+    "SlotTransport",
 ]
