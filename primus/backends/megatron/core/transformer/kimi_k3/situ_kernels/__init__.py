@@ -49,6 +49,8 @@ def resolve_situ_backend(name: str):
         return situ_pre_mul_fused
     if name == "flydsl":
         try:
+            import flydsl.compiler  # noqa: F401  (the kernels import it only when they first build)
+
             _require_flydsl_arch()
             from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels._flydsl_gfx1250 import (
                 flydsl_situ_pre_mul_fused,

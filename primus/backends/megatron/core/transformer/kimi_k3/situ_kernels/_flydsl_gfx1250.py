@@ -901,8 +901,11 @@ def supports_situ_probs_inputs(x: Tensor, probs: Tensor) -> Optional[str]:
         return reason
     if (x.shape[-1] // 2) % _PCOLS:
         return f"intermediate width {x.shape[-1] // 2} is not a multiple of {_PCOLS}"
-    if probs.numel() != x.numel() // x.shape[-1]:
-        return f"probs has {probs.numel()} elements for {x.numel() // x.shape[-1]} rows"
+    if probs.device != x.device:
+        return f"probs is on {probs.device}, x on {x.device}"
+    rows = x.numel() // x.shape[-1]
+    if not (probs.dim() == 1 or probs.shape[-1] == 1) or probs.numel() != rows:
+        return f"probs of shape {tuple(probs.shape)} is not one value for each of the {rows} rows"
     return None
 
 

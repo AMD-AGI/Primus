@@ -268,14 +268,15 @@ class SituActivation(nn.Module):
         return self._probs_kernel is not None
 
     def forward_with_probs(self, x: Tensor, probs: Tensor) -> Tensor:
-        """``situ(x) * probs`` (one probability per row, e.g. ``[rows, 1]``) in ``x``'s dtype; the multiply runs
-        inside the FlyDSL kernel when :attr:`fuses_probs` and the shape allows, else as the routed experts'
-        unfused ``(act * probs).to(act.dtype)``."""
+        """``situ(x) * probs`` (one probability per row, e.g. ``[rows, 1]``) in ``x``'s dtype. With
+        :attr:`fuses_probs` the multiply runs inside the FlyDSL kernel for the inputs it takes; every other input,
+        and the eager backend, take the eager reference and the routed experts' unfused
+        ``(act * probs).to(act.dtype)``."""
         if self._probs_kernel is not None:
             unsupported, situ_with_probs = self._probs_kernel
             if unsupported(x, probs) is None:
                 return situ_with_probs(x, probs, beta=self.beta, linear_beta=self.linear_beta)
-        out = self(x)
+        out = situ_pre_mul_fused(x, beta=self.beta, linear_beta=self.linear_beta)
         return (out * probs).to(out.dtype)
 
     def sharded_state_dict(
