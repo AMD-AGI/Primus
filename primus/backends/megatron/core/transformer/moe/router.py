@@ -7,6 +7,7 @@
 from typing import Tuple
 
 import torch
+from megatron.core.transformer.moe import router as mcore_router
 from megatron.core.transformer.moe.moe_utils import apply_router_token_dropping
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -20,6 +21,36 @@ class PrimusTopKRouter(TopKRouter):
 
     def __init__(self, config: TransformerConfig, *args, **kwargs) -> None:
         super().__init__(config=config, *args, **kwargs)
+
+        # Preserve Megatron's bound gating method for bias-free and custom routers.
+        base_gating = getattr(getattr(mcore_router, "Router", None), "gating", None)
+        if (
+            getattr(self, "bias", None) is not None
+            and torch.version.hip is not None
+            and getattr(config, "moe_router_dtype", None) == "fp32"
+            and self.bias.dtype == torch.bfloat16
+            and callable(getattr(mcore_router, "router_gating_linear", None))
+            and base_gating is not None
+            and getattr(self.gating, "__func__", None) is base_gating
+        ):
+            self.gating = self._gating_with_fp32_bias
+
+    def _gating_with_fp32_bias(self, input: torch.Tensor) -> torch.Tensor:
+        if (
+            input.device.type != "cuda"
+            or self.bias is None
+            or self.bias.dtype != torch.bfloat16
+            or self.config.moe_router_dtype != "fp32"
+        ):
+            return super().gating(input)
+
+        # Match Megatron's lazy CPU initialization without replacing either Parameter.
+        for parameter in (self.weight, self.bias):
+            if parameter.device.type == "cpu":
+                parameter.data = parameter.data.to(device=torch.cuda.current_device())
+
+        # The ROCm TE GEMM expects bias in its output dtype; keep the BF16 optimizer leaf.
+        return mcore_router.router_gating_linear(input, self.weight, self.bias.float(), torch.float32)
 
     def fused_router_and_auxiliary_loss(self, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         try:
