@@ -9,7 +9,7 @@ from typing import Any, List
 import torch
 from megatron.core import parallel_state
 
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 
 def get_megatron_arg(name: str, default: Any = None) -> Any:
@@ -95,6 +95,64 @@ def shard_batch_on_this_cp_rank(sharder, batch):
                 seq_dim = 1 if key != "attention_mask" else 2
                 batch[key] = sharder.shard_cp_input([val], cp_group, seq_dim)[0]
     return batch
+
+
+def _compile_errors() -> tuple:
+    """Exception types meaning torch.compile could not compile a function, as opposed to the function failing.
+
+    TorchDynamoException covers Inductor's errors. Hitting the recompile limit
+    under fullgraph=True raises a plain Exception, named by torch version.
+    """
+    import torch._dynamo.exc as dynamo_exc
+
+    names = ("TorchDynamoException", "FailOnRecompileLimitHit", "FailOnCacheLimitHit")
+    return tuple(cls for cls in (getattr(dynamo_exc, name, None) for name in names) if cls is not None)
+
+
+def _first_line(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text.splitlines()[0][:500] if text else ''}"
+
+
+def maybe_compile(fn, dynamic: bool = False):
+    """``fn`` under torch.compile (fullgraph), or ``fn`` itself once it fails to compile.
+
+    Compilation happens at the first call. When a compiled call fails to compile
+    (a Dynamo or Inductor error, including hitting the recompile limit), the
+    failure is logged once and ``fn`` runs eagerly from then on. Any other
+    error, such as running out of memory, propagates. ``compiled_ok()`` on the
+    result says whether the compiled path is still in use.
+    """
+    if not hasattr(torch, "compile"):
+        return fn
+    name = f"{fn.__module__}.{fn.__qualname__}"
+    try:
+        # emulate_precision_casts keeps the function's explicit casts to a lower
+        # precision as rounding points, as eager runs them. Inductor can still
+        # reorder reductions, so results match eager to rounding error, not bit
+        # for bit.
+        compiled = torch.compile(
+            fn, dynamic=dynamic, fullgraph=True, options={"emulate_precision_casts": True}
+        )
+        compile_errors = _compile_errors()
+    except Exception as exc:  # pragma: no cover - depends on the image
+        warning_rank_0(f"torch.compile is unavailable for {name}, running it eagerly: {_first_line(exc)}")
+        return fn
+    state = {"ok": True}
+
+    def wrapper(*args, **kwargs):
+        if state["ok"]:
+            try:
+                return compiled(*args, **kwargs)
+            except compile_errors as exc:
+                state["ok"] = False
+                warning_rank_0(
+                    f"torch.compile of {name} failed, running it eagerly from now on: {_first_line(exc)}"
+                )
+        return fn(*args, **kwargs)
+
+    wrapper.compiled_ok = lambda: state["ok"]
+    return wrapper
 
 
 def apply_torch_compile_if_enabled(model: List[Any], args: Any) -> None:
