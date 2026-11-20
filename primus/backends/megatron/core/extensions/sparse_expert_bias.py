@@ -59,32 +59,31 @@ def _routing_gradient(DY, IDS, BIAS, DP, H: tl.constexpr, BH: tl.constexpr):
         tl.store(DP + row * 4 + slot, tl.sum(dy * bias, axis=0))
 
 
-def supports_sparse_expert_bias(x, indices, probabilities, bias, ep_group):
-    """Only enable the qualified training geometry and FP32 accumulation policy."""
-    return (
-        x.is_cuda
-        and torch.version.hip is not None
-        and x.ndim == 2
-        and x.shape[1] == 2880
-        and 0 < x.shape[0] <= (2**31 - 1) // 2880
-        and x.dtype == torch.bfloat16
-        and bias is not None
-        and bias.dtype == torch.bfloat16
-        and bias.shape == (16, 2880)
-        and ep_group is not None
-        and ep_group.size() == 8
-        and indices.shape == (x.shape[0], 4)
-        and indices.dtype == torch.int64
-        and probabilities.shape == indices.shape
-        and probabilities.dtype == torch.float32
-        and x.device == indices.device == probabilities.device == bias.device
-        and torch.get_float32_matmul_precision() == "highest"
-        and not torch.is_autocast_enabled()
-        and x.device.index == torch.cuda.current_device()
-        and not torch.compiler.is_compiling()
-        and not torch.cuda.is_current_stream_capturing()
-        and getattr(torch.cuda.get_device_properties(x.device), "gcnArchName", "").split(":")[0] == "gfx950"
-    )
+def sparse_expert_bias_fallback_reason(x, indices, probabilities, bias, ep_group):
+    """Return None for the qualified local path, or the reason to use Turbo's bias epilogue."""
+    if not x.is_cuda or torch.version.hip is None:
+        return "requires ROCm tensors"
+    if x.ndim != 2 or x.shape[1] != 2880 or not 0 < x.shape[0] <= (2**31 - 1) // 2880:
+        return "requires a nonempty [tokens, 2880] input with 32-bit indexing"
+    if x.dtype != torch.bfloat16 or bias is None or bias.dtype != torch.bfloat16 or bias.shape != (16, 2880):
+        return "requires BF16 input and a BF16 [16, 2880] local bias"
+    if ep_group is None or ep_group.size() != 8:
+        return "requires an EP group of size 8"
+    if indices.shape != (x.shape[0], 4) or indices.dtype != torch.int64:
+        return "requires four int64 expert indices per token"
+    if probabilities.shape != indices.shape or probabilities.dtype != torch.float32:
+        return "requires four FP32 routing weights per token"
+    if not (x.device == indices.device == probabilities.device == bias.device):
+        return "all bias operands must use the same device"
+    if torch.get_float32_matmul_precision() != "highest" or torch.is_autocast_enabled():
+        return "requires highest FP32 matmul precision and disabled autocast"
+    if x.device.index != torch.cuda.current_device():
+        return "input is on a different device from the current device"
+    if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
+        return "compilation or graph capture is active"
+    if getattr(torch.cuda.get_device_properties(x.device), "gcnArchName", "").split(":")[0] != "gfx950":
+        return "requires gfx950"
+    return None
 
 
 class SparseExpertBias(torch.autograd.Function):
@@ -121,6 +120,7 @@ class SparseExpertBias(torch.autograd.Function):
         _routing_gradient[(indices.shape[0],)](
             dy.contiguous(), indices, bias, dprob, hidden, triton.next_power_of_2(hidden), num_warps=8
         )
+        # Preserve the stock FP32 GEMM and EP reduction order for the optimizer-owned bias gradient.
         dbias_full = probabilities.t() @ dy.float()
         dbias = dbias_full.new_empty((experts // ctx.group.size(), hidden))
         dist.reduce_scatter_tensor(dbias, dbias_full, group=ctx.group)

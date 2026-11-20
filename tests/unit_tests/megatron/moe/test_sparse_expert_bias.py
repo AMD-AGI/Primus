@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -57,24 +58,98 @@ def test_stage2_and_bias_run_once_in_parameter_gather_order(
 
     monkeypatch.setattr(mega_moe, "fused_mega_moe_fp8_stage1", first)
     monkeypatch.setattr(mega_moe, "fused_mega_moe_fp8_stage2", second)
+    messages = []
     monkeypatch.setattr(mega_moe, "_log_once", lambda message: None)
+    monkeypatch.setattr(mega_moe, "log_rank_all", messages.append)
+    mega_moe._log_sparse_bias_fallback.cache_clear()
     layer = SimpleNamespace(
         ep_group=group,
         training=training,
         activation=object(),
         fc1_weight=lambda: gather("fc1", b1),
         fc2_weight=lambda: gather("fc2", b2),
-        _sparse_bias_ops=(lambda *a: supported and a[3] is not None, sparse) if enabled else None,
+        _sparse_bias_ops=(
+            (lambda *a: None if supported and a[3] is not None else "runtime guard", sparse)
+            if enabled
+            else None
+        ),
     )
     out = mega_moe.MegaMoEFP8Experts.forward(layer, x, ids, probs)
     assert torch.equal(out, x + 1 if uses_sparse else x)
-    assert trace == ["fc1", "stage1", "fc2", "stage2"] + (["bias"] if uses_sparse else [])
+    expected = ["fc1", "stage1", "fc2", "stage2"] + (["bias"] if uses_sparse else [])
+    assert trace == expected
+    mega_moe.MegaMoEFP8Experts.forward(layer, x, ids, probs)
+    assert trace == expected * 2
+    assert len(messages) == int(enabled and not uses_sparse)
+    if messages:
+        assert ("runtime guard" if training else "evaluation mode") in messages[0]
+    mega_moe._log_sparse_bias_fallback.cache_clear()
+
+
+def test_sparse_bias_constructor_selects_compatible_stage(monkeypatch):
+    import megatron.training
+
+    from primus.backends.megatron.core.extensions.sparse_expert_bias import (
+        SparseExpertBias,
+        sparse_expert_bias_fallback_reason,
+    )
+
+    cfg = mega_moe.TransformerConfig(
+        num_layers=1,
+        hidden_size=2880,
+        num_attention_heads=8,
+        num_moe_experts=128,
+        expert_model_parallel_size=8,
+        moe_ffn_hidden_size=2880,
+        moe_router_topk=4,
+        gated_linear_unit=True,
+        activation_func=mega_moe.quick_gelu,
+        glu_linear_offset=1.0,
+        activation_func_clamp_value=7.0,
+        bias_activation_fusion=False,
+        add_bias_linear=True,
+        params_dtype=torch.bfloat16,
+        bf16=True,
+        use_cpu_initialization=False,
+        perform_initialization=False,
+    )
+    args = SimpleNamespace(turbo_mega_moe_sparse_fc2_bias=True, turbo_mega_moe_wgrad_accum_fusion=False)
+    monkeypatch.setattr(megatron.training, "get_args", lambda: args)
+    # Exercise the actual constructor and both weight modules without allocating 760 MiB.
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("meta"))
+    messages = []
+    monkeypatch.setattr(mega_moe, "log_rank_all", messages.append)
+    mega_moe._log_sparse_bias_fallback.cache_clear()
+
+    def build():
+        return mega_moe.MegaMoEFP8Experts(cfg, 16, 2880, 2880, SimpleNamespace(size=lambda: 8))
+
+    # Exercise the installed public ABI when present. Also qualify the negative path on older releases.
+    bias_arg = inspect.signature(mega_moe.fused_mega_moe_fp8_stage2).parameters.get("fc2_bias")
+    if (
+        bias_arg is not None
+        and bias_arg.default is None
+        and bias_arg.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ):
+        assert build()._sparse_bias_ops == (sparse_expert_bias_fallback_reason, SparseExpertBias.apply)
+        assert not messages
+    monkeypatch.setattr(mega_moe, "fused_mega_moe_fp8_stage2", lambda *args, fc2_bias: None)
+    assert build()._sparse_bias_ops is None
+    assert "optional keyword fc2_bias=None" in messages[-1]
+    cfg.glu_linear_offset = 0.0
+    assert build()._sparse_bias_ops is None
+    assert "biased quick-GeGLU" in messages[-1]
+    count = len(messages)
+    args.turbo_mega_moe_sparse_fc2_bias = False
+    assert build()._sparse_bias_ops is None
+    assert len(messages) == count
+    mega_moe._log_sparse_bias_fallback.cache_clear()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is None, reason="requires ROCm")
 def test_runtime_fallbacks():
     from primus.backends.megatron.core.extensions.sparse_expert_bias import (
-        supports_sparse_expert_bias,
+        sparse_expert_bias_fallback_reason,
     )
 
     x = torch.empty(7, 2880, dtype=torch.bfloat16, device="cuda")
@@ -82,14 +157,23 @@ def test_runtime_fallbacks():
     i = torch.zeros_like(p, dtype=torch.int64)
     bias = torch.empty(16, 2880, dtype=x.dtype, device=x.device)
     group = SimpleNamespace(size=lambda: 8)
-    assert not supports_sparse_expert_bias(x, i.to(torch.int32), p, bias, group)
-    assert not supports_sparse_expert_bias(x, i, p.bfloat16(), bias, group)
-    assert not supports_sparse_expert_bias(x, i, p, None, group)
-    assert not supports_sparse_expert_bias(x, i, p, bias, SimpleNamespace(size=lambda: 4))
-    assert not supports_sparse_expert_bias(x, i[:, :2], p[:, :2], bias, group)
-    assert not supports_sparse_expert_bias(x[:0], i[:0], p[:0], bias, group)
+    arch = getattr(torch.cuda.get_device_properties(x.device), "gcnArchName", "").split(":")[0]
+    precision = torch.get_float32_matmul_precision()
+    try:
+        torch.set_float32_matmul_precision("highest")
+        with torch.autocast(device_type="cuda", enabled=False):
+            reason = sparse_expert_bias_fallback_reason(x, i, p, bias, group)
+            assert reason is None if arch == "gfx950" else reason == "requires gfx950"
+    finally:
+        torch.set_float32_matmul_precision(precision)
+    assert sparse_expert_bias_fallback_reason(x, i.to(torch.int32), p, bias, group)
+    assert sparse_expert_bias_fallback_reason(x, i, p.bfloat16(), bias, group)
+    assert sparse_expert_bias_fallback_reason(x, i, p, None, group)
+    assert sparse_expert_bias_fallback_reason(x, i, p, bias, SimpleNamespace(size=lambda: 4))
+    assert sparse_expert_bias_fallback_reason(x, i[:, :2], p[:, :2], bias, group)
+    assert sparse_expert_bias_fallback_reason(x[:0], i[:0], p[:0], bias, group)
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        assert not supports_sparse_expert_bias(x, i, p, bias, group)
+        assert sparse_expert_bias_fallback_reason(x, i, p, bias, group)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is None, reason="requires ROCm")
