@@ -82,6 +82,10 @@ EXTRA_ENV="NUM_TRAIN_TS=4 METRIC_LOG_FREQ=20 SKIP_EVAL_EPOCH_PCT=0 EVAL_EVERY_DA
     bash examples/mlperf/dlrm_v4/run_with_docker.sh
 ```
 
+For a throughput benchmark without the dataset, see
+`examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml` (synthetic data;
+[docs](../../../docs/04-technical-guides/recommendation/dlrm_v4/README.md#throughput-runs-on-synthetic-data)).
+
 ## Run inside an existing container
 
 ```bash

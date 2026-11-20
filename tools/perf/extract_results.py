@@ -61,7 +61,7 @@ gets captured, so this script computes its own harmonic mean over the
 post-warmup window.
 
 Per-iteration metrics are parsed for megatron, megatron_bridge, torchtitan,
-maxtext, maxdiffusion and diffusion backends. Megatron-Bridge only logs TFLOP/s/GPU,
+maxtext, maxdiffusion, diffusion and recommendation (DLRMv4) backends. Megatron-Bridge only logs TFLOP/s/GPU,
 as the number immediately before ``MODEL_TFLOP/s/GPU`` (no space between
 the value and the unit). That number is an estimate that counts every sample
 as ``seq_length`` tokens, which post-training without packed sequences does
@@ -73,7 +73,10 @@ first three unique logged steps are always dropped before aggregates
 when it leaves some steps behind. For
 megatron the warmup prefers ``log_avg_skip_iterations`` (the steps the
 throughput patch itself skips) over ``lr_warmup_iters``; for diffusion it is
-the five steps AMDiffusionBenchmark skips. Throughput metrics
+the five steps AMDiffusionBenchmark skips, and for recommendation the first
+20 (kernel builds and FP8 calibration). DLRMv4 logs samples/s per GPU, and
+TFLOP/s both as executed on its sequences and as nominal TFLOP/s at the full
+sequence length (``hmean_nominal_tflops``, with a ``throughput_note``). Throughput metrics
 use the harmonic mean, and memory metrics use the arithmetic mean. Results
 are written to results.csv / results.json in the input directory. MaxDiffusion also
 reports sample/s and (WAN) frame/s, and diffusion sample/s and its peak memory
@@ -686,6 +689,57 @@ def parse_diffusion_iterations(lines: list[str], keep_rank: int | None = None) -
     return iterations
 
 
+# DLRMv4 (backend recommendation) logs its throughput every METRIC_LOG_FREQ steps.
+# The first window holds the HIP / Triton builds and the FP8 calibration steps
+# (minutes); the steps up to 20 are left out.
+RECOMMENDATION_WARMUP_STEPS = 20
+RECOMMENDATION_PERF_RE = re.compile(r"train - Step (\d+) perf: (.*)$")
+RECOMMENDATION_KV_RE = re.compile(r"(\S+?)=(-?[\d.]+(?:[eE][-+]?\d+)?)%?(?=\s|$)")
+RECOMMENDATION_NOTE = (
+    "TFLOP/s counts the FLOPs of each batch's sequences as they are (DLRMv4's tflops_real); "
+    "nominal TFLOP/s prices every sample at the full 4096-token sequence (its tflops_algo, the MFU yardstick)"
+)
+
+
+def parse_recommendation_iterations(lines: list[str]) -> list[dict]:
+    """Parse the DLRMv4 trainer's perf lines (backend recommendation)::
+
+        INFO:utils:train - Step 200 perf: local_sps=8693.4 global_sps=69547.1
+            step_ms=117.79 elapsed_sec=370.1 total_samples=204800 wall_step_ms=117.79
+            eval_ms=0.0 ckpt_ms=0.0 tflops_algo/gpu=2744.3 mfu=109.8%
+            tflops_real/gpu=1058.2 hfu=42.3% fill=53.8% exec=38.6%
+
+    Each covers the steps since the previous one, eval and checkpoint time left
+    out. Every rank prints its own (with no rank tag), so a step's samples/s and
+    TFLOP/s per GPU are the means over its lines: ``local_sps``,
+    ``tflops_real/gpu`` (the FLOPs of the batch's sequences as they are) and
+    ``tflops_algo/gpu`` as nominal TFLOP/s (every sample priced at the full
+    sequence length).
+    """
+    per_step: dict[int, list[dict]] = {}
+    for line in lines:
+        m = RECOMMENDATION_PERF_RE.search(strip_ansi(line))
+        if not m:
+            continue
+        values = {k: float(v) for k, v in RECOMMENDATION_KV_RE.findall(m.group(2))}
+        if "local_sps" in values:
+            per_step.setdefault(int(m.group(1)), []).append(values)
+    iterations = []
+    for step in sorted(per_step):
+        ranks = per_step[step]
+        it = {"step": step}
+        for key, name in (
+            ("local_sps", "samples_per_gpu"),
+            ("tflops_real/gpu", "tflops"),
+            ("tflops_algo/gpu", "nominal_tflops"),
+        ):
+            vals = [r[key] for r in ranks if key in r]
+            if vals:
+                it[name] = sum(vals) / len(vals)
+        iterations.append(it)
+    return iterations
+
+
 # Precision tokens as they appear in config names. Order matters: the longer
 # spellings must be tried first so ``nanoo_fp8`` is not truncated to ``fp8``
 # and ``mxfp8`` / ``mxfp4`` not to ``fp8`` / ``fp4``.
@@ -947,6 +1001,10 @@ def _populate_from_new_banner(result: dict, banner: dict, config_text: str) -> N
         # warmup is AMDiffusionBenchmark's, not the LR schedule's
         # lr_scheduler.warmup_steps (100 for SDXL on MI300X / MI325X).
         result["warmup_steps"] = DIFFUSION_WARMUP_STEPS
+
+    elif backend == "recommendation":
+        # MBS (per GPU), GBS and the step count come from the banner.
+        result["warmup_steps"] = RECOMMENDATION_WARMUP_STEPS
 
     elif backend == "maxdiffusion":
         # Diffusion configs have no sequence length / GBS in the banner
@@ -1286,6 +1344,10 @@ def parse_log_file(filepath: str) -> dict | None:
     elif backend == "diffusion":
         keep_rank = _detect_iter_logging_rank(lines, "peak_mem=")
         iterations = parse_diffusion_iterations(lines, keep_rank=keep_rank)
+    elif backend == "recommendation":
+        iterations = parse_recommendation_iterations(lines)
+        if any("nominal_tflops" in it for it in iterations):
+            result["throughput_note"] = RECOMMENDATION_NOTE
     elif backend == DIFFUSION_DLRM_BACKEND:
         # Expanded into one row per model by parse_log.
         return result
