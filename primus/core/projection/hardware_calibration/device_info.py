@@ -179,6 +179,8 @@ def describe_device(device_index: int) -> DeviceInfo:
 
 # amdsmi reports absent XCDs / unsupported fields as "N/A" or 0xFFFF.
 _MAX_PLAUSIBLE_CLOCK_MHZ = 10_000
+# Longest a clock may take to settle before the timed runs start anyway.
+SETTLE_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -251,7 +253,7 @@ class AmdSmiClockReader:
         try:
             self._amdsmi.amdsmi_shut_down()
         except Exception:
-            pass
+            pass  # amdsmi may already be shut down; nothing is left to release.
 
 
 class SysfsClockReader:
@@ -288,7 +290,7 @@ def make_clock_reader(info: DeviceInfo):
                 return reader
             reader.close()
         except Exception:
-            pass
+            pass  # amdsmi unusable for this device; fall back to sysfs.
     if info.sysfs_dir is not None:
         return SysfsClockReader(info.sysfs_dir)
     return None
@@ -381,7 +383,7 @@ def run_until_settled(
     reader,
     signal: str,
     min_s: float,
-    max_s: float = 5.0,
+    max_s: float = SETTLE_TIMEOUT_S,
     window_s: float = 0.3,
     rel_tol: float = 0.03,
 ) -> Dict[str, Any]:

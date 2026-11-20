@@ -21,6 +21,7 @@ package measures both on every bench GPU:
 from primus.core.projection.hardware_calibration.calibration import (
     PAYLOAD_KEY,
     SKIP_ENV,
+    TAG,
     calibrated_model_hbm_bandwidth_gbps,
     calibration_skip_reason,
     format_calibration_report,
@@ -38,6 +39,7 @@ __all__ = [
     "SKIP_ENV",
     "STREAM_DERATE_ENV",
     "STREAM_WORKLOAD_DERATE",
+    "TAG",
     "calibrated_model_hbm_bandwidth_gbps",
     "calibration_skip_reason",
     "derive_model_hbm_bandwidth",

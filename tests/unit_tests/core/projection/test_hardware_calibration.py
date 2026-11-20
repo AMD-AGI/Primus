@@ -57,6 +57,7 @@ from primus.core.projection.simulation_backends.base import (
     HBM_BANDWIDTH_ENV,
     hbm_bandwidth_override_gbps,
     resolve_hbm_bytes_per_ms,
+    set_calibrated_hbm_bandwidth,
     set_hbm_bandwidth_override,
 )
 from primus.core.projection.training_config import (
@@ -149,13 +150,20 @@ def test_dense_workload_gemms_match_swiglu_mlp_and_output_layer():
 def test_workload_gemms_follow_tensor_parallel_split():
     tp1, _ = collect_workload_gemms(_training_config(tp=1))
     tp2, _ = collect_workload_gemms(_training_config(tp=2))
-    assert tp1 != tp2
+    # The simulator's profilers give each TP rank half the tokens of every GEMM.
+    assert GemmShape(SEQ, FFN, HIDDEN) in tp1 and GemmShape(SEQ, FFN, HIDDEN) not in tp2
+    assert GemmShape(SEQ // 2, FFN, HIDDEN) in tp2
+    assert GemmShape(SEQ // 2, HIDDEN, FFN) in tp2
+    assert GemmShape(SEQ // 2, VOCAB, HIDDEN) in tp2
 
 
 def test_moe_workload_records_expert_gemms():
-    dense, _ = collect_workload_gemms(_training_config())
     moe, _ = collect_workload_gemms(_training_config(moe=True))
-    assert set(moe) - set(dense), "MoE layers should contribute expert / router GEMMs"
+    expert_tokens = SEQ * 2 // NUM_EXPERTS  # top-2 routing, balanced
+    assert GemmShape(expert_tokens, FFN, HIDDEN) in moe
+    assert GemmShape(expert_tokens, HIDDEN, FFN) in moe
+    assert GemmShape(SEQ, NUM_EXPERTS, HIDDEN) in moe  # router
+    assert GemmShape(SEQ, FFN, HIDDEN) not in moe, "every layer is MoE, so no dense MLP GEMM"
 
 
 def test_select_ranks_by_total_flops_and_filters():
@@ -529,8 +537,10 @@ def clean_hbm_override(monkeypatch):
     monkeypatch.delenv(HBM_BANDWIDTH_ENV, raising=False)
     monkeypatch.delenv(STREAM_DERATE_ENV, raising=False)
     set_hbm_bandwidth_override(None)
+    set_calibrated_hbm_bandwidth(None)
     yield
     set_hbm_bandwidth_override(None)
+    set_calibrated_hbm_bandwidth(None)
 
 
 def test_model_bandwidth_reproduces_mi325x_spec_peak(clean_hbm_override):
@@ -544,12 +554,22 @@ def test_model_bandwidth_reproduces_mi325x_spec_peak(clean_hbm_override):
 def test_stream_derate_env_override_and_validation(clean_hbm_override, monkeypatch):
     monkeypatch.setenv(STREAM_DERATE_ENV, "0.5")
     assert derive_model_hbm_bandwidth(4000.0)["workload_bandwidth_gbps"] == pytest.approx(2000.0)
-    monkeypatch.setenv(STREAM_DERATE_ENV, "1.5")
-    with pytest.raises(ValueError):
-        derive_model_hbm_bandwidth(4000.0)
+    for bad in ("1.5", "0", "abc"):
+        monkeypatch.setenv(STREAM_DERATE_ENV, bad)
+        with pytest.raises(ValueError, match=STREAM_DERATE_ENV):
+            derive_model_hbm_bandwidth(4000.0)
 
 
-def test_calibrated_bandwidth_uses_slowest_healthy_rank():
+def test_bad_stream_derate_fails_before_measuring(clean_hbm_override, monkeypatch):
+    from primus.core.projection.hardware_calibration import calibration
+
+    monkeypatch.setenv(STREAM_DERATE_ENV, "abc")
+    monkeypatch.setattr(calibration, "_measure", lambda *a, **k: pytest.fail("measured with a bad derate"))
+    with pytest.raises(ValueError, match=STREAM_DERATE_ENV):
+        calibration.run_hardware_calibration(None, device_index=0)
+
+
+def test_calibrated_bandwidth_uses_slowest_healthy_rank(clean_hbm_override, monkeypatch):
     from primus.core.projection.hardware_calibration import (
         calibrated_model_hbm_bandwidth_gbps,
     )
@@ -560,11 +580,15 @@ def test_calibrated_bandwidth_uses_slowest_healthy_rank():
     own = payload["memory"]["model_hbm_bandwidth_gbps"]
     assert calibrated_model_hbm_bandwidth_gbps(payload) == pytest.approx(own)
     payload["per_rank"] = [
-        {"rank": 0, "model_hbm_bandwidth_gbps": own},
-        {"rank": 1, "model_hbm_bandwidth_gbps": own - 100.0},
+        {"rank": 0, "sustained_bandwidth_gbps": 4900.0},
+        {"rank": 1, "sustained_bandwidth_gbps": 4800.0},
         {"rank": 2, "error": "RuntimeError: boom"},
     ]
-    assert calibrated_model_hbm_bandwidth_gbps(payload) == pytest.approx(own - 100.0)
+    slowest = derive_model_hbm_bandwidth(4800.0)["model_hbm_bandwidth_gbps"]
+    assert calibrated_model_hbm_bandwidth_gbps(payload) == pytest.approx(slowest)
+    # A derate set when a saved bench is loaded applies to its STREAM result.
+    monkeypatch.setenv(STREAM_DERATE_ENV, "0.36")
+    assert calibrated_model_hbm_bandwidth_gbps(payload) == pytest.approx(slowest / 2)
 
 
 def test_hbm_override_replaces_backend_profile_peak(clean_hbm_override, monkeypatch):
@@ -580,8 +604,22 @@ def test_hbm_override_replaces_backend_profile_peak(clean_hbm_override, monkeypa
     set_hbm_bandwidth_override(None)
     monkeypatch.setenv(HBM_BANDWIDTH_ENV, "6500")
     assert backend.hbm_bandwidth_gbps == 6500.0
-    with pytest.raises(ValueError):
-        set_hbm_bandwidth_override(0.0)
+    for bad in (0.0, -5.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            set_hbm_bandwidth_override(bad)
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "nan", "inf", "fast"])
+def test_invalid_hbm_env_is_ignored(clean_hbm_override, monkeypatch, bad):
+    from primus.core.projection.simulation_backends.origami_backend import (
+        OrigamiGEMMBackend,
+    )
+
+    monkeypatch.setenv(HBM_BANDWIDTH_ENV, bad)
+    with pytest.warns(UserWarning, match=HBM_BANDWIDTH_ENV):
+        assert hbm_bandwidth_override_gbps() is None
+    with pytest.warns(UserWarning):
+        assert OrigamiGEMMBackend(gpu_arch="mi325x").hbm_bandwidth_gbps == 6000.0
 
 
 def test_hbm_override_reaches_sdpa_backend(clean_hbm_override):
@@ -602,12 +640,55 @@ def test_projection_applies_calibration_unless_overridden(clean_hbm_override):
     projection._apply_calibrated_hbm_bandwidth(payload, rank=0)
     assert hbm_bandwidth_override_gbps() == pytest.approx(calibrated)
 
+    # The calibrated value is not mistaken for a user override by a later run.
+    assert projection.user_hbm_bandwidth_gbps() is None
+
     set_hbm_bandwidth_override(7100.0)
     projection._apply_calibrated_hbm_bandwidth(payload, rank=0)
     assert hbm_bandwidth_override_gbps() == 7100.0
 
     set_hbm_bandwidth_override(None)
+    set_calibrated_hbm_bandwidth(None)
     projection._apply_calibrated_hbm_bandwidth({"error": "OOM"}, rank=0)
+    assert hbm_bandwidth_override_gbps() is None
+
+
+def test_loaded_calibration_reused_unless_skipped(clean_hbm_override, monkeypatch, capsys):
+    from primus.core.projection.performance_projection import projection
+
+    payload = _payload(bw=4900.0)
+    projection._apply_loaded_calibration(payload, SimpleNamespace(skip_hw_calibration=True), True)
+    assert hbm_bandwidth_override_gbps() is None
+    assert "Calibration recorded with the loaded bench" in capsys.readouterr().out
+
+    monkeypatch.setenv(SKIP_ENV, "1")
+    projection._apply_loaded_calibration(payload, SimpleNamespace(), False)
+    assert hbm_bandwidth_override_gbps() is None
+
+    monkeypatch.delenv(SKIP_ENV)
+    projection._apply_loaded_calibration(payload, SimpleNamespace(), False)
+    assert hbm_bandwidth_override_gbps() == pytest.approx(payload["memory"]["model_hbm_bandwidth_gbps"])
+
+    # A bad derate at load time keeps the profile bandwidth instead of crashing.
+    set_calibrated_hbm_bandwidth(None)
+    monkeypatch.setenv(STREAM_DERATE_ENV, "2")
+    projection._apply_loaded_calibration(payload, SimpleNamespace(), True)
+    assert hbm_bandwidth_override_gbps() is None
+    assert "not using the calibrated HBM bandwidth" in capsys.readouterr().out
+
+
+def test_cli_resets_overrides_before_loading_config(clean_hbm_override, tmp_path):
+    from primus.core.projection.performance_projection import projection
+
+    set_calibrated_hbm_bandwidth(5000.0)
+    args = SimpleNamespace(config=str(tmp_path / "config.yaml"), hbm_bandwidth_gbps=7100.0)
+    (tmp_path / "config.yaml").write_text("")
+    try:
+        projection.launch_projection_from_cli(args, [])
+    except Exception:
+        pass  # only the overrides set before the config is parsed matter here
+    assert projection.user_hbm_bandwidth_gbps() == 7100.0
+    set_hbm_bandwidth_override(None)
     assert hbm_bandwidth_override_gbps() is None
 
 
@@ -674,7 +755,7 @@ def _payload(clock=1600.0, bw=4900.0):
     }
 
 
-def test_report_contains_headline_numbers():
+def test_report_contains_headline_numbers(clean_hbm_override):
     report = format_calibration_report(_payload())
     assert "Effective compute clock: 1600 MHz (Origami inversion, 76% of 2100 MHz max)" in report
     assert "--gpu-clock-mhz 1600" in report
@@ -686,6 +767,14 @@ def test_report_contains_headline_numbers():
     assert "Origami-inverted clock is +4.6% vs observed" in report
     assert "Observed MCLK (amdsmi, during timed STREAM, settled after 0.8s): median 1300 MHz" in report
     assert "WARNING" not in report
+
+
+def test_clock_hint_only_for_a_real_clock():
+    payload = _payload()
+    payload["compute"]["method"] = "mfma-peak-lower-bound"
+    assert "--gpu-clock-mhz" not in format_calibration_report(payload)
+    payload["compute"]["method"] = "live-sclk"
+    assert "--gpu-clock-mhz 1600" in format_calibration_report(payload)
 
 
 def test_report_shows_gemm_dtype_and_fallback_note():

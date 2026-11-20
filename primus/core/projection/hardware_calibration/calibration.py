@@ -25,6 +25,7 @@ from primus.core.projection.hardware_calibration.compute_clock import (
     time_gemm_ms,
 )
 from primus.core.projection.hardware_calibration.device_info import (
+    SETTLE_TIMEOUT_S,
     ClockSampler,
     describe_device,
     make_clock_reader,
@@ -38,12 +39,13 @@ from primus.core.projection.hardware_calibration.stream_bandwidth import (
     analyze_memory_clock,
     derive_model_hbm_bandwidth,
     run_stream,
+    stream_workload_derate,
 )
 
 SKIP_ENV = "PRIMUS_BENCH_SKIP_HW_CALIB"
 PAYLOAD_KEY = "_hardware_calibration"
 
-_TAG = "[Primus:HW Calibration]"
+TAG = "[Primus:HW Calibration]"
 
 # Later GEMMs start with the clock already in its loaded state; the settle
 # check still has to pass before they are timed.
@@ -82,10 +84,12 @@ def run_hardware_calibration(
 ) -> Dict[str, Any]:
     """Measure this rank's GPU; returns a JSON-serialisable payload.
 
-    Leaves no allocations or peak-memory history behind, even on failure.
+    Frees what it allocated and resets peak-memory stats; after a GPU fault
+    the cleanup is best effort and the original error is the one raised.
     """
     import torch
 
+    stream_workload_derate()  # reject a bad PRIMUS_HBM_STREAM_DERATE before measuring
     if device_index is None:
         device_index = _local_device_index()
     torch.cuda.set_device(device_index)
@@ -93,9 +97,12 @@ def run_hardware_calibration(
     try:
         return _measure(training_config, device, device_index, max_gemms, stream_array_mib)
     finally:
-        torch.cuda.synchronize(device)
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(device)
+        try:
+            torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats(device)
+        except RuntimeError:
+            pass
 
 
 def _measure(training_config, device, device_index, max_gemms, stream_array_mib) -> Dict[str, Any]:
@@ -223,14 +230,18 @@ def _rank_summary(payload: Dict[str, Any], rank: int) -> Dict[str, Any]:
 
 
 def calibrated_model_hbm_bandwidth_gbps(payload: Optional[Dict[str, Any]]) -> Optional[float]:
-    """Model HBM bandwidth to project with: the slowest GPU's, since every rank waits on it."""
+    """Model HBM bandwidth to project with: the slowest GPU's, since every rank waits on it.
+
+    Re-derived from the measured STREAM bandwidth with the current derate, so a
+    ``PRIMUS_HBM_STREAM_DERATE`` set when loading a saved bench still applies.
+    """
     if not payload:
         return None
-    values = [r.get("model_hbm_bandwidth_gbps") for r in payload.get("per_rank") or [] if "error" not in r]
+    values = [r.get("sustained_bandwidth_gbps") for r in payload.get("per_rank") or [] if "error" not in r]
     if "error" not in payload:
-        values.append(payload.get("memory", {}).get("model_hbm_bandwidth_gbps"))
+        values.append(payload.get("memory", {}).get("sustained_bandwidth_gbps"))
     values = [v for v in values if v]
-    return min(values) if values else None
+    return derive_model_hbm_bandwidth(min(values))["model_hbm_bandwidth_gbps"] if values else None
 
 
 def gather_rank_summaries(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -303,7 +314,7 @@ def _per_rank_lines(per_rank: List[Dict[str, Any]]) -> List[str]:
 def format_calibration_report(payload: Dict[str, Any]) -> str:
     per_rank = payload.get("per_rank") or []
     if "error" in payload:
-        lines = ["=" * 100, f"{_TAG} Calibration failed on this rank: {payload['error']}"]
+        lines = ["=" * 100, f"{TAG} Calibration failed on this rank: {payload['error']}"]
         if len(per_rank) > 1:
             lines += _per_rank_lines(per_rank)
         return "\n".join(lines + ["=" * 100])
@@ -313,7 +324,7 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
     mem = payload["memory"]
     lines = [
         "=" * 100,
-        f"{_TAG} Device {dev['index']}: {dev['profile_key'] or dev['name']} "
+        f"{TAG} Device {dev['index']}: {dev['profile_key'] or dev['name']} "
         f"({dev['gcn_arch']}, {dev['num_cus']} CUs)",
         "=" * 100,
         f"  Compute clock from {len(comp['gemms'])} GEMM(s), {comp['measured_dtype']}, "
@@ -367,8 +378,10 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
                 "(Origami model bias on these shapes)"
             )
     if comp.get("all_settled") is False:
-        lines.append("  WARNING: SCLK did not settle within 5 s for every GEMM; clocks may be unstable")
-    if eff:
+        lines.append(
+            f"  WARNING: SCLK did not settle within {SETTLE_TIMEOUT_S:g} s for every GEMM; clocks may be unstable"
+        )
+    if eff and comp.get("method") in ("origami-inversion", "live-sclk"):
         lines.append(f"  To simulate at this clock: --gpu-clock-mhz {eff:.0f}")
 
     stream = mem["stream"]
@@ -400,7 +413,7 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
         )
     stream_settle = stream.get("settle") or {}
     if stream_settle.get("settled") is False:
-        lines.append("  WARNING: MCLK did not settle within 5 s before STREAM was timed")
+        lines.append(f"  WARNING: MCLK did not settle within {SETTLE_TIMEOUT_S:g} s before STREAM was timed")
     mclk = mem.get("observed_mclk")
     if mclk:
         at_obs = mem.get("efficiency_at_observed_mclk")

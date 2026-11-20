@@ -44,6 +44,7 @@ that reproduces the spec peak to within 1 %.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from typing import Dict, Optional
 
@@ -72,6 +73,17 @@ def _allocate_arrays(num_elements: int, device):
     return a, b, c
 
 
+def _stream_kernels(a, b, c):
+    import torch
+
+    return {
+        "copy": lambda: c.copy_(a),
+        "scale": lambda: torch.mul(c, _SCALAR, out=b),
+        "add": lambda: torch.add(a, b, out=c),
+        "triad": lambda: torch.add(b, c, alpha=_SCALAR, out=a),
+    }
+
+
 def run_stream(
     device,
     array_mib: int = DEFAULT_ARRAY_MIB,
@@ -85,8 +97,6 @@ def run_stream(
     Halves the array size on OOM down to 256 MiB per array.  When a
     :class:`ClockSampler` is given, the timed trials run inside its window.
     """
-    import contextlib
-
     import torch
 
     elem_bytes = 4
@@ -100,14 +110,8 @@ def run_stream(
             if array_mib // 2 < _MIN_ARRAY_MIB:
                 raise
             array_mib //= 2
-    a, b, c = arrays
-
-    kernels = {
-        "copy": lambda: c.copy_(a),
-        "scale": lambda: torch.mul(c, _SCALAR, out=b),
-        "add": lambda: torch.add(a, b, out=c),
-        "triad": lambda: torch.add(b, c, alpha=_SCALAR, out=a),
-    }
+    kernels = _stream_kernels(*arrays)
+    del arrays
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
 
@@ -127,7 +131,7 @@ def run_stream(
                 end.record()
                 end.synchronize()
                 times_ms[name].append(start.elapsed_time(end))
-    a = b = c = arrays = None
+    kernels.clear()
     torch.cuda.empty_cache()
 
     array_bytes = num_elements * elem_bytes
@@ -148,9 +152,14 @@ def run_stream(
 def stream_workload_derate() -> float:
     """``PRIMUS_HBM_STREAM_DERATE`` if set, else :data:`STREAM_WORKLOAD_DERATE`."""
     env = os.getenv(STREAM_DERATE_ENV)
-    derate = float(env) if env else STREAM_WORKLOAD_DERATE
+    if not env:
+        return STREAM_WORKLOAD_DERATE
+    try:
+        derate = float(env)
+    except ValueError:
+        derate = float("nan")
     if not 0.0 < derate <= 1.0:
-        raise ValueError(f"{STREAM_DERATE_ENV} must be in (0, 1], got {derate}")
+        raise ValueError(f"{STREAM_DERATE_ENV} must be a number in (0, 1], got {env!r}")
     return derate
 
 

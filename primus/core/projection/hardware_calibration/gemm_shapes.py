@@ -80,6 +80,8 @@ class RecordingGEMMBackend(GEMMSimulationBackend):
     def is_available(self) -> bool:
         return True
 
+    # Nominal hardware figures: the profilers need some, but they do not change
+    # which GEMMs are recorded.
     @property
     def hbm_bandwidth_gbps(self) -> Optional[float]:
         return 5300.0

@@ -16,7 +16,9 @@ kernels.  Two concrete GEMM backends are shipped:
 An SDPA simulation backend is provided in ``sdpa_simulator.py``.
 """
 
+import math
 import os
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -368,27 +370,56 @@ def available_gemm_backends() -> Tuple[str, ...]:
 HBM_BANDWIDTH_ENV = "PRIMUS_HBM_BANDWIDTH_GBPS"
 
 _hbm_bandwidth_override_gbps: Optional[float] = None
+_calibrated_hbm_bandwidth_gbps: Optional[float] = None
+
+
+def _checked_bandwidth(gbps: Optional[float], what: str) -> Optional[float]:
+    if gbps is None:
+        return None
+    gbps = float(gbps)
+    if not math.isfinite(gbps) or gbps <= 0:
+        raise ValueError(f"{what} must be a positive number of GB/s, got {gbps}")
+    return gbps
 
 
 def set_hbm_bandwidth_override(gbps: Optional[float]) -> None:
-    """Set (or clear with ``None``) the process-wide HBM bandwidth override in GB/s.
+    """Set (or clear with ``None``) the user's process-wide HBM bandwidth override in GB/s.
 
     The value replaces the arch-profile ``hbm_bandwidth_gbps`` of every backend,
     so it must be expressed in the same peak-referenced units: the profilers
     multiply it by their own sustained-efficiency fractions.
     """
     global _hbm_bandwidth_override_gbps
-    if gbps is not None and gbps <= 0:
-        raise ValueError(f"HBM bandwidth override must be positive, got {gbps}")
-    _hbm_bandwidth_override_gbps = float(gbps) if gbps is not None else None
+    _hbm_bandwidth_override_gbps = _checked_bandwidth(gbps, "HBM bandwidth override")
 
 
-def hbm_bandwidth_override_gbps() -> Optional[float]:
-    """HBM bandwidth override in GB/s: programmatic setting, then the env var, else None."""
+def set_calibrated_hbm_bandwidth(gbps: Optional[float]) -> None:
+    """Set (or clear) the benchmark-calibrated HBM bandwidth; user overrides win over it."""
+    global _calibrated_hbm_bandwidth_gbps
+    _calibrated_hbm_bandwidth_gbps = _checked_bandwidth(gbps, "Calibrated HBM bandwidth")
+
+
+def user_hbm_bandwidth_gbps() -> Optional[float]:
+    """The user's HBM bandwidth in GB/s: programmatic setting, then the env var, else None.
+
+    An env value that is not a positive finite number is ignored with a warning.
+    """
     if _hbm_bandwidth_override_gbps is not None:
         return _hbm_bandwidth_override_gbps
     env = os.getenv(HBM_BANDWIDTH_ENV)
-    return float(env) if env else None
+    if not env:
+        return None
+    try:
+        return _checked_bandwidth(env, HBM_BANDWIDTH_ENV)
+    except ValueError as exc:
+        warnings.warn(f"Ignoring {HBM_BANDWIDTH_ENV}={env!r}: {exc}", stacklevel=2)
+        return None
+
+
+def hbm_bandwidth_override_gbps() -> Optional[float]:
+    """HBM bandwidth in GB/s that replaces the arch profile: user value, then calibration, else None."""
+    user = user_hbm_bandwidth_gbps()
+    return user if user is not None else _calibrated_hbm_bandwidth_gbps
 
 
 def resolve_hbm_bytes_per_ms(
