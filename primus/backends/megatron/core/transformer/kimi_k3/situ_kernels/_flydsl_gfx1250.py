@@ -41,6 +41,10 @@ from typing import Dict, Optional, Tuple
 import torch
 from torch import Tensor
 
+from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels import (
+    FLYDSL_SITU_ARCHS,
+)
+
 __all__ = [
     "flydsl_situ_pre_mul_fused",
     "flydsl_situ_with_probs",
@@ -50,9 +54,14 @@ __all__ = [
 
 _BLOCK = 256
 _VEC = 8
-# situ * probs forward: 4 vectors of 8 columns per lane (1 selects the one-vector kernel; 4: 0.71 -> 0.58 ms on the
-# routed experts' [229376, 2 x 3072], one vector per lane leaves too few loads in flight)
+# situ * probs backward: 8 vectors of 8 columns per lane, so each lane owns _PCOLS = 64 columns of one row; the probs
+# kernels take intermediate widths that are a multiple of _PCOLS
+_PGRP = 8
+_PCOLS = _PGRP * _VEC
+# situ * probs forward: 4 vectors of 8 columns per lane (0.71 -> 0.58 ms against one vector per lane on the routed
+# experts' [229376, 2 x 3072], which leaves too few loads in flight); divides _PGRP, so it fits every accepted width
 _FGRP = 4
+assert _PGRP % _FGRP == 0
 # tanh / sigmoid divide with v_rcp_f32 (~1 ulp) instead of the IEEE division sequence (about 10 instructions each,
 # most of the kernels' instructions)
 _RCP = True
@@ -234,7 +243,6 @@ def _build():
 
     # ---- situ(x) * p[row] (routed experts: the router probability folded in) ----------------------------
     # Bodies are plain helpers: FlyDSL rewrites a kernel's own AST, these run as ordinary Python at trace time.
-    _PGRP = 8  # vectors (of 8 columns) per lane in the backward: each lane owns 64 columns of one row, interleaved
 
     def _act(g, u, beta, g_scale, lbeta, u_scale):
         tg = _tanh(g, g_scale)
@@ -242,21 +250,6 @@ def _build():
         a = beta * tg * sg
         tu = _tanh(u, u_scale)
         return tg, sg, a, tu, lbeta * tu
-
-    def _situp_fwd_body(gx, gp, gy, n_vec, vpr, beta, g_scale, lbeta, u_scale):
-        v = fx.Int32(fx.block_idx.x) * fx.Int32(_BLOCK) + fx.Int32(fx.thread_idx.x)
-        vc = (v < n_vec).select(v, n_vec - fx.Int32(1))
-        row = vc // vpr
-        col = vc - row * vpr
-        gi = row * (vpr + vpr) + col
-        g8 = _ldv(gx, gi, fx.BFloat16, _VEC)
-        u8 = _ldv(gx, gi + vpr, fx.BFloat16, _VEC)
-        pr = fx.Float32(_ldv(gp, row, fx.Float32, 1)[0])
-        outs = []
-        for e in range(_VEC):
-            _, _, a, _, lu = _act(fx.Float32(g8[e]), fx.Float32(u8[e]), beta, g_scale, lbeta, u_scale)
-            outs.append((a * lu * pr).to(fx.BFloat16))
-        _stv(outs, gy, vc, fx.BFloat16)
 
     def _situp_bwd_body(gx, gp, gdy, gdx, gpp, n_lanes, vpr, gpr, beta, g_scale, lbeta, u_scale):
         lane = fx.Int32(fx.block_idx.x) * fx.Int32(_BLOCK) + fx.Int32(fx.thread_idx.x)
@@ -482,26 +475,6 @@ def _build():
         ).launch(grid=(nblk, 1, 1), block=(_BLOCK, 1, 1), stream=stream)
 
     @flyc.kernel(known_block_size=[_BLOCK, 1, 1])
-    def k_situp_fwd(
-        X: fx.Tensor,
-        P: fx.Tensor,
-        Y: fx.Tensor,
-        n_vec: fx.Int32,
-        vpr: fx.Int32,
-        x_bytes: fx.Int64,
-        y_bytes: fx.Int64,
-        p_bytes: fx.Int64,
-        beta: fx.Float32,
-        g_scale: fx.Float32,
-        lbeta: fx.Float32,
-        u_scale: fx.Float32,
-    ):
-        gx = _bv(X, x_bytes, fx.BFloat16, _VEC)
-        gy = _bv(Y, y_bytes, fx.BFloat16, _VEC)
-        gp = _bv(P, p_bytes, fx.Float32, 1)
-        _situp_fwd_body(gx, gp, gy, n_vec, vpr, beta, g_scale, lbeta, u_scale)
-
-    @flyc.kernel(known_block_size=[_BLOCK, 1, 1])
     def k_situp_bwd(
         X: fx.Tensor,
         P: fx.Tensor,
@@ -526,27 +499,6 @@ def _build():
         gp = _bv(P, p_bytes, fx.Float32, 1)
         gpp = _bv(PP, pp_bytes, fx.Float32, 1)
         _situp_bwd_body(gx, gp, gdy, gdx, gpp, n_lanes, vpr, gpr, beta, g_scale, lbeta, u_scale)
-
-    @flyc.jit
-    def launch_situp_fwd(
-        X,
-        P,
-        Y,
-        n_vec: fx.Int32,
-        vpr: fx.Int32,
-        x_bytes: fx.Int64,
-        y_bytes: fx.Int64,
-        p_bytes: fx.Int64,
-        beta: fx.Float32,
-        g_scale: fx.Float32,
-        lbeta: fx.Float32,
-        u_scale: fx.Float32,
-        nblk: fx.Int32,
-        stream: fx.Stream,
-    ):
-        k_situp_fwd(X, P, Y, n_vec, vpr, x_bytes, y_bytes, p_bytes, beta, g_scale, lbeta, u_scale).launch(
-            grid=(nblk, 1, 1), block=(_BLOCK, 1, 1), stream=stream
-        )
 
     @flyc.jit
     def launch_situp_bwd(
@@ -588,16 +540,14 @@ def _build():
             u_scale,
         ).launch(grid=(nblk, 1, 1), block=(_BLOCK, 1, 1), stream=stream)
 
-    return (
-        flyc,
-        launch_fwd,
-        launch_bwd,
-        launch_situp_fwd,
-        launch_situp_bwd,
-        launch_situp_fwd_g,
-        launch_situ_fwd_g,
-        launch_situ_bwd_g,
-    )
+    return flyc, {
+        "fwd": launch_fwd,
+        "bwd": launch_bwd,
+        "fwd_g": launch_situ_fwd_g,
+        "bwd_g": launch_situ_bwd_g,
+        "situp_fwd_g": launch_situp_fwd_g,
+        "situp_bwd": launch_situp_bwd,
+    }
 
 
 def _kernels():
@@ -636,6 +586,16 @@ def _aligned(t: Tensor) -> Tensor:
     return t.clone(memory_format=torch.contiguous_format) if t.data_ptr() % 16 else t
 
 
+_ARCH: Dict[int, str] = {}
+
+
+def _arch(device: torch.device) -> str:
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    if index not in _ARCH:
+        _ARCH[index] = str(getattr(torch.cuda.get_device_properties(index), "gcnArchName", ""))
+    return _ARCH[index]
+
+
 def supports_situ_inputs(x: Tensor) -> Optional[str]:
     """``None`` when the kernel can run ``x``, else why it cannot."""
     if not x.is_cuda:
@@ -644,9 +604,9 @@ def supports_situ_inputs(x: Tensor) -> Optional[str]:
         return f"dtype {x.dtype} is not bf16"
     if x.shape[-1] % (2 * _VEC) != 0:
         return f"last dim {x.shape[-1]} is not a multiple of {2 * _VEC}"
-    arch = str(getattr(torch.cuda.get_device_properties(x.device), "gcnArchName", ""))
-    if not arch.startswith("gfx1250"):
-        return f"device arch is {arch!r}, not gfx1250"
+    arch = _arch(x.device)
+    if not arch.startswith(FLYDSL_SITU_ARCHS):
+        return f"device arch is {arch!r}, not {' or '.join(FLYDSL_SITU_ARCHS)}"
     return None
 
 
@@ -674,42 +634,26 @@ class _SituFlydsl(torch.autograd.Function):
         rows = x.numel() // two_i
         y = torch.empty(*x.shape[:-1], inter, dtype=x.dtype, device=x.device)
         if rows:
-            launch_fwd = _kernels()[1]
             x2, y2 = x.view(rows, two_i), y.view(rows, inter)
-            vpr = inter // _VEC
+            name, per_row, shape_args = _plain_layout(inter // _VEC, "fwd")
+            launch = _kernels()[1][name]
+            scalars = _scalars(beta, linear_beta)
             stream = torch.cuda.current_stream()
             for r0, r1 in _row_chunks(rows, two_i * x.element_size()):
                 xs, ys = x2[r0:r1], y2[r0:r1]
-                if _PLAIN_GRP > 1 and vpr % _PLAIN_GRP == 0:
-                    gpr = vpr // _PLAIN_GRP
-                    n_lanes = (r1 - r0) * gpr
-                    _run(
-                        "fwd_g",
-                        _kernels()[6],
-                        xs,
-                        ys,
-                        n_lanes,
-                        vpr,
-                        gpr,
-                        xs.numel() * 2,
-                        ys.numel() * 2,
-                        *_scalars(beta, linear_beta),
-                        (n_lanes + _BLOCK - 1) // _BLOCK,
-                        stream,
-                    )
-                    continue
-                n_vec = (r1 - r0) * vpr
+                n = (r1 - r0) * per_row
+                nblk = (n + _BLOCK - 1) // _BLOCK
                 _run(
-                    "fwd",
-                    launch_fwd,
+                    name,
+                    launch,
                     xs,
                     ys,
-                    n_vec,
-                    vpr,
+                    n,
+                    *shape_args,
                     xs.numel() * 2,
                     ys.numel() * 2,
-                    *_scalars(beta, linear_beta),
-                    (n_vec + _BLOCK - 1) // _BLOCK,
+                    *scalars,
+                    nblk,
                     stream,
                 )
         ctx.save_for_backward(x)
@@ -726,47 +670,38 @@ class _SituFlydsl(torch.autograd.Function):
         rows = x.numel() // two_i
         dx = torch.empty_like(x)
         if rows:
-            launch_bwd = _kernels()[2]
             x2, dy2, dx2 = x.view(rows, two_i), dy.view(rows, inter), dx.view(rows, two_i)
-            vpr = inter // _VEC
+            name, per_row, shape_args = _plain_layout(inter // _VEC, "bwd")
+            launch = _kernels()[1][name]
+            scalars = _scalars(beta, linear_beta)
             stream = torch.cuda.current_stream()
             for r0, r1 in _row_chunks(rows, two_i * x.element_size()):
                 xs, dys, dxs = x2[r0:r1], dy2[r0:r1], dx2[r0:r1]
-                if _PLAIN_GRP > 1 and vpr % _PLAIN_GRP == 0:
-                    gpr = vpr // _PLAIN_GRP
-                    n_lanes = (r1 - r0) * gpr
-                    _run(
-                        "bwd_g",
-                        _kernels()[7],
-                        xs,
-                        dys,
-                        dxs,
-                        n_lanes,
-                        vpr,
-                        gpr,
-                        xs.numel() * 2,
-                        dys.numel() * 2,
-                        *_scalars(beta, linear_beta),
-                        (n_lanes + _BLOCK - 1) // _BLOCK,
-                        stream,
-                    )
-                    continue
-                n_vec = (r1 - r0) * vpr
+                n = (r1 - r0) * per_row
+                nblk = (n + _BLOCK - 1) // _BLOCK
                 _run(
-                    "bwd",
-                    launch_bwd,
+                    name,
+                    launch,
                     xs,
                     dys,
                     dxs,
-                    n_vec,
-                    vpr,
+                    n,
+                    *shape_args,
                     xs.numel() * 2,
                     dys.numel() * 2,
-                    *_scalars(beta, linear_beta),
-                    (n_vec + _BLOCK - 1) // _BLOCK,
+                    *scalars,
+                    nblk,
                     stream,
                 )
         return dx, None, None
+
+
+def _plain_layout(vpr: int, direction: str):
+    """The plain situ launcher for a row of ``vpr`` vectors, its lanes per row and its shape arguments:
+    ``_PLAIN_GRP`` vectors per lane when they divide the row, else one."""
+    if _PLAIN_GRP > 1 and vpr % _PLAIN_GRP == 0:
+        return f"{direction}_g", vpr // _PLAIN_GRP, (vpr, vpr // _PLAIN_GRP)
+    return direction, vpr, (vpr,)
 
 
 def flydsl_situ_pre_mul_fused(x: Tensor, *, beta: float, linear_beta: Optional[float]) -> Tensor:
@@ -786,14 +721,11 @@ def flydsl_situ_pre_mul_fused(x: Tensor, *, beta: float, linear_beta: Optional[f
     return _SituFlydsl.apply(x, float(beta), float(linear_beta))
 
 
-_PCOLS = 64  # columns per lane in the probs backward (_PGRP vectors of _VEC)
-
-
 class _SituProbsFlydsl(torch.autograd.Function):
     """``situ(x) * probs[row]``: the routed experts' activation with the router probability folded in, so the
     fp32 ``[rows, I]`` product and its cast (forward), and the two products and the cast (backward), are gone.
-    ``d probs[row] = sum_c dout[row, c] * situ(x)[row, c]`` is reduced over 64 columns per lane in the kernel
-    and over the row's ``I / 64`` lane partials here."""
+    ``d probs[row] = sum_c dout[row, c] * situ(x)[row, c]`` is reduced over ``_PCOLS`` (64) columns per lane in the
+    kernel and over the row's ``I / _PCOLS`` lane partials here."""
 
     @staticmethod
     def forward(ctx, x: Tensor, probs: Tensor, beta: float, linear_beta: float):
@@ -806,45 +738,28 @@ class _SituProbsFlydsl(torch.autograd.Function):
         if rows:
             x2, y2 = x.view(rows, two_i), y.view(rows, inter)
             vpr = inter // _VEC
+            gpr = vpr // _FGRP
+            launch = _kernels()[1]["situp_fwd_g"]
+            scalars = _scalars(beta, linear_beta)
             stream = torch.cuda.current_stream()
-            grouped = _FGRP > 1 and vpr % _FGRP == 0
-            launch = _kernels()[5 if grouped else 3]
             for r0, r1 in _row_chunks(rows, two_i * x.element_size()):
                 xs, ys, ps = x2[r0:r1], y2[r0:r1], p[r0:r1]
-                if grouped:
-                    gpr = vpr // _FGRP
-                    n_lanes = (r1 - r0) * gpr
-                    _run(
-                        "situp_fwd_g",
-                        launch,
-                        xs,
-                        ps,
-                        ys,
-                        n_lanes,
-                        vpr,
-                        gpr,
-                        xs.numel() * 2,
-                        ys.numel() * 2,
-                        ps.numel() * 4,
-                        *_scalars(beta, linear_beta),
-                        (n_lanes + _BLOCK - 1) // _BLOCK,
-                        stream,
-                    )
-                    continue
-                n_vec = (r1 - r0) * vpr
+                n_lanes = (r1 - r0) * gpr
+                nblk = (n_lanes + _BLOCK - 1) // _BLOCK
                 _run(
-                    "situp_fwd",
+                    "situp_fwd_g",
                     launch,
                     xs,
                     ps,
                     ys,
-                    n_vec,
+                    n_lanes,
                     vpr,
+                    gpr,
                     xs.numel() * 2,
                     ys.numel() * 2,
                     ps.numel() * 4,
-                    *_scalars(beta, linear_beta),
-                    (n_vec + _BLOCK - 1) // _BLOCK,
+                    *scalars,
+                    nblk,
                     stream,
                 )
         ctx.save_for_backward(x, p)
@@ -864,13 +779,15 @@ class _SituProbsFlydsl(torch.autograd.Function):
         dx = torch.empty_like(x)
         part = torch.empty(rows, gpr, dtype=torch.float32, device=x.device)
         if rows:
-            launch = _kernels()[4]
             x2, dy2, dx2 = x.view(rows, two_i), dy.view(rows, inter), dx.view(rows, two_i)
             vpr = inter // _VEC
+            launch = _kernels()[1]["situp_bwd"]
+            scalars = _scalars(beta, linear_beta)
             stream = torch.cuda.current_stream()
             for r0, r1 in _row_chunks(rows, two_i * x.element_size()):
                 xs, dys, dxs, ps, pps = x2[r0:r1], dy2[r0:r1], dx2[r0:r1], p[r0:r1], part[r0:r1]
                 n_lanes = (r1 - r0) * gpr
+                nblk = (n_lanes + _BLOCK - 1) // _BLOCK
                 _run(
                     "situp_bwd",
                     launch,
@@ -886,8 +803,8 @@ class _SituProbsFlydsl(torch.autograd.Function):
                     dys.numel() * 2,
                     ps.numel() * 4,
                     pps.numel() * 4,
-                    *_scalars(beta, linear_beta),
-                    (n_lanes + _BLOCK - 1) // _BLOCK,
+                    *scalars,
+                    nblk,
                     stream,
                 )
         dp = part.sum(-1).reshape(ctx.probs_shape).to(ctx.probs_dtype)

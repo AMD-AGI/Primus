@@ -101,6 +101,11 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels import (
+    SITU_BACKENDS,
+    resolve_situ_backend,
+)
+
 __all__ = [
     "situ_pre_mul",
     "situ_pre_mul_fused",
@@ -232,11 +237,6 @@ class SituActivation(nn.Module):
             linear_beta = cfg_linear_beta if linear_beta is None else linear_beta
         self.beta = float(beta) if beta else _DEFAULT_BETA
         self.linear_beta = None if linear_beta is None else float(linear_beta)
-        from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels import (
-            SITU_BACKENDS,
-            resolve_situ_backend,
-        )
-
         if backend is None:
             backend = str(getattr(config, "situ_backend", "eager") or "eager")
         if backend not in SITU_BACKENDS:
@@ -315,4 +315,4 @@ class SituActivation(nn.Module):
         )
 
     def extra_repr(self) -> str:
-        return f"beta={self.beta}, linear_beta={self.linear_beta}"
+        return f"beta={self.beta}, linear_beta={self.linear_beta}, backend={self.backend_name}"

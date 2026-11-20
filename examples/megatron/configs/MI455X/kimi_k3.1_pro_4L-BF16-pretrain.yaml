@@ -148,6 +148,9 @@ modules:
       moe_permute_fusion: true
       # the router's score function and top-k as fused kernels (Megatron's moe_router_fusion)
       moe_router_fusion: true
+      # situ_backend: flydsl and moe_router_fusion checked on 4 x MI455X (EP 4, BF16, seq 4096, MBS 2, GBS 64,
+      # 12 iterations, dev/mi455x_v4): loss within 7.6e-5 (relative) of situ_backend: eager with the fusion off
+      # over iterations 1-7, no NaN.
       # Attention uses the FlyDSL MLA backend (PRIMUS_TURBO_ATTN_BACKEND).
       # DeepEP uses Primus-Turbo's FlyDSL flydsl_v2 backend for gfx1250
       # (Primus-Turbo#602, in amdprimus/amdprimus:tas-20261109's Primus-Turbo)
