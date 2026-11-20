@@ -54,6 +54,10 @@ use_turbo_fused_qk_rmsnorm_rope: false
 # operator switch
 # use turbo gemm
 use_turbo_gemm: false
+# Train the native GPT vocabulary projection in hybrid tensorwise FP8 at TP1.
+# Requires BF16, enable_primus_turbo, and ordinary (unfused, non-deferred) weight gradients.
+# Evaluation retains the native projection.
+turbo_fp8_lm_head: false
 # Fuse the dense SwiGLU MLP chain (fc1 + GLU + fc2) into Primus-Turbo's
 # FlyDSL MXFP4 dense MLP op. Analog of turbo_fused_grouped_gemm for G=1.
 # Default off; Llama-3.1-8B opts in from the experiment YAML.
