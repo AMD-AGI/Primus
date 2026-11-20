@@ -111,9 +111,27 @@ def test_recording_backend_counts_shapes_and_ignores_degenerate():
     rec.simulate_gemm(8, 16, 32, "fp8")
     rec.simulate_gemm(0, 16, 32)
     result = rec.simulate_gemm(4, 4, 4, batch=3)
-    assert rec.shapes == {GemmShape(8, 16, 32): 2, GemmShape(4, 4, 4, 3): 1}
+    assert rec.shapes == {
+        GemmShape(8, 16, 32): 1,
+        GemmShape(8, 16, 32, dtype="fp8"): 1,
+        GemmShape(4, 4, 4, 3): 1,
+    }
     assert rec.dtypes["bf16"] == 2 and rec.dtypes["fp8"] == 1
     assert result.forward_time_ms > 0
+
+
+def test_fp8_workload_records_fp8_gemms():
+    cfg = _training_config()
+    cfg.model_config.fp8 = "hybrid"
+    shapes, dtypes = collect_workload_gemms(cfg)
+    assert "fp8" in dtypes
+    assert GemmShape(SEQ, FFN, HIDDEN, dtype="fp8") in shapes
+
+
+def test_gemm_bytes_follow_dtype():
+    assert GemmShape(1024, 1024, 1024).nbytes == 3 * 2 * 1024**2
+    # fp8 inputs, bf16 output.
+    assert GemmShape(1024, 1024, 1024, dtype="fp8").nbytes == (2 * 1 + 2) * 1024**2
 
 
 def test_dense_workload_gemms_match_swiglu_mlp_and_output_layer():
@@ -157,6 +175,8 @@ def test_select_respects_max_gemms():
 def test_select_falls_back_to_reference_gemm():
     assert select_calibration_gemms({}) == [(REFERENCE_GEMM, 1)]
     assert select_calibration_gemms({GemmShape(32, 32, 32): 5}) == [(REFERENCE_GEMM, 1)]
+    fp8_tiny = {GemmShape(32, 32, 32, dtype="fp8"): 5}
+    assert select_calibration_gemms(fp8_tiny) == [(GemmShape(8192, 8192, 8192, dtype="fp8"), 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +213,60 @@ def test_mfma_bound_matches_mi300x_peak():
     flops = 304 * 2048 * 2.1e9
     assert mfma_bound_clock_mhz(flops, 1000.0, "gfx942", 304) == pytest.approx(2100.0)
     assert mfma_bound_clock_mhz(flops, 1000.0, "gfx1100", 304) is None
+    # fp8 runs at twice the bf16 rate: 2614.9 TF on MI300X is also 2100 MHz.
+    assert mfma_bound_clock_mhz(2 * flops, 1000.0, "gfx942", 304, "fp8") == pytest.approx(2100.0)
+    assert mfma_bound_clock_mhz(flops, 1000.0, "gfx942", 304, "mx4") is None
+
+
+@pytest.mark.parametrize(
+    "workload, measured",
+    [("bf16", "bf16"), ("fp16", "fp16"), ("fp8", "fp8"), ("mx8", "fp8"), ("fp4", "fp8"), ("int8", "bf16")],
+)
+def test_measured_gemm_dtype(workload, measured):
+    from primus.core.projection.hardware_calibration.compute_clock import (
+        measured_gemm_dtype,
+    )
+
+    assert measured_gemm_dtype(workload) == measured
+
+
+def test_aggregate_mfma_bound_mixes_dtypes():
+    bf16 = GemmShape(8192, 8192, 8192)
+    fp8 = GemmShape(8192, 8192, 8192, dtype="fp8")
+    # Both at 100 % MFMA use and 1500 MHz: fp8 takes half the bf16 time.
+    bf16_ms = bf16.flops / (304 * 2048 * 1.5e9) * 1e3
+    result = back_calculate_compute_clock([(bf16, 1, bf16_ms), (fp8, 1, bf16_ms / 2)], "gfx942", 304, None)
+    assert result["mfma_bound_clock_mhz"] == pytest.approx(1500.0)
+    assert [row["dtype"] for row in result["gemms"]] == ["bf16", "fp8"]
+
+
+def test_workload_gemm_falls_back_to_bf16_when_fp8_unavailable(monkeypatch):
+    from primus.core.projection.hardware_calibration import calibration
+
+    timed = []
+
+    def fake_time(shape, device, **kwargs):
+        timed.append(shape.dtype)
+        if shape.dtype == "fp8":
+            raise RuntimeError("HIPBLAS_STATUS_NOT_SUPPORTED")
+        return 1.0, {"settled": True}
+
+    monkeypatch.setattr(calibration, "time_gemm_ms", fake_time)
+    shape = GemmShape(4096, 4096, 4096, dtype="mx8")
+    measured, ms, _, note = calibration._time_workload_gemm(shape, None)
+    assert timed == ["fp8", "bf16"]
+    assert measured.dtype == "bf16" and ms == 1.0
+    assert note == "mx8 GEMMs timed as bf16 (fp8 GEMM unavailable: RuntimeError)"
+
+
+def test_workload_gemm_keeps_supported_dtype(monkeypatch):
+    from primus.core.projection.hardware_calibration import calibration
+
+    monkeypatch.setattr(calibration, "time_gemm_ms", lambda shape, device, **kw: (2.0, {}))
+    measured, _, _, note = calibration._time_workload_gemm(GemmShape(64, 64, 64, dtype="fp8"), None)
+    assert measured.dtype == "fp8" and note is None
+    measured, _, _, note = calibration._time_workload_gemm(GemmShape(64, 64, 64, dtype="mx8"), None)
+    assert measured.dtype == "fp8" and note == "mx8 GEMMs timed as fp8"
 
 
 def test_back_calculate_with_origami_style_predictor():
@@ -565,6 +639,18 @@ def test_report_contains_headline_numbers():
     assert "WARNING" not in report
 
 
+def test_report_shows_gemm_dtype_and_fallback_note():
+    payload = _payload()
+    payload["compute"]["gemms"][0]["dtype"] = "fp8"
+    payload["compute"]["measured_dtype"] = "fp8"
+    payload["compute"]["dtype_notes"] = ["mx8 GEMMs timed as fp8"]
+    report = format_calibration_report(payload)
+    assert "Compute clock from 1 GEMM(s), fp8," in report
+    row = next(line.split() for line in report.splitlines() if line.split()[:3] == ["8192", "14336", "4096"])
+    assert row[3:6] == ["1", "fp8", "3"]  # batch, dtype, count
+    assert "note: mx8 GEMMs timed as fp8" in report
+
+
 def test_report_warns_when_clocks_never_settled():
     payload = _payload()
     payload["compute"]["all_settled"] = False
@@ -682,6 +768,24 @@ def test_time_gemm_is_positive_and_scales_with_work():
     large, _ = time_gemm_ms(GemmShape(4096, 4096, 4096), device, trials=3, min_settle_s=0.0)
     batched, _ = time_gemm_ms(GemmShape(1024, 1024, 1024, batch=4), device, trials=3, min_settle_s=0.0)
     assert 0 < small < large
+    assert batched > 0
+
+
+@requires_gpu
+def test_time_gemm_runs_fp8_faster_than_bf16():
+    import torch
+
+    from primus.core.projection.hardware_calibration.compute_clock import time_gemm_ms
+
+    device = torch.device("cuda", 0)
+    if torch.cuda.get_device_properties(device).gcnArchName.split(":")[0] not in ("gfx942", "gfx950"):
+        pytest.skip("fp8 matrix cores need gfx942 / gfx950")
+    bf16, _ = time_gemm_ms(GemmShape(8192, 8192, 8192), device, trials=3, min_settle_s=0.0)
+    fp8, _ = time_gemm_ms(GemmShape(8192, 8192, 8192, dtype="fp8"), device, trials=3, min_settle_s=0.0)
+    batched, _ = time_gemm_ms(
+        GemmShape(2048, 2048, 2048, batch=2, dtype="fp8"), device, trials=3, min_settle_s=0.0
+    )
+    assert 0 < fp8 < bf16
     assert batched > 0
 
 

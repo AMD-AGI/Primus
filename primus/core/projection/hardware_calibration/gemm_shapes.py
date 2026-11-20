@@ -18,15 +18,13 @@ from __future__ import annotations
 import contextlib
 import io
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 from primus.core.projection.simulation_backends.base import (
     GEMMSimulationBackend,
     SimulationResult,
 )
-
-_BF16_BYTES = 2
 
 # A GEMM this small is launch-bound: its time says nothing about the clock.
 _MIN_CALIBRATION_GFLOP = 1.0
@@ -36,20 +34,24 @@ _MAX_CALIBRATION_BYTES = 2 * 1024**3
 
 @dataclass(frozen=True)
 class GemmShape:
-    """``C[batch, M, N] = A[batch, M, K] @ B[batch, K, N]``."""
+    """``C[batch, M, N] = A[batch, M, K] @ B[batch, K, N]`` computed in *dtype*."""
 
     m: int
     n: int
     k: int
     batch: int = 1
+    dtype: str = "bf16"
 
     @property
     def flops(self) -> float:
         return 2.0 * self.m * self.n * self.k * self.batch
 
     @property
-    def bf16_bytes(self) -> int:
-        return _BF16_BYTES * self.batch * (self.m * self.k + self.k * self.n + self.m * self.n)
+    def nbytes(self) -> int:
+        """A, B and C footprint; the output is bf16 for sub-16-bit inputs."""
+        in_bytes = {"fp32": 4, "bf16": 2, "fp16": 2}.get(self.dtype, 1)
+        out_bytes = max(in_bytes, 2)
+        return self.batch * (in_bytes * (self.m * self.k + self.k * self.n) + out_bytes * self.m * self.n)
 
     def to_dict(self) -> Dict[str, int]:
         return asdict(self)
@@ -86,7 +88,7 @@ class RecordingGEMMBackend(GEMMSimulationBackend):
         return 1.0e14
 
     def simulate_gemm(self, m, n, k, dtype="bf16", trans_a=False, trans_b=False, batch=1) -> SimulationResult:
-        shape = GemmShape(int(m), int(n), int(k), max(int(batch), 1))
+        shape = GemmShape(int(m), int(n), int(k), max(int(batch), 1), str(dtype))
         if shape.m > 0 and shape.n > 0 and shape.k > 0:
             self.shapes[shape] += 1
             self.dtypes[str(dtype)] += 1
@@ -127,15 +129,24 @@ def select_calibration_gemms(
 
     Ranked by total FLOPs (``flops x occurrences``); shapes too small to be
     compute-bound or too large to allocate beside the bench are skipped.
-    Falls back to an 8192^3 reference GEMM when nothing qualifies.
+    Falls back to an 8192^3 reference GEMM, in the workload's dominant dtype,
+    when nothing qualifies.
     """
     candidates = [
         (shape, count)
         for shape, count in shape_counts.items()
-        if shape.flops >= min_gflop * 1e9 and shape.bf16_bytes <= max_bytes
+        if shape.flops >= min_gflop * 1e9 and shape.nbytes <= max_bytes
     ]
     candidates.sort(key=lambda item: (item[0].flops * item[1], item[0].flops), reverse=True)
     selected = candidates[: max(max_gemms, 1)]
     if not selected:
-        selected = [(REFERENCE_GEMM, 1)]
+        selected = [(replace(REFERENCE_GEMM, dtype=dominant_dtype(shape_counts)), 1)]
     return selected
+
+
+def dominant_dtype(shape_counts: Dict[GemmShape, int]) -> str:
+    """The dtype carrying most of the workload's GEMM FLOPs (bf16 if none)."""
+    flops: Counter = Counter()
+    for shape, count in shape_counts.items():
+        flops[shape.dtype] += shape.flops * count
+    return flops.most_common(1)[0][0] if flops else "bf16"

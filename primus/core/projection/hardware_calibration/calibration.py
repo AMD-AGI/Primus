@@ -14,12 +14,14 @@ recorder takes its first snapshot.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 from primus.core.projection.hardware_calibration.compute_clock import (
     DEFAULT_MIN_SETTLE_S,
     back_calculate_compute_clock,
     make_origami_predictor,
+    measured_gemm_dtype,
     time_gemm_ms,
 )
 from primus.core.projection.hardware_calibration.device_info import (
@@ -119,26 +121,30 @@ def _measure_with_reader(
     if shape_source == "workload" and selected[0][0] not in shape_counts:
         shape_source = "reference (no workload GEMM is large enough to be clock-bound)"
 
-    measurements, settles = [], []
+    measurements, settles, dtype_notes = [], [], []
     with ClockSampler(reader) as gemm_clocks:
         for i, (shape, count) in enumerate(selected):
-            measured_ms, settle = time_gemm_ms(
+            measured_shape, measured_ms, settle, note = _time_workload_gemm(
                 shape,
                 device,
                 reader=reader,
                 sampler=gemm_clocks,
                 min_settle_s=DEFAULT_MIN_SETTLE_S if i == 0 else _NEXT_GEMM_MIN_SETTLE_S,
             )
-            measurements.append((shape, count, measured_ms))
+            measurements.append((measured_shape, count, measured_ms))
             settles.append(settle)
+            if note and note not in dtype_notes:
+                dtype_notes.append(note)
     predictor = make_origami_predictor(info.profile_key, info.num_cus) if info.profile_key else None
     compute = back_calculate_compute_clock(measurements, info.gcn_arch, info.num_cus, predictor)
-    for row, settle in zip(compute["gemms"], settles):
+    for row, (shape, _), settle in zip(compute["gemms"], selected, settles):
         row["settle"] = settle
+        row["workload_dtype"] = shape.dtype
     gemm_clock_summary = gemm_clocks.summary()
     compute.update(
         shape_source=shape_source,
-        measured_dtype="bf16",
+        measured_dtype="/".join(sorted({s.dtype for s, _, _ in measurements})),
+        dtype_notes=dtype_notes,
         workload_dtypes=sorted(dtypes),
         workload_unique_gemms=len(shape_counts),
         max_sclk_mhz=info.max_sclk_mhz,
@@ -168,6 +174,35 @@ def _measure_with_reader(
         ),
     }
     return {"device": info.to_dict(), "compute": compute, "memory": memory}
+
+
+def _time_workload_gemm(shape, device, **timing_kwargs):
+    """Time *shape* in its workload precision: ``(measured_shape, ms, settle, note)``.
+
+    MX / FP4 recipes are timed as fp8.  If the part or torch cannot run an
+    fp8 GEMM, it is timed in bf16 instead and *note* says so.
+    """
+    import torch
+
+    measured = replace(shape, dtype=measured_gemm_dtype(shape.dtype))
+    note = None
+    if measured.dtype != shape.dtype:
+        note = f"{shape.dtype} GEMMs timed as {measured.dtype}"
+    failure = None
+    try:
+        ms, settle = time_gemm_ms(measured, device, **timing_kwargs)
+    except torch.cuda.OutOfMemoryError:
+        raise
+    except (RuntimeError, NotImplementedError, AttributeError, TypeError) as exc:
+        if measured.dtype != "fp8":
+            raise
+        failure = type(exc).__name__
+    if failure is not None:
+        torch.cuda.empty_cache()
+        note = f"{shape.dtype} GEMMs timed as bf16 (fp8 GEMM unavailable: {failure})"
+        measured = replace(shape, dtype="bf16")
+        ms, settle = time_gemm_ms(measured, device, **timing_kwargs)
+    return measured, ms, settle, note
 
 
 def _rank_summary(payload: Dict[str, Any], rank: int) -> Dict[str, Any]:
@@ -281,17 +316,19 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
         "=" * 100,
         f"  Compute clock from {len(comp['gemms'])} GEMM(s), {comp['measured_dtype']}, "
         f"shapes: {comp['shape_source']}",
-        f"    {'M':>7} {'N':>7} {'K':>7} {'batch':>5} {'count':>5} {'time_ms':>9} "
+        f"    {'M':>7} {'N':>7} {'K':>7} {'batch':>5} {'dtype':>5} {'count':>5} {'time_ms':>9} "
         f"{'TFLOPS':>8} {'origami_MHz':>11} {'mfma_bound_MHz':>14} {'settled':>10}",
     ]
     for g in comp["gemms"]:
         clamp = "*" if g.get("origami_clamped") else " "
         lines.append(
-            f"    {g['m']:>7} {g['n']:>7} {g['k']:>7} {g['batch']:>5} {g['occurrences']:>5} "
-            f"{g['measured_ms']:>9.4f} {g['achieved_tflops']:>8.1f} "
+            f"    {g['m']:>7} {g['n']:>7} {g['k']:>7} {g['batch']:>5} {g.get('dtype', 'bf16'):>5} "
+            f"{g['occurrences']:>5} {g['measured_ms']:>9.4f} {g['achieved_tflops']:>8.1f} "
             f"{_fmt(g['origami_clock_mhz']):>10}{clamp} {_fmt(g['mfma_bound_clock_mhz']):>14} "
             f"{_settle_label(g.get('settle')):>10}"
         )
+    for note in comp.get("dtype_notes") or []:
+        lines.append(f"    note: {note}")
     eff = comp.get("effective_clock_mhz")
     max_sclk = comp.get("max_sclk_mhz")
     pct = f", {eff / max_sclk:.0%} of {max_sclk} MHz max" if eff and max_sclk else ""

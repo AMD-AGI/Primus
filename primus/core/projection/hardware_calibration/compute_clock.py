@@ -26,9 +26,27 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from primus.core.projection.hardware_calibration.device_info import run_until_settled
 from primus.core.projection.hardware_calibration.gemm_shapes import GemmShape
 
-# Dense bf16 matrix-core FLOPs per CU per clock: MI300X 1307 TF = 304 CU x
-# 2.1 GHz x 2048; MI355X 2.5 PF = 256 CU x 2.4 GHz x 4096.
-_BF16_MFMA_FLOPS_PER_CU_PER_CLK = {"gfx942": 2048, "gfx950": 4096}
+# Dense matrix-core FLOPs per CU per clock.  MI300X: bf16 1307 TF = 304 CU x
+# 2.1 GHz x 2048, fp8 2615 TF (x4096), fp32 163 TF (x256).  MI355X: bf16
+# 2.5 PF = 256 CU x 2.4 GHz x 4096, fp8 5.0 PF (x8192), fp32 157 TF (x256).
+_MFMA_FLOPS_PER_CU_PER_CLK = {
+    "gfx942": {"fp32": 256, "bf16": 2048, "fp16": 2048, "fp8": 4096},
+    "gfx950": {"fp32": 256, "bf16": 4096, "fp16": 4096, "fp8": 8192},
+}
+
+# Microscaled and sub-8-bit recipes are timed as fp8: torch has no portable
+# kernel for them, and Origami models them as fp8 too.
+_FP8_PROXY_DTYPES = ("mx8", "mx6", "mx4", "fp6", "fp4")
+_TIMEABLE_DTYPES = ("fp32", "bf16", "fp16", "fp8")
+
+
+def measured_gemm_dtype(workload_dtype: str) -> str:
+    """The dtype a workload GEMM is timed in (fp8 for MX / FP4 recipes, else itself or bf16)."""
+    dtype = (workload_dtype or "bf16").lower()
+    if dtype in _FP8_PROXY_DTYPES:
+        return "fp8"
+    return dtype if dtype in _TIMEABLE_DTYPES else "bf16"
+
 
 CLOCK_SEARCH_MIN_MHZ = 100
 CLOCK_SEARCH_MAX_MHZ = 4000
@@ -49,7 +67,11 @@ def time_gemm_ms(
     sampler=None,
     min_settle_s: float = DEFAULT_MIN_SETTLE_S,
 ) -> Tuple[float, Dict]:
-    """``(median per-call ms, settle info)`` of a bf16 GEMM of *shape* on *device*.
+    """``(median per-call ms, settle info)`` of a GEMM of *shape* on *device*.
+
+    Runs in ``shape.dtype`` (``fp32`` / ``bf16`` / ``fp16`` / ``fp8``; map
+    workload dtypes with :func:`measured_gemm_dtype` first).  fp8 uses
+    ``torch._scaled_mm`` with bf16 output, in the part's native fp8 format.
 
     The GEMM first runs until the compute clock settles (see
     :func:`run_until_settled`), so the timing reflects the clock the part
@@ -59,22 +81,7 @@ def time_gemm_ms(
     """
     import torch
 
-    if shape.batch > 1:
-        a = torch.randn(shape.batch, shape.m, shape.k, dtype=torch.bfloat16, device=device)
-        b = torch.randn(shape.batch, shape.k, shape.n, dtype=torch.bfloat16, device=device)
-        c = torch.empty(shape.batch, shape.m, shape.n, dtype=torch.bfloat16, device=device)
-
-        def call():
-            torch.bmm(a, b, out=c)
-
-    else:
-        a = torch.randn(shape.m, shape.k, dtype=torch.bfloat16, device=device)
-        b = torch.randn(shape.k, shape.n, dtype=torch.bfloat16, device=device)
-        c = torch.empty(shape.m, shape.n, dtype=torch.bfloat16, device=device)
-
-        def call():
-            torch.mm(a, b, out=c)
-
+    call, tensors = _build_gemm(shape, device)
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
 
@@ -100,13 +107,59 @@ def time_gemm_ms(
     settle = run_until_settled(step, reader, "sclk", min_s=min_settle_s)
     with sampler.window() if sampler is not None else contextlib.nullcontext():
         samples = sorted(timed_loop(iters) for _ in range(trials))
-    a = b = c = None
+    tensors.clear()
     return samples[len(samples) // 2], settle
 
 
-def mfma_bound_clock_mhz(flops: float, time_ms: float, gcn_arch: str, num_cus: int) -> Optional[float]:
-    """Lowest clock (MHz) that sustains ``flops / time_ms`` at 100 % MFMA use."""
-    per_clk = _BF16_MFMA_FLOPS_PER_CU_PER_CLK.get(gcn_arch)
+def _fp8_dtype(device):
+    """The fp8 format the part's matrix cores run: fnuz on gfx942, OCP elsewhere."""
+    import torch
+
+    arch = torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
+    return torch.float8_e4m3fnuz if arch == "gfx942" else torch.float8_e4m3fn
+
+
+def _build_gemm(shape: GemmShape, device):
+    """``(call, tensors)`` running one ``shape`` GEMM; clearing *tensors* frees them."""
+    import torch
+
+    batch = (shape.batch,) if shape.batch > 1 else ()
+    if shape.dtype == "fp8":
+        fp8 = _fp8_dtype(device)
+        a = torch.randn(*batch, shape.m, shape.k, dtype=torch.bfloat16, device=device).to(fp8)
+        # _scaled_mm wants B column-major.
+        b = (
+            torch.randn(*batch, shape.n, shape.k, dtype=torch.bfloat16, device=device)
+            .to(fp8)
+            .transpose(-1, -2)
+        )
+        c = torch.empty(*batch, shape.m, shape.n, dtype=torch.bfloat16, device=device)
+        one = torch.ones((), dtype=torch.float32, device=device)
+        pairs = [(a[i], b[i], c[i]) for i in range(shape.batch)] if batch else [(a, b, c)]
+
+        def call():
+            for ai, bi, ci in pairs:
+                torch._scaled_mm(ai, bi, scale_a=one, scale_b=one, out_dtype=torch.bfloat16, out=ci)
+
+        return call, [a, b, c, one, pairs]
+
+    dt = {"fp32": torch.float32, "fp16": torch.float16}.get(shape.dtype, torch.bfloat16)
+    a = torch.randn(*batch, shape.m, shape.k, dtype=dt, device=device)
+    b = torch.randn(*batch, shape.k, shape.n, dtype=dt, device=device)
+    c = torch.empty(*batch, shape.m, shape.n, dtype=dt, device=device)
+    mm = torch.bmm if batch else torch.mm
+
+    def call():
+        mm(a, b, out=c)
+
+    return call, [a, b, c]
+
+
+def mfma_bound_clock_mhz(
+    flops: float, time_ms: float, gcn_arch: str, num_cus: int, dtype: str = "bf16"
+) -> Optional[float]:
+    """Lowest clock (MHz) that sustains ``flops / time_ms`` of *dtype* at 100 % MFMA use."""
+    per_clk = _MFMA_FLOPS_PER_CU_PER_CLK.get(gcn_arch, {}).get(dtype)
     if per_clk is None or time_ms <= 0 or num_cus <= 0:
         return None
     flops_per_s = flops / (time_ms / 1e3)
@@ -135,7 +188,9 @@ def make_origami_predictor(profile_key: str, num_cus: int) -> Optional[Callable[
             if backend is None:
                 backend = OrigamiGEMMBackend(gpu_arch=profile_key, gpu_clock_mhz=mhz, n_cu_override=num_cus)
                 backends[mhz] = backend
-            return backend.simulate_gemm(shape.m, shape.n, shape.k, "bf16", batch=shape.batch).forward_time_ms
+            return backend.simulate_gemm(
+                shape.m, shape.n, shape.k, shape.dtype, batch=shape.batch
+            ).forward_time_ms
 
     return predict
 
@@ -167,6 +222,15 @@ def solve_clock_mhz(
     return 0.5 * (lo + hi), False
 
 
+def _aggregate_mfma_bound_mhz(measurements, total_ms, gcn_arch, num_cus) -> Optional[float]:
+    """MFMA bound for all GEMMs together: total MFMA cycles needed / total time."""
+    rates = _MFMA_FLOPS_PER_CU_PER_CLK.get(gcn_arch, {})
+    if total_ms <= 0 or num_cus <= 0 or any(shape.dtype not in rates for shape, _, _ in measurements):
+        return None
+    cycles = sum(count * shape.flops / (num_cus * rates[shape.dtype]) for shape, count, _ in measurements)
+    return cycles / (total_ms / 1e3) / 1e6
+
+
 def back_calculate_compute_clock(
     measurements: Sequence[Tuple[GemmShape, int, float]],
     gcn_arch: str,
@@ -186,7 +250,9 @@ def back_calculate_compute_clock(
             "occurrences": count,
             "measured_ms": measured_ms,
             "achieved_tflops": shape.flops / (measured_ms / 1e3) / 1e12,
-            "mfma_bound_clock_mhz": mfma_bound_clock_mhz(shape.flops, measured_ms, gcn_arch, num_cus),
+            "mfma_bound_clock_mhz": mfma_bound_clock_mhz(
+                shape.flops, measured_ms, gcn_arch, num_cus, shape.dtype
+            ),
             "origami_clock_mhz": None,
             "origami_clamped": None,
         }
@@ -197,10 +263,9 @@ def back_calculate_compute_clock(
         rows.append(row)
 
     total_ms = sum(count * ms for _, count, ms in measurements)
-    total_flops = sum(count * shape.flops for shape, count, _ in measurements)
     result = {
         "gemms": rows,
-        "mfma_bound_clock_mhz": mfma_bound_clock_mhz(total_flops, total_ms, gcn_arch, num_cus),
+        "mfma_bound_clock_mhz": _aggregate_mfma_bound_mhz(measurements, total_ms, gcn_arch, num_cus),
         "effective_clock_mhz": None,
         "clamped": None,
         "method": None,
