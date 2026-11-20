@@ -37,7 +37,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v6"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v7"
 _extension = None
 
 
@@ -51,6 +51,14 @@ def _bf16_writeback_enabled() -> bool:
 
 def _bf16_grad_enabled() -> bool:
     return os.environ.get("PRIMUS_FUSED_ADAM_BF16_GRAD", "0") == "1"
+
+
+def _fp8blk_enabled() -> bool:
+    """PRIMUS_FP8BLK_ADAM_QUANT=1 (needs PRIMUS_FUSED_ADAM_BF16_WRITEBACK=1 and the Turbo 128-block
+    UE8M0 recipe): every weight a Turbo block-FP8 GEMM quantizes is updated by a 128x128-tile Adam
+    kernel that also writes its FP8 W, W^T and UE8M0 scales into Turbo's per-step weight cache
+    (primus_turbo.pytorch.core.fp8blk_weight_cache), so the GEMMs skip their weight quant."""
+    return os.environ.get("PRIMUS_FP8BLK_ADAM_QUANT", "0") == "1"
 
 
 def _static_bf16_loss_scale_cpu_enabled() -> bool:
@@ -247,6 +255,65 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
     )
 
 
+_FP8BLK_TILE = 128
+
+
+def _fp8blk_metadata_key(tensor_lists, fp8blk_by_param_ptr) -> tuple[Any, ...]:
+    return tuple(
+        (tensor.data_ptr(), tensor.numel(), tensor.dtype)
+        for tensor_list in tensor_lists
+        for tensor in tensor_list
+    ) + tuple(id(fp8blk_by_param_ptr[p.data_ptr()][1]) for p in tensor_lists[1])
+
+
+def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param_ptr):
+    """Per tensor: 10 addresses (grad, fp32 master, exp_avg, exp_avg_sq, bf16 param, W, W^T,
+    scale_inv, e8m0, e8m0_t) and dims (N, K, tiles_n, tiles_k); one 128x128 tile per block."""
+    device = tensor_lists[0][0].device
+    grad_dtype = tensor_lists[0][0].dtype
+    moment_dtype = tensor_lists[2][0].dtype
+    if grad_dtype not in (torch.float32, torch.bfloat16) or moment_dtype not in (torch.float32, torch.bfloat16):
+        raise RuntimeError(f"PRIMUS_FP8BLK_ADAM_QUANT: unsupported grad/moment dtypes {grad_dtype}/{moment_dtype}")
+    addresses, dims, tile_to_tensor, tile_offsets = [], [], [], []
+    total_tiles = 0
+    for idx in range(len(tensor_lists[0])):
+        grad, master, exp_avg, exp_avg_sq = (tensor_lists[j][idx] for j in range(4))
+        model_param, cache = fp8blk_by_param_ptr[master.data_ptr()]
+        model_buf = writeback_by_param_ptr.get(master.data_ptr())
+        if model_buf is None:
+            raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT requires the BF16 writeback destination of every weight")
+        if (grad.dtype, master.dtype, exp_avg.dtype, exp_avg_sq.dtype) != (
+            grad_dtype, torch.float32, moment_dtype, moment_dtype
+        ):
+            raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT received mixed optimizer dtypes in one call")
+        out = (cache.w, cache.wt, cache.scale_inv, cache.e8m0, cache.e8m0_t)
+        dense = (grad, master, exp_avg, exp_avg_sq, model_buf)
+        if any(t.numel() != model_param.numel() for t in dense) or any(not t.is_contiguous() for t in dense + out):
+            raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT: optimizer shard does not cover the whole contiguous weight")
+        if any(t.data_ptr() % 16 for t in dense + out[:2]):
+            raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT requires 16-byte aligned optimizer and cache tensors")
+        n, k = model_param.shape[-2:]
+        batch = model_param.numel() // (n * k)
+        tiles_n = (n + _FP8BLK_TILE - 1) // _FP8BLK_TILE
+        tiles_k = (k + _FP8BLK_TILE - 1) // _FP8BLK_TILE
+        addresses.extend(t.data_ptr() for t in dense + out)
+        dims.extend((n, k, tiles_n, tiles_k))
+        tiles = batch * tiles_n * tiles_k
+        tile_offsets.append(total_tiles)
+        tile_to_tensor.extend([idx] * tiles)
+        total_tiles += tiles
+    return (
+        torch.tensor(addresses, dtype=torch.int64, device=device),
+        torch.tensor(dims, dtype=torch.int64, device=device),
+        torch.tensor(tile_to_tensor, dtype=torch.int32, device=device),
+        torch.tensor(tile_offsets, dtype=torch.int64, device=device),
+        total_tiles,
+        0 if moment_dtype == torch.float32 else 1,
+        0 if grad_dtype == torch.float32 else 1,
+        [cache for _, cache in (fp8blk_by_param_ptr[p.data_ptr()] for p in tensor_lists[1])],
+    )
+
+
 def _copy_model_grads_to_decoupled(distributed_optimizer) -> None:
     """Attach DDP gradient-buffer shards directly to FP32 master parameters."""
 
@@ -318,14 +385,18 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
 
     cached = getattr(distributed_optimizer, "_primus_bf16_writeback_cache", None)
     if cached is not None:
-        writeback_by_param_ptr, writeback_tensors = cached
+        writeback_by_param_ptr, writeback_tensors, fp8blk_by_param_ptr = cached
         inner_optimizer._primus_bf16_writeback_by_param_ptr = writeback_by_param_ptr
         inner_optimizer._primus_bf16_writeback_tensors = writeback_tensors
+        inner_optimizer._primus_fp8blk_by_param_ptr = fp8blk_by_param_ptr
         distributed_optimizer._primus_bf16_writeback_active = True
         return
 
     writeback_by_param_ptr = {}
     writeback_tensors = []
+    fp8blk_by_param_ptr = {}
+    if _fp8blk_enabled():
+        from primus_turbo.pytorch.core import fp8blk_weight_cache
     for shard_main_group, model_group in zip(
         distributed_optimizer.shard_fp32_from_float16_groups,
         distributed_optimizer.model_float16_groups,
@@ -349,6 +420,18 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
                 raise RuntimeError("PRIMUS_FUSED_ADAM_BF16_WRITEBACK requires a BF16 parameter buffer")
             writeback_by_param_ptr[shard_main_param.data_ptr()] = shard_model_param
             writeback_tensors.append(shard_model_param)
+            if (
+                _fp8blk_enabled()
+                and fp8blk_weight_cache.wants_cache(model_param)
+                and model_param.dim() in (2, 3)
+                and world_range.size == model_param.numel()
+                and shard_model_param.data_ptr() == model_param.data_ptr()
+            ):
+                # The whole weight lives in this rank's master shard (DP=1 or an unsplit
+                # parameter), so 128x128 tiles can be formed inside the optimizer.
+                cache = fp8blk_weight_cache.attach(model_param)
+                cache.ready = False
+                fp8blk_by_param_ptr[shard_main_param.data_ptr()] = (model_param, cache)
 
     expected_masters = sum(len(group) for group in distributed_optimizer.shard_fp32_from_float16_groups)
     if len(writeback_by_param_ptr) != expected_masters:
@@ -358,10 +441,18 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
     distributed_optimizer._primus_bf16_writeback_cache = (
         writeback_by_param_ptr,
         writeback_tensors,
+        fp8blk_by_param_ptr,
     )
     inner_optimizer._primus_bf16_writeback_by_param_ptr = writeback_by_param_ptr
     inner_optimizer._primus_bf16_writeback_tensors = writeback_tensors
+    inner_optimizer._primus_fp8blk_by_param_ptr = fp8blk_by_param_ptr
     distributed_optimizer._primus_bf16_writeback_active = True
+    if _fp8blk_enabled():
+        log_rank_0(
+            f"[Patch:{_PATCH_KEY}] PRIMUS_FP8BLK_ADAM_QUANT: {len(fp8blk_by_param_ptr)} weights "
+            f"({sum(p.numel() for p, _ in fp8blk_by_param_ptr.values()) / 1e6:.1f} M params) get FP8 "
+            "W / W^T / UE8M0 scales from the Adam writeback"
+        )
 
 
 def _copy_only_fp32_model_groups(distributed_optimizer) -> None:
@@ -451,6 +542,16 @@ def _install_patch() -> None:
         log_rank_0(f"[Patch:{_PATCH_KEY}] already installed; skipping.")
         return
 
+    if _fp8blk_enabled():
+        if not _bf16_writeback_enabled():
+            raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT requires PRIMUS_FUSED_ADAM_BF16_WRITEBACK=1")
+        if os.environ.get("PRIMUS_TURBO_FP8_BLOCK_UE8M0", "0") != "1":
+            raise RuntimeError(
+                "PRIMUS_FP8BLK_ADAM_QUANT emits UE8M0 scales: needs PRIMUS_TURBO_FP8_BLOCK=1 / PRIMUS_TURBO_FP8_BLOCK_UE8M0=1"
+            )
+        # Turbo block-FP8 GEMMs tag the weights they quantize and use the optimizer-written cache.
+        os.environ["PRIMUS_TURBO_FP8_WCACHE"] = "1"
+
     extension = _load_extension()
     original_adam_init = FusedAdam.__init__
     original_adam_step = FusedAdam.step
@@ -495,6 +596,8 @@ def _install_patch() -> None:
         self._primus_adam_metadata_cache = {}
         self._primus_bf16_writeback_by_param_ptr = {}
         self._primus_bf16_writeback_tensors = []
+        self._primus_fp8blk_by_param_ptr = {}
+        self._primus_fp8blk_metadata_cache = {}
 
         def fused_multi_tensor_adam(
             chunk_size,
@@ -511,6 +614,47 @@ def _install_patch() -> None:
         ):
             del noop_flag
             writeback_by_param_ptr = self._primus_bf16_writeback_by_param_ptr
+            if self._primus_clip_norm is None:
+                raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP did not receive a device gradient norm")
+            fp8blk_by_param_ptr = self._primus_fp8blk_by_param_ptr
+            if fp8blk_by_param_ptr:
+                sel = [i for i, p in enumerate(tensor_lists[1]) if p.data_ptr() in fp8blk_by_param_ptr]
+                if sel:
+                    sel_lists = [[lst[i] for i in sel] for lst in tensor_lists]
+                    fkey = _fp8blk_metadata_key(sel_lists, fp8blk_by_param_ptr)
+                    fmeta = self._primus_fp8blk_metadata_cache.get(fkey)
+                    if fmeta is None:
+                        fmeta = _build_fp8blk_metadata(sel_lists, fp8blk_by_param_ptr, writeback_by_param_ptr)
+                        self._primus_fp8blk_metadata_cache[fkey] = fmeta
+                    f_addr, f_dims, f_t2t, f_toff, f_tiles, f_mdt, f_gdt, f_caches = fmeta
+                    extension.fused_adam_clip_fp8blk(
+                        f_addr,
+                        f_dims,
+                        f_t2t,
+                        f_toff,
+                        f_tiles,
+                        float(lr),
+                        float(beta1),
+                        float(beta2),
+                        float(epsilon),
+                        int(step),
+                        int(mode),
+                        int(bias_correction),
+                        float(weight_decay),
+                        int(f_mdt),
+                        int(f_gdt),
+                        self._primus_clip_norm,
+                        float(self._primus_clip_max_norm),
+                    )
+                    # Queued on the current stream: later GEMMs on it read the new FP8 weights.
+                    for cache in f_caches:
+                        cache.ready = True
+                    sel_set = set(sel)
+                    tensor_lists = [
+                        [t for i, t in enumerate(lst) if i not in sel_set] for lst in tensor_lists
+                    ]
+                    if not tensor_lists[0]:
+                        return
             key = _metadata_key(chunk_size, tensor_lists, writeback_by_param_ptr)
             metadata = self._primus_adam_metadata_cache.get(key)
             if metadata is None:
@@ -525,8 +669,6 @@ def _install_patch() -> None:
                 moment_dtype,
                 grad_dtype,
             ) = metadata
-            if self._primus_clip_norm is None:
-                raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP did not receive a device gradient norm")
             extension.fused_adam_clip(
                 addresses,
                 sizes,
