@@ -545,6 +545,9 @@ def _install_patch() -> None:
     if _fp8blk_enabled():
         if not _bf16_writeback_enabled():
             raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT requires PRIMUS_FUSED_ADAM_BF16_WRITEBACK=1")
+        if os.environ.get("PRIMUS_TURBO_FP8_BLOCK", "0").strip().lower() in ("1", "true"):
+            # Same default the Turbo precision setup applies later (at the first forward).
+            os.environ.setdefault("PRIMUS_TURBO_FP8_BLOCK_UE8M0", "1")
         if os.environ.get("PRIMUS_TURBO_FP8_BLOCK_UE8M0", "0") != "1":
             raise RuntimeError(
                 "PRIMUS_FP8BLK_ADAM_QUANT emits UE8M0 scales: needs PRIMUS_TURBO_FP8_BLOCK=1 / PRIMUS_TURBO_FP8_BLOCK_UE8M0=1"
