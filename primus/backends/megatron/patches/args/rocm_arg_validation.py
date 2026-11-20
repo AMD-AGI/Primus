@@ -19,7 +19,7 @@ import os
 import torch
 
 from primus.core.utils import logger
-from primus.core.utils.module_utils import warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 # Environment variables read by the PyTorch caching allocator.
 ALLOC_CONF_ENVS = ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF")
@@ -181,6 +181,166 @@ def validate_turbo_fp8_permute(args) -> None:
         raise ValueError(f"{option}=True does not support recompute of moe_act.")
 
 
+def _bf16_grouped_gemm_backend(value) -> str:
+    """The backend ``turbo_grouped_gemm_backend`` picks for BF16, in Primus-Turbo's format (``triton``, or
+    ``bf16:triton,fp8:ck`` / ``other:...`` per precision; BF16, FP16 and FP32 share one entry), lower case;
+    ``default`` when none applies."""
+    value = str(value or "default").strip().lower()
+    if ":" not in value:
+        return value
+    pairs = dict(p.split(":", 1) for p in (s.strip() for s in value.split(",")) if p)
+    for key in ("bf16", "fp16", "fp32", "other"):
+        if key in pairs:
+            return pairs[key].strip()
+    return "default"
+
+
+def _num_moe_layers(args) -> int:
+    freq = getattr(args, "moe_layer_freq", 1)
+    num_layers = getattr(args, "num_layers", 0) or 0
+    if isinstance(freq, int):
+        n = sum(1 for i in range(num_layers) if i % freq == 0) if freq > 0 else 0
+    else:
+        n = sum(1 for x in freq if x)
+    return n + (getattr(args, "mtp_num_layers", None) or 0)
+
+
+def moe_replica_slot_bytes(args) -> int:
+    """Memory the replica slots take on every rank: per MoE layer, ``moe_replica_slots`` copies of one expert's
+    fc1 and fc2 weights (``params_dtype``) plus their gradients (the owners' ``main_grad`` dtype: fp32 with
+    ``accumulate_allreduce_grads_in_fp32``, else ``params_dtype``)."""
+    hidden = getattr(args, "hidden_size", 0) or 0
+    ffn = getattr(args, "moe_ffn_hidden_size", None) or getattr(args, "ffn_hidden_size", 0) or 0
+    fc1 = (2 if getattr(args, "swiglu", False) else 1) * ffn * hidden
+    weight_bytes = 4 if str(getattr(args, "params_dtype", "")).endswith("float32") else 2
+    grad_bytes = 4 if getattr(args, "accumulate_allreduce_grads_in_fp32", False) else weight_bytes
+    slots = getattr(args, "moe_replica_slots", 4)
+    return _num_moe_layers(args) * slots * (fc1 + ffn * hidden) * (weight_bytes + grad_bytes)
+
+
+def _log_moe_replica_memory(args, option: str) -> None:
+    # runs before Megatron sets the device, so no CUDA call here: slots that do not fit fail with an
+    # out-of-memory error when the MoE layers allocate them
+    need = moe_replica_slot_bytes(args)
+    if need:
+        log_rank_0(
+            f"{option}: the replica slots take {need / 2**30:.1f} GiB per GPU ({_num_moe_layers(args)} MoE "
+            f"layers x {getattr(args, 'moe_replica_slots', 4)} slots x one expert's weights and gradients)"
+        )
+
+
+def _cuda_graphs_enabled(args) -> bool:
+    return bool(
+        getattr(args, "enable_cuda_graph", False)
+        or getattr(args, "external_cuda_graph", False)
+        or getattr(args, "cuda_graph_impl", None) not in (None, "none")
+    )
+
+
+def validate_moe_replica(args) -> None:
+    """Dynamic expert replication (``moe_replica_planner``): BF16 Turbo DeepEP and Turbo grouped GEMM, TP 1, PP 1.
+
+    The replicas live in ``PrimusTurboDeepEPTokenDispatcher`` and ``PrimusTurboGroupedLinear``; a combination
+    they do not handle would silently run without replicas or lose replica gradients, so it is rejected here.
+    """
+    planner = getattr(args, "moe_replica_planner", None)
+    if not planner:
+        return
+    option = f"moe_replica_planner={planner}"
+    if planner not in ("ultraep", "moonep"):
+        raise ValueError(f"moe_replica_planner must be ultraep or moonep, got {planner!r}.")
+    placement = getattr(args, "moe_replica_placement", "per_step")
+    if placement not in ("per_step", "per_microbatch"):
+        raise ValueError(f"moe_replica_placement must be per_step or per_microbatch, got {placement!r}.")
+    slots = getattr(args, "moe_replica_slots", 4)
+    min_rows = getattr(args, "moe_replica_min_rows", 1024)
+    min_gain = getattr(args, "moe_replica_min_gain", 0.1)
+    cost = getattr(args, "moe_replica_cost", 0)
+    block = getattr(args, "moe_replica_block", 1)
+    replan_above = getattr(args, "moe_replica_replan_above", 0.0)
+    log_interval = getattr(args, "moe_replica_log_interval", 0)
+    for name, value, ok, want in (
+        ("moe_replica_slots", slots, slots >= 1, ">= 1"),
+        ("moe_replica_min_rows", min_rows, min_rows >= 0, ">= 0"),
+        ("moe_replica_min_gain", min_gain, 0 <= min_gain < 1, "in [0, 1)"),
+        ("moe_replica_cost", cost, cost >= 0, ">= 0"),
+        ("moe_replica_block", block, block >= 1, ">= 1"),
+        ("moe_replica_replan_above", replan_above, replan_above == 0 or replan_above >= 1, "0 or >= 1"),
+        ("moe_replica_log_interval", log_interval, log_interval >= 0, ">= 0"),
+    ):
+        if not ok:
+            raise ValueError(f"{name} must be {want}, got {value}.")
+    if replan_above > 0 and placement != "per_microbatch":
+        raise ValueError("moe_replica_replan_above > 0 requires moe_replica_placement=per_microbatch.")
+
+    for required in ("enable_primus_turbo", "use_turbo_deepep", "use_turbo_grouped_gemm", "moe_grouped_gemm"):
+        if not getattr(args, required, False):
+            raise ValueError(f"{option} requires {required}=True.")
+    ep = getattr(args, "expert_model_parallel_size", 1)
+    if ep <= 1:
+        raise ValueError(f"{option} requires expert_model_parallel_size > 1.")
+    num_experts = getattr(args, "num_experts", None) or 0
+    if planner == "moonep" and slots < num_experts // ep:
+        raise ValueError(
+            f"moe_replica_planner=moonep requires moe_replica_slots >= num_experts / "
+            f"expert_model_parallel_size = {num_experts // ep}, got {slots}."
+        )
+    backend = getattr(args, "turbo_grouped_gemm_backend", "default")
+    if _bf16_grouped_gemm_backend(backend) not in ("default", "triton"):
+        raise ValueError(
+            f"{option} runs the experts and their replicas in one Triton grouped GEMM; "
+            f"turbo_grouped_gemm_backend={backend} picks another BF16 backend, use default or triton for BF16."
+        )
+
+    tp = getattr(args, "tensor_model_parallel_size", 1)
+    etp = getattr(args, "expert_tensor_parallel_size", None) or tp
+    pp = getattr(args, "pipeline_model_parallel_size", 1)
+    for name, value in (
+        ("tensor_model_parallel_size", tp),
+        ("expert_tensor_parallel_size", etp),
+        ("pipeline_model_parallel_size", pp),
+    ):
+        if value != 1:
+            raise ValueError(f"{option} requires {name}=1, got {value}.")
+    unsupported = {
+        "use_turbo_mega_moe": "MegaMoE replaces the DeepEP dispatcher",
+        "turbo_fused_grouped_gemm": "replicas run on the BF16 grouped GEMM only",
+        "fp8": "replicas run on the BF16 grouped GEMM only",
+        "fp4": "replicas run on the BF16 grouped GEMM only",
+        "overlap_moe_expert_parallel_comm": "the replica scheduler assumes one micro-batch in flight",
+        "delay_wgrad_compute": "the replica gradients are returned with the weight gradients",
+        "use_megatron_fsdp": "the replica gradients go into the owners' DDP main_grad",
+        "use_torch_fsdp2": "the replica gradients go into the owners' DDP main_grad",
+        "use_deprecated_20241209_moe_layer": "the replicas attach to Megatron's MoELayer",
+        "moe_router_grad_merge": "its input-gradient join skips MoE layers with the replica forward pre-hook",
+    }
+    for name, why in unsupported.items():
+        if getattr(args, name, None):
+            raise ValueError(f"{option} does not support {name} ({why}).")
+    if (getattr(args, "mlp_chunks_for_training", None) or 1) > 1:
+        raise ValueError(
+            f"{option} does not support mlp_chunks_for_training > 1 "
+            "(the replica scheduler counts one MoE call per micro-batch)."
+        )
+    if getattr(args, "moe_expert_capacity_factor", None) is not None:
+        raise ValueError(f"{option} does not support token dropping (moe_expert_capacity_factor).")
+    if (
+        getattr(args, "moe_router_force_load_balancing", False)
+        and getattr(args, "moe_router_force_load_balancing_type", "uniform") == "even"
+    ):
+        raise ValueError(f"{option} does not support moe_router_force_load_balancing_type=even.")
+    if _cuda_graphs_enabled(args):
+        raise ValueError(
+            f"{option} does not support CUDA graphs: planning reads the routed counts on the host."
+        )
+    if getattr(args, "overlap_grad_reduce", False):
+        raise ValueError(
+            f"{option} does not support overlap_grad_reduce=True: the expert gradient buckets are reduced during "
+            "the backward, before the replica gradients reach the owners' main_grad. Set overlap_grad_reduce=False."
+        )
+    _log_moe_replica_memory(args, option)
+
+
 def expandable_segments_requested() -> bool:
     """Return True if any allocator config env var sets ``expandable_segments:True``."""
     for env in ALLOC_CONF_ENVS:
@@ -322,6 +482,7 @@ def validate_args_on_rocm(args):
     validate_turbo_fp8_permute(args)
     # After sync-free MoE, which may auto-enable use_turbo_grouped_gemm.
     warn_turbo_grouped_gemm_without_expandable_segments(args)
+    validate_moe_replica(args)
 
     # turbo deepep
     if args.use_turbo_deepep:
