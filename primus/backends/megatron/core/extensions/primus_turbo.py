@@ -386,7 +386,10 @@ def _bridge_weight_grad(
                 # the dummy wgrad returned below means they are not recoverable from
                 # param.grad either. The fused path above is immune because its beta=1
                 # epilogue accumulates on every microbatch regardless of the flag.
-                if _is_gfx1250():
+                if _main_grad_first_write(weight):
+                    # PRIMUS_WGRAD_BETA0: first write of the step, the buffer clear was skipped
+                    weight.main_grad.copy_(grad_quantized_weight)
+                elif _is_gfx1250():
                     inplace_add_triton_(weight.main_grad, grad_quantized_weight)
                 else:
                     weight.main_grad.add_(grad_quantized_weight)
@@ -414,9 +417,35 @@ def _bridge_weight_grad(
         # and therefore the gemm -- actually sees.
         quantized_weight.main_grad = weight.main_grad
         quantized_weight.grad_added_to_main_grad = weight.grad_added_to_main_grad
+        quantized_weight._primus_mg_param = weight  # first-write policy (PRIMUS_WGRAD_BETA0) resolves the parameter
 
     # wrapper quantized_weight and quantized_weight_trans into PrimusTurboQuantizedTensorPair
     return x, PrimusTurboQuantizedTensorPair(data=quantized_weight, data_t=quantized_weight_trans)
+
+
+def _main_grad_first_write(weight) -> bool:
+    """PRIMUS_WGRAD_BETA0 first-write policy (Turbo-registered); False (accumulate) when unavailable."""
+    try:
+        from primus_turbo.pytorch.ops.utils import main_grad_first_write
+    except ImportError:
+        return False
+    return main_grad_first_write(weight)
+
+
+def _g90_block_wgrad_fuse(weight) -> bool:
+    if os.environ.get("PRIMUS_TURBO_G90_WGRAD_FUSE", "0").strip().lower() not in ("1", "true"):
+        return False
+    if os.environ.get("PRIMUS_TURBO_FP8_BLOCK_KERNEL", "") != "g90":
+        return False
+    mg = getattr(weight, "main_grad", None)
+    return (
+        isinstance(weight, torch.Tensor)
+        and weight.dim() == 2
+        and isinstance(mg, torch.Tensor)
+        and mg.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and mg.shape == weight.shape
+        and mg.is_contiguous()
+    )
 
 
 def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
@@ -456,10 +485,13 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
         if quant_config is None:
             return None
         if quant_config.block_scaling():
-            # No Turbo BLOCKWISE wgrad kernel has a beta=1 epilogue yet (dense gemm_fp8 asserts,
-            # the grouped variable-K Triton backend rejects inplace_add_to_out): the framework
-            # adds the returned gradient into main_grad.
-            return None
+            # PRIMUS_TURBO_G90_WGRAD_FUSE=1 with the gfx1250 g90 dense kernel (PRIMUS_TURBO_FP8_BLOCK_KERNEL=g90):
+            # the wgrad epilogue writes main_grad itself (beta 1 = old + acc in fp32, rounded once; beta 0 on the
+            # step's first write under PRIMUS_WGRAD_BETA0). Grouped weights and the other BLOCKWISE kernels keep the
+            # framework's separate add (the grouped variable-K Triton backend rejects inplace_add_to_out).
+            if not _g90_block_wgrad_fuse(weight):
+                return None
+            weight._primus_fwd_claim = True  # Turbo flags grad_added_to_main_grad already in forward
         elif quant_config.mxfp8_scaling() and _is_gfx1250():
             # gfx1250 FlyDSL MXFP8 dense GEMM has a beta=1 epilogue for a 16-bit main_grad
             # (grouped MXFP8 weights keep the separate add).
