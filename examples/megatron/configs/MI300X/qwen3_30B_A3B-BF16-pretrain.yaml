@@ -77,15 +77,19 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
-      # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 64
+      # 160 for ep8 on MI300X, 32 for ep16-64
+      turbo_deepep_num_cu: 160
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 0-3, 0 means not use sync-free moe
       # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
       turbo_sync_free_moe_stage: 2
+      # The masked SwiGLU kernel specializes on the row count, so with real routing
+      # (moe_router_force_load_balancing: false) it recompiles on almost every call.
+      # Keep this off there until AMD-AGI/Primus-Turbo#596 is in the pinned Primus-Turbo.
+      use_turbo_fused_act_with_probs: true
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
