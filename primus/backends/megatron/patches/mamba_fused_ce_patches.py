@@ -13,8 +13,8 @@ Wires flash-linear-attention's (FLA) fused cross-entropy kernels into
 the full ``(batch*seq, vocab)`` logits tensor -- avoiding OOM on large
 vocab/long sequence runs and matching FLA's own training loss numerically.
 
-Two modes, selected by ``args.fused_ce_mode`` (resolved by
-``fla_runtime_patches.py`` from ``PRIMUS_FUSED_CE`` / YAML ``fused_ce_mode``):
+Selected by ``args.fused_ce_mode`` (resolved by ``fla_runtime_patches.py``
+from ``PRIMUS_FUSED_CE`` / YAML ``fused_ce_mode``):
 
     0: disabled -- stock Megatron path (materializes full logits).
     1 (default): ``FusedLinearCrossEntropyLoss`` -- computes logits + CE in
@@ -22,6 +22,12 @@ Two modes, selected by ``args.fused_ce_mode`` (resolved by
        is never resident. Biggest memory win.
     2: ``FusedCrossEntropyLoss`` -- materializes logits in bf16, then a fused
        Triton CE kernel; matches FLA's exact computation.
+    3: Primus's chunked linear cross-entropy
+       (``primus/backends/megatron/core/fusions/chunked_linear_cross_entropy.py``),
+       which ZAYA1 selects with the same value -- per-token loss with
+       Megatron's rounding, ``args.fused_ce_chunk_tokens`` (default 4096)
+       tokens per chunk, compiled under ``args.fused_ce_compile``. It needs
+       TP=1 and steps aside for ``cross_entropy_loss_fusion``.
 
 This is a "source-string rewrite" style patch: the two injection points
 (``MambaModel.__init__`` / ``MambaModel.forward``) sit in the middle of
@@ -64,6 +70,9 @@ _INIT_NEW = (
     "                self._fused_ce_mode = 1\n"
     "            except ImportError:\n"
     "                pass\n"
+    "        elif _ce_mode == 3:\n"
+    "            from primus.backends.megatron.patches.mamba_fused_ce_patches import _setup_chunked_ce\n"
+    "            self._fused_ce_mode = _setup_chunked_ce(self, _args)\n"
     "        self._use_fused_cross_entropy = self._fused_ce_mode > 0"
 )
 
@@ -78,15 +87,63 @@ _FORWARD_NEW = (
 )
 
 
+def _setup_chunked_ce(model, args) -> int:
+    """Set up mode 3 on ``model``: returns 3, or 0 (Megatron's cross-entropy) when it can't run."""
+    from primus.backends.megatron.core.fusions.chunked_linear_cross_entropy import (
+        CHUNKED_CE_MODE,
+        DEFAULT_CHUNK_TOKENS,
+        check_chunk_tokens,
+        chunked_ce_blocker,
+    )
+
+    config = model.config
+    blocker = chunked_ce_blocker(config, config.tensor_model_parallel_size)
+    if blocker is not None:
+        log_rank_0(f"[Patch:{_PATCH_KEY}] fused_ce_mode 3: Megatron's cross-entropy, as {blocker}.")
+        return 0
+    tokens = getattr(args, "fused_ce_chunk_tokens", None)
+    tokens = check_chunk_tokens(DEFAULT_CHUNK_TOKENS if tokens is None else tokens)
+    compiled = getattr(args, "fused_ce_compile", None)
+    if compiled is None or (type(compiled) is int and compiled in (0, 1)):
+        compiled = bool(compiled)
+    if not isinstance(compiled, bool):
+        raise ValueError(f"fused_ce_compile must be true or false, got {compiled!r}.")
+    model._fused_ce_chunk_tokens = tokens
+    model._fused_ce_compile = compiled
+    log_rank_0(
+        f"[Patch:{_PATCH_KEY}] fused_ce_mode 3: chunked linear cross-entropy "
+        f"({tokens} tokens per chunk, {'compiled' if compiled else 'eager'})."
+    )
+    return CHUNKED_CE_MODE
+
+
 def _fused_cross_entropy_loss(self, hidden_states, labels, output_weight, runtime_gather_output=None):
-    """Compute loss using FLA's fused cross-entropy kernels.
+    """Compute loss using FLA's fused cross-entropy kernels, or Primus's chunked one.
 
     Mode 1 (FusedLinearCrossEntropyLoss): computes logits + CE in chunks,
            never materializing the full (batch*seq, vocab) logits tensor.
     Mode 2 (FusedCrossEntropyLoss): materializes logits in bf16, then
            uses a fused Triton CE kernel -- matches FLA's exact computation.
+    Mode 3 (chunked_linear_cross_entropy): per-token loss [b, s] like
+           Megatron's path, logits and CE in chunks of tokens.
     """
     s, b, h = hidden_states.shape
+
+    if self._fused_ce_mode == 3:
+        from primus.backends.megatron.core.fusions.chunked_linear_cross_entropy import (
+            chunked_linear_cross_entropy,
+            mup_logit_scale,
+        )
+
+        weight = output_weight if output_weight is not None else self.output_layer.weight
+        return chunked_linear_cross_entropy(
+            hidden_states,
+            weight,
+            labels,
+            chunk_tokens=self._fused_ce_chunk_tokens,
+            logit_scale=mup_logit_scale(self.config),
+            compiled=self._fused_ce_compile,
+        )
 
     if self._fused_ce_mode == 2:
         logits, _ = self.output_layer(
@@ -138,7 +195,7 @@ def _install_mamba_fused_ce_patch() -> None:
     log_rank_0(
         f"[Patch:{_PATCH_KEY}] Patched {init_owner.__name__}.__init__ / "
         f"{forward_owner.__name__}.forward to route through FLA's fused cross-entropy "
-        "kernels when fused_ce_mode != 0."
+        "kernels, or Primus's chunked one (mode 3), when fused_ce_mode != 0."
     )
 
 
@@ -147,8 +204,9 @@ def _install_mamba_fused_ce_patch() -> None:
     backend="megatron",
     phase="before_train",
     description=(
-        "Wire FLA's FusedLinearCrossEntropyLoss / FusedCrossEntropyLoss into MambaModel "
-        "so the full (batch*seq, vocab) logits tensor is never materialized."
+        "Wire FLA's FusedLinearCrossEntropyLoss / FusedCrossEntropyLoss, or Primus's "
+        "chunked linear cross-entropy (fused_ce_mode 3), into MambaModel so the full "
+        "(batch*seq, vocab) logits tensor is never materialized."
     ),
     # Runs after fla_runtime_knobs (priority=-100) has resolved args.fused_ce_mode.
     priority=50,
