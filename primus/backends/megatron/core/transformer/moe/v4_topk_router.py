@@ -72,6 +72,13 @@ from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
     v4_router_post_triton,
 )
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_fused import (
+    is_fused_router_enabled as _v4_router_fused_enabled,
+)
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_fused import (
+    router_fused_supported,
+    v4_router_fused,
+)
 from primus.backends.megatron.core.transformer.moe.v4_seq_balance_loss import (
     log_seq_balance_loss,
     normalise_affinities,
@@ -114,6 +121,7 @@ def _compute_route(
     score_function: str,
     topk: int,
     topk_scaling_factor: float,
+    indices: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Shared selection / renormalization core for V4 routers.
 
@@ -129,12 +137,14 @@ def _compute_route(
     # benefits from being its own kernel).  When PRIMUS_V4_ROUTER_TRITON
     # is on (and supported), route the rest of the chain through one
     # fused Triton kernel; otherwise fall back to the eager body.
-    scores_for_selection = v4_score_fn(logits, score_function=score_function)
-    if expert_bias is not None:
-        sel_score = scores_for_selection + expert_bias.to(scores_for_selection.dtype)
-    else:
-        sel_score = scores_for_selection
-    indices = sel_score.topk(topk, dim=-1).indices  # [N, K]
+    # ``indices`` given: selection already done (fused router kernel, PRIMUS_V4_ROUTER_FUSED=1).
+    if indices is None:
+        scores_for_selection = v4_score_fn(logits, score_function=score_function)
+        if expert_bias is not None:
+            sel_score = scores_for_selection + expert_bias.to(scores_for_selection.dtype)
+        else:
+            sel_score = scores_for_selection
+        indices = sel_score.topk(topk, dim=-1).indices  # [N, K]
 
     # The V4 router is GPU-only: both the Triton and eager paths run on
     # CUDA/HIP tensors (there is no CPU compute path).
@@ -150,12 +160,12 @@ def _compute_route(
             indices,
             score_function=score_function,
             topk_scaling_factor=topk_scaling_factor,
-            out_dtype=scores_for_selection.dtype,
+            out_dtype=logits.dtype,
         )
         return probs, routing_map
 
     # Eager fallback (verbatim pre-P39 body).
-    original_scores = scores_for_selection
+    original_scores = v4_score_fn(logits, score_function=score_function)
     weights = original_scores.gather(1, indices)  # [N, K]
 
     if score_function != "softmax":
@@ -323,13 +333,23 @@ class DeepseekV4LearnedRouter(nn.Module):
         flat = hidden.reshape(-1, self.hidden_size)
         # Match HF reference: routing math runs in fp32 regardless of
         # input dtype.
-        logits = F.linear(flat.to(torch.float32), self.weight.to(torch.float32))
+        indices = None
+        if _v4_router_fused_enabled() and router_fused_supported(flat, self.weight, self.topk):
+            # One kernel: bf16 x read once, fp32-accurate GEMM (3-way bf16 split of w), score fn + bias +
+            # top-k in the epilogue. Backward: bf16 dx without fp32 casts, deterministic split-K dw.
+            bias = self.expert_bias.detach() if self.expert_bias is not None else None
+            logits, indices, _ = v4_router_fused(
+                flat, self.weight, bias, self.topk, self.score_function, self.topk_scaling_factor
+            )
+        else:
+            logits = F.linear(flat.to(torch.float32), self.weight.to(torch.float32))
         probs, routing_map = _compute_route(
             logits=logits,
             expert_bias=self.expert_bias,
             score_function=self.score_function,
             topk=self.topk,
             topk_scaling_factor=self.topk_scaling_factor,
+            indices=indices,
         )
 
         # The balance loss is per-sequence, so it needs the [B, S] structure
