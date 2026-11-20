@@ -121,6 +121,15 @@ overrides:
   moe_replica_slots: 4
 ```
 
+## Benchmarking with recorded routing
+
+Mock weights route almost uniformly, which hides the imbalance replication is for. To benchmark with a real model's routing, record it with Megatron's router tracer and replay it on the proxy:
+
+1. Record: run the real model with `moe_routing_trace_path: <dir>` (and `moe_routing_trace_max_training_iters` to limit the steps), without activation recompute of the MoE layers and without evaluation, so that every record is one training forward. Every rank writes `<dir>/router_trace_rank<r>.jsonl` with the top-k experts of every MoE layer.
+2. Replay: run the proxy on the same number of ranks with `moe_routing_replay_path: <dir>`. Each rank reads its own file; each MoE layer replays the recorded decoder layer with the same number, or the ones listed in `moe_routing_replay_layers` (e.g. `[10, 30, 44, 23]` drives a 4-layer proxy with four layers of a 61-layer model). Every forward takes the next recorded tokens of its layer and wraps around.
+
+The router still computes its scores; Megatron's routing replay picks the recorded experts and takes their probabilities from those scores. The replayed routes need the same top-k and expert count as the proxy. Not with `moe_router_fusion`, `moe_use_fused_router_with_aux_score`, forced or biased routing, recompute of MoE layers, PP > 1 or MTP.
+
 ## Results
 
 8 x MI355X, DeepSeek-V3 4-layer proxy, EP8, 256 experts, top-8, BF16 (`main_grads_dtype: bf16`), sequence 4096, MBS 2, GBS 64 (8192 tokens per rank per micro-batch, 4 micro-batches per step), Turbo DeepEP at 80 CUs, `overlap_grad_reduce: false`, mock data. Synthetic skew: `moe_router_force_biased: -0.7`, with the DeepSeek expert bias off (`moe_router_enable_expert_bias: false`) unless the row says on. Step time of rank 7, mean over the steps after the first 10.

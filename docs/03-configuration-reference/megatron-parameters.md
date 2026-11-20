@@ -608,6 +608,8 @@ models:
 | `moe_replica_replan_above` | `0.0` | *Primus:* `per_microbatch`: keep the slots while the busiest rank stays within this multiple of the mean load; `0` plans every micro-batch. |
 | `moe_replica_async_comm` | `true` | *Primus:* push slot weights right after planning and return slot gradients overlapped with the backward. |
 | `moe_replica_log_interval` | `0` | *Primus:* log the busiest rank's load before and after planning every N plans; `0` is off. |
+| `moe_routing_replay_path` | `null` | *Primus:* replay the routes Megatron recorded with `moe_routing_trace_path` from this directory (one `router_trace_rank<r>.jsonl` per rank), for benchmarks with real routing on mock weights. Not with recompute of MoE layers, PP > 1 or MTP. |
+| `moe_routing_replay_layers` | `null` | *Primus:* the recorded decoder layer each MoE layer replays, in build order; `null` replays the layer with the same number. |
 
 
 ### 10.7 Logit softcapping (Primus / Grok-style)

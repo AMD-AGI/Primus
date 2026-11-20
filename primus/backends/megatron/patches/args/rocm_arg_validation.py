@@ -247,6 +247,41 @@ def _cuda_graphs_enabled(args) -> bool:
     )
 
 
+def validate_moe_routing_replay(args) -> None:
+    """``moe_routing_replay_path``: the router takes recorded routes through Megatron's routing replay."""
+    path = getattr(args, "moe_routing_replay_path", None)
+    if not path:
+        if getattr(args, "moe_routing_replay_layers", None):
+            raise ValueError("moe_routing_replay_layers requires moe_routing_replay_path.")
+        return
+    option = "moe_routing_replay_path"
+    for name in (
+        "moe_router_fusion",
+        "moe_router_force_load_balancing",
+        "moe_use_fused_router_with_aux_score",
+    ):
+        if getattr(args, name, False):
+            raise ValueError(
+                f"{option} requires {name}=False: that router path does not take replayed routes."
+            )
+    if getattr(args, "moe_router_force_biased", None) is not None:
+        raise ValueError(f"{option} requires moe_router_force_biased=None.")
+    pp = getattr(args, "pipeline_model_parallel_size", 1)
+    if pp != 1:
+        raise ValueError(f"{option} requires pipeline_model_parallel_size=1, got {pp}.")
+    if getattr(args, "mtp_num_layers", None):
+        raise ValueError(f"{option} does not replay the MTP layers' routers; set mtp_num_layers to 0.")
+    recompute_modules = getattr(args, "recompute_modules", None) or []
+    if (
+        getattr(args, "recompute_granularity", None) == "full"
+        or getattr(args, "recompute_layer_ids", None)
+        or "moe" in recompute_modules
+    ):
+        raise ValueError(
+            f"{option} does not support recomputing MoE layers: every forward takes the next recorded tokens."
+        )
+
+
 def validate_moe_replica(args) -> None:
     """Dynamic expert replication (``moe_replica_planner``): BF16 Turbo DeepEP and Turbo grouped GEMM, TP 1, PP 1.
 
@@ -487,6 +522,7 @@ def validate_args_on_rocm(args):
     # After sync-free MoE, which may auto-enable use_turbo_grouped_gemm.
     warn_turbo_grouped_gemm_without_expandable_segments(args)
     validate_moe_replica(args)
+    validate_moe_routing_replay(args)
 
     # turbo deepep
     if args.use_turbo_deepep:

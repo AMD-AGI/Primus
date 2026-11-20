@@ -13,6 +13,7 @@ from primus.backends.megatron.patches.args.rocm_arg_validation import (
     ALLOC_CONF_ENVS,
     validate_cross_entropy_exclusivity,
     validate_moe_replica,
+    validate_moe_routing_replay,
     validate_turbo_fp8_permute,
     validate_turbo_grouped_gemm_with_muon,
     validate_turbo_grouped_gemm_without_padding,
@@ -361,3 +362,58 @@ def test_moe_replica_accepts_supported(overrides):
 def test_moe_replica_rejects_unsupported(overrides, match):
     with pytest.raises(ValueError, match=match):
         validate_moe_replica(_replica_args(**overrides))
+
+
+def _replay_args(**overrides):
+    values = {
+        "moe_routing_replay_path": "/traces",
+        "moe_routing_replay_layers": None,
+        "moe_router_fusion": False,
+        "moe_router_force_load_balancing": False,
+        "moe_use_fused_router_with_aux_score": False,
+        "moe_router_force_biased": None,
+        "pipeline_model_parallel_size": 1,
+        "mtp_num_layers": None,
+        "recompute_granularity": None,
+        "recompute_layer_ids": None,
+        "recompute_modules": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"moe_routing_replay_layers": [10, 30, 44, 23]},
+        # moe_act recompute does not route again
+        {"recompute_granularity": "selective", "recompute_modules": ["moe_act"]},
+    ],
+)
+def test_moe_routing_replay_accepts_supported(overrides):
+    validate_moe_routing_replay(_replay_args(**overrides))
+    validate_moe_routing_replay(SimpleNamespace())
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        (
+            {"moe_routing_replay_path": None, "moe_routing_replay_layers": [0]},
+            "requires moe_routing_replay_path",
+        ),
+        ({"moe_router_fusion": True}, "moe_router_fusion=False"),
+        ({"moe_use_fused_router_with_aux_score": True}, "moe_use_fused_router_with_aux_score=False"),
+        ({"moe_router_force_load_balancing": True}, "moe_router_force_load_balancing=False"),
+        ({"moe_router_force_biased": 0.3}, "moe_router_force_biased=None"),
+        ({"pipeline_model_parallel_size": 2}, "pipeline_model_parallel_size=1"),
+        ({"mtp_num_layers": 1}, "MTP"),
+        ({"recompute_granularity": "full"}, "recomputing MoE layers"),
+        ({"recompute_layer_ids": [0, 1]}, "recomputing MoE layers"),
+        ({"recompute_granularity": "selective", "recompute_modules": ["moe"]}, "recomputing MoE layers"),
+    ],
+)
+def test_moe_routing_replay_rejects_unsupported(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        validate_moe_routing_replay(_replay_args(**overrides))

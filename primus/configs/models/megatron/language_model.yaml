@@ -166,6 +166,11 @@ moe_replica_block: 1 # int, ultraep: quotas in multiples of this many rows
 moe_replica_replan_above: 0.0
 moe_replica_async_comm: true # push slot weights right after planning, return slot gradients overlapped
 moe_replica_log_interval: 0 # int, log the busiest rank's load before / after planning every N plans; 0: off
+# Replay the routes Megatron recorded with moe_routing_trace_path (benchmarking: real routing on mock
+# weights). A directory of router_trace_rank<r>.jsonl files, one per rank; null: off.
+moe_routing_replay_path: null # str
+# The recorded decoder layer each MoE layer replays, in build order; null: the layer with the same number.
+moe_routing_replay_layers: null # list of int
 
 # Model parallelism
 model_parallel_size: null
