@@ -345,6 +345,77 @@ def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+# ---------------------------------------------------------------------------
+# wq_a || wkv concat (PRIMUS_V4_QKV_A_CONCAT=1)
+# ---------------------------------------------------------------------------
+# linear_q_down_proj (wq_a, D -> q_lora_rank) and linear_kv (wkv, D -> head_dim) read the same
+# hidden. With the switch on they run as ONE GEMM against W = cat([wq_a, wkv, 0-pad]) [Npad, D]:
+#   fwd   one x quant (1x128) + one GEMM N=Npad; q_a / kv are strided views of the output
+#   dgrad one GEMM with K=Npad (dX accumulated in fp32 once instead of two bf16 GEMMs + a bf16 add)
+#   wgrad one [Npad, D] GEMM; cat's backward slices it into both parameters' .grad
+# Npad = round_up(nq + nkv, PRIMUS_V4_QKV_A_CONCAT_PAD) (default 512 -> 2048 for 1024+576: passes the
+# g90 FP8 guard N%512 and its dgrad K%512; 128 -> 1664 for backends that take N%128 and any K%128).
+# Quantization is identical to the separate path (wq_a rows end on a 128-block boundary, the zero pad
+# leaves wkv's last 128x128 block amax unchanged; 1x128 dY groups line up the same way) -- see
+# ~/dsv41/work/opt3/small/splitk/cpu_check_small.py. PRIMUS_V4_QKV_A_CONCAT_VIEWS=0 makes q_a / kv
+# contiguous copies (only needed if a consumer rejects row-strided inputs).
+def _qkv_a_concat_enabled() -> bool:
+    return os.environ.get("PRIMUS_V4_QKV_A_CONCAT", "0") == "1"
+
+
+class _QKVASplit(torch.autograd.Function):
+    """[.., Npad] -> ([.., nq], [.., nkv]) views; backward writes ONE [.., Npad] grad (zero pad)."""
+
+    @staticmethod
+    def forward(ctx, out, nq: int, nkv: int):  # type: ignore[override]
+        ctx.nq, ctx.nkv, ctx.shape = nq, nkv, out.shape
+        views = os.environ.get("PRIMUS_V4_QKV_A_CONCAT_VIEWS", "1") == "1"
+        q = out.narrow(-1, 0, nq)
+        kv = out.narrow(-1, nq, nkv)
+        if not views:
+            q, kv = q.contiguous(), kv.contiguous()
+        return q, kv
+
+    @staticmethod
+    def backward(ctx, dq, dkv):  # type: ignore[override]
+        nq, nkv = ctx.nq, ctx.nkv
+        ref = dq if dq is not None else dkv
+        g = torch.empty(ctx.shape, dtype=ref.dtype, device=ref.device)
+        if dq is None:
+            g.narrow(-1, 0, nq).zero_()
+        else:
+            g.narrow(-1, 0, nq).copy_(dq)
+        if dkv is None:
+            g.narrow(-1, nq, nkv).zero_()
+        else:
+            g.narrow(-1, nq, nkv).copy_(dkv)
+        if ctx.shape[-1] > nq + nkv:
+            g.narrow(-1, nq + nkv, ctx.shape[-1] - nq - nkv).zero_()
+        return g, None, None
+
+
+def _concat_linear(x2: torch.Tensor, w: torch.Tensor, ref_module: nn.Module) -> torch.Tensor:
+    """y = x2 @ w^T through the same Turbo precision path a PrimusTurbo*Linear would take for this weight."""
+    try:
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLowPrecisionGlobalStateManager as _M,
+        )
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            _dense_precision_context,
+        )
+    except Exception:  # CPU unit tests without Turbo
+        return x2 @ w.t()
+    with _dense_precision_context(x2, w):
+        if _M.is_turbo_fp8_enabled():
+            import primus_turbo.pytorch as pt
+
+            qc = _M.get_turbo_quant_config()
+            assert qc.block_scaling() or qc.mxfp8_scaling() or qc.current_scaling(), "qkv_a concat: unsupported fp8 recipe"
+            # .grad path (no fused main_grad accumulate): cat's backward splits dW into both params.
+            return pt.ops.gemm_fp8(x2, w, trans_a=False, trans_b=True, out_dtype=None, config=qc.data())
+        return x2 @ w.t()
+
+
 def _v4_o_a_fp8_enabled(config) -> bool:
     """Whether to run the grouped-O ``o_a`` down-projection in MXFP8.
 
@@ -1183,9 +1254,45 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         """
         return 1.0 / math.sqrt(self.head_dim)
 
-    def _apply_q(self, hidden: torch.Tensor) -> torch.Tensor:
+    def _qkv_a_concat_ok(self, hidden: torch.Tensor) -> bool:
+        if not _qkv_a_concat_enabled():
+            return False
+        wq = getattr(self.linear_q_down_proj, "weight", None)
+        wkv = getattr(self.linear_kv, "weight", None)
+        if wq is None or wkv is None or wq.dim() != 2 or wkv.dim() != 2 or wq.shape[1] != wkv.shape[1]:
+            return False
+        if getattr(self.linear_q_down_proj, "use_bias", False) or getattr(self.linear_kv, "use_bias", False):
+            return False
+        if getattr(self.linear_q_down_proj, "bias", None) is not None or getattr(self.linear_kv, "bias", None) is not None:
+            return False
+        return getattr(self.config, "tensor_model_parallel_size", 1) == 1 and hidden.shape[-1] == wq.shape[1]
+
+    def _qkv_a_concat(self, hidden: torch.Tensor):
+        """One GEMM for wq_a and wkv -> (q_compressed [B,S,nq], kv_proj [B,S,nkv]) (row-strided views)."""
+        wq = self.linear_q_down_proj.weight
+        wkv = self.linear_kv.weight
+        nq, nkv, D = wq.shape[0], wkv.shape[0], wq.shape[1]
+        pad_to = int(os.environ.get("PRIMUS_V4_QKV_A_CONCAT_PAD", "512"))
+        npad = (nq + nkv + pad_to - 1) // pad_to * pad_to
+        parts = [wq, wkv]
+        if npad > nq + nkv:
+            zp = getattr(self, "_qkv_a_zero_pad", None)
+            if zp is None or zp.shape != (npad - nq - nkv, D) or zp.dtype != wq.dtype or zp.device != wq.device:
+                zp = torch.zeros(npad - nq - nkv, D, dtype=wq.dtype, device=wq.device)
+                self._qkv_a_zero_pad = zp
+            parts.append(zp)
+        w = torch.cat(parts, dim=0)  # [Npad, D]; one bf16 copy (an Adam-fused weight quant would emit it directly)
+        lead = hidden.shape[:-1]
+        x2 = hidden.reshape(-1, D)
+        if not x2.is_contiguous():
+            x2 = x2.contiguous()
+        out = _concat_linear(x2, w, self.linear_q_down_proj).view(*lead, npad)
+        return _QKVASplit.apply(out, nq, nkv)
+
+    def _apply_q(self, hidden: torch.Tensor, q_compressed: Optional[torch.Tensor] = None) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, H, head_dim]`` (Q after q_norm + q_rms)."""
-        q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
+        if q_compressed is None:
+            q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
         q_compressed = self.q_layernorm(q_compressed)
         q = _projection_forward(self.linear_q_up_proj, q_compressed)
         B, S, _ = q.shape
@@ -1204,9 +1311,12 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         hd = int(self.head_dim)
         return hd >= 2 and (hd & (hd - 1)) == 0 and hidden.dtype in (torch.bfloat16, torch.float16)
 
-    def _apply_q_norm_rope(self, hidden: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+    def _apply_q_norm_rope(
+        self, hidden: torch.Tensor, position_ids: torch.Tensor, q_compressed: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """``_apply_q`` + Q RoPE in one fused kernel (same math, see ``q_norm_rope``)."""
-        q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
+        if q_compressed is None:
+            q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
         q_compressed = self.q_layernorm(q_compressed)
         q = _projection_forward(self.linear_q_up_proj, q_compressed)
         B, S, _ = q.shape
@@ -1218,9 +1328,10 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         pad = 64 if (be == "triton_v2" and not (self.compress_ratio == 0 and self._use_core_attention)) else 0
         return q_norm_rope_pad(q, pos_flat, rope.inv_freq, rotary_dim=self.rotary_dim, eps=self.norm_eps, pad=pad)
 
-    def _apply_kv(self, hidden: torch.Tensor) -> torch.Tensor:
+    def _apply_kv(self, hidden: torch.Tensor, kv: Optional[torch.Tensor] = None) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, 1, head_dim]`` (single-latent K = V)."""
-        kv = _projection_forward(self.linear_kv, hidden)
+        if kv is None:
+            kv = _projection_forward(self.linear_kv, hidden)
         kv = self.kv_layernorm(kv)
         B, S, _ = kv.shape
         return kv.view(B, S, 1, self.head_dim)
@@ -2306,15 +2417,17 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             )
         device, dtype = hidden.device, hidden.dtype
 
+        # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one GEMM (see _QKVASplit); else two linears.
+        q_a, kv_a = self._qkv_a_concat(hidden) if self._qkv_a_concat_ok(hidden) else (None, None)
         if self._fused_q_norm_rope_ok(hidden):
             # One pass for per-head RMSNorm + RoPE on Q, written straight into the
             # zero-padded buffer the sparse-MLA adapter consumes (no pad copy).
-            q = self._apply_q_norm_rope(hidden, position_ids)  # [B, S, H, head_dim] view
-            kv = self._apply_kv(hidden)  # [B, S, 1, head_dim]
+            q = self._apply_q_norm_rope(hidden, position_ids, q_compressed=q_a)  # [B, S, H, head_dim] view
+            kv = self._apply_kv(hidden, kv=kv_a)  # [B, S, 1, head_dim]
             kv = self.rope.apply_rope(kv, position_ids=position_ids, compress_ratio=self.compress_ratio)
         else:
-            q = self._apply_q(hidden)  # [B, S, H, head_dim]
-            kv = self._apply_kv(hidden)  # [B, S, 1, head_dim]
+            q = self._apply_q(hidden, q_compressed=q_a)  # [B, S, H, head_dim]
+            kv = self._apply_kv(hidden, kv=kv_a)  # [B, S, 1, head_dim]
 
             # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
             # (V4's single-latent design: K and V share the rope-applied kv).
