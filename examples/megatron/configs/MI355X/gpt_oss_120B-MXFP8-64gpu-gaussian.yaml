@@ -1,0 +1,154 @@
+# GPT-OSS-120B synthetic training throughput, 64 MI355X GPUs, 4096-token sequences.
+# Requires Primus MXFP8 sparse top-4 FC2 bias and support for BF16 router biases with FP32 gating.
+# The output head uses BF16. FP8 vocabulary projection requires separate opt-in support in Primus.
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:benchmark}
+exp_name: ${PRIMUS_EXP_NAME:gpt_oss_120B-MXFP8-bias-gaussian-64gpu}
+workspace: ${PRIMUS_WORKSPACE:./output}
+env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: gpt_oss_120B.yaml
+    overrides:
+      # Synthetic training input. The uniform policy replaces learned scores with sampled Gaussian logits.
+      mock_data: true
+      tokenizer_type: NullTokenizer
+      tokenizer_model: null
+      vocab_size: 201088
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      moe_router_force_load_balancing: true
+      moe_router_force_load_balancing_type: uniform
+      seed: 1234
+
+      # Eight nodes of eight GPUs. PP stage 2 owns the vocabulary projection.
+      seq_length: 4096
+      max_position_embeddings: 4096
+      global_batch_size: 30720
+      micro_batch_size: 10
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      decoder_first_pipeline_num_layers: 19
+      decoder_last_pipeline_num_layers: 17
+      virtual_pipeline_model_parallel_size: null
+      expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
+
+      # GPT-OSS experts and attention. Window 127 covers 127 preceding tokens plus the current token.
+      quick_geglu: true
+      swiglu: false
+      activation_func_clamp_value: 7.0
+      glu_linear_offset: 1.0
+      bias_gelu_fusion: true
+      bias_dropout_fusion: false
+      add_bias_linear: true
+      add_qkv_bias: true
+      qk_layernorm: false
+      norm_epsilon: 1e-05
+      multi_latent_attention: false
+      use_sink_attention: true
+      sink_sliding_window: 127
+      sink_window_even_layers_only: true
+      position_embedding_type: yarn
+      rotary_base: 150000
+      rotary_scaling_factor: 32.0
+      yarn_original_max_position_embeddings: 4096
+      yarn_beta_fast: 32.0
+      yarn_beta_slow: 1.0
+      yarn_correction_range_round_to_int: false
+      mscale: 1.0
+      mscale_all_dim: 0.0
+      add_position_embedding: true
+      use_rotary_position_embeddings: false
+      apply_rope_fusion: false
+
+      # Current tensorwise HYBRID dense GEMMs, MXFP8 experts, BF16 attention and the ordinary final LM head.
+      enable_primus_turbo: true
+      fp8: hybrid
+      fp8_recipe: tensorwise
+      fp8_output_proj: false
+      use_turbo_gemm: true
+      turbo_gemm_backend: fp8:flydsl,fp4:flydsl,other:hipblaslt
+      turbo_grouped_gemm_backend: fp8:flydsl,fp4:flydsl,other:hipblaslt
+      use_turbo_mega_moe: true
+      turbo_mega_moe_precision: mxfp8
+      turbo_mega_moe_sparse_fc2_bias: true
+      use_turbo_attention: true
+      enable_turbo_attention_float8: false
+      use_turbo_fused_qk_rmsnorm_rope: false
+      use_turbo_rms_norm: true
+      use_turbo_norm_te_linear: false
+      use_turbo_cross_entropy: true
+      turbo_ce_overwrite_input: true
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te
+
+      # Router and expert dispatch settings
+      moe_router_dtype: fp32
+      moe_router_fusion: true
+      moe_router_load_balancing_type: none
+      moe_router_pre_softmax: false
+      moe_expert_capacity_factor: null
+      moe_permute_fusion: false
+      moe_use_fused_router_with_aux_score: false
+      moe_shared_expert_overlap: false
+      use_turbo_deepep: false
+      use_turbo_grouped_gemm: false
+      turbo_fused_grouped_gemm: false
+      turbo_fp8_permute: false
+      use_turbo_fused_act_with_probs: false
+      turbo_sync_free_moe_stage: 0
+      moe_use_legacy_grouped_gemm: false
+      turbo_deepep_num_cu: 160
+      turbo_deepep_use_comm_stream: false
+
+      # Training and optimizer
+      init_method_std: 0.008
+      eod_mask_loss: true
+      lr: 1.0e-05
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      gradient_accumulation_fusion: false
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      ddp_num_buckets: 24
+      ddp_average_in_collective: true
+      grad_reduce_in_bf16: true
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: 0
+
+      # Benchmark logging, evaluation and checkpoint settings
+      train_iters: 15
+      log_interval: 1
+      log_avg_skip_iterations: 5
+      log_avg_reset_interval: 15
+      profile: false
+      use_pytorch_profiler: false
+      profile_step_start: 6
+      profile_step_end: 7
+      profile_ranks: [0, 32]
+      eval_iters: 0
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      stderr_sink_level: DEBUG
+      wandb_project: Primus_GPT_OSS_120B_Pretrain

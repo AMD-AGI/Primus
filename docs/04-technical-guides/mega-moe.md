@@ -115,13 +115,29 @@ The following model settings are **required** — MegaMoE asserts on anything el
 
 ```yaml
 tensor_model_parallel_size: 1           # EP-only, TP=1
-add_bias_linear: false                  # no bias in linear layers
 # gated activation: SwiGLU (SiLU), or quick_geglu (MiniMax-M3's swigluoai)
 ```
 
 Unsupported (each raises an error): sequence-level / global aux loss, z-loss, sinkhorn, and input
 jitter (only the standard `aux_loss` is supported); aux-loss-free expert bias
 (`enable_expert_bias=True` raises `NotImplementedError`).
+
+### Sparse top-4 FC2 bias for GPT-OSS
+
+Set `turbo_mega_moe_sparse_fc2_bias: true` with `turbo_mega_moe_precision: mxfp8` to compute
+the post-combine bias and routing gradients using the four selected experts. The option defaults
+to false. It supports BF16 training on gfx950 with 128 experts, 16 per EP8 rank, H=I=2880,
+TP/ETP/CP=1, and biased quick-GeGLU with clamp 7 and offset 1. The eager path takes nonempty
+BF16 token rows, int64 indices and FP32 routing weights on the current device with Triton,
+highest FP32 matmul precision and autocast disabled.
+
+The qualified Primus-Turbo 0.6.1.dev27 (`9ad9d38d`) accepts the optional public
+`fused_mega_moe_fp8_stage2(..., fc2_bias=None)` argument. Its stock and sparse epilogues both
+all-gather BF16 bias and reduce-scatter the same FP32 dense bias gradient over the EP group.
+This preserves the optimizer's gradient reduction order and requires a temporary FP32 copy of
+the upstream gradient. Requalify that collective contract when updating Turbo.
+The active log follows the first sparse execution. When an opted-in MXFP8 rank uses the stock
+epilogue, its log records the first occurrence of each fallback reason.
 
 ### Router force load balancing (`moe_router_force_load_balancing_type`)
 

@@ -26,6 +26,7 @@ routing weight. Both flavours take them; the ops own how each is applied.
 import contextlib
 import functools
 import inspect
+from importlib.util import find_spec
 from typing import Optional, Tuple
 
 import torch
@@ -53,7 +54,7 @@ from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8 import (
     fused_mega_moe_fp8_stage2,
 )
 
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0, log_rank_all
 
 # Megatron's quick_gelu hardcodes its sigmoid scale.
 _QUICK_GELU_ALPHA = 1.702
@@ -120,6 +121,12 @@ def mega_moe_wgrad_accum_fusion(config: TransformerConfig) -> bool:
 @functools.lru_cache(maxsize=None)
 def _log_once(message: str) -> None:
     log_rank_0(message)
+
+
+@functools.lru_cache(maxsize=None)
+def _log_sparse_bias_fallback(reason: str) -> None:
+    # Eligibility can differ across EP ranks; keep the reason in the affected rank's log.
+    log_rank_all(f"[MegaMoE] Sparse top-4 FC2 bias requested; using Turbo stage2 bias: {reason}")
 
 
 @functools.lru_cache(maxsize=None)
@@ -297,6 +304,55 @@ class MegaMoEFP8Experts(MegaMoEExperts):
     quantized operands that cannot ride autograd's gradient slots.
     """
 
+    def __init__(self, config, experts_per_rank, hidden_size, intermediate_size, ep_group):
+        from megatron.training import get_args
+
+        super().__init__(config, experts_per_rank, hidden_size, intermediate_size, ep_group)
+        self._sparse_bias_ops = None
+        if not getattr(get_args(), "turbo_mega_moe_sparse_fc2_bias", False):
+            return
+        if not (
+            config.add_bias_linear
+            and config.activation_func is quick_gelu
+            and config.activation_func_clamp_value == 7.0
+            and config.glu_linear_offset == 1.0
+        ):
+            _log_sparse_bias_fallback("requires biased quick-GeGLU with clamp 7 and offset 1")
+            return
+        if not (
+            config.tensor_model_parallel_size == 1
+            and getattr(config, "expert_tensor_parallel_size", 1) in (None, 1)
+            and getattr(config, "context_parallel_size", 1) == 1
+            and config.num_moe_experts == 128
+            and config.moe_router_topk == 4
+            and hidden_size == intermediate_size == 2880
+            and experts_per_rank == 16
+        ):
+            _log_sparse_bias_fallback(
+                "requires TP/ETP/CP 1, 128 experts, top-4, 16 local experts and H=I=2880"
+            )
+            return
+        if find_spec("triton") is None:
+            _log_sparse_bias_fallback("Triton is unavailable")
+            return
+        try:
+            bias_arg = inspect.signature(fused_mega_moe_fp8_stage2).parameters.get("fc2_bias")
+        except (TypeError, ValueError):
+            bias_arg = None
+        if (
+            bias_arg is None
+            or bias_arg.default is not None
+            or bias_arg.kind not in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        ):
+            _log_sparse_bias_fallback("installed Primus-Turbo stage2 lacks optional keyword fc2_bias=None")
+            return
+        from .sparse_expert_bias import (
+            SparseExpertBias,
+            sparse_expert_bias_fallback_reason,
+        )
+
+        self._sparse_bias_ops = sparse_expert_bias_fallback_reason, SparseExpertBias.apply
+
     def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
         """None: the mxfp8 stages take no accumulation pattern, so DDP keeps adding their wgrads."""
         if mega_moe_wgrad_accum_fusion(config):
@@ -314,7 +370,19 @@ class MegaMoEFP8Experts(MegaMoEExperts):
         w1, b1 = self.fc1_weight()
         l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
         w2, b2 = self.fc2_weight()
-        return fused_mega_moe_fp8_stage2(
+        sparse_bias = None
+        if self._sparse_bias_ops is not None:
+            fallback_reason, apply_bias = self._sparse_bias_ops
+            reason = (
+                fallback_reason(x, topk_idx, topk_weights, b2, self.ep_group)
+                if self.training
+                else "evaluation mode"
+            )
+            if reason is None:
+                sparse_bias = apply_bias
+            else:
+                _log_sparse_bias_fallback(reason)
+        y = fused_mega_moe_fp8_stage2(
             l1_out,
             dwib,
             handle,
@@ -325,8 +393,20 @@ class MegaMoEFP8Experts(MegaMoEExperts):
             self.ep_group,
             self.activation,
             fc1_bias=b1,
-            fc2_bias=b2,
+            fc2_bias=b2 if sparse_bias is None else None,
         )
+        if sparse_bias is None:
+            return y
+        if (
+            not isinstance(y, torch.Tensor)
+            or y.shape != x.shape
+            or y.dtype != torch.bfloat16
+            or y.device != x.device
+        ):
+            raise RuntimeError("Sparse expert bias requires a BF16 token tensor from public MXFP8 stage2")
+        result = sparse_bias(y, topk_idx, topk_weights, b2, self.ep_group)
+        _log_once("[MegaMoE] Sparse top-4 FC2 bias active for MXFP8 experts")
+        return result
 
 
 class PrimusTurboMegaMoELayer(MegatronModule):
