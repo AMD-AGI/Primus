@@ -20,8 +20,8 @@ from typing import Any, Dict, List, Optional
 from primus.core.projection.hardware_calibration.compute_clock import (
     DEFAULT_MIN_SETTLE_S,
     back_calculate_compute_clock,
+    gemm_dtype_candidates,
     make_origami_predictor,
-    measured_gemm_dtype,
     time_gemm_ms,
 )
 from primus.core.projection.hardware_calibration.device_info import (
@@ -127,6 +127,7 @@ def _measure_with_reader(
             measured_shape, measured_ms, settle, note = _time_workload_gemm(
                 shape,
                 device,
+                info.gcn_arch,
                 reader=reader,
                 sampler=gemm_clocks,
                 min_settle_s=DEFAULT_MIN_SETTLE_S if i == 0 else _NEXT_GEMM_MIN_SETTLE_S,
@@ -135,12 +136,13 @@ def _measure_with_reader(
             settles.append(settle)
             if note and note not in dtype_notes:
                 dtype_notes.append(note)
+    gemm_clock_summary = gemm_clocks.summary()
+    live_sclk = (gemm_clock_summary["sclk"] or {}).get("median_mhz")
     predictor = make_origami_predictor(info.profile_key, info.num_cus) if info.profile_key else None
-    compute = back_calculate_compute_clock(measurements, info.gcn_arch, info.num_cus, predictor)
+    compute = back_calculate_compute_clock(measurements, info.gcn_arch, info.num_cus, predictor, live_sclk)
     for row, (shape, _), settle in zip(compute["gemms"], selected, settles):
         row["settle"] = settle
         row["workload_dtype"] = shape.dtype
-    gemm_clock_summary = gemm_clocks.summary()
     compute.update(
         shape_source=shape_source,
         measured_dtype="/".join(sorted({s.dtype for s, _, _ in measurements})),
@@ -176,33 +178,33 @@ def _measure_with_reader(
     return {"device": info.to_dict(), "compute": compute, "memory": memory}
 
 
-def _time_workload_gemm(shape, device, **timing_kwargs):
+def _time_workload_gemm(shape, device, gcn_arch=None, **timing_kwargs):
     """Time *shape* in its workload precision: ``(measured_shape, ms, settle, note)``.
 
-    MX / FP4 recipes are timed as fp8.  If the part or torch cannot run an
-    fp8 GEMM, it is timed in bf16 instead and *note* says so.
+    Tries :func:`gemm_dtype_candidates` in order (e.g. MXFP4 natively, then
+    fp8, then bf16), moving on when torch or the part cannot run one.
+    *note* records any substitution and why.
     """
     import torch
 
-    measured = replace(shape, dtype=measured_gemm_dtype(shape.dtype))
-    note = None
-    if measured.dtype != shape.dtype:
-        note = f"{shape.dtype} GEMMs timed as {measured.dtype}"
-    failure = None
-    try:
-        ms, settle = time_gemm_ms(measured, device, **timing_kwargs)
-    except torch.cuda.OutOfMemoryError:
-        raise
-    except (RuntimeError, NotImplementedError, AttributeError, TypeError) as exc:
-        if measured.dtype != "fp8":
+    failures = []
+    for dtype in gemm_dtype_candidates(shape.dtype, gcn_arch):
+        measured = replace(shape, dtype=dtype)
+        try:
+            ms, settle = time_gemm_ms(measured, device, **timing_kwargs)
+        except torch.cuda.OutOfMemoryError:
             raise
-        failure = type(exc).__name__
-    if failure is not None:
-        torch.cuda.empty_cache()
-        note = f"{shape.dtype} GEMMs timed as bf16 (fp8 GEMM unavailable: {failure})"
-        measured = replace(shape, dtype="bf16")
-        ms, settle = time_gemm_ms(measured, device, **timing_kwargs)
-    return measured, ms, settle, note
+        except (RuntimeError, NotImplementedError, ValueError, AttributeError, TypeError) as exc:
+            if dtype == "bf16":
+                raise
+            failures.append(f"{dtype} unavailable: {type(exc).__name__}")
+            torch.cuda.empty_cache()
+            continue
+        if dtype == shape.dtype or (shape.dtype == "fp4" and dtype == "mx4"):
+            return measured, ms, settle, None
+        reason = f" ({'; '.join(failures)})" if failures else ""
+        return measured, ms, settle, f"{shape.dtype} GEMMs timed as {dtype}{reason}"
+    raise AssertionError("bf16 is always a candidate")
 
 
 def _rank_summary(payload: Dict[str, Any], rank: int) -> Dict[str, Any]:
@@ -335,6 +337,12 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
     if comp.get("method") == "origami-inversion":
         clamp_note = " (clamped to search bound)" if comp.get("clamped") else ""
         lines.append(f"  Effective compute clock: {eff:.0f} MHz (Origami inversion{pct}){clamp_note}")
+        lines.append(f"  MFMA-peak lower bound:   {_fmt(comp.get('mfma_bound_clock_mhz'))} MHz")
+    elif comp.get("method") == "live-sclk":
+        lines.append(
+            f"  Effective compute clock: {eff:.0f} MHz (live SCLK during the timed GEMMs{pct}; "
+            "Origami cannot invert these GEMMs)"
+        )
         lines.append(f"  MFMA-peak lower bound:   {_fmt(comp.get('mfma_bound_clock_mhz'))} MHz")
     elif comp.get("method") == "mfma-peak-lower-bound":
         lines.append(

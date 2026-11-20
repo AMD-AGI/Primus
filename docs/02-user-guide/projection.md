@@ -110,7 +110,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 Before the layer benchmark, each bench GPU measures its compute clock and memory bandwidth. Both are printed and saved in the bench artifact.
 
-- **Compute clock.** The workload's largest GEMMs are timed in the workload's precision (bf16 or fp8; MX recipes as fp8) once SCLK has settled. The effective clock is the one at which Origami's predicted time matches the measured time. Use the printed `--gpu-clock-mhz` to simulate at that clock.
+- **Compute clock.** The workload's largest GEMMs are timed in the workload's precision (bf16, fp8, or native MXFP8/MXFP4 where the GPU supports it, else fp8) once SCLK has settled. The effective clock is the one at which Origami's predicted time matches the measured time; MX GEMMs, which Origami does not model, use the live SCLK. Use the printed `--gpu-clock-mhz` to simulate at that clock.
 - **Memory bandwidth.** STREAM (copy/scale/add/triad on 1 GiB arrays) runs once MCLK has settled, and the best kernel gives the sustained bandwidth. This is derated by 0.72, based on measurements on the earlier generation (MI325X), and the projection's memory-bound terms use the result instead of the spec peak.
 
 Opt out with `--skip-hw-calibration`. Override the bandwidth with `--hbm-bandwidth-gbps`.

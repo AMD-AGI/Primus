@@ -28,24 +28,35 @@ from primus.core.projection.hardware_calibration.gemm_shapes import GemmShape
 
 # Dense matrix-core FLOPs per CU per clock.  MI300X: bf16 1307 TF = 304 CU x
 # 2.1 GHz x 2048, fp8 2615 TF (x4096), fp32 163 TF (x256).  MI355X: bf16
-# 2.5 PF = 256 CU x 2.4 GHz x 4096, fp8 5.0 PF (x8192), fp32 157 TF (x256).
+# 2.5 PF = 256 CU x 2.4 GHz x 4096, fp8 / MXFP8 5.0 PF (x8192), MXFP4
+# 10.1 PF (x16384), fp32 157 TF (x256).
 _MFMA_FLOPS_PER_CU_PER_CLK = {
     "gfx942": {"fp32": 256, "bf16": 2048, "fp16": 2048, "fp8": 4096},
-    "gfx950": {"fp32": 256, "bf16": 4096, "fp16": 4096, "fp8": 8192},
+    "gfx950": {"fp32": 256, "bf16": 4096, "fp16": 4096, "fp8": 8192, "mx8": 8192, "mx4": 16384},
 }
 
-# Microscaled and sub-8-bit recipes are timed as fp8: torch has no portable
-# kernel for them, and Origami models them as fp8 too.
-_FP8_PROXY_DTYPES = ("mx8", "mx6", "mx4", "fp6", "fp4")
-_TIMEABLE_DTYPES = ("fp32", "bf16", "fp16", "fp8")
+# Origami prices MX / sub-8-bit GEMMs as fp8, so only these are inverted.
+ORIGAMI_MODELLED_DTYPES = ("fp32", "bf16", "fp16", "fp8")
+# gfx942 has no microscaled matrix cores; elsewhere native MX is attempted.
+_NO_MX_ARCHS = ("gfx942",)
 
 
-def measured_gemm_dtype(workload_dtype: str) -> str:
-    """The dtype a workload GEMM is timed in (fp8 for MX / FP4 recipes, else itself or bf16)."""
+def gemm_dtype_candidates(workload_dtype: str, gcn_arch: Optional[str] = None) -> List[str]:
+    """Dtypes to time a workload GEMM in, best first; later entries are fallbacks.
+
+    MXFP8 / MXFP4 run natively where the part has microscaled matrix cores
+    and fall back to fp8; fp6 (no torch kernel) is timed as fp8; fp8 falls
+    back to bf16; anything else is bf16.
+    """
     dtype = (workload_dtype or "bf16").lower()
-    if dtype in _FP8_PROXY_DTYPES:
-        return "fp8"
-    return dtype if dtype in _TIMEABLE_DTYPES else "bf16"
+    native_mx = gcn_arch not in _NO_MX_ARCHS
+    if dtype in ("mx4", "fp4"):
+        return (["mx4"] if native_mx else []) + ["fp8", "bf16"]
+    if dtype == "mx8":
+        return (["mx8"] if native_mx else []) + ["fp8", "bf16"]
+    if dtype in ("mx6", "fp6", "fp8"):
+        return ["fp8", "bf16"]
+    return [dtype] if dtype in ("fp32", "bf16", "fp16") else ["bf16"]
 
 
 CLOCK_SEARCH_MIN_MHZ = 100
@@ -69,9 +80,10 @@ def time_gemm_ms(
 ) -> Tuple[float, Dict]:
     """``(median per-call ms, settle info)`` of a GEMM of *shape* on *device*.
 
-    Runs in ``shape.dtype`` (``fp32`` / ``bf16`` / ``fp16`` / ``fp8``; map
-    workload dtypes with :func:`measured_gemm_dtype` first).  fp8 uses
-    ``torch._scaled_mm`` with bf16 output, in the part's native fp8 format.
+    Runs in ``shape.dtype`` (``fp32`` / ``bf16`` / ``fp16`` / ``fp8`` /
+    ``mx8`` / ``mx4``; pick from :func:`gemm_dtype_candidates` first).  fp8
+    and MX use ``torch._scaled_mm`` with bf16 output; fp8 in the part's
+    native format, MX with 32-element e8m0 block scales.
 
     The GEMM first runs until the compute clock settles (see
     :func:`run_until_settled`), so the timing reflects the clock the part
@@ -124,6 +136,8 @@ def _build_gemm(shape: GemmShape, device):
     import torch
 
     batch = (shape.batch,) if shape.batch > 1 else ()
+    if shape.dtype in ("mx8", "mx4"):
+        return _build_mx_gemm(shape, device, batch)
     if shape.dtype == "fp8":
         fp8 = _fp8_dtype(device)
         a = torch.randn(*batch, shape.m, shape.k, dtype=torch.bfloat16, device=device).to(fp8)
@@ -153,6 +167,40 @@ def _build_gemm(shape: GemmShape, device):
         mm(a, b, out=c)
 
     return call, [a, b, c]
+
+
+_MX_BLOCK = 32
+
+
+def _build_mx_gemm(shape: GemmShape, device, batch):
+    """MXFP8 (e4m3 + e8m0 scales) or MXFP4 (packed e2m1 + e8m0 scales) via ``_scaled_mm``."""
+    import torch
+
+    if shape.k % _MX_BLOCK:
+        raise ValueError(f"K={shape.k} is not a multiple of the {_MX_BLOCK}-element MX block")
+
+    def operand(rows):
+        if shape.dtype == "mx4":
+            packed = torch.randint(0, 256, (*batch, rows, shape.k // 2), dtype=torch.uint8, device=device)
+            return packed.view(torch.float4_e2m1fn_x2)
+        return torch.randn(*batch, rows, shape.k, dtype=torch.bfloat16, device=device).to(torch.float8_e4m3fn)
+
+    def scales(rows):
+        return torch.ones(*batch, rows, shape.k // _MX_BLOCK, device=device).to(torch.float8_e8m0fnu)
+
+    a, b = operand(shape.m), operand(shape.n).transpose(-1, -2)
+    sa, sb = scales(shape.m), scales(shape.n)
+    c = torch.empty(*batch, shape.m, shape.n, dtype=torch.bfloat16, device=device)
+    if batch:
+        quads = [(a[i], b[i], sa[i], sb[i], c[i]) for i in range(shape.batch)]
+    else:
+        quads = [(a, b, sa, sb, c)]
+
+    def call():
+        for ai, bi, sai, sbi, ci in quads:
+            torch._scaled_mm(ai, bi, scale_a=sai, scale_b=sbi, out_dtype=torch.bfloat16, out=ci)
+
+    return call, [a, b, sa, sb, c, quads]
 
 
 def mfma_bound_clock_mhz(
@@ -236,13 +284,20 @@ def back_calculate_compute_clock(
     gcn_arch: str,
     num_cus: int,
     predictor: Optional[Callable[[float, GemmShape], float]],
+    live_sclk_mhz: Optional[float] = None,
 ) -> Dict:
     """Effective clock from ``[(shape, occurrences, measured_ms), ...]``.
 
-    The aggregate solves one clock for the summed time of all GEMMs, each
-    weighted by its occurrences in the workload, so the GEMMs that dominate
-    the workload dominate the answer.  Per-GEMM clocks show the spread.
+    The aggregate solves one clock for the summed time of all GEMMs Origami
+    models (:data:`ORIGAMI_MODELLED_DTYPES`), each weighted by its
+    occurrences in the workload, so the GEMMs that dominate the workload
+    dominate the answer.  Per-GEMM clocks show the spread.  When no GEMM can
+    be inverted -- no Origami, or only natively timed MX GEMMs -- the live
+    SCLK sampled during the GEMMs is used, else the MFMA-peak lower bound.
     """
+    modelled = [m for m in measurements if m[0].dtype in ORIGAMI_MODELLED_DTYPES]
+    if predictor is None:
+        modelled = []
     rows: List[Dict] = []
     for shape, count, measured_ms in measurements:
         row = {
@@ -256,7 +311,7 @@ def back_calculate_compute_clock(
             "origami_clock_mhz": None,
             "origami_clamped": None,
         }
-        if predictor is not None:
+        if predictor is not None and shape.dtype in ORIGAMI_MODELLED_DTYPES:
             mhz, clamped = solve_clock_mhz(lambda f, s=shape: predictor(f, s), measured_ms)
             row["origami_clock_mhz"] = mhz
             row["origami_clamped"] = clamped
@@ -270,12 +325,14 @@ def back_calculate_compute_clock(
         "clamped": None,
         "method": None,
     }
-    if predictor is not None:
+    if modelled:
         mhz, clamped = solve_clock_mhz(
-            lambda f: sum(count * predictor(f, shape) for shape, count, _ in measurements),
-            total_ms,
+            lambda f: sum(count * predictor(f, shape) for shape, count, _ in modelled),
+            sum(count * ms for _, count, ms in modelled),
         )
         result.update(effective_clock_mhz=mhz, clamped=clamped, method="origami-inversion")
+    elif live_sclk_mhz:
+        result.update(effective_clock_mhz=live_sclk_mhz, method="live-sclk")
     elif result["mfma_bound_clock_mhz"] is not None:
         result.update(effective_clock_mhz=result["mfma_bound_clock_mhz"], method="mfma-peak-lower-bound")
     return result

@@ -216,18 +216,31 @@ def test_mfma_bound_matches_mi300x_peak():
     # fp8 runs at twice the bf16 rate: 2614.9 TF on MI300X is also 2100 MHz.
     assert mfma_bound_clock_mhz(2 * flops, 1000.0, "gfx942", 304, "fp8") == pytest.approx(2100.0)
     assert mfma_bound_clock_mhz(flops, 1000.0, "gfx942", 304, "mx4") is None
+    # MXFP4 on MI355X: 10.1 PF = 256 CU x 2.4 GHz x 16384.
+    assert mfma_bound_clock_mhz(256 * 16384 * 2.4e9, 1000.0, "gfx950", 256, "mx4") == pytest.approx(2400.0)
 
 
 @pytest.mark.parametrize(
-    "workload, measured",
-    [("bf16", "bf16"), ("fp16", "fp16"), ("fp8", "fp8"), ("mx8", "fp8"), ("fp4", "fp8"), ("int8", "bf16")],
+    "workload, arch, candidates",
+    [
+        ("bf16", "gfx942", ["bf16"]),
+        ("fp16", "gfx942", ["fp16"]),
+        ("fp8", "gfx942", ["fp8", "bf16"]),
+        ("mx8", "gfx942", ["fp8", "bf16"]),
+        ("mx4", "gfx942", ["fp8", "bf16"]),
+        ("mx8", "gfx950", ["mx8", "fp8", "bf16"]),
+        ("fp4", "gfx950", ["mx4", "fp8", "bf16"]),
+        ("mx4", "gfx1250", ["mx4", "fp8", "bf16"]),
+        ("mx6", "gfx950", ["fp8", "bf16"]),
+        ("int8", "gfx950", ["bf16"]),
+    ],
 )
-def test_measured_gemm_dtype(workload, measured):
+def test_gemm_dtype_candidates(workload, arch, candidates):
     from primus.core.projection.hardware_calibration.compute_clock import (
-        measured_gemm_dtype,
+        gemm_dtype_candidates,
     )
 
-    assert measured_gemm_dtype(workload) == measured
+    assert gemm_dtype_candidates(workload, arch) == candidates
 
 
 def test_aggregate_mfma_bound_mixes_dtypes():
@@ -240,32 +253,68 @@ def test_aggregate_mfma_bound_mixes_dtypes():
     assert [row["dtype"] for row in result["gemms"]] == ["bf16", "fp8"]
 
 
-def test_workload_gemm_falls_back_to_bf16_when_fp8_unavailable(monkeypatch):
+def test_mx_gemms_skip_origami_and_use_live_sclk():
+    predict = _cycle_model(1.0 / 4096 / 256)
+    mx4 = GemmShape(8192, 8192, 8192, dtype="mx4")
+    bf16 = GemmShape(8192, 8192, 8192)
+    only_mx = back_calculate_compute_clock([(mx4, 1, 1.0)], "gfx950", 256, predict, live_sclk_mhz=1850.0)
+    assert only_mx["gemms"][0]["origami_clock_mhz"] is None
+    assert only_mx["gemms"][0]["mfma_bound_clock_mhz"] is not None
+    assert only_mx["method"] == "live-sclk" and only_mx["effective_clock_mhz"] == 1850.0
+    # With a modelled GEMM alongside, Origami inverts that one only.
+    mixed = back_calculate_compute_clock(
+        [(mx4, 5, 1.0), (bf16, 1, predict(1600.0, bf16))], "gfx950", 256, predict, live_sclk_mhz=1850.0
+    )
+    assert mixed["method"] == "origami-inversion"
+    assert mixed["effective_clock_mhz"] == pytest.approx(1600.0, abs=1.0)
+
+
+def test_live_sclk_used_when_origami_is_unavailable():
+    shape = GemmShape(8192, 8192, 8192)
+    result = back_calculate_compute_clock([(shape, 1, 2.0)], "gfx1250", 256, None, live_sclk_mhz=1700.0)
+    assert result["method"] == "live-sclk" and result["effective_clock_mhz"] == 1700.0
+
+
+def _fake_timer(monkeypatch, failing):
     from primus.core.projection.hardware_calibration import calibration
 
     timed = []
 
     def fake_time(shape, device, **kwargs):
         timed.append(shape.dtype)
-        if shape.dtype == "fp8":
-            raise RuntimeError("HIPBLAS_STATUS_NOT_SUPPORTED")
+        if shape.dtype in failing:
+            raise failing[shape.dtype]
         return 1.0, {"settled": True}
 
     monkeypatch.setattr(calibration, "time_gemm_ms", fake_time)
-    shape = GemmShape(4096, 4096, 4096, dtype="mx8")
-    measured, ms, _, note = calibration._time_workload_gemm(shape, None)
+    return calibration, timed
+
+
+def test_workload_gemm_falls_back_to_bf16_when_fp8_unavailable(monkeypatch):
+    calibration, timed = _fake_timer(monkeypatch, {"fp8": RuntimeError("HIPBLAS_STATUS_NOT_SUPPORTED")})
+    measured, ms, _, note = calibration._time_workload_gemm(
+        GemmShape(4096, 4096, 4096, dtype="mx8"), None, "gfx942"
+    )
     assert timed == ["fp8", "bf16"]
     assert measured.dtype == "bf16" and ms == 1.0
-    assert note == "mx8 GEMMs timed as bf16 (fp8 GEMM unavailable: RuntimeError)"
+    assert note == "mx8 GEMMs timed as bf16 (fp8 unavailable: RuntimeError)"
 
 
-def test_workload_gemm_keeps_supported_dtype(monkeypatch):
-    from primus.core.projection.hardware_calibration import calibration
+def test_workload_gemm_falls_back_from_native_mx_to_fp8(monkeypatch):
+    calibration, timed = _fake_timer(monkeypatch, {"mx4": NotImplementedError("only on gfx950")})
+    measured, _, _, note = calibration._time_workload_gemm(
+        GemmShape(4096, 4096, 4096, dtype="mx4"), None, "gfx1250"
+    )
+    assert timed == ["mx4", "fp8"]
+    assert measured.dtype == "fp8"
+    assert note == "mx4 GEMMs timed as fp8 (mx4 unavailable: NotImplementedError)"
 
-    monkeypatch.setattr(calibration, "time_gemm_ms", lambda shape, device, **kw: (2.0, {}))
-    measured, _, _, note = calibration._time_workload_gemm(GemmShape(64, 64, 64, dtype="fp8"), None)
-    assert measured.dtype == "fp8" and note is None
-    measured, _, _, note = calibration._time_workload_gemm(GemmShape(64, 64, 64, dtype="mx8"), None)
+
+def test_workload_gemm_runs_native_mx(monkeypatch):
+    calibration, timed = _fake_timer(monkeypatch, {})
+    measured, _, _, note = calibration._time_workload_gemm(GemmShape(64, 64, 64, dtype="fp4"), None, "gfx950")
+    assert measured.dtype == "mx4" and note is None
+    measured, _, _, note = calibration._time_workload_gemm(GemmShape(64, 64, 64, dtype="mx8"), None, "gfx942")
     assert measured.dtype == "fp8" and note == "mx8 GEMMs timed as fp8"
 
 
@@ -787,6 +836,28 @@ def test_time_gemm_runs_fp8_faster_than_bf16():
     )
     assert 0 < fp8 < bf16
     assert batched > 0
+
+
+@requires_gpu
+def test_mx_gemms_run_natively_or_fall_back_to_fp8():
+    import torch
+
+    from primus.core.projection.hardware_calibration import calibration
+
+    device = torch.device("cuda", 0)
+    arch = torch.cuda.get_device_properties(device).gcnArchName.split(":")[0]
+    if arch not in ("gfx942", "gfx950"):
+        pytest.skip("fp8 matrix cores need gfx942 / gfx950")
+    kw = dict(trials=3, min_settle_s=0.0)
+    for dtype in ("mx8", "mx4"):
+        # Claim MX support so parts without it exercise the real fallback.
+        shape = GemmShape(8192, 8192, 8192, batch=1 if dtype == "mx8" else 2, dtype=dtype)
+        measured, ms, _, note = calibration._time_workload_gemm(shape, device, "gfx950", **kw)
+        assert ms > 0
+        if arch == "gfx950":
+            assert measured.dtype == dtype and note is None
+        else:
+            assert measured.dtype == "fp8" and f"{dtype} unavailable" in note
 
 
 @requires_gpu
