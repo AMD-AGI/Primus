@@ -88,11 +88,11 @@ Clone the branch matching your image, on the host. Every command on this page ru
 ```bash
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
-git checkout release/v26.9
+git checkout release/v26.10
 git submodule update --init --recursive
 ```
 
-Container mode mounts this checkout into the container, so this is the code that runs—you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.9](../01-getting-started/release-notes.md#primus-source-for-v269).
+Container mode mounts this checkout into the container, so this is the code that runs—you do not need the `/workspace/Primus` copy baked into the image, which lags the release branch. See [Release notes → Primus source for v26.10](../01-getting-started/release-notes.md#primus-source-for-v2610).
 
 ### Pull the image (optional)
 
@@ -100,7 +100,7 @@ Container mode mounts this checkout into the container, so this is the code that
 
 ```bash
 docker pull rocm/primus:v26.9                  # Megatron-LM, TorchTitan, Megatron Bridge
-docker pull rocm/jax-training:maxtext-v26.9    # JAX MaxText
+docker pull rocm/jax-training:maxtext-v26.10    # JAX MaxText
 ```
 
 <details>
@@ -243,15 +243,15 @@ Available models include Llama 3.1 (8B/70B/405B), Llama 4 (17Bx16E/17Bx128E), De
 
 MaxText uses a different Docker image than the PyTorch backends and it is **not** the default in `runner/.primus.yaml`, so pass it explicitly with `--image` in container and Slurm modes.
 
-> On MI355X, export `RCCL_WARP_SPEED_AUTO=0` before launching or training can produce NaN losses. It is a no-op on MI300X. See [Important notes](jax-maxtext-training.md#important-notes-for-v269).
+> On MI355X, export `RCCL_WARP_SPEED_AUTO=0` before launching or training can produce NaN losses. It is a no-op on MI300X. See [Important notes](jax-maxtext-training.md#important-notes-for-v2610).
 
 Pretrain Llama 3 8B on **MI355X**, from your Primus checkout on the host:
 
 ```bash
 export RCCL_WARP_SPEED_AUTO=0
-./runner/primus-cli container --image rocm/jax-training:maxtext-v26.9 \
+./runner/primus-cli container --image rocm/jax-training:maxtext-v26.10 \
   -- train pretrain \
-  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
 ```
 
 If you already have a shell inside the MaxText container, use `direct` instead — no `--image` needed:
@@ -260,7 +260,7 @@ If you already have a shell inside the MaxText container, use `direct` instead �
 export RCCL_WARP_SPEED_AUTO=0
 ./runner/primus-cli direct \
   -- train pretrain \
-  --config examples/maxtext/configs/MI355X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI355X/llama3_8B-bf16-pretrain.yaml
 ```
 
 Slurm mode — supply the image (and any environment variables) via a config file:
@@ -268,7 +268,7 @@ Slurm mode — supply the image (and any environment variables) via a config fil
 ```bash
 ./runner/primus-cli --config my_maxtext_config.yaml slurm srun -N 8 \
   -- train pretrain \
-  --config examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml
+  --config examples/maxtext/configs/MI300X/llama3_8B-bf16-pretrain.yaml
 ```
 
 MaxText parallelism is set with `ici_*` (intra-node) and `dcn_*` (inter-node) fields — see the [MaxText config table](pretraining.md#maxtext-jax-pretraining) and [MaxText parameters](../03-configuration-reference/maxtext-parameters.md).

@@ -53,7 +53,7 @@ Check the AMD-published training Docker images here:
 # For Megatron-LM and TorchTitan backends
 docker pull rocm/primus:v26.9
 # For MaxText backend
-docker pull rocm/jax-training:maxtext-v26.9
+docker pull rocm/jax-training:maxtext-v26.10
 ```
 
 ### 2. Clone the repository
@@ -64,7 +64,7 @@ Submodules are required for third-party backends and tools:
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 # checkout the branch for the specific release
-git checkout release/v26.9
+git checkout release/v26.10
 git submodule update --init --recursive
 ```
 
