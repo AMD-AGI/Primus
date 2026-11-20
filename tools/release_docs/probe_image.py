@@ -159,7 +159,7 @@ def inspect_image(image):
         raise SystemExit(f"ERROR: docker image inspect {image} failed:\n{result.stderr.strip()}")
     data = json.loads(result.stdout)
     full_id = data.get("Id", "")
-    hex_id = full_id.split(":", 1)[-1]   # docker: sha256:<hex>; podman: <hex>
+    hex_id = full_id.split(":", 1)[-1]  # docker: sha256:<hex>; podman: <hex>
     image_id = hex_id[:12]
     created = (data.get("Created") or "")[:10]
     content_size = data.get("Size") or 0
@@ -168,8 +168,10 @@ def inspect_image(image):
     if is_podman():
         # podman counts the image's storage differently (v26.10 jax: 39.4 GB vs docker's 56.2 GB), so its
         # number is not comparable with the published tables: no size; probe on a docker host for it.
-        print("WARNING: docker is podman here: the image size is not recorded (probe on a docker host)",
-              file=sys.stderr)
+        print(
+            "WARNING: docker is podman here: the image size is not recorded (probe on a docker host)",
+            file=sys.stderr,
+        )
         return image_id, created, content_size, size_display, sorted(data.get("RepoDigests") or [])
     disk = run(["docker", "images", "--no-trunc", "--format", "{{.ID}} {{.Size}}"])
     for line in disk.stdout.splitlines():
