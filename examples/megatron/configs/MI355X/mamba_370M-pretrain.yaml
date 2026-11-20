@@ -39,7 +39,7 @@ modules:
       adam_beta2: 0.95
       eod_mask_loss: true
       init_method_std: 0.02
-      norm_epsilon: 1.0e-5
+      layernorm_epsilon: 1.0e-5
 
       # Mamba-specific: must provide spec
       spec: ['primus.backends.megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
@@ -60,7 +60,6 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: false
       load: null
       no_load_optim: null
       no_load_rng: null

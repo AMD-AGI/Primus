@@ -150,7 +150,6 @@ modules:
       #   no_load_optim: true
       #   no_load_rng: true
       finetune: false
-      auto_continue_train: false
       load: null
       save: ./output/zebra_llama_gdn_300M_BF16-pretrain
       # FLA parity: FLA's setup_and_train_gdn_hybrid_300M.sh uses `save=99999`,

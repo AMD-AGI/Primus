@@ -115,7 +115,6 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: false
       load: null
       # from random weights: aux-loss-free load balancing (the base preset keeps the
       # released checkpoint's selection bias frozen, rate 0.0, for fine-tuning)

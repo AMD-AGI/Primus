@@ -66,7 +66,6 @@ modules:
       eod_mask_loss: false
 
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
 
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
@@ -111,7 +110,6 @@ modules:
       # =====================================================================
       profile: true
       use_pytorch_profiler: true
-      use_nsys_profiler: false
       profile_step_start: 10
       profile_step_end: 11
       profile_ranks: [0]

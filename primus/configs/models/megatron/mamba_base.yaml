@@ -30,7 +30,7 @@ add_bias_linear: false
 swiglu: false
 
 # Normalization
-norm_epsilon: 1.0e-5
+layernorm_epsilon: 1.0e-5
 
 # Initialization
 init_method_std: 0.02

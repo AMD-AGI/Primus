@@ -50,7 +50,7 @@ add_bias_linear: false
 
 # Scale-only RMSNorm, no bias (matches FLA norm)
 normalization: RMSNorm
-norm_epsilon: 1.0e-6
+layernorm_epsilon: 1.0e-6
 
 # Positional encoding — none for pure GDN (delta rule recurrence)
 rotary_base: 500000

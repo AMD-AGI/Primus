@@ -49,7 +49,6 @@ max_position_embeddings: 4096
 
 # ---------- norm / residual / embeddings ----------
 normalization: RMSNorm
-norm_epsilon: 1.0e-05
 layernorm_epsilon: 1.0e-05
 swiglu: true
 add_bias_linear: false

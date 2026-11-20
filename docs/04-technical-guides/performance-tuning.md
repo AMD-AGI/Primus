@@ -185,7 +185,6 @@ From `trainer_base.yaml` and model settings:
 | `overlap_grad_reduce` | Overlap gradient reduction with backward. |
 | `overlap_param_gather` | Overlap parameter gather with forward. |
 | `overlap_p2p_comm` | Pipeline P2P overlap. |
-| `async_tensor_model_parallel_allreduce` | Async TP all-reduce (model config). |
 
 ### TorchTitan
 

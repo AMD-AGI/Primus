@@ -4,7 +4,7 @@ extends:
 group_query_attention: true
 max_position_embeddings: 8192
 rotary_base: 500000
-norm_epsilon: 1.0e-05
+layernorm_epsilon: 1.0e-05
 init_method_std: 0.02
 
 apply_rope_fusion: true

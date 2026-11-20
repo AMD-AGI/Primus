@@ -77,19 +77,7 @@ Related profiler/log uploads: `mlflow_upload_traces` (upload raw trace files) an
 
 ---
 
-## 4. Performance metrics to MLflow (Megatron)
-
-`mlflow_upload_performance_metrics: false` (`primus_megatron_module.yaml`) enables a comprehensive scaling-test metric set when turned on (implicitly enabling throughput calculation):
-
-- `perf/throughput_tflops_per_gpu`, `perf/tps_tokens_per_sec_per_gpu`, `perf/iteration_time_ms`
-- `perf/{rocm,hip}_current_mem_gb`, `perf/{rocm,hip}_mem_utilization_pct`
-- `perf/gpu_utilization_pct_rank{N}`, `perf/gpu_utilization_pct_avg`
-
-> GPU utilization collection uses an `all_gather` every `log_interval`, which synchronizes ranks—keep this in mind for throughput-sensitive runs.
-
----
-
-## 5. Profiling (TorchTitan)
+## 4. Profiling (TorchTitan)
 
 Configured under `profiling:` in `primus/configs/modules/torchtitan/pre_trainer.yaml`:
 
@@ -105,7 +93,7 @@ Communication tracing is configured under `comm:` (`trace_buf_size`, `save_trace
 
 ---
 
-## 6. Profiling (MaxText)
+## 5. Profiling (MaxText)
 
 Configured in `primus/configs/modules/maxtext/pre_trainer.yaml`:
 
@@ -117,7 +105,7 @@ Configured in `primus/configs/modules/maxtext/pre_trainer.yaml`:
 
 ---
 
-## 7. Memory and performance projection
+## 6. Memory and performance projection
 
 Project resource usage **before** launching, without consuming a full cluster. Exposed through the Primus CLI `projection` subcommand (`primus/cli/subcommands/projection.py`).
 
@@ -136,7 +124,7 @@ Memory projection breaks VRAM down across parameters, gradients, activations, op
 
 ---
 
-## 8. Pipeline schedule visualization
+## 7. Pipeline schedule visualization
 
 Diagnose pipeline bubbles and stage imbalance with the built-in tool `tools/visualization/pp_vis/`.
 
@@ -152,7 +140,7 @@ Configure `task_list` in `vis.py` to point at your dumped `log_path` and the ite
 
 ---
 
-## 9. Recommended workflow
+## 8. Recommended workflow
 
 1. **Project first**—run `projection memory` to confirm the config fits before booking GPUs.
 2. **Capture a short trace**—a few steps after warmup with `profile` + `use_pytorch_profiler`.
