@@ -34,6 +34,7 @@ from primus.core.projection.hardware_calibration.gemm_shapes import (
 from primus.core.projection.hardware_calibration.stream_bandwidth import (
     DEFAULT_ARRAY_MIB,
     analyze_memory_clock,
+    derive_model_hbm_bandwidth,
     run_stream,
 )
 
@@ -158,6 +159,7 @@ def _measure_with_reader(
         "clock_source": stream_clock_summary["source"],
         "observed_mclk": observed_mclk,
         "memory_clock_back_calculated": False,
+        **derive_model_hbm_bandwidth(sustained),
         **analyze_memory_clock(
             sustained,
             info.peak_hbm_gbps,
@@ -179,7 +181,19 @@ def _rank_summary(payload: Dict[str, Any], rank: int) -> Dict[str, Any]:
         "observed_sclk_median_mhz": observed.get("median_mhz"),
         "observed_mclk_median_mhz": (payload["memory"].get("observed_mclk") or {}).get("median_mhz"),
         "sustained_bandwidth_gbps": payload["memory"]["sustained_bandwidth_gbps"],
+        "model_hbm_bandwidth_gbps": payload["memory"].get("model_hbm_bandwidth_gbps"),
     }
+
+
+def calibrated_model_hbm_bandwidth_gbps(payload: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Model HBM bandwidth to project with: the slowest GPU's, since every rank waits on it."""
+    if not payload:
+        return None
+    values = [r.get("model_hbm_bandwidth_gbps") for r in payload.get("per_rank") or [] if "error" not in r]
+    if "error" not in payload:
+        values.append(payload.get("memory", {}).get("model_hbm_bandwidth_gbps"))
+    values = [v for v in values if v]
+    return min(values) if values else None
 
 
 def gather_rank_summaries(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -225,7 +239,8 @@ def _source_label(source: Optional[str], per_xcd: bool = False) -> str:
 def _per_rank_lines(per_rank: List[Dict[str, Any]]) -> List[str]:
     lines = [
         f"  Per GPU ({len(per_rank)} ranks):",
-        f"    {'rank':>4} {'origami_MHz':>11} {'live_SCLK':>9} {'live_MCLK':>9} {'STREAM_GB/s':>11}",
+        f"    {'rank':>4} {'origami_MHz':>11} {'live_SCLK':>9} {'live_MCLK':>9} {'STREAM_GB/s':>11} "
+        f"{'model_GB/s':>10}",
     ]
     for r in per_rank:
         if "error" in r:
@@ -234,7 +249,7 @@ def _per_rank_lines(per_rank: List[Dict[str, Any]]) -> List[str]:
         lines.append(
             f"    {r['rank']:>4} {_fmt(r['effective_clock_mhz']):>11} "
             f"{_fmt(r['observed_sclk_median_mhz']):>9} {_fmt(r.get('observed_mclk_median_mhz')):>9} "
-            f"{r['sustained_bandwidth_gbps']:>11.0f}"
+            f"{r['sustained_bandwidth_gbps']:>11.0f} {_fmt(r.get('model_hbm_bandwidth_gbps')):>10}"
         )
     clocks = [r["effective_clock_mhz"] for r in per_rank if r.get("effective_clock_mhz")]
     bws = [r["sustained_bandwidth_gbps"] for r in per_rank if "error" not in r]
@@ -321,6 +336,16 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
     peak = mem.get("peak_bandwidth_gbps")
     eff_peak = f" ({mem['efficiency_vs_peak']:.0%} of {peak:.0f} GB/s peak)" if peak else ""
     lines.append(f"  Sustained HBM bandwidth: {mem['sustained_bandwidth_gbps']:.0f} GB/s{eff_peak}")
+    if mem.get("workload_bandwidth_gbps"):
+        lines.append(
+            f"  Workload HBM bandwidth:  {mem['workload_bandwidth_gbps']:.0f} GB/s "
+            f"(STREAM x {mem['stream_derate']:.2f} derate for memory-bound layer kernels)"
+        )
+        lines.append(
+            f"  Model HBM bandwidth:     {mem['model_hbm_bandwidth_gbps']:.0f} GB/s peak-equivalent "
+            f"(workload / {mem['model_reference_fraction']} sustained fraction the profilers assume); "
+            f"reuse with --hbm-bandwidth-gbps {mem['model_hbm_bandwidth_gbps']:.0f}"
+        )
     min_mclk = mem.get("min_mclk_mhz_at_full_efficiency")
     if min_mclk is not None:
         lines.append(

@@ -146,3 +146,11 @@ def test_skip_hw_calibration_flag(suite):
     assert parser.parse_args(["projection", suite, "--config", "x"]).skip_hw_calibration is False
     args = parser.parse_args(["projection", suite, "--config", "x", "--skip-hw-calibration"])
     assert args.skip_hw_calibration is True
+
+
+@pytest.mark.parametrize("suite", ["performance", "both"])
+def test_hbm_bandwidth_flag(suite):
+    parser, _ = _build_parser()
+    assert parser.parse_args(["projection", suite, "--config", "x"]).hbm_bandwidth_gbps is None
+    args = parser.parse_args(["projection", suite, "--config", "x", "--hbm-bandwidth-gbps", "7100"])
+    assert args.hbm_bandwidth_gbps == pytest.approx(7100.0)

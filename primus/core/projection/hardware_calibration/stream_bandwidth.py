@@ -24,13 +24,34 @@ efficiency at that clock.
 
 MCLK idles low and ramps up over a few hundred ms once memory traffic starts,
 so the kernels run until it settles before any trial is timed.
+
+From STREAM to the projection's HBM bandwidth
+---------------------------------------------
+STREAM is the ceiling; a training layer's memory-bound kernels (norms, RoPE,
+SwiGLU, residual adds, layout copies) sustain only part of it.  rocprofv3
+FETCH_SIZE / WRITE_SIZE counters on a Llama-3-8B layer (fwd+bwd, MI325X)
+put them at 72 % of STREAM in aggregate (3.41 of 4.76 TB/s), so the workload
+bandwidth is ``STREAM x STREAM_WORKLOAD_DERATE``.
+
+The profilers price memory traffic as ``peak x fraction`` with fractions
+fitted against the spec peak, anchored at ``_ACTIVATION_BW_FRACTION`` (0.566)
+for exactly these streaming kernels.  The measured 3.41 TB/s is 0.569 of the
+MI325X 6.0 TB/s spec, so the fitted model already agrees with the counters.
+To keep every fitted fraction valid the workload bandwidth is handed to the
+model as a peak-equivalent, ``workload / _ACTIVATION_BW_FRACTION``; on MI325X
+that reproduces the spec peak to within 1 %.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Dict, Optional
 
 from primus.core.projection.hardware_calibration.device_info import run_until_settled
+from primus.core.projection.module_profilers.moe_mlp import _ACTIVATION_BW_FRACTION
+
+STREAM_WORKLOAD_DERATE = 0.72
+STREAM_DERATE_ENV = "PRIMUS_HBM_STREAM_DERATE"
 
 # (name, bytes moved per element in units of the element size)
 STREAM_KERNELS = (("copy", 2), ("scale", 2), ("add", 3), ("triad", 3))
@@ -106,7 +127,7 @@ def run_stream(
                 end.record()
                 end.synchronize()
                 times_ms[name].append(start.elapsed_time(end))
-    del a, b, c, arrays
+    a = b = c = arrays = None
     torch.cuda.empty_cache()
 
     array_bytes = num_elements * elem_bytes
@@ -122,6 +143,28 @@ def run_stream(
             "mean_gbps": moved / (mean_ms / 1e3) / 1e9,
         }
     return {"array_mib": array_mib, "dtype": "fp32", "trials": trials, "settle": settle, "kernels": results}
+
+
+def stream_workload_derate() -> float:
+    """``PRIMUS_HBM_STREAM_DERATE`` if set, else :data:`STREAM_WORKLOAD_DERATE`."""
+    env = os.getenv(STREAM_DERATE_ENV)
+    derate = float(env) if env else STREAM_WORKLOAD_DERATE
+    if not 0.0 < derate <= 1.0:
+        raise ValueError(f"{STREAM_DERATE_ENV} must be in (0, 1], got {derate}")
+    return derate
+
+
+def derive_model_hbm_bandwidth(sustained_gbps: float, derate: Optional[float] = None) -> Dict[str, float]:
+    """Turn a STREAM result into the workload bandwidth and the model's peak-equivalent."""
+    if derate is None:
+        derate = stream_workload_derate()
+    workload = sustained_gbps * derate
+    return {
+        "stream_derate": derate,
+        "workload_bandwidth_gbps": workload,
+        "model_reference_fraction": _ACTIVATION_BW_FRACTION,
+        "model_hbm_bandwidth_gbps": workload / _ACTIVATION_BW_FRACTION,
+    }
 
 
 def analyze_memory_clock(

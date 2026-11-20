@@ -16,6 +16,7 @@ kernels.  Two concrete GEMM backends are shipped:
 An SDPA simulation backend is provided in ``sdpa_simulator.py``.
 """
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -362,6 +363,32 @@ def get_gemm_backend_factory(name: str) -> Optional[GEMMBackendFactory]:
 def available_gemm_backends() -> Tuple[str, ...]:
     """Return the sorted names of all currently registered GEMM backends."""
     return tuple(sorted(_GEMM_BACKEND_REGISTRY))
+
+
+HBM_BANDWIDTH_ENV = "PRIMUS_HBM_BANDWIDTH_GBPS"
+
+_hbm_bandwidth_override_gbps: Optional[float] = None
+
+
+def set_hbm_bandwidth_override(gbps: Optional[float]) -> None:
+    """Set (or clear with ``None``) the process-wide HBM bandwidth override in GB/s.
+
+    The value replaces the arch-profile ``hbm_bandwidth_gbps`` of every backend,
+    so it must be expressed in the same peak-referenced units: the profilers
+    multiply it by their own sustained-efficiency fractions.
+    """
+    global _hbm_bandwidth_override_gbps
+    if gbps is not None and gbps <= 0:
+        raise ValueError(f"HBM bandwidth override must be positive, got {gbps}")
+    _hbm_bandwidth_override_gbps = float(gbps) if gbps is not None else None
+
+
+def hbm_bandwidth_override_gbps() -> Optional[float]:
+    """HBM bandwidth override in GB/s: programmatic setting, then the env var, else None."""
+    if _hbm_bandwidth_override_gbps is not None:
+        return _hbm_bandwidth_override_gbps
+    env = os.getenv(HBM_BANDWIDTH_ENV)
+    return float(env) if env else None
 
 
 def resolve_hbm_bytes_per_ms(

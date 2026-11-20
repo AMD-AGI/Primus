@@ -48,7 +48,16 @@ from primus.core.projection.hardware_calibration.gemm_shapes import (
     select_calibration_gemms,
 )
 from primus.core.projection.hardware_calibration.stream_bandwidth import (
+    STREAM_DERATE_ENV,
+    STREAM_WORKLOAD_DERATE,
     analyze_memory_clock,
+    derive_model_hbm_bandwidth,
+)
+from primus.core.projection.simulation_backends.base import (
+    HBM_BANDWIDTH_ENV,
+    hbm_bandwidth_override_gbps,
+    resolve_hbm_bytes_per_ms,
+    set_hbm_bandwidth_override,
 )
 from primus.core.projection.training_config import (
     ModelConfig,
@@ -388,6 +397,98 @@ def test_analyze_memory_clock_without_spec():
 
 
 # ---------------------------------------------------------------------------
+# STREAM -> model HBM bandwidth
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_hbm_override(monkeypatch):
+    monkeypatch.delenv(HBM_BANDWIDTH_ENV, raising=False)
+    monkeypatch.delenv(STREAM_DERATE_ENV, raising=False)
+    set_hbm_bandwidth_override(None)
+    yield
+    set_hbm_bandwidth_override(None)
+
+
+def test_model_bandwidth_reproduces_mi325x_spec_peak(clean_hbm_override):
+    # Llama-3-8B layer on MI325X: STREAM 4761 GB/s, memory-bound kernels at 72 % of it.
+    out = derive_model_hbm_bandwidth(4761.0)
+    assert out["stream_derate"] == STREAM_WORKLOAD_DERATE == 0.72
+    assert out["workload_bandwidth_gbps"] == pytest.approx(3427.9, abs=0.1)
+    assert out["model_hbm_bandwidth_gbps"] == pytest.approx(6000.0, rel=0.01)
+
+
+def test_stream_derate_env_override_and_validation(clean_hbm_override, monkeypatch):
+    monkeypatch.setenv(STREAM_DERATE_ENV, "0.5")
+    assert derive_model_hbm_bandwidth(4000.0)["workload_bandwidth_gbps"] == pytest.approx(2000.0)
+    monkeypatch.setenv(STREAM_DERATE_ENV, "1.5")
+    with pytest.raises(ValueError):
+        derive_model_hbm_bandwidth(4000.0)
+
+
+def test_calibrated_bandwidth_uses_slowest_healthy_rank():
+    from primus.core.projection.hardware_calibration import (
+        calibrated_model_hbm_bandwidth_gbps,
+    )
+
+    assert calibrated_model_hbm_bandwidth_gbps(None) is None
+    assert calibrated_model_hbm_bandwidth_gbps({"error": "OOM"}) is None
+    payload = _payload(bw=4900.0)
+    own = payload["memory"]["model_hbm_bandwidth_gbps"]
+    assert calibrated_model_hbm_bandwidth_gbps(payload) == pytest.approx(own)
+    payload["per_rank"] = [
+        {"rank": 0, "model_hbm_bandwidth_gbps": own},
+        {"rank": 1, "model_hbm_bandwidth_gbps": own - 100.0},
+        {"rank": 2, "error": "RuntimeError: boom"},
+    ]
+    assert calibrated_model_hbm_bandwidth_gbps(payload) == pytest.approx(own - 100.0)
+
+
+def test_hbm_override_replaces_backend_profile_peak(clean_hbm_override, monkeypatch):
+    from primus.core.projection.simulation_backends.origami_backend import (
+        OrigamiGEMMBackend,
+    )
+
+    backend = OrigamiGEMMBackend(gpu_arch="mi325x")
+    assert backend.hbm_bandwidth_gbps == 6000.0
+    set_hbm_bandwidth_override(7100.0)
+    assert backend.hbm_bandwidth_gbps == 7100.0
+    assert resolve_hbm_bytes_per_ms(backend) == pytest.approx(7100.0 * 1e6)
+    set_hbm_bandwidth_override(None)
+    monkeypatch.setenv(HBM_BANDWIDTH_ENV, "6500")
+    assert backend.hbm_bandwidth_gbps == 6500.0
+    with pytest.raises(ValueError):
+        set_hbm_bandwidth_override(0.0)
+
+
+def test_hbm_override_reaches_sdpa_backend(clean_hbm_override):
+    from primus.core.projection.simulation_backends import sdpa_simulator
+
+    sdpa = sdpa_simulator.SDPASimulator.__new__(sdpa_simulator.SDPASimulator)
+    sdpa._hw = sdpa_simulator._get_hardware_spec("mi325x")
+    assert sdpa.hbm_bandwidth_gbps == 6000.0
+    set_hbm_bandwidth_override(7100.0)
+    assert sdpa.hbm_bandwidth_gbps == 7100.0
+
+
+def test_projection_applies_calibration_unless_overridden(clean_hbm_override):
+    from primus.core.projection.performance_projection import projection
+
+    payload = _payload(bw=4900.0)
+    calibrated = payload["memory"]["model_hbm_bandwidth_gbps"]
+    projection._apply_calibrated_hbm_bandwidth(payload, rank=0)
+    assert hbm_bandwidth_override_gbps() == pytest.approx(calibrated)
+
+    set_hbm_bandwidth_override(7100.0)
+    projection._apply_calibrated_hbm_bandwidth(payload, rank=0)
+    assert hbm_bandwidth_override_gbps() == 7100.0
+
+    set_hbm_bandwidth_override(None)
+    projection._apply_calibrated_hbm_bandwidth({"error": "OOM"}, rank=0)
+    assert hbm_bandwidth_override_gbps() is None
+
+
+# ---------------------------------------------------------------------------
 # Skip logic, reporting, gathering, artifact
 # ---------------------------------------------------------------------------
 
@@ -444,6 +545,7 @@ def _payload(clock=1600.0, bw=4900.0):
             "max_mclk_mhz": 1500,
             "clock_source": "amdsmi",
             "observed_mclk": {"median_mhz": 1300.0},
+            **derive_model_hbm_bandwidth(bw),
             **analyze_memory_clock(bw, 6000.0, 1500, 1300.0),
         },
     }
@@ -454,6 +556,8 @@ def test_report_contains_headline_numbers():
     assert "Effective compute clock: 1600 MHz (Origami inversion, 76% of 2100 MHz max)" in report
     assert "--gpu-clock-mhz 1600" in report
     assert "Sustained HBM bandwidth: 4900 GB/s (82% of 6000 GB/s peak)" in report
+    assert "Workload HBM bandwidth:  3528 GB/s (STREAM x 0.72 derate" in report
+    assert "--hbm-bandwidth-gbps 6233" in report
     assert "Observed SCLK (amdsmi, mean of all XCDs, during timed GEMMs): median 1530 MHz" in report
     assert "per-XCD medians: 1540, 1520 MHz" in report
     assert "Origami-inverted clock is +4.6% vs observed" in report

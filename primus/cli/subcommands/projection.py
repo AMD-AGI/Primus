@@ -399,6 +399,20 @@ def _add_performance_args(parser):
             "Example: --gpu-clock-mhz 1500\n"
         ),
     )
+    parser.add_argument(
+        "--hbm-bandwidth-gbps",
+        type=float,
+        required=False,
+        default=None,
+        help=(
+            "Override the HBM bandwidth (GB/s) the memory-bound terms are priced at.\n"
+            "Peak-referenced: the profilers still apply their own sustained fractions.\n"
+            "Benchmark mode otherwise uses the bench GPUs' STREAM result, derated\n"
+            "(PRIMUS_HBM_STREAM_DERATE, default 0.72); simulation mode uses the\n"
+            "--gpu-arch profile peak. Can also be set via PRIMUS_HBM_BANDWIDTH_GBPS.\n"
+            "The benchmark-mode report prints the value to reuse here.\n"
+        ),
+    )
     _add_pipeline_schedule_algorithm_arg(parser)
     # Projection-specific overrides.
     parser.add_argument(

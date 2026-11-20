@@ -100,7 +100,7 @@ def time_gemm_ms(
     settle = run_until_settled(step, reader, "sclk", min_s=min_settle_s)
     with sampler.window() if sampler is not None else contextlib.nullcontext():
         samples = sorted(timed_loop(iters) for _ in range(trials))
-    del a, b, c
+    a = b = c = None
     return samples[len(samples) // 2], settle
 
 
