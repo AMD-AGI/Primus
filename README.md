@@ -83,7 +83,7 @@ Besides the Docker image, Primus can be installed as a wheel that bundles the `p
 pip install "git+https://github.com/AMD-AGI/Primus.git@v26.9.0"
 
 # Option 2 — install a released wheel from the GitHub Pages index (recommended; pin the version):
-pip install "primus==26.9.0" --extra-index-url https://amd-agi.github.io/Primus/simple/
+pip install "primus==26.10.0" --extra-index-url https://amd-agi.github.io/Primus/simple/
 ```
 
 The wheel ships the `primus-cli` toolkit but not the heavy backend sources. Fetch the backend
@@ -118,7 +118,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # For Megatron-LM and TorchTitan backends
     docker pull rocm/primus:v26.9
     # For MaxText backend
-    docker pull rocm/jax-training:maxtext-v26.9
+    docker pull rocm/jax-training:maxtext-v26.10
     ```
 
 2. **Clone the repository**
@@ -127,7 +127,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
     cd Primus
     # checkout the branch for the specific release
-    git checkout release/v26.9
+    git checkout release/v26.10
     git submodule update --init --recursive
     ```
 
@@ -156,7 +156,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
     python -m venv primus-env
     source primus-env/bin/activate
     # Install Primus
-    pip install "primus==26.9.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+    pip install "primus==26.10.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
 
     ```
 
