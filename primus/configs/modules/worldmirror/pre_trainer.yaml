@@ -1,4 +1,0 @@
-extends:
-  - ../module_base.yaml
-
-stage: pretrain
