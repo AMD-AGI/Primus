@@ -1,5 +1,9 @@
 name: Build SpecForge Images
 
+# The image copies the whole Primus checkout, but its build and GPU-free checks only exercise
+# the SpecForge backend, the Primus core it imports and the primus-cli entry points. Other
+# backends and recipes cannot break it, so they do not rebuild it. Release tags always build:
+# GitHub ignores path filters for tag pushes.
 on:
   workflow_dispatch:
   push:
@@ -8,23 +12,27 @@ on:
     paths:
       - .github/workflows/build-specforge-images.yml
       - examples/specforge/**
-      - primus/**
-      - runner/**
+      - primus/__init__.py
+      - primus/backends/specforge/**
+      - primus/cli/**
+      - primus/core/**
+      - runner/primus-cli
+      - runner/lib/**
       - primus_cli.py
       - pyproject.toml
-      - LICENSE
-      - README.md
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/build-specforge-images.yml
       - examples/specforge/**
-      - primus/**
-      - runner/**
+      - primus/__init__.py
+      - primus/backends/specforge/**
+      - primus/cli/**
+      - primus/core/**
+      - runner/primus-cli
+      - runner/lib/**
       - primus_cli.py
       - pyproject.toml
-      - LICENSE
-      - README.md
 
 permissions:
   contents: read
