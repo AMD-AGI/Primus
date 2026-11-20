@@ -6,22 +6,24 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Mistral Large 4 1T-A52B (text decoder) BF16 pretraining on MI355X.
 #   model: primus/configs/models/megatron/mistral_Large_4_1T_A52B.yaml
 #   Defaults are the full-scale layout.
-#   Layout: TP8 x PP6 x EP8 x expert-TP 1 (sequence parallel on, CP1) = 192 GPUs, 24 nodes x 8
-#   GPUs (data parallel 4, expert data parallel 4). EP x expert-TP = 8 = the GPUs of one node,
-#   so the expert-parallel group stays in a node and Primus-Turbo's DeepEP runs intra-node (the
-#   release image's DeepEP takes no RDMA ranks: an EP group across nodes fails at start).
-#   Per GPU, with the distributed optimizer: routed experts 1018B / (PP6 x EP8 = 48) = 21.2B and
-#   the rest 35B / (TP8 x PP6) = 0.7B -> bf16 weights 44 GB + fp32 grads 88 GB + fp32 master and
-#   Adam state (12 bytes, sharded over expert-DP 4 / DP 4) 66 GB = ~197 GB of the MI355X's 288
-#   GB before activations.
-#   PP6 puts 12 layers on each stage (starts 0, 12, 24, 36, 48, 60): every stage starts on a
+#   Layout: TP8 x PP3 x EP32 x expert-TP 1 (sequence parallel on, CP1) = 96 GPUs, 12 nodes x 8
+#   GPUs (data parallel 4, expert data parallel 1), token dispatch by Megatron's alltoall
+#   (use_turbo_deepep false). Per GPU, with the distributed optimizer: routed experts 1018B /
+#   (PP3 x EP32 = 96) = 10.6B and the rest 35B / (TP8 x PP3) = 1.5B -> bf16 weights 24 GB + fp32
+#   grads 48 GB + fp32 master and Adam state 130 GB = ~202 GB of the MI355X's 288 GB before
+#   activations. PP3 puts 24 layers on each stage (starts 0, 24, 48): every stage starts on a
 #   full-indexer layer (indexer_types), as index sharing requires; layer 35's shared KV latent
-#   crosses from stage 2 to stages 3-5.
-#   Alternative where EP8 does not fit (fewer nodes): EP32 with DeepEP off (alltoall), e.g.
-#   PRIMUS_EP=32 PRIMUS_TURBO_DEEPEP=false PRIMUS_PP=3 PRIMUS_GBS=64 on 12 nodes (~202 GB per
-#   GPU: experts 1018B / (PP3 x EP32) = 10.6B, the rest 1.5B). Another PP size must start every
-#   stage on a full-indexer layer. MoE with TP > 1 needs sequence_parallel (Megatron), so keep
-#   PRIMUS_SP true whenever PRIMUS_TP > 1.
+#   crosses from stage 1 to stage 2.
+#   Validated on MI355X: this layout (EP32, alltoall) was measured faster at full scale than EP8
+#   with intra-node DeepEP, which needs PP6 to fit (owner's measurement, see the pull request).
+#   EP8 with Primus-Turbo DeepEP inside a node needs these overrides together:
+#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=6 PRIMUS_GBS=96 on 24 nodes (~197 GB per GPU:
+#   experts 1018B / (PP6 x EP8) = 21.2B, the rest 0.7B; stages start 0, 12, 24, 36, 48, 60).
+#   DeepEP across nodes (EP above 8, e.g. PRIMUS_EP=32 PRIMUS_TURBO_DEEPEP=true) needs an image
+#   whose Primus-Turbo is built with rocSHMEM; at EP >= 16 rocm_arg_validation also requires
+#   turbo_deepep_num_cu <= 32 (the default here). Another PP size must start every stage on a
+#   full-indexer layer. MoE with TP > 1 needs sequence_parallel (Megatron), so keep PRIMUS_SP
+#   true whenever PRIMUS_TP > 1.
 #   Depth-reduced runs on one node override the layout (see tests/trainer/test_megatron_trainer.py).
 
 modules:
@@ -40,9 +42,9 @@ modules:
       train_iters: ${PRIMUS_TRAIN_ITERS:50}
       micro_batch_size: ${PRIMUS_MBS:1}
       # GBS / (MBS x DP) micro-batches per pipeline; keep it well above PP (the 1F1B bubble is
-      # (PP - 1) / micro-batches). TP8 x PP6 on 192 GPUs: DP 4, so 96 = 24 micro-batches of MBS 1
-      # per pipeline for 6 stages.
-      global_batch_size: ${PRIMUS_GBS:96}
+      # (PP - 1) / micro-batches). TP8 x PP3 on 96 GPUs: DP 4, so 64 = 16 micro-batches of MBS 1
+      # per pipeline for 3 stages.
+      global_batch_size: ${PRIMUS_GBS:64}
       # <= index_topk (2048): every causal key is selected, so attention is the dense causal
       # kernel (Primus-Turbo's here; TE's when CP > 1), exact. Longer sequences (> index_topk) run the eager (unfused) DSA path.
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
@@ -58,8 +60,8 @@ modules:
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:8}
-      pipeline_model_parallel_size: ${PRIMUS_PP:6}
-      expert_model_parallel_size: ${PRIMUS_EP:8}
+      pipeline_model_parallel_size: ${PRIMUS_PP:3}
+      expert_model_parallel_size: ${PRIMUS_EP:32}
       expert_tensor_parallel_size: ${PRIMUS_ETP:1}
       sequence_parallel: ${PRIMUS_SP:true}
       overlap_grad_reduce: true
@@ -86,7 +88,7 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
-      # Primus-Turbo: grouped GEMM experts; DeepEP dispatch when expert-TP x EP > 1 (expert-TP is 1 here)
+      # Primus-Turbo: grouped GEMM experts; DeepEP dispatch only with PRIMUS_TURBO_DEEPEP=true
       enable_primus_turbo: true
       # Primus-Turbo attention (dense path, CP1). With context parallelism > 1 the model patch
       # mistral_large4.turbo_attention_cp switches it off: the Turbo kernel's CP is Ulysses with a
@@ -94,10 +96,12 @@ modules:
       use_turbo_attention: true
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: true
-      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:true}
-      # EP8 in one node (intra-node DeepEP): 64 CUs for dispatch / combine. With PRIMUS_EP >= 16 and
-      # DeepEP on, rocm_arg_validation allows <= 32 CUs (set PRIMUS_TURBO_DEEPEP_NUM_CU=32)
-      turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:64}
+      # DeepEP off: the preset's moe_token_dispatcher_type alltoall (see the header).
+      # PRIMUS_TURBO_DEEPEP=true switches to Primus-Turbo DeepEP (its patch sets the dispatcher to
+      # flex); across nodes (EP above 8) that needs a Primus-Turbo built with rocSHMEM.
+      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
+      # rocm_arg_validation: <= 32 CUs for DeepEP at ep_size >= 16 (EP32); 32 also serves EP8
+      turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:32}
       # not set: use_turbo_fused_act_with_probs (this image's Primus-Turbo swiglu_with_probs takes no
       # clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
       # release renormalises a softmax over all 128 experts on the top-4, which that op does not take).

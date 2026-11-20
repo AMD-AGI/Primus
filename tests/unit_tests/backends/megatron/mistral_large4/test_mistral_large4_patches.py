@@ -104,33 +104,14 @@ def test_moe_layer_freq_patch(n, k_args, k_params, want):
 
 
 @pytest.fixture
-def megatron_moe_freq_type(monkeypatch):
-    """Megatron's ``moe_freq_type``: the real ``megatron.training.arguments`` when it imports (a
-    job with Megatron's GPU-only dependencies: fla, mamba_ssm), so its parser is the one checked.
-    Only when that import fails, a stand-in with Megatron's own code (the character check and
-    ``eval`` of ``_eval_pattern``) is installed for the patch to import."""
-    import sys
-    import types
-
+def megatron_moe_freq_type():
+    """Megatron's real ``moe_freq_type`` (``megatron.training.arguments``), the parser the patch
+    calls; the tests that need it are skipped, naming the error, where that module does not import
+    (its GPU-only dependencies: fla, mamba_ssm)."""
     try:
         import megatron.training.arguments  # noqa: F401
-
-        return  # the real parser
-    except Exception:  # noqa: BLE001 - ImportError or a dependency failing at import on CPU
-        sys.modules.pop("megatron.training.arguments", None)
-
-    def moe_freq_type(x):
-        if isinstance(x, int):
-            return x
-        if "[" in x:
-            if re.search(r"[^,\d\[\]\(\)\+\*]", x):
-                raise ValueError(f"Invalid pattern: {x}")
-            return eval(x)
-        return int(x)
-
-    module = types.ModuleType("megatron.training.arguments")
-    module.moe_freq_type = moe_freq_type
-    monkeypatch.setitem(sys.modules, "megatron.training.arguments", module)
+    except Exception as e:  # noqa: BLE001 - ImportError or a dependency failing at import on CPU
+        pytest.skip(f"Megatron's parser (megatron.training.arguments) does not import here: {e!r}")
 
 
 @pytest.mark.parametrize(
@@ -597,7 +578,7 @@ def test_fused_lerope_refuses_other_values():
 
 def test_single_kv_source():
     cfg = _cfg(kv_source_layers=[0, 1, 2, 1], no_rope_layers=[1, 0, 1, 0])
-    assert cfg.kv_source_layer == 1 and cfg.stores_kv(1) and cfg.multi_latent_attention
+    assert cfg.shared_kv_layer == 1 and cfg.stores_kv(1) and cfg.multi_latent_attention
 
 
 # ---- posttrain hook family resolution and the model-provider registration ---------------------
@@ -1008,8 +989,8 @@ def _stage(layers, pre, post, kv=(0, 1, 2, 1)):
     )
 
     blk = MistralLarge4TransformerBlock.__new__(MistralLarge4TransformerBlock)
-    blk.config = SimpleNamespace(kv_lora_rank=4, num_layers=4, kv_source=lambda i: kv[i])
-    blk.carrier, blk.kv_source, blk.layer_indices = True, 1, list(layers)
+    blk.config = SimpleNamespace(kv_lora_rank=4, num_layers=4, kv_source_layer=lambda i: kv[i])
+    blk.carrier, blk.shared_kv_layer, blk.layer_indices = True, 1, list(layers)
     blk._set_source_position()  # as __init__ does
     blk.pre_process, blk.post_process = pre, post
     return blk
@@ -1269,7 +1250,7 @@ def test_converter_keeps_fp32_tensors_exact():
 
     class _Model:
         config = SimpleNamespace(
-            kv_source=lambda i: i, index_source_layer=lambda i: i, uses_rope=lambda i: True
+            kv_source_layer=lambda i: i, index_source_layer=lambda i: i, uses_rope=lambda i: True
         )
 
         def state_dict(self):
@@ -2804,3 +2785,78 @@ def test_turbo_modules_follow_enable_primus_turbo(monkeypatch):
     monkeypatch.setattr(layout.importlib.util, "find_spec", lambda name: object())
     p = specs._backend(cfg)
     assert p.cfg is primus_args["cfg"] and p.cfg.use_turbo_attention and p.cfg.use_turbo_grouped_gemm
+
+
+# ---- TE GEMM workspace: main's PRIMUS_TE_GEMM_WORKSPACE_MIB, defaulted by this model's patch ----
+def _ws_params(**kw):
+    base = dict(
+        model_type="mistral_large4",
+        enable_primus_turbo=True,
+        use_turbo_grouped_gemm=True,
+        moe_grouped_gemm=True,
+        use_megatron_fsdp=False,
+        expert_tensor_parallel_size=1,
+        tensor_model_parallel_size=1,
+        ckpt_format="torch",
+        use_distributed_optimizer=True,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_te_gemm_workspace_defaults_mib_variable(monkeypatch):
+    """Experts on TE GEMMs: PRIMUS_TE_GEMM_WORKSPACE_MIB defaults to 512 (setup phase, before main's
+    megatron.te.hipblaslt_gemm_workspace reads it in before_train); a user value is kept."""
+    import os
+
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_layout as layout,
+    )
+    from primus.backends.megatron.patches.te_patches import hipblaslt_workspace_patches
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    m = mistral_large4_args_patches
+    env = m.TE_GEMM_WORKSPACE_ENV
+    assert env == hipblaslt_workspace_patches.ENV_VAR  # the one variable main's patch reads
+    patch = PatchRegistry.get("megatron.mistral_large4.te_gemm_workspace")
+    assert patch.phase == "setup"
+    monkeypatch.setattr(layout.importlib.util, "find_spec", lambda name: object())
+
+    # Primus-Turbo grouped GEMM: not applied
+    assert patch.condition(_ctx("setup", params=_ws_params())) is False
+    # another model: not applied
+    other = _ws_params(model_type="glm5_next", use_turbo_grouped_gemm=False)
+    assert patch.condition(_ctx("setup", params=other)) is False
+    # SequentialMLP (grouped GEMM off) and the setup-phase fallback (Megatron-FSDP), not switched yet
+    for params in (_ws_params(moe_grouped_gemm=False), _ws_params(use_megatron_fsdp=True)):
+        assert patch.condition(_ctx("setup", params=params)) is True
+
+    # record the variable's original state before the patch writes os.environ directly, so
+    # teardown restores it (removes it when it was unset) instead of keeping the patch's 512
+    original = os.environ.get(env)
+    monkeypatch.setenv(env, "placeholder")
+    monkeypatch.delenv(env)
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
+    assert hipblaslt_workspace_patches._requested_workspace_mib() == 512
+    monkeypatch.setenv(env, "128")
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
+    assert hipblaslt_workspace_patches._requested_workspace_mib() == 128  # the user's value wins
+    # the patch wrote os.environ directly: undoing the monkeypatch restores the original state
+    monkeypatch.undo()
+    assert os.environ.get(env) == original
+
+
+def test_preset_values_raises_on_a_missing_extends_target(monkeypatch):
+    """A missing preset is 'no preset' (None); an existing preset whose ``extends`` target is
+    missing is a broken preset and raises, not silently None."""
+    from primus.core.config.preset_loader import PresetLoader
+
+    m = mistral_large4_args_patches
+    assert m._preset_values(SimpleNamespace(model="no_such_preset_xyz.yaml")) is None
+
+    def broken(name, framework, config_type="models"):
+        raise FileNotFoundError(2, "No such file or directory", "/x/missing_base.yaml")
+
+    monkeypatch.setattr(PresetLoader, "load", staticmethod(broken))
+    with pytest.raises(FileNotFoundError, match="missing_base"):
+        m._preset_values(SimpleNamespace(model="mistral_Large_4_1T_A52B.yaml"))

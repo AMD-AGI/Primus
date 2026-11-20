@@ -263,12 +263,23 @@ def mark_experts_expert_parallel(model) -> int:
     return n
 
 
-# The provider a family package exports (registry.py, builder.family_model_provider): the
-# shared Primus model_provider, defaulting to this model's builder
-def model_provider(*a, **k):
+# The provider a family package exports (registry.py): builder.family_model_provider's signature,
+# defaulting to this model's builder. builder.py is imported on the call, not at module import:
+# it imports megatron.training, which pulls in optional GPU-probing packages (fla, mamba_ssm) that
+# fail on a host without a GPU; the converter and CPU tests import this module.
+def model_provider(
+    model_builder=None,
+    pre_process: bool = True,
+    post_process: bool = True,
+    vp_stage=None,
+    config=None,
+    pg_collection=None,
+):
     from primus.backends.megatron.core.models.builder import family_model_provider
 
-    return family_model_provider(mistral_large4_builder)(*a, **k)
+    return family_model_provider(mistral_large4_builder)(
+        model_builder, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
+    )
 
 
 model_provider.default_builder = mistral_large4_builder

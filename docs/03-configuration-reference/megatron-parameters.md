@@ -464,7 +464,7 @@ models:
 |-----------|---------|-------------|
 | `use_legacy_models` | `false` | Use legacy Megatron model code paths. |
 | `deprecated_use_mcore_models` | `false` | Deprecated flag for Megatron-Core models; prefer current `transformer_impl` + stack. |
-| `model_type` | `gpt` | `gpt` or `mamba` family. *Primus:* also model-specific values that `get_model_provider` builds (e.g. `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1`, `inkling`); `muse_spark` is the Muse Spark text decoder (set by `muse_spark_base.yaml`; §11.5). |
+| `model_type` | `gpt` | `gpt` or `mamba` family. *Primus:* also model-specific values that `get_model_provider` builds (e.g. `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1`, `inkling`, `mistral_large4`); `muse_spark` is the Muse Spark text decoder (set by `muse_spark_base.yaml`; §11.5); `mistral_large4` is the Mistral Large 4 text decoder (set by `mistral_base.yaml`; §10.8). |
 | `num_layers` | `24` | Transformer layers (decoder or unified stack). |
 | `encoder_num_layers` | `null` | Encoder depth (encoder–decoder). |
 | `decoder_num_layers` | `null` | Decoder depth. |
@@ -510,8 +510,6 @@ models:
 | `use_te_activation_func` | `false` | Use Transformer Engine activation kernels. |
 | `gradient_accumulation_fusion` | `true` | Fuse gradient accumulation kernels. |
 | `delay_wgrad_compute` | `false` | Delay weight-gradient computation for scheduling. |
-
-`model_type` also takes the Primus-owned values that `get_model_provider` dispatches (`deepseek_v4`, `kimi_k3`, `glm5_next`, `mistral_large4`, `zaya1`, `inkling`); see [10.8](#108-mistral-large-4-model_type-mistral_large4-mistral_baseyaml) for `mistral_large4`.
 
 ### 10.2 Tokenizer and vocabulary
 
@@ -612,7 +610,7 @@ models:
 
 ### 10.8 Mistral Large 4 (`model_type: mistral_large4`, `mistral_base.yaml`)
 
-`model_type: mistral_large4` selects the Mistral Large 4 text decoder (BF16 training; no KV-cache inference; the sparse DSA path, sequence > `index_topk`, does not run with context parallelism; with pipeline parallelism each stage starts on a `full` indexer layer); the list of `model_type` values is in 10.1. All keys below are *Primus:* keys (Primus' Mistral Large 4 config, not upstream Megatron arguments).
+`model_type: mistral_large4` selects the Mistral Large 4 text decoder (BF16 training; no KV-cache inference; the sparse DSA path, sequence > `index_topk`, does not run with context parallelism; with pipeline parallelism each stage starts on a `full` indexer layer); the list of `model_type` values is in the `model_type` row of 10.1. All keys below are *Primus:* keys (Primus' Mistral Large 4 config, not upstream Megatron arguments).
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -625,9 +623,11 @@ models:
 | `first_k_dense_replace` | `1` | *Primus:* First layers with a dense MLP; the rest are MoE (`moe_layer_freq` is derived from it). |
 | `freeze_routed_experts` | `false` | *Primus:* Fine-tuning: freeze the routed experts (router, shared expert and the rest stay trainable). |
 | `allow_untrained_indexer` | `false` | *Primus:* Accept `seq_length` > `index_topk` without a checkpoint: the frozen DSA indexer stays random (code-path tests only). |
-| `fused_lerope` | `true` | *Primus:* Run the rotary embedding through the fused LeRoPE kernel (Triton): the angles are computed in the kernel from the positions and the YaRN inverse frequencies times `exp(lerope.alpha)`. `alpha` is a frozen buffer loaded from the checkpoint (not trained), so the kernel's gradient to the frequencies is not computed in training. `false`, or a CPU tensor: the eager path with a precomputed table. |
+| `fused_lerope` | `true` (`mistral_base.yaml`; `false` in a config built without the preset, e.g. the converter's) | *Primus:* Run the rotary embedding through the fused LeRoPE kernel (Triton): the angles are computed in the kernel from the positions and the YaRN inverse frequencies times `exp(lerope.alpha)`. `alpha` is a frozen buffer loaded from the checkpoint (not trained), so the kernel's gradient to the frequencies is not computed in training. `false`, or a CPU tensor: the eager path with a precomputed table. |
 
 In `deterministic_mode` the model runs Transformer Engine's attention and RMSNorm instead of Primus-Turbo's (`use_turbo_attention` / `use_turbo_rms_norm` are set to `false`): those two Turbo kernels gave different losses from run to run on this model even in that mode. Primus-Turbo grouped GEMM and DeepEP stay on.
+
+With `context_parallel_size` > 1 the model also runs Transformer Engine's core attention (patch `megatron.mistral_large4.turbo_attention_cp` sets `use_turbo_attention` to `false`, with a log line): Primus-Turbo attention runs context parallelism as Ulysses all-to-all, which does not match the p2p ring Megatron's MLA uses.
 
 ---
 
@@ -712,7 +712,7 @@ In `deterministic_mode` the model runs Transformer Engine's attention and RMSNor
 
 ### 11.5 Muse Spark (`models/megatron/muse_spark/muse_spark_base.yaml`)
 
-These settings (YAML keys in `muse_spark_base.yaml`) apply only to a Muse Spark model (`model_type: muse_spark`). `muse_spark` is one of the Primus values of `model_type` (row `model_type` in §10.1, next to `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1` and `inkling`), beside the `gpt` / `mamba` of §10.1; `muse_spark_base.yaml` sets it, so a Muse Spark preset gets it by `extends`.
+These settings (YAML keys in `muse_spark_base.yaml`) apply only to a Muse Spark model (`model_type: muse_spark`). `muse_spark` is one of the Primus values of `model_type` (row `model_type` in §10.1, next to `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1`, `inkling` and `mistral_large4`), beside the `gpt` / `mamba` of §10.1; `muse_spark_base.yaml` sets it, so a Muse Spark preset gets it by `extends`.
 
 Vocabulary padding: a Muse Spark model does not read `make_vocab_size_divisible_by` (§2). Its embedding and output layers have `vocab_size` rounded up to a multiple of 64 rows at every TP (202048 for the released model), the same rule as the native converter. The `muse_spark_vocab` patch sets Megatron's padded vocabulary size that way, so the converted checkpoint has the same embedding shape at every TP. The vocabulary-parallel layers also need the rows to divide by TP (202048 = 2^6 x 7 x 11 x 41). TP must also divide the 16 query groups, so the usable TPs are 1, 2, 4, 8 and 16 (both checks pass); Megatron's query-group check refuses another TP (e.g. 3, 6 or 12) before the vocabulary is sized. A refusal from a Muse Spark patch stops the run with `SystemExit` (the `ValueError` is its cause). Training at TP 2 is tested; for the TP a converted checkpoint is tested to load at, see §11.6.
 

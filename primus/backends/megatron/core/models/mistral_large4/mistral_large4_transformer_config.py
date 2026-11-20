@@ -110,7 +110,7 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
             raise ValueError("indexer_types[0] is 'shared': layer 0 has no earlier top-k to reuse")
         check_kv_sources(self.kv_source_layers, self.no_rope_layers)
         sources = sorted({s for i, s in enumerate(self.kv_source_layers) if s != i})
-        # the one layer whose latent other layers reuse (kv_source_layer); checked just below
+        # the one layer whose latent other layers reuse (shared_kv_layer); checked just below
         self._kv_source_layer = sources[0] if sources else None
         if len(sources) > 1:
             # the decoder block (and its pipeline carrier) holds the latent of one source layer
@@ -135,16 +135,17 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
             i -= 1
         return i
 
-    def kv_source(self, layer_idx: int) -> int:
+    def kv_source_layer(self, layer_idx: int) -> int:
+        """The layer whose latent layer ``layer_idx`` uses (itself unless it reuses one)."""
         return int(self.kv_source_layers[layer_idx])
 
     def stores_kv(self, layer_idx: int) -> bool:
         """Whether layer ``layer_idx`` keeps its latent for later layers: it is the one KV source
-        layer (``kv_source_layer``, found and checked in ``__post_init__``)."""
+        layer (``shared_kv_layer``, found and checked in ``__post_init__``)."""
         return layer_idx == self._kv_source_layer
 
     @property
-    def kv_source_layer(self) -> Optional[int]:
+    def shared_kv_layer(self) -> Optional[int]:
         """The one layer whose latent other layers reuse, or None (computed in ``__post_init__``)."""
         return self._kv_source_layer
 

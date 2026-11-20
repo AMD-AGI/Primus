@@ -97,12 +97,12 @@ class MistralLarge4TransformerBlock(TransformerBlock):
             config.pipeline_model_parallel_size,
             config.no_rope_layers,
         )
-        self.kv_source = config.kv_source_layer  # the one layer whose latent is reused, or None
+        self.shared_kv_layer = config.shared_kv_layer  # the one layer whose latent is reused, or None
         for layer in self.layers:  # fixed at build: checked once, not per forward
             attn = layer.self_attention
-            if attn.consumes_kv and attn.kv_source_idx != self.kv_source:
+            if attn.consumes_kv and attn.kv_source_idx != self.shared_kv_layer:
                 raise RuntimeError(
-                    f"layer {attn.layer_idx} reuses layer {attn.kv_source_idx}, not {self.kv_source}"
+                    f"layer {attn.layer_idx} reuses layer {attn.kv_source_idx}, not {self.shared_kv_layer}"
                 )
         self._set_source_position()
         first = self.layer_indices[0] if self.layer_indices else None
@@ -131,11 +131,11 @@ class MistralLarge4TransformerBlock(TransformerBlock):
     # ---- pipeline carrier of the shared KV latent ------------------------------
     def _set_source_position(self) -> None:
         """Where this stage's layers sit around the KV source layer, computed once at build
-        (``kv_source`` and ``layer_indices`` do not change): the source ran before the stage /
+        (``shared_kv_layer`` and ``layer_indices`` do not change): the source ran before the stage /
         by its end; both False without sharing or layers."""
-        has_source = self.kv_source is not None and bool(self.layer_indices)
-        self._source_ran_before_stage = has_source and self.layer_indices[0] > self.kv_source
-        self._source_ran_by_stage_end = has_source and self.layer_indices[-1] >= self.kv_source
+        has_source = self.shared_kv_layer is not None and bool(self.layer_indices)
+        self._source_ran_before_stage = has_source and self.layer_indices[0] > self.shared_kv_layer
+        self._source_ran_by_stage_end = has_source and self.layer_indices[-1] >= self.shared_kv_layer
 
     def _pack_latent(self, latent, s, b, h):
         """``[s, b, r]`` latent -> ``[n, b, h]`` rows, each sample's ``s * r`` values dense, the
@@ -203,7 +203,7 @@ class MistralLarge4TransformerBlock(TransformerBlock):
             return h
         if self._source_ran_by_stage_end and latent is None:
             raise RuntimeError(
-                f"Mistral Large 4 PP carrier: layer {self.kv_source}'s latent should reach later stages "
+                f"Mistral Large 4 PP carrier: layer {self.shared_kv_layer}'s latent should reach later stages "
                 "but this stage has none to send"
             )
         s, b, width = h.size(0), h.size(1), h.size(-1)

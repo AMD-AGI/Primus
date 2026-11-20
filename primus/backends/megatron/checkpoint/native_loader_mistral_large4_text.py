@@ -49,7 +49,6 @@ import faulthandler
 import functools
 import json
 import logging
-import math
 import os
 import shutil
 import threading
@@ -303,14 +302,16 @@ def yarn_attention_factor(rope: dict) -> float:
     get_mscale(factor, mscale_all_dim)`` when both mscales are given, else ``get_mscale(factor)``
     (``0.1 * ln(factor) + 1`` for ``factor > 1``)."""
 
-    def get_mscale(scale, mscale=1.0):
-        return 1.0 if scale <= 1 else 0.1 * float(mscale) * math.log(scale) + 1.0
+    # Megatron's YaRN mscale (the formula its YaRN rotary embedding applies)
+    from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
+        _yarn_get_mscale as get_mscale,
+    )
 
     if rope.get("attention_factor") is not None:
         return float(rope["attention_factor"])
     factor = float(rope["factor"])
     if rope.get("mscale") and rope.get("mscale_all_dim"):
-        return get_mscale(factor, rope["mscale"]) / get_mscale(factor, rope["mscale_all_dim"])
+        return get_mscale(factor, float(rope["mscale"])) / get_mscale(factor, float(rope["mscale_all_dim"]))
     return get_mscale(factor)
 
 
@@ -691,7 +692,7 @@ def build_mcore_state_dict(model, store, margs, fields, log):
         for L in range(n):
             p, h = f"decoder.layers.{L}.", f"layers.{L}."
             kv_src, idx_src, is_moe = (
-                cfg.kv_source(L),
+                cfg.kv_source_layer(L),
                 cfg.index_source_layer(L),
                 bool(margs.moe_layer_freq[L]),
             )

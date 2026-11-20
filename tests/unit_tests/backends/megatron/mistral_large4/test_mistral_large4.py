@@ -366,7 +366,7 @@ def test_yarn_inv_freq_matches_transformers():
 def test_config_per_layer_helpers():
     cfg = build_config()
     assert [cfg.index_source_layer(i) for i in range(NL)] == [0, 1, 1, 3, 4, 4]
-    assert cfg.stores_kv(3) and not cfg.stores_kv(4) and cfg.kv_source(5) == 3
+    assert cfg.stores_kv(3) and not cfg.stores_kv(4) and cfg.kv_source_layer(5) == 3
     nope = cfg.layer_config(3)
     assert nope.qk_pos_emb_head_dim == 0 and nope.qk_head_dim == NOPE + ROPE
     assert cfg.layer_config(0) is cfg

@@ -33,9 +33,6 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     moe_layer_freq_list,
     text_config,
 )
-from primus.backends.megatron.patches.te_patches.gemm_workspace_size_patches import (
-    enlarge_te_gemm_workspace,
-)
 from primus.core.config.preset_loader import PresetLoader
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_kv_rank_0, log_rank_0
@@ -205,6 +202,16 @@ def _comparable(value, name, n):
     return list(lst)[:n]
 
 
+def _preset_path(model: str):
+    """The file ``PresetLoader.load(model, framework="megatron")`` reads (same suffix rule)."""
+    from pathlib import Path
+
+    import primus.configs.models as models_root
+
+    name = model if model.endswith((".yaml", ".yml")) else f"{model}.yaml"
+    return (Path(models_root.__file__).resolve().parent / "megatron" / name).resolve()
+
+
 def _preset_values(params):
     """The model preset's own values of the per-layer keys (to tell a user override from them);
     None when there is no model preset (no ``model``, or not a Primus preset file). Other load
@@ -212,12 +219,16 @@ def _preset_values(params):
     model = getattr(params, "model", None)
     if not model:
         return None
-    try:
-        preset = PresetLoader.load(str(model), framework="megatron")
-    except FileNotFoundError:
+    # "not a Primus preset" is decided by the preset file's existence (the path PresetLoader.load
+    # reads), not by its error message: a missing ``extends`` target of an existing preset then
+    # raises from the load below as the broken preset it is
+    path = _preset_path(str(model))
+    # a name outside the presets directory goes to the loader, which refuses it (path traversal)
+    if path.parent == _preset_path("x").parent and not path.is_file():
         # a model that is not a Primus preset: no defaults to tell a user value from, so the caller
-        # refuses any value that disagrees with the checkpoint; any other preset error is raised
+        # refuses any value that disagrees with the checkpoint
         return None
+    preset = PresetLoader.load(str(model), framework="megatron")
     return {k: preset.get(k) for k in LAYER_LISTS + ("first_k_dense_replace",)}
 
 
@@ -517,8 +528,9 @@ def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
 
     In those layouts the experts run through Megatron's ``SequentialMLP`` (one TE linear per
     expert): the same math and the same checkpoint keys (``experts.linear_fc*.weight`` with the
-    expert axis), not TE's own grouped GEMM (see te_gemm_workspace below, which enlarges the TE
-    GEMM workspace for both and warns for TE's grouped GEMM, untested on ROCm for this model).
+    expert axis), not TE's own grouped GEMM (see te_gemm_workspace below, which asks main's
+    hipblaslt_gemm_workspace patch for a larger TE GEMM workspace for both and warns for TE's grouped
+    GEMM, untested on ROCm for this model).
     """
     args = get_args(ctx)
     # this model only: args.model_type (is_mistral_large4_args)
@@ -552,8 +564,8 @@ def patch_mistral_large4_turbo_grouped_gemm_fallback(ctx: PatchContext):
     args.use_turbo_grouped_gemm = False
     args.moe_grouped_gemm = False
     log_kv_rank_0(
-        "[Patch:megatron.mistral_large4.turbo_grouped_gemm_fallback] -moe_grouped_gemm",
-        "False (Megatron-FSDP, expert-TP > 1, or sharded checkpoint without the distributed optimizer: "
+        "[Patch:megatron.mistral_large4.turbo_grouped_gemm_fallback] -use_turbo_grouped_gemm/-moe_grouped_gemm",
+        "False/False (Megatron-FSDP, expert-TP > 1, or sharded checkpoint without the distributed optimizer: "
         "SequentialMLP experts)",
     )
 
@@ -562,15 +574,25 @@ def _experts_on_te_gemms(ctx: PatchContext) -> bool:
     """A Mistral Large 4 run (args.model_type) whose routed experts are not on Primus-Turbo's
     grouped GEMM (``experts_on_turbo_grouped_gemm``, the layer specs' rule)."""
     args = get_args(ctx)
-    # this model only: args.model_type (is_mistral_large4_args)
-    return is_mistral_large4_args(args) and not experts_on_turbo_grouped_gemm(args)
+    # this model only: args.model_type (is_mistral_large4_args). The patch runner evaluates every
+    # condition of a phase before it runs any patch of it, so the setup-phase
+    # turbo_grouped_gemm_fallback has not switched the experts yet: its own condition counts too
+    return is_mistral_large4_args(args) and (
+        not experts_on_turbo_grouped_gemm(args) or _turbo_grouped_gemm_unusable(ctx)
+    )
+
+
+# TE GEMM workspace (MiB) this model asks for when its experts run on TE GEMMs; read by main's
+# patch megatron.te.hipblaslt_gemm_workspace through PRIMUS_TE_GEMM_WORKSPACE_MIB
+TE_GEMM_WORKSPACE_MIB = 512
+TE_GEMM_WORKSPACE_ENV = "PRIMUS_TE_GEMM_WORKSPACE_MIB"
 
 
 @register_patch(
     "megatron.mistral_large4.te_gemm_workspace",
     backend="megatron",
-    phase="before_train",
-    description="Mistral Large 4: enlarge the TE hipBLASLt GEMM workspace when the experts run on TE GEMMs "
+    phase="setup",  # before the before_train phase evaluates megatron.te.hipblaslt_gemm_workspace
+    description="Mistral Large 4: default PRIMUS_TE_GEMM_WORKSPACE_MIB to 512 when the experts run on TE GEMMs "
     "(not on Primus-Turbo's grouped GEMM)",
     condition=_experts_on_te_gemms,
 )
@@ -587,9 +609,10 @@ def patch_mistral_large4_te_gemm_workspace(ctx: PatchContext):
     * ``moe_grouped_gemm`` on without Primus-Turbo (TE's own grouped GEMM): failed on ROCm with
       TE's default workspace and is not tested with the larger one; a warning says so.
 
-    Uses ``te_patches/gemm_workspace_size_patches.py`` (``PRIMUS_TE_GEMM_WORKSPACE_MB``, default 512; nothing on
-    CUDA or when the workspace is already large enough; handles TE 2.17's ``cpp_extensions.gemm``
-    and TE 2.8's ``module.base`` layouts, an error on a TE with neither)."""
+    The resize itself is main's patch ``megatron.te.hipblaslt_gemm_workspace``
+    (``te_patches/hipblaslt_workspace_patches.py``), which reads ``PRIMUS_TE_GEMM_WORKSPACE_MIB``
+    in the before_train phase. This patch only sets that variable to 512 when the user has not set
+    it (a value the user sets, also a smaller one, is kept)."""
     if getattr(get_args(ctx), "moe_grouped_gemm", False):  # here: without Primus-Turbo
         log_rank_0(
             "[Patch:megatron.mistral_large4.te_gemm_workspace] WARNING: TE grouped GEMM experts "
@@ -597,4 +620,14 @@ def patch_mistral_large4_te_gemm_workspace(ctx: PatchContext):
             "(hipBLASLt error 6 with TE's default workspace); use_turbo_grouped_gemm, or moe_grouped_gemm "
             "false (SequentialMLP), are the tested paths"
         )
-    enlarge_te_gemm_workspace("megatron.mistral_large4.te_gemm_workspace")
+    if os.environ.get(TE_GEMM_WORKSPACE_ENV, "").strip():
+        log_rank_0(
+            f"[Patch:megatron.mistral_large4.te_gemm_workspace] {TE_GEMM_WORKSPACE_ENV}="
+            f"{os.environ[TE_GEMM_WORKSPACE_ENV].strip()} set by the user: kept"
+        )
+        return
+    os.environ[TE_GEMM_WORKSPACE_ENV] = str(TE_GEMM_WORKSPACE_MIB)
+    log_rank_0(
+        f"[Patch:megatron.mistral_large4.te_gemm_workspace] {TE_GEMM_WORKSPACE_ENV}={TE_GEMM_WORKSPACE_MIB} "
+        "(experts on TE GEMMs); megatron.te.hipblaslt_gemm_workspace enlarges the workspace"
+    )

@@ -155,7 +155,11 @@ class _LeRoPEFn(torch.autograd.Function):
         _lerope_fwd_kernel[(s, n_rb)](
             xc, y, pos, inv, rows, F=F, BLOCK_F=triton.next_power_of_2(F), BLOCK_R=BLOCK_ROWS
         )
-        ctx.save_for_backward(xc, pos, inv)
+        # x itself is read in backward only for the gradient of inv_freq (NEED_DINV); the model's
+        # alpha is a frozen buffer, so in training only the shape is kept, not a copy of x
+        need_dinv = ctx.needs_input_grad[2]
+        ctx.save_for_backward(xc if need_dinv else None, pos, inv)
+        ctx.x_meta = (xc.shape, xc.dtype, xc.device)
         ctx.inv_dtype = inv_freq.dtype
         ctx.inv_device = inv_freq.device
         return y
@@ -163,15 +167,18 @@ class _LeRoPEFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         xc, pos, inv = ctx.saved_tensors
-        s, rows, F = _shape(xc)
+        shape, dtype, device = ctx.x_meta
         need_dinv = ctx.needs_input_grad[2]
         dyc = dy.contiguous()
-        dx = torch.empty_like(xc)
+        dx = torch.empty(shape, dtype=dtype, device=device)
+        s, rows, F = _shape(dx)
+        if xc is None:  # not read by the kernel without NEED_DINV: any pointer of the right dtype
+            xc = dyc
         block_f = triton.next_power_of_2(F)
         n_rb = triton.cdiv(rows, BLOCK_ROWS)
         # one partial row per program, summed in a fixed order below (no atomics: deterministic);
         # every program writes its row for f < F, and columns >= F are dropped by [:F]: no fill
-        part = torch.empty((s * n_rb if need_dinv else 1, block_f), device=xc.device, dtype=torch.float32)
+        part = torch.empty((s * n_rb if need_dinv else 1, block_f), device=device, dtype=torch.float32)
         _lerope_bwd_kernel[(s, n_rb)](
             dyc,
             xc,

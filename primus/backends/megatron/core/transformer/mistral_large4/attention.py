@@ -241,7 +241,7 @@ class MistralLarge4Attention(MLASelfAttention):
         idx = int(layer_number) - 1  # TransformerLayer passes the global 1-based number
         self.layer_idx = idx
         self.use_rope = config.uses_rope(idx)
-        self.kv_source_idx = config.kv_source(idx)
+        self.kv_source_idx = config.kv_source_layer(idx)
         self.consumes_kv = self.kv_source_idx != idx
         self.stores_kv = config.stores_kv(idx)
         self.index_source_idx = config.index_source_layer(idx)

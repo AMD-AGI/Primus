@@ -5,8 +5,8 @@
 ###############################################################################
 
 """Mistral Large 4 per-layer layout rules, shared by the config, the layer specs, the converter
-and the patches. Pure Python (no Megatron import): the patches load before Megatron is on the
-path."""
+and the patches. No Megatron import (the patches load before Megatron is on the path); the
+tracker name comes from native_convert_common (torch and the standard library only)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,9 @@ import ast
 import importlib.util
 import os
 from typing import List
+
+# torch and the standard library only (no Megatron): the module stays importable before Megatron
+from primus.backends.megatron.checkpoint.native_convert_common import TRACKER_FILENAME
 
 __all__ = [
     "DEFAULT_FIRST_K_DENSE_REPLACE",
@@ -45,9 +48,10 @@ def is_mistral_large4_args(args) -> bool:
     return getattr(args, "model_type", None) == MODEL_TYPE
 
 
-# Megatron's tracker file: a ``load`` / ``pretrained_checkpoint`` directory without it holds no
-# checkpoint (Megatron reads either only through it; a path to ``release/`` or ``iter_N/`` has none)
-MEGATRON_TRACKER = "latest_checkpointed_iteration.txt"
+# Megatron's tracker file (native_convert_common.TRACKER_FILENAME, the converter's constant): a
+# ``load`` / ``pretrained_checkpoint`` directory without it holds no checkpoint (Megatron reads either
+# only through it; a path to ``release/`` or ``iter_N/`` has none)
+MEGATRON_TRACKER = TRACKER_FILENAME
 
 
 def holds_megatron_checkpoint(path) -> bool:

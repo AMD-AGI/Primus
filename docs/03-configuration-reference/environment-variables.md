@@ -154,15 +154,6 @@ Primus seeds many of these in `runner/helpers/envs/base_env.sh`. RCCL honors NCC
 | `NVTE_CK_USES_BWD_V3` | `1` | `base_env.sh`, container passthrough | TE / CK | Use CK backward v3 kernels. |
 | `NVTE_CK_IS_V3_ATOMIC_FP32` | (unset; examples print `0`) | User / container passthrough (`runner/.primus.yaml`) | TE / CK | Atomic FP32 mode for CK v3 backward. |
 | `PATCH_TE_FLASH_ATTN` | `0` | `base_env.sh`, container passthrough | `runner/helpers/hooks/01_patch_te_flash_attn_max_version.sh` | Trigger TE flash-attn patch hook when `1`. |
-| `PRIMUS_TE_GEMM_WORKSPACE_MB` | `512`, read only by the GLM-5.3 and Mistral Large 4 patches (see notes) | User, container passthrough (`runner/.primus.yaml`) | `primus/backends/megatron/patches/te_patches/gemm_workspace_size_patches.py` | TE's hipBLASLt GEMM workspace in MiB on ROCm; raise it if a GEMM fails with `HIPBLASLT Error: 6`. See the notes below the table. |
-
-Notes on `PRIMUS_TE_GEMM_WORKSPACE_MB`:
-
-- Only two patches read it: `megatron.glm5_next.te_gemm_workspace` (every GLM-5.3 run) and `megatron.mistral_large4.te_gemm_workspace` (Mistral Large 4 runs whose routed experts are not on Primus-Turbo's grouped GEMM, i.e. Primus-Turbo off or not installed, or `use_turbo_grouped_gemm` / `moe_grouped_gemm` false). The shipped Mistral Large 4 examples use Primus-Turbo's grouped GEMM, so there it has no effect. For any other model it does nothing.
-- Not to be confused with `PRIMUS_TE_GEMM_WORKSPACE_MIB` (patch `megatron.te.hipblaslt_gemm_workspace`): an opt-in setting for any model, unset by default. Both variables are in MiB and go through the same resize (`te_patches/hipblaslt_workspace_patches.py`, TE 2.17 and TE 2.8 layouts). Both only enlarge the workspace, so with both set the larger value applies.
-- It is in MiB (the name keeps GLM-5.3's existing spelling). Unset or empty means the 512 default. Otherwise it must be an integer, else startup raises a `ValueError` naming it. `0` or below keeps TE's default. It is never lowered below TE's default and is not read on CUDA.
-- Cost: every GEMM workspace buffer TE allocates (per device, and per stream where TE keeps one per stream) has this size, so the 512 MiB default uses about 512 MiB of HBM per buffer instead of TE's 32-64 MiB default.
-- It handles TE 2.17 (`cpp_extensions.gemm`) and TE 2.8 (`module.base`). A TE with neither layout makes startup fail with a `RuntimeError` unless the variable is `0` or below. Without TE it logs a warning and does nothing.
 
 ---
 
@@ -227,7 +218,7 @@ Notes on `PRIMUS_TE_GEMM_WORKSPACE_MB`:
 
 Forwarded keys:
 
-`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `DATABRICKS_TOKEN`, `DATABRICKS_HOST`, `MLFLOW_TRACKING_URI`, `MLFLOW_REGISTRY_URI`, `MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `GPU_ARCHS`, `USING_UEP`, `REBUILD_UEP`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `GPU_MAX_HW_QUEUES`, `HSA_KERNARG_POOL_SIZE`, `PRIMUS_TURBO_DEEPEP_TIMEOUT`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`, `PATH_TO_BNXT_TAR_PACKAGE`, `ANP_HOME_DIR`, `RCCL_HOME_DIR`, `MPI_HOME_DIR`, `DUMP_HLO`, `DUMP_HLO_DIR`, `PRIMUS_DETERMINISTIC`, `PRIMUS_HIPBLASLT_TUNING`, `PRIMUS_HIPBLASLT_TUNING_STAGE`, `TE_HIPBLASLT_TUNING_RUN_COUNT`, `TE_HIPBLASLT_TUNING_ALGO_COUNT`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_TUNING_OVERRIDE_FILE`, `PRIMUS_TE_GEMM_WORKSPACE_MB`
+`MASTER_ADDR`, `MASTER_PORT`, `NNODES`, `NODE_RANK`, `GPUS_PER_NODE`, `DOCKER_IMAGE`, `HF_TOKEN`, `WANDB_API_KEY`, `DATABRICKS_TOKEN`, `DATABRICKS_HOST`, `MLFLOW_TRACKING_URI`, `MLFLOW_REGISTRY_URI`, `MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING`, `ENABLE_NUMA_BINDING`, `REBUILD_PRIMUS_TURBO`, `GPU_ARCHS`, `USING_UEP`, `REBUILD_UEP`, `USING_AINIC`, `PATCH_TE_FLASH_ATTN`, `REBUILD_BNXT`, `HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_USES_BWD_V3`, `GPU_MAX_HW_QUEUES`, `HSA_KERNARG_POOL_SIZE`, `PRIMUS_TURBO_DEEPEP_TIMEOUT`, `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX`, `PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32`, `NVTE_CK_IS_V3_ATOMIC_FP32`, `PATH_TO_BNXT_TAR_PACKAGE`, `ANP_HOME_DIR`, `RCCL_HOME_DIR`, `MPI_HOME_DIR`, `DUMP_HLO`, `DUMP_HLO_DIR`, `PRIMUS_DETERMINISTIC`, `PRIMUS_HIPBLASLT_TUNING`, `PRIMUS_HIPBLASLT_TUNING_STAGE`, `TE_HIPBLASLT_TUNING_RUN_COUNT`, `TE_HIPBLASLT_TUNING_ALGO_COUNT`, `HIPBLASLT_LOG_MASK`, `HIPBLASLT_LOG_FILE`, `HIPBLASLT_LOG_LEVEL`, `HIPBLASLT_TUNING_OVERRIDE_FILE`
 
 ---
 
