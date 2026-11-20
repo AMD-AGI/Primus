@@ -12,14 +12,13 @@ optimizer groups.
 
 VGGT lives in `primus/backends/vision/vggt_model/`. WorldMirror lives in
 `primus/backends/vision/worldmirror/`. Both are part of this package, the same
-way the diffusion models live under `primus/backends/diffusion/`. The trainer
-does not import `third_party/vggt` or `third_party/HunyuanWorld-Mirror-rocm`.
-
-The existing `worldmirror` backend still launches WorldMirror's Lightning
-trainer from `third_party/HunyuanWorld-Mirror-rocm`. That backend is unchanged.
+way the diffusion models live under `primus/backends/diffusion/`. There is no
+runtime checkout: the trainer does not import `third_party/` or launch an
+upstream trainer.
 
 Stage 2's Gaussian renderer needs the `gsplat` package. Set
-`VISION_BUILD_GSPLAT=1` and the install hook builds it. Stage 1 does not import
-it.
+`VISION_BUILD_GSPLAT=1` and the install hook builds gsplat v1.5.3 the same
+way as before: a temporary copy, the ROCm patch, GLM, then
+`pip install --no-build-isolation`. Stage 1 does not import it.
 
 Launch recipes live in `examples/vision/`.

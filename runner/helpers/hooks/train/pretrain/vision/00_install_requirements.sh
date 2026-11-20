@@ -47,7 +47,7 @@ fi
 if [[ "${VISION_BUILD_GSPLAT:-0}" == "1" ]]; then
   echo "[+] Building gsplat when it is not already installed..."
   PYTHONPATH="${PRIMUS_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    python3 -c 'from primus.backends.worldmirror.runtime import install_gsplat; from primus.backends.worldmirror.worldmirror_trainer import resolve_worldmirror_repo; install_gsplat(resolve_worldmirror_repo(""))'
+    python3 -c 'from primus.backends.vision.gsplat_build import install_gsplat; install_gsplat()'
   echo "[OK] gsplat is installed"
 else
   echo "[INFO] VISION_BUILD_GSPLAT is unset. Stage 2's Gaussian renderer needs gsplat; set VISION_BUILD_GSPLAT=1 to build it."
