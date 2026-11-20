@@ -4626,4 +4626,10 @@ def precompute_float8_dynamic_scale_for_fsdp(model: nn.Module) -> None:
     )
 
     torchao_precompute(model)
+    if os.getenv("FLUX_FPROP_SWITCH_STEP", "").strip():
+        from . import flux_fprop_switch
+
+        # The switch explicitly refreshes FP8 scales before the first FP8 gather.
+        if not flux_fprop_switch.FP8_ACTIVE:
+            return
     precompute_fp8_all_gather_amax(model)

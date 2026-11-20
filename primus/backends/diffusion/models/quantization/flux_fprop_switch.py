@@ -19,6 +19,7 @@ _MODS: list = []
 _A6W4_LOCAL: dict = {}
 _FP8_LOCAL: dict = {}
 _READY = False
+FP8_ACTIVE = False
 
 
 def _log(msg):
@@ -36,11 +37,6 @@ def switch_step():
     fp4_ag = os.getenv("FLUX_FP4_ALL_GATHER", "1") == "1"
     if not _PRECOMPILE and fp4_ag:
         raise RuntimeError("FLUX_FPROP_SWITCH_PRECOMPILE=0 needs FLUX_FP4_ALL_GATHER=0")
-    if _PRECOMPILE and fp4_ag and os.getenv("FLUX_FP8_ALL_GATHER", "0") != "1":
-        raise RuntimeError(
-            "FLUX_FPROP_SWITCH_STEP with the FP4 gather needs FLUX_FP8_ALL_GATHER=1, which runs "
-            "the per-step amax refresh the FP8 gather quantizes with"
-        )
     return step
 
 
@@ -133,13 +129,13 @@ def _swap_gather(model, to_fp8):
                 skipped[kind] = skipped.get(kind, 0) + 1
                 continue
             _A6W4_LOCAL[key] = cur
-            if eligible:
+            if eligible and os.getenv("FLUX_FP8_ALL_GATHER", "0") == "1":
                 new = _FP8_LOCAL.get(key)
                 if new is None or new._tensor is not cur._tensor:
                     new = mx._FP8AllGatherWeight(cur._tensor)
                     _FP8_LOCAL[key] = new
             else:
-                # Gathers the bf16 weight, as with FLUX_FP4_ALL_GATHER=0.
+                # Without FP8 gather, quantize the gathered bf16 weight locally.
                 new = cur._tensor
                 plain += 1
         else:
@@ -208,6 +204,7 @@ def precompile(trainer):
 
 
 def switch_fprop(model, global_step, target="fp8"):
+    global FP8_ACTIVE
     t0 = time.time()
     if _PRECOMPILE:
         if not _READY:
@@ -228,6 +225,7 @@ def switch_fprop(model, global_step, target="fp8"):
                 switched += 1
         torch._dynamo.reset()
         how = "dynamo reset"
+    FP8_ACTIVE = target == "fp8"
     _log(
         f"FLUX_FPROP_SWITCH_STEP: {switched} linears a6w4 -> {target} fprop after step "
         f"{global_step} ({how}, {time.time() - t0:.2f}s)"

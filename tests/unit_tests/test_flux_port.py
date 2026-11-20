@@ -6,14 +6,20 @@
 
 """CPU regressions for selectable FLUX paths; GPU kernel validation is separate."""
 
+import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 from torch import nn
 
 from primus.backends.diffusion.models.flux import layers
-from primus.backends.diffusion.models.quantization import mxfp4_linear
+from primus.backends.diffusion.models.quantization import (
+    flux_fprop_switch,
+    mxfp4_linear,
+    mxfp4_linear_dual,
+)
 
 
 class FluxPortTest(unittest.TestCase):
@@ -54,6 +60,58 @@ class FluxPortTest(unittest.TestCase):
                 actual = layers._gated_linear(linear, x, gate)
             self.assertEqual(linear.used_fusion, enabled)
             torch.testing.assert_close(actual, gate * linear(x))
+
+    def test_fprop_switch_bf16_gather_roundtrip(self):
+        model = nn.Linear(32, 32)
+        shard = mxfp4_linear._A6W4AllGatherWeight(model.weight.detach())
+        weight = SimpleNamespace(_local_tensor=shard)
+        fp = SimpleNamespace(sharded_param=weight)
+        with (
+            patch.dict(
+                os.environ, FLUX_FPROP_SWITCH_STEP="7325", FLUX_FP4_ALL_GATHER="1", FLUX_FP8_ALL_GATHER="0"
+            ),
+            patch.object(flux_fprop_switch, "_PRECOMPILE", True),
+            patch.object(flux_fprop_switch, "_MODS", [(model, None, None, True)]),
+            patch.object(flux_fprop_switch, "_A6W4_LOCAL", {}),
+            patch.object(flux_fprop_switch, "_fsdp_params", return_value={id(model): fp}),
+            patch.object(flux_fprop_switch, "_reset_gather_state"),
+        ):
+            self.assertEqual(flux_fprop_switch.switch_step(), 7325)
+            self.assertEqual(flux_fprop_switch._swap_gather(model, True), (1, 1))
+            self.assertIs(weight._local_tensor, shard._tensor)
+            self.assertEqual(flux_fprop_switch._swap_gather(model, False), (1, 0))
+            self.assertIs(weight._local_tensor, shard)
+
+    def test_fp8_scale_refresh_deferred_until_switch(self):
+        model = nn.Linear(32, 32)
+        with (
+            patch.dict(os.environ, FLUX_FPROP_SWITCH_STEP="50", FLUX_FP8_ALL_GATHER="1"),
+            patch.object(flux_fprop_switch, "FP8_ACTIVE", False),
+            patch.object(flux_fprop_switch, "_PRECOMPILE", True),
+            patch.object(flux_fprop_switch, "_READY", True),
+            patch.object(flux_fprop_switch, "_set_mode", return_value=(1, 0)),
+            patch("torchao.float8.precompute_float8_dynamic_scale_for_fsdp") as torchao_refresh,
+            patch.object(mxfp4_linear_dual, "precompute_fp8_all_gather_amax") as refresh,
+        ):
+            mxfp4_linear_dual.precompute_float8_dynamic_scale_for_fsdp(model)
+            torchao_refresh.assert_called_once_with(model)
+            refresh.assert_not_called()
+            flux_fprop_switch.switch_fprop(model, 50)
+            refresh.assert_called_once_with(model)
+            refresh.reset_mock()
+            mxfp4_linear_dual.precompute_float8_dynamic_scale_for_fsdp(model)
+            refresh.assert_called_once_with(model)
+
+    def test_fp8_scale_refresh_without_switch(self):
+        model = nn.Linear(32, 32)
+        with (
+            patch.dict(os.environ, FLUX_FPROP_SWITCH_STEP=""),
+            patch.object(flux_fprop_switch, "FP8_ACTIVE", False),
+            patch("torchao.float8.precompute_float8_dynamic_scale_for_fsdp"),
+            patch.object(mxfp4_linear_dual, "precompute_fp8_all_gather_amax") as refresh,
+        ):
+            mxfp4_linear_dual.precompute_float8_dynamic_scale_for_fsdp(model)
+            refresh.assert_called_once_with(model)
 
     def test_bf16_eval_guard_preserves_training_dispatch(self):
         implementation = mxfp4_linear._implementation
