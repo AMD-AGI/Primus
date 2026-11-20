@@ -16,6 +16,7 @@ halves of ``[gate | up]`` swapped and a wrong ``beta``, have to fail the same ch
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +68,16 @@ def test_backend_names():
         LINEAR_BETA,
         False,
     )
+    assert repr(act) == f"SituActivation(beta={BETA}, linear_beta={LINEAR_BETA}, backend=eager)"
+
+
+def test_flydsl_probe_needs_the_flydsl_package(monkeypatch):
+    """Without the package the backend fails when it is resolved (at build), naming the eager fallback."""
+    monkeypatch.setitem(sys.modules, "flydsl", None)
+    monkeypatch.setitem(sys.modules, "flydsl.compiler", None)
+    with pytest.raises(ImportError, match="situ_backend: eager") as err:
+        resolve_situ_backend("flydsl")
+    assert "flydsl" in str(err.value.__cause__)
 
 
 def _flydsl_or_skip():
@@ -138,6 +149,31 @@ def test_flydsl_situ_with_probs_matches_eager(rows):
         assert _rel_err(a, b) < 1e-2, f"{name}: {_rel_err(a, b):.2e}"
 
 
+@pytest.mark.parametrize(
+    "inter, dtype",
+    [
+        (3076, torch.bfloat16),  # 2 x 3076 is not a multiple of 16: neither FlyDSL kernel takes it
+        (3072, torch.float32),  # the FlyDSL kernels take bf16 only
+    ],
+)
+def test_flydsl_forward_with_probs_falls_back_to_eager(inter, dtype):
+    """Inputs the FlyDSL kernels do not take go through the eager reference, gradients included."""
+    _flydsl_or_skip()
+    rows = 1000
+    x = _x(rows, inter, seed=inter).to(dtype)
+    g = torch.Generator(device="cpu").manual_seed(5)
+    p = torch.rand(rows, 1, generator=g).cuda()
+    dy = torch.randn(rows, inter, generator=g).to("cuda", dtype)
+    ref_y, ref_dx, ref_dp = _eager_with_probs(x, p, dy)
+    act = SituActivation(backend="flydsl", beta=BETA, linear_beta=LINEAR_BETA)
+    xg, pg = x.detach().clone().requires_grad_(), p.detach().clone().requires_grad_()
+    y = act.forward_with_probs(xg, pg)
+    y.backward(dy)
+    assert y.dtype == dtype
+    for name, a, b in (("out", ref_y, y.detach()), ("dx", ref_dx, xg.grad), ("dprobs", ref_dp, pg.grad)):
+        assert _rel_err(a, b) < 1e-2, f"{name}: {_rel_err(a, b):.2e}"
+
+
 def test_flydsl_situ_misaligned_views_match_eager():
     """``x`` and ``dy`` as views 2 bytes past a 16-byte boundary (the kernels move 16 B per access)."""
     _flydsl_or_skip()
@@ -187,3 +223,7 @@ def test_flydsl_rejects_unsupported_inputs():
         flydsl_situ_pre_mul_fused(x, beta=BETA, linear_beta=None)
     with pytest.raises(ValueError, match="situ_backend: eager"):
         flydsl_situ_with_probs(x, torch.rand(32, 1, device="cuda"), beta=BETA, linear_beta=LINEAR_BETA)
+    with pytest.raises(ValueError, match="probs is on cpu"):
+        flydsl_situ_with_probs(x, torch.rand(64, 1), beta=BETA, linear_beta=LINEAR_BETA)
+    with pytest.raises(ValueError, match="not one value for each"):
+        flydsl_situ_with_probs(x, torch.rand(32, 2, device="cuda"), beta=BETA, linear_beta=LINEAR_BETA)
