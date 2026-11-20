@@ -241,8 +241,21 @@ class SituActivation(nn.Module):
             backend = str(getattr(config, "situ_backend", "eager") or "eager")
         if backend not in SITU_BACKENDS:
             raise ValueError(f"situ_backend must be one of {list(SITU_BACKENDS)}; got {backend!r}")
+        if backend == "flydsl" and self.linear_beta is None:
+            raise ValueError(
+                "situ_backend 'flydsl' needs activation_situ_linear_beta (its kernels always soft-clamp the up "
+                "branch); set it or select situ_backend: eager"
+            )
         self.backend_name = backend
         self._situ = resolve_situ_backend(backend)
+        self._probs_kernel = None
+        if backend == "flydsl":
+            from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels._flydsl_gfx1250 import (
+                flydsl_situ_with_probs,
+                supports_situ_probs_inputs,
+            )
+
+            self._probs_kernel = (supports_situ_probs_inputs, flydsl_situ_with_probs)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply ``situ`` to a fused ``[..., 2I]`` ``[gate | up]`` tensor."""
@@ -250,22 +263,18 @@ class SituActivation(nn.Module):
 
     @property
     def fuses_probs(self) -> bool:
-        """Whether :meth:`forward_with_probs` folds the router probability into the FlyDSL kernel: always with
-        the flydsl backend (the kernels need ``linear_beta``)."""
-        return self.backend_name == "flydsl" and self.linear_beta is not None
+        """Whether :meth:`forward_with_probs` folds the router probability into the FlyDSL kernel: true with
+        the flydsl backend."""
+        return self._probs_kernel is not None
 
     def forward_with_probs(self, x: Tensor, probs: Tensor) -> Tensor:
         """``situ(x) * probs`` (one probability per row, e.g. ``[rows, 1]``) in ``x``'s dtype; the multiply runs
         inside the FlyDSL kernel when :attr:`fuses_probs` and the shape allows, else as the routed experts'
         unfused ``(act * probs).to(act.dtype)``."""
-        if self.fuses_probs:
-            from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels._flydsl_gfx1250 import (
-                flydsl_situ_with_probs,
-                supports_situ_probs_inputs,
-            )
-
-            if supports_situ_probs_inputs(x, probs) is None:
-                return flydsl_situ_with_probs(x, probs, beta=self.beta, linear_beta=self.linear_beta)
+        if self._probs_kernel is not None:
+            unsupported, situ_with_probs = self._probs_kernel
+            if unsupported(x, probs) is None:
+                return situ_with_probs(x, probs, beta=self.beta, linear_beta=self.linear_beta)
         out = self(x)
         return (out * probs).to(out.dtype)
 

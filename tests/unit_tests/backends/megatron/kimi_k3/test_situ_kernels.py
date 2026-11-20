@@ -53,6 +53,9 @@ def test_backend_names():
         resolve_situ_backend("cuda")
     with pytest.raises(ValueError):
         SituActivation(backend="cuda")
+    # checked before the kernels load, so on any device and at build time rather than on the first forward
+    with pytest.raises(ValueError, match="situ_backend: eager"):
+        SituActivation(backend="flydsl", beta=BETA, linear_beta=None)
     assert SituActivation().backend_name == "eager"
     cfg = SimpleNamespace(
         situ_backend="eager", activation_situ_beta=BETA, activation_situ_linear_beta=LINEAR_BETA

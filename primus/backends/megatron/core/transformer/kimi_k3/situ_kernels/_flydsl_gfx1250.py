@@ -41,7 +41,12 @@ from typing import Dict, Optional, Tuple
 import torch
 from torch import Tensor
 
-__all__ = ["flydsl_situ_pre_mul_fused", "flydsl_situ_with_probs", "supports_situ_inputs"]
+__all__ = [
+    "flydsl_situ_pre_mul_fused",
+    "flydsl_situ_with_probs",
+    "supports_situ_inputs",
+    "supports_situ_probs_inputs",
+]
 
 _BLOCK = 256
 _VEC = 8
