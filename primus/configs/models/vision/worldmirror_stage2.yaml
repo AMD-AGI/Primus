@@ -12,6 +12,8 @@ model:
     enable_norm: true
     enable_gs: true
     enable_cond: true
+    # Match training/configs/train/stage2_disk.yaml: only the four render losses.
+    loss_preset: render
     pretrained: ${PRETRAINED_PATH:}
     freeze_params:
       - visual_geometry_transformer

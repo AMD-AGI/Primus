@@ -13,6 +13,12 @@ model:
     enable_norm: true
     enable_gs: false
     enable_cond: true
+    # Same four terms as the baseline criterion when the Gaussian head is off.
+    loss_preset: geometry
+    # The paper initializes stage 1 from VGGT. Those tensors use different module
+    # names, so point PRETRAINED_PATH at the file from
+    # examples/vision/convert_vggt_to_worldmirror.py. Unset, this loads the
+    # released WorldMirror checkpoint instead.
     pretrained: ${PRETRAINED_PATH:tencent/HunyuanWorld-Mirror}
     freeze_params: []
     pretrained_lr: 2.0e-5
