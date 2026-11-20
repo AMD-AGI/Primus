@@ -121,6 +121,15 @@ overrides:
   moe_replica_slots: 4
 ```
 
+## Benchmarking with recorded routing
+
+Mock weights route almost uniformly, which hides the imbalance replication is for. To benchmark with a real model's routing, record it with Megatron's router tracer and replay it on the proxy:
+
+1. Record: run the real model with `moe_routing_trace_path: <dir>` (and `moe_routing_trace_max_training_iters` to limit the steps), without activation recompute of the MoE layers and without evaluation, so that every record is one training forward. Every rank writes `<dir>/router_trace_rank<r>.jsonl` with the top-k experts of every MoE layer.
+2. Replay: run the proxy on the same number of ranks with `moe_routing_replay_path: <dir>`. Each rank reads its own file; each MoE layer replays the recorded decoder layer with the same number, or the ones listed in `moe_routing_replay_layers`, in layer order (e.g. `[10, 30, 44, 23]` drives a 4-layer proxy with four layers of a 61-layer model). Every training forward takes the next recorded tokens of its layer and wraps around; evaluation routes by the router's own scores and leaves the recorded position as it is.
+
+The router still computes its scores; Megatron's routing replay picks the recorded experts and takes their probabilities from those scores. The replayed routes need the same top-k and expert count as the proxy. Not with `disable_primus_topk_router` (replay lives in Primus's top-k router), `moe_router_fusion`, `moe_use_fused_router_with_aux_score`, forced or biased routing, recompute of MoE layers, PP > 1 or MTP.
+
 ## Results
 
 8 x MI355X, one node, EP8, BF16, DeepSeek-V3 4-layer proxy: 256 experts, top-8, `main_grads_dtype: bf16`, sequence 4096, MBS 2, GBS 64 (4 micro-batches per step, 8192 tokens per rank per micro-batch), Turbo DeepEP at 80 CUs, `overlap_grad_reduce: false`, mock weights. `ultraep` with the defaults (4 slots, `min_rows` 1024, `min_gain` 0.1), `per_step`. The DeepSeek expert bias is off (`moe_router_enable_expert_bias: false`) unless the row says on. Step time on rank 7: median of 3 interleaved runs per arm (20- or 30-step runs, steps after the 10th), or the mean after the 10th step of one 100-step run where marked. Real routing is replayed with `moe_routing_replay_path` ([Benchmarking with recorded routing](#benchmarking-with-recorded-routing)). Primus-Turbo [#675](https://github.com/AMD-AGI/Primus-Turbo/pull/675) at `8eadf346`; Primus: this feature's code at revisions measured during the review of [AMD-AGI/Primus#1508](https://github.com/AMD-AGI/Primus/pull/1508); the synthetic-skew row and the recompute run after the last change to the replica path, the other rows earlier (re-measuring the synthetic skew after the later revisions moved it by less than 0.1%).
