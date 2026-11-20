@@ -74,7 +74,7 @@ modules:
       load: null
       save: null
       disable_last_saving: true
-      ckpt_format: torch
+      ckpt_format: torch_dist
       eval_iters: 0
 
       # turbo off: TE grouped GEMM + alltoall dispatcher

@@ -43,7 +43,9 @@ a Megatron GPT layer:
 | `primus/backends/megatron/patches/inkling_muon_qkv_patches.py` | Per-layer q/k/v split for Megatron's Muon (see [Muon](#muon)) |
 | `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L`, `inkling_large_6L` and `inkling_large_20L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
 | `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml`, `inkling_large_6L-FP8-pretrain.yaml` | Single-node recipes (EP 8, AdamW, mock data) |
-| `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_large_20L-BF16-pretrain.yaml` | Four-node recipes (PP 4 × EP 8) for the full Small model and the 20-layer Large proxy; not yet run on this code |
+| `examples/megatron/configs/MI355X/inkling_large_6L-BF16-async-ckpt-pretrain.yaml` | The 6L recipe with asynchronous checkpoint saves that resume on rerun (see [Asynchronous saving](#asynchronous-saving)) |
+| `examples/megatron/configs/MI355X/inkling_large_20L-BF16-pretrain.yaml` | Four-node recipe (PP 4 × EP 8) for the 20-layer Large proxy, run on 4 MI355X nodes in BF16 with Turbo off |
+| `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_small-FP8-pretrain.yaml`, `inkling_large-BF16-pretrain.yaml`, `inkling_large-FP8-pretrain.yaml` | Multi-node recipes run on MI355X nodes: the full Small model (PP 4 × EP 8) on 4 nodes with Turbo, in BF16 and in FP8 tensorwise, and the full 66-layer Large model (PP 16 × EP 8) on 16 nodes with Turbo, in BF16 and in FP8 tensorwise with Turbo's GEMMs off |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
 
@@ -160,7 +162,7 @@ arguments can be appended after `--config` (later ones win).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `PRIMUS_TURBO` | `true` (Large recipes) | `false` turns off every Turbo kernel in the Large recipes; the Small recipe always runs without Turbo |
+| `PRIMUS_TURBO` | `true` (Large recipes) | `false` turns off every Turbo kernel in the Large recipes; the single-node Small recipe always runs without Turbo |
 | `PRIMUS_MODEL` | `inkling_small_12L` or `inkling_large_6L` | Model preset |
 | `PRIMUS_INKLING_ATTN` | `flex` | `flex` or `eager` (dense bias; about 2× the step time and more memory) |
 | `PRIMUS_TRAIN_ITERS` | `50` | Training steps; must be more than the 5 warmup steps |
@@ -168,7 +170,10 @@ arguments can be appended after `--config` (later ones win).
 
 ### Primus-Turbo
 
-The Large recipes turn on Turbo grouped GEMM, RMSNorm, DeepEP and GEMM.
+The single-node Large recipes and the multi-node recipes turn on Turbo grouped
+GEMM, RMSNorm, DeepEP and GEMM, except Large FP8, which turns on only RMSNorm
+and DeepEP and keeps TE's FP8 GEMMs (its header gives the cost of switching).
+The 12-layer Small and 20-layer Large proxies run without Turbo.
 Inkling keeps its own attention core, so `use_turbo_attention` stays off.
 
 - In BF16, Turbo's GEMM and TE's linears call the same hipBLASLt kernels, so
@@ -183,10 +188,12 @@ Inkling keeps its own attention core, so `use_turbo_attention` stays off.
   has no effect, because Inkling's router replaces Megatron's routing.
 - Turbo grouped GEMM trains each expert linear as one stacked 3-D `weights`
   tensor, exposing the per-expert `weight{e}` as views of it. Muon does not
-  orthogonalize 3-D weights, so Primus rejects Muon with Turbo grouped GEMM;
-  run Muon with `PRIMUS_TURBO=false`. Strict checkpoint loading also expects
-  the stacked key, so load checkpoints without it (such as the converter's)
-  with `use_turbo_grouped_gemm: false`.
+  orthogonalize 3-D weights, so Primus rejects Muon with Turbo grouped GEMM
+  (unless `primus_turbo` isn't installed or the model has no MoE layers);
+  run Muon with `PRIMUS_TURBO=false`. Checkpoints hold only the per-expert
+  `weight{e}` (`torch_dist` always; `torch` ones written without Turbo), and
+  loading them fills the stacked tensor, so checkpoints move freely between
+  Turbo and non-Turbo runs.
 
 ### FP8
 
@@ -267,30 +274,131 @@ python tools/checkpoint_conversion/convert_inkling_hf_megatron.py \
 
 The embedding and LM head are resized to the vocabulary that training builds:
 the 200,058 real tokens rounded up to a multiple of
-`make_vocab_size_divisible_by` × TP, which is 200,064 with the defaults (128 × 1).
-If the training run uses other values, pass the same ones with
-`--make-vocab-size-divisible-by` and `--tensor-model-parallel-size`, or set
-`--target-vocab-size` directly; otherwise loading fails on the embedding and
-LM-head shapes.
+`make_vocab_size_divisible_by` × TP, which is 200,064 with the defaults (128 × 1;
+Inkling trains only at TP 1, so the converter refuses other TP values).
+If the training run uses another `make_vocab_size_divisible_by`, pass it with
+`--make-vocab-size-divisible-by`, or set `--target-vocab-size` directly;
+otherwise loading fails on the embedding and LM-head shapes.
 
-`--dry-run` maps every tensor from the safetensors headers alone and writes
-nothing. Both modes need one visible GPU (Transformer Engine layers will not
-build without one), but the model is built on the meta device, so no GPU memory
-is allocated. The output is a single-rank (TP = PP = EP = 1) `torch` checkpoint;
-load it with `--load <output> --ckpt-format torch --finetune --no-load-optim
---no-load-rng`, and with Turbo grouped GEMM off (see [Primus-Turbo](#primus-turbo)).
-A resharded `torch_dist` checkpoint for multi-node runs is not written yet.
+The output is a `torch_dist` checkpoint in `<output>/release`. Megatron
+reshards it on load, so any layout (PP, virtual stages, EP, DP, with or without
+Turbo) can start from it:
+
+```bash
+--load /data/inkling_small_megatron --ckpt_format torch_dist --finetune --no_load_optim --no_load_rng
+```
+
+`--ckpt-format torch` writes the older single-rank (TP = PP = EP = 1) file
+instead, which only a single-rank run can load. `--dry-run` maps every tensor
+from the safetensors headers alone and writes nothing. Every mode needs one
+visible GPU (Transformer Engine layers will not build without one), but the
+model is built on the meta device, so no GPU memory is allocated. The converted
+weights sit in host memory until they are written: 2 bytes per parameter in
+bf16.
+
+## Saving and resuming
+
+The recipes save `torch_dist` checkpoints (`ckpt_format: torch_dist`); set
+`save` and `save_interval` to write them and `load` to resume. Primus writes
+them under `<workspace>/<work_group>/<user_name>/<exp_name>/checkpoints`
+whatever path `save` names. Megatron keys
+every tensor by its global layer and expert number, so a run can resume under a
+different PP, EP or DP size, or with Turbo switched on or off; for the optimizer
+state, see below.
+
+### Optimizer state: `dist_ckpt_optim_fully_reshardable`
+
+**This is off in every Inkling recipe.** No recipe or preset sets it, so it
+comes from `trainer_base.yaml` as `null`, which is Megatron's default `False`.
+The recipes use the distributed optimizer, which then saves its state (fp32
+master weights and Adam moments) as `dp_reshardable`: each rank's slice of the
+optimizer's flat buffers, as laid out in memory. That save is fast, but those
+buffers depend on the parallel layout and on which expert layers are built, so
+**with the default, a resume may change only the DP size.**
+
+To resume with the optimizer state under any of these changes, **the run that
+saves** must set, under the recipe's `overrides`:
+
+```yaml
+      dist_ckpt_optim_fully_reshardable: true
+```
+
+- a different PP or EP size;
+- Turbo grouped GEMM (`use_turbo_grouped_gemm`) switched on or off: Turbo
+  trains each expert linear as one stacked tensor and TE as one tensor per
+  expert, so the optimizer buffers are laid out differently even at the same
+  PP and EP.
+
+It cannot be added at resume time: the format is fixed when the checkpoint is
+written. It stores one optimizer tensor per model parameter, under the
+parameter's global key, so any layout can load it; the save gathers the
+buffers across DP ranks and is slower and uses more memory than the default.
+The model weights reshard either way, so a run that does not load the optimizer
+state (`--no-load-optim`, as when starting from a converted checkpoint) does not
+need it. All the PP, EP and Turbo-switch resumes below were saved with it set.
+
+On Nov 9, 2026 (`rocm/primus:v26.9`, one node), the 6L recipe on a 4-layer
+model (`PRIMUS_MODEL=inkling_small_tiny --num_layers 4 --moe_layer_freq
+"([0]*1+[1]*3)"`, Turbo on, EP 8) saved at step 10 of 20 and was resumed three
+ways:
+
+| Resume | Steps 13–20 vs. the uninterrupted run |
+| --- | --- |
+| Same layout | identical |
+| PP 2 × EP 4, Turbo on | within 6e-4 |
+| PP 2 × EP 4, Turbo off | within 6e-4 |
+
+The PP 2 runs differ only by summation order. With the same layout, step 11 is
+identical too. Step 12's logged loss differs in every resume (by 3e-3 with the
+same layout), yet steps 13–20 then match exactly, so the training state is
+unchanged and only that logged value differs: Megatron does not reset its loss
+accumulator after the first logged step of a run, so the resumed run logs the
+mean of steps 11 and 12.
+
+### Asynchronous saving
+
+`inkling_large_6L-BF16-async-ckpt-pretrain.yaml` is the 6L recipe with
+background saves. Training pauses only while each rank copies its shard to host
+memory; the write to disk runs in a persistent worker. It sets:
+
+```yaml
+      async_save: true
+      use_persistent_ckpt_worker: true    # without it Megatron turns async_save off for torch_dist
+      async_strategy: mcore               # the default, nvrx, needs nvidia-resiliency-ext
+      save: <workspace>/<work_group>/<user_name>/<exp_name>/checkpoints
+      load: <same directory>              # a rerun of the same command resumes
+      exit_on_missing_checkpoint: false   # the first run starts from scratch
+      disable_last_saving: false
+      save_interval: ${PRIMUS_SAVE_INTERVAL:25}
+```
+
+Each checkpoint of the 6L model (weights and distributed-optimizer state) is
+about 820 GB, so set `PRIMUS_WORKSPACE` to a large local disk:
+
+```bash
+export PRIMUS_WORKSPACE=/mnt/m2m_nobackup/$USER
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI355X/inkling_large_6L-BF16-async-ckpt-pretrain.yaml
+```
+
+On Nov 16, 2026 (`rocm/primus:v26.9`, one node), a save at step 10 paused
+training for about 1 minute, against 14 minutes with a synchronous save; the
+background write finished during the next 10 steps without slowing them. A run
+stopped at step 10 (`PRIMUS_EXIT_INTERVAL=10`) and then rerun with the same
+command resumed from step 10 and saved again at step 20.
 
 ## Parallelism
 
 - **Expert and data parallelism** are used by the single-node recipes and are
   covered by the 8-GPU parallel check.
 - **Pipeline parallelism**, with or without virtual (interleaved) stages, is
-  covered by the 8-GPU parallel check. The four-node recipes use PP 4 but have
-  not been run on this code yet.
-- **Tensor parallelism** has not been run. **Sequence parallelism** and
-  **context parallelism** are rejected: the output ShortConvs would need a
-  3-token halo exchange across ranks, which isn't written.
+  covered by the 8-GPU parallel check. The multi-node recipes run PP 4 for
+  Small and the 20-layer Large proxy on 4 nodes and PP 16 for Large on 16
+  nodes.
+- **Tensor, sequence and context parallelism** are rejected. With TP, MoE needs
+  sequence parallelism, and the output ShortConvs would then need a 3-token
+  halo exchange across ranks, which isn't written; their checkpoint entries
+  would also need to be TP-sharded.
 
 ## Testing
 
@@ -350,8 +458,9 @@ TP stays at 1 in every layout. The script exits non-zero if any layout fails.
   for sequences of 128 tokens or fewer, and that kernel rejects the block mask.
   It hits the 96-token unit tests in some orders. Training lengths are
   unaffected.
-- No `sharded_state_dict` yet, so distributed checkpoint save and restore are
-  untested. No Inkling FLOPs formula, so logged TFLOP/s use the GPT formula.
+- No Inkling FLOPs formula, so logged TFLOP/s use the GPT formula.
+- Checkpoint save and resume have been run on one node only, on a 4-layer
+  model; the four-node recipes have not saved or resumed yet.
 - Expert load balance and the bias update have not been verified with
   per-expert load logging.
 - FP8 lowers the loss by about 0.045 at 50 steps for reasons not yet known

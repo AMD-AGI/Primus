@@ -6,9 +6,10 @@
 
 """Inkling model builder + ``model_provider`` entry points.
 
-Same shape as ``kimi_k3_builders.py``: ``model_provider`` is the thin wrapper
-Megatron's ``pretrain()`` calls and ``inkling_builder`` does the
-instantiation. :func:`build_inkling_model` is the args-free core, shared by
+``MODEL_FAMILIES["inkling"]`` in ``registry.py`` names :func:`inkling_builder`
+rather than the shared builder: ``InklingModel`` takes ``decoder_spec``, not
+GPTModel-style arguments. ``model_provider`` is the shared Primus provider
+defaulting to this builder. :func:`build_inkling_model` is the args-free core, shared by
 the builder, the converter's dry run and the tests; ``meta=True`` builds the
 module tree on the meta device so a full-size model can be inspected
 without memory.
@@ -22,9 +23,10 @@ from typing import Optional
 
 import torch
 from megatron.core.transformer.spec_utils import import_module
-from megatron.training import get_args, print_rank_0
+from megatron.training import print_rank_0
 from megatron.training.arguments import core_transformer_config_from_args
 
+from primus.backends.megatron.core.models.builder import family_model_provider
 from primus.backends.megatron.core.models.inkling.inkling_layer_specs import (
     get_inkling_decoder_block_spec,
 )
@@ -126,7 +128,7 @@ def inkling_builder(
     pg_collection=None,
 ):
     """Build an Inkling model from Megatron args."""
-    print_rank_0("[Primus:Inkling] building InklingModel...")
+    print_rank_0("[Primus:inkling] building InklingModel...")
 
     if config is None:
         config = core_transformer_config_from_args(args, config_class=InklingTransformerConfig)
@@ -157,22 +159,4 @@ def inkling_builder(
     )
 
 
-def model_provider(
-    model_builder=None,
-    pre_process: bool = True,
-    post_process: bool = True,
-    vp_stage: Optional[int] = None,
-    config: Optional[InklingTransformerConfig] = None,
-    pg_collection=None,
-):
-    """``model_provider`` entry point used by Megatron's ``pretrain()``.
-
-    ``get_model_provider`` binds :func:`inkling_builder` as the first arg via
-    ``functools.partial``.
-    """
-    if model_builder is None:
-        model_builder = inkling_builder
-    args = get_args()
-    return model_builder(
-        args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
-    )
+model_provider = family_model_provider(inkling_builder)

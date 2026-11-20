@@ -1,8 +1,8 @@
 # ZAYA1-8B validation
 
-The checked-in BF16 recipes are `zaya1_8B-BF16-pretrain.yaml` under `examples/megatron/configs/MI300X`, `MI325X`, and `MI355X`. They train on mock data (`mock_data: true`), so they need no dataset mount. They differ only in batch size, which is set to fill each GPU's memory (see [Throughput](#throughput)). The run below used micro-batch 1 and global batch 8 with `train_iters: 30000` on GSM8K instead of mock data.
+The checked-in BF16 recipes are `zaya1_8B-BF16-pretrain.yaml` under `examples/megatron/configs/MI300X`, `MI325X`, and `MI355X`. They train on mock data (`mock_data: true`), so they need no dataset mount. They differ in batch size (see [Throughput](#throughput)), and the MI355X recipe also turns on five ZAYA1 compute paths (`zaya_attn_flash`, `zaya_fuse_norm`, `zaya_fuse_cca`, `zaya_conv_gemm` and `zaya_fuse_moe`), the split experts' sort-based dispatch (`zaya_sort_dispatch`, bit for bit with main's boolean masks) and the deferred router-bias all-reduce (`zaya_router_defer_ar`; these fields are off by default in `zaya1_base.yaml`), runs the experts as Primus Turbo grouped GEMMs (`enable_primus_turbo` and `use_turbo_grouped_gemm`) with the router's gate inside Turbo's `swiglu_with_probs` (`use_turbo_fused_act_with_probs`), and turns on `ddp_average_in_collective` and Transformer Engine's fused cross-entropy, which matches Megatron's precision only from Transformer Engine 2.20 (`rocm/primus:v26.9`; see [Throughput](#throughput)). The run below used micro-batch 1 and global batch 8 with `train_iters: 30000` on GSM8K instead of mock data.
 
-The FP8 recipes are `zaya1_8B-FP8-pretrain.yaml` in the same three directories, also on mock data. They set `fp8: hybrid` with `fp8_recipe: tensorwise`. CCA Q/K/V/O projections and expert SwiGLU GEMMs are Transformer Engine FP8 linears. The router, depthwise convolutions, RMSNorm, attention, embeddings, and the tied logits projection stay in BF16. The training and parity numbers in this note are from the BF16 run.
+The FP8 recipes are `zaya1_8B-FP8-pretrain.yaml` in the same three directories, also on mock data. They set `fp8: hybrid` with `fp8_recipe: tensorwise`, and the MI355X one also turns on the same five compute paths and the sort-based dispatch. Like every recipe but the MI355X BF16 one, it computes the loss with Megatron's cross-entropy. CCA Q/K/V/O projections and expert SwiGLU GEMMs are Transformer Engine FP8 linears. Primus Turbo's tensorwise FP8 grouped GEMMs can run the experts instead (`enable_primus_turbo` and `use_turbo_grouped_gemm`, with `turbo_grouped_gemm_backend: fp8:triton`, since Turbo's default FlyDSL backend can stall in its weight-gradient kernel); they quantize all 16 experts with one scale, and the MI355X recipe leaves them off. The router, depthwise convolutions, RMSNorm, attention, embeddings, and the tied logits projection stay in BF16. The training and parity numbers in this note are from the BF16 run.
 
 Tensorwise (current) scaling takes each FP8 scale from the tensor being cast, so FP8 is accurate from the first step of a cold start. Delayed scaling starts with an empty amax history. On the released checkpoint, a cold delayed-scaling forward scored SGLang's greedy GSM8K rollouts at Pearson r 0.72 (BF16 gives 0.98) and stayed there until training-style backward passes filled the amax history. Keep `fp8_recipe: delayed` only for runs that warm the history before the steps that matter.
 
@@ -22,7 +22,7 @@ Tensorwise (current) scaling takes each FP8 scale from the tensor being cast, so
 | Megatron-LM | `d3528a213` |
 | Primus commit of the run | `5c7dc4113` |
 
-The only MI355X (gfx950) runs in this note are the 30-step recipes in [Throughput](#throughput).
+The only MI355X (gfx950) runs in this note are the 30-step recipes in [Throughput](#throughput) and the 300-iteration loss check after them.
 
 ## Training
 
@@ -60,19 +60,19 @@ That comparison checks the loaded checkpoint forward (CCA, router, residual scal
 
 ## Throughput
 
-Each recipe was run as checked in on one 8-GPU node with `rocm/primus:v26.8` (PyTorch 2.14.0, Transformer Engine 2.17.1): 30 steps of mock data, sequence length 128, data parallel 8, one micro-batch per GPU per step. Each micro-batch size is the largest multiple of 8 that completes the recipe, including the end-of-training evaluation. Step time is the median, tokens/s/GPU the harmonic mean, and TFLOP/s/GPU the mean over steps 6 to 30.
+Each recipe was run as checked in at the time on one 8-GPU node with `rocm/primus:v26.8` (PyTorch 2.14.0, Transformer Engine 2.17.1): 30 steps of mock data, sequence length 128, data parallel 8, one micro-batch per GPU per step, the MI355X FP8 recipe with `--numa`, as its launch comment says. The MI355X rows predate later changes to those recipes. The FP8 row ran the ZAYA1 chunked cross-entropy, which that recipe now leaves off, and predates its `create_attention_mask_in_dataloader: false`, which made its steps slightly faster with identical losses. The BF16 row ran Transformer Engine's fused cross-entropy on Transformer Engine 2.17.1, where the recipe's comment now says to leave it off (see below). On MI300X and MI325X, each micro-batch size is the largest multiple of 8 that completes the recipe, including the end-of-training evaluation. The MI355X sizes were found that way before the ZAYA1 kernel changes and the MI355X recipes' current settings, which lowered their peak memory; larger sizes haven't been tried since.
 
-| GPU | Precision | Micro / global batch | Step time | Tokens/s/GPU | TFLOP/s/GPU | Peak memory per GPU | Next size up |
-|---|---|---|---|---|---|---|---|
-| MI300X | BF16 | 128 / 1024 | 1635 ms | 10016 | 118.6 | 181 of 192 GB | 136 stalls in evaluation |
-| MI300X | FP8 | 120 / 960 | 1814 ms | 8478 | 100.4 | 187 of 192 GB | 128 runs out of memory |
-| MI325X | BF16 | 216 / 1728 | 2049 ms | 13426 | 159.0 | 249 of 256 GB | 224 runs out of memory |
-| MI325X | FP8 | 184 / 1472 | 2118 ms | 11154 | 132.1 | 245 of 256 GB | 192 runs out of memory |
-| MI355X | BF16 | 248 / 1984 | 1733 ms | 17363 | 209.7 | 282 of 288 GB | 256 runs out of memory |
-| MI355X | FP8 | 208 / 1664 | 1890 ms | 12400 | 158.4 | 284 of 288 GB | 216 runs out of memory |
+| GPU | Precision | Micro / global batch | Peak memory per GPU | Next size up |
+|---|---|---|---|---|
+| MI300X | BF16 | 128 / 1024 | 181 of 192 GB | 136 stalls in evaluation |
+| MI300X | FP8 | 120 / 960 | 187 of 192 GB | 128 runs out of memory |
+| MI325X | BF16 | 216 / 1728 | 249 of 256 GB | 224 runs out of memory |
+| MI325X | FP8 | 184 / 1472 | 245 of 256 GB | 192 runs out of memory |
+| MI355X | BF16 | 248 / 1984 | 208 of 288 GB | not tried |
+| MI355X | FP8 | 208 / 1664 | 192 of 288 GB | not tried |
 
-TFLOP/s/GPU is Megatron's analytic GPT estimate with ZAYA1's dimensions. It models neither CCA nor the alternation of attention and MoE stages, so compare it only between ZAYA1 runs.
+Memory per GPU is a fixed 74 GB (BF16) or 87 GB (FP8, 91 GB on MI355X) for weights, gradients, sharded optimizer state, and runtime buffers, plus about 0.8 GB per sample, mostly fp32 logits over the 262k vocabulary. The MI355X recipes peak lower at the same sizes. In their rows neither kept fp32 logits: the FP8 run computed them 4,096 tokens at a time with the ZAYA1 chunked cross-entropy, and the BF16 recipe keeps them in bf16 for Transformer Engine's fused cross-entropy. The FP8 recipe now leaves the chunked cross-entropy off, so it keeps fp32 logits and peaks higher than its row. FP8 holds extra FP8 weight copies, so it fits fewer samples. It is also slower than BF16 in these recipes: with hidden size 2048 and top-1 routing over 16 experts, the expert GEMMs are small, and the FP8 casts cost more than the faster GEMMs save.
 
-Memory per GPU is a fixed 74 GB (BF16) or 87 GB (FP8, 91 GB on MI355X) for weights, gradients, sharded optimizer state, and runtime buffers, plus about 0.8 GB per sample, mostly fp32 logits over the 262k vocabulary. FP8 holds extra FP8 weight copies, so it fits fewer samples. It is also slower than BF16 here: with hidden size 2048 and top-1 routing over 16 experts, the expert GEMMs are small, and the FP8 casts cost more than the faster GEMMs save.
+The MI355X BF16 row comes from a run with Transformer Engine's fused cross-entropy on Transformer Engine 2.17.1, which rounds the logits gradient to bf16 twice where Megatron's cross-entropy rounds an fp32 gradient once. From Transformer Engine 2.20 (`rocm/primus:v26.9`) it rounds once, as Megatron's does. No training run in this note covers that setting: the GSM8K run above predates it, and the parity check is forward-only. Its only loss check in this note is a 300-iteration mock-data run of the MI355X BF16 recipe as it was then, on Transformer Engine 2.17.1, against `main`'s recipe from before these changes: the largest per-iteration loss difference was 6.04e-4, against 2.31e-4 between two runs of `main`'s, and all three runs ended at 0.0891.
 
-The FP8 recipes set `NVTE_USE_CAST_TRANSPOSE_TRITON: "0"` in their `env:` block. The runner turns on Transformer Engine's Triton cast-transpose by default, and that kernel autotunes for each new tensor shape. Expert token counts change every step, so with the Triton kernel the MI325X FP8 run at micro-batch 64 spent 307 s on its first step and still took 2 to 10 s per step at steps 11 to 15, against 1.8 s with the HIP cast kernel.
+The FP8 recipes set `NVTE_USE_CAST_TRANSPOSE_TRITON: "0"` in their `env:` block. The runner turns on Transformer Engine's Triton cast-transpose by default, and that kernel autotunes for each new tensor shape. Expert token counts change every step, so with the Triton kernel the MI325X FP8 run at micro-batch 64 spent its first step mostly autotuning, and steps 11 to 15 still took up to several times as long as with the HIP cast kernel.

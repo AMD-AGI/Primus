@@ -5,7 +5,7 @@
 #
 # Purpose:
 #   Run a batch of Primus training benchmarks (Megatron, Megatron Bridge,
-#   TorchTitan, MaxText, MaxDiffusion, diffusion), and optionally the DLRM
+#   TorchTitan, MaxText, MaxDiffusion, diffusion, recommendation), and optionally the DLRM
 #   benchmarks of diffusion_bench/, and collect the results in a single
 #   directory with enough metadata that a reviewer can reproduce or audit each
 #   run from the logs alone.
@@ -48,6 +48,13 @@
 #   DIFFUSION_HF_CACHE=<dir>       where the diffusion configs keep their model
 #                                  downloads (default: $PRIMUS_HF_HOME, else
 #                                  <DATA_PATH or checkout/data>/huggingface_diffusion)
+#
+# Recommendation (BACKEND=...,recommendation, single node only):
+#   DLRMv4 (the MLPerf dlrmv4 HSTU model) throughput on synthetic data, from
+#   the catalog's examples/recommendation/configs/<GPU>/*.yaml. The trainer
+#   generates the data for the run's length once, under
+#   $DATA_PATH/dlrm_v4_synthetic (11 GB for 200 steps of 8 x 1024 samples), and
+#   later runs reuse it. TRAIN_STEPS is not applied.
 #
 # Diffusion and DLRM (BACKEND=...,diffusion_dlrm, catalog mode only):
 #   Not a catalog backend. Adding it to BACKEND runs diffusion_bench/
@@ -139,6 +146,7 @@
 #   torchtitan                 : --training.steps N   (NOT --steps)
 #   maxtext                    : --steps N
 #   maxdiffusion               : --max_train_steps N  (NOT --steps; ignored if used)
+#   recommendation             : none; TRAIN_STEPS is not applied
 #
 # Per-config behaviour:
 #   The script runs each config NUM_REPS times (default 1). For every run it

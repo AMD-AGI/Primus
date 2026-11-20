@@ -1,0 +1,32 @@
+exp_name: ${PRIMUS_EXP_NAME:inkling_large_6L-async-ckpt-pretrain}
+
+# inkling_large_6L-BF16-pretrain.yaml with asynchronous torch_dist checkpoints:
+# training pauses only while each rank copies its shard to host memory, and the
+# write to disk runs in a background worker. A rerun of the same command resumes
+# from the latest checkpoint.
+#
+# Checkpoints go to <workspace>/<work_group>/<user_name>/<exp_name>/checkpoints:
+# Primus routes `save` there whatever path it holds, so `load` names the same
+# directory. Each checkpoint (weights and distributed-optimizer state) is about
+# 820 GB, so set PRIMUS_WORKSPACE to a large local disk, e.g.
+# /mnt/m2m_nobackup/<user>.
+
+extends:
+  - inkling_large_6L-BF16-pretrain.yaml
+
+modules:
+  pre_trainer:
+    overrides:
+      save: ${PRIMUS_WORKSPACE:./output}/${PRIMUS_TEAM:amd}/${PRIMUS_USER:root}/${PRIMUS_EXP_NAME:inkling_large_6L-async-ckpt-pretrain}/checkpoints
+      load: ${PRIMUS_WORKSPACE:./output}/${PRIMUS_TEAM:amd}/${PRIMUS_USER:root}/${PRIMUS_EXP_NAME:inkling_large_6L-async-ckpt-pretrain}/checkpoints
+      # Start from scratch when that directory holds no checkpoint yet (Primus defaults to exiting).
+      exit_on_missing_checkpoint: false
+      save_interval: ${PRIMUS_SAVE_INTERVAL:25}
+      disable_last_saving: false
+      ckpt_format: torch_dist
+
+      async_save: true
+      # Megatron turns async_save off for torch_dist without the persistent worker.
+      use_persistent_ckpt_worker: true
+      # The default, nvrx, needs nvidia-resiliency-ext, which rocm/primus images don't ship.
+      async_strategy: mcore

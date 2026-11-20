@@ -206,6 +206,17 @@ extract_config_fields() {
                 GBS=$(diffusion_gbs "$config_file" "$MBS")
             fi
             ;;
+        recommendation)
+            # DLRMv4: batch_size is per GPU and every GPU is data parallel; the
+            # run lasts num_train_batches steps (the perf config's one window).
+            MBS=$(perf_config_value ".modules.$MODULE.overrides.batch_size" "$config_file")
+            STEPS=$(perf_config_value ".modules.$MODULE.overrides.num_train_batches" "$config_file")
+            SEQ_LEN="N/A"
+            GBS="N/A"
+            if [[ "$MBS" =~ ^[0-9]+$ ]]; then
+                GBS=$(( MBS * NNODES * ${GPUS_PER_NODE:-8} ))
+            fi
+            ;;
         *)
             MBS=$(yq_or_na ".modules.$MODULE.overrides.micro_batch_size" "$config_file")
             GBS=$(yq_or_na ".modules.$MODULE.overrides.global_batch_size" "$config_file")
@@ -308,9 +319,10 @@ run_log_name() {
 # than the warmup fails Megatron's lr_warmup_steps < lr_decay_steps assertion
 # before the first step. The diffusion benchmark configs' training.steps is
 # part of the benchmark's definition (five warmup steps are left out of the
-# throughput), and diffusion_dlrm's models keep the num_iterations of its
-# diffusion_bench config.
-PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion diffusion_dlrm"
+# throughput), so is the recommendation (DLRMv4) config's num_train_batches
+# (its synthetic data is generated for that length), and diffusion_dlrm's
+# models keep the num_iterations of its diffusion_bench config.
+PERF_TRAIN_STEPS_IGNORED="megatron_bridge diffusion recommendation diffusion_dlrm"
 
 train_steps_ignored() {
     [[ " $PERF_TRAIN_STEPS_IGNORED " == *" $1 "* ]]
