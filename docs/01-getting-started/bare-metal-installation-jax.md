@@ -136,7 +136,7 @@ This mirrors the v26.10 image, which **builds TensorFlow (2.21 CPU) from source*
 (`tf_source`). That is the heavy one: the bazel build takes roughly 15–60 min
 depending on core count (about 13 min on 120 cores). The image also builds
 Primus-Turbo's JAX extension (`turbo`, Section 3.10). RCCL is not rebuilt — the
-pip ROCm SDK ships RCCL and the image uses it as-is, so `rccl` is an
+pip ROCm SDK ships RCCL 2.32.3 and the image uses it as-is, so `rccl` is an
 optional stage (Section 3.11).
 Lighter/alternative stages:
 
@@ -291,8 +291,14 @@ scripts use the same pins; change one and you may have to change the others.
 > ran end-to-end on **MI325X (gfx942) / Ubuntu 22.04 (glibc 2.35) / Python 3.12**
 > with no host clang, followed by single-node 8-GPU MaxText pretraining
 > (`examples/maxtext/configs/MI325X/llama2_7B-bf16-pretrain.yaml`), compared
-> against the `rocm/jax-training:maxtext-v26.8` container on that node. The v26.10
-> pins have not been through a bare-metal run yet.
+> against the `rocm/jax-training:maxtext-v26.8` container on that node.
+>
+> **Validated for v26.10:** the v26.10 pins' default flow (prebuilt `te`,
+> `tf_source`, `turbo`) ran end-to-end on **MI325X (gfx942) / Ubuntu 24.04 /
+> Python 3.12**, followed by single-node 8-GPU MaxText pretraining
+> (`llama2_7B-bf16-pretrain.yaml`, `mixtral_8x7B-bf16-pretrain.yaml` from
+> `examples/maxtext/configs/MI325X/`), compared against the
+> `rocm/jax-training:maxtext-v26.10` container.
 
 For a **distributed (multi-node) JAX MaxText job** specifically, beyond JAX and
 ROCm you additionally need:
@@ -764,7 +770,7 @@ the clone and just run the `git submodule update`, `pip uninstall`, and
 
 ### 3.11 Build RCCL from source (optional, into the ROCm tree)
 
-> **Not needed for v26.10.** The pip ROCm SDK ships RCCL, which is what
+> **Not needed for v26.10.** The pip ROCm SDK ships RCCL 2.32.3, which is what
 > `rocm/jax-training:maxtext-v26.10` uses, so skip this section unless you are
 > reproducing v26.6 or your fabric needs the `rocm-systems` net-ib fix
 > (ROCM-27881).

@@ -71,10 +71,10 @@ TF_BRANCH="upstream-v2.21.0"
 TF_LLVM_SHA256="3f986184ee126677dbd77edb16d6b82c057ec869fefd7a9871979941e52e837a"
 BAZELISK_VERSION="v1.29.0"
 
-# RCCL. Not built since v26.7: the pip ROCm SDK ships RCCL, and the image uses
-# that copy, so the `rccl` stage is not in DEFAULT_STAGES. These pins remain only
-# for the optional stage, which reproduces the v26.6 behaviour of overriding the
-# SDK copy from rocm-systems.
+# RCCL. Not built since v26.7: the pip ROCm SDK ships RCCL (2.32.3 in the v26.10
+# image), and the image uses that copy, so the `rccl` stage is not in
+# DEFAULT_STAGES. These pins remain only for the optional stage, which reproduces
+# the v26.6 behaviour of overriding the SDK copy from rocm-systems.
 RCCL_REPO="https://github.com/ROCm/rocm-systems.git"
 RCCL_COMMIT="9e5e4084a4b8e1e86551b0eb054725c62354a926"
 

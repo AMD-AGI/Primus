@@ -129,8 +129,8 @@ checkout we installed the dependencies for. Configs for MI325X live in
 Optional / alternative stages:
 
 - **rccl** — build **RCCL from source** into `$ROCM_PATH/lib`. Not part of the
-  default flow since v26.7: the pip ROCm SDK ships RCCL and the published image
-  does not override it. Run this only to
+  default flow since v26.7: the pip ROCm SDK ships RCCL (2.32.3 in the v26.10
+  image) and the published image does not override it. Run this only to
   reproduce v26.6, or on a host that needs the `rocm-systems` net-ib fix
   (ROCM-27881).
 - **te_source** — force the from-source TransformerEngine build regardless of
@@ -227,8 +227,12 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus turbo jaxreqs manifest
   Python 3.12**, followed by single-node 8-GPU MaxText pretraining
   (`examples/maxtext/configs/MI325X/llama2_7B-bf16-pretrain.yaml`). Earlier
   releases also exercised a 2-node run over the JAX distributed coordinator +
-  RCCL, with no UCX/OpenMPI; that was not repeated for v26.8. The v26.10 pins
-  have not been through a bare-metal run yet.
+  RCCL, with no UCX/OpenMPI; that was not repeated for v26.8.
+- **Runtime-validated for v26.10.** The v26.10 pins' default flow (prebuilt `te`,
+  `tf_source`, `turbo`) ran end to end on **MI325X (gfx942) / Ubuntu 24.04 /
+  Python 3.12**, followed by single-node 8-GPU MaxText pretraining
+  (`llama2_7B-bf16-pretrain.yaml` and `mixtral_8x7B-bf16-pretrain.yaml` from
+  `examples/maxtext/configs/MI325X/`).
 
 Treat the reference `Dockerfile` as the authoritative, tested version
 combination; if you bump one pin you may need to bump the others.
