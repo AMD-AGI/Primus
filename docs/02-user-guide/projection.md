@@ -106,6 +106,15 @@ export HSA_NO_SCRATCH_RECLAIM=1
 2. **Simulate** pipeline scheduling, data parallelism, and communication using analytical models.
 3. **Project** iteration time and tokens/s to a **target** node count when you specify one.
 
+### Hardware calibration (benchmark mode)
+
+Before the layer benchmark, every bench GPU measures what it actually sustains, and the result is printed and stored in the bench artifact (`_hardware_calibration`):
+
+- **Effective compute clock.** The workload's largest GEMMs (up to 4, ranked by total FLOPs, taken from the same profiler tree the simulator uses) are timed in bf16. The clock is then back-calculated by finding the clock at which Origami's predicted time matches the measured time. Without Origami, the tool instead reports a lower bound: the clock needed to reach the measured TFLOPS at 100% matrix-core utilisation. Use the printed `--gpu-clock-mhz` value to simulate at the measured clock.
+- **Memory bandwidth.** STREAM copy, scale, add, and triad run on 1 GiB fp32 arrays, which is well beyond the Infinity Cache. A memory clock cannot be back-calculated, because achieved bandwidth is MCLK × bytes per cycle × efficiency, and the efficiency is unknown. The report therefore gives the sustained bandwidth, its fraction of the spec peak, and the lowest MCLK that could deliver it.
+
+Clocks only mean something once the workload has reached steady state. Right after a launch, SCLK boosts to its ceiling and then drops as power management kicks in, and MCLK ramps up from idle over a few hundred ms. So each GEMM and the STREAM kernels keep running until the clock they depend on (SCLK for GEMMs, MCLK for STREAM) holds within 3% for 0.3 s. Only then are they timed, and the reported live clocks are sampled only during those timed runs, never taken from the DPM maximum. Live clocks come from amdsmi when it is available (all XCDs, averaged, plus per-XCD medians) and from amdgpu sysfs otherwise (first XCD only). The report also shows how far the Origami-inverted clock is from the live clock. Multi-GPU benches also print a per-GPU table, which helps spot a slow GPU. Calibration adds a few seconds per GPU. To skip it, pass `--skip-hw-calibration` or set `PRIMUS_BENCH_SKIP_HW_CALIB=1`. It is also skipped for JAX backends.
+
 ### Projecting to a specific node count
 
 ```bash
@@ -164,6 +173,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 | `--gemm-backend` | GEMM simulation backend when profiling is simulated (`origami`). |
 | `--gpu-arch` | Target architecture for simulation (for example `mi300x`, `gfx942`, `mi355x`, `gfx950`); can use `PRIMUS_GPU_ARCH`. |
 | `--gpu-clock-mhz` | Override GPU clock in MHz for simulation; can use `PRIMUS_GPU_CLOCK_MHZ`. |
+| `--skip-hw-calibration` | Skip the benchmark-mode compute-clock and STREAM-bandwidth calibration (also `PRIMUS_BENCH_SKIP_HW_CALIB=1`). Accepted by `memory`, `performance`, and `both`. |
 | `--pipeline-schedule-algorithm` | Pipeline simulation scheduler (`auto`, zero-bubble variants, or `all` for comparison). |
 | `--enable-zero-bubble` | Enable zero-bubble pipeline scheduling for projection. |
 | `--enable-deepep` | Enable DeepEP overlap modeling. |

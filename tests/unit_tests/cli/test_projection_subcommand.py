@@ -138,3 +138,11 @@ def test_both_exposes_safety_margin_but_not_memory_mode():
     assert args.memory_safety_margin == pytest.approx(0.05)
     # perf knobs are present on `both`.
     assert args.profiling_mode == "benchmark"
+
+
+@pytest.mark.parametrize("suite", ["memory", "performance", "both"])
+def test_skip_hw_calibration_flag(suite):
+    parser, _ = _build_parser()
+    assert parser.parse_args(["projection", suite, "--config", "x"]).skip_hw_calibration is False
+    args = parser.parse_args(["projection", suite, "--config", "x", "--skip-hw-calibration"])
+    assert args.skip_hw_calibration is True
