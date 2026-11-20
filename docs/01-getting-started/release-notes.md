@@ -43,9 +43,9 @@ MaxText (JAX) backend.
 
 | | |
 | --- | --- |
-| Image ID | `f82867d74a3639b04a8eaa800b6f91a65257ff8e2368cfbdfdfdabc79748c0c3` |
+| Image ID | `cba61cee9442` |
 | Built | 2026-11-16 |
-| Size | None |
+| Size | 56.2 GB |
 | Manifest | `1e84cb0e419c65707cf7fca5454161ccf8fa4b07` |
 | Dockerfile | [`Dockerfile.jax-v26.10`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.10) |
 
@@ -57,7 +57,7 @@ MaxText (JAX) backend.
 | jax-rocm10-pjrt / jax-rocm10-plugin | 0.12.0+rocm10.3.0a20261109 |
 | Transformer Engine | 2.21.0.dev0+rocm10.3.0a20261109.4c7ed18 |
 | hipBLASLt | 1.5.0-60b43a5a |
-| RCCL | UNRESOLVED |
+| RCCL | 2.32.3 |
 | Flax | 0.12.10 |
 | TensorFlow | 2.21.0 |
 | Optax / Orbax / Grain / tensorstore | 0.2.9 / 0.12.11 / 0.2.18 / 0.1.86 |
@@ -117,12 +117,11 @@ The pins are those of the build commit. Since v26.9, MaxText moved to `release/v
 | jax-rocm10-pjrt / jax-rocm10-plugin | 0.12.0+rocm10.3.0a20261026 | 0.12.0+rocm10.3.0a20261109 |
 | Transformer Engine | 2.19.0.dev0+rocm10.2.0a20261002.bfe94fb | 2.21.0.dev0+rocm10.3.0a20261109.4c7ed18 |
 | hipBLASLt | 1.5.0-565c4c74 | 1.5.0-60b43a5a |
-| RCCL | 2.32.3 | - |
 | Optax / Orbax / Grain / tensorstore | 0.2.8 / 0.12.8 / 0.2.18 / 0.1.86 | 0.2.9 / 0.12.11 / 0.2.18 / 0.1.86 |
 | MaxText | 8d1d43c0 | 2fb48f50 |
 | transformers / datasets | 4.57.3 / 4.8.5 | 4.57.3 / 5.0.1 |
 | NumPy | 2.5.4 | 2.5.5 |
-| Image size | 50.0 GB | None |
+| Image size | 50.0 GB | 56.2 GB |
 
 ---
 

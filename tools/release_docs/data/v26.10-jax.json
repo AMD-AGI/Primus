@@ -2,7 +2,7 @@
   "build_commit": "31128a29033de9da05f93ffdffe159f94fe90ce1",
   "build_commit_short": "31128a29",
   "built": "2026-11-16",
-  "content_size_bytes": 39389384063,
+  "content_size_bytes": 16477674261,
   "dockerfile": {
     "in_image_name": "docker-build-recipe.txt",
     "path": ".github/workflows/docker-release/Dockerfile.jax-v26.10",
@@ -486,10 +486,11 @@
   },
   "family": "jax",
   "image": "rocm/jax-training:maxtext-v26.10",
-  "image_id": "f82867d74a3639b04a8eaa800b6f91a65257ff8e2368cfbdfdfdabc79748c0c3",
+  "image_id": "cba61cee9442",
   "manifest_version": "1e84cb0e419c65707cf7fca5454161ccf8fa4b07",
   "native": {
-    "hipblaslt": "1.5.0-60b43a5a"
+    "hipblaslt": "1.5.0-60b43a5a",
+    "rccl": "2.32.3"
   },
   "pip": {
     "absl-py": "2.5.1",
@@ -794,15 +795,14 @@
     }
   },
   "pip_source": "installed",
-  "probed_image": "unifiedtrainingdockers.azurecr.io/utd/ci:jax_ci_1e84cb0_20261116_maxdiffusion",
+  "probed_image": null,
   "python": "3.12.3",
   "repo_digests": [
-    "unifiedtrainingdockers.azurecr.io/utd/ci@sha256:10751cc61349ff2caad4653f36f9b83f037d30f76e13e56ac4fe36a9b4d1fefa",
-    "unifiedtrainingdockers.azurecr.io/utd/ci@sha256:224a92a9a7f42435135320e6ec2d4734e1407556e20339d33e1c83dee4876651"
+    "rocm/jax-training@sha256:cba61cee9442258bc5489b546eba667efe4d2a716310ab0108bda671e55556dc"
   ],
   "rocm_path": "/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel",
   "schema_version": 1,
-  "size": null,
+  "size": "56.2 GB",
   "source": "image",
   "version": "v26.10",
   "workspace_repos": {
