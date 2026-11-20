@@ -28,9 +28,12 @@ with one kernel that never materialises ``dot``:
   stored as ``out_dtype``. Tiles that are fully masked skip the head loop
   (no TDM traffic, no WMMA) and store -inf only.
 
-Backward stays on the existing path: ``dot`` is recomputed with the same
-einsum, the existing ``indexer_score_post`` backward kernels produce
-``d_dot`` / ``d_w`` and autograd through the einsum produces ``dq`` / ``dk``.
+Backward stays on the existing path: the existing ``indexer_score_post``
+backward kernels produce ``d_dot`` / ``d_w`` from the bf16 ``dot`` and the two
+einsum-backward GEMMs produce ``dq`` / ``dk``. By default
+(``PRIMUS_INDEXER_GLUON_SAVE_DOT=1``) the kernel itself writes that ``dot``
+(zeros in dead tiles), so no forward GEMM runs anywhere; with ``=0`` nothing
+is saved and the backward recomputes ``dot`` with the einsum.
 
 Gating: ``PRIMUS_INDEXER_GLUON=1`` (default OFF). Needs a Triton with the
 CDNA5 Gluon API (``triton.experimental.gluon.language.amd.cdna5`` with

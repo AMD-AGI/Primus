@@ -660,8 +660,10 @@ class Indexer(nn.Module):
         #
         # Dispatch precedence (P41 re-routing):
         #   PRIMUS_INDEXER_GLUON=1        → fused Gluon fwd score on gfx1250
-        #                                    (no [B,S,H,P] dot; bwd recomputes the
-        #                                    einsum and reuses the existing tail bwd).
+        #                                    (no einsum; the kernel writes the bf16 dot
+        #                                    for the existing tail bwd, or with
+        #                                    PRIMUS_INDEXER_GLUON_SAVE_DOT=0 the bwd
+        #                                    recomputes it).
         #   PRIMUS_INDEXER_TRITON=1       → post-einsum tail fused
         #                                    (einsum stays eager / cuBLAS).
         #   PRIMUS_INDEXER_TRITON_FULL=1  → legacy P38 full-fuse path
