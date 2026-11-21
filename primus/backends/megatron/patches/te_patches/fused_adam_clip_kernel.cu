@@ -159,6 +159,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
 
 #pragma unroll
     for (int j = 0; j < kIlp; ++j) {
+      // No FMA contraction: identical rounding in the chunk and the FP8-block tile kernel.
+#pragma clang fp contract(off)
       g[j] *= grad_scale;
       if constexpr (!AdamW) g[j] += decay * p[j];
       m[j] = beta1 * m[j] + (1.0f - beta1) * g[j];
@@ -385,6 +387,8 @@ __host__ __device__ __forceinline__ float fp8blk_adam_phase(
     // --- per-element Adam: verbatim copy of fused_adam_clip_kernel ---
 #pragma unroll
     for (int j = 0; j < kIlp; ++j) {
+      // No FMA contraction: identical rounding in the chunk and the FP8-block tile kernel.
+#pragma clang fp contract(off)
       g[j] *= grad_scale;
       if constexpr (!AdamW) g[j] += decay * p[j];
       m[j] = beta1 * m[j] + (1.0f - beta1) * g[j];
