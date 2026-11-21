@@ -179,6 +179,15 @@ The same `--op-*` flags work on the tuning agent, on `primus projection
 | `--op-paper FILE\|URL\|TEXT` | Paper text for the new op. Repeatable. |
 | `--hf-config PATH\|URL\|REPO` | HF config, if the YAML has no `tokenizer_model`. |
 | `--op-out-dir DIR` | Where context packs and reports go (the tuning agent uses its `--out-dir`). |
+| `--op-pr off\|commit\|push\|pr` | Publish each registered or acknowledged op on its own branch off HEAD (`projection-agent/<op_id>-<time>`), built in a temporary worktree so the checkout is untouched. `commit` keeps it local, `push` pushes it, `pr` also opens a draft PR. Default `off`. |
+| `--op-pr-remote`, `--op-pr-base`, `--op-pr-repo` | Remote to push to (`origin`); branch the PR targets (the remote's default); `owner/name` to open the PR on when pushing to a fork. |
+| `--op-pr-author 'Name <email>'` | Commit identity when git has none configured (`$PRIMUS_OP_PR_AUTHOR`). |
+| `--op-pr-signoff`, `--op-pr-ready` | Add `Signed-off-by`; open the PR ready for review instead of draft. |
+
+With `--op-pr pr` the PR is opened with `gh` when it is installed, else through
+the GitHub REST API with `$GITHUB_TOKEN` / `$GH_TOKEN`; with neither, the agent
+prints the compare URL to open it from. The PR body is the bring-up report: the
+gap, the validation checks and cases, and the module's references.
 
 The `projection-op-bringup` skill covers doing the same work by hand.
 
