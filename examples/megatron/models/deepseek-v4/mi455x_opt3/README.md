@@ -36,7 +36,8 @@ Requirements:
 | + Adam writes the MegaMoE expert caches, graph | 61.9 | 9.8715 |
 | + fuseq switches, graph | 60.7 | 9.8715 |
 | + MegaMoE flygg k256, graph | 60.1 | 9.8715 |
-| **+ BF16 GEMM layouts and TunableOp for all BF16 shapes (this config), graph** | **59.5** | 9.8710 |
+| + BF16 GEMM layouts and TunableOp for all BF16 shapes, graph | 59.5 | 9.8710 |
+| **+ lagged step logging, DP=1 all-gather skip (this config), graph** | **58.2** | 9.8710 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -58,6 +59,11 @@ bf16gemm then -0.75 ms (2 A/B pairs in the int tree, 60.2 -> 59.45; loss@20 9.87
 tuned), o_a dgrad as a TN bmm, and the `tunableop_dsv4_gfx1250_bf16_0.csv` TunableOp file. The bit-identical variant
 `PRIMUS_LM_HEAD_WGRAD_LAYOUT=nt` gave no gain on top of fuseq (60.2 vs 60.2). The TunableOp entries are tied to the
 image's hipBLASLt; without the o_a TN entry the o_a dgrad change is slower.
+bubble then -1.25 ms (bit-identical; 2 A/B pairs in the int tree, 59.4 -> 58.15): `PRIMUS_BUBBLE_LAG_LOG` snapshots
+the log values to host without blocking and prints step k-1 while step k runs, removing the ~2 ms per-step GPU drain
+(7 syncs + host logging/zero_grad/graph launch); `PRIMUS_BUBBLE_SKIP_DP1_AG` skips the 32 no-op param all-gathers.
+Each iteration's log line prints one step late. Most of the earlier "7.7 ms idle" was profiler overhead (~1.4 us per
+launch); real idle was ~3.3 ms, of which ~1.4 ms is the graph-replay per-kernel floor (~1.2 us/kernel).
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
