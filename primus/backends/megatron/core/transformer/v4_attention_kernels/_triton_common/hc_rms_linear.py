@@ -61,6 +61,18 @@ HC_CFG = dict(
 )
 
 
+# hc track (PRIMUS_HC_RMSLIN_TUNED=1): bit-identical retune of the fp32-ieee kernels used by HyperHead (N=4, Kd=16384,
+# T=4096; bench_rmslin.py, 112 configs, out/dx/dW byte-equal): fwd bt32 -> 64 (41.2 -> 32.0 us wall),
+# bwd 8 warps / 2 stages -> 4 warps / 1 stage (124.1 -> 76.5 us wall incl. prep and the dW sum).
+_HC_CFG_TUNED = dict(fwd_bt=64, bwd_warps=4, bwd_stages=1)
+
+
+def _cfg():
+    if os.environ.get("PRIMUS_HC_RMSLIN_TUNED", "0") == "1":
+        return {**HC_CFG, **_HC_CFG_TUNED}
+    return HC_CFG
+
+
 def hc_rms_linear_enabled() -> bool:
     return os.environ.get("PRIMUS_HC_RMS_LINEAR", "1") != "0"
 
@@ -396,7 +408,7 @@ class HcRmsLinearFn(torch.autograd.Function):
         T, KD = x2d.shape
         N = w.shape[0]
         BN = _block_n(N)
-        c = HC_CFG
+        c = _cfg()
         # bf16 x feeds the bf16 matrix cores as-is; other dtypes fall back to the fp32-FMA kernels
         prec = c["fwd_prec"] if x2d.dtype in (torch.bfloat16,) else "ieee"
         wmma3 = prec == "wmma3"
@@ -468,7 +480,7 @@ class HcRmsLinearFn(torch.autograd.Function):
             dlogits, dlogits.stride(0), raw, rstd, g, coef, T, N, KD, BLOCK_T=64, BLOCK_N=BN, num_warps=4
         )
         dx = torch.empty_like(x2d)
-        c = HC_CFG
+        c = _cfg()
         prec = c["bwd_prec"] if x2d.dtype in (torch.bfloat16,) else "ieee"
         BLOCK_T, BLOCK_K, tsplit = c["bwd_bt"], c["bwd_bk"], c["bwd_tsplit"]
         t_per = triton.cdiv(triton.cdiv(T, tsplit), BLOCK_T) * BLOCK_T
@@ -507,7 +519,7 @@ class HcRmsLinearFn(torch.autograd.Function):
         )
         g3 = _split3_rows(g, T)  # [3, T, BN] bf16
         dx = torch.empty_like(x2d)
-        c = HC_CFG
+        c = _cfg()
         BLOCK_T, BLOCK_K, tsplit = c["w3_bwd_bt"], c["w3_bwd_bk"], c["w3_bwd_tsplit"]
         t_per = triton.cdiv(triton.cdiv(T, tsplit), BLOCK_T) * BLOCK_T
         tsplit = triton.cdiv(T, t_per)
