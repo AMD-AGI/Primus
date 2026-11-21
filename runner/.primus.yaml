@@ -92,6 +92,8 @@ container:
       - "HSA_NO_SCRATCH_RECLAIM"
       - "NVTE_CK_USES_BWD_V3"
       - "GPU_MAX_HW_QUEUES"
+      - "FSDP_ALL_GATHER_BACKEND"
+      - "SDMA_ALL_GATHER"
       - "HSA_KERNARG_POOL_SIZE"
       - "PRIMUS_TURBO_DEEPEP_TIMEOUT"
       - "NCCL_IB_HCA"

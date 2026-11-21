@@ -46,3 +46,22 @@
 # Tests
 # ---------------------------------------------------------------------------
 /tests/                         @Xiaoming-AMD @wenxie-amd @vidushi8 @lorri-rao @GeneDer @amd-fuyuajin @JohnQin-llm
+
+# ---------------------------------------------------------------------------
+# RCCL-SDMA (copy-engine collectives): a change here can silently put the
+# AllGather back on RCCL kernels, so these keep dedicated reviewers.
+# ---------------------------------------------------------------------------
+/runner/helpers/hooks/06_enable_sdma_all_gather.sh                                      @lorri-rao @Xiaoming-AMD @wenxie-amd
+/runner/helpers/hooks/sdma/                                                             @lorri-rao @Xiaoming-AMD @wenxie-amd
+/primus/backends/torchtitan/patches/sdma_symm_mem_collectives.py                        @lorri-rao @Xiaoming-AMD @wenxie-amd
+/primus/backends/megatron/patches/sdma_symm_mem_collectives_patches.py                  @lorri-rao @Xiaoming-AMD @wenxie-amd
+/primus/backends/megatron/core/distributed/rccl_sdma_param_gather.py                    @lorri-rao @Xiaoming-AMD @wenxie-amd
+/primus/backends/megatron/core/distributed/sdma_param_gather.py                         @lorri-rao @Xiaoming-AMD @wenxie-amd
+/primus/backends/megatron/patches/parallelism/rccl_sdma_param_all_gather_patches.py     @lorri-rao @Xiaoming-AMD @wenxie-amd
+/primus/backends/megatron/patches/parallelism/rccl_sdma_grad_reduce_scatter_patches.py  @lorri-rao @Xiaoming-AMD @wenxie-amd
+/primus/backends/megatron/patches/parallelism/sdma_param_all_gather_patches.py          @lorri-rao @Xiaoming-AMD @wenxie-amd
+/tests/unit_tests/backends/test_rccl_sdma_param_gather.py                               @lorri-rao @Xiaoming-AMD @wenxie-amd
+/tests/unit_tests/backends/test_rccl_sdma_grad_reduce_scatter.py                        @lorri-rao @Xiaoming-AMD @wenxie-amd
+/tests/unit_tests/backends/torchtitan/test_sdma_symm_mem_collectives_patch.py           @lorri-rao @Xiaoming-AMD @wenxie-amd
+/tests/unit_tests/backends/diffusion/test_flux_rccl_sdma_all_gather.py                  @lorri-rao @Xiaoming-AMD @wenxie-amd
+/docs/04-technical-guides/rccl-sdma-torchtitan.md                                       @lorri-rao @Xiaoming-AMD @wenxie-amd
