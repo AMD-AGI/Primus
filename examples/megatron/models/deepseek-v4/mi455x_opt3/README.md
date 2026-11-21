@@ -40,7 +40,8 @@ Requirements:
 | + lagged step logging, DP=1 all-gather skip, graph | 58.2 | 9.8710 |
 | + MoE wgrad sum-of-squares fold, dsv4up for all passes, graph | 57.5 | 9.8695 |
 | + Adam skips the MegaMoE expert BF16 store, graph | 57.3 (A/B -0.6 ms, see note) | 9.8695 |
-| **+ glue switches (this config), graph** | **56.1** (A/B -1.1 ms) | 9.8695 |
+| + glue switches, graph | 56.1 (A/B -1.1 ms) | 9.8695 |
+| **+ hc config C (this config), graph** | **54.8** (A/B -1.3 ms) | 9.8695 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -89,6 +90,13 @@ unchanged), `PRIMUS_GLUE_ROPE_NOCAST` (RoPE reads int64 positions / bf16 inv_fre
 (compressor pool kernels read the fused wkv_gate output; the old path still runs for packed sequences / CP),
 `PRIMUS_GLUE_EMB_TOUCHED` (clear only the embedding main_grad rows written last step; raises on a second write
 per step), `PRIMUS_GLUE_SMALLS` (fused router builds no zero grads). `PRIMUS_GLUE_WQB_DYQ` is correct but slower: off.
+hc then -1.3 ms (bit-identical; 2 A/B pairs in the int tree, 56.05 -> 54.75): Triton main routes a 3-D-tile middle-axis
+`tl.sum` through LDS + barriers (~3x slower than Triton 3.8), so `_hc_expand_fwd` took 68.8 us in-step;
+`PRIMUS_HC_EXPAND_TILE=1,2048,8` and `PRIMUS_HC_POST_TILE=1,1` avoid it (24.3 / 35.1 us, byte-equal);
+`PRIMUS_HC_NOCAST` (no torch casts of HC params), `PRIMUS_HC_HEAD_FUSED=1` / `PRIMUS_HC_LIFT_FUSED=1` (HyperHead
+collapse and the embedding lift in Triton, torch's summation order), `PRIMUS_HC_B3_VAR=1,0` (B3 W^T in LDS).
+The tile choices are bit-identical only under this Triton main build (83c9228329); re-check after a Triton bump.
+`HEAD_FUSED=2` (one-pass dpre) puts loss@20 at 9.8672, outside the spread: keep 1.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
