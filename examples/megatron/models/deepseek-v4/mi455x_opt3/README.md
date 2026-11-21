@@ -33,7 +33,8 @@ Requirements:
 | yyq/opt3-int, all opt3 switches off, graph | 92.7 | 9.8712 |
 | all opt3 switches on (+ new fused Adam), graph | 77.9 | 9.8687 |
 | + MegaMoE fp8_block experts, graph | 62.1 | 9.8715 |
-| **+ Adam writes the MegaMoE expert caches (this config), graph** | **61.9** | 9.8715 |
+| + Adam writes the MegaMoE expert caches, graph | 61.9 | 9.8715 |
+| **+ fuseq switches (this config), graph** | **60.7** | 9.8715 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -42,6 +43,10 @@ at 1273 us for 879M params (83% of HBM). MegaMoE fp8_block then -15.7 ms (MoE GE
 `PRIMUS_FP8BLK_ADAM_MEGAMOE` then -0.3 ms (bit-identical; 6 A/B pairs, track adamqmoe): the tile Adam kernel also
 writes the MegaMoE expert q/s/qT/sT caches, so the `_w_128x128` re-quant (1.9 ms) goes away, but the tile kernel
 takes +1.8 ms on the expert weights (it still writes the same FP8 bytes and runs at ~14.5 vs 15.9 TB/s).
+fuseq switches then -1.4 ms (bit-identical; 2 A/B pairs in the int tree, 62.05 -> 60.65): `PRIMUS_TURBO_FUSEQ` (1x128
+dual quant writes scales in the consumer GEMM layout, half the `_pack_scales` launches gone), `PRIMUS_V4_ROPE_BWD_INPLACE`
+(inverse RoPE bwd on the 64 rope columns only), `PRIMUS_V4_OA_MAIN_GRAD` and `PRIMUS_EMB_MAIN_GRAD` (dW straight
+into main_grad, no DDP copy), `PRIMUS_V4_ROUTER_DENSE_OUT` (no bool zero fills). Kernels/step 2178 -> 2048.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
