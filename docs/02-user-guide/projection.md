@@ -126,6 +126,25 @@ Opt out with `--skip-hw-calibration`. Override the bandwidth with `--hbm-bandwid
 
 If `--target-nodes` is omitted, the tool defaults to the **minimum** number of nodes implied by your parallelism configuration (TP, PP, EP, CP, GPUs per node).
 
+### Expected and ceiling bounds (simulate mode)
+
+The default projection is the *expected* bound: what today's software stack achieves. `--bound ceiling` projects the same deployment with the software levers at their physical best, while GEMM and attention kernels stay Origami's and the SDPA simulator's:
+
+- **overlap**: TP all-reduce, MoE all-to-all, gradient reduce, FSDP and pipeline point-to-point traffic are hidden behind compute, limited only by the compute available to hide them.
+- **fusion**: element-wise passes (norm and residual, MoE permute and unpermute, activation, expert quantize and dequantize) are fused into neighbouring kernels.
+- **launch**: zero kernel-launch latency and a bubble-free pipeline (the busiest stage's compute over all microbatches).
+
+A measured throughput above the ceiling means the model is missing something. `--headroom` prints both bounds, each lever's gain on its own, and a waterfall that stacks the levers biggest first. `--headroom-measured` adds a measured tokens/s/GPU to that report.
+
+```bash
+./runner/primus-cli direct --script primus/cli/main.py -- \
+  projection performance \
+  --config examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml \
+  --profiling-mode simulate --gpu-arch mi355x --headroom
+```
+
+Both options need `--profiling-mode simulate` without `--load-benchmark`, because measured layer times cannot be split into the terms the ceiling removes.
+
 ### Parallelism overrides (environment)
 
 You can override parallelism for what-if analysis:
@@ -181,6 +200,10 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 | `--sync-free-stage` | Override Sync-Free MoE stage (`0` off; stages `1`-`3` enable additional modeling assumptions). |
 | `--num-virtual-stages-per-pipeline-rank` | Override virtual pipeline stage count for projection. |
 | `--micro-batch-size`, `--global-batch-size` | Override batch sizes for projection without editing the YAML. |
+| `--bound` | `expected` (default) or `ceiling`; simulate mode only. See [Expected and ceiling bounds](#expected-and-ceiling-bounds-simulate-mode). |
+| `--ceiling-levers` | Comma-separated levers the ceiling removes: `overlap`, `fusion`, `launch` (default: all). |
+| `--headroom` | Also print expected vs ceiling, each lever's gain, and a stacked waterfall. |
+| `--headroom-measured` | Measured tokens/s/GPU to place against both bounds in the headroom report. |
 
 ---
 

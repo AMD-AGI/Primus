@@ -9,6 +9,7 @@ from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import MOE
+from primus.core.projection.ceiling import at_ceiling
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import (
     TrainingConfig,
@@ -178,7 +179,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         bpe_disp = bytes_per_el  # fp8 (quantized expert inputs)
         bpe_comb = 2  # bf16 (expert outputs / grads reduced in bf16)
         has_sort = 1.0 if (ep_size > 1 and num_local_experts > 1) else 0.0
-        launch_us = float(os.getenv("PRIMUS_MOE_PERMUTE_LAUNCH_US", "2.8"))
+        launch_us = 0.0 if at_ceiling("launch") else float(os.getenv("PRIMUS_MOE_PERMUTE_LAUNCH_US", "2.8"))
 
         # #10: dispatch (permute) AND combine (unpermute) each run in BOTH the
         # forward pass (dispatch -> experts -> combine) and the backward pass
@@ -269,12 +270,15 @@ class MoEMLPProfiler(BaseModuleProfiler):
             bwd_quant_elems = topk_tokens * (H + F)  # down:H, up:F
         bwd_bytes = bwd_quant_elems * 4
 
+        if at_ceiling("fusion"):
+            # Casts fused into the grouped-GEMM prologue / epilogue: no extra pass, no extra launch.
+            return 0.0, 0.0
         fwd_ms = fwd_bytes / (eff_bw * 1e6)
         bwd_ms = bwd_bytes / (eff_bw * 1e6)
 
         # Per-group launch latency (BW-independent).  Forward casts ~2 buffers
         # (X, h); backward casts ~3 (swiglu) grad-outputs, each a small launch.
-        launch_us = float(os.getenv("PRIMUS_MOE_EXPERT_LAUNCH_US", "0.75"))
+        launch_us = 0.0 if at_ceiling("launch") else float(os.getenv("PRIMUS_MOE_EXPERT_LAUNCH_US", "0.75"))
         n_fwd_launch = 2.0
         n_bwd_launch = 3.0 if swiglu else 2.0
         # #8: the batched grouped-GEMM quant/dequant kernels launch a CONSTANT
@@ -552,6 +556,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
             combine_bwd = combine_bytes / (permute_eff_bw_gbps * 1e6)
             dispatch_bwd = combine_fwd = 0.0
 
+        if at_ceiling("fusion"):
+            # Permute / unpermute folded into the dispatch, the combine and the grouped GEMM.
+            dispatch_fwd = dispatch_bwd = combine_fwd = combine_bwd = 0.0
         permute_fwd_ms = dispatch_fwd + combine_fwd
         permute_bwd_ms = dispatch_bwd + combine_bwd
         fwd_time += permute_fwd_ms
@@ -562,7 +569,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
             act_bytes = 3 * topk_tokens * moe_ffn * bytes_per_el  # gate+up read, result write
         else:
             act_bytes = 2 * topk_tokens * moe_ffn * bytes_per_el  # read + write
-        activation_ms = act_bytes / (activation_bw_gbps * 1e6)
+        activation_ms = 0.0 if at_ceiling("fusion") else act_bytes / (activation_bw_gbps * 1e6)
 
         fwd_time += activation_ms
         bwd_time += activation_ms

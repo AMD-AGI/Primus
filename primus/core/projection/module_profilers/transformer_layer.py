@@ -10,6 +10,7 @@ from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import LAYER
+from primus.core.projection.ceiling import at_ceiling
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
@@ -230,6 +231,19 @@ def _deepep_exposed_a2a_ms(a2a_ms: float, overlap_window_ms: float, efficiency: 
     return max(a2a_ms - hidden, 0.0)
 
 
+def _layer_comm_ms(comm_ms: float, compute_ms: float, expected_ms: float) -> float:
+    """Exposed in-layer comm: ``expected_ms`` today, ``comm - compute`` at the overlap ceiling."""
+    if at_ceiling("overlap"):
+        return max(comm_ms - max(compute_ms, 0.0), 0.0)
+    return expected_ms
+
+
+def _layer_ln_res_ms(config, batch_size: int, seq_len: int, gemm_backend) -> tuple[float, float]:
+    if at_ceiling("fusion"):
+        return 0.0, 0.0
+    return _estimate_layernorm_residual_time_ms(config, batch_size, seq_len, gemm_backend)
+
+
 # Transformer Layer Data Flow
 #
 #             +----------------+
@@ -354,12 +368,12 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
 
         # Add LayerNorm + Residual Add overhead (simulation only).
         # These element-wise ops are missing from GEMM/SDPA simulation.
-        ln_res_fwd_ms, ln_res_bwd_ms = _estimate_layernorm_residual_time_ms(
-            self.config, batch_size, seq_len, self._gemm_backend
-        )
+        ln_res_fwd_ms, ln_res_bwd_ms = _layer_ln_res_ms(self.config, batch_size, seq_len, self._gemm_backend)
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
+        comm_fwd = _layer_comm_ms(2 * tp_ar_ms, attn_fwd + mlp_fwd, 2 * tp_ar_ms)
+        comm_bwd = _layer_comm_ms(2 * tp_ar_ms, attn_bwd + mlp_bwd, 2 * tp_ar_ms)
+        fwd_time = attn_fwd + mlp_fwd + comm_fwd + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + comm_bwd + ln_res_bwd_ms
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd
@@ -502,12 +516,14 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
 
         # Add LayerNorm + Residual Add overhead (simulation only).
         # These element-wise ops are missing from GEMM/SDPA simulation.
-        ln_res_fwd_ms, ln_res_bwd_ms = _estimate_layernorm_residual_time_ms(
-            self.config, batch_size, seq_len, self._gemm_backend
-        )
+        ln_res_fwd_ms, ln_res_bwd_ms = _layer_ln_res_ms(self.config, batch_size, seq_len, self._gemm_backend)
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_fwd_ms + ln_res_fwd_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_bwd_ms + ln_res_bwd_ms
+        # TP all-reduce and the MoE all-to-all share the same compute window.
+        layer_comm_ms = 2 * tp_ar_ms + moe_a2a_ms
+        comm_fwd = _layer_comm_ms(layer_comm_ms, attn_fwd + mlp_fwd, 2 * tp_ar_ms + moe_a2a_fwd_ms)
+        comm_bwd = _layer_comm_ms(layer_comm_ms, attn_bwd + mlp_bwd, 2 * tp_ar_ms + moe_a2a_bwd_ms)
+        fwd_time = attn_fwd + mlp_fwd + comm_fwd + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + comm_bwd + ln_res_bwd_ms
         # Selective recompute (core_attn): re-run attention forward during backward.
         if getattr(self.config.model_parallel_config, "recompute_granularity", None) == "selective":
             bwd_time += attn_fwd

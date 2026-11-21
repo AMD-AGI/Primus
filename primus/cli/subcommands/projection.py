@@ -475,6 +475,46 @@ def _add_performance_args(parser):
         default=False,
         help=_argparse.SUPPRESS,
     )
+    _add_ceiling_args(parser)
+
+
+def _add_ceiling_args(parser):
+    parser.add_argument(
+        "--bound",
+        dest="projection_bound",
+        type=str,
+        default="expected",
+        choices=["expected", "ceiling"],
+        help=(
+            "Projection bound (simulate mode only):\n"
+            "  expected - what today's stack achieves (default)\n"
+            "  ceiling  - same deployment with --ceiling-levers at their physical best;\n"
+            "             kernels stay Origami's. A measurement above it is a modelling gap.\n"
+        ),
+    )
+    parser.add_argument(
+        "--ceiling-levers",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated levers the ceiling removes (default: all):\n"
+            "  overlap - TP/A2A/grad-reduce/FSDP/PP comm hidden behind compute\n"
+            "  fusion  - norm/residual, MoE permute/activation/quant passes fused\n"
+            "  launch  - zero kernel-launch latency and pipeline bubbles\n"
+        ),
+    )
+    parser.add_argument(
+        "--headroom",
+        action="store_true",
+        default=False,
+        help="Also print expected vs ceiling with each lever's gain and a stacked waterfall.",
+    )
+    parser.add_argument(
+        "--headroom-measured",
+        type=float,
+        default=None,
+        help="Measured tokens/s/GPU to place against the expected and ceiling bounds in the headroom report.",
+    )
 
 
 def register_subcommand(subparsers):
