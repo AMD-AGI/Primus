@@ -24,6 +24,25 @@ def rmsnorm_g90_enabled() -> bool:
     return os.environ.get("PRIMUS_RMSNORM_G90", "1") != "0"
 
 
+def _glue_main_grad(gamma):
+    """PRIMUS_GLUE_RMSNORM=1: ``gamma.main_grad`` when dgamma can be written into it directly, else None."""
+    if os.environ.get("PRIMUS_GLUE_RMSNORM", "0") != "1":
+        return None
+    mg = getattr(gamma, "main_grad", None)
+    if (
+        isinstance(gamma, torch.nn.Parameter)
+        and hasattr(gamma, "grad_added_to_main_grad")
+        and isinstance(mg, torch.Tensor)
+        and mg.is_cuda
+        and mg.shape == gamma.shape
+        and mg.is_contiguous()
+        and gamma.dim() == 1
+        and not getattr(gamma, "shared", False)
+    ):
+        return mg
+    return None
+
+
 @triton.jit
 def _rms_fwd_kernel(X, G, Y, RSTD, M, H: tl.constexpr, eps, BH: tl.constexpr, RB: tl.constexpr):
     rows = tl.program_id(0) * RB + tl.arange(0, RB)
@@ -126,6 +145,13 @@ class RMSNormG90Fn(torch.autograd.Function):
         _rms_fwd_kernel[(triton.cdiv(M, rb),)](x2, g, y, rstd, M, H, float(eps), BH=BH, RB=rb, num_warps=4)
         ctx.save_for_backward(x2, g, rstd)
         ctx.x_shape = x.shape
+        # PRIMUS_GLUE_RMSNORM=1: dgamma goes straight into gamma.main_grad (no DDP hook copy / add); flagged in
+        # forward like the o_a / Turbo fused-wgrad writers.
+        ctx.wparam = None
+        if _glue_main_grad(gamma) is not None:
+            gamma.grad_added_to_main_grad = True
+            gamma._primus_fwd_claim = True
+            ctx.wparam = gamma
         return y.view(x.shape)
 
     @staticmethod
@@ -151,6 +177,20 @@ class RMSNormG90Fn(torch.autograd.Function):
             P = triton.cdiv(M, rpp)
             dgp = torch.empty((P, H), dtype=torch.float32, device=x2.device)
             _rms_bwd_kernel[(P,)](dy2, x2, g, rstd, dx, dgp, M, H, BH=BH, RB=rb, ROWS_PER_PROG=rpp, num_warps=8)
+        wparam, ctx.wparam = ctx.wparam, None
+        mg = _glue_main_grad(wparam) if wparam is not None else None
+        if mg is not None:
+            from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad, main_grad_first_write
+
+            first = main_grad_first_write(wparam)
+            if first and mg.dtype == g.dtype:
+                # beta 0: the reduce stores into main_grad exactly the bits the DDP hook would have copied
+                _rms_dg_reduce_kernel[(triton.cdiv(H, 64),)](dgp, mg.view(-1), P, H, BH=64, BP=64, num_warps=4)
+            else:
+                dg = torch.empty_like(g)
+                _rms_dg_reduce_kernel[(triton.cdiv(H, 64),)](dgp, dg, P, H, BH=64, BP=64, num_warps=4)
+                mg.view(-1).copy_(dg) if first else mg.view(-1).add_(dg)
+            return dx.view(ctx.x_shape), _get_dummy_wgrad(list(g.shape), g.dtype), None
         dg = torch.empty_like(g)
         _rms_dg_reduce_kernel[(triton.cdiv(H, 64),)](dgp, dg, P, H, BH=64, BP=64, num_warps=4)
         return dx.view(ctx.x_shape), dg, None

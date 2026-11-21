@@ -691,6 +691,29 @@ def _launch_rope_tail_inplace(x3, pos_c, inv_c, N, H, nope, rd, inverse):
     )
 
 
+_POS_KERNEL_DTYPES = (torch.int64, torch.int32, torch.float32)
+_INVFREQ_KERNEL_DTYPES = (torch.float32, torch.bfloat16, torch.float16)
+
+
+def rope_kernel_vectors(pos_flat: torch.Tensor, inv_freq: torch.Tensor):
+    """``(positions, inv_freq)`` as the rope kernels read them.
+
+    Default: contiguous fp32 copies (one cast kernel each per call). ``PRIMUS_GLUE_ROPE_NOCAST=1`` passes them
+    through when they are already contiguous in a dtype the kernels upcast exactly in-register
+    (``tl.load(...).to(tl.float32)``: int positions < 2**24 and bf16/fp16 inv_freq convert exactly), so the 2 small
+    cast kernels per rope call (~48 per step) disappear with the same bits.
+    """
+    if os.environ.get("PRIMUS_GLUE_ROPE_NOCAST", "0") == "1":
+        p = pos_flat if (pos_flat.is_contiguous() and pos_flat.dtype in _POS_KERNEL_DTYPES) else None
+        i = inv_freq if (inv_freq.is_contiguous() and inv_freq.dtype in _INVFREQ_KERNEL_DTYPES) else None
+        if p is None:
+            p = pos_flat.contiguous().to(torch.float32)
+        if i is None:
+            i = inv_freq.contiguous().to(torch.float32)
+        return p, i
+    return pos_flat.contiguous().to(torch.float32), inv_freq.contiguous().to(torch.float32)
+
+
 def _rows_view(t: torch.Tensor, N: int, H: int, D: int) -> torch.Tensor:
     """``t`` as an ``[N, H, D]`` view whose last dim is unit-stride, copying only if needed.
 
@@ -741,8 +764,7 @@ class RoPEFromPositionsFn(torch.autograd.Function):
                 f"inv_freq last dim must be rotary_dim // 2 ({rd_half}); got {tuple(inv_freq.shape)}"
             )
 
-        pos_c = pos_flat.contiguous().to(torch.float32)
-        inv_c = inv_freq.contiguous().to(torch.float32)
+        pos_c, inv_c = rope_kernel_vectors(pos_flat, inv_freq)
         out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
 
         nope = head_dim - rotary_dim

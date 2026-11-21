@@ -56,6 +56,42 @@ def _emb_segment_sum_kernel(G, PERM, SORTED, OUT, N, D, stride_g, NROWS: tl.cons
         tl.store(OUT + row.to(tl.int64) * D + d, total.to(OUT.dtype.element_ty), mask=dm)
 
 
+@triton.jit
+def _emb_zero_rows_kernel(PREV, CUR, OUT, D, BLOCK_D: tl.constexpr):
+    """PRIMUS_GLUE_EMB_TOUCHED: zero the rows the previous step wrote (PREV[i]) and record this step's (CUR[i])."""
+    i = tl.program_id(0)
+    row = tl.load(PREV + i).to(tl.int64)
+    for d0 in range(0, D, BLOCK_D):
+        d = d0 + tl.arange(0, BLOCK_D)
+        tl.store(OUT + row * D + d, tl.zeros((BLOCK_D,), dtype=OUT.dtype.element_ty), mask=d < D)
+    tl.store(PREV + i, tl.load(CUR + i))
+
+
+_touched = {}  # main_grad data_ptr -> persistent int64 [N] buffer of the rows written by the last call
+
+
+def _clear_for_write(out: torch.Tensor, idx: torch.Tensor) -> None:
+    """Make ``out`` all-zero before the segment-sum writes this step's rows.
+
+    Default: ``out.zero_()`` (1 GB at vocab 129280 x 4096 bf16, ~72 us). PRIMUS_GLUE_EMB_TOUCHED=1: only the rows the
+    previous call of this function wrote are non-zero (every other row was zeroed then and nobody else writes this
+    main_grad between two first writes: the embedding owns its slice under wgrad_beta0, and a clear / scaling keeps
+    zeros zero), so zeroing those N rows (32 MB) restores the all-zero state. The first call per buffer, or a token
+    count change, does the full clear. Bit-identical: the buffer is all zeros either way.
+    """
+    st = _touched.get(out.data_ptr())
+    N = idx.numel()
+    if os.environ.get("PRIMUS_GLUE_EMB_TOUCHED", "0") != "1":
+        out.zero_()
+        return
+    if st is None or st.numel() != N or st.device != idx.device:
+        out.zero_()
+        _touched[out.data_ptr()] = idx.to(torch.int64).clone()
+        return
+    cur = idx if (idx.dtype == torch.int64 and idx.is_contiguous()) else idx.to(torch.int64).contiguous()
+    _emb_zero_rows_kernel[(N,)](st, cur, out, out.shape[1], BLOCK_D=1024, num_warps=4)
+
+
 def embedding_grad_into(grad: torch.Tensor, indices: torch.Tensor, out: torch.Tensor) -> None:
     """out[:] = embedding_dense_backward(grad, indices, out.shape[0], -1, False), bit for bit (sorted path)."""
     D = out.shape[1]
@@ -65,7 +101,7 @@ def embedding_grad_into(grad: torch.Tensor, indices: torch.Tensor, out: torch.Te
     idx = indices.reshape(-1)
     N = idx.numel()
     sorted_idx, perm = torch.sort(idx, stable=True)
-    out.zero_()
+    _clear_for_write(out, idx)
     BLOCK_D = 1024
     _emb_segment_sum_kernel[(N, triton.cdiv(D, BLOCK_D))](
         g, perm, sorted_idx, out, N, D, g.stride(0), NROWS=_NROWS_PER_THREAD, BLOCK_D=BLOCK_D, num_warps=4
@@ -92,6 +128,10 @@ class EmbeddingMainGradFn(torch.autograd.Function):
         if main_grad_first_write(w) and ids.numel() > 3072:
             embedding_grad_into(grad, ids, mg)
         else:  # accumulate: exactly the DDP hook's add of the autograd gradient
+            if os.environ.get("PRIMUS_GLUE_EMB_TOUCHED", "0") == "1":
+                # the touched-rows clear only tracks the rows of the step's single first write
+                raise RuntimeError("PRIMUS_GLUE_EMB_TOUCHED=1 needs exactly one embedding gradient write per step "
+                                   "(one microbatch, untied, no MTP sharing); unset it for this configuration")
             mg.add_(torch.ops.aten.embedding_dense_backward(grad, ids, w.shape[0], -1, False))
         return None, _get_dummy_wgrad(list(w.shape), w.dtype)
 

@@ -590,7 +590,18 @@ class Compressor(KeepInFp32Mixin, nn.Module):
         ``row_idx`` is just ``arange`` -- and factoring the rest out is what keeps them
         numerically interchangeable rather than three drifting copies.
         """
-        if self._fuse_proj:
+        if self._fuse_proj and row_idx is None and is_first is None:
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.compressor_pool import (
+                fused_window_pool,
+                glue_window_pool_ok,
+            )
+
+            proj = self.wkv_gate(hidden)
+            if glue_window_pool_ok(proj, self.ape, self.ratio, self.head_dim, self.overlap):
+                # PRIMUS_GLUE_COMPRESS_POOL=1: window split + overlap stitch folded into the pool kernels
+                return self.kv_norm(fused_window_pool(proj, self.ape, self.ratio, self.head_dim, self.overlap))
+            kv_proj, score_proj = proj.split(self._proj_out, dim=-1)
+        elif self._fuse_proj:
             kv_proj, score_proj = self.wkv_gate(hidden).split(self._proj_out, dim=-1)
         else:
             kv_proj = self.wkv(hidden)  # [B, S, coff*head_dim]
