@@ -35,7 +35,8 @@ Requirements:
 | + MegaMoE fp8_block experts, graph | 62.1 | 9.8715 |
 | + Adam writes the MegaMoE expert caches, graph | 61.9 | 9.8715 |
 | + fuseq switches, graph | 60.7 | 9.8715 |
-| **+ MegaMoE flygg k256 (this config), graph** | **60.1** | 9.8715 |
+| + MegaMoE flygg k256, graph | 60.1 | 9.8715 |
+| **+ BF16 GEMM layouts and TunableOp for all BF16 shapes (this config), graph** | **59.5** | 9.8710 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -52,6 +53,11 @@ into main_grad, no DDP copy), `PRIMUS_V4_ROUTER_DENSE_OUT` (no bool zero fills).
 MegaMoE fp8_block fwd/dgrad grouped GEMM (flygg) uses 256x256x256 tiles, a 2-stage ring, a M/256 grid bound and one
 B-scale row per 16-row fragment (kernel -8..-13%, flygg 4.87 -> 4.30 ms/step). It assumes 128x128-block weight scales
 and 256-aligned expert offsets; `tile` restores the old kernel.
+bf16gemm then -0.75 ms (2 A/B pairs in the int tree, 60.2 -> 59.45; loss@20 9.871018, grad norm 4.152, inside the
+9.868-9.872 spread, so NOT bit-identical): lm_head wgrad via torch mm into main_grad on Triton-transposed operands (TN,
+tuned), o_a dgrad as a TN bmm, and the `tunableop_dsv4_gfx1250_bf16_0.csv` TunableOp file. The bit-identical variant
+`PRIMUS_LM_HEAD_WGRAD_LAYOUT=nt` gave no gain on top of fuseq (60.2 vs 60.2). The TunableOp entries are tied to the
+image's hipBLASLt; without the o_a TN entry the o_a dgrad change is slower.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
