@@ -4,15 +4,90 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from typing import Tuple
+import json
+import os
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from megatron.core.transformer.moe.moe_utils import apply_router_token_dropping
 from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.transformer.moe.router_replay import RouterReplay, RouterReplayAction
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training import get_args
 
 from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
+from primus.core.utils.module_utils import log_rank_0
+
+_REPLAY_ROUTERS: List["PrimusTopKRouter"] = []
+_REPLAY_RECORDS: Dict[str, Dict[int, torch.Tensor]] = {}
+
+
+def _routing_records(path: str) -> Dict[int, torch.Tensor]:
+    """This rank's routes in a Megatron router trace (``--moe-routing-trace-path``): decoder layer -> top-k expert
+    ids ``[tokens, topk]`` of all its records, in file order. Read once per process."""
+    if path not in _REPLAY_RECORDS:
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        world = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+        files = len(
+            [f for f in os.listdir(path) if f.startswith("router_trace_rank") and f.endswith(".jsonl")]
+        )
+        if files != world:
+            raise ValueError(
+                f"{path} has {files} router_trace_rank<r>.jsonl files for {world} ranks: replay on the world size "
+                "and parallel layout the routes were recorded with"
+            )
+        per_layer: Dict[int, List[torch.Tensor]] = {}
+        with open(os.path.join(path, f"router_trace_rank{rank}.jsonl")) as f:
+            for line in f:
+                record = json.loads(line)
+                if record.get("block", "decoder") != "decoder":
+                    continue
+                routes = torch.tensor(record["top_indices"], dtype=torch.int32)
+                per_layer.setdefault(int(record["layer"]), []).append(routes)
+        _REPLAY_RECORDS[path] = {layer: torch.cat(routes) for layer, routes in per_layer.items()}
+    return _REPLAY_RECORDS[path]
+
+
+def _replayed_topk(router: "PrimusTopKRouter", num_tokens: int) -> Optional[torch.Tensor]:
+    """Benchmark aid (``moe_routing_replay_path``): the next ``num_tokens`` recorded top-k expert ids of this
+    router's layer, wrapping around, or None when replay is off.
+
+    The trace of a decoder layer ``n`` (``decoder.layers.n`` in the trace) drives the MoE layer with
+    ``layer_number == n + 1``, or the MoE layers listed in ``moe_routing_replay_layers``, in build order."""
+    args = get_args()
+    path = args.moe_routing_replay_path
+    if not path:
+        return None
+    if getattr(router, "_replay", None) is None:
+        order = len(_REPLAY_ROUTERS)
+        layers = args.moe_routing_replay_layers
+        if layers and order >= len(layers):
+            raise ValueError(
+                f"moe_routing_replay_layers has {len(layers)} entries; the model has more MoE layers"
+            )
+        layer = int(layers[order]) if layers else router.layer_number - 1
+        records = _routing_records(path)
+        if layer not in records:
+            raise ValueError(f"no routes of decoder layer {layer} in {path} (layers {sorted(records)})")
+        routes = records[layer]
+        if routes.shape[1] != router.topk or int(routes.max()) >= router.config.num_moe_experts:
+            raise ValueError(
+                f"{path} layer {layer}: top-{routes.shape[1]} routes up to expert {int(routes.max())} do not fit "
+                f"top-{router.topk} over {router.config.num_moe_experts} experts"
+            )
+        _REPLAY_ROUTERS.append(router)
+        router._replay = routes.to(router.weight.device, torch.int64)
+        router._replay_pos = 0
+        if router.router_replay is None:
+            router.router_replay = RouterReplay()
+        log_rank_0(
+            f"[moe_routing_replay] MoE layer {router.layer_number} replays decoder layer {layer} of {path} "
+            f"({routes.shape[0]} tokens)"
+        )
+    routes, pos = router._replay, router._replay_pos
+    idx = (torch.arange(num_tokens, device=routes.device) + pos) % routes.shape[0]
+    router._replay_pos = (pos + num_tokens) % routes.shape[0]
+    return routes[idx]
 
 
 class PrimusTopKRouter(TopKRouter):
@@ -84,7 +159,13 @@ class PrimusTopKRouter(TopKRouter):
             # grok2 router logit softcapping
             fused_softcap(logits, args.router_logit_softcapping)
 
-        if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
+        replay = _replayed_topk(self, logits.view(-1, self.config.num_moe_experts).shape[0])
+        if replay is not None:
+            # Megatron's routing replay picks these experts and gathers their probabilities from this router's scores
+            self.router_replay.target_topk_idx = replay
+            self.router_replay.set_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
+            scores, routing_map = super().routing(logits, **kwargs)
+        elif args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
             scores, routing_map = self.fused_router_and_auxiliary_loss(logits)
         else:
             scores, routing_map = super().routing(logits, **kwargs)

@@ -598,6 +598,18 @@ models:
 | `use_deprecated_20241209_moe_layer` | `false` | *Primus:* legacy MoE layer implementation. |
 | `moe_router_force_load_balancing_type` | `even` | *Primus:* Control the force load balancing type for the MoE router. Choices: even, uniform. |
 | `moe_router_triton_gemm` | `false` | *Primus:* run an FP32 router's gating GEMM and its backward on Triton kernels, as accurate as Megatron's FP32 GEMMs (BF16 input and weight, no bias, 16-256 experts, hidden a multiple of 256; other calls keep Megatron's path). Not together with `moe_router_bwd_bf16`. |
+| `moe_replica_planner` | `null` | *Primus:* dynamic expert replication: copy hot experts into replica slots on lightly loaded EP ranks (`ultraep` or `moonep`; `null` is off). Turbo DeepEP and BF16 Turbo grouped GEMM only. See [MoE expert replication](../04-technical-guides/moe-expert-replication.md). |
+| `moe_replica_placement` | `per_step` | *Primus:* plan replicas once per optimizer step (`per_step`) or every micro-batch (`per_microbatch`). |
+| `moe_replica_slots` | `4` | *Primus:* replica slots per rank and expert linear; `moonep` needs at least `num_experts / expert_model_parallel_size`. |
+| `moe_replica_min_rows` | `1024` | *Primus:* `ultraep`: rows a new replica must take. |
+| `moe_replica_min_gain` | `0.1` | *Primus:* `ultraep`: build replicas only if the busiest rank drops by this fraction of the mean load. |
+| `moe_replica_cost` | `0` | *Primus:* `ultraep`: rows a new replica costs its rank. |
+| `moe_replica_block` | `1` | *Primus:* `ultraep`: quotas in multiples of this many rows. |
+| `moe_replica_replan_above` | `0.0` | *Primus:* `per_microbatch`: keep the slots while the busiest rank stays within this multiple of the mean load; `0` plans every micro-batch. |
+| `moe_replica_async_comm` | `true` | *Primus:* push slot weights right after planning and return slot gradients overlapped with the backward. |
+| `moe_replica_log_interval` | `0` | *Primus:* log the busiest rank's load before and after planning every N plans; `0` is off. |
+| `moe_routing_replay_path` | `null` | *Primus:* replay the routes Megatron recorded with `moe_routing_trace_path` from this directory (one `router_trace_rank<r>.jsonl` per rank), for benchmarks with real routing on mock weights. Not with recompute of MoE layers, PP > 1 or MTP. |
+| `moe_routing_replay_layers` | `null` | *Primus:* the recorded decoder layer each MoE layer replays, in build order; `null` replays the layer with the same number. |
 
 
 ### 10.7 Logit softcapping (Primus / Grok-style)
