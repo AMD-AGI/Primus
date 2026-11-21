@@ -28,9 +28,94 @@ the same Function serves all backends (backward returns ``None`` for them).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import os
+import weakref
 from typing import Callable, Optional
 
 import torch
+
+# Set while a fwd / bwd kernel runs on a "canonical band" top-k map: B == 1, no CP, no
+# packing, the 128-row sliding window [t-127, t] in slot order, plus (HCA) the causal pool
+# kv row Skv' + p visible iff t >= cr * (p + 1) - 1 with cr = S / P. A backend may then
+# use closed-form band kernels that do not read the indices (Turbo gfx1250 use_swa=True).
+_BAND_HINT = contextvars.ContextVar("v4_sparse_mla_band_hint", default=False)
+_SWA_BAND_W = 128
+# id(mask) -> (weakref to mask, mask._version, ok). Not a WeakKeyDictionary: tensor keys
+# compare with the elementwise __eq__.
+_mask_ok_cache = {}
+
+
+_BAND_TOPK_CACHE = {}
+
+
+def _fused_glue_on(t: torch.Tensor) -> bool:
+    """Fused Triton glue (one kernel for the CSA top-k map / the rope-padded kv) on GPU tensors."""
+    return t.is_cuda and os.environ.get("PRIMUS_V4_FUSED_GLUE", "1") == "1"
+
+
+def _glue():
+    from ._triton_common import sparse_mla_glue
+
+    return sparse_mla_glue
+
+
+def band_hint():
+    """True inside a fwd / bwd call whose top-k map is a canonical band (see above)."""
+    return _BAND_HINT.get()
+
+
+@contextlib.contextmanager
+def _band(on: bool):
+    tok = _BAND_HINT.set(on if isinstance(on, tuple) else bool(on))
+    try:
+        yield
+    finally:
+        _BAND_HINT.reset(tok)
+
+
+def _hca_mask_is_closed_form(mask: torch.Tensor, S: int, P: int) -> bool:
+    """``mask`` ([S, P] additive) == the causal pool mask with ratio S // P. Checked once per
+    mask tensor (one device sync; the model caches its mask, so once per run and layer)."""
+    ent = _mask_ok_cache.get(id(mask))
+    if ent is not None and ent[0]() is mask and ent[1] == mask._version:
+        return ent[2]
+    cr = S // P
+    t = torch.arange(S, device=mask.device).view(S, 1)
+    vis = (torch.arange(P, device=mask.device).view(1, P) + 1) * cr - 1 <= t
+    ok = bool(torch.equal(mask.reshape(S, P) == 0, vis))
+    if len(_mask_ok_cache) > 64:
+        _mask_ok_cache.clear()
+    _mask_ok_cache[id(mask)] = (weakref.ref(mask), mask._version, ok)
+    return ok
+
+
+def _csa_band_pool(B, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts):
+    """``(W, Skv, P)`` when a CSA map is "window + pool" in its simplest form: B == 1, no CP,
+    no packing, so slot s < W of token t is raw row t - W + 1 + s (or -1) and the rest are
+    pool rows Skv + p (indexer top-k: each at most once per token) or -1. The backward may
+    then reduce dKV without a CSR inverse (Turbo ``band_pool``). Else ``False``."""
+    if os.environ.get("PRIMUS_V4_BAND_KERNELS", "1") != "1":
+        return False
+    if B != 1 or W <= 0 or int(cp_dwindow) != 0 or int(cp_global_start) != 0 or seq_starts is not None:
+        return False
+    if Skv != S or P <= 0:
+        return False
+    return (int(W), int(Skv), int(P))
+
+
+def _canonical_band(B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, hca_local_seqlen, mask) -> bool:
+    if os.environ.get("PRIMUS_V4_BAND_KERNELS", "1") != "1":
+        return False
+    if B != 1 or W != _SWA_BAND_W or int(cp_dwindow) != 0 or int(cp_global_start) != 0 or seq_starts is not None:
+        return False
+    if hca_local_seqlen > 0 and mask is not None:
+        P = Skv - int(hca_local_seqlen)
+        if int(hca_local_seqlen) != S or P <= 0 or S % P or mask.numel() != S * P:
+            return False
+        return _hca_mask_is_closed_form(mask, S, P)
+    return Skv == S
 
 _ROPE_PAD = 64  # dummy separate-rope block (zeros); the kernels need D_ROPE > 0
 
@@ -216,17 +301,24 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         latent = k_local_bh[:, :, 0, :] if k_is_latent else k_local_bh[:, 0, :, :]  # [B, Skv, D]
 
         q_g = _rope_pad_q(q_bh)
-        kv_g = _rope_pad_kv(torch.cat([latent, pool], dim=1).reshape(B * (Skv + P), 1, D))
+        if _fused_glue_on(q_bh) and latent.stride(-1) == 1 and pool.stride(-1) == 1 and pool.dtype == latent.dtype:
+            kv_g = _glue().rope_pad_kv(latent, pool, _ROPE_PAD)
+        else:
+            kv_g = _rope_pad_kv(torch.cat([latent, pool], dim=1).reshape(B * (Skv + P), 1, D))
 
-        topk_g = _pad_topk_64(
-            _build_csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start), seq_starts)
-        )
+        if seq_starts is None and _fused_glue_on(q_bh) and topk_idxs.stride(-1) == 1:
+            topk_g = _glue().csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start))
+        else:
+            topk_g = _pad_topk_64(
+                _build_csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start), seq_starts)
+            )
 
         sink_arg = sink.float().contiguous() if sink is not None else None
         o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
         ctx.shapes = (B, H, S, Skv, D, P, W)
+        ctx.band = _csa_band_pool(B, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts)
         ctx.scale = float(scale)
         ctx.sink_was_none = sink is None
         ctx.bwd_fn = bwd_fn
@@ -246,9 +338,10 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         sink_arg = None if ctx.sink_was_none else sink_saved
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
-        dq_g, dkv_g, dsink = ctx.bwd_fn(
-            q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-        )
+        with _band(ctx.band):
+            dq_g, dkv_g, dsink = ctx.bwd_fn(
+                q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+            )
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv512 = dkv_g[:, 0, :D].reshape(B, Skv + P, D)
@@ -330,42 +423,59 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         assert q_bh.dtype == torch.bfloat16, "sparse-MLA adapter requires bf16"
         assert W > 0, "sparse-MLA adapter requires swa_window > 0"
 
-        device = q_bh.device
-        # int32 throughout: this index matrix is cast to int32 by _pad_topk_64 anyway, and
-        # the largest value is B*(Skv+P) -- 139264 at 1M with CP=8, nowhere near the int32
-        # range. Building it in torch's default int64 doubled every intermediate below,
-        # which at 1M is ~8.6 GiB apiece.
-        idx_dtype = torch.int32
-        neg1 = -1  # Python scalar: torch.tensor(-1, device=cuda) was a pageable H2D copy (host sync, not graph-capturable)
-        base = (torch.arange(B, device=device, dtype=idx_dtype) * Skv).view(B, 1, 1)
-        # Context parallel: this rank owns global rows [cp_global_start, +S), and its KV
-        # buffer is [boundary ++ local] with `cp_dwindow` boundary rows received from the
-        # left neighbour. So the window is validated against GLOBAL positions (a token must
-        # not attend before the sequence start) but indexed in LOCAL buffer coordinates.
-        # With cp_dwindow == cp_global_start == 0 this is byte-identical to the non-CP form.
-        win_idx = _window_indices(
-            S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device
+        band = _canonical_band(
+            B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, int(hca_local_seqlen), additive_mask
         )
+        # A certified band map depends only on (S, Skv, W, pool) -- the same tensor for every layer
+        # and step: build it once. (Kernels only read it.)
+        band_key = (B, S, Skv, W, int(hca_local_seqlen), str(q_bh.device)) if band else None
+        topk_g = _BAND_TOPK_CACHE.get(band_key) if band else None
+        if topk_g is None:
+            device = q_bh.device
+            # int32 throughout: this index matrix is cast to int32 by _pad_topk_64 anyway, and
+            # the largest value is B*(Skv+P) -- 139264 at 1M with CP=8, nowhere near the int32
+            # range. Building it in torch's default int64 doubled every intermediate below,
+            # which at 1M is ~8.6 GiB apiece.
+            idx_dtype = torch.int32
+            neg1 = -1  # Python scalar: torch.tensor(-1, device=cuda) was a pageable H2D copy (host sync, not graph-capturable)
+            base = (torch.arange(B, device=device, dtype=idx_dtype) * Skv).view(B, 1, 1)
+            # Context parallel: this rank owns global rows [cp_global_start, +S), and its KV
+            # buffer is [boundary ++ local] with `cp_dwindow` boundary rows received from the
+            # left neighbour. So the window is validated against GLOBAL positions (a token must
+            # not attend before the sequence start) but indexed in LOCAL buffer coordinates.
+            # With cp_dwindow == cp_global_start == 0 this is byte-identical to the non-CP form.
+            win_idx = _window_indices(
+                S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device
+            )
 
-        if hca_local_seqlen > 0 and additive_mask is not None:
-            P = Skv - int(hca_local_seqlen)
-            vis = (additive_mask == 0).view(1, S, P)
-            ps = torch.arange(P, device=device, dtype=idx_dtype).view(1, 1, P)
-            # `neg1` is a 0-dim tensor, not torch.full((B, S, P), -1): the full form
-            # materialised an entire [B, S, P] constant just to be the `where` else-branch
-            # -- 8.6 GiB at 1M, thrown away immediately.
-            pool_idx = torch.where(vis, base + hca_local_seqlen + ps, neg1)
-            topk = torch.cat([win_idx, pool_idx], dim=2)
-        else:
-            topk = win_idx
-        topk_g = _pad_topk_64(topk.reshape(B * S, -1))
+            if hca_local_seqlen > 0 and additive_mask is not None:
+                P = Skv - int(hca_local_seqlen)
+                vis = (additive_mask == 0).view(1, S, P)
+                ps = torch.arange(P, device=device, dtype=idx_dtype).view(1, 1, P)
+                # `neg1` is a 0-dim tensor, not torch.full((B, S, P), -1): the full form
+                # materialised an entire [B, S, P] constant just to be the `where` else-branch
+                # -- 8.6 GiB at 1M, thrown away immediately.
+                pool_idx = torch.where(vis, base + hca_local_seqlen + ps, neg1)
+                topk = torch.cat([win_idx, pool_idx], dim=2)
+            else:
+                topk = win_idx
+            topk_g = _pad_topk_64(topk.reshape(B * S, -1))
+            if band:
+                if len(_BAND_TOPK_CACHE) > 16:
+                    _BAND_TOPK_CACHE.clear()
+                _BAND_TOPK_CACHE[band_key] = topk_g
 
         q_g = _rope_pad_q(q_bh)
         latent = k_bh[:, :, 0, :] if k_is_latent else k_bh[:, 0, :, :]  # [B, Skv, D]
-        kv_g = _rope_pad_kv(latent.reshape(B * Skv, 1, D))
+        if _fused_glue_on(q_bh) and latent.stride(-1) == 1:
+            kv_g = _glue().rope_pad_kv(latent, None, _ROPE_PAD)
+        else:
+            kv_g = _rope_pad_kv(latent.reshape(B * Skv, 1, D))
 
         sink_arg = sink.float().contiguous() if sink is not None else None
-        o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
+        ctx.band = band
+        with _band(band):
+            o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
         ctx.shapes = (B, H, S, D, Skv)
@@ -388,9 +498,10 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         sink_arg = None if ctx.sink_was_none else sink_saved
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
-        dq_g, dkv_g, dsink = ctx.bwd_fn(
-            q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-        )
+        with _band(ctx.band):
+            dq_g, dkv_g, dsink = ctx.bwd_fn(
+                q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+            )
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv = dkv_g[:, 0, :D].reshape(B, Skv, D)
