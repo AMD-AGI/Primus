@@ -359,8 +359,21 @@ def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
 # leaves wkv's last 128x128 block amax unchanged; 1x128 dY groups line up the same way) -- see
 # ~/dsv41/work/opt3/small/splitk/cpu_check_small.py. PRIMUS_V4_QKV_A_CONCAT_VIEWS=0 makes q_a / kv
 # contiguous copies (only needed if a consumer rejects row-strided inputs).
+# densefp8 (2026-11-21): this path was never active in the DSv4 proxy -- TE-style linears keep ``bias`` as an empty
+# tensor, which the old ``bias is not None`` check rejected. Now:
+#   PRIMUS_V4_QKV_A_CONCAT_FP8BLK=1 -> Turbo gemm_fp8_block_concat_n on the block-FP8 dsv4up path (joint FP8 weight
+#                                       written by the optimizer, fused main_grad wgrad, order [wkv, wq_a]);
+#   otherwise the separate linears (as before), unless PRIMUS_V4_QKV_A_CONCAT_LEGACY=1 asks for the generic concat.
 def _qkv_a_concat_enabled() -> bool:
     return os.environ.get("PRIMUS_V4_QKV_A_CONCAT", "0") == "1"
+
+
+def _no_bias(m: nn.Module) -> bool:
+    """No bias: TE-style linears keep ``bias`` as an EMPTY tensor when bias=False (not None)."""
+    if getattr(m, "use_bias", False):
+        return False
+    b = getattr(m, "bias", None)
+    return b is None or (isinstance(b, torch.Tensor) and b.numel() == 0)
 
 
 class _QKVASplit(torch.autograd.Function):
@@ -392,6 +405,40 @@ class _QKVASplit(torch.autograd.Function):
         if ctx.shape[-1] > nq + nkv:
             g.narrow(-1, nq + nkv, ctx.shape[-1] - nq - nkv).zero_()
         return g, None, None
+
+
+def _qkv_a_fp8blk(x2: torch.Tensor, ws, config):
+    """PRIMUS_V4_QKV_A_CONCAT on the Turbo block-FP8 dsv4up path: one x quant + one launch per pass against the
+    joint FP8 weight the optimizer writes (Turbo gemm_fp8_block_concat_n; fused main_grad wgrad, no bf16 weight
+    cat, no .grad round trip). Returns one contiguous [M, N_i] output per weight of ``ws``, or None when that
+    path does not apply."""
+    if os.environ.get("PRIMUS_V4_QKV_A_CONCAT_FP8BLK", "0") != "1":
+        return None
+    try:
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLowPrecisionGlobalStateManager as _M,
+        )
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            _dense_precision_context,
+            _fuse_wgrad_accum_pattern,
+        )
+        from primus_turbo.pytorch.ops.gemm_fp8_concat import (
+            gemm_fp8_block_concat_n,
+            gemm_fp8_block_concat_n_supported,
+        )
+    except Exception:  # CPU unit tests / a Turbo without the op
+        return None
+    with _dense_precision_context(x2, ws[0]):
+        if not _M.is_turbo_fp8_enabled():
+            return None
+        qc = _M.get_turbo_quant_config()
+        if qc is None or not qc.block_scaling():
+            return None
+        cfg = qc.data()
+        if not gemm_fp8_block_concat_n_supported(x2, ws, cfg):
+            return None
+        pats = [_fuse_wgrad_accum_pattern(config, w) for w in ws]
+        return gemm_fp8_block_concat_n(x2, list(ws), cfg, pats)
 
 
 def _concat_linear(x2: torch.Tensor, w: torch.Tensor, ref_module: nn.Module) -> torch.Tensor:
@@ -1331,9 +1378,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         wkv = getattr(self.linear_kv, "weight", None)
         if wq is None or wkv is None or wq.dim() != 2 or wkv.dim() != 2 or wq.shape[1] != wkv.shape[1]:
             return False
-        if getattr(self.linear_q_down_proj, "use_bias", False) or getattr(self.linear_kv, "use_bias", False):
-            return False
-        if getattr(self.linear_q_down_proj, "bias", None) is not None or getattr(self.linear_kv, "bias", None) is not None:
+        if not (_no_bias(self.linear_q_down_proj) and _no_bias(self.linear_kv)):
             return False
         return getattr(self.config, "tensor_model_parallel_size", 1) == 1 and hidden.shape[-1] == wq.shape[1]
 
@@ -1342,6 +1387,33 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         wq = self.linear_q_down_proj.weight
         wkv = self.linear_kv.weight
         nq, nkv, D = wq.shape[0], wkv.shape[0], wq.shape[1]
+        lead = hidden.shape[:-1]
+        # Block-FP8 dsv4up path (the DSv4 recipe): joint FP8 weight, fused main_grad. The weight order follows the
+        # main_grad layout (DDP lays wkv right before wq_a), so the wgrad is one GEMM into both main_grads; it is
+        # fixed at the first call (the optimizer's joint FP8 cache is built in that order).
+        order = getattr(self, "_qkv_a_fp8_order", None)
+        if order is None:
+            mq, mk = getattr(wq, "main_grad", None), getattr(wkv, "main_grad", None)
+            kv_first = (
+                isinstance(mq, torch.Tensor)
+                and isinstance(mk, torch.Tensor)
+                and mk.data_ptr() + mk.numel() * mk.element_size() == mq.data_ptr()
+            )
+            order = "kv_q" if kv_first else "q_kv"
+            self._qkv_a_fp8_order = order
+            if os.environ.get("PRIMUS_V4_QKV_A_CONCAT_DEBUG", "0") == "1" and isinstance(mq, torch.Tensor) and isinstance(mk, torch.Tensor):
+                print(f"[qkv_a concat] order={order} wq.main_grad ptr={mq.data_ptr():#x} n={mq.numel()} "
+                      f"wkv.main_grad ptr={mk.data_ptr():#x} n={mk.numel()} es={mq.element_size()}", flush=True)
+        ws = (wkv, wq) if order == "kv_q" else (wq, wkv)
+        x2 = hidden.reshape(-1, D)
+        outs = _qkv_a_fp8blk(x2, ws, self.config)
+        if outs is not None:  # one contiguous output per weight, in ``ws`` order
+            o_q, o_kv = (outs[1], outs[0]) if order == "kv_q" else (outs[0], outs[1])
+            return o_q.view(*lead, nq), o_kv.view(*lead, nkv)
+        if os.environ.get("PRIMUS_V4_QKV_A_CONCAT_LEGACY", "0") != "1":
+            # The generic concat below (bf16 weight cat + per-call weight quant, .grad wgrad) was never active in
+            # the DSv4 proxy (the TE empty-bias check rejected it); keep the separate linears unless asked.
+            return None, None
         pad_to = int(os.environ.get("PRIMUS_V4_QKV_A_CONCAT_PAD", "512"))
         npad = (nq + nkv + pad_to - 1) // pad_to * pad_to
         parts = [wq, wkv]
@@ -1352,8 +1424,6 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 self._qkv_a_zero_pad = zp
             parts.append(zp)
         w = torch.cat(parts, dim=0)  # [Npad, D]; one bf16 copy (an Adam-fused weight quant would emit it directly)
-        lead = hidden.shape[:-1]
-        x2 = hidden.reshape(-1, D)
         if not x2.is_contiguous():
             x2 = x2.contiguous()
         out = _concat_linear(x2, w, self.linear_q_down_proj).view(*lead, npad)
