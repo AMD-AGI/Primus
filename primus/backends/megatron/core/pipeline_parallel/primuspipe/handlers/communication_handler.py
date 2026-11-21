@@ -58,12 +58,19 @@ def _async_send_recv_op(
     else:
         even_recv_odd_send_group = group
 
+    def global_rank(pp_rank):
+        # Peers go by global rank: one of the two groups above may be WORLD, where a pp rank names
+        # a different process.
+        return torch.distributed.get_global_rank(group, pp_rank)
+
     if group.rank() % 2 == 0:
         if send_next_nodes is not None:
             for node in send_next_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_next_req = torch.distributed.isend(
-                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
+                        tensor=send_buffer,
+                        dst=global_rank(node.args["to_pp_rank"]),
+                        group=even_send_odd_recv_group,
                     )
                     node.args["req"] = send_next_req
 
@@ -72,7 +79,7 @@ def _async_send_recv_op(
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_prev_req = torch.distributed.irecv(
                         tensor=recv_buffer,
-                        group_src=node.args["from_pp_rank"],
+                        src=global_rank(node.args["from_pp_rank"]),
                         group=even_recv_odd_send_group,
                     )
                     node.args["req"] = recv_prev_req
@@ -81,7 +88,9 @@ def _async_send_recv_op(
             for node in send_prev_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_prev_req = torch.distributed.isend(
-                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
+                        tensor=send_buffer,
+                        dst=global_rank(node.args["to_pp_rank"]),
+                        group=even_send_odd_recv_group,
                     )
                     node.args["req"] = send_prev_req
 
@@ -90,7 +99,7 @@ def _async_send_recv_op(
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_next_req = torch.distributed.irecv(
                         tensor=recv_buffer,
-                        group_src=node.args["from_pp_rank"],
+                        src=global_rank(node.args["from_pp_rank"]),
                         group=even_recv_odd_send_group,
                     )
                     node.args["req"] = recv_next_req
@@ -101,7 +110,7 @@ def _async_send_recv_op(
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_prev_req = torch.distributed.irecv(
                         tensor=recv_buffer,
-                        group_src=node.args["from_pp_rank"],
+                        src=global_rank(node.args["from_pp_rank"]),
                         group=even_send_odd_recv_group,
                     )
                     node.args["req"] = recv_prev_req
@@ -110,7 +119,9 @@ def _async_send_recv_op(
             for node in send_next_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_next_req = torch.distributed.isend(
-                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
+                        tensor=send_buffer,
+                        dst=global_rank(node.args["to_pp_rank"]),
+                        group=even_recv_odd_send_group,
                     )
                     node.args["req"] = send_next_req
 
@@ -119,7 +130,7 @@ def _async_send_recv_op(
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_next_req = torch.distributed.irecv(
                         tensor=recv_buffer,
-                        group_src=node.args["from_pp_rank"],
+                        src=global_rank(node.args["from_pp_rank"]),
                         group=even_send_odd_recv_group,
                     )
                     node.args["req"] = recv_next_req
@@ -128,7 +139,9 @@ def _async_send_recv_op(
             for node in send_prev_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_prev_req = torch.distributed.isend(
-                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
+                        tensor=send_buffer,
+                        dst=global_rank(node.args["to_pp_rank"]),
+                        group=even_recv_odd_send_group,
                     )
                     node.args["req"] = send_prev_req
 
