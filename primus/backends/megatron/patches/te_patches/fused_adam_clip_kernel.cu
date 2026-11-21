@@ -57,6 +57,24 @@ __device__ __forceinline__ uint4 pack_bf16x8(const float* values) {
   return {words[0], words[1], words[2], words[3]};
 }
 
+// The tensor pointers come from a device array, so the compiler cannot prove they are global
+// and emits flat loads/stores (which also count against the LDS wait counter). These helpers
+// access them through the global address space explicitly (tile kernel only); the cast goes
+// through an integer because a generic->global pointer cast is folded back to flat.
+#if defined(__HIP_DEVICE_COMPILE__)
+#define FP8BLK_GLOBAL __attribute__((address_space(1)))
+#else
+#define FP8BLK_GLOBAL
+#endif
+template <typename V>
+__host__ __device__ __forceinline__ V gld(const void* p) {
+  return *(const FP8BLK_GLOBAL V*)(reinterpret_cast<uintptr_t>(p));
+}
+template <typename V>
+__host__ __device__ __forceinline__ void gst(void* p, const V& v) {
+  *(FP8BLK_GLOBAL V*)(reinterpret_cast<uintptr_t>(p)) = v;
+}
+
 #ifndef PRIMUS_FP8BLK_HOST_TEST
 template <bool AdamW, typename MomentT, typename GradT>
 __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
@@ -222,6 +240,12 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
 // It emits W [B,N,K] fp8, W^T [B,K,N] fp8 (same tile, same scale), scale_inv
 // [B,N/128,K/128] fp32 and E8M0 bytes [B,N/128,K/128] and [B,K/128,N/128].
 // Partial edge tiles follow the reference (out-of-range elements count as 0).
+//
+// Performance: the kernel is latency bound (Adam's IEEE div/sqrt plus the amax and LDS
+// barriers per tile), so it needs many resident tiles per CU. The full-tile path keeps its
+// VGPR count <= 85 (3 blocks of 16 waves per CU): uniform tile origin + 32-bit offsets, the
+// BF16 weights parked in LDS between the Adam and the quant phase, and a lean element-wise
+// edge path, since the kernel's VGPR count is the maximum over both paths.
 // ---------------------------------------------------------------------------
 constexpr int kTile = 128;
 constexpr int kTileColThreads = kTile / kIlp;                      // 16 threads per tile row
@@ -308,11 +332,17 @@ __host__ __device__ __forceinline__ Fp8BlkTile fp8blk_tile_coords(
   t.K = dims[tensor_idx * kFp8BlkDims + 1];
   t.tiles_n = dims[tensor_idx * kFp8BlkDims + 2];
   t.tiles_k = dims[tensor_idx * kFp8BlkDims + 3];
-  const int64_t per_mat = t.tiles_n * t.tiles_k;
-  t.b = tile_idx / per_mat;
-  const int64_t r = tile_idx - t.b * per_mat;
-  t.tm = r / t.tiles_k;
-  t.tk = r - t.tm * t.tiles_k;
+  // Tile counts fit in 32 bits (the grid is one block per tile): 32-bit division is far
+  // cheaper than the 64-bit software routine.
+  const uint32_t per_mat = static_cast<uint32_t>(t.tiles_n * t.tiles_k);
+  const uint32_t tiles_k = static_cast<uint32_t>(t.tiles_k);
+  const uint32_t idx = static_cast<uint32_t>(tile_idx);
+  const uint32_t b = idx / per_mat;
+  const uint32_t r = idx - b * per_mat;
+  const uint32_t tm = r / tiles_k;
+  t.b = b;
+  t.tm = tm;
+  t.tk = r - tm * tiles_k;
   return t;
 }
 
@@ -436,6 +466,129 @@ __host__ __device__ __forceinline__ float fp8blk_adam_phase(
   return amax;
 }
 
+// 8 consecutive elements of T as raw 16-byte words (one uint4 for BF16, two for FP32).
+template <typename T>
+struct Fp8BlkRaw8 {
+  static constexpr int kWords = static_cast<int>(sizeof(T)) * kIlp / 16;
+  uint4 w[kWords];
+};
+
+template <typename T>
+__host__ __device__ __forceinline__ void fp8blk_load8(const T* src, Fp8BlkRaw8<T>& r) {
+#pragma unroll
+  for (int q = 0; q < Fp8BlkRaw8<T>::kWords; ++q) r.w[q] = gld<uint4>(reinterpret_cast<const uint4*>(src) + q);
+}
+
+template <typename T>
+__host__ __device__ __forceinline__ void fp8blk_unpack8(const Fp8BlkRaw8<T>& r, float* out) {
+  if constexpr (std::is_same_v<T, float>) {
+    memcpy(out, r.w, sizeof(r.w));
+  } else {
+    unpack_bf16x8(r.w[0], out);
+  }
+}
+
+// Full tiles are addressed as a uniform 64-bit tile origin plus a 32-bit per-thread element
+// offset (fp8blk_tile_full guarantees 128 * K < 2^31), so the loads and stores use a scalar
+// base register instead of a 64-bit VGPR address each.
+__host__ __device__ __forceinline__ int64_t fp8blk_tile_origin(const Fp8BlkTile& t) {
+  return (t.b * t.N + t.tm * kTile) * t.K + t.tk * kTile;
+}
+
+// LDS slot (16 bytes = 8 BF16) of thread tid's row group it in the parked weight tile; the
+// tile is row-major [128][128] BF16 (slot = row * 16 + column group).
+__host__ __device__ __forceinline__ int fp8blk_xs_slot(int tid, int it) {
+  return it * kBlockSize + tid;
+}
+
+__host__ __device__ __forceinline__ uint32_t fp8blk_thread_off(int tid, int it, uint32_t K) {
+  return static_cast<uint32_t>(it * kTileRowsPerIter + tid / kTileColThreads) * K +
+      static_cast<uint32_t>((tid % kTileColThreads) * kIlp);
+}
+
+// Phase 1, full-tile fast path (whole 128x128 tile in range): identical math and stores to
+// fp8blk_adam_phase. The addresses are a uniform tile origin plus 32-bit offsets and the BF16
+// weights are parked in LDS for the quant phase instead of being held in registers: the VGPR
+// count sets the occupancy (a 512-thread block is 4 waves per SIMD, 1024 VGPRs per lane per
+// SIMD), which is what this latency-bound kernel is limited by.
+template <bool AdamW, typename MomentT, typename GradT>
+__host__ __device__ __forceinline__ float fp8blk_adam_full(
+    int tid, const Fp8BlkTile& t, const Fp8BlkPtrs<GradT, MomentT>& ptr,
+    float beta1, float beta2, float step_size, float beta2_corr_inv, float epsilon,
+    float lr, float decay, float grad_scale, uint4* xs) {
+  float amax = 0.0f;
+  const int64_t o = fp8blk_tile_origin(t);
+  GradT* __restrict__ grad = ptr.grad + o;
+  float* __restrict__ param = ptr.param + o;
+  MomentT* __restrict__ exp_avg = ptr.exp_avg + o;
+  MomentT* __restrict__ exp_avg_sq = ptr.exp_avg_sq + o;
+  c10::BFloat16* __restrict__ model_param = ptr.model_param + o;
+  const uint32_t K = static_cast<uint32_t>(t.K);
+#pragma unroll
+  for (int it = 0; it < kTileIters; ++it) {
+    const uint32_t i = fp8blk_thread_off(tid, it, K);
+    Fp8BlkRaw8<GradT> rg;
+    Fp8BlkRaw8<float> rp;
+    Fp8BlkRaw8<MomentT> rm;
+    Fp8BlkRaw8<MomentT> rv;
+    fp8blk_load8(grad + i, rg);
+    fp8blk_load8(param + i, rp);
+    fp8blk_load8(exp_avg + i, rm);
+    fp8blk_load8(exp_avg_sq + i, rv);
+    float g[kIlp];
+    float p[kIlp];
+    float m[kIlp];
+    float v[kIlp];
+    fp8blk_unpack8(rg, g);
+    fp8blk_unpack8(rp, p);
+    fp8blk_unpack8(rm, m);
+    fp8blk_unpack8(rv, v);
+
+    // --- per-element Adam: verbatim copy of fused_adam_clip_kernel ---
+#pragma unroll
+    for (int j = 0; j < kIlp; ++j) {
+      // No FMA contraction: identical rounding in the chunk and the FP8-block tile kernel.
+#pragma clang fp contract(off)
+      g[j] *= grad_scale;
+      if constexpr (!AdamW) g[j] += decay * p[j];
+      m[j] = beta1 * m[j] + (1.0f - beta1) * g[j];
+      v[j] = beta2 * v[j] + (1.0f - beta2) * g[j] * g[j];
+      const float denom = sqrtf(v[j] * beta2_corr_inv) + epsilon;
+      if constexpr (AdamW) {
+        p[j] = p[j] - step_size * (m[j] / denom) - lr * decay * p[j];
+      } else {
+        p[j] -= step_size * (m[j] / denom);
+      }
+    }
+
+    gst(param + i, float4{p[0], p[1], p[2], p[3]});
+    gst(param + i + 4, float4{p[4], p[5], p[6], p[7]});
+    if constexpr (std::is_same_v<MomentT, float>) {
+      gst(exp_avg + i, float4{m[0], m[1], m[2], m[3]});
+      gst(exp_avg + i + 4, float4{m[4], m[5], m[6], m[7]});
+      gst(exp_avg_sq + i, float4{v[0], v[1], v[2], v[3]});
+      gst(exp_avg_sq + i + 4, float4{v[4], v[5], v[6], v[7]});
+    } else {
+      gst(exp_avg + i, pack_bf16x8(m));
+      gst(exp_avg_sq + i, pack_bf16x8(v));
+    }
+    const uint4 pb = pack_bf16x8(p);  // == static_cast<c10::BFloat16>(p[j]) (RNE)
+    gst(model_param + i, pb);
+    xs[fp8blk_xs_slot(tid, it)] = pb;  // parked in LDS until the quant phase
+    float x[kIlp];
+    unpack_bf16x8(pb, x);
+#pragma unroll
+    for (int j = 0; j < kIlp; ++j) amax = fmaxf(amax, fabsf(x[j]));
+  }
+  return amax;
+}
+
+__host__ __device__ __forceinline__ bool fp8blk_tile_full(const Fp8BlkTile& t) {
+  return (t.K % kIlp) == 0 && (t.tm + 1) * kTile <= t.N && (t.tk + 1) * kTile <= t.K &&
+      (t.N % 16) == 0 && t.K * kTile < (INT64_C(1) << 31) && t.N * kTile < (INT64_C(1) << 31);
+}
+
+
 __host__ __device__ __forceinline__ float fp8blk_scale(float amax) {
   return fp8blk_pow2_floor(kFp8Max / fmaxf(amax, 1.0e-4f));
 }
@@ -459,7 +612,7 @@ __host__ __device__ __forceinline__ void fp8blk_quant_phase(
     if (n < t.N) {
       const int64_t i = (t.b * t.N + n) * t.K + k0;
       if (k_vec_ok) {
-        *reinterpret_cast<uint2*>(w + i) = bytes;
+        gst(w + i, bytes);
       } else {
         uint8_t b8[kIlp];
         memcpy(b8, &bytes, kIlp);
@@ -487,12 +640,140 @@ __host__ __device__ __forceinline__ void fp8blk_transpose_phase(
     uint4 v0, v1;
     memcpy(&v0, b32, 16);
     memcpy(&v1, b32 + 16, 16);
-    *reinterpret_cast<uint4*>(wt + i) = v0;
-    *reinterpret_cast<uint4*>(wt + i + 16) = v1;
+    gst(wt + i, v0);
+    gst(wt + i + 16, v1);
   } else {
     for (int r = 0; r < kTransRows; ++r) {
       if (n0 + r < t.N) wt[i + r] = b32[r];
     }
+  }
+}
+
+// Generic (edge / odd-shape) Adam for the tile kernel: the same per-element math and stores as
+// fp8blk_adam_phase, element by element with the BF16 weight (0 out of range) written straight
+// to the row-major LDS tile, so this rarely used path holds few registers and does not lower
+// the occupancy of the full-tile path.
+constexpr int kFp8BlkGenericUnroll = 2;  // elements in flight per thread
+template <bool AdamW, typename MomentT, typename GradT>
+__host__ __device__ __forceinline__ float fp8blk_adam_generic(
+    int tid, const Fp8BlkTile& t, const Fp8BlkPtrs<GradT, MomentT>& ptr,
+    float beta1, float beta2, float step_size, float beta2_corr_inv, float epsilon,
+    float lr, float decay, float grad_scale, uint4* xs) {
+  float amax = 0.0f;
+  const int col = (tid % kTileColThreads) * kIlp;
+  const int64_t k0 = t.tk * kTile + col;
+  GradT* __restrict__ grad = ptr.grad;
+  float* __restrict__ param = ptr.param;
+  MomentT* __restrict__ exp_avg = ptr.exp_avg;
+  MomentT* __restrict__ exp_avg_sq = ptr.exp_avg_sq;
+  uint16_t* xs16 = reinterpret_cast<uint16_t*>(xs);
+#pragma unroll 1
+  for (int it = 0; it < kTileIters; ++it) {
+    const int row = it * kTileRowsPerIter + tid / kTileColThreads;
+    const int64_t n = t.tm * kTile + row;
+    const bool row_ok = n < t.N;
+    const int64_t i = (t.b * t.N + n) * t.K + k0;
+#pragma unroll kFp8BlkGenericUnroll
+    for (int j = 0; j < kIlp; ++j) {
+      c10::BFloat16 pb(0.0f);
+      if (row_ok && k0 + j < t.K) {
+        float g[1] = {grad[i + j]};
+        float p[1] = {param[i + j]};
+        float m[1] = {exp_avg[i + j]};
+        float v[1] = {exp_avg_sq[i + j]};
+        {
+#pragma clang fp contract(off)
+          // --- per-element Adam: verbatim copy of fused_adam_clip_kernel (one element) ---
+          const int jj = 0;
+          g[jj] *= grad_scale;
+          if constexpr (!AdamW) g[jj] += decay * p[jj];
+          m[jj] = beta1 * m[jj] + (1.0f - beta1) * g[jj];
+          v[jj] = beta2 * v[jj] + (1.0f - beta2) * g[jj] * g[jj];
+          const float denom = sqrtf(v[jj] * beta2_corr_inv) + epsilon;
+          if constexpr (AdamW) {
+            p[jj] = p[jj] - step_size * (m[jj] / denom) - lr * decay * p[jj];
+          } else {
+            p[jj] -= step_size * (m[jj] / denom);
+          }
+        }
+        param[i + j] = p[0];
+        exp_avg[i + j] = m[0];
+        exp_avg_sq[i + j] = v[0];
+        pb = static_cast<c10::BFloat16>(p[0]);
+        ptr.model_param[i + j] = pb;
+      }
+      xs16[row * kTile + col + j] = pb.x;
+      amax = fmaxf(amax, fabsf(static_cast<float>(pb)));
+    }
+  }
+  return amax;
+}
+
+// Phase 2 from the parked BF16 weights (same bytes as fp8blk_quant_phase): stage the FP8 tile
+// in LDS and store W (full tiles: uniform origin + 32-bit offsets; else edge-checked).
+template <bool kFull>
+__host__ __device__ __forceinline__ void fp8blk_quant_lds(
+    int tid, const Fp8BlkTile& t, uint8_t* w, float s, const uint4* xs, uint8_t* lds) {
+  const int col = (tid % kTileColThreads) * kIlp;
+  const int64_t k0 = t.tk * kTile + col;
+  const bool k_vec_ok = (t.K % kIlp) == 0 && k0 + kIlp <= t.K;
+  uint8_t* wo = w + fp8blk_tile_origin(t);
+  const uint32_t K = static_cast<uint32_t>(t.K);
+#pragma unroll
+  for (int it = 0; it < kTileIters; ++it) {
+    const int row = it * kTileRowsPerIter + tid / kTileColThreads;
+    float x[kIlp];
+    unpack_bf16x8(xs[fp8blk_xs_slot(tid, it)], x);
+    float q[kIlp];
+#pragma unroll
+    for (int j = 0; j < kIlp; ++j) q[j] = fminf(fmaxf(x[j] * s, -kFp8Max), kFp8Max);
+    const uint2 bytes = fp8blk_cvt8(q);
+    *reinterpret_cast<uint2*>(lds + row * kTilePitch + col) = bytes;
+    if constexpr (kFull) {
+      gst(wo + fp8blk_thread_off(tid, it, K), bytes);
+    } else {
+      const int64_t n = t.tm * kTile + row;
+      if (n < t.N) {
+        const int64_t i = (t.b * t.N + n) * t.K + k0;
+        if (k_vec_ok) {
+          gst(w + i, bytes);
+        } else {
+          uint8_t b8[kIlp];
+          memcpy(b8, &bytes, kIlp);
+          for (int j = 0; j < kIlp; ++j) {
+            if (k0 + j < t.K) w[i + j] = b8[j];
+          }
+        }
+      }
+    }
+  }
+}
+
+// Full-tile phase 3.
+__host__ __device__ __forceinline__ void fp8blk_transpose_full(
+    int tid, const Fp8BlkTile& t, uint8_t* wt, const uint8_t* lds) {
+  // Thread (kq, part) moves the 8x4 byte block rows part*8..+8 x cols 4*kq..+4 of the staged
+  // tile to W^T rows 4*kq..+4, cols part*8..+8: 8 dword LDS reads (not 32 byte reads) and 4
+  // 8-byte stores; the 16 lanes of a column group cover one 128-byte W^T row segment.
+  const int kq = tid / (kTile / kIlp);
+  const int part = tid % (kTile / kIlp);
+  uint32_t d[kIlp];
+#pragma unroll
+  for (int r = 0; r < kIlp; ++r) {
+    d[r] = *reinterpret_cast<const uint32_t*>(lds + (part * kIlp + r) * kTilePitch + kq * 4);
+  }
+  uint8_t* wto = wt + (t.b * t.K + t.tk * kTile) * t.N + t.tm * kTile;
+  const uint32_t N = static_cast<uint32_t>(t.N);
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    uint32_t lo = 0, hi = 0;
+#pragma unroll
+    for (int r = 0; r < 4; ++r) {
+      lo |= ((d[r] >> (8 * j)) & 0xFFu) << (8 * r);
+      hi |= ((d[r + 4] >> (8 * j)) & 0xFFu) << (8 * r);
+    }
+    gst(wto + static_cast<uint32_t>(kq * 4 + j) * N + static_cast<uint32_t>(part * kIlp),
+        uint2{lo, hi});
   }
 }
 
@@ -541,38 +822,47 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_fp8blk_kernel(
   ptr.e8m0 = reinterpret_cast<uint8_t*>(a[8]);
   ptr.e8m0_t = reinterpret_cast<uint8_t*>(a[9]);
 
-  __shared__ float grad_scale_shared;
-  __shared__ float wave_amax[kBlockSize / 32];
-  __shared__ float tile_scale;
+  __shared__ __attribute__((aligned(16))) float wave_amax[kBlockSize / 32];
   __shared__ __attribute__((aligned(16))) uint8_t lds[kTile * kTilePitch];
-  if (threadIdx.x == 0) {
-    const float clip_coeff = max_norm / (*grad_norm + 1.0e-6f);
-    // Match Python's min(1.0, coeff), including its NaN behavior.
-    grad_scale_shared = clip_coeff < 1.0f ? clip_coeff : 1.0f;
-  }
-  __syncthreads();
-  const float grad_scale = grad_scale_shared;
+  // Every thread derives the clip scale itself (uniform scalar load, same arithmetic as the
+  // chunk kernel): no barrier in front of the tile loads.
+  const float clip_coeff = max_norm / (*grad_norm + 1.0e-6f);
+  // Match Python's min(1.0, coeff), including its NaN behavior.
+  const float grad_scale = clip_coeff < 1.0f ? clip_coeff : 1.0f;
 
-  float x[kTileIters][kIlp];
-  float amax = fp8blk_adam_phase<AdamW, MomentT, GradT>(
-      threadIdx.x, t, ptr, beta1, beta2, step_size, beta2_corr_inv, epsilon, lr, decay,
-      grad_scale, x);
+  __shared__ uint4 xs[kTileIters * kBlockSize];  // parked BF16 weights (32 KB)
+  float amax;
+  const bool full = fp8blk_tile_full(t);  // block-uniform
+  if (full) {
+    amax = fp8blk_adam_full<AdamW, MomentT, GradT>(
+        threadIdx.x, t, ptr, beta1, beta2, step_size, beta2_corr_inv, epsilon, lr, decay,
+        grad_scale, xs);
+  } else {
+    amax = fp8blk_adam_generic<AdamW, MomentT, GradT>(
+        threadIdx.x, t, ptr, beta1, beta2, step_size, beta2_corr_inv, epsilon, lr, decay,
+        grad_scale, xs);
+  }
   // Block amax (max is exact, order-independent).
 #pragma unroll
   for (int off = 16; off > 0; off >>= 1) amax = fmaxf(amax, __shfl_xor(amax, off, 32));
   if ((threadIdx.x & 31) == 0) wave_amax[threadIdx.x >> 5] = amax;
   __syncthreads();
-  if (threadIdx.x == 0) {
-    float a = wave_amax[0];
+  // Every thread reduces the 16 wave maxima itself (one barrier instead of two).
+  float tile_amax = wave_amax[0];
 #pragma unroll
-    for (int w = 1; w < kBlockSize / 32; ++w) a = fmaxf(a, wave_amax[w]);
-    tile_scale = fp8blk_scale(a);
+  for (int w = 1; w < kBlockSize / 32; ++w) tile_amax = fmaxf(tile_amax, wave_amax[w]);
+  const float s = fp8blk_scale(tile_amax);
+  if (full) {
+    fp8blk_quant_lds<true>(threadIdx.x, t, ptr.w, s, xs, lds);
+  } else {
+    fp8blk_quant_lds<false>(threadIdx.x, t, ptr.w, s, xs, lds);
   }
   __syncthreads();
-  const float s = tile_scale;
-  fp8blk_quant_phase(threadIdx.x, t, ptr.w, s, x, lds);
-  __syncthreads();
-  fp8blk_transpose_phase(threadIdx.x, t, ptr.wt, lds);
+  if (full) {
+    fp8blk_transpose_full(threadIdx.x, t, ptr.wt, lds);
+  } else {
+    fp8blk_transpose_phase(threadIdx.x, t, ptr.wt, lds);
+  }
   if (threadIdx.x == 0) fp8blk_scale_store(t, s, ptr.scale_inv, ptr.e8m0, ptr.e8m0_t);
 }
 
