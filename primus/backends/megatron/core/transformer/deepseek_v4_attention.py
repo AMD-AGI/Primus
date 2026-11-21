@@ -465,6 +465,9 @@ def _fp8_grouped_o_a(attn_g: torch.Tensor, wo_a_w: torch.Tensor) -> torch.Tensor
     return out.reshape(G, B, S, r).permute(1, 2, 0, 3)  # [B, S, G, r]
 
 
+_OA_DGRAD_TN = os.environ.get("PRIMUS_V4_OA_DGRAD_TN", "0") == "1"
+
+
 class _GroupedOAProjFn(torch.autograd.Function):
     """Grouped-O ``o_a`` down-projection ``[B,S,G,d] x [G,r,d] -> [B,S,G*r]`` without layout copies.
 
@@ -511,7 +514,18 @@ class _GroupedOAProjFn(torch.autograd.Function):
         dx = None
         if ctx.needs_input_grad[0]:
             dx = x2.new_empty(BS, G, d)
-            torch.bmm(do, w, out=dx.transpose(0, 1))
+            if _OA_DGRAD_TN and w.stride(-1) == 1:
+                # TN: K (= r) contiguous for both operands. With the TunableOp entry for
+                # tn_4096_4096_1024_B_8_ld_1024_8192_32768 (tunableop_dsv4_gfx1250_bf16{bit,all}_0.csv) hipBLASLt
+                # runs ~20% faster than the tuned NN form and bit-identical to it; without the entry the default
+                # TN kernel is SLOWER. The [G, d, r] copy of w costs ~13 us (Triton, LDS-tiled).
+                from primus.backends.megatron.core.fusions.bf16_transpose import (
+                    transpose_last2,
+                )
+
+                torch.bmm(do, transpose_last2(w).transpose(1, 2), out=dx.transpose(0, 1))
+            else:
+                torch.bmm(do, w, out=dx.transpose(0, 1))
             dx = dx.view(ctx.x_shape)
         dw = None
         if ctx.needs_input_grad[1]:
