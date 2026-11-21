@@ -14,6 +14,9 @@ agent and here, so an op is brought up the same way whoever asks::
 
     # bring them up only
     python -m primus.agents.projection_agent --workload <yaml> --op-llm-model anthropic/claude-opus-4-5
+
+    # ... and open a draft pull request per op it brings up
+    python -m primus.agents.projection_agent --workload <yaml> --op-coder-cmd '...' --op-pr pr
 """
 
 from __future__ import annotations
@@ -27,6 +30,8 @@ from typing import Optional, Sequence
 
 from .agent import POLICIES, ProjectionAgent
 from .bringup import llm_model_from_env, make_coder
+from .publish import MODES as PR_MODES
+from .publish import PublishConfig
 
 
 def add_op_bringup_args(parser: argparse.ArgumentParser, *, default: str = "auto") -> None:
@@ -67,6 +72,53 @@ def add_op_bringup_args(parser: argparse.ArgumentParser, *, default: str = "auto
         default=None,
         help="Where context packs and reports go (op_bringup/<op_id>/).",
     )
+    g.add_argument(
+        "--op-pr",
+        choices=PR_MODES,
+        default="off",
+        help=(
+            "Publish every op brought up on its own branch off HEAD. commit: local branch; "
+            "push: also push it to --op-pr-remote; pr: also open a draft pull request "
+            "(gh, else $GITHUB_TOKEN/$GH_TOKEN, else the compare URL is printed). Default: off."
+        ),
+    )
+    g.add_argument(
+        "--op-pr-remote", default="origin", help="Remote the branch is pushed to. Default: origin."
+    )
+    g.add_argument(
+        "--op-pr-base",
+        default=None,
+        help="Branch the pull request targets. Default: the remote's default branch.",
+    )
+    g.add_argument(
+        "--op-pr-repo",
+        default=None,
+        help="owner/name the pull request is opened on, when pushing to a fork. Default: the remote's repo.",
+    )
+    g.add_argument(
+        "--op-pr-author",
+        default=os.getenv("PRIMUS_OP_PR_AUTHOR"),
+        help="'Name <email>' for the commit when git has no identity configured (default: $PRIMUS_OP_PR_AUTHOR).",
+    )
+    g.add_argument("--op-pr-signoff", action="store_true", help="Add a Signed-off-by trailer to the commit.")
+    g.add_argument(
+        "--op-pr-ready", action="store_true", help="Open the pull request ready for review, not draft."
+    )
+
+
+def publish_from_args(args) -> Optional[PublishConfig]:
+    mode = getattr(args, "op_pr", "off")
+    if mode == "off":
+        return None
+    return PublishConfig(
+        mode=mode,
+        remote=args.op_pr_remote,
+        base=args.op_pr_base,
+        repo=args.op_pr_repo,
+        signoff=args.op_pr_signoff,
+        author=args.op_pr_author,
+        draft=not args.op_pr_ready,
+    )
 
 
 def _llm_available(args) -> bool:
@@ -101,6 +153,7 @@ def agent_from_args(
         coder=coder_from_args(args) if args.op_bringup == "auto" else None,
         papers=args.op_paper,
         hf_config=args.hf_config,
+        publish=publish_from_args(args),
         **kwargs,
     )
 
@@ -128,6 +181,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     results = agent.ensure_ops(args.workload, only=args.op)
     print(json.dumps([r.as_dict() for r in results], indent=2, default=str))
+    if agent.published:
+        print(json.dumps({k: v.as_dict() for k, v in agent.published.items()}, indent=2))
     return 0 if all(r.status in ("registered", "acknowledged", "context_only") for r in results) else 1
 
 

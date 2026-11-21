@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from .bringup import BringupResult, Coder, bring_up_gaps
+from .publish import PublishConfig, PublishResult, publish_op
 
 # <root>/primus/agents/projection_agent/agent.py
 PRIMUS_ROOT = Path(__file__).resolve().parents[3]
@@ -42,7 +43,9 @@ class ProjectionAgent:
     ``policy`` is ``auto`` (write, validate and register op models with
     *coder*; without a coder it behaves as ``report``), ``report`` (write the
     context packs only) or ``off``.  An op id is brought up at most once per
-    agent, however many times it is reported.
+    agent, however many times it is reported.  With *publish* (``--op-pr``)
+    every op it registers or acknowledges also gets its own branch, commit and
+    pull request (:mod:`.publish`).
     """
 
     def __init__(
@@ -58,6 +61,7 @@ class ProjectionAgent:
         max_attempts: int = 3,
         register: bool = True,
         env: Optional[dict] = None,
+        publish: Optional[PublishConfig] = None,
         log: Callable[[str], None] = print,
     ):
         if policy not in POLICIES:
@@ -72,8 +76,10 @@ class ProjectionAgent:
         self.max_attempts = max_attempts
         self.register = register
         self.env = env
+        self.publish = publish if publish is not None and publish.mode != "off" and register else None
         self.log = log
         self.results: List[BringupResult] = []
+        self.published: Dict[str, PublishResult] = {}
         self.gaps_seen: Dict[str, dict] = {}
         self._archs: Dict[Path, object] = {}
 
@@ -169,6 +175,17 @@ class ProjectionAgent:
 
             discover_op_models(force=True)
         self.results.extend(res)
+        if self.publish is not None:
+            for r in res:
+                if r.changed_projection:
+                    self.published[r.op_id] = publish_op(
+                        r,
+                        self.publish,
+                        primus_root=self.primus_root,
+                        workload=Path(workload).resolve(),
+                        gap=self.gaps_seen.get(r.op_id),
+                        log=lambda s: self.log(f"[projection-agent] {s}"),
+                    )
         return res
 
     def summary(self) -> dict:
@@ -176,4 +193,5 @@ class ProjectionAgent:
             "policy": self.policy,
             "gaps_seen": self.gaps_seen,
             "results": [{k: v for k, v in r.as_dict().items() if k != "validation"} for r in self.results],
+            "published": {k: v.as_dict() for k, v in self.published.items()},
         }

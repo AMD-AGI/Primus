@@ -174,7 +174,9 @@ projects, the projection agent (`primus/agents/projection_agent/`) adds a
 validated analytical model for every op of the model the projection does not
 price yet, so the run uses it instead of a built-in stand-in. `--op-coder-cmd`
 or `--op-llm-model` says who writes the model; without either, the agent only
-writes a context pack per op (`op_bringup/<op_id>/context.md`). See the
+writes a context pack per op (`op_bringup/<op_id>/context.md`). With
+`--op-pr pr` each op it adds is also committed on its own branch, pushed, and
+opened as a draft pull request. See the
 tuning agent's README, "Op bring-up (new ops)", for the flags.
 
 ### Benchmark suites
