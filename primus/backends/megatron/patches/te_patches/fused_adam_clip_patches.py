@@ -305,7 +305,9 @@ def _fp8blk_metadata_key(tensor_lists, fp8blk_by_param_ptr) -> tuple[Any, ...]:
 
 def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param_ptr):
     """Per tensor: 10 addresses (grad, fp32 master, exp_avg, exp_avg_sq, bf16 param, W, W^T,
-    scale_inv, e8m0, e8m0_t) and dims (N, K, tiles_n, tiles_k); one 128x128 tile per block."""
+    scale_inv, e8m0, e8m0_t) and dims (N, K, tiles_n, tiles_k); one 128x128 tile per block.
+    A cache whose ``wt`` / ``e8m0_t`` are None (a weight whose GEMMs never read W^T) gets address
+    0 there and the kernel skips its transpose."""
     device = tensor_lists[0][0].device
     grad_dtype = tensor_lists[0][0].dtype
     moment_dtype = tensor_lists[2][0].dtype
@@ -323,17 +325,21 @@ def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param
             grad_dtype, torch.float32, moment_dtype, moment_dtype
         ):
             raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT received mixed optimizer dtypes in one call")
-        out = (cache.w, cache.wt, cache.scale_inv, cache.e8m0, cache.e8m0_t)
+        wt, e8m0_t = getattr(cache, "wt", None), getattr(cache, "e8m0_t", None)
+        if (wt is None) != (e8m0_t is None):
+            raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT: W^T and its E8M0 bytes must both be cached or both skipped")
+        out = (cache.w, wt, cache.scale_inv, cache.e8m0, e8m0_t)
+        present = tuple(t for t in out if t is not None)
         dense = (grad, master, exp_avg, exp_avg_sq, model_buf)
-        if any(t.numel() != model_param.numel() for t in dense) or any(not t.is_contiguous() for t in dense + out):
+        if any(t.numel() != model_param.numel() for t in dense) or any(not t.is_contiguous() for t in dense + present):
             raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT: optimizer shard does not cover the whole contiguous weight")
-        if any(t.data_ptr() % 16 for t in dense + out[:2]):
+        if any(t.data_ptr() % 16 for t in dense + tuple(t for t in out[:2] if t is not None)):
             raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT requires 16-byte aligned optimizer and cache tensors")
         n, k = model_param.shape[-2:]
         batch = model_param.numel() // (n * k)
         tiles_n = (n + _FP8BLK_TILE - 1) // _FP8BLK_TILE
         tiles_k = (k + _FP8BLK_TILE - 1) // _FP8BLK_TILE
-        addresses.extend(t.data_ptr() for t in dense + out)
+        addresses.extend(0 if t is None else t.data_ptr() for t in dense + out)
         dims.extend((n, k, tiles_n, tiles_k))
         tiles = batch * tiles_n * tiles_k
         tile_offsets.append(total_tiles)
