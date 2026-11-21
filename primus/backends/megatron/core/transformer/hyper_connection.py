@@ -73,6 +73,11 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     hc_glue_compute_tail_triton,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_head import (
+    hc_head_collapse,
+    hc_head_fused_enabled,
+    hc_head_supported,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     is_triton_kernel_supported as _hc_glue_supported,
 )
@@ -482,6 +487,10 @@ class HyperHead(nn.Module):
             normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
             mixes = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))  # [..., K]
         pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
+        if hc_head_fused_enabled() and hc_head_supported(x, pre):
+            # hc track: one streaming kernel each way instead of the fp32 [.., K, D] product + reduce + cast
+            # (forward bit-identical; backward dx bit-identical, dpre summed in a different fp32 order)
+            return hc_head_collapse(x, pre)
         return (pre.unsqueeze(-1) * x).sum(dim=-2).to(x.dtype)
 
 

@@ -99,6 +99,11 @@ from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
 )
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_head import (
+    hc_lift,
+    hc_lift_enabled,
+    hc_lift_supported,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_fused import (
     hc_fold_supported,
     hc_fused_enabled,
@@ -386,6 +391,9 @@ def _lift_streams_in(
         # [S, B, D] -> [B, S, D] -> [B, S, K, D] (broadcast across K).
         x = hidden_states.transpose(0, 1).contiguous()
         B, S, D = x.shape
+        if hc_lift_enabled() and hc_lift_supported(x, hc_mult):
+            # hc track (PRIMUS_HC_LIFT_FUSED=1): Triton broadcast copy; backward sums the streams in torch's order
+            return hc_lift(x)
         return x.unsqueeze(2).expand(B, S, hc_mult, D).contiguous()
 
     # Non-first stage: [S*K, B, D] -> [B, S, K, D].
