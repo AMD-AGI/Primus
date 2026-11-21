@@ -175,6 +175,87 @@ def _rmsnorm_bwd_kernel(
         tl.store(DX_PTR + row * D + cols, dx.to(IN_DTYPE), mask=mask)
 
 
+@triton.jit
+def _rmsnorm_bwd_part_kernel(
+    X_PTR,  # [N, D] contiguous (original input)
+    W_PTR,  # [D] weight (any float dtype, upcast in-kernel)
+    RSTD_PTR,  # [N] fp32
+    DY_PTR,  # [N, D] contiguous (upstream grad)
+    DX_PTR,  # [N, D] contiguous (output, IN_DTYPE)
+    DWP_PTR,  # [P, D] fp32 per-program dw partials
+    N,
+    D,
+    ROWS_PER_PROG,
+    BLOCK_D: tl.constexpr,
+    IN_DTYPE: tl.constexpr,
+):
+    """PRIMUS_GLUE_RMSNORM=1: weighted RMSNorm backward without fp32 atomics (D <= BLOCK_D, one column chunk).
+
+    Each program walks ROWS_PER_PROG rows; dx uses exactly the expressions of ``_rmsnorm_bwd_kernel`` (same
+    1-D reduction shape and warps, so the same bits); dw is summed in registers in row order and written as one
+    fp32 partial per program, reduced in a fixed order by ``_rmsnorm_dw_reduce_kernel`` (deterministic)."""
+    pid = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_D)
+    mask = cols < D
+    w = tl.load(W_PTR + cols, mask=mask, other=0.0).to(tl.float32)
+    dw = tl.zeros((BLOCK_D,), dtype=tl.float32)
+    r0 = pid * ROWS_PER_PROG
+    r1 = tl.minimum(r0 + ROWS_PER_PROG, N)
+    for row in range(r0, r1):
+        x = tl.load(X_PTR + row * D + cols, mask=mask, other=0.0).to(tl.float32)
+        dy = tl.load(DY_PTR + row * D + cols, mask=mask, other=0.0).to(tl.float32)
+        rstd = tl.load(RSTD_PTR + row)
+        c = tl.zeros((), dtype=tl.float32)
+        c += tl.sum(dy * w * x, axis=0)
+        coef = rstd * rstd * rstd * c / D
+        dx = rstd * dy * w - x * coef
+        dw += dy * (x * rstd)
+        tl.store(DX_PTR + row * D + cols, dx.to(IN_DTYPE), mask=mask)
+    tl.store(DWP_PTR + pid * D + cols, dw, mask=mask)
+
+
+@triton.jit
+def _rmsnorm_dw_reduce_kernel(DWP_PTR, OUT_PTR, P, D, BH: tl.constexpr, BP: tl.constexpr, ACCUM: tl.constexpr,
+                              W_DTYPE: tl.constexpr):
+    """dw[c] = sum_p DWP[p, c] in a fixed order, rounded to the weight dtype (= param.grad of the unfused path),
+    then stored in OUT's dtype (param.grad itself, or main_grad = the DDP hook's copy_). ACCUM: OUT = OUT + dw in
+    fp32, rounded once (the hook's add_ on a later write of the same step)."""
+    cols = tl.program_id(0) * BH + tl.arange(0, BH)
+    cm = cols < D
+    acc = tl.zeros((BP, BH), dtype=tl.float32)
+    for p0 in range(0, P, BP):
+        pr = p0 + tl.arange(0, BP)
+        acc += tl.load(DWP_PTR + pr[:, None] * D + cols[None, :], mask=(pr[:, None] < P) & cm[None, :], other=0.0)
+    dw = tl.sum(acc, axis=0).to(W_DTYPE).to(tl.float32)
+    if ACCUM:
+        dw = tl.load(OUT_PTR + cols, mask=cm, other=0.0).to(tl.float32) + dw
+    tl.store(OUT_PTR + cols, dw.to(OUT_PTR.dtype.element_ty), mask=cm)
+
+
+def glue_rmsnorm_enabled() -> bool:
+    """PRIMUS_GLUE_RMSNORM=1 (default off): weighted RMSNorm backward with per-program dw partials + one
+    deterministic reduce (no fp32 atomics / zero fill / dw cast), weight upcast in-kernel in forward, and dw written
+    straight into ``weight.main_grad`` when the wgrad_beta0 first-write policy allows it (no DDP hook copy)."""
+    return os.environ.get("PRIMUS_GLUE_RMSNORM", "0") == "1"
+
+
+def _main_grad_target(weight) -> Optional[torch.Tensor]:
+    """``weight.main_grad`` when the reduce can write it directly (same contract as the o_a / Turbo fused writers)."""
+    mg = getattr(weight, "main_grad", None)
+    if (
+        isinstance(weight, torch.nn.Parameter)
+        and hasattr(weight, "grad_added_to_main_grad")
+        and isinstance(mg, torch.Tensor)
+        and mg.is_cuda
+        and mg.shape == weight.shape
+        and mg.dtype in (torch.float32, torch.bfloat16, torch.float16)
+        and mg.is_contiguous()
+        and not getattr(weight, "shared", False)
+    ):
+        return mg
+    return None
+
+
 def _pick_block_d(d: int) -> int:
     """Tile the reduction axis; power-of-2, capped so registers stay bounded."""
     if d <= 2048:
@@ -217,14 +298,27 @@ class FusedRMSNormFn(torch.autograd.Function):
 
         has_weight = weight is not None
         w32 = None
+        block_d = _pick_block_d(D)
+        # PRIMUS_GLUE_RMSNORM=1: single-chunk rows use the partial-dw backward; the kernels upcast the weight
+        # in-register (bf16/fp16 -> fp32 is exact), so no weight cast kernel per call.
+        ctx.glue = bool(has_weight and glue_rmsnorm_enabled() and D <= block_d and weight.is_contiguous())
+        ctx.wparam = None
         if has_weight:
             if weight.shape[-1] != D:
                 raise ValueError(f"rmsnorm: weight dim {tuple(weight.shape)} != x last dim {D}")
-            w32 = weight.reshape(D).to(torch.float32).contiguous()
+            if ctx.glue:
+                w32 = weight.detach().reshape(D)
+                if _main_grad_target(weight) is not None:
+                    # dw goes straight into main_grad in backward (flag set in forward, like the o_a / Turbo
+                    # fused-wgrad writers, so the DDP hook skips its copy / add)
+                    weight.grad_added_to_main_grad = True
+                    weight._primus_fwd_claim = True
+                    ctx.wparam = weight
+            else:
+                w32 = weight.reshape(D).to(torch.float32).contiguous()
 
         out = torch.empty((N, D), dtype=out_dtype, device=x.device)
         rstd = torch.empty((N,), dtype=torch.float32, device=x.device)
-        block_d = _pick_block_d(D)
         grid = (N,)
         _rmsnorm_fwd_kernel[grid](
             x2,
@@ -262,6 +356,9 @@ class FusedRMSNormFn(torch.autograd.Function):
         # float dtype is fine. Keep it as-is (contiguous) without a lossy cast.
         dy2 = dy.reshape(-1, D).contiguous()
 
+        if ctx.glue:
+            return FusedRMSNormFn._glue_backward(ctx, x2, w32, rstd, dy2)
+
         dx = torch.empty((N, D), dtype=ctx.in_dtype, device=dy.device)
         dw_acc = (
             torch.zeros((D,), dtype=torch.float32, device=dy.device)
@@ -288,6 +385,42 @@ class FusedRMSNormFn(torch.autograd.Function):
         if has_weight:
             dweight = dw_acc.to(ctx.weight_dtype).reshape(ctx.weight_shape)
         return dx, dweight, None, None, None
+
+    @staticmethod
+    def _glue_backward(ctx, x2, w, rstd, dy2):
+        """PRIMUS_GLUE_RMSNORM=1 backward: 2 launches (rows + dw partials, fixed-order reduce), no atomics."""
+        D = ctx.D
+        N = x2.shape[0]
+        dev = dy2.device
+        dx = torch.empty((N, D), dtype=ctx.in_dtype, device=dev)
+        P = max(1, min(256, N))
+        rpp = max(1, triton.cdiv(N, P))
+        P = max(1, triton.cdiv(N, rpp))
+        dwp = torch.empty((P, D), dtype=torch.float32, device=dev)
+        if N > 0:
+            _rmsnorm_bwd_part_kernel[(P,)](
+                x2, w, rstd, dy2, dx, dwp, N, D, rpp, BLOCK_D=ctx.block_d, IN_DTYPE=_triton_dtype(ctx.in_dtype),
+                num_warps=4,
+            )
+        wparam, ctx.wparam = ctx.wparam, None
+        mg = _main_grad_target(wparam) if wparam is not None else None
+        accum = False
+        if mg is not None:
+            from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad, main_grad_first_write
+
+            accum = not main_grad_first_write(wparam)
+            out = mg.view(-1)
+        else:
+            out = torch.empty((D,), dtype=ctx.weight_dtype, device=dev)
+        if N > 0:
+            _rmsnorm_dw_reduce_kernel[(triton.cdiv(D, 64),)](
+                dwp, out, P, D, BH=64, BP=64, ACCUM=accum, W_DTYPE=_triton_dtype(ctx.weight_dtype), num_warps=4)
+        elif not accum:
+            out.zero_()
+        dx = dx.reshape(ctx.x_shape)
+        if mg is not None:
+            return dx, _get_dummy_wgrad(list(ctx.weight_shape), ctx.weight_dtype), None, None, None
+        return dx, out.reshape(ctx.weight_shape), None, None, None
 
 
 # ---------------------------------------------------------------------------

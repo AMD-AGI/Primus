@@ -271,6 +271,155 @@ class _CompressorSoftmaxPool(torch.autograd.Function):
         return dkv, dscore, dape
 
 
+# ----------------------------------------------------------------------------------------------------------------
+# PRIMUS_GLUE_COMPRESS_POOL=1: the pool reads the fused wkv_gate projection directly. The window split, the overlap
+# stitch (zeros + roll + cat of the two halves) and their backward (slice-grad zero fill + copy, chunk/split cats)
+# become address arithmetic inside the two kernels; values, operation order and rounding are those of the kernels
+# above, so the result is bit-identical.
+# ----------------------------------------------------------------------------------------------------------------
+
+
+@triton.jit
+def _window_src(pid_bn, offs_r, NW, RATIO: tl.constexpr, HD: tl.constexpr, OVERLAP: tl.constexpr):
+    """(source row in [B*S], kv channel offset, score channel offset, valid) of window slot r of window pid_bn."""
+    n = pid_bn % NW
+    if OVERLAP:
+        is_a = offs_r < RATIO
+        row = tl.where(is_a, pid_bn * RATIO + offs_r, (pid_bn - 1) * RATIO + offs_r - RATIO)
+        valid = is_a | (n > 0)
+        kv_c = tl.where(is_a, 0, HD)
+        sc_c = tl.where(is_a, 2 * HD, 3 * HD)
+    else:
+        row = pid_bn * RATIO + offs_r
+        valid = offs_r < RATIO
+        kv_c = offs_r * 0
+        sc_c = offs_r * 0 + HD
+    return row, kv_c, sc_c, valid
+
+
+@triton.jit
+def _window_pool_fwd_kernel(P_PTR, APE_PTR, OUT_PTR, NW, R, stride_p, RATIO: tl.constexpr, HD: tl.constexpr,
+                            OVERLAP: tl.constexpr, BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr):
+    pid_bn = tl.program_id(0)
+    pid_d = tl.program_id(1)
+    offs_r = tl.arange(0, BLOCK_R)
+    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    r_mask = offs_r < R
+    d_mask = offs_d < HD
+    mask = r_mask[:, None] & d_mask[None, :]
+    row, kv_c, sc_c, valid = _window_src(pid_bn, offs_r, NW, RATIO, HD, OVERLAP)
+    lmask = mask & valid[:, None]
+    rbase = row.to(tl.int64)[:, None] * stride_p + offs_d[None, :]
+    s = tl.load(P_PTR + rbase + sc_c[:, None], mask=lmask, other=0.0).to(tl.float32)
+    a = tl.load(APE_PTR + offs_r[:, None] * HD + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+    s = s + a
+    s = tl.where(r_mask[:, None], s, float("-inf"))
+    s_max = tl.max(s, axis=0)
+    e = tl.exp(s - s_max[None, :])
+    e = tl.where(r_mask[:, None], e, 0.0)
+    denom = tl.sum(e, axis=0)
+    w = e / denom[None, :]
+    kv = tl.load(P_PTR + rbase + kv_c[:, None], mask=lmask, other=0.0).to(tl.float32)
+    pooled = tl.sum(kv * w, axis=0)
+    tl.store(OUT_PTR + pid_bn * HD + offs_d, pooled.to(OUT_PTR.dtype.element_ty), mask=d_mask)
+
+
+@triton.jit
+def _window_pool_bwd_kernel(P_PTR, APE_PTR, DO_PTR, DP_PTR, DSC_PTR, NW, R, stride_p, RATIO: tl.constexpr,
+                            HD: tl.constexpr, OVERLAP: tl.constexpr, BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr):
+    pid_bn = tl.program_id(0)
+    pid_d = tl.program_id(1)
+    offs_r = tl.arange(0, BLOCK_R)
+    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    r_mask = offs_r < R
+    d_mask = offs_d < HD
+    mask = r_mask[:, None] & d_mask[None, :]
+    row, kv_c, sc_c, valid = _window_src(pid_bn, offs_r, NW, RATIO, HD, OVERLAP)
+    lmask = mask & valid[:, None]
+    rbase = row.to(tl.int64)[:, None] * stride_p + offs_d[None, :]
+    s = tl.load(P_PTR + rbase + sc_c[:, None], mask=lmask, other=0.0).to(tl.float32)
+    a = tl.load(APE_PTR + offs_r[:, None] * HD + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+    s = s + a
+    s = tl.where(r_mask[:, None], s, float("-inf"))
+    s_max = tl.max(s, axis=0)
+    e = tl.exp(s - s_max[None, :])
+    e = tl.where(r_mask[:, None], e, 0.0)
+    denom = tl.sum(e, axis=0)
+    w = e / denom[None, :]
+    kv = tl.load(P_PTR + rbase + kv_c[:, None], mask=lmask, other=0.0).to(tl.float32)
+    dout = tl.load(DO_PTR + pid_bn * HD + offs_d, mask=d_mask, other=0.0).to(tl.float32)
+    dkv = dout[None, :] * w
+    dw = dout[None, :] * kv
+    sum_dw_w = tl.sum(dw * w, axis=0)
+    dscore = w * (dw - sum_dw_w[None, :])
+    dt = DP_PTR.dtype.element_ty
+    # every (row, channel) of d(proj) belongs to exactly one window slot: plain stores, no accumulation
+    tl.store(DP_PTR + rbase + kv_c[:, None], dkv.to(dt), mask=lmask)
+    tl.store(DP_PTR + rbase + sc_c[:, None], dscore.to(dt), mask=lmask)
+    # dscore in the [B*N, W, HD] layout of the unfused path, for the (unchanged) torch dape reduction
+    tl.store(DSC_PTR + pid_bn * R * HD + offs_r[:, None] * HD + offs_d[None, :], dscore.to(DSC_PTR.dtype.element_ty),
+             mask=mask)
+    if OVERLAP:
+        # the last window's "b" halves feed no window (the roll drops them): their gradient is zero
+        if pid_bn % NW == NW - 1:
+            zr = (pid_bn * RATIO + offs_r).to(tl.int64)
+            zm = (offs_r < RATIO)[:, None] & d_mask[None, :]
+            z = tl.zeros((BLOCK_R, BLOCK_D), dtype=dt)
+            tl.store(DP_PTR + zr[:, None] * stride_p + HD + offs_d[None, :], z, mask=zm)
+            tl.store(DP_PTR + zr[:, None] * stride_p + 3 * HD + offs_d[None, :], z, mask=zm)
+
+
+class _WindowPool(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, proj, ape, ratio, hd, overlap):
+        B, S, C = proj.shape
+        NW = S // ratio
+        R = 2 * ratio if overlap else ratio
+        p2 = proj.reshape(B * S, C)
+        out = torch.empty((B * NW, hd), dtype=proj.dtype, device=proj.device)
+        BLOCK_R = max(16, triton.next_power_of_2(R))
+        BLOCK_D = min(64, max(16, triton.next_power_of_2(hd)))
+        grid = (B * NW, triton.cdiv(hd, BLOCK_D))
+        _window_pool_fwd_kernel[grid](p2, ape, out, NW, R, p2.stride(0), RATIO=ratio, HD=hd, OVERLAP=bool(overlap),
+                                      BLOCK_R=BLOCK_R, BLOCK_D=BLOCK_D)
+        ctx.save_for_backward(p2, ape)
+        ctx.meta = (B, S, C, NW, R, ratio, hd, bool(overlap), BLOCK_R, BLOCK_D)
+        return out.view(B, NW, hd)
+
+    @staticmethod
+    def backward(ctx, dout):
+        p2, ape = ctx.saved_tensors
+        B, S, C, NW, R, ratio, hd, overlap, BLOCK_R, BLOCK_D = ctx.meta
+        do2 = dout.reshape(B * NW, hd).contiguous()
+        dp = torch.empty_like(p2)
+        dsc = torch.empty((B * NW, R, hd), dtype=p2.dtype, device=p2.device)
+        grid = (B * NW, triton.cdiv(hd, BLOCK_D))
+        _window_pool_bwd_kernel[grid](p2, ape, do2, dp, dsc, NW, R, p2.stride(0), RATIO=ratio, HD=hd,
+                                      OVERLAP=overlap, BLOCK_R=BLOCK_R, BLOCK_D=BLOCK_D)
+        dape = dsc.reshape(B, NW, R, hd).sum(dim=(0, 1)).to(ape.dtype)
+        return dp.view(B, S, C), dape, None, None, None
+
+
+def glue_window_pool_ok(proj: torch.Tensor, ape: torch.Tensor, ratio: int, hd: int, overlap: bool) -> bool:
+    """PRIMUS_GLUE_COMPRESS_POOL=1 (default off) and the contiguous fused-projection layout."""
+    if os.environ.get("PRIMUS_GLUE_COMPRESS_POOL", "0") != "1":
+        return False
+    if os.environ.get("PRIMUS_COMPRESS_POOL_TRITON", "1") == "0" or os.environ.get(
+            "PRIMUS_COMPRESS_POOL_TRITON_BWD", "1") == "0":
+        return False
+    coff = 2 if overlap else 1
+    return (
+        proj.is_cuda and proj.dim() == 3 and proj.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and proj.is_contiguous() and proj.shape[-1] == 2 * coff * hd and proj.shape[1] % ratio == 0
+        and proj.shape[1] >= ratio and ape.is_contiguous() and tuple(ape.shape) == ((2 * ratio if overlap else ratio), hd)
+    )
+
+
+def fused_window_pool(proj: torch.Tensor, ape: torch.Tensor, ratio: int, hd: int, overlap: bool) -> torch.Tensor:
+    """``_pool_windows`` from the fused ``[B, S, 2*coff*hd]`` projection -> ``[B, S // ratio, hd]``."""
+    return _WindowPool.apply(proj, ape, ratio, hd, overlap)
+
+
 def fused_softmax_weighted_pool(kv: torch.Tensor, score: torch.Tensor, ape: torch.Tensor) -> torch.Tensor:
     """Fused ``(softmax(score+ape, dim=2) * kv).sum(dim=2)``.
 
