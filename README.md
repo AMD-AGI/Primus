@@ -254,10 +254,13 @@ This separation of concerns allows each component to evolve independently while 
 
 ---
 
-## 📝 TODOs
+## 📍 Roadmap
 
-- [ ] Add support for more model architectures and backends
-- [ ] Expand documentation with more examples and tutorials
+- **Current roadmap**: the open [roadmap issue](https://github.com/AMD-AGI/Primus/issues?q=is%3Aissue%20is%3Aopen%20label%3Aroadmap), updated at every release.
+- **Work in progress**: the open [tracking issues](https://github.com/AMD-AGI/Primus/issues?q=is%3Aissue%20is%3Aopen%20label%3Atracking), one per effort that takes several PRs.
+- **Kernels and ops**: the [Primus-Turbo roadmap](https://github.com/AMD-AGI/Primus-Turbo/issues?q=is%3Aissue%20is%3Aopen%20label%3Aroadmap).
+
+How roadmap, tracking and feature issues are used: [Roadmap and Issues](./CONTRIBUTING.md#roadmap-and-issues).
 
 ---
 

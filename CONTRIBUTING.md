@@ -104,6 +104,7 @@ it is planned for; at a release, its open issues move to the next milestone or l
 * Every week: each `needs-triage` issue gets its labels, an owner and a milestone, or is closed; then
   `needs-triage` comes off.
 * At every release: the roadmap issue is updated (release table, ticked items) and the milestone closed.
-* Every half-year: a new roadmap issue that links the previous one, which is closed.
+* Every half-year: a new roadmap issue that links the previous one, which is closed. The
+  README's Roadmap section links the open issue labeled `roadmap`, so it needs no edit.
 
 Thank you for contributing!
