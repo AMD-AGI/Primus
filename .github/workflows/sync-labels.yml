@@ -1,0 +1,54 @@
+name: Sync labels
+
+# Creates and updates the labels listed in .github/labels.json. Labels that are not in the file are
+# left alone, so removing an entry does not delete the label or take it off issues.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.json
+      - .github/workflows/sync-labels.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const wanted = JSON.parse(fs.readFileSync('.github/labels.json', 'utf8'));
+            const repo = { owner: context.repo.owner, repo: context.repo.repo };
+            const existing = await github.paginate(github.rest.issues.listLabelsForRepo, {
+              ...repo,
+              per_page: 100,
+            });
+            // GitHub label names are case-insensitive.
+            const byName = new Map(existing.map((label) => [label.name.toLowerCase(), label]));
+            for (const { name, color, description } of wanted) {
+              const current = byName.get(name.toLowerCase());
+              if (!current) {
+                await github.rest.issues.createLabel({ ...repo, name, color, description });
+                core.info(`created ${name}`);
+              } else if (
+                current.name !== name ||
+                current.color.toLowerCase() !== color.toLowerCase() ||
+                (current.description || '') !== description
+              ) {
+                await github.rest.issues.updateLabel({
+                  ...repo,
+                  name: current.name,
+                  new_name: name,
+                  color,
+                  description,
+                });
+                core.info(`updated ${name}`);
+              }
+            }

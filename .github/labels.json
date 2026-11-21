@@ -1,0 +1,32 @@
+[
+  { "name": "bug", "color": "d73a4a", "description": "Something isn't working" },
+  { "name": "enhancement", "color": "a2eeef", "description": "New feature or request" },
+  { "name": "performance", "color": "fbca04", "description": "Faster or smaller, same results" },
+  { "name": "documentation", "color": "0075ca", "description": "Improvements or additions to documentation" },
+  { "name": "design", "color": "c5def5", "description": "Design discussion before implementation" },
+  { "name": "roadmap", "color": "5319e7", "description": "The half-year roadmap of the repository" },
+  { "name": "tracking", "color": "1d76db", "description": "Tracks an effort with several PRs or both repositories; children are sub-issues" },
+
+  { "name": "needs-triage", "color": "ededed", "description": "New; labels, owner and milestone not set yet" },
+  { "name": "blocked", "color": "b60205", "description": "Waiting on another issue, an upstream fix or hardware" },
+
+  { "name": "P0", "color": "b60205", "description": "Blocks a release, a model recipe or a customer run" },
+  { "name": "P1", "color": "d93f0b", "description": "Planned for the current milestone" },
+  { "name": "P2", "color": "fef2c0", "description": "Wanted; done when there is capacity" },
+
+  { "name": "hw:mi300x", "color": "bfdadc", "description": "MI300X / MI325X (gfx942)" },
+  { "name": "hw:mi355x", "color": "bfdadc", "description": "MI350X / MI355X (gfx950)" },
+  { "name": "hw:mi455x", "color": "bfdadc", "description": "MI455X (gfx1250)" },
+
+  { "name": "area:megatron", "color": "d4c5f9", "description": "Megatron backend and its patches" },
+  { "name": "area:torchtitan", "color": "d4c5f9", "description": "TorchTitan backend" },
+  { "name": "area:jax", "color": "d4c5f9", "description": "JAX / MaxText backend" },
+  { "name": "area:diffusion", "color": "d4c5f9", "description": "Diffusion models (Flux, WAN, MaxDiffusion)" },
+  { "name": "area:moe", "color": "d4c5f9", "description": "MoE layers, token dispatch and expert parallelism" },
+  { "name": "area:comm", "color": "d4c5f9", "description": "Collectives, overlap, SDMA and fused communication" },
+  { "name": "area:low-precision", "color": "d4c5f9", "description": "FP8 / MXFP8 / MXFP4 training" },
+  { "name": "area:recipes", "color": "d4c5f9", "description": "Model configs under examples/ and their performance" },
+  { "name": "area:runtime", "color": "d4c5f9", "description": "Launcher, CLI, containers, checkpointing and fault tolerance" },
+  { "name": "area:rl", "color": "d4c5f9", "description": "RL post-training" },
+  { "name": "area:tools", "color": "d4c5f9", "description": "Projection, tuning agent, preflight and dashboards" }
+]
