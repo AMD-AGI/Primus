@@ -34,7 +34,8 @@ Requirements:
 | all opt3 switches on (+ new fused Adam), graph | 77.9 | 9.8687 |
 | + MegaMoE fp8_block experts, graph | 62.1 | 9.8715 |
 | + Adam writes the MegaMoE expert caches, graph | 61.9 | 9.8715 |
-| **+ fuseq switches (this config), graph** | **60.7** | 9.8715 |
+| + fuseq switches, graph | 60.7 | 9.8715 |
+| **+ MegaMoE flygg k256 (this config), graph** | **60.1** | 9.8715 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -47,6 +48,10 @@ fuseq switches then -1.4 ms (bit-identical; 2 A/B pairs in the int tree, 62.05 -
 dual quant writes scales in the consumer GEMM layout, half the `_pack_scales` launches gone), `PRIMUS_V4_ROPE_BWD_INPLACE`
 (inverse RoPE bwd on the 64 rope columns only), `PRIMUS_V4_OA_MAIN_GRAD` and `PRIMUS_EMB_MAIN_GRAD` (dW straight
 into main_grad, no DDP copy), `PRIMUS_V4_ROUTER_DENSE_OUT` (no bool zero fills). Kernels/step 2178 -> 2048.
+`PRIMUS_TURBO_MOE_FP8BLK_GG=k256` then -0.65 ms (bit-identical; 2 A/B pairs in the int tree, 60.75 -> 60.1): the
+MegaMoE fp8_block fwd/dgrad grouped GEMM (flygg) uses 256x256x256 tiles, a 2-stage ring, a M/256 grid bound and one
+B-scale row per 16-row fragment (kernel -8..-13%, flygg 4.87 -> 4.30 ms/step). It assumes 128x128-block weight scales
+and 256-aligned expert offsets; `tile` restores the old kernel.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
