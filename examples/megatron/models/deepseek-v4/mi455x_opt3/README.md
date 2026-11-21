@@ -32,19 +32,29 @@ Requirements:
 | baseline, full-iteration graph | 97.0 | 9.8688 |
 | yyq/opt3-int, all opt3 switches off, graph | 92.7 | 9.8712 |
 | all opt3 switches on (+ new fused Adam), graph | 77.9 | 9.8687 |
-| **+ MegaMoE fp8_block experts (this config), graph** | **62.1** | 9.8715 |
+| + MegaMoE fp8_block experts, graph | 62.1 | 9.8715 |
+| **+ Adam writes the MegaMoE expert caches (this config), graph** | **61.9** | 9.8715 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
 wgrad fusion -0.4, wq_a||wkv concat -0.4 ms. FP8-block Adam (`PRIMUS_FP8BLK_ADAM_QUANT`) -4.0 ms with the tile kernel
 at 1273 us for 879M params (83% of HBM). MegaMoE fp8_block then -15.7 ms (MoE GEMMs 22.8 -> 8.4 ms/step).
+`PRIMUS_FP8BLK_ADAM_MEGAMOE` then -0.3 ms (bit-identical; 6 A/B pairs, track adamqmoe): the tile Adam kernel also
+writes the MegaMoE expert q/s/qT/sT caches, so the `_w_128x128` re-quant (1.9 ms) goes away, but the tile kernel
+takes +1.8 ms on the expert weights (it still writes the same FP8 bytes and runs at ~14.5 vs 15.9 TB/s).
+`PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
+(debug only, ~+15 ms/step).
 
 ## Known issues
 
 - `PRIMUS_TURBO_WQB_SPLITK=4`: grad norm NaN from iteration 1 (g90 split-K wiring). Keep off.
 - `PRIMUS_TURBO_MOE_GG_DSV4=1`: 2% faster than flygg at kernel level, not worth enabling.
 - MegaMoE `fp8_block` runs the EP=1 stages only; EP>1 dispatch/combine has no FP8-block path yet.
-- With the MegaMoE experts, the expert weights are re-quantized after Adam (`_w_128x128_kernel`, ~2 ms/step)
-  instead of being written by the FP8-block Adam kernel.
+- `PRIMUS_FP8BLK_ADAM_MEGAMOE=1`: after the first step the MegaMoE FP8 expert caches are written only by the fused
+  Adam. Anything else that changes the expert weights mid-run (checkpoint load after step 1, an optimizer fallback)
+  would leave them stale. It is a no-op at EP>1, for DP-sharded weights and with `PRIMUS_TURBO_MOE_GG_DSV4=1`.
+- Rare nondeterminism (WATCH): 1 run in ~30 on 2026-11-21 (int_aqm_off1) had a different iteration-1 loss
+  (11.91723 vs 11.91726) and NaN grad norm on every iteration, 75.5 ms/step; an identical rerun was normal. An
+  earlier g90-path run once had grad norm inf at iteration 12. Cause unknown; rerun if iteration-1 loss is off.
 - The log line "fused kernel hardcodes unclamped SwiGLU" is stale for fp8_block: the kernel applies the default
   SiLU-SwiGLU with a +-10 clamp on gate and up.
