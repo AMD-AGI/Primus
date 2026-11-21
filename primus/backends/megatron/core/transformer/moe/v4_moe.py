@@ -70,7 +70,7 @@ from __future__ import annotations
 import logging
 from copy import copy
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -87,9 +87,6 @@ from megatron.core.transformer.moe.token_dispatcher import (
 )
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 
-from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
-    DeepSeekV4TransformerConfig,
-)
 from primus.backends.megatron.core.transformer.clamped_swiglu import ClampedSwiGLUMLP
 from primus.backends.megatron.core.transformer.moe.shared_experts import (
     PrimusSharedExpertMLP,
@@ -100,6 +97,13 @@ from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
 from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
     DeepseekV4LearnedRouter,
 )
+
+if TYPE_CHECKING:
+    # Importing it at runtime goes through the deepseek_v4 package __init__, whose
+    # deepseek_v4_block imports this module back.
+    from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+        DeepSeekV4TransformerConfig,
+    )
 
 logger = logging.getLogger(__name__)
 

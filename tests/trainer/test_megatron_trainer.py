@@ -5,38 +5,26 @@
 ###############################################################################
 
 
+import hashlib
+import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import pytest
 
-from tests.utils import PrimusUT, isolated_torchrun_env, run_training_script
-
-_GFX_TO_PLATFORM = {
-    "gfx942": "MI300X",
-    "gfx950": "MI355X",
-}
-
-
-def detect_gpu_platform() -> str:
-    """Map hardware GFX arch to platform config directory: gfx942 → MI300X, gfx950 → MI355X."""
-    try:
-        import torch
-
-        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
-            props = torch.cuda.get_device_properties(0)
-            arch_raw = getattr(props, "gcnArchName", "") or ""
-            arch = arch_raw.split(":")[0].strip()
-            if arch in _GFX_TO_PLATFORM:
-                return _GFX_TO_PLATFORM[arch]
-    except Exception:
-        pass
-    raise RuntimeError(f"Unable to detect GPU platform. Ensure ROCm GPU (gfx942/gfx950) is available.")
-
+from tests.utils import (
+    PrimusUT,
+    detect_gpu_platform,
+    isolated_torchrun_env,
+    run_training_script,
+)
 
 GPU_PLATFORM = detect_gpu_platform()
 
@@ -118,6 +106,59 @@ def run_posttrain_script(
         cmd.extend(extra_args)
 
     return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
+
+
+# The model shape of test_megatron_trainer_sft_lora.yaml.
+_TINY_QWEN2_SHAPE = dict(
+    hidden_size=8,
+    intermediate_size=32,
+    num_hidden_layers=2,
+    num_attention_heads=4,
+    num_key_value_heads=2,
+    tie_word_embeddings=False,
+)
+_TINY_QWEN2_TOKENIZER = (
+    "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5",
+    "4b10ebee6e13a2669155516652960f50984399fd",
+)
+
+
+def tiny_qwen2_hf_dir() -> str:
+    """A random-weight Qwen2 HF model dir (bf16, with tokenizer) of the shape above, under DATA_PATH.
+
+    The posttrain hook caches its conversion under the dir's name, so the name
+    hashes everything that defines the model.
+    """
+    spec = dict(_TINY_QWEN2_SHAPE, tokenizer=_TINY_QWEN2_TOKENIZER, seed=0)
+    digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:10]
+    data_path = Path(os.environ.get("DATA_PATH", Path(__file__).resolve().parents[2] / "data"))
+    path = data_path / "hf_models" / f"primus-tiny-qwen2-{digest}"
+    if path.is_dir():
+        return str(path)
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2Config
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
+    try:
+        repo, revision = _TINY_QWEN2_TOKENIZER
+        tokenizer = AutoTokenizer.from_pretrained(repo, revision=revision)
+        torch.manual_seed(spec["seed"])
+        config = Qwen2Config(vocab_size=len(tokenizer), **_TINY_QWEN2_SHAPE)
+        AutoModelForCausalLM.from_config(config).to(torch.bfloat16).save_pretrained(tmp)
+        tokenizer.save_pretrained(tmp)
+        # mkdtemp makes the dir 0700; DATA_PATH may be shared with other users.
+        tmp.chmod(0o755)
+        # The rename is atomic, so a dir at `path` is always complete; another run may get there first.
+        try:
+            tmp.rename(path)
+        except OSError:
+            if not path.is_dir():
+                raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return str(path)
 
 
 class TestMegatronTrainer(PrimusUT):
@@ -846,14 +887,14 @@ class TestMegatronTrainer(PrimusUT):
     def test_qwen2_sft_lora(self):
         # Only E2E covering the "posttrain" suite (MegatronSFTTrainer) and
         # peft/*.py; LoRA is enabled in test_megatron_trainer_sft_lora.yaml.
-        # The posttrain hook HF->Megatron-converts `tokenizer_model` into the
-        # base checkpoint when pretrained_checkpoint/load are unset, so this
-        # uses a tiny stand-in checkpoint, not real Qwen2.5-7B weights.
+        # The posttrain hook HF->Megatron-converts `hf_path` into the base
+        # checkpoint when pretrained_checkpoint/load are unset, so this uses a
+        # tiny generated stand-in, not real Qwen2.5-7B weights.
         run_posttrain_script(
             self.__class__.__name__,
             "qwen2_sft_lora",
             exp_path="tests/trainer/test_megatron_trainer_sft_lora.yaml",
-            env_override={},
+            env_override={"PRIMUS_TINY_QWEN2_PATH": tiny_qwen2_hf_dir()},
             # head_dim (2) is below the image's fused-attention CK kernel minimum,
             # so pin the unfused path; attention_backend_patches forces it over
             # the image's baked NVTE_FUSED_ATTN=1.
@@ -866,7 +907,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v2_lite_uep",
-            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={"USING_UEP": "1", "REBUILD_UEP": "1"},
             extra_args=[
                 "--num_layers",
