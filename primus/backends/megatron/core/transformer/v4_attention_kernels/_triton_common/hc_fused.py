@@ -689,12 +689,16 @@ if _HAVE_GLUON:
     def _hc_b3_gl_kernel(X, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW, DX, DWP, M, D, T_PER, N_D, N_TILES,
                          BT: gl.constexpr, BC: gl.constexpr, BN: gl.constexpr, HAS_DNEW: gl.constexpr,
                          WMMA: gl.constexpr, OPA: gl.constexpr, OPB: gl.constexpr, BLK: gl.constexpr,
-                         SMEM: gl.constexpr):
+                         SMEM: gl.constexpr, SMEM_W: gl.constexpr = None, WLDS: gl.constexpr = False,
+                         LATE: gl.constexpr = False):
         """B3 with explicit layouts: one program = one stream k x BC columns x T_PER rows (K = 4).
 
         dx_k = g @ W_k (bf16 hi/lo WMMA, 3 products) - x_k*coef + pre_k*dcoll + sum_h comb^T[h,k]*dnew_h,
         dW_k += g^T @ x_k (x_k staged through LDS, read back with ds_load_tr as the B operand).
         The 4 stream programs of a tile get pids p, p+8, p+16, p+24 (same XCD) so dnew/dcoll hit L2.
+        hc track (PRIMUS_HC_B3_VAR): WLDS keeps the loop-invariant W^T hi/lo B operands in LDS instead of VGPRs, LATE loads
+        the 4 dnew planes after the WMMA instead of hoisting them; both only cut VGPRs (326 -> 190 under Triton main),
+        the arithmetic is unchanged (dx / dW partials byte-identical).
         """
         pid = gl.program_id(0)
         u = pid % 8
@@ -711,6 +715,11 @@ if _HAVE_GLUON:
             woff = gl.expand_dims((k * D + cb) * BN, 0) + gl.expand_dims(nb, 1)
             wh = gl.load(WTH + woff)
             wl = gl.load(WTL + woff)
+            if WLDS:
+                wsh = gl.allocate_shared_memory(gl.bfloat16, [BN, BC], SMEM_W)
+                wsl = gl.allocate_shared_memory(gl.bfloat16, [BN, BC], SMEM_W)
+                wsh.store(wh)
+                wsl.store(wl)
             na_r = gl.arange(0, BN, layout=gl.SliceLayout(0, OPA))
             na_c = gl.arange(0, BN, layout=gl.SliceLayout(1, OPA))
             tb = gl.arange(0, BT, layout=gl.SliceLayout(1, BLK))
@@ -727,10 +736,11 @@ if _HAVE_GLUON:
                 cf = gl.expand_dims(gl.load(COEF + tr), 1)
                 pk = gl.expand_dims(gl.load(PRE + tr * 4 + k).to(gl.float32), 1)
                 if HAS_DNEW:  # issue every streaming load before the WMMA / layout conversion
-                    n0 = gl.load(DNEW + rowoff)
-                    n1 = gl.load(DNEW + rowoff + D)
-                    n2 = gl.load(DNEW + rowoff + 2 * D)
-                    n3 = gl.load(DNEW + rowoff + 3 * D)
+                    if not LATE:
+                        n0 = gl.load(DNEW + rowoff)
+                        n1 = gl.load(DNEW + rowoff + D)
+                        n2 = gl.load(DNEW + rowoff + 2 * D)
+                        n3 = gl.load(DNEW + rowoff + 3 * D)
                     q0 = gl.expand_dims(gl.load(COMBT + tr * 16 + 0 + k).to(gl.float32), 1)
                     q1 = gl.expand_dims(gl.load(COMBT + tr * 16 + 4 + k).to(gl.float32), 1)
                     q2 = gl.expand_dims(gl.load(COMBT + tr * 16 + 8 + k).to(gl.float32), 1)
@@ -739,12 +749,20 @@ if _HAVE_GLUON:
                 goff = gl.expand_dims(ta, 1) * BN + gl.expand_dims(na_r, 0)
                 gh = gl.load(GH + goff)
                 gq = gl.load(GL + goff)
+                if WLDS:
+                    wh = wsh.load(OPB)
+                    wl = wsl.load(OPB)
                 acc = gl.zeros([BT, BC], gl.float32, layout=WMMA)
                 acc = gl.amd.gfx1250.wmma(gh, wh, acc)
                 acc = gl.amd.gfx1250.wmma(gh, wl, acc)
                 acc = gl.amd.gfx1250.wmma(gq, wh, acc)
                 out = gl.convert_layout(acc, BLK) - xk.to(gl.float32) * cf + pk * dcv
                 if HAS_DNEW:
+                    if LATE:
+                        n0 = gl.load(DNEW + rowoff)
+                        n1 = gl.load(DNEW + rowoff + D)
+                        n2 = gl.load(DNEW + rowoff + 2 * D)
+                        n3 = gl.load(DNEW + rowoff + 3 * D)
                     out = (out + q0 * n0.to(gl.float32) + q1 * n1.to(gl.float32) + q2 * n2.to(gl.float32)
                            + q3 * n3.to(gl.float32))
                 gl.store(DX + rowoff + k * D, out.to(gl.bfloat16))
@@ -777,6 +795,21 @@ if _HAVE_GLUON:
             smem = gl.PaddedSharedLayout.with_identity_for([[bc, 16]], [bt, bc], [1, 0])
             _GL_LAYOUTS[key] = (wm, opa, opb, blk, smem)
         return _GL_LAYOUTS[key]
+
+    def _gl_smem_w(bn, bc):
+        key = ("w", bn, bc)
+        if key not in _GL_LAYOUTS:
+            _GL_LAYOUTS[key] = gl.PaddedSharedLayout.with_identity_for([[bc, 16]], [bn, bc], [1, 0])
+        return _GL_LAYOUTS[key]
+
+
+def _b3_var():
+    """PRIMUS_HC_B3_VAR=wlds,late (each 0/1); default 0,0 = the original register schedule."""
+    v = os.environ.get("PRIMUS_HC_B3_VAR", "").strip()
+    if not v:
+        return False, False
+    a, b = (int(t) for t in v.split(","))
+    return bool(a), bool(b)
 
 
 def _gl_b3_ok(M, D, K):
@@ -1055,11 +1088,15 @@ class HCPreFn(torch.autograd.Function):
             n_tiles = n_d * ts
             dx = torch.empty_like(x3)
             dw_p = torch.empty((ts, BN, KD), dtype=torch.float32, device=dev)
+            wlds, late = _b3_var()
+            vkw = dict(SMEM_W=_gl_smem_w(BN, bc), WLDS=True) if wlds else {}
+            if late:
+                vkw["LATE"] = True
             _hc_b3_gl_kernel[(triton.cdiv(n_tiles, 8) * 8 * K,)](
                 x3, wth, wtl, gh, glo, gth, gtl, coef, pre, combt, dcoll, dnew if dnew is not None else x3, dx, dw_p,
                 M, D, M // ts, n_d, n_tiles,
                 BT=bt, BC=bc, BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk, SMEM=smem,
-                num_warps=nw,
+                num_warps=nw, **vkw,
             )
             if link is not None:
                 link.dnew = link.dpost = link.dcombt = None
