@@ -594,6 +594,41 @@ __host__ __device__ __forceinline__ float fp8blk_scale(float amax) {
   return fp8blk_pow2_floor(kFp8Max / fmaxf(amax, 1.0e-4f));
 }
 
+// MX-plane mode (MegaMoE fp8_block expert cache, selected per tensor by a null scale_inv
+// address): the exponent of Turbo's quant_w_128x128 (quant_blk_gfx1250 _ue8m0_exp ->
+// ue8m0_exp_fly(amax, 8)): smallest e with amax <= 448 * 2^e from the amax bits, 0 for
+// amax == 0 (no 1e-4 floor), inf/nan -> 126, clamped to [-126, 126]; q = e4m3(w * 2^-e).
+__host__ __device__ __forceinline__ int fp8blk_mx_exp(float amax) {
+  const uint32_t bits = fp8blk_f32_bits(amax);
+  const int fld = static_cast<int>((bits >> 23) & 0xFF);
+  int e = fld - (127 + 8) + ((bits & UINT32_C(0x7FFFFF)) > UINT32_C(0x600000) ? 1 : 0);
+  if (fld == 0xFF) e = 126;
+  if (!(amax > 0.0f)) e = 0;
+  return e < -126 ? -126 : (e > 126 ? 126 : e);
+}
+
+__host__ __device__ __forceinline__ float fp8blk_pow2_neg(int e) {
+  const uint32_t u = static_cast<uint32_t>(127 - e) << 23;
+  float r;
+  memcpy(&r, &u, 4);
+  return r;
+}
+
+// MX-plane scale store: S [B, N, K/32] and ST [B, K, N/32] uint8, the tile's E8M0 byte
+// (e + 127) repeated 4x per 128 columns, i.e. one int32 word per tile row (S) and per tile
+// column (ST), as Turbo's _w_128x128_kernel writes them. Full tiles only (N, K % 128 == 0).
+__host__ __device__ __forceinline__ void fp8blk_mx_scale_store(
+    int tid, const Fp8BlkTile& t, int e, uint8_t* s, uint8_t* st) {
+  const uint32_t word = static_cast<uint32_t>((e + 127) & 0xFF) * UINT32_C(0x01010101);
+  if (tid < kTile) {
+    uint32_t* s32 = reinterpret_cast<uint32_t*>(s);
+    s32[(t.b * t.N + t.tm * kTile + tid) * t.tiles_k + t.tk] = word;
+  } else if (tid < 2 * kTile && st != nullptr) {
+    uint32_t* st32 = reinterpret_cast<uint32_t*>(st);
+    st32[(t.b * t.K + t.tk * kTile + (tid - kTile)) * t.tiles_n + t.tm] = word;
+  }
+}
+
 // Phase 2 (per thread): quantize the 4 x 8 weights, store W and stage the bytes in LDS.
 __host__ __device__ __forceinline__ void fp8blk_quant_phase(
     int tid, const Fp8BlkTile& t, uint8_t* w, float s, const float (&x)[kTileIters][kIlp],
@@ -854,7 +889,10 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_fp8blk_kernel(
   float tile_amax = wave_amax[0];
 #pragma unroll
   for (int w = 1; w < kBlockSize / 32; ++w) tile_amax = fmaxf(tile_amax, wave_amax[w]);
-  const float s = fp8blk_scale(tile_amax);
+  // A null scale_inv address (per tensor, block-uniform) selects the MX-plane mode.
+  const bool mx = ptr.scale_inv == nullptr;
+  const int mx_e = fp8blk_mx_exp(tile_amax);
+  const float s = mx ? fp8blk_pow2_neg(mx_e) : fp8blk_scale(tile_amax);
   // A null W^T address (per tensor) skips the transpose phase: e.g. weights whose GEMMs only
   // read W (grouped expert GEMMs take W with the transpose flag in dgrad).
   const bool want_t = ptr.wt != nullptr;  // block-uniform
@@ -871,7 +909,11 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_fp8blk_kernel(
       fp8blk_transpose_phase(threadIdx.x, t, ptr.wt, lds);
     }
   }
-  if (threadIdx.x == 0) fp8blk_scale_store(t, s, ptr.scale_inv, ptr.e8m0, ptr.e8m0_t);
+  if (mx) {
+    fp8blk_mx_scale_store(threadIdx.x, t, mx_e, ptr.e8m0, ptr.e8m0_t);
+  } else if (threadIdx.x == 0) {
+    fp8blk_scale_store(t, s, ptr.scale_inv, ptr.e8m0, ptr.e8m0_t);
+  }
 }
 
 void fused_adam_clip(
@@ -953,7 +995,9 @@ void fused_adam_clip(
 }
 
 // Per tensor: addresses[10] = grad, fp32 master, exp_avg, exp_avg_sq, bf16 param, W fp8,
-// W^T fp8, scale_inv fp32, e8m0, e8m0_t (W^T and e8m0_t may be 0: not written); dims[4] =
+// W^T fp8, scale_inv fp32, e8m0, e8m0_t (W^T and e8m0_t may be 0: not written). scale_inv 0
+// selects the MX-plane mode (MegaMoE expert cache: e8m0 -> S [B,N,K/32], e8m0_t -> ST
+// [B,K,N/32], quant_w_128x128 exponent; N, K % 128 == 0 checked by the caller); dims[4] =
 // N, K, tiles_n, tiles_k (B is implied by the tile count). Scalars are derived exactly as in
 // fused_adam_clip.
 void fused_adam_clip_fp8blk(

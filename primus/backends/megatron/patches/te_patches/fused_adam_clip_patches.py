@@ -37,7 +37,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v7"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v8"
 _extension = None
 
 
@@ -59,6 +59,39 @@ def _fp8blk_enabled() -> bool:
     kernel that also writes its FP8 W, W^T and UE8M0 scales into Turbo's per-step weight cache
     (primus_turbo.pytorch.core.fp8blk_weight_cache), so the GEMMs skip their weight quant."""
     return os.environ.get("PRIMUS_FP8BLK_ADAM_QUANT", "0") == "1"
+
+
+def _fp8blk_megamoe_enabled() -> bool:
+    """PRIMUS_FP8BLK_ADAM_MEGAMOE=1 (with PRIMUS_FP8BLK_ADAM_QUANT=1): the MegaMoE fp8_block expert
+    weights go through the same tile Adam kernel, which writes Turbo's FP8BlockWeightCache (q / s and
+    qT / sT MX planes, bytes of quant_w_128x128) so refresh_fp8blk_weights() skips them."""
+    return _fp8blk_enabled() and os.environ.get("PRIMUS_FP8BLK_ADAM_MEGAMOE", "0") == "1"
+
+
+class _MegaMoEAdamTarget:
+    """A Turbo MegaMoE ``FP8BlockWeightCache`` seen as a tile-Adam output: W = q, W^T = qT, MX scale
+    planes s / sT in the e8m0 / e8m0_t slots and no scale_inv (address 0 = MX-plane mode)."""
+
+    scale_inv = None
+
+    def __init__(self, cache):
+        self.cache = cache
+        self.w, self.wt, self.e8m0, self.e8m0_t = cache.q, cache.qT, cache.s, cache.sT
+        self.ready = False  # not read by MegaMoE (its cache stays valid; the forward reads it unconditionally)
+
+    @staticmethod
+    def find(model_param):
+        """The live MegaMoE cache whose weight is ``model_param`` (None if there is none)."""
+        try:
+            from primus_turbo.pytorch.ops.moe import fused_mega_moe_fp8blk as mm
+        except ImportError:
+            return None
+        if getattr(mm, "_GG_DSV4", False):  # gg_dsv4 also needs the packed scales from refresh()
+            return None
+        for c in list(mm._CACHES):
+            if c.weight is model_param:
+                return c
+        return None
 
 
 def _static_bf16_loss_scale_cpu_enabled() -> bool:
@@ -438,6 +471,7 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
     writeback_by_param_ptr = {}
     writeback_tensors = []
     fp8blk_by_param_ptr = {}
+    megamoe_count = 0
     if _fp8blk_enabled():
         from primus_turbo.pytorch.core import fp8blk_weight_cache
     for shard_main_group, model_group in zip(
@@ -475,6 +509,20 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
                 cache = fp8blk_weight_cache.attach(model_param)
                 cache.ready = False
                 fp8blk_by_param_ptr[shard_main_param.data_ptr()] = (model_param, cache)
+            elif (
+                _fp8blk_megamoe_enabled()
+                and model_param.dim() == 3
+                and model_param.shape[-2] % _FP8BLK_TILE == 0
+                and model_param.shape[-1] % _FP8BLK_TILE == 0
+                and world_range.size == model_param.numel()
+                and shard_model_param.data_ptr() == model_param.data_ptr()
+            ):
+                mm_cache = _MegaMoEAdamTarget.find(model_param)
+                if mm_cache is not None:
+                    # The tile kernel now owns this cache; refresh_fp8blk_weights() skips it.
+                    mm_cache.adam_managed = True
+                    fp8blk_by_param_ptr[shard_main_param.data_ptr()] = (model_param, _MegaMoEAdamTarget(mm_cache))
+                    megamoe_count += 1
 
     expected_masters = sum(len(group) for group in distributed_optimizer.shard_fp32_from_float16_groups)
     if len(writeback_by_param_ptr) != expected_masters:
@@ -495,6 +543,7 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
             f"[Patch:{_PATCH_KEY}] PRIMUS_FP8BLK_ADAM_QUANT: {len(fp8blk_by_param_ptr)} weights "
             f"({sum(p.numel() for p, _ in fp8blk_by_param_ptr.values()) / 1e6:.1f} M params) get FP8 "
             "W / W^T / UE8M0 scales from the Adam writeback"
+            + (f", {megamoe_count} of them MegaMoE expert caches (PRIMUS_FP8BLK_ADAM_MEGAMOE)" if megamoe_count else "")
         )
 
 
