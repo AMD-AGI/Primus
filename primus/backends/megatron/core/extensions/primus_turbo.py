@@ -435,7 +435,7 @@ def _main_grad_first_write(weight) -> bool:
 def _g90_block_wgrad_fuse(weight) -> bool:
     if os.environ.get("PRIMUS_TURBO_G90_WGRAD_FUSE", "0").strip().lower() not in ("1", "true"):
         return False
-    if os.environ.get("PRIMUS_TURBO_FP8_BLOCK_KERNEL", "") != "g90":
+    if os.environ.get("PRIMUS_TURBO_FP8_BLOCK_KERNEL", "") not in ("g90", "dsv4up"):  # dsv4up rides on the g90 path
         return False
     mg = getattr(weight, "main_grad", None)
     return (
