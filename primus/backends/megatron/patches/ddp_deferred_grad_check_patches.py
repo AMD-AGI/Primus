@@ -112,6 +112,32 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
             part = n if part is None else part + n
         state["acc"] = part if state["acc"] is None else state["acc"] + part
 
+    def _bucket_ranges(b, n):
+        # wgsmall: params whose wgrad epilogue already produced the sum of squares of their final main_grad
+        # (Turbo PRIMUS_TURBO_MOE_WGRAD_SUMSQ=1: ``_primus_main_grad_sumsq`` partial buffer, flagged fresh by this
+        # step's backward) are cut out of the bucket; returns the element ranges still to reduce and those buffers.
+        skip, folded = [], []
+        for prm in getattr(b, "params_list", ()):
+            buf = getattr(prm, "_primus_main_grad_sumsq", None)
+            if buf is None or not getattr(prm, "_primus_main_grad_sumsq_fresh", False):
+                continue
+            idx = getattr(b, "param_to_index", {}).get(prm)
+            if idx is None:
+                continue
+            prm._primus_main_grad_sumsq_fresh = False  # consumed; the next step's backward sets it again
+            skip.append(idx)
+            folded.append(buf)
+        if not skip:
+            return [(0, n)], folded
+        ranges, cur = [], 0
+        for lo, hi in sorted(skip):
+            if lo > cur:
+                ranges.append((cur, lo))
+            cur = max(cur, hi)
+        if cur < n:
+            ranges.append((cur, n))
+        return ranges, folded
+
     def _sumsq_all_buckets(ddp):
         # opt3-mem: with the NaN check off (e.g. --check_for_nan_in_loss_and_grad False under the
         # full-iteration graph) check_grads is never called; the clip norm still wants the sum of squares,
@@ -119,6 +145,7 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
         if not use_triton:
             return None
         acc = None
+        folded = []
         for bg in list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", [])):
             for b in bg.buckets:
                 g = b.grad_data
@@ -126,8 +153,14 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
                     continue
                 if not (g.is_cuda and g.is_contiguous()):
                     return None
-                n = grad_sumsq(g)
-                acc = n if acc is None else acc + n
+                ranges, fb = _bucket_ranges(b, g.numel())
+                folded += fb
+                for lo, hi in ranges:
+                    n = grad_sumsq(g[lo:hi])
+                    acc = n if acc is None else acc + n
+        if folded:
+            n = torch.cat(folded).sum()
+            acc = n if acc is None else acc + n
         return acc
 
     def finish_grad_sync(self, *args, **kwargs):
