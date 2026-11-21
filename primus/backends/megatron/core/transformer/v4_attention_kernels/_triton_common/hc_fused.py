@@ -120,6 +120,32 @@ HCF_CFG = dict(
 )
 
 
+def _exp_tile():
+    """(BLOCK_M, BLOCK_D, num_warps) of F3 ``_hc_expand_fwd_kernel``. ``PRIMUS_HC_EXPAND_TILE=bm,bd,warps`` overrides
+    the default (16, 128, 4). hc track: under Triton main (3.9, the e2e compiler) bm16/bd128 runs 74 us vs 26.6 us
+    under the image Triton 3.8; bm1/bd2048/8 warps is 26.5 us and byte-identical (bench_expand2.py)."""
+    v = os.environ.get("PRIMUS_HC_EXPAND_TILE", "").strip()
+    if v:
+        bm, bd, nw = (int(s) for s in v.split(","))
+        return bm, bd, nw
+    return HCF_CFG["exp_bm"], HCF_CFG["exp_bd"], HCF_CFG["exp_warps"]
+
+
+def _post_tile():
+    """(BT, num_warps) of B1 ``_hc_post_bwd2d_kernel`` (BC stays t2_bc: B2 consumes D / t2_bc partials).
+    ``PRIMUS_HC_POST_TILE=bt,warps`` overrides the default (t2_bt, t2_warps) = (8, 4). hc track: bt1/1 warp is
+    35.8 vs 50.5 us under Triton main, byte-identical dout / dpost / dcomb^T partials (bench_post.py)."""
+    v = os.environ.get("PRIMUS_HC_POST_TILE", "").strip()
+    if v:
+        bt, nw = (int(s) for s in v.split(","))
+        return bt, nw
+    return HCF_CFG["t2_bt"], HCF_CFG["t2_warps"]
+
+
+def _hc_nocast() -> bool:
+    return os.environ.get("PRIMUS_HC_NOCAST", "0") == "1"
+
+
 def _bif_nprog(dev) -> int:
     try:
         n_cu = torch.cuda.get_device_properties(dev).multi_processor_count
@@ -215,12 +241,12 @@ def _hc_pre_fwd_kernel(
     tl.store(RAW + r2 * BN + K + kk[None, :], raw_post, mask=m2)
     tl.store(RAW + r3 * BN + 2 * K + i3 * K + j3, raw_comb, mask=m3)
 
-    s0 = tl.load(SCALE + 0)
-    s1 = tl.load(SCALE + 1)
-    s2 = tl.load(SCALE + 2)
-    b_pre = tl.load(BASE + kk)
-    b_post = tl.load(BASE + K + kk)
-    b_comb = tl.load(BASE + 2 * K + kk[:, None] * K + kk[None, :])
+    s0 = tl.load(SCALE + 0).to(tl.float32)
+    s1 = tl.load(SCALE + 1).to(tl.float32)
+    s2 = tl.load(SCALE + 2).to(tl.float32)
+    b_pre = tl.load(BASE + kk).to(tl.float32)
+    b_post = tl.load(BASE + K + kk).to(tl.float32)
+    b_comb = tl.load(BASE + 2 * K + kk[:, None] * K + kk[None, :]).to(tl.float32)
     pre_logit = (raw_pre * rstd[:, None]) * s0 + b_pre[None, :]
     post_logit = (raw_post * rstd[:, None]) * s1 + b_post[None, :]
     comb_logit = (raw_comb * rstd[:, None, None]) * s2 + b_comb[None, :, :]
@@ -467,12 +493,12 @@ def _hc_pre_bwd_kernel(
     raw_post = tl.load(RAW + r2 * BN + K + kk[None, :], mask=m2, other=0.0)
     raw_comb = tl.load(RAW + r3 * BN + 2 * K + i3 * K + j3, mask=m3, other=0.0)
     rstd = tl.load(RSTD + rows64, mask=rmask, other=0.0)
-    s0 = tl.load(SCALE + 0)
-    s1 = tl.load(SCALE + 1)
-    s2 = tl.load(SCALE + 2)
-    b_pre = tl.load(BASE + kk)
-    b_post = tl.load(BASE + K + kk)
-    b_comb = tl.load(BASE + 2 * K + kk[:, None] * K + kk[None, :])
+    s0 = tl.load(SCALE + 0).to(tl.float32)
+    s1 = tl.load(SCALE + 1).to(tl.float32)
+    s2 = tl.load(SCALE + 2).to(tl.float32)
+    b_pre = tl.load(BASE + kk).to(tl.float32)
+    b_post = tl.load(BASE + K + kk).to(tl.float32)
+    b_comb = tl.load(BASE + 2 * K + kk[:, None] * K + kk[None, :]).to(tl.float32)
     l_pre = raw_pre * rstd[:, None]
     l_post = raw_post * rstd[:, None]
     l_comb = raw_comb * rstd[:, None, None]
@@ -640,7 +666,7 @@ def _hc_wt_split_kernel(W, WTH, WTL, N, KD, BN: tl.constexpr, BLOCK: tl.constexp
     c = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     n = tl.arange(0, BN)
     m = (c[:, None] < KD) & (n[None, :] < N)
-    v = tl.load(W + n[None, :].to(tl.int64) * KD + c[:, None], mask=m, other=0.0)
+    v = tl.load(W + n[None, :].to(tl.int64) * KD + c[:, None], mask=m, other=0.0).to(tl.float32)  # W may be bf16 (PRIMUS_HC_NOCAST)
     h = v.to(tl.bfloat16)
     o = c[:, None].to(tl.int64) * BN + n[None, :]
     om = c[:, None] < KD
@@ -856,7 +882,12 @@ class HCPreFn(torch.autograd.Function):
         M = x3.shape[0]
         KD = K * D
         x2d = x3.view(M, KD)
-        w = weight.float().contiguous()
+        # PRIMUS_HC_NOCAST=1: the kernels read bf16 fn.weight / scale / base directly (exact upcast in-kernel) instead
+        # of 3 torch casts per HC application; only on the wmma3 + gluon path, where w feeds _hc_wt_split_kernel only.
+        nocast = (_hc_nocast() and weight.is_contiguous() and weight.dtype in (torch.float32, torch.bfloat16)
+                  and HCF_CFG["f1_wmma3"] and x.dtype == torch.bfloat16 and _gl_b3_ok(M, D, K)
+                  and getattr(x, "_hc_stash", None) is None)
+        w = weight if nocast else weight.float().contiguous()
         N = w.shape[0]
         BN = _block_n(N)
         assert N == (2 + K) * K
@@ -905,8 +936,8 @@ class HCPreFn(torch.autograd.Function):
         post = torch.empty((M, K), dtype=x.dtype, device=dev)
         combt = torch.empty((M, K, K), dtype=x.dtype, device=dev)
         coll = torch.empty(x.shape[:-2] + (D,), dtype=x.dtype, device=dev)
-        scale_c = scale.float().contiguous()
-        base_c = base.float().contiguous()
+        scale_c = scale.contiguous() if nocast else scale.float().contiguous()
+        base_c = base.contiguous() if nocast else base.float().contiguous()
         two_d = f["two_d"] and D % f["t2_bc"] == 0
         bm = f["rm_bm"] if two_d else f["row_bm"]
         _hc_pre_fwd_kernel[(triton.cdiv(M, bm),)](
@@ -1091,9 +1122,10 @@ class HCPostFn(torch.autograd.Function):
             g_ = bif_grid(M, D, bt, bc, _bif_nprog(x.device))
             _hc_expand_bif_kernel[g_](x3, out_c, post_c, combt_c, new, M, D, BT=bt, BC=bc, NPROG=g_[0], num_warps=nw)
         else:
-            _hc_expand_fwd_kernel[(triton.cdiv(M, f["exp_bm"]), triton.cdiv(D, f["exp_bd"]))](
+            ebm, ebd, ew = _exp_tile()
+            _hc_expand_fwd_kernel[(triton.cdiv(M, ebm), triton.cdiv(D, ebd))](
                 x3, out_c, post_c, combt_c, new, M, D,
-                K=K, BLOCK_M=f["exp_bm"], BLOCK_D=f["exp_bd"], num_warps=f["exp_warps"],
+                K=K, BLOCK_M=ebm, BLOCK_D=ebd, num_warps=ew,
             )
         ctx.save_for_backward(x3, out_c, post_c)
         ctx.link = link
@@ -1122,9 +1154,10 @@ class HCPostFn(torch.autograd.Function):
                 _hc_post_bwd_bif_kernel[g_](dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
                                             BT=bt, BC=bc, NPROG=g_[0], num_warps=nw)
             else:
-                _hc_post_bwd2d_kernel[(triton.cdiv(M, f["t2_bt"]), nc)](
+                pbt, pw = _post_tile()
+                _hc_post_bwd2d_kernel[(triton.cdiv(M, pbt), nc)](
                     dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
-                    K=K, BT=f["t2_bt"], BC=f["t2_bc"], num_warps=f["t2_warps"],
+                    K=K, BT=pbt, BC=f["t2_bc"], num_warps=pw,
                 )
             link.nc = nc
         else:
