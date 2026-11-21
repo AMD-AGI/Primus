@@ -94,6 +94,7 @@ def _v4_router_post_fwd_kernel(
     BLOCK_E: tl.constexpr,  # next_pow2(E) — column block over the expert axis
     BLOCK_K: tl.constexpr,  # next_pow2(K) — column block over the topk axis
     OUT_DTYPE: tl.constexpr,
+    DENSE_OUT: tl.constexpr = 0,
 ):
     """One program tile = ``BLOCK_N`` rows of the post-logits chain.
 
@@ -189,20 +190,44 @@ def _v4_router_post_fwd_kernel(
         mask=n_mask[:, None] & k_mask[None, :],
     )
 
-    # Sparse scatter (probs[n, indices] = weights, rmap[n, indices] = True).
-    # No atomics needed because each (n, e) is written at most once
-    # per row (caller guarantees indices are unique within a row).  Padded
-    # topk columns are masked out so they never write to expert 0.
-    tl.store(
-        PROBS_PTR + n_offs[:, None] * E + indices,
-        weights.to(OUT_DTYPE),
-        mask=n_mask[:, None] & k_mask[None, :],
-    )
-    tl.store(
-        RMAP_PTR + n_offs[:, None] * E + indices,
-        tl.full((BLOCK_N, BLOCK_K), 1, dtype=tl.int1),
-        mask=n_mask[:, None] & k_mask[None, :],
-    )
+    if DENSE_OUT:
+        # PRIMUS_V4_ROUTER_DENSE_OUT=1: write whole rows of probs / rmap (zeros off the top-k), so the caller
+        # allocates them with torch.empty instead of two zero fills. Same values: probs[n, e] is the same fp32
+        # weight converted once to OUT_DTYPE, selected (not summed) into the row.
+        p_full = tl.zeros((BLOCK_N, BLOCK_E), dtype=tl.float32)
+        r_full = tl.zeros((BLOCK_N, BLOCK_E), dtype=tl.int32)
+        for k_off in tl.static_range(BLOCK_K):
+            sel = k_idx[None, :] == k_off
+            idx_col = tl.sum(tl.where(sel, indices, 0), axis=1)
+            w_col = tl.max(tl.where(sel, weights, float("-inf")), axis=1)
+            hit = (e_idx[None, :] == idx_col[:, None]) & (k_off < K)
+            p_full = tl.where(hit, w_col[:, None], p_full)
+            r_full = tl.where(hit, 1, r_full)
+        tl.store(
+            PROBS_PTR + n_offs[:, None] * E + e_idx[None, :],
+            p_full.to(OUT_DTYPE),
+            mask=n_mask[:, None] & e_mask[None, :],
+        )
+        tl.store(
+            RMAP_PTR + n_offs[:, None] * E + e_idx[None, :],
+            r_full != 0,
+            mask=n_mask[:, None] & e_mask[None, :],
+        )
+    else:
+        # Sparse scatter (probs[n, indices] = weights, rmap[n, indices] = True).
+        # No atomics needed because each (n, e) is written at most once
+        # per row (caller guarantees indices are unique within a row).  Padded
+        # topk columns are masked out so they never write to expert 0.
+        tl.store(
+            PROBS_PTR + n_offs[:, None] * E + indices,
+            weights.to(OUT_DTYPE),
+            mask=n_mask[:, None] & k_mask[None, :],
+        )
+        tl.store(
+            RMAP_PTR + n_offs[:, None] * E + indices,
+            tl.full((BLOCK_N, BLOCK_K), 1, dtype=tl.int1),
+            mask=n_mask[:, None] & k_mask[None, :],
+        )
 
 
 @triton.jit
@@ -355,6 +380,13 @@ def _v4_router_post_bwd_kernel(
 # ---------------------------------------------------------------------------
 
 
+def _dense_out() -> bool:
+    """PRIMUS_V4_ROUTER_DENSE_OUT=1 (default off): the fwd kernel writes whole probs / routing_map rows and the bwd
+    allocates d_logits with torch.empty (its kernel stores every real column), dropping three [N, E] zero fills per
+    router (one of them bool, ~11 us on gfx1250) and autograd's zero bool grad for routing_map. Bit-identical."""
+    return os.environ.get("PRIMUS_V4_ROUTER_DENSE_OUT", "0") == "1"
+
+
 class V4RouterPostFn(torch.autograd.Function):
     """Autograd-aware wrapper around the FWD/BWD Triton kernels.
 
@@ -407,8 +439,12 @@ class V4RouterPostFn(torch.autograd.Function):
             indices_pad = indices_c
 
         device = logits_c.device
-        probs = torch.zeros((N, E), dtype=out_dtype, device=device)
-        routing_map = torch.zeros((N, E), dtype=torch.bool, device=device)
+        # softmax keeps the sparse path: the dense variant changes its exp / div codegen by 1 ulp (sigmoid and
+        # sqrtsoftplus, V4's score function, are bit-identical)
+        dense = _dense_out() and score_fn_enum != 0
+        alloc = torch.empty if dense else torch.zeros  # dense: the kernel writes whole rows (no zero fills)
+        probs = alloc((N, E), dtype=out_dtype, device=device)
+        routing_map = alloc((N, E), dtype=torch.bool, device=device)
         scores_saved = torch.empty((N, E), dtype=torch.float32, device=device)
         weights_saved = torch.zeros((N, block_k), dtype=torch.float32, device=device)
         denom_saved = torch.empty((N,), dtype=torch.float32, device=device)
@@ -445,7 +481,12 @@ class V4RouterPostFn(torch.autograd.Function):
                 torch.bfloat16: tl.bfloat16,
                 torch.float64: tl.float64,
             }[out_dtype],
+            DENSE_OUT=int(dense),
         )
+        ctx.dense = dense
+        if dense:
+            # routing_map never gets a gradient: don't let autograd materialise a zero bool [N, E] for it
+            ctx.set_materialize_grads(False)
 
         ctx.save_for_backward(indices_pad, scores_saved, weights_saved, denom_saved)
         ctx.score_fn_enum = score_fn_enum
@@ -473,10 +514,12 @@ class V4RouterPostFn(torch.autograd.Function):
         N = indices_pad.shape[0]
         device = indices_pad.device
 
+        if d_probs is None:  # only with set_materialize_grads(False) (dense mode): no gradient reached probs
+            return None, None, None, None, None
         d_probs = d_probs.contiguous()
         # d_routing_map ignored (bool tensor, no grad flow).
-        # Initialise d_logits to 0 so the scatter writes only at K positions per row.
-        d_logits_fp32 = torch.zeros((N, E), dtype=torch.float32, device=device)
+        # The kernel stores every real (n, e) of d_logits (dense mode: no zero fill needed).
+        d_logits_fp32 = (torch.empty if ctx.dense else torch.zeros)((N, E), dtype=torch.float32, device=device)
 
         grid = (triton.cdiv(N, block_n),)
         _v4_router_post_bwd_kernel[grid](
@@ -546,3 +589,78 @@ __all__ = [
     "v4_router_post_triton",
     "is_triton_path_enabled",
 ]
+
+
+@triton.jit
+def _rows_from_slots_kernel(
+    SLOT_PTR,  # [N, K] int64 expert per (token, k), unique within a row
+    VALS_PTR,  # [N, K] probs dtype
+    PROBS_PTR,  # [N, E] out: VALS at the slots, 0 elsewhere
+    RMAP_PTR,  # [N, E] bool out: True at the slots
+    N,
+    E,
+    K,
+    BLOCK_N: tl.constexpr,
+    BLOCK_E: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    n_offs = pid * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_mask = n_offs < N
+    e_idx = tl.arange(0, BLOCK_E)
+    e_mask = e_idx < E
+    k_idx = tl.arange(0, BLOCK_K)
+    k_mask = k_idx < K
+    m = n_mask[:, None] & k_mask[None, :]
+    slot = tl.load(SLOT_PTR + n_offs[:, None] * K + k_idx[None, :], mask=m, other=0)
+    vals = tl.load(VALS_PTR + n_offs[:, None] * K + k_idx[None, :], mask=m, other=0.0).to(tl.float32)
+    p_full = tl.zeros((BLOCK_N, BLOCK_E), dtype=tl.float32)
+    r_full = tl.zeros((BLOCK_N, BLOCK_E), dtype=tl.int32)
+    for k_off in tl.static_range(BLOCK_K):
+        sel = k_idx[None, :] == k_off
+        s_col = tl.sum(tl.where(sel, slot, 0), axis=1)
+        v_col = tl.max(tl.where(sel, vals, float("-inf")), axis=1)
+        hit = (e_idx[None, :] == s_col[:, None]) & (k_off < K)
+        p_full = tl.where(hit, v_col[:, None], p_full)
+        r_full = tl.where(hit, 1, r_full)
+    om = n_mask[:, None] & e_mask[None, :]
+    tl.store(PROBS_PTR + n_offs[:, None] * E + e_idx[None, :], p_full.to(PROBS_PTR.dtype.element_ty), mask=om)
+    tl.store(RMAP_PTR + n_offs[:, None] * E + e_idx[None, :], r_full != 0, mask=om)
+
+
+def rows_from_slots(slot: torch.Tensor, vals: torch.Tensor, num_experts: int):
+    """(probs [N, E] in vals.dtype with probs[n, slot[n, k]] = vals[n, k] and 0 elsewhere, routing_map [N, E] bool).
+    One launch for ``zeros + scatter_`` of both (force-load-balancing rewrite); ``slot`` must be unique per row."""
+    N, K = slot.shape
+    E = num_experts
+    slot_c = slot.contiguous().to(torch.int64)
+    vals_c = vals.contiguous()
+    probs = torch.empty((N, E), dtype=vals.dtype, device=vals.device)
+    rmap = torch.empty((N, E), dtype=torch.bool, device=vals.device)
+    block_e = triton.next_power_of_2(E)
+    block_n = 64 if block_e <= 64 else 16
+    _rows_from_slots_kernel[(triton.cdiv(N, block_n),)](
+        slot_c, vals_c, probs, rmap, N, E, K,
+        BLOCK_N=block_n, BLOCK_E=block_e, BLOCK_K=triton.next_power_of_2(K),
+    )
+    return probs, rmap
+
+
+class RowsFromSlotsFn(torch.autograd.Function):
+    """Autograd wrapper of :func:`rows_from_slots`: the gradient of ``vals`` is ``grad_probs.gather(1, slot)``,
+    exactly what ``zeros_like(probs).scatter_(1, slot, vals)`` backpropagates."""
+
+    @staticmethod
+    def forward(ctx, slot, vals, num_experts):  # type: ignore[override]
+        probs, rmap = rows_from_slots(slot, vals, num_experts)
+        ctx.mark_non_differentiable(rmap)
+        ctx.set_materialize_grads(False)
+        ctx.save_for_backward(slot)
+        return probs, rmap
+
+    @staticmethod
+    def backward(ctx, d_probs, d_rmap):  # type: ignore[override]
+        if d_probs is None:
+            return None, None, None
+        (slot,) = ctx.saved_tensors
+        return None, d_probs.gather(1, slot), None

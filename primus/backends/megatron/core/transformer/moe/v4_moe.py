@@ -68,6 +68,7 @@ device check upstream.
 from __future__ import annotations
 
 import logging
+import os
 from copy import copy
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -368,11 +369,17 @@ class DeepseekV4MoE(MegatronModule):
         else:
             slot = torch.rand(num_tokens, num_experts, device=device).topk(topk, dim=-1).indices
 
-        new_routing_map = torch.zeros_like(routing_map)
-        new_routing_map.scatter_(1, slot, torch.ones_like(slot, dtype=routing_map.dtype))
-
         # probs is non-zero only on the real top-k, so topk() extracts exactly them.
         topk_vals, _ = torch.topk(probs, topk, dim=1)
+        if os.environ.get("PRIMUS_V4_ROUTER_DENSE_OUT", "0") == "1" and probs.is_cuda and routing_map.dtype == torch.bool:
+            # one Triton launch writes both whole rows (no zero fills: a bool fill is ~11 us here); same values and
+            # the same vals gradient (grad.gather(1, slot)) as the zeros + scatter_ pair below
+            from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import RowsFromSlotsFn
+
+            return RowsFromSlotsFn.apply(slot, topk_vals.to(probs.dtype), probs.shape[1])
+
+        new_routing_map = torch.zeros_like(routing_map)
+        new_routing_map.scatter_(1, slot, torch.ones_like(slot, dtype=routing_map.dtype))
         new_probs = torch.zeros_like(probs)
         new_probs.scatter_(1, slot, topk_vals.to(probs.dtype))
 

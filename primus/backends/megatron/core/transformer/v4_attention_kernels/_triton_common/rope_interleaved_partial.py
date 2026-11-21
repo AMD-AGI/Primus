@@ -636,6 +636,61 @@ def _launch_rope_row(x3, pos_c, inv_c, out, N, H, head_dim, nope, inverse):
     )
 
 
+@triton.jit
+def _rope_tail_inplace_kernel(
+    X_PTR,  # [N, H, head_dim] rows strided by (SN, SH), last dim contiguous; rotated in place on [NOPE, head_dim)
+    POS_PTR,
+    INVFREQ_PTR,
+    N,
+    H,
+    SN,
+    SH,
+    NOPE: tl.constexpr,
+    RD: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    INVERSE: tl.constexpr,
+):
+    """In-place variant of ``_rope_gen_row_kernel`` touching only the rotary tail: the same fp32 angle, cos / sin,
+    pair rotation and single rounding as the row kernel, so the tail bytes are identical; the NoPE columns are not
+    read or written (the row kernel copies them through x * 1 - y * 0 / x * 0 + y * 1, which is the identity for
+    finite values up to the sign of a zero)."""
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    HALF: tl.constexpr = RD // 2
+    fi = tl.arange(0, HALF)
+    ang = tl.load(POS_PTR + pid_n).to(tl.float32) * tl.load(INVFREQ_PTR + fi).to(tl.float32)
+    if INVERSE:
+        ang = -ang
+    c = tl.cos(ang)
+    s = tl.sin(ang)
+    h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    hm = h < H
+    d = NOPE + tl.arange(0, RD)
+    ptr = X_PTR + pid_n.to(tl.int64) * SN + h[:, None].to(tl.int64) * SH + d[None, :]
+    xv = tl.load(ptr, mask=hm[:, None], other=0.0).to(tl.float32)
+    a, b = tl.split(tl.reshape(xv, (BLOCK_H, HALF, 2)))
+    o = tl.reshape(tl.join(a * c[None, :] - b * s[None, :], a * s[None, :] + b * c[None, :]), (BLOCK_H, RD))
+    tl.store(ptr, o.to(X_PTR.dtype.element_ty), mask=hm[:, None])
+
+
+def _rope_bwd_inplace_ok(head_dim: int, rotary_dim: int) -> bool:
+    return (
+        os.environ.get("PRIMUS_V4_ROPE_BWD_INPLACE", "0") == "1"
+        and _rope_row_ok(head_dim)
+        and rotary_dim >= 2
+        and (rotary_dim & (rotary_dim - 1)) == 0
+        and (head_dim - rotary_dim) % 2 == 0
+    )
+
+
+def _launch_rope_tail_inplace(x3, pos_c, inv_c, N, H, nope, rd, inverse):
+    bh = min(64, triton.next_power_of_2(max(H, 1)))
+    _rope_tail_inplace_kernel[(N, triton.cdiv(H, bh))](
+        x3, pos_c, inv_c, N, H, x3.stride(0), x3.stride(1),
+        NOPE=nope, RD=rd, BLOCK_H=bh, INVERSE=bool(inverse), num_warps=4,
+    )
+
+
 def _rows_view(t: torch.Tensor, N: int, H: int, D: int) -> torch.Tensor:
     """``t`` as an ``[N, H, D]`` view whose last dim is unit-stride, copying only if needed.
 
@@ -738,6 +793,13 @@ class RoPEFromPositionsFn(torch.autograd.Function):
         dout3 = _rows_view(dout, N, H, head_dim)
         rd_half = rotary_dim // 2
         nope = head_dim - rotary_dim
+        if ctx.inverse and _rope_bwd_inplace_ok(head_dim, rotary_dim):
+            # PRIMUS_V4_ROPE_BWD_INPLACE=1 (output de-rotation only): its incoming gradient is the fresh dX of the
+            # o_a projection, read by nobody else, so rotate just its rope tail in place -- the NoPE columns pass
+            # through unchanged. Same fp32 math as the row kernel; 1/8 of the traffic at head_dim 512 / rope 64.
+            _launch_rope_tail_inplace(dout3, pos_c, inv_c, N, H, nope, rotary_dim, not ctx.inverse)
+            dx = dout if dout3.data_ptr() == dout.data_ptr() else dout3.view(dout.shape)  # rotated in place
+            return dx, None, None, None, None
         block_h = _pick_block_h(H)
         block_nope = max(triton.next_power_of_2(max(nope, 1)), 1)
         block_rd_half = triton.next_power_of_2(rd_half)

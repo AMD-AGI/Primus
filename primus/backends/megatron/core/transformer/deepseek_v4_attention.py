@@ -481,13 +481,20 @@ class _GroupedOAProjFn(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, w):  # type: ignore[override]
+    def forward(ctx, x, w, wview=None):  # type: ignore[override]
         # x: [B, S, G, d] (rows unit-stride), w: [G, r, d]
+        # wview = (G, r, d): ``w`` is the 2-D weight Parameter itself and its dW goes straight into ``main_grad``
+        # (PRIMUS_V4_OA_MAIN_GRAD=1, see _oa_main_grad_ok) instead of param.grad + the DDP hook's copy / add.
+        ctx.wparam, ctx.wview = None, wview
+        if wview is not None:
+            ctx.wparam = w
+            w.grad_added_to_main_grad = True  # set in forward, like Turbo's fused-wgrad linears
+        wv = w.view(wview) if wview is not None else w
         B, S, G, d = x.shape
-        r = w.shape[1]
+        r = wv.shape[1]
         x2 = x.reshape(B * S, G, d)
         out = x.new_empty(B * S, G, r)
-        torch.bmm(x2.transpose(0, 1), w.transpose(1, 2), out=out.transpose(0, 1))
+        torch.bmm(x2.transpose(0, 1), wv.transpose(1, 2), out=out.transpose(0, 1))
         ctx.save_for_backward(x2, w)
         ctx.x_shape = x.shape
         return out.view(B, S, G * r)
@@ -495,6 +502,9 @@ class _GroupedOAProjFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dout):  # type: ignore[override]
         x2, w = ctx.saved_tensors
+        wshape = w.shape
+        if ctx.wview is not None:
+            w = w.view(ctx.wview)
         BS, G, d = x2.shape
         r = w.shape[1]
         do = dout.reshape(BS, G, r).transpose(0, 1)  # [G, BS, r] strided view
@@ -505,8 +515,36 @@ class _GroupedOAProjFn(torch.autograd.Function):
             dx = dx.view(ctx.x_shape)
         dw = None
         if ctx.needs_input_grad[1]:
-            dw = torch.bmm(do.transpose(1, 2), x2.transpose(0, 1))  # [G, r, d], contiguous
-        return dx, dw
+            if ctx.wparam is not None:
+                from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad, main_grad_first_write
+
+                mg = ctx.wparam.main_grad.view(G, r, d)
+                if main_grad_first_write(ctx.wparam):  # beta 0: the GEMM writes main_grad (= param.grad's bits)
+                    torch.bmm(do.transpose(1, 2), x2.transpose(0, 1), out=mg)
+                else:  # the DDP hook's add, done here
+                    mg.add_(torch.bmm(do.transpose(1, 2), x2.transpose(0, 1)))
+                dw = _get_dummy_wgrad(list(wshape), w.dtype)
+                ctx.wparam = None
+            else:
+                dw = torch.bmm(do.transpose(1, 2), x2.transpose(0, 1))  # [G, r, d], contiguous
+        return dx, dw, None
+
+
+def _oa_main_grad_ok(weight: torch.Tensor) -> bool:
+    """PRIMUS_V4_OA_MAIN_GRAD=1 (default off): the grouped o_a bmm writes its dW into ``weight.main_grad``."""
+    if os.environ.get("PRIMUS_V4_OA_MAIN_GRAD", "0") != "1":
+        return False
+    mg = getattr(weight, "main_grad", None)
+    return (
+        isinstance(weight, torch.nn.Parameter)
+        and hasattr(weight, "grad_added_to_main_grad")
+        and isinstance(mg, torch.Tensor)
+        and mg.shape == weight.shape
+        and mg.dtype == weight.dtype
+        and mg.is_contiguous()
+        and weight.is_contiguous()
+        and not getattr(weight, "shared", False)
+    )
 
 
 def _grouped_o_a_bmm_enabled() -> bool:
@@ -1583,7 +1621,11 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             if _v4_o_a_fp8_enabled(self.config):
                 o = _fp8_grouped_o_a(attn_g, wo_a_w).flatten(2)  # per-group MXFP8
             elif _grouped_o_a_bmm_enabled() and attn_g.stride(-1) == 1 and attn_g.is_cuda:
-                o = _GroupedOAProjFn.apply(attn_g, wo_a_w)  # [B, S, G*r], no layout copies
+                if _oa_main_grad_ok(weight):
+                    weight._primus_fwd_claim = True  # grad_added_to_main_grad is flagged already in forward
+                    o = _GroupedOAProjFn.apply(attn_g, weight, tuple(wo_a_w.shape))
+                else:
+                    o = _GroupedOAProjFn.apply(attn_g, wo_a_w)  # [B, S, G*r], no layout copies
             else:
                 o = torch.einsum("bsgd,grd->bsgr", attn_g, wo_a_w).flatten(2)
         return _projection_forward(self.linear_o_b, o)
