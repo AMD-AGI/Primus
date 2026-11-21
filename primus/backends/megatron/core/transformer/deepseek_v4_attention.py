@@ -561,6 +561,24 @@ def _oa_main_grad_ok(weight: torch.Tensor) -> bool:
     )
 
 
+def _glue_wqb_dyq_ok(linear) -> bool:
+    """PRIMUS_GLUE_WQB_DYQ=1 (default off): the wq_b linear (no bias, TP=1) may take its dY pre-quantized from the
+    fused q norm/rope backward. The slot only opens when that linear really runs the Turbo g90/dsv4up block FP8 path
+    with the FUSEQ quant layouts; otherwise nothing changes."""
+    if os.environ.get("PRIMUS_GLUE_WQB_DYQ", "0") != "1" or os.environ.get("PRIMUS_TURBO_FUSEQ", "0") != "1":
+        return False
+    b = getattr(linear, "bias", None)
+    if isinstance(b, torch.Tensor) and b.numel() > 0:
+        return False
+    if getattr(getattr(linear, "config", None), "tensor_model_parallel_size", 1) != 1:
+        return False
+    try:
+        from primus_turbo.pytorch.ops.gemm_fp8 import request_dy_prequant  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
 def _grouped_o_a_bmm_enabled() -> bool:
     return os.environ.get("PRIMUS_V4_GROUPED_OA_BMM", "1") != "0"
 
@@ -1370,7 +1388,19 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         if q_compressed is None:
             q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
         q_compressed = self.q_layernorm(q_compressed)
-        q = _projection_forward(self.linear_q_up_proj, q_compressed)
+        dyq_slot = None
+        if _glue_wqb_dyq_ok(self.linear_q_up_proj):
+            # PRIMUS_GLUE_WQB_DYQ=1: the wq_b FP8 GEMM opens a dY-prequant slot; the q norm/rope backward fills it
+            # with the FP8 dY copies, so wq_b's backward skips its own quant pass (Turbo DyPrequantSlot).
+            from primus_turbo.pytorch.ops.gemm_fp8 import request_dy_prequant, take_dy_prequant_slot
+
+            request_dy_prequant()
+            try:
+                q = _projection_forward(self.linear_q_up_proj, q_compressed)
+            finally:
+                dyq_slot = take_dy_prequant_slot()
+        else:
+            q = _projection_forward(self.linear_q_up_proj, q_compressed)
         B, S, _ = q.shape
         q = q.view(B, S, self.num_heads, self.head_dim)
         rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
@@ -1378,7 +1408,9 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # The triton_v2 sparse-MLA adapter wants the query zero-padded by 64 columns.
         be = self._csa_backend if self.compress_ratio == 4 else self._attn_backend
         pad = 64 if (be == "triton_v2" and not (self.compress_ratio == 0 and self._use_core_attention)) else 0
-        return q_norm_rope_pad(q, pos_flat, rope.inv_freq, rotary_dim=self.rotary_dim, eps=self.norm_eps, pad=pad)
+        return q_norm_rope_pad(
+            q, pos_flat, rope.inv_freq, rotary_dim=self.rotary_dim, eps=self.norm_eps, pad=pad, dyq_slot=dyq_slot
+        )
 
     def _apply_kv(self, hidden: torch.Tensor, kv: Optional[torch.Tensor] = None) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, 1, head_dim]`` (single-latent K = V)."""

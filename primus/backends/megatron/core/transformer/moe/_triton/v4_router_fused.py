@@ -277,11 +277,16 @@ class _RouterFusedFn(torch.autograd.Function):
         logits, idx, wts = router_fwd(x, w, bias, topk, score_function, scale)
         ctx.save_for_backward(x, w)
         ctx.mark_non_differentiable(idx, wts)
+        if os.environ.get("PRIMUS_GLUE_SMALLS", "0") == "1":
+            # the index / weight outputs never carry a gradient: don't let autograd build two zero tensors for them
+            ctx.set_materialize_grads(False)
         return logits, idx, wts
 
     @staticmethod
     def backward(ctx, dl, _didx, _dwts):
         x, w = ctx.saved_tensors
+        if dl is None:  # only possible with set_materialize_grads(False): logits unused
+            dl = torch.zeros(x.shape[0], w.shape[0], dtype=torch.float32, device=x.device)
         dl = dl.contiguous().float()
         dx = router_dgrad(dl, w, dtype=x.dtype) if ctx.needs_input_grad[0] else None
         dw = router_wgrad(dl, x, dtype=w.dtype) if ctx.needs_input_grad[1] else None
