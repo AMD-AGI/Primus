@@ -37,7 +37,8 @@ Requirements:
 | + fuseq switches, graph | 60.7 | 9.8715 |
 | + MegaMoE flygg k256, graph | 60.1 | 9.8715 |
 | + BF16 GEMM layouts and TunableOp for all BF16 shapes, graph | 59.5 | 9.8710 |
-| **+ lagged step logging, DP=1 all-gather skip (this config), graph** | **58.2** | 9.8710 |
+| + lagged step logging, DP=1 all-gather skip, graph | 58.2 | 9.8710 |
+| **+ MoE wgrad sum-of-squares fold, dsv4up for all passes (this config), graph** | **57.5** | 9.8695 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -64,18 +65,29 @@ the log values to host without blocking and prints step k-1 while step k runs, r
 (7 syncs + host logging/zero_grad/graph launch); `PRIMUS_BUBBLE_SKIP_DP1_AG` skips the 32 no-op param all-gathers.
 Each iteration's log line prints one step late. Most of the earlier "7.7 ms idle" was profiler overhead (~1.4 us per
 launch); real idle was ~3.3 ms, of which ~1.4 ms is the graph-replay per-kernel floor (~1.2 us/kernel).
+wgsmall then -0.6 ms (2 A/B pairs in the int tree, 58.05 -> 57.45; loss@20 9.869526, grad norm 4.151, in spread):
+`PRIMUS_TURBO_MOE_WGRAD_SUMSQ` (the MegaMoE vkp wgrad epilogue writes per-weight sums of squares, so the grad norm
+does not re-read those grads) and an empty `PRIMUS_TURBO_DSV4UP_PREFER_G90` (all supported dense passes on dsv4up).
+`PRIMUS_TURBO_DSV4UP_SPLITK=4096x1024x32768:4` (wq_b dgrad split-K) is available but off: -0.35 ms, loss@20 9.8675,
+just below the spread.
+One-step kernel profile of this config (LAG_LOG off for a clean step window): 2030 kernels, 55.0 ms kernel time;
+`~/dsv41/work/int/e2e/c3/tprof_final2.txt` on the dev node.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
 ## Known issues
 
-- `PRIMUS_TURBO_WQB_SPLITK=4`: grad norm NaN from iteration 1 (g90 split-K wiring). Keep off.
+- `PRIMUS_TURBO_WQB_SPLITK=4`: correct but slower than the dsv4up split-K; keep off. Its earlier "NaN" run was the
+  transient below, not split-K.
 - `PRIMUS_TURBO_MOE_GG_DSV4=1`: 2% faster than flygg at kernel level, not worth enabling.
 - MegaMoE `fp8_block` runs the EP=1 stages only; EP>1 dispatch/combine has no FP8-block path yet.
 - `PRIMUS_FP8BLK_ADAM_MEGAMOE=1`: after the first step the MegaMoE FP8 expert caches are written only by the fused
   Adam. Anything else that changes the expert weights mid-run (checkpoint load after step 1, an optimizer fallback)
   would leave them stale. It is a no-op at EP>1, for DP-sharded weights and with `PRIMUS_TURBO_MOE_GG_DSV4=1`.
-- Rare nondeterminism (WATCH): 1 run in ~30 on 2026-11-21 (int_aqm_off1) had a different iteration-1 loss
+- Rare nondeterminism (WATCH, 4 occurrences on 2026-11-21 in unrelated configs/containers: int_aqm_off1, fq_ab3_all4,
+  wgs_c_sumsq_sk4, and the 12:02 loo_plus_splitk run): the iteration-1 forward loss is already off, grad norm NaN on
+  every iteration, ~75 ms/step; identical reruns are clean. Treat any run whose iteration-1 loss is not 11.91726 as
+  invalid and rerun it. First seen as 1 run in ~30 (int_aqm_off1) had a different iteration-1 loss
   (11.91723 vs 11.91726) and NaN grad norm on every iteration, 75.5 ms/step; an identical rerun was normal. An
   earlier g90-path run once had grad norm inf at iteration 12. Cause unknown; rerun if iteration-1 loss is off.
 - The log line "fused kernel hardcodes unclamped SwiGLU" is stale for fp8_block: the kernel applies the default
