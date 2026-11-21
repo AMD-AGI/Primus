@@ -2465,6 +2465,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
+        self.grouped_gemm_schedule = getattr(args, "turbo_grouped_gemm_schedule", "static")
 
         super().__init__(
             num_gemms,
@@ -2732,6 +2733,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 weights,
                 m_splits,
                 trans_b=True,
+                schedule=self.grouped_gemm_schedule,
                 fuse_bgrad_accum_pattern=fuse_wgrad_accum_pattern,
             )
 

@@ -630,6 +630,7 @@ models:
 | `use_turbo_gemm` | `false` | Active Turbo GEMM flag for Dense paths. |
 | `use_turbo_parallel_linear` | *(removed)* | Removed—use `use_turbo_gemm`. Passing this key now raises an assertion error (`use_turbo_parallel_linear has been removed; please use use_turbo_gemm instead`). |
 | `use_turbo_grouped_gemm` | `false` | Active Turbo grouped GEMM flag for MoE paths. |
+| `turbo_grouped_gemm_schedule` | `static` | Persistent-loop scheduling of the BF16 Turbo grouped GEMM: `static` or `work_steal`. Use `work_steal` with `overlap_moe_expert_parallel_comm` and `use_turbo_deepep`, where the DeepEP kernels hold CUs while the GEMM runs. Triton or CK backend; FP8 / FP4 grouped GEMMs ignore it. |
 | `use_turbo_grouped_mlp` | *(removed)* | Removed—use `use_turbo_grouped_gemm`. Passing this key now raises an assertion error (`use_turbo_grouped_mlp has been removed; please use use_turbo_grouped_gemm instead`). |
 | `moe_use_fused_router_with_aux_score` | `false` | Fused MoE router with auxiliary scores. |
 | `enable_turbo_attention_float8` | `false` | FP8 path inside Turbo attention (spacing in YAML is normalized to this key). |
