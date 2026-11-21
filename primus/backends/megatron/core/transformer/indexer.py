@@ -122,6 +122,15 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (
     indexer_score_post_triton,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_gluon import (
+    indexer_score_gluon,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_gluon import (
+    is_gluon_kernel_supported as _indexer_gluon_supported,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_gluon import (
+    is_gluon_path_enabled as _indexer_gluon_enabled,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (
     is_triton_kernel_supported as _indexer_tail_triton_supported,
 )
@@ -650,6 +659,11 @@ class Indexer(nn.Module):
         # 4) Causal mask + (effective topk capped at P).
         #
         # Dispatch precedence (P41 re-routing):
+        #   PRIMUS_INDEXER_GLUON=1        → fused Gluon fwd score on gfx1250
+        #                                    (no einsum; the kernel writes the bf16 dot
+        #                                    for the existing tail bwd, or with
+        #                                    PRIMUS_INDEXER_GLUON_SAVE_DOT=0 the bwd
+        #                                    recomputes it).
         #   PRIMUS_INDEXER_TRITON=1       → post-einsum tail fused
         #                                    (einsum stays eager / cuBLAS).
         #   PRIMUS_INDEXER_TRITON_FULL=1  → legacy P38 full-fuse path
@@ -681,6 +695,10 @@ class Indexer(nn.Module):
                 dot_c = _fp4_qk_gemm(q_i, k2d)
                 sc = (F.relu(dot_c) * w_i.unsqueeze(-1)).sum(dim=2)
                 return sc + self._causal_mask(S, Pc, sc.device, sc.dtype, q_offset=q_off).unsqueeze(0)
+            if _indexer_gluon_enabled() and _indexer_gluon_supported(q_i, k2d, w_i):
+                return indexer_score_gluon(
+                    q_i, k2d, w_i, compress_ratio=self.compress_ratio, out_dtype=hidden.dtype, q_offset=q_off
+                )
             if _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k2d, w_i):
                 return indexer_score_triton(
                     q_i,
@@ -711,7 +729,11 @@ class Indexer(nn.Module):
         # be a model quietly conditioning on other samples. The packed branch below does
         # its own streaming with the per-sequence mask.
         if cu_seqlens is None and chunk > 0 and P > chunk:
-            if _indexer_tail_triton_enabled() and not _indexer_triton_full_enabled():
+            if (
+                _indexer_tail_triton_enabled()
+                and not _indexer_triton_full_enabled()
+                and not (_indexer_gluon_enabled() and _indexer_gluon_supported(q_i, k_icomp_2d, w_i))
+            ):
                 raise NotImplementedError(
                     "Streaming indexer top-K does not support the tail-fused path "
                     "(PRIMUS_INDEXER_TRITON): indexer_score_post applies the causal mask "
@@ -801,6 +823,19 @@ class Indexer(nn.Module):
             scores = (relu * w_i.unsqueeze(-1)).sum(dim=2)  # [B, S, P]
             mask = self._causal_mask(S, P, scores.device, scores.dtype)  # [S, P]
             scores = scores + mask.unsqueeze(0)  # [B, S, P]
+        elif _indexer_gluon_enabled() and _indexer_gluon_supported(q_i, k_icomp_2d, w_i):
+            # Fused Gluon forward (gfx1250): q.k WMMA -> bf16 round -> w*relu -> sum_h
+            # -> causal -inf, never materialising [B, S, H, P]; causally dead tiles
+            # skip the GEMM. Same values as einsum + indexer_score_post (fp32 head
+            # sum, bf16 dot). Uses the CP query offset like the full-fuse path.
+            scores = indexer_score_gluon(
+                q_i,
+                k_icomp_2d,
+                w_i,
+                compress_ratio=self.compress_ratio,
+                out_dtype=hidden.dtype,
+                q_offset=self._cp_query_offset(S),
+            )
         elif _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
             scores = indexer_score_triton(
                 q_i,
