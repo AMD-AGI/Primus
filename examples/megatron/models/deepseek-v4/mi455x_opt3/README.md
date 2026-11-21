@@ -39,7 +39,8 @@ Requirements:
 | + BF16 GEMM layouts and TunableOp for all BF16 shapes, graph | 59.5 | 9.8710 |
 | + lagged step logging, DP=1 all-gather skip, graph | 58.2 | 9.8710 |
 | + MoE wgrad sum-of-squares fold, dsv4up for all passes, graph | 57.5 | 9.8695 |
-| **+ Adam skips the MegaMoE expert BF16 store (this config), graph** | **57.3** (A/B -0.6 ms, see note) | 9.8695 |
+| + Adam skips the MegaMoE expert BF16 store, graph | 57.3 (A/B -0.6 ms, see note) | 9.8695 |
+| **+ glue switches (this config), graph** | **56.1** (A/B -1.1 ms) | 9.8695 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -81,6 +82,13 @@ calc_params_l2_norm, check_param_hashes_across_dp_replicas. Model checkpoint at 
 baseline. No-op at EP>1, DP>1, with gg_dsv4. Code outside those wrapped functions that reads expert w1/w2 .data
 between steps must call `materialize_skipped_bf16_weights()` first.
 Optimizer HBM floor at 18.0 TB/s with this: 9.68 ms (tile 8.15 + chunk 1.54) vs 12.59 ms measured.
+glue then -1.1 ms (2 A/B pairs in the int tree, 57.2 -> 56.1; track: kernels/step 2030 -> 1878):
+`PRIMUS_GLUE_RMSNORM` (LocalRMSNorm bwd with per-program partials + fixed-order reduce instead of fp32 atomics,
+dgamma straight into main_grad; changes the compressor kv_norm dgamma bits, now deterministic; logged loss/grad norm
+unchanged), `PRIMUS_GLUE_ROPE_NOCAST` (RoPE reads int64 positions / bf16 inv_freq), `PRIMUS_GLUE_COMPRESS_POOL`
+(compressor pool kernels read the fused wkv_gate output; the old path still runs for packed sequences / CP),
+`PRIMUS_GLUE_EMB_TOUCHED` (clear only the embedding main_grad rows written last step; raises on a second write
+per step), `PRIMUS_GLUE_SMALLS` (fused router builds no zero grads). `PRIMUS_GLUE_WQB_DYQ` is correct but slower: off.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
