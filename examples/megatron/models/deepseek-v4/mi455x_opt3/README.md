@@ -41,7 +41,8 @@ Requirements:
 | + MoE wgrad sum-of-squares fold, dsv4up for all passes, graph | 57.5 | 9.8695 |
 | + Adam skips the MegaMoE expert BF16 store, graph | 57.3 (A/B -0.6 ms, see note) | 9.8695 |
 | + glue switches, graph | 56.1 (A/B -1.1 ms) | 9.8695 |
-| **+ hc config C (this config), graph** | **54.8** (A/B -1.3 ms) | 9.8695 |
+| + hc config C, graph | 54.8 (A/B -1.3 ms) | 9.8695 |
+| **+ MoE vkp wgrad sched2 (this config), graph** | **54.65** (A/B 54.9 -> 54.65) | 9.8695 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -97,6 +98,13 @@ hc then -1.3 ms (bit-identical; 2 A/B pairs in the int tree, 56.05 -> 54.75): Tr
 collapse and the embedding lift in Triton, torch's summation order), `PRIMUS_HC_B3_VAR=1,0` (B3 W^T in LDS).
 The tile choices are bit-identical only under this Triton main build (83c9228329); re-check after a Triton bump.
 `HEAD_FUSED=2` (one-pass dpre) puts loss@20 at 9.8672, outside the spread: keep 1.
+moegemm2 then -0.25 ms (bit-identical; 2 A/B pairs in the int tree after the 23:03 reboot, 54.9 -> 54.65):
+`PRIMUS_TURBO_MOE_FP8BLK_VKP_SCHED2` schedules the MegaMoE vkp wgrad scale loads without per-word LDS waits and decodes
+tile parameters with scalar loads (fc1 wgrad 289-294 -> 268-274 us). `PRIMUS_TURBO_MOE_FP8BLK_GG=k256p` (persistent
+flygg) is available but off (no clear e2e signal). Merged but off: densefp8's `PRIMUS_V4_QKV_A_CONCAT_FP8BLK`
+(wq_a||wkv as one block-FP8 op, dX not bit-identical, loss in spread; A/B pending), `PRIMUS_TURBO_DSV4UP_DUAL` and
+`PRIMUS_TURBO_DSV4UP_EPI2` (slower in-step / untested). glue `PRIMUS_GLUE_WQB_DYQ` off (slower).
+Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by reboot + `sudo modprobe amdgpu`.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
