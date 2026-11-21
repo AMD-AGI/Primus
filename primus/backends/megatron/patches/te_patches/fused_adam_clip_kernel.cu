@@ -238,7 +238,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
 //   s = pow2_floor(448 / max(amax|w_bf16|, 1e-4)), q = e4m3(clamp(w_bf16 * s, +-448)),
 //   scale_inv = 1 / s (exact), e8m0 = exponent byte of scale_inv.
 // It emits W [B,N,K] fp8, W^T [B,K,N] fp8 (same tile, same scale), scale_inv
-// [B,N/128,K/128] fp32 and E8M0 bytes [B,N/128,K/128] and [B,K/128,N/128].
+// [B,N/128,K/128] fp32 and E8M0 bytes [B,N/128,K/128] and [B,K/128,N/128]; W^T and the
+// transposed E8M0 bytes are skipped for a tensor whose W^T address is 0.
 // Partial edge tiles follow the reference (out-of-range elements count as 0).
 //
 // Performance: the kernel is latency bound (Adam's IEEE div/sqrt plus the amax and LDS
@@ -709,11 +710,13 @@ __host__ __device__ __forceinline__ float fp8blk_adam_generic(
   return amax;
 }
 
-// Phase 2 from the parked BF16 weights (same bytes as fp8blk_quant_phase): stage the FP8 tile
-// in LDS and store W (full tiles: uniform origin + 32-bit offsets; else edge-checked).
+// Phase 2 from the parked BF16 weights (same bytes as fp8blk_quant_phase): store W (full
+// tiles: uniform origin + 32-bit offsets; else edge-checked) and, if W^T is wanted, stage the
+// FP8 tile in LDS for the transpose.
 template <bool kFull>
 __host__ __device__ __forceinline__ void fp8blk_quant_lds(
-    int tid, const Fp8BlkTile& t, uint8_t* w, float s, const uint4* xs, uint8_t* lds) {
+    int tid, const Fp8BlkTile& t, uint8_t* w, float s, const uint4* xs, uint8_t* lds,
+    bool stage) {
   const int col = (tid % kTileColThreads) * kIlp;
   const int64_t k0 = t.tk * kTile + col;
   const bool k_vec_ok = (t.K % kIlp) == 0 && k0 + kIlp <= t.K;
@@ -728,7 +731,7 @@ __host__ __device__ __forceinline__ void fp8blk_quant_lds(
 #pragma unroll
     for (int j = 0; j < kIlp; ++j) q[j] = fminf(fmaxf(x[j] * s, -kFp8Max), kFp8Max);
     const uint2 bytes = fp8blk_cvt8(q);
-    *reinterpret_cast<uint2*>(lds + row * kTilePitch + col) = bytes;
+    if (stage) *reinterpret_cast<uint2*>(lds + row * kTilePitch + col) = bytes;
     if constexpr (kFull) {
       gst(wo + fp8blk_thread_off(tid, it, K), bytes);
     } else {
@@ -784,7 +787,7 @@ __host__ __device__ __forceinline__ void fp8blk_scale_store(
   const int64_t idx = (t.b * t.tiles_n + t.tm) * t.tiles_k + t.tk;
   scale_inv[idx] = inv;
   e8m0[idx] = e;
-  e8m0_t[(t.b * t.tiles_k + t.tk) * t.tiles_n + t.tm] = e;
+  if (e8m0_t != nullptr) e8m0_t[(t.b * t.tiles_k + t.tk) * t.tiles_n + t.tm] = e;
 }
 
 #ifndef PRIMUS_FP8BLK_HOST_TEST
@@ -852,16 +855,21 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_fp8blk_kernel(
 #pragma unroll
   for (int w = 1; w < kBlockSize / 32; ++w) tile_amax = fmaxf(tile_amax, wave_amax[w]);
   const float s = fp8blk_scale(tile_amax);
+  // A null W^T address (per tensor) skips the transpose phase: e.g. weights whose GEMMs only
+  // read W (grouped expert GEMMs take W with the transpose flag in dgrad).
+  const bool want_t = ptr.wt != nullptr;  // block-uniform
   if (full) {
-    fp8blk_quant_lds<true>(threadIdx.x, t, ptr.w, s, xs, lds);
+    fp8blk_quant_lds<true>(threadIdx.x, t, ptr.w, s, xs, lds, want_t);
   } else {
-    fp8blk_quant_lds<false>(threadIdx.x, t, ptr.w, s, xs, lds);
+    fp8blk_quant_lds<false>(threadIdx.x, t, ptr.w, s, xs, lds, want_t);
   }
-  __syncthreads();
-  if (full) {
-    fp8blk_transpose_full(threadIdx.x, t, ptr.wt, lds);
-  } else {
-    fp8blk_transpose_phase(threadIdx.x, t, ptr.wt, lds);
+  if (want_t) {
+    __syncthreads();
+    if (full) {
+      fp8blk_transpose_full(threadIdx.x, t, ptr.wt, lds);
+    } else {
+      fp8blk_transpose_phase(threadIdx.x, t, ptr.wt, lds);
+    }
   }
   if (threadIdx.x == 0) fp8blk_scale_store(t, s, ptr.scale_inv, ptr.e8m0, ptr.e8m0_t);
 }
@@ -945,8 +953,9 @@ void fused_adam_clip(
 }
 
 // Per tensor: addresses[10] = grad, fp32 master, exp_avg, exp_avg_sq, bf16 param, W fp8,
-// W^T fp8, scale_inv fp32, e8m0, e8m0_t; dims[4] = N, K, tiles_n, tiles_k (B is implied
-// by the tile count). Scalars are derived exactly as in fused_adam_clip.
+// W^T fp8, scale_inv fp32, e8m0, e8m0_t (W^T and e8m0_t may be 0: not written); dims[4] =
+// N, K, tiles_n, tiles_k (B is implied by the tile count). Scalars are derived exactly as in
+// fused_adam_clip.
 void fused_adam_clip_fp8blk(
     torch::Tensor addresses,
     torch::Tensor dims,
