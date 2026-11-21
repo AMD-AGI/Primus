@@ -42,7 +42,8 @@ Requirements:
 | + Adam skips the MegaMoE expert BF16 store, graph | 57.3 (A/B -0.6 ms, see note) | 9.8695 |
 | + glue switches, graph | 56.1 (A/B -1.1 ms) | 9.8695 |
 | + hc config C, graph | 54.8 (A/B -1.3 ms) | 9.8695 |
-| **+ MoE vkp wgrad sched2 (this config), graph** | **54.65** (A/B 54.9 -> 54.65) | 9.8695 |
+| + MoE vkp wgrad sched2, graph | 54.65 (A/B 54.9 -> 54.65) | 9.8695 |
+| **+ wq_a\|\|wkv block-FP8 concat (this config), graph** | **54.4** (A/B 54.8 -> 54.4) | 9.8718 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -102,7 +103,7 @@ moegemm2 then -0.25 ms (bit-identical; 2 A/B pairs in the int tree after the 23:
 `PRIMUS_TURBO_MOE_FP8BLK_VKP_SCHED2` schedules the MegaMoE vkp wgrad scale loads without per-word LDS waits and decodes
 tile parameters with scalar loads (fc1 wgrad 289-294 -> 268-274 us). `PRIMUS_TURBO_MOE_FP8BLK_GG=k256p` (persistent
 flygg) is available but off (no clear e2e signal). Merged but off: densefp8's `PRIMUS_V4_QKV_A_CONCAT_FP8BLK`
-(wq_a||wkv as one block-FP8 op, dX not bit-identical, loss in spread; A/B pending), `PRIMUS_TURBO_DSV4UP_DUAL` and
+(wq_a||wkv as one block-FP8 op; ON since the 23:25 A/B: 3 pairs 54.8 -> 54.4 ms, loss@20 9.871798 / grad norm 4.159, in spread; dX summed in fp32 over both K parts, closer to fp64), `PRIMUS_TURBO_DSV4UP_DUAL` and
 `PRIMUS_TURBO_DSV4UP_EPI2` (slower in-step / untested). glue `PRIMUS_GLUE_WQB_DYQ` off (slower).
 Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by reboot + `sudo modprobe amdgpu`.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
