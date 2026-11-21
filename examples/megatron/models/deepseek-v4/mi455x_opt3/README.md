@@ -38,7 +38,8 @@ Requirements:
 | + MegaMoE flygg k256, graph | 60.1 | 9.8715 |
 | + BF16 GEMM layouts and TunableOp for all BF16 shapes, graph | 59.5 | 9.8710 |
 | + lagged step logging, DP=1 all-gather skip, graph | 58.2 | 9.8710 |
-| **+ MoE wgrad sum-of-squares fold, dsv4up for all passes (this config), graph** | **57.5** | 9.8695 |
+| + MoE wgrad sum-of-squares fold, dsv4up for all passes, graph | 57.5 | 9.8695 |
+| **+ Adam skips the MegaMoE expert BF16 store (this config), graph** | **57.3** (A/B -0.6 ms, see note) | 9.8695 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -72,6 +73,14 @@ does not re-read those grads) and an empty `PRIMUS_TURBO_DSV4UP_PREFER_G90` (all
 just below the spread.
 One-step kernel profile of this config (LAG_LOG off for a clean step window): 2030 kernels, 55.0 ms kernel time;
 `~/dsv41/work/int/e2e/c3/tprof_final2.txt` on the dev node.
+adamfast then -0.6 ms (bit-identical; 2 A/B pairs in the int tree, 57.9 -> 57.3 with the node ~0.5 ms slower than
+at the wgsmall merge; track A/B 3 pairs 58.12 -> 57.27): `PRIMUS_FP8BLK_ADAM_SKIP_BF16` makes the tile Adam skip
+the BF16 store of the 16 MegaMoE expert weights (22.06 -> 20.06 B/param); the BF16 weight is rebuilt from the fp32
+master (RNE copy, same bytes) before every BF16 reader: Turbo cache refresh/VERIFY (hook), save_checkpoint,
+calc_params_l2_norm, check_param_hashes_across_dp_replicas. Model checkpoint at iteration 10 byte-identical to the
+baseline. No-op at EP>1, DP>1, with gg_dsv4. Code outside those wrapped functions that reads expert w1/w2 .data
+between steps must call `materialize_skipped_bf16_weights()` first.
+Optimizer HBM floor at 18.0 TB/s with this: 9.68 ms (tile 8.15 + chunk 1.54) vs 12.59 ms measured.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
