@@ -29,6 +29,26 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 
+# g90mem: the per-step sum of squares of every grad bucket, kept so the optimizer can take the global grad
+# norm from it instead of re-reading all gradients (PRIMUS_GRAD_NORM_FROM_NAN_CHECK=1, see
+# te_patches/fused_adam_clip_patches.py). None when any bucket used the norm (not sum-of-squares) fallback.
+_LAST_SUMSQ = {"value": None}
+
+
+def pop_last_grad_sumsq():
+    """Sum of squares of this step's grads (None if not available). A value produced while a CUDA graph was
+    being captured (full-iteration graph) is a static graph-pool tensor that every replay rewrites in place,
+    and the Python code that produced it never runs again on replay, so it is kept instead of cleared."""
+    v = _LAST_SUMSQ["value"]
+    if not _LAST_SUMSQ.get("static", False):
+        _LAST_SUMSQ["value"] = None
+    return v
+
+
+def _norm_reuse_requested() -> bool:
+    return os.environ.get("PRIMUS_GRAD_NORM_FROM_NAN_CHECK", "0") == "1"
+
+
 def _enabled(ctx: PatchContext) -> bool:
     if os.environ.get("PRIMUS_DEFERRED_GRAD_NAN_CHECK", "1") == "0":
         return False
@@ -71,7 +91,7 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
 
     original_check = _ParamAndGradBucketGroup.check_grads
     original_finish = DistributedDataParallel.finish_grad_sync
-    state = {"acc": None}
+    state = {"acc": None, "exact": True}
 
     def check_grads(self, check_for_nan_or_inf, check_for_large):
         if check_for_large or not check_for_nan_or_inf:
@@ -88,15 +108,41 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
                 n = grad_sumsq(g)
             else:
                 n = g.norm(p=2).float()
+                state["exact"] = False
             part = n if part is None else part + n
         state["acc"] = part if state["acc"] is None else state["acc"] + part
+
+    def _sumsq_all_buckets(ddp):
+        # opt3-mem: with the NaN check off (e.g. --check_for_nan_in_loss_and_grad False under the
+        # full-iteration graph) check_grads is never called; the clip norm still wants the sum of squares,
+        # so take it here, once, over every bucket (the same reduction the l2norm would do).
+        if not use_triton:
+            return None
+        acc = None
+        for bg in list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", [])):
+            for b in bg.buckets:
+                g = b.grad_data
+                if g is None or g.numel() == 0:
+                    continue
+                if not (g.is_cuda and g.is_contiguous()):
+                    return None
+                n = grad_sumsq(g)
+                acc = n if acc is None else acc + n
+        return acc
 
     def finish_grad_sync(self, *args, **kwargs):
         # Run upstream first: without overlap_grad_reduce it is what calls start_grad_sync
         # (and so check_grads) for every group.
         out = original_finish(self, *args, **kwargs)
         acc, state["acc"] = state["acc"], None
-        if acc is not None:
+        checked = acc is not None
+        if acc is None and _norm_reuse_requested():
+            acc = _sumsq_all_buckets(self)
+            state["exact"] = acc is not None
+        _LAST_SUMSQ["value"] = acc if state["exact"] else None
+        _LAST_SUMSQ["static"] = bool(acc is not None and torch.cuda.is_current_stream_capturing())
+        state["exact"] = True
+        if checked:
             rsm = get_rerun_state_machine()
             msg = "in backward pass (deferred check over all grad buckets of this step)"
             rsm.validate_result(

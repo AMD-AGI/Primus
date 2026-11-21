@@ -104,7 +104,44 @@ def _separate_grad_norm_groups() -> tuple:
     return tuple(getattr(mcore_optimizer, "SEPARATE_GRAD_NORM_GROUPS", ()))
 
 
+def _norm_from_nan_check(optimizer):
+    """g90mem: global grad norm from the DDP NaN-check sum of squares (PRIMUS_GRAD_NORM_FROM_NAN_CHECK=1).
+
+    The deferred NaN check already reduced every grad bucket to a sum of squares in the backward; at
+    gradient-statistics group size 1 its sqrt is the clip norm, so the 17 GB re-read by multi_tensor_l2norm
+    (1.43 ms/step on the 1-GPU proxy) is skipped. The first use is cross-checked against the full norm
+    (one host sync); on a mismatch the reuse stays off for the run. Returns None to fall back."""
+    if os.environ.get("PRIMUS_GRAD_NORM_FROM_NAN_CHECK", "0") != "1":
+        return None
+    try:
+        from primus.backends.megatron.patches.ddp_deferred_grad_check_patches import pop_last_grad_sumsq
+    except Exception:
+        return None
+    acc = pop_last_grad_sumsq()
+    if acc is None:
+        return None
+    grp = optimizer.get_grad_stats_parallel_group()
+    if grp is not None and torch.distributed.is_initialized() and torch.distributed.get_world_size(grp) != 1:
+        return None
+    st = optimizer.__dict__.setdefault("_primus_norm_reuse", {"checked": False, "ok": False})
+    if not st["checked"]:
+        ref = _get_grad_norm_tensor_full(optimizer)
+        got = acc.reshape(1).float().sqrt()
+        rel = ((got - ref).abs() / ref.clamp_min(1e-30)).item()
+        st["checked"], st["ok"] = True, rel < 1e-3
+        log_rank_0(f"[g90mem] grad norm from NaN-check sumsq: rel diff {rel:.2e} vs l2norm -> reuse={st['ok']}")
+        return ref
+    return acc.reshape(1).float().sqrt() if st["ok"] else None
+
+
 def _get_grad_norm_tensor(optimizer) -> torch.Tensor:
+    reused = _norm_from_nan_check(optimizer)
+    if reused is not None:
+        return reused
+    return _get_grad_norm_tensor_full(optimizer)
+
+
+def _get_grad_norm_tensor_full(optimizer) -> torch.Tensor:
     """Megatron's FP32 L2 norm path without its final host synchronization."""
 
     from megatron.core.optimizer import clip_grads

@@ -580,6 +580,62 @@ def _rope_gen_bwd_kernel(
     tl.store(DX_PTR + row_base + odd_offs[None, :], dx_odd, mask=pair_mask)
 
 
+@triton.jit
+def _rope_gen_row_kernel(
+    X_PTR,  # [N, H, head_dim], last dim contiguous, rows strided by (IN_SN, IN_SH)
+    POS_PTR,
+    INVFREQ_PTR,
+    OUT_PTR,  # [N, H, head_dim] contiguous
+    N,
+    H,
+    IN_SN,
+    IN_SH,
+    HEAD_DIM: tl.constexpr,
+    NOPE: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    INVERSE: tl.constexpr,
+):
+    """Whole-row variant (g90mem): one contiguous load / store per head row, pairs split in registers
+    (``tl.split``), rotation in fp32 and one rounding. ~2x faster than the even/odd strided kernels on
+    gfx1250 ([4096, 64, 512]: 70.6 -> 36.5 us, 87% of the HBM floor) and closer to the fp32 reference."""
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    HALF: tl.constexpr = HEAD_DIM // 2
+    p = tl.arange(0, HALF)
+    fi = p - NOPE // 2
+    is_rope = fi >= 0
+    ang = tl.load(POS_PTR + pid_n).to(tl.float32) * tl.load(INVFREQ_PTR + fi, mask=is_rope, other=0.0).to(tl.float32)
+    if INVERSE:
+        ang = -ang
+    c = tl.where(is_rope, tl.cos(ang), 1.0)
+    s = tl.where(is_rope, tl.sin(ang), 0.0)
+    h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    hm = h < H
+    d = tl.arange(0, HEAD_DIM)
+    xv = tl.load(
+        X_PTR + pid_n.to(tl.int64) * IN_SN + h[:, None].to(tl.int64) * IN_SH + d[None, :], mask=hm[:, None], other=0.0
+    ).to(tl.float32)
+    a, b = tl.split(tl.reshape(xv, (BLOCK_H, HALF, 2)))
+    o = tl.reshape(tl.join(a * c[None, :] - b * s[None, :], a * s[None, :] + b * c[None, :]), (BLOCK_H, HEAD_DIM))
+    tl.store(
+        OUT_PTR + (pid_n.to(tl.int64) * H + h[:, None]) * HEAD_DIM + d[None, :],
+        o.to(OUT_PTR.dtype.element_ty),
+        mask=hm[:, None],
+    )
+
+
+def _rope_row_ok(head_dim: int) -> bool:
+    return os.environ.get("PRIMUS_V4_ROPE_ROW", "1") != "0" and head_dim >= 2 and (head_dim & (head_dim - 1)) == 0
+
+
+def _launch_rope_row(x3, pos_c, inv_c, out, N, H, head_dim, nope, inverse):
+    bh = min(16, triton.next_power_of_2(max(H, 1)))
+    _rope_gen_row_kernel[(N, triton.cdiv(H, bh))](
+        x3, pos_c, inv_c, out, N, H, x3.stride(0), x3.stride(1),
+        HEAD_DIM=head_dim, NOPE=nope, BLOCK_H=bh, INVERSE=bool(inverse), num_warps=8 if bh >= 16 else 4,
+    )
+
+
 def _rows_view(t: torch.Tensor, N: int, H: int, D: int) -> torch.Tensor:
     """``t`` as an ``[N, H, D]`` view whose last dim is unit-stride, copying only if needed.
 
@@ -639,7 +695,10 @@ class RoPEFromPositionsFn(torch.autograd.Function):
         block_nope = max(triton.next_power_of_2(max(nope, 1)), 1)
         block_rd_half = triton.next_power_of_2(rd_half)
         grid = (N, triton.cdiv(H, block_h))
-        _rope_gen_fwd_kernel[grid](
+        if _rope_row_ok(head_dim):
+            _launch_rope_row(x3, pos_c, inv_c, out, N, H, head_dim, nope, inverse)
+        else:
+          _rope_gen_fwd_kernel[grid](
             x3,
             pos_c,
             inv_c,
@@ -684,7 +743,10 @@ class RoPEFromPositionsFn(torch.autograd.Function):
         block_rd_half = triton.next_power_of_2(rd_half)
         dx = torch.empty(dout.shape, dtype=dout.dtype, device=dout.device)
         grid = (N, triton.cdiv(H, block_h))
-        _rope_gen_bwd_kernel[grid](
+        if _rope_row_ok(head_dim):  # adjoint of R(+-theta) is R(-+theta)
+            _launch_rope_row(dout3, pos_c, inv_c, dx, N, H, head_dim, nope, not ctx.inverse)
+        else:
+          _rope_gen_bwd_kernel[grid](
             dout3,
             pos_c,
             inv_c,
