@@ -37,7 +37,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v8"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v9"
 _extension = None
 
 
@@ -68,6 +68,42 @@ def _fp8blk_megamoe_enabled() -> bool:
     return _fp8blk_enabled() and os.environ.get("PRIMUS_FP8BLK_ADAM_MEGAMOE", "0") == "1"
 
 
+def _fp8blk_skip_bf16_enabled() -> bool:
+    """PRIMUS_FP8BLK_ADAM_SKIP_BF16=1 (with PRIMUS_FP8BLK_ADAM_MEGAMOE=1): the tile Adam does not store the BF16
+    MegaMoE expert weights (2 of its 22 B/param). Their GEMMs read only the Adam-written FP8 cache, so the BF16
+    copy is rebuilt from the FP32 master (same RNE cast, same bytes) only before a BF16 reader: a cache refresh
+    (Turbo materialize hook), save_checkpoint, the params-norm log and the DP param-hash check. Applies only where
+    the expert weight's param buffer has a data-parallel group of size 1 (else the param all-gather ships it)."""
+    return _fp8blk_megamoe_enabled() and os.environ.get("PRIMUS_FP8BLK_ADAM_SKIP_BF16", "0") == "1"
+
+
+class _BF16Materializer:
+    """Rebuilds a skipped BF16 weight (the param-buffer view) from its FP32 master shard, on the current stream,
+    once per optimizer update (``stale`` is set on the host each time the Adam kernel is queued for it)."""
+
+    _ALL = []
+
+    def __init__(self, model_buf, master):
+        self.model_buf, self.master, self.stale = model_buf, master, False
+        _BF16Materializer._ALL.append(self)
+
+    @torch.no_grad()
+    def __call__(self):
+        if self.stale:
+            self.model_buf.copy_(self.master)  # c10 RNE, the kernel's pack_bf16x8 bytes
+            self.stale = False
+
+
+def materialize_skipped_bf16_weights() -> int:
+    """Bring every BF16 weight the tile Adam skipped (PRIMUS_FP8BLK_ADAM_SKIP_BF16) up to date. Returns the count
+    rebuilt. Call before anything outside the FP8 GEMMs reads those weights."""
+    n = 0
+    for m in _BF16Materializer._ALL:
+        n += int(m.stale)
+        m()
+    return n
+
+
 class _MegaMoEAdamTarget:
     """A Turbo MegaMoE ``FP8BlockWeightCache`` seen as a tile-Adam output: W = q, W^T = qT, MX scale
     planes s / sT in the e8m0 / e8m0_t slots and no scale_inv (address 0 = MX-plane mode)."""
@@ -78,6 +114,7 @@ class _MegaMoEAdamTarget:
         self.cache = cache
         self.w, self.wt, self.e8m0, self.e8m0_t = cache.q, cache.qT, cache.s, cache.sT
         self.ready = False  # not read by MegaMoE (its cache stays valid; the forward reads it unconditionally)
+        self.materializer = None  # set when the BF16 weight store is skipped (PRIMUS_FP8BLK_ADAM_SKIP_BF16)
 
     @staticmethod
     def find(model_param):
@@ -364,6 +401,8 @@ def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param
         out = (cache.w, wt, cache.scale_inv, cache.e8m0, e8m0_t)
         present = tuple(t for t in out if t is not None)
         dense = (grad, master, exp_avg, exp_avg_sq, model_buf)
+        # BF16 address 0: the kernel skips the BF16 weight store (only MegaMoE targets with a materializer).
+        skip_bf16 = getattr(cache, "materializer", None) is not None
         if any(t.numel() != model_param.numel() for t in dense) or any(not t.is_contiguous() for t in dense + present):
             raise RuntimeError("PRIMUS_FP8BLK_ADAM_QUANT: optimizer shard does not cover the whole contiguous weight")
         if any(t.data_ptr() % 16 for t in dense + tuple(t for t in out[:2] if t is not None)):
@@ -372,7 +411,7 @@ def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param
         batch = model_param.numel() // (n * k)
         tiles_n = (n + _FP8BLK_TILE - 1) // _FP8BLK_TILE
         tiles_k = (k + _FP8BLK_TILE - 1) // _FP8BLK_TILE
-        addresses.extend(0 if t is None else t.data_ptr() for t in dense + out)
+        addresses.extend(0 if t is None or (skip_bf16 and t is model_buf) else t.data_ptr() for t in dense + out)
         dims.extend((n, k, tiles_n, tiles_k))
         tiles = batch * tiles_n * tiles_k
         tile_offsets.append(total_tiles)
@@ -472,6 +511,7 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
     writeback_tensors = []
     fp8blk_by_param_ptr = {}
     megamoe_count = 0
+    skip_bf16_count = 0
     if _fp8blk_enabled():
         from primus_turbo.pytorch.core import fp8blk_weight_cache
     for shard_main_group, model_group in zip(
@@ -521,7 +561,18 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
                 if mm_cache is not None:
                     # The tile kernel now owns this cache; refresh_fp8blk_weights() skips it.
                     mm_cache.adam_managed = True
-                    fp8blk_by_param_ptr[shard_main_param.data_ptr()] = (model_param, _MegaMoEAdamTarget(mm_cache))
+                    target = _MegaMoEAdamTarget(mm_cache)
+                    dp_group = getattr(distributed_optimizer.buffers[gbuf_index], "data_parallel_group", None)
+                    if (
+                        _fp8blk_skip_bf16_enabled()
+                        and dp_group is not None
+                        and dp_group.size() == 1
+                        and getattr(type(mm_cache), "MATERIALIZE_HOOK", None)  # Turbo calls it before reading
+                    ):
+                        target.materializer = _BF16Materializer(shard_model_param, shard_main_param)
+                        setattr(model_param, type(mm_cache).MATERIALIZE_HOOK, target.materializer)
+                        skip_bf16_count += 1
+                    fp8blk_by_param_ptr[shard_main_param.data_ptr()] = (model_param, target)
                     megamoe_count += 1
 
     expected_masters = sum(len(group) for group in distributed_optimizer.shard_fp32_from_float16_groups)
@@ -544,6 +595,12 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
             f"({sum(p.numel() for p, _ in fp8blk_by_param_ptr.values()) / 1e6:.1f} M params) get FP8 "
             "W / W^T / UE8M0 scales from the Adam writeback"
             + (f", {megamoe_count} of them MegaMoE expert caches (PRIMUS_FP8BLK_ADAM_MEGAMOE)" if megamoe_count else "")
+            + (
+                f"; {skip_bf16_count} skip the BF16 weight store (PRIMUS_FP8BLK_ADAM_SKIP_BF16, rebuilt from the "
+                "FP32 master before any BF16 reader)"
+                if _fp8blk_skip_bf16_enabled()
+                else ""
+            )
         )
 
 
@@ -624,6 +681,42 @@ def _deferred_passthrough_reduce_max(value, *args, **kwargs):
     return value
 
 
+_BF16_READERS = (
+    ("megatron.training.training", "save_checkpoint"),
+    ("megatron.training.checkpointing", "save_checkpoint"),
+    ("megatron.training.training", "calc_params_l2_norm"),
+    ("megatron.training.utils", "calc_params_l2_norm"),
+    ("megatron.training.training", "check_param_hashes_across_dp_replicas"),
+    ("megatron.training.utils", "check_param_hashes_across_dp_replicas"),
+)
+
+
+def _wrap_bf16_readers() -> None:
+    """PRIMUS_FP8BLK_ADAM_SKIP_BF16: rebuild the skipped BF16 weights before the Megatron functions that read model
+    parameters outside the FP8 GEMMs (checkpoint save, params-norm log, DP param-hash check)."""
+    import importlib
+
+    for mod_name, attr in _BF16_READERS:
+        try:
+            mod = importlib.import_module(mod_name)
+        except ImportError:
+            continue
+        fn = getattr(mod, attr, None)
+        if fn is None or getattr(fn, "_primus_materializes_bf16", False):
+            continue
+
+        def make(fn):
+            @wraps(fn)
+            def wrapped(*args, **kwargs):
+                materialize_skipped_bf16_weights()
+                return fn(*args, **kwargs)
+
+            wrapped._primus_materializes_bf16 = True
+            return wrapped
+
+        setattr(mod, attr, make(fn))
+
+
 def _install_patch() -> None:
     from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
     from megatron.core.optimizer.optimizer import ChainedOptimizer, MegatronOptimizer
@@ -646,6 +739,8 @@ def _install_patch() -> None:
             )
         # Turbo block-FP8 GEMMs tag the weights they quantize and use the optimizer-written cache.
         os.environ["PRIMUS_TURBO_FP8_WCACHE"] = "1"
+    if _fp8blk_skip_bf16_enabled():
+        _wrap_bf16_readers()
 
     extension = _load_extension()
     original_adam_init = FusedAdam.__init__
@@ -744,6 +839,9 @@ def _install_patch() -> None:
                     # Queued on the current stream: later GEMMs on it read the new FP8 weights.
                     for cache in f_caches:
                         cache.ready = True
+                        materializer = getattr(cache, "materializer", None)
+                        if materializer is not None:
+                            materializer.stale = True  # the BF16 weight now lags the FP32 master
                     sel_set = set(sel)
                     tensor_lists = [
                         [t for i, t in enumerate(lst) if i not in sel_set] for lst in tensor_lists

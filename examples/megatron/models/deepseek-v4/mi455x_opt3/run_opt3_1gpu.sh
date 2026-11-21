@@ -8,7 +8,8 @@ MODE=${1:-graph}; ITERS=${2:-20}
 source "$HERE/opt3_best.env"
 : "${TRITON_MAIN:?set TRITON_MAIN to a Triton main checkout python dir with gluon cdna5 (dsv4up needs it)}"
 export PYTHONPATH=$HERE/fla_stub:$TRITON_MAIN:/workspace/Primus-Turbo${PYTHONPATH:+:$PYTHONPATH}
-EXTRA="--turbo_mega_moe_precision,fp8_block"
+# OPT3_EXTRA_ARGS: more comma-separated trainer args (e.g. --save,<dir>,--save_interval,10,--no_save_optim,True)
+EXTRA="--turbo_mega_moe_precision,fp8_block${OPT3_EXTRA_ARGS:+,$OPT3_EXTRA_ARGS}"
 [ "$MODE" = graph ] && EXTRA="--cuda_graph_impl,full_iteration,--check_for_nan_in_loss_and_grad,False,$EXTRA"
 export PRIMUS_EXTRA_TRAIN_ARGS=$EXTRA
 export PRIMUS_LAUNCHER=direct GPUS_PER_NODE=1 NNODES=1 PRIMUS_TP=1 PRIMUS_PP=1 PRIMUS_EP=1 MBS=1 GBS=1

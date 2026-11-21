@@ -239,7 +239,10 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
 //   scale_inv = 1 / s (exact), e8m0 = exponent byte of scale_inv.
 // It emits W [B,N,K] fp8, W^T [B,K,N] fp8 (same tile, same scale), scale_inv
 // [B,N/128,K/128] fp32 and E8M0 bytes [B,N/128,K/128] and [B,K/128,N/128]; W^T and the
-// transposed E8M0 bytes are skipped for a tensor whose W^T address is 0.
+// transposed E8M0 bytes are skipped for a tensor whose W^T address is 0, and the BF16 model
+// parameter store is skipped for a tensor whose BF16 address is 0 (PRIMUS_FP8BLK_ADAM_SKIP_BF16:
+// MegaMoE expert weights, whose GEMMs read only the FP8 cache; the caller materializes the BF16
+// weight from the FP32 master before any BF16 reader).
 // Partial edge tiles follow the reference (out-of-range elements count as 0).
 //
 // Performance: the kernel is latency bound (Adam's IEEE div/sqrt plus the amax and LDS
@@ -445,7 +448,7 @@ __host__ __device__ __forceinline__ float fp8blk_adam_phase(
         *reinterpret_cast<uint4*>(exp_avg_sq + i) = pack_bf16x8(v);
       }
       const uint4 pb = pack_bf16x8(p);  // == static_cast<c10::BFloat16>(p[j]) (RNE)
-      *reinterpret_cast<uint4*>(ptr.model_param + i) = pb;
+      if (ptr.model_param != nullptr) *reinterpret_cast<uint4*>(ptr.model_param + i) = pb;
       unpack_bf16x8(pb, x[it]);
     } else {
 #pragma unroll
@@ -456,7 +459,7 @@ __host__ __device__ __forceinline__ float fp8blk_adam_phase(
           exp_avg[i + j] = m[j];
           exp_avg_sq[i + j] = v[j];
           const c10::BFloat16 pb = static_cast<c10::BFloat16>(p[j]);
-          ptr.model_param[i + j] = pb;
+          if (ptr.model_param != nullptr) ptr.model_param[i + j] = pb;
           x[it][j] = static_cast<float>(pb);
         }
       }
@@ -523,6 +526,9 @@ __host__ __device__ __forceinline__ float fp8blk_adam_full(
   float* __restrict__ param = ptr.param + o;
   MomentT* __restrict__ exp_avg = ptr.exp_avg + o;
   MomentT* __restrict__ exp_avg_sq = ptr.exp_avg_sq + o;
+  // A null BF16 address (per tensor, block-uniform) skips the BF16 parameter store; the BF16
+  // value is still formed, since the FP8 quant reads it.
+  const bool write_bf16 = ptr.model_param != nullptr;
   c10::BFloat16* __restrict__ model_param = ptr.model_param + o;
   const uint32_t K = static_cast<uint32_t>(t.K);
 #pragma unroll
@@ -574,7 +580,7 @@ __host__ __device__ __forceinline__ float fp8blk_adam_full(
       gst(exp_avg_sq + i, pack_bf16x8(v));
     }
     const uint4 pb = pack_bf16x8(p);  // == static_cast<c10::BFloat16>(p[j]) (RNE)
-    gst(model_param + i, pb);
+    if (write_bf16) gst(model_param + i, pb);
     xs[fp8blk_xs_slot(tid, it)] = pb;  // parked in LDS until the quant phase
     float x[kIlp];
     unpack_bf16x8(pb, x);
@@ -736,7 +742,7 @@ __host__ __device__ __forceinline__ float fp8blk_adam_generic(
         exp_avg[i + j] = m[0];
         exp_avg_sq[i + j] = v[0];
         pb = static_cast<c10::BFloat16>(p[0]);
-        ptr.model_param[i + j] = pb;
+        if (ptr.model_param != nullptr) ptr.model_param[i + j] = pb;
       }
       xs16[row * kTile + col + j] = pb.x;
       amax = fmaxf(amax, fabsf(static_cast<float>(pb)));
@@ -995,7 +1001,8 @@ void fused_adam_clip(
 }
 
 // Per tensor: addresses[10] = grad, fp32 master, exp_avg, exp_avg_sq, bf16 param, W fp8,
-// W^T fp8, scale_inv fp32, e8m0, e8m0_t (W^T and e8m0_t may be 0: not written). scale_inv 0
+// W^T fp8, scale_inv fp32, e8m0, e8m0_t (W^T and e8m0_t may be 0: not written; the bf16 param
+// may be 0: not written, for a weight whose only readers take the FP8 outputs). scale_inv 0
 // selects the MX-plane mode (MegaMoE expert cache: e8m0 -> S [B,N,K/32], e8m0_t -> ST
 // [B,K,N/32], quant_w_128x128 exponent; N, K % 128 == 0 checked by the caller); dims[4] =
 // N, K, tiles_n, tiles_k (B is implied by the tile count). Scalars are derived exactly as in
