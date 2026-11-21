@@ -151,11 +151,12 @@ From `.github/workflows/ci.yaml`:
 - **`code-lint`:** Python 3.12 on GitHub-hosted runners. Runs `pre-commit run --all-files --show-diff-on-failure`, so checks follow `.pre-commit-config.yaml`.
 - **`dependency-review`:** Runs `actions/dependency-review-action` on pull requests to flag dependency changes.
 - **`run-unittest-torch`:** Self-hosted GPU runner. Installs `requirements.txt`, runs `bash ./tests/runner/run_all_tests.sh`, then `pytest tests/unit_tests/` under coverage (`--cov=primus --cov-report=term-missing`) with specific tests `--deselect`ed (currently some `megatron/cco` TP-overlap and `megatron/transformer/moe` dispatcher cases—see the workflow file). Trainer steps set `MASTER_PORT`, `DATA_PATH`, `HSA_NO_SCRATCH_RECLAIM=1`, and `HF_TOKEN` for Megatron and TorchTitan trainer tests. A follow-up **coverage** step combines unit and E2E coverage.
+- **`run-unittest-torch-gfx950`:** MI355X (gfx950) runner without docker. Installs the pinned Triton, AITER, Primus-Turbo and origami into the runner's environment once per commit, then runs the same tests and tiers as `run-unittest-torch`, without coverage. Skipped for fork PRs.
 - **`run-unittest-jax`:** JAX runner. Installs `requirements-jax.txt`, runs the same shell test script, then `python ./tests/run_unit_tests.py --jax` with CI environment variables (for example `JAX_SKIP_UT=1` and `DATA_PATH` as defined in the workflow).
 
 The torch job picks its tier from `PRIMUS_CI_FULL` and prints the resolved tier in the job summary. See [Test tiers](#test-tiers-slim-on-prs-full-on-weekends).
 
-The **`build-docker`** job builds images after lint passes. **`run-unittest-torch`** depends on **`build-docker`** and runs inside the image it built; **`run-unittest-jax`** depends only on **`code-lint`**.
+The **`build-docker`** job builds images after lint passes. **`run-unittest-torch`** depends on **`build-docker`** and runs inside the image it built; **`run-unittest-torch-gfx950`** and **`run-unittest-jax`** depend only on **`code-lint`**.
 
 ## 6. Pre-commit hooks
 
