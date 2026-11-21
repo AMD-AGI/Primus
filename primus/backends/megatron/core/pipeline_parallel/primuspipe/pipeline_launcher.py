@@ -337,4 +337,7 @@ class PrimusPipelineParallelLauncher:
 
         assert WGradRunningCache.is_empty(), "WGradRunningCache is not empty"
 
+        if config.timers is not None:
+            config.timers("forward-backward").stop()
+
         return self.forward_data_store
