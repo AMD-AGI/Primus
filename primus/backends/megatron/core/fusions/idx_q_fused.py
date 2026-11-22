@@ -14,6 +14,8 @@ bf16 rope expressions on the rounded GEMM output, the bf16 rounding of the Hadam
 Meant to be byte-identical to the chain (checked by tools/bench_idx.py on the real shapes).
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -111,3 +113,93 @@ def rope_hadamard_fused(x, cos, sin, hm, rotary_dim, norm, bt=32, num_warps=4):
                               NOPE=HD - rotary_dim, RDH=rdh, BT=bt, HB=1, NSTAGE=1, HAS_W=False,
                               num_warps=num_warps)
     return out.view(T, HD)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Indexer glue (PRIMUS_BF16G2_IDXQ=1; called from Indexer.forward). Takes precedence over PRIMUS_FUSE2_IDX_ROT: with
+# both set, the queries / keys never reach Indexer._rotate_queries / _rotate_keys (logged once).
+# ---------------------------------------------------------------------------------------------------------------------
+_LOGGED = {}
+
+
+def _log_once(key, msg):
+    if not _LOGGED.get(key):
+        _LOGGED[key] = True
+        print(f"[bf16g2] {msg}", flush=True)
+        if os.environ.get("PRIMUS_FUSE2_IDX_ROT", "0") == "1" and not _LOGGED.get("fuse2"):
+            _LOGGED["fuse2"] = True
+            print("[bf16g2] PRIMUS_BF16G2_IDXQ=1 takes precedence over PRIMUS_FUSE2_IDX_ROT for the indexer "
+                  "rotations (IDX_ROT skipped)", flush=True)
+
+
+class _IdxQFusedFn(torch.autograd.Function):
+    """Fused forward; the backward (never reached while the indexer is frozen) recomputes the reference chain."""
+
+    @staticmethod
+    def forward(ctx, q2, w, cos, sin, hm, rotary_dim, norm, shape, ref_fn):
+        ctx.save_for_backward(q2, w)
+        ctx.ref_fn = ref_fn
+        return idx_q_fused(q2, w, cos, sin, hm, rotary_dim, norm).view(shape)
+
+    @staticmethod
+    def backward(ctx, g):
+        q2, w = ctx.saved_tensors
+        with torch.enable_grad():
+            q2r = q2.detach().requires_grad_(ctx.needs_input_grad[0])
+            wr = w.detach().requires_grad_(ctx.needs_input_grad[1])
+            out = ctx.ref_fn(q2r, wr)
+            ins = [t for t, need in ((q2r, ctx.needs_input_grad[0]), (wr, ctx.needs_input_grad[1])) if need]
+            grads = list(torch.autograd.grad(out, ins, g)) if ins else []
+        gq = grads.pop(0) if ctx.needs_input_grad[0] else None
+        gw = grads.pop(0) if ctx.needs_input_grad[1] else None
+        return gq, gw, None, None, None, None, None, None, None
+
+
+def indexer_queries_bf16g2(indexer, q_q, position_ids, B, S, H, Hd):
+    """Indexer queries: rotate(w_iuq(q_q)) as one kernel; None when not applicable (caller runs the chain)."""
+    import torch.nn.functional as F
+
+    from primus.backends.megatron.core.transformer import hadamard_rotation as _hr
+    from primus.backends.megatron.core.transformer.dual_rope import apply_interleaved_partial_rope
+
+    rope, lin = indexer.rope, indexer.w_iuq
+    w = lin.weight
+    if (rope is None or indexer.rotary_dim == 0 or getattr(lin, "bias", None) is not None
+            or _hr._fast_hadamard_transform is not None or not q_q.is_cuda or q_q.dtype != torch.bfloat16
+            or w.dtype != torch.bfloat16 or not w.is_contiguous() or w.shape != (H * Hd, q_q.shape[-1])
+            or Hd & (Hd - 1) or q_q.shape[-1] & (q_q.shape[-1] - 1) or q_q.stride(-1) != 1):
+        return None
+    if position_ids is None:
+        position_ids = torch.arange(S, device=q_q.device)
+    cos, sin = rope(position_ids)
+    if tuple(cos.shape[:-1]) != (B, S):
+        cos = cos.expand(B, S, -1)
+        sin = sin.expand(B, S, -1)
+    hm = _hr._sylvester(Hd, q_q.device, q_q.dtype)
+    rd = indexer.rotary_dim
+
+    def ref_fn(q2r, wr):
+        qi = F.linear(q2r.view(B, S, -1), wr).view(B, S, H, Hd)
+        return _hr.rotate_activation(apply_interleaved_partial_rope(qi, cos, sin, rotary_dim=rd))
+
+    _log_once("q", f"indexer query path fused (T={B * S}, H={H}, Hd={Hd}, rotary_dim={rd})")
+    return _IdxQFusedFn.apply(q_q.reshape(B * S, q_q.shape[-1]), w, cos, sin, hm, rd, Hd**-0.5, (B, S, H, Hd), ref_fn)
+
+
+def indexer_keys_bf16g2(indexer, k_icomp):
+    """Indexer keys [B, P, Hd]: rotate (partial RoPE at arange(P) * ratio + Hadamard + scale) as one kernel; None when
+    not applicable (no grad needed, power-of-two Hd, bf16, contiguous)."""
+    from primus.backends.megatron.core.transformer import hadamard_rotation as _hr
+
+    rope = indexer.rope
+    if rope is None or indexer.rotary_dim == 0:
+        return None
+    B, P, Hd = k_icomp.shape
+    if ((torch.is_grad_enabled() and k_icomp.requires_grad) or _hr._fast_hadamard_transform is not None
+            or not k_icomp.is_cuda or k_icomp.dtype != torch.bfloat16 or Hd & (Hd - 1) or not k_icomp.is_contiguous()):
+        return None
+    cos, sin = rope.forward_arange(P, k_icomp.device, stride=indexer.compress_ratio)
+    _log_once("k", f"indexer key rope+Hadamard fused (P={P}, Hd={Hd})")
+    return rope_hadamard_fused(k_icomp.reshape(B * P, Hd), cos.unsqueeze(0).expand(B, -1, -1),
+                               sin.unsqueeze(0).expand(B, -1, -1), _hr._sylvester(Hd, k_icomp.device, k_icomp.dtype),
+                               indexer.rotary_dim, Hd**-0.5).view(B, P, Hd)

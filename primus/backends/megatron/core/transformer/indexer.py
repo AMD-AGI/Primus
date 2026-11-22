@@ -87,36 +87,6 @@ from primus.backends.megatron.core.transformer.hadamard_rotation import (
 # E4M3 finite max magnitude (float8_e4m3fn): largest representable value.
 _FP8_E4M3_MAX = 448.0
 
-# bf16g2: PRIMUS_BF16G2_IDXQ=1 (default off) runs the query path w_iuq GEMM -> partial RoPE -> Hadamard -> scale as one
-# Triton kernel (primus/backends/megatron/core/fusions/idx_q_fused.py), byte-identical to the chain below.
-_BF16G2_IDXQ = os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1"
-_BF16G2_LOGGED = {}
-
-
-class _IdxQFusedFn(torch.autograd.Function):
-    """Fused forward; the backward (never reached while the indexer is frozen) recomputes the reference chain."""
-
-    @staticmethod
-    def forward(ctx, q2, w, cos, sin, hm, rotary_dim, norm, shape, ref_fn):
-        from primus.backends.megatron.core.fusions.idx_q_fused import idx_q_fused
-
-        ctx.save_for_backward(q2, w)
-        ctx.ref_fn = ref_fn
-        return idx_q_fused(q2, w, cos, sin, hm, rotary_dim, norm).view(shape)
-
-    @staticmethod
-    def backward(ctx, g):
-        q2, w = ctx.saved_tensors
-        with torch.enable_grad():
-            q2r = q2.detach().requires_grad_(ctx.needs_input_grad[0])
-            wr = w.detach().requires_grad_(ctx.needs_input_grad[1])
-            out = ctx.ref_fn(q2r, wr)
-            ins = [t for t, need in ((q2r, ctx.needs_input_grad[0]), (wr, ctx.needs_input_grad[1])) if need]
-            grads = list(torch.autograd.grad(out, ins, g)) if ins else []
-        gq = grads.pop(0) if ctx.needs_input_grad[0] else None
-        gw = grads.pop(0) if ctx.needs_input_grad[1] else None
-        return gq, gw, None, None, None, None, None, None, None
-
 
 def fake_quantize_fp8_e4m3(x: torch.Tensor) -> torch.Tensor:
     """Per-tensor dynamic FP8 (E4M3) fake-quantization.
@@ -520,22 +490,6 @@ class Indexer(nn.Module):
 
         P = k_icomp.shape[1]
         cos, sin = rope.forward_arange(P, k_icomp.device, stride=self.compress_ratio)
-        if _BF16G2_IDXQ and not (torch.is_grad_enabled() and k_icomp.requires_grad):
-            from primus.backends.megatron.core.transformer import hadamard_rotation as _hr
-
-            Hd = k_icomp.shape[-1]
-            if (_hr._fast_hadamard_transform is None and k_icomp.is_cuda and k_icomp.dtype == torch.bfloat16
-                    and Hd & (Hd - 1) == 0 and k_icomp.is_contiguous()):
-                from primus.backends.megatron.core.fusions.idx_q_fused import rope_hadamard_fused
-
-                B = k_icomp.shape[0]
-                if not _BF16G2_LOGGED.get("k"):
-                    _BF16G2_LOGGED["k"] = True
-                    print(f"[bf16g2] indexer key rope+Hadamard fused (P={P}, Hd={Hd})", flush=True)
-                c2 = cos.unsqueeze(0).expand(B, -1, -1)
-                s2 = sin.unsqueeze(0).expand(B, -1, -1)
-                return rope_hadamard_fused(k_icomp.reshape(B * P, Hd), c2, s2, _hr._sylvester(Hd, k_icomp.device,
-                                           k_icomp.dtype), self.rotary_dim, Hd**-0.5).view(B, P, Hd)
         # ``apply_interleaved_partial_rope`` inserts a singleton head axis into
         # cos / sin, so give it a ``[B, P, 1, Hd]`` view to broadcast against.
         rotated = apply_interleaved_partial_rope(
@@ -545,36 +499,6 @@ class Indexer(nn.Module):
             rotary_dim=self.rotary_dim,
         )
         return rotate_activation(rotated.squeeze(2))
-
-    def _bf16g2_queries(self, q_q, position_ids, B, S, H, Hd):
-        """Fused w_iuq + partial RoPE + Hadamard + scale (PRIMUS_BF16G2_IDXQ=1); None when not applicable."""
-        from primus.backends.megatron.core.transformer import hadamard_rotation as _hr
-
-        rope = self.rope
-        w = self.w_iuq.weight
-        if (rope is None or self.rotary_dim == 0 or getattr(self.w_iuq, "bias", None) is not None
-                or _hr._fast_hadamard_transform is not None or not q_q.is_cuda or q_q.dtype != torch.bfloat16
-                or w.dtype != torch.bfloat16 or not w.is_contiguous() or w.shape != (H * Hd, q_q.shape[-1])
-                or Hd & (Hd - 1) or q_q.shape[-1] & (q_q.shape[-1] - 1) or q_q.stride(-1) != 1):
-            return None
-        q2 = q_q.reshape(B * S, q_q.shape[-1])
-        if position_ids is None:
-            position_ids = torch.arange(S, device=q_q.device)
-        cos, sin = rope(position_ids)
-        if tuple(cos.shape[:-1]) != (B, S):
-            cos = cos.expand(B, S, -1)
-            sin = sin.expand(B, S, -1)
-        hm = _hr._sylvester(Hd, q_q.device, q_q.dtype)
-        rd = self.rotary_dim
-
-        def ref_fn(q2r, wr):
-            qi = F.linear(q2r.view(B, S, -1), wr).view(B, S, H, Hd)
-            return rotate_activation(apply_interleaved_partial_rope(qi, cos, sin, rotary_dim=rd))
-
-        if not _BF16G2_LOGGED.get("q"):
-            _BF16G2_LOGGED["q"] = True
-            print(f"[bf16g2] indexer query path fused (T={B * S}, H={H}, Hd={Hd}, rotary_dim={rd})", flush=True)
-        return _IdxQFusedFn.apply(q2, w, cos, sin, hm, rd, Hd**-0.5, (B, S, H, Hd), ref_fn)
 
     def _rotate_queries(self, q_i: torch.Tensor, position_ids: Optional[torch.Tensor]) -> torch.Tensor:
         """Partial RoPE + Hadamard on the indexer queries (``[B, S, H, Hd]``)."""
@@ -703,7 +627,12 @@ class Indexer(nn.Module):
         # so arange(P) is the right position set. Rotating the LOCAL pool first would give
         # every rank positions 0..P_local-1: correct on rank 0, silently the wrong phase
         # everywhere else, with no error and no shape mismatch to catch it.
-        k_icomp = self._rotate_keys(k_icomp)  # [B, P, Hd]
+        k_rot = None
+        if os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1":  # bf16g2: RoPE + Hadamard + scale in one kernel
+            from primus.backends.megatron.core.fusions.idx_q_fused import indexer_keys_bf16g2
+
+            k_rot = indexer_keys_bf16g2(self, k_icomp)
+        k_icomp = self._rotate_keys(k_icomp) if k_rot is None else k_rot  # [B, P, Hd]
         P = k_icomp.shape[1]
         k_icomp = k_icomp.unsqueeze(2)  # [B, P, 1, Hd]
 
@@ -719,14 +648,16 @@ class Indexer(nn.Module):
         else:
             q_q = proj(self.w_dq, hidden)  # [B, S, dq_rank]
             w_i = proj(self.w_w, hidden)  # [B, S, H]
-        q_i = self._bf16g2_queries(q_q, position_ids, B, S, H, Hd) if (
-            _BF16G2_IDXQ and not _indexer_fp8_proj_enabled()) else None
-        if q_i is None:
-            q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd)  # [B, S, H, Hd]
-            # Queries are rotated at their own token positions, then Hadamard-rotated
-            # like the keys, so the ReLU'd dot product sees both operands in the same
-            # basis the reference scores in.
-            q_i = self._rotate_queries(q_i, position_ids)
+        q_g2 = None
+        if os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1" and not _indexer_fp8_proj_enabled():
+            from primus.backends.megatron.core.fusions.idx_q_fused import indexer_queries_bf16g2
+
+            q_g2 = indexer_queries_bf16g2(self, q_q, position_ids, B, S, H, Hd)  # bf16g2: w_iuq + rotation fused
+        q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd) if q_g2 is None else None  # [B, S, H, Hd]
+        # Queries are rotated at their own token positions, then Hadamard-rotated
+        # like the keys, so the ReLU'd dot product sees both operands in the same
+        # basis the reference scores in.
+        q_i = self._rotate_queries(q_i, position_ids) if q_g2 is None else q_g2
 
         # Score temperature (see ``self.score_scale``). Applied on ``w_i``
         # because every scoring branch below multiplies by it before summing
