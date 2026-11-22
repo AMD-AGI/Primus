@@ -291,13 +291,65 @@ class _Ctx:
         pass
 
 
-class PersistRouterFn(torch.autograd.Function):
-    """(hidden [.., H] bf16, router weight [E, H], ...) -> (topk_w, topk_idx, loss, hidden alias for the routed experts,
-    hidden alias for the shared expert). Forward = the int kernels (_router_fwd + _route_fwd [+ _route_loss]);
-    backward = one ``_router_bwd_mega_kernel`` launch (see module docstring)."""
+class RouterStash:
+    """Hand-off from PersistRouterFn's backward (no kernels: d top-k weights + route state) to PersistForkFn's backward
+    (the two launches). Lives for one forward/backward of one MoE layer."""
+
+    __slots__ = ("job",)
+
+    def __init__(self):
+        self.job = None
+
+
+def _ordered_sum(gs):
+    acc = None
+    for g in gs:
+        if g is not None:
+            acc = g if acc is None else acc + g
+    return acc
+
+
+class PersistForkFn(torch.autograd.Function):
+    """hidden -> (router alias, routed-expert alias, shared-expert alias) [no kernel]. The backward receives the three
+    consumers' gradients; when PersistRouterFn left its job in the stash (router input gradient None), it runs the
+    route backward + ONE _router_bwd_mega_kernel launch: dx = (g_shared + g_routed) + router dgrad (ForkGrad's /
+    the serial engine's order and bf16 roundings) and the router wgrad into main_grad. Without a job it is ForkGrad."""
 
     @staticmethod
-    def forward(ctx, hidden, w, bias, idx_tab, ids, topk, score_function, scale, slot_even, loss_cfg, hash_, claimed):
+    def forward(ctx, hidden, stash):
+        ctx.stash = stash
+        ctx.hshape = hidden.shape
+        ctx.set_materialize_grads(False)
+        return hidden.view_as(hidden), hidden.view_as(hidden), hidden.view_as(hidden)
+
+    @staticmethod
+    def backward(ctx, g_r, g_e, g_s):
+        job, ctx.stash.job = ctx.stash.job, None
+        for g in (g_r, g_e, g_s):  # a branch-stream gradient (PRIMUS_OVERLAP_SHARED) is read on this stream too
+            if g is not None and g.is_cuda:
+                g.record_stream(torch.cuda.current_stream(g.device))
+        if job is None:
+            return _ordered_sum((g_s, g_e, g_r)), None
+        assert g_r is None, "router input gradient must come through the stash"
+        route, flat, w, dtopw, out_w, pdt, acc = job
+        N, H = flat.shape
+        gs = [g.reshape(N, H) if g is not None else None for g in (g_s, g_e)]
+        if any(g is not None and (not g.is_contiguous() or g.dtype != flat.dtype) for g in gs):
+            gs = [g.contiguous().to(flat.dtype) if g is not None else None for g in gs]
+        dx = router_bwd_mega(route, flat, w, dtopw, gs[0], gs[1], out_w, pdt, acc, need_dx=True, sync_key=id(w))
+        return dx.view(ctx.hshape), None
+
+
+class PersistRouterFn(torch.autograd.Function):
+    """(router alias of the MoE input [.., H] bf16, router weight [E, H], ...) -> (topk_w, topk_idx, loss). Forward =
+    the int kernels (_router_fwd + _route_fwd [+ _route_loss]). Backward: with a claimed main_grad and a stash it only
+    records the job (d top-k weights, route state, main_grad slot; the beta-0 / accumulate decision is taken now, as
+    the DDP hook would) and returns no input gradient -- PersistForkFn's backward runs the kernels. Otherwise it runs
+    the route backward + megakernel itself (dgrad without adds) and returns dx / dW."""
+
+    @staticmethod
+    def forward(ctx, hidden, w, bias, idx_tab, ids, topk, score_function, scale, slot_even, loss_cfg, hash_, claimed,
+                stash):
         H = hidden.shape[-1]
         flat = hidden.reshape(-1, H)
         if hash_:
@@ -313,13 +365,14 @@ class PersistRouterFn(torch.autograd.Function):
         ctx.lcoef = getattr(rc, "lcoef", 0.0)
         ctx.S = getattr(rc, "S", 1)
         ctx.claimed = claimed
+        ctx.stash = stash
         ctx.hshape = hidden.shape
         ctx.mark_non_differentiable(topi, loss)
         ctx.set_materialize_grads(False)
-        return topw, topi, loss, hidden.view_as(hidden), hidden.view_as(hidden)
+        return topw, topi, loss
 
     @staticmethod
-    def backward(ctx, dtopw, _dtopi, _dloss, g_e, g_s):
+    def backward(ctx, dtopw, _dtopi, _dloss):
         flat, w, logits, idx_rows, ids, wsave, denom, cnt = ctx.saved_tensors
         N, E = logits.shape
         K = ctx.K
@@ -337,33 +390,29 @@ class PersistRouterFn(torch.autograd.Function):
             assert dscale.is_cuda and dscale.numel() == 1
         route = (logits, idx_rows, ids, wsave, denom, cnt, dscale, K, ctx.S if ctx.has_loss else 1,
                  ctx.lcoef if ctx.has_loss else 0.0, ctx.scale, ctx.hash, ctx.has_loss)
-        H = flat.shape[1]
-        cur = torch.cuda.current_stream(dev)
-        for g in (g_e, g_s):  # a branch-stream gradient (PRIMUS_OVERLAP_SHARED) is read on this stream too
-            if g is not None and g.is_cuda:
-                g.record_stream(cur)
-        # autograd's accumulation order of the input gradient (ForkGrad's order): (shared + routed) + router
-        gs = [g.reshape(N, H) if g is not None else None for g in (g_s, g_e)]
-        if any(g is not None and (not g.is_contiguous() or g.dtype != flat.dtype) for g in (g_s, g_e)):
-            gs = [g.reshape(N, H).contiguous().to(flat.dtype) if g is not None else None for g in (g_s, g_e)]
-        need_dx = ctx.needs_input_grad[0]
-        dw_ret = None
-        out_w = None
-        if ctx.needs_input_grad[1]:
-            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_boundary import (
-                _GradSlot,
-            )
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_boundary import (
+            _GradSlot,
+            direct_main_grad,
+        )
 
+        stash, ctx.stash = ctx.stash, None
+        nones = (None,) * 11
+        if (stash is not None and ctx.claimed and ctx.needs_input_grad[0] and ctx.needs_input_grad[1]
+                and direct_main_grad(w) is not None):
+            slot = _GradSlot(w, w.dtype, tuple(w.shape), dev, ctx.claimed)
+            stash.job = (route, flat, w, dtopw, slot.out, w.dtype, slot.acc)
+            return (None, slot.grad(w.dtype)) + nones
+        dw_ret = out_w = None
+        acc = False
+        if ctx.needs_input_grad[1]:
             slot = _GradSlot(w, w.dtype, tuple(w.shape), dev, ctx.claimed)
             out_w, acc = slot.out, slot.acc
             dw_ret = slot.grad(w.dtype)
-        else:
-            acc = False
-        dx = router_bwd_mega(route, flat, w, dtopw, gs[0], gs[1], out_w, w.dtype, acc, need_dx=need_dx,
-                             sync_key=id(w))
+        dx = router_bwd_mega(route, flat, w, dtopw, None, None, out_w, w.dtype, acc,
+                             need_dx=ctx.needs_input_grad[0], sync_key=id(w))
         if dx is not None:
             dx = dx.view(ctx.hshape)
-        return dx, dw_ret, None, None, None, None, None, None, None, None, None, None
+        return (dx, dw_ret) + nones
 
 
-__all__ = ["persist_router_bwd_enabled", "PersistRouterFn", "router_bwd_mega", "check_error"]
+__all__ = ["persist_router_bwd_enabled", "PersistForkFn", "PersistRouterFn", "RouterStash", "router_bwd_mega", "check_error"]
