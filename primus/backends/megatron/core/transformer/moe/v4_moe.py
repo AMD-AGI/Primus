@@ -983,8 +983,13 @@ class DeepseekV4MoE(MegatronModule):
             # PRIMUS_FUSE_ROUTE=1: router GEMM + one compact route kernel straight into MegaMoE's (idx, weights)
             topk_w, topk_idx = compact
             x = hidden.reshape(-1, self.hidden_size).to(torch.bfloat16)
+            shared = self.shared_expert is not None and not self.shared_expert_overlap
+            if shared and os.environ.get("PRIMUS_FUSE_MOE_ADD", "0") == "1" and hidden.dtype == torch.bfloat16:
+                # routed + shared add inside the MegaMoE combine kernel (bit-identical to the bf16 add below)
+                sh = self.shared_expert(hidden)
+                return self.mega_moe_experts(x, topk_idx, topk_w, add=sh.reshape(x.shape)).reshape(hidden.shape)
             out = self.mega_moe_experts(x, topk_idx, topk_w).reshape(hidden.shape).to(hidden.dtype)
-            if self.shared_expert is not None and not self.shared_expert_overlap:
+            if shared:
                 out = out + self.shared_expert(hidden)
             return out
 
