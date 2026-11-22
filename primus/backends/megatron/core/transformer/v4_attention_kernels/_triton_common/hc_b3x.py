@@ -187,7 +187,8 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
                    BT: gl.constexpr, BC: gl.constexpr, BN: gl.constexpr, HAS_DNEW: gl.constexpr,
                    WMMA: gl.constexpr, OPA: gl.constexpr, OPB: gl.constexpr, BLK: gl.constexpr,
                    SMEM: gl.constexpr, SMEM_W: gl.constexpr, DIRECT_W: gl.constexpr, PF: gl.constexpr = False,
-                   ABL: gl.constexpr = 0, BUF: gl.constexpr = False):
+                   ABL: gl.constexpr = 0, BUF: gl.constexpr = False, NMASK: gl.constexpr = False,
+                   UNEVEN: gl.constexpr = False):
     tile = gl.program_id(0)
     if tile < N_TILES:
         pid_d = tile % N_D
@@ -234,7 +235,15 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
         xs1 = gl.allocate_shared_memory(gl.bfloat16, [BT, BC], SMEM)
         xs2 = gl.allocate_shared_memory(gl.bfloat16, [BT, BC], SMEM)
         xs3 = gl.allocate_shared_memory(gl.bfloat16, [BT, BC], SMEM)
-        t_lo = pid_s * T_PER
+        if UNEVEN:
+            # splitk: ts row splits that need not divide M / BT; split s owns BT-steps [s*n/ts, (s+1)*n/ts)
+            n_st = M // BT
+            nspl = N_TILES // N_D
+            t_lo = (pid_s * n_st // nspl) * BT
+            t_hi = ((pid_s + 1) * n_st // nspl) * BT
+        else:
+            t_lo = pid_s * T_PER
+            t_hi = t_lo + T_PER
         if PF:
             # register prefetch: the next step's global loads are issued before this step's math (same arithmetic)
             x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl = _b3x_load(
@@ -258,7 +267,7 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
             dDC = gl.amd.cdna5.buffer.make_buffer_descriptor(DC, M * D * 2)
             loc_x = gl.expand_dims(tb * KD, 1) + gl.expand_dims(cr, 0)
             loc_d = gl.expand_dims(tb * D, 1) + gl.expand_dims(cr, 0)
-            for t0 in range(t_lo, t_lo + T_PER, BT):
+            for t0 in range(t_lo, t_hi, BT):
                 x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl = _b3x_load_buf(
                     t0, dX, dDC, COEF, dN, GH, GL, GTH, GTL, loc_x, loc_d, tb, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA)
                 accw0, accw1, accw2, accw3 = _b3x_step(
@@ -266,7 +275,7 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
                     wsh0, wsh1, wsh2, wsh3, wsl0, wsl1, wsl2, wsl3, xs0, xs1, xs2, xs3, accw0, accw1, accw2, accw3,
                     PRE, COMBT, DX, tb, cr, D, BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, True, dDX, loc_x)
         else:
-            for t0 in range(t_lo, t_lo + T_PER, BT):
+            for t0 in range(t_lo, t_hi, BT):
                 x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl = _b3x_load(
                     t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA, ABL)
                 accw0, accw1, accw2, accw3 = _b3x_step(
@@ -277,14 +286,34 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
         cw = c0 + gl.arange(0, BC, layout=gl.SliceLayout(0, WMMA))
         if not (ABL & 1):
             dwo = DWP + pid_s * BN * KD + gl.expand_dims(nr.to(gl.int64) * KD, 1) + gl.expand_dims(cw, 0)
-            gl.store(dwo, accw0)
-            gl.store(dwo + D, accw1)
-            gl.store(dwo + 2 * D, accw2)
-            gl.store(dwo + 3 * D, accw3)
+            if NMASK:
+                # splitk: only the N real rows of each [BN, KD] partial (the reducers read rows < N only)
+                mk = gl.expand_dims(nr < N, 1) & gl.expand_dims(cw >= 0, 0)
+                gl.store(dwo, accw0, mask=mk)
+                gl.store(dwo + D, accw1, mask=mk)
+                gl.store(dwo + 2 * D, accw2, mask=mk)
+                gl.store(dwo + 3 * D, accw3, mask=mk)
+            else:
+                gl.store(dwo, accw0)
+                gl.store(dwo + D, accw1)
+                gl.store(dwo + 2 * D, accw2)
+                gl.store(dwo + 3 * D, accw3)
 
 
 def b3x_enabled() -> bool:
     return os.environ.get("PRIMUS_HC_B3X", "0") == "1"
+
+
+def b3x_splitk_ts() -> int:
+    """splitk line: PRIMUS_SPLITK_HC_TS=<ts> (default 0 = off -> HCF_CFG gl_tsplit = 8): B3X row splits. More splits
+    = more, shorter programs; the ts dW partials are summed in one fixed order by the tail (deterministic, no atomics;
+    dW differs from ts = 8 by the fp32 summation order only, dx is unchanged)."""
+    return int(os.environ.get("PRIMUS_SPLITK_HC_TS", "0") or "0")
+
+
+def b3x_splitk_kw():
+    """PRIMUS_SPLITK_HC_NMASK=1 (default 0): B3X stores only the N real rows of each dW partial (same values)."""
+    return dict(NMASK=True) if os.environ.get("PRIMUS_SPLITK_HC_NMASK", "0") == "1" else {}
 
 
 def b3x_cfg():

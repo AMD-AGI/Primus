@@ -524,6 +524,23 @@ def _fp8_grouped_o_a(attn_g: torch.Tensor, wo_a_w: torch.Tensor) -> torch.Tensor
 
 
 _OA_DGRAD_TN = os.environ.get("PRIMUS_V4_OA_DGRAD_TN", "0") == "1"
+# bf16g2: o_a dgrad as an NN Gluon GEMM on w itself (no [G, d, r] transpose of w); bit-identical to the hipBLASLt
+# TN / NN solutions (same per-output K order). Needs Triton main (Gluon cdna5); falls back to the paths below.
+_BF16G2_OA_DGRAD = os.environ.get("PRIMUS_BF16G2_OA_DGRAD", "0") == "1"
+_BF16G2_STATE = {}
+
+
+def _bf16g2_mm_or_none():
+    """primus_turbo bf16g2_mm if importable (Gluon cdna5 / gfx1250), else None (logged once)."""
+    if "mm" not in _BF16G2_STATE:
+        try:
+            from primus_turbo.gluon.gemm.bf16g2_gemm import bf16g2_mm
+
+            _BF16G2_STATE["mm"] = bf16g2_mm
+        except Exception as e:  # noqa: BLE001
+            _BF16G2_STATE["mm"] = None
+            logging.getLogger(__name__).warning(f"bf16g2 unavailable ({type(e).__name__}: {e}); using hipBLASLt")
+    return _BF16G2_STATE["mm"]
 
 
 class _GroupedOAProjFn(torch.autograd.Function):
@@ -572,7 +589,15 @@ class _GroupedOAProjFn(torch.autograd.Function):
         dx = None
         if ctx.needs_input_grad[0]:
             dx = x2.new_empty(BS, G, d)
-            if _OA_DGRAD_TN and w.stride(-1) == 1:
+            g2 = _bf16g2_mm_or_none() if _BF16G2_OA_DGRAD else None
+            if (g2 is not None and w.stride(-1) == 1 and do.stride(-1) == 1 and w.dtype == torch.bfloat16
+                    and do.dtype == torch.bfloat16 and r % 128 == 0 and r >= 384):
+                # NN: B = w [G, r(K), d(N)], N contiguous; 256x256 tiles, 16-element row pad for the MN-major tile
+                g2(do, w, dx.transpose(0, 1), tile="256x256", tpad=16)
+                if not _BF16G2_STATE.get("logged"):
+                    _BF16G2_STATE["logged"] = True
+                    print(f"[bf16g2] o_a dgrad NN Gluon (G={G}, T={BS}, r={r}, d={d})", flush=True)
+            elif _OA_DGRAD_TN and w.stride(-1) == 1:
                 # TN: K (= r) contiguous for both operands. With the TunableOp entry for
                 # tn_4096_4096_1024_B_8_ld_1024_8192_32768 (tunableop_dsv4_gfx1250_bf16{bit,all}_0.csv) hipBLASLt
                 # runs ~20% faster than the tuned NN form and bit-identical to it; without the entry the default
@@ -1942,7 +1967,13 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # for prefill and indexes ``start_pos + 1 - ratio`` for decode -- both
         # land on the window's first token. Positions stay deterministic, so the
         # cached table is still reused every forward.
-        cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl():  # membound: memoised contiguous cast table (same bytes, no per-call copies)
+            cos, sin = self.rope.compress_rope.forward_arange_cast(P, device, pooled.dtype, self.rotary_dim // 2,
+                                                                   stride=self.compress_ratio)
+        else:
+            cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
         cos = cos.unsqueeze(0).expand(B, -1, -1)

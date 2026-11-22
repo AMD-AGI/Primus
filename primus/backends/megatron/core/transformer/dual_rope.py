@@ -110,6 +110,15 @@ def _yarn_attn_scale(factor: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+# membound: (position_ids, its version, inv_freq, its version, dtype, (cos, sin)) of the last few forward_pos_cast
+# calls (holding the tensors keeps the identity test sound: an entry's tensors cannot be freed and reused)
+_MB_POS_MEMO: list = []
+
+
+def mb_rope_tbl() -> bool:
+    return os.environ.get("PRIMUS_MB_ROPE_TBL", "0") == "1"
+
+
 class RoPECache(nn.Module):
     """Builds ``cos`` / ``sin`` tables on demand for a single RoPE base.
 
@@ -177,6 +186,37 @@ class RoPECache(nn.Module):
         cos = freqs.cos()
         sin = freqs.sin()
         return cos, sin
+
+    def forward_arange_cast(self, n: int, device, dtype, rd_half: int, *, stride: int = 1) -> tuple:
+        """membound (PRIMUS_MB_ROPE_TBL=1): ``forward_arange(n, device, stride=stride)`` sliced to ``rd_half``
+        columns, made contiguous and cast to ``dtype`` -- the exact tensors RoPEInterleavedPartialFn builds from it
+        on every call (``cos.contiguous().reshape(N, rd_half).to(x.dtype)``) -- memoised, so those two copy
+        kernels per call go away (same bytes)."""
+        key = (int(n), int(stride), str(device), dtype, int(rd_half))
+        cc = self.__dict__.setdefault("_mb_cast_cache", {})
+        hit = cc.get(key)
+        if hit is None:
+            cos, sin = self.forward_arange(n, device, stride=stride)
+            hit = (cos[..., :rd_half].contiguous().to(dtype), sin[..., :rd_half].contiguous().to(dtype))
+            cc[key] = hit
+        return hit
+
+    def forward_pos_cast(self, position_ids: torch.Tensor, dtype) -> tuple:
+        """membound (PRIMUS_MB_ROPE_TBL=1): ``forward(position_ids)`` cast to ``dtype`` (contiguous), memoised for
+        the SAME position_ids tensor object (identity + version), so the CSA layers of one step share one table
+        (one float/mul/cos/sin/cast chain per step instead of one per layer; same bytes). Process-wide memo, so
+        RoPECache instances with an identical inv_freq share it too."""
+        memo = _MB_POS_MEMO
+        inv = self.inv_freq
+        for ent in memo:
+            if (ent[0] is position_ids and ent[1] == position_ids._version and ent[2] is inv
+                    and ent[3] == inv._version and ent[4] == dtype):
+                return ent[5]
+        cos, sin = self.forward(position_ids)
+        out = (cos.contiguous().to(dtype), sin.contiguous().to(dtype))
+        memo.insert(0, (position_ids, position_ids._version, inv, inv._version, dtype, out))
+        del memo[4:]
+        return out
 
     def forward_arange(self, n: int, device, *, stride: int = 1) -> tuple:
         """``(cos, sin)`` for positions ``torch.arange(n) * stride`` -- cached.
