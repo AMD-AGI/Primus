@@ -1,8 +1,9 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 
+from importlib.util import find_spec
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 import torch
@@ -98,8 +99,12 @@ def test_prefetch_preserves_native_bucket_ownership():
         prefix.prefetch_expert_parameters(model)
 
 
-def test_install_binds_the_real_schedule_and_decoder_alias(monkeypatch):
-    recompute = pytest.importorskip("megatron.core.recompute")
+@pytest.fixture
+def installed_pipeline(monkeypatch):
+    # Only the optional package may be absent. A broken Megatron pin must fail.
+    if find_spec("megatron") is None:
+        pytest.skip("Megatron-LM is not installed")
+    from megatron.core import recompute
     from megatron.core.pipeline_parallel import schedules
     from megatron.core.transformer import transformer_block
 
@@ -123,24 +128,59 @@ def test_install_binds_the_real_schedule_and_decoder_alias(monkeypatch):
     ):
         for name in names:
             monkeypatch.setattr(module, name, None, raising=False)
-    original = transformer_block.checkpointed_forward
+    native_schedule = schedules.forward_backward_pipelining_without_interleaving
+    native_decoder = transformer_block.checkpointed_forward
     entry.handler(ctx)
     assert transformer_block.checkpointed_forward is recompute.checkpointed_forward
-    assert transformer_block.checkpointed_forward is not original
+    assert transformer_block.checkpointed_forward is not native_decoder
     sched = schedules.forward_backward_pipelining_without_interleaving
     assert sched._primus_pipeline_prefetch
     entry.handler(ctx)
     assert schedules.forward_backward_pipelining_without_interleaving is sched
+    return schedules, transformer_block, native_schedule, native_decoder
 
 
-def test_cut_keeps_the_live_graph_microbatch_and_random_sequence(monkeypatch):
+@pytest.mark.parametrize("stage", [0, 1], ids=["first_stage", "last_stage"])
+def test_pipeline_hooks_preserve_the_live_graph_and_random_sequence(installed_pipeline, monkeypatch, stage):
     from megatron.core import tensor_parallel, utils
     from megatron.core.transformer import cuda_graphs
 
-    layers = torch.nn.ModuleList([torch.nn.Linear(4, 4) for _ in range(6)])
-    model = SimpleNamespace(
-        decoder=SimpleNamespace(layers=layers), dp_cp_group=0, ep_group=1, expt_dp_group=2
+    schedules, transformer_block, native_schedule, native_decoder = installed_pipeline
+
+    class Layer(torch.nn.Linear):
+        def forward(self, hidden_states, **kwargs):
+            assert self.current_microbatch == current_mb
+            assert timer.active
+            visited.append((current_mb, self.layer_number))
+            return super().forward(hidden_states).tanh() * torch.rand_like(hidden_states)
+
+    layers = torch.nn.ModuleList([Layer(4, 4) for _ in range(6)])
+    for i, layer in enumerate(layers):
+        layer.layer_number = i + 1
+    config = settings(
+        overlap_p2p_comm=False,
+        no_sync_func=None,
+        grad_sync_func=None,
+        finalize_model_grads_func=None,
+        num_microbatches_with_partial_activation_checkpoints=None,
+        deallocate_pipeline_outputs=False,
+        barrier_with_L1_time=False,
+        fp4=False,
     )
+    model = SimpleNamespace(
+        decoder=SimpleNamespace(layers=layers, config=config, num_layers_per_pipeline_rank=len(layers)),
+        dp_cp_group=0,
+        ep_group=1,
+        expt_dp_group=2,
+    )
+    groups = Mock(spec=schedules.ProcessGroupCollection)
+    groups.tp, groups.cp = None, Mock()
+    p2p = Mock(total_stages=2, current_stage=stage, is_pp_first_stage=stage == 0, is_pp_last_stage=stage == 1)
+    p2p.send_backward_recv_forward.return_value = None
+    monkeypatch.setattr(schedules, "get_model_config", lambda _: config)
+    monkeypatch.setattr(schedules, "get_tensor_shapes", lambda **kwargs: [])
+    # The native schedule uses this scalar only to accumulate the token count.
+    monkeypatch.setattr(schedules, "torch", SimpleNamespace(int=torch.int, zeros=lambda *a, **kw: 0))
     monkeypatch.setattr(utils, "get_attr_wrapped_model", lambda m, k, **kw: getattr(m, k))
     tracker = Mock()
     tracker.get_states.return_value = {}
@@ -157,11 +197,14 @@ def test_cut_keeps_the_live_graph_microbatch_and_random_sequence(monkeypatch):
 
     monkeypatch.setattr(cuda_graphs, "set_current_microbatch", set_mb)
 
-    def run(depth):
+    current_mb, visited, timer = None, [], SimpleNamespace(active=False)
+
+    def run(schedule, decoder_forward, patched):
+        nonlocal current_mb
         layers.zero_grad()
         torch.manual_seed(7)
-        visited = []
-        timer = SimpleNamespace(active=False)
+        visited.clear()
+        outputs, backward_positions, comm_events = [], [], []
 
         def set_timing(active):
             assert timer.active != active
@@ -169,44 +212,69 @@ def test_cut_keeps_the_live_graph_microbatch_and_random_sequence(monkeypatch):
 
         timer.start = lambda: set_timing(True)
         timer.stop = lambda: set_timing(False)
-        timers = Mock(return_value=timer)
+        config.timers = Mock(
+            side_effect=lambda name, **kwargs: timer if name == "forward-compute" else Mock()
+        )
 
-        def forward(ordinal):
+        def forward(*args, current_microbatch, **kwargs):
+            nonlocal current_mb
+            current_mb = current_microbatch
             timer.start()
-            set_mb(model, ordinal)
-            state = torch.rand(8, 4)
-            for i, layer in enumerate(layers):
-                assert layer.current_microbatch == ordinal
-                assert timer.active
-                state = layer(state).tanh() * torch.rand_like(state)
-                visited.append((ordinal, i))
-                prefix.after_decoder_layer(model.decoder, i + 1)
+            set_mb(model, current_mb)
+            state = decoder_forward(
+                model.decoder, torch.rand(8, 4), None, None, None, None, None, None, False
+            )
+            outputs.append(state)
             timer.stop()
-            return state
+            return state, 0
 
-        f0 = forward(0)
-        f1 = forward(1)
-
-        def backward0():
-            assert all(layer.current_microbatch == 1 for layer in layers)
+        def backward(_input, output, _grad, _config):
+            if stage == 0 and not backward_positions:
+                assert all(layer.current_microbatch == 1 for layer in layers)
             assert not timer.active
-            f0.sum().backward()
+            backward_positions.append(len(visited))
+            output.sum().backward()
 
-        if depth:
-            gate = prefix.ForwardPrefix(model, depth, forward, timers)
-            gate.defer(backward0)
-            f2 = gate.forward(2)
-            assert gate.handoff is None
-            timers.assert_called_once_with("forward-compute", log_level=2)
+        monkeypatch.setattr(schedules, "forward_step", forward)
+        monkeypatch.setattr(schedules, "backward_step", backward)
+        monkeypatch.setattr(
+            schedules, "_primus_prefetch_expert_parameters", lambda _: comm_events.append("prefetch")
+        )
+        p2p.recv_forward.side_effect = lambda *args: comm_events.append("recv")
+        schedule(
+            forward_step_func=None,
+            data_iterator=None,
+            model=model,
+            num_microbatches=3,
+            seq_length=1,
+            micro_batch_size=1,
+            p2p_communicator=p2p,
+            pg_collection=groups,
+        )
+        if patched and stage == 1:
+            assert comm_events == ["prefetch", "recv"]
         else:
-            backward0()
-            f2 = forward(2)
-        f1.sum().backward()
-        f2.sum().backward()
-        return [f0, f1, f2, *(p.grad.clone() for p in layers.parameters()), torch.get_rng_state()], visited
+            assert "prefetch" not in comm_events
+        # Stage 0 normally runs B0 after F1. The patch moves it four layers into F2.
+        if stage == 0:
+            assert backward_positions == [
+                2 * len(layers) + (4 if patched else 0),
+                3 * len(layers),
+                3 * len(layers),
+            ]
+            if patched:
+                assert config.timers.call_args_list.count(call("forward-compute", log_level=2)) == 1
+        else:
+            assert backward_positions == [len(layers), 2 * len(layers), 3 * len(layers)]
+        values = [*outputs, *(p.grad.clone() for p in layers.parameters()), torch.get_rng_state()]
+        return values, visited.copy()
 
-    reference, order = run(0)
-    actual, visits = run(4)
+    reference, order = run(native_schedule, native_decoder, patched=False)
+    actual, visits = run(
+        schedules.forward_backward_pipelining_without_interleaving,
+        transformer_block.checkpointed_forward,
+        patched=True,
+    )
     assert visits == order
     for observed, expected in zip(actual, reference, strict=True):
         torch.testing.assert_close(observed, expected, atol=0, rtol=0)
