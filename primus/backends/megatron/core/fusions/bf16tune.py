@@ -3,7 +3,14 @@
 (Bias_HA_S_SAV ... CD1_1, PostGSU split-K): grouped o_a wgrad, CSA / HCA compressor wkv_gate fwd / dgrad / wgrad,
 indexer compressor (4096 -> 512) and indexer q/w projection (4096 -> 192) forwards.
 
-PRIMUS_BF16TUNE=1 (default 0; off = int byte-for-byte):
+PRIMUS_BF16TUNE (default 0; off = int byte-for-byte). Modes (TunableOp file chosen in opt3_best.env, Gluon plan here):
+  1        all winners: bf16tune CSV (o_a wgrad, CSA fwd/dgrad, HCA wgrad tuned) + Gluon HCA fwd/dgrad, idx512, q192
+  bit      bit-identical subset only: int CSV + Gluon split-K HCA fwd (S=4), HCA wgrad (S=4), q192 (S=8), whose fixed
+           fp32 partial order reproduces hipBLASLt's GSU4 / GSU8 kernels bit for bit
+  hcaidx   HCA + indexer shapes: CSV with the HCA wgrad entry + the full Gluon plan
+  oacsa    o_a wgrad + CSA: CSV with those entries, no Gluon
+  bitoacsa bit + oacsa
+For mode 1:
   * opt3_best.env points TunableOp at tunableop_dsv4_gfx1250_bf16tune_.csv (int bf16 CSV + tuned entries for these
     shapes), so shapes whose winner is a tuned hipBLASLt / rocBLAS solution need no code here;
   * the call sites below ask ``bt_mm`` first; it runs the shape's Gluon winner (bf16g2_mm, or deterministic split-K
@@ -17,7 +24,8 @@ import os
 
 import torch
 
-_ON = os.environ.get("PRIMUS_BF16TUNE", "0") == "1"
+_MODE = os.environ.get("PRIMUS_BF16TUNE", "0")
+_ON = _MODE not in ("", "0")
 
 # name: (ndim, M, N, K, A K-contiguous, B N-contiguous) -- training layouts at S=4096, H=4096
 _SHAPES = {
@@ -32,25 +40,38 @@ _SHAPES = {
     "q192_fwd": (2, 4096, 192, 4096, True, False),
 }
 # winners from ~/dsv41/work/bf16tune (microbench, L2 flushed, after a GEMM, median of 30); "off" = torch (TunableOp)
-_PLAN = {
-    "hca_fwd": "g2:256x128",
-    "hca_dgrad": "g2:256x256",
-    "idx512_fwd": "sk4:256x128",
-    "q192_fwd": "sk8:128x256",  # bit-identical to the int GSU8 kernel
+# spec: g2:<tile>[:t<pad>] = bf16g2_mm; sk<S>:<tile>[:t<pad>] = split-K S; t16 = 16-element LDS row pad for MN-major
+# operand tiles (o_a wgrad A and B, dgrad B, wgrad A and B); csa_fwd stays on its tuned TunableOp entry (32.7 us).
+_BIT = {  # bitdiff 0 vs the int kernels: the fixed fp32 partial order reproduces hipBLASLt's GSU4 / GSU8
+    "hca_fwd": "sk4:256x256",  # 51.1 -> 33.9 us
+    "hca_wgrad": "sk4:256x256:t16",  # 41.4 -> 32.9
+    "q192_fwd": "sk8:128x256",  # 25.0 -> 15.8
 }
+_HCAIDX = dict(_BIT, hca_fwd="g2:256x128s3", hca_dgrad="g2:256x256:t16", idx512_fwd="sk4:256x128")  # 30.3, 22.0, 21.7
+_OACSA = {
+    "oa_wgrad": "g2:256x256:t16",  # 127.0 -> 112.5
+    "csa_dgrad": "g2:256x256:t16",  # 43.7 -> 35.4 (same bits as the tuned hipBLASLt entry)
+    "csa_wgrad": "g2:256x128s3:t16",  # 43.7 -> 37.9
+}
+_FULL = dict(_HCAIDX, **_OACSA)
+_PLANS = {"1": _FULL, "hcaidx": _HCAIDX, "oacsa": _OACSA, "bit": _BIT, "bitoacsa": dict(_BIT, **_OACSA)}
+if _ON and _MODE not in _PLANS:
+    raise ValueError(f"PRIMUS_BF16TUNE={_MODE!r}: expected 0 or one of {sorted(_PLANS)}")
 
 
 def _parse_plan():
-    plan = dict(_PLAN)
+    plan = dict(_PLANS[_MODE])
     for item in filter(None, os.environ.get("PRIMUS_BF16TUNE_PLAN", "").split(",")):
         k, v = item.split("=")
         plan[k.strip()] = v.strip()
     by_shape = {}
     for name, spec in plan.items():
         if spec != "off" and name in _SHAPES:
-            kind, tile = spec.split(":")[:2]
+            f = spec.split(":")
+            kind, tile = f[0], f[1]
             splits = 1 if kind == "g2" else int(kind[2:])
-            by_shape[_SHAPES[name]] = (name, splits, tile)
+            kw = {"tpad": int(t[1:]) for t in f[2:] if t.startswith("t")}
+            by_shape[_SHAPES[name]] = (name, splits, tile, kw)
     return by_shape
 
 
@@ -65,7 +86,7 @@ def _impl():
 
             _STATE["impl"] = (bf16g2_mm, bf16g2_splitk_mm)
             _STATE["plan"] = _parse_plan()
-            print(f"[bf16tune] Gluon GEMM plan: {sorted(v[0] + '=' + str(v[1:]) for v in _STATE['plan'].values())}",
+            print(f"[bf16tune] mode {_MODE}, Gluon GEMM plan: {sorted(v[0] + '=' + str(v[1:]) for v in _STATE['plan'].values())}",
                   flush=True)
         except Exception as ex:  # noqa: BLE001
             _STATE["impl"] = None
@@ -95,7 +116,7 @@ def bt_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None):
     hit = _STATE["plan"].get(key)
     if hit is None:
         return None
-    name, splits, tile = hit
+    name, splits, tile, kw = hit
     shape = tuple(a.shape[:-1]) + (N,)
     if out is None:
         out = torch.empty(shape, device=a.device, dtype=torch.bfloat16)
@@ -107,8 +128,8 @@ def bt_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None):
     if a.dim() == 3:
         if splits != 1:
             return None
-        return g2(a, b, out, tile=tile)
-    return sk(a, b, out, splits, tile=tile)
+        return g2(a, b, out, tile=tile, **kw)
+    return sk(a, b, out, splits, tile=tile, **kw)
 
 
 def bt_linear(x: torch.Tensor, w: torch.Tensor, bias=None):
