@@ -12,7 +12,8 @@ wraps Megatron's ``schedules.backward_step`` so that the current stream waits fo
 microbatch's backward: before the next microbatch, ``finalize_model_grads``, the grad norm and the optimizer. Under
 ``--cuda_graph_impl full_iteration`` the fork and the join are edges of the same capture.
 
-EP > 1 / TP > 1 / DP > 1 need no special handling for correctness (the join precedes every grad reduction), but the
+With a process group of world size > 1 (DP / TP / EP / PP) every switch falls back to the serial path
+(``overlap.enabled`` is False): DDP may launch a bucket reduction from a backward hook before the join, and the
 overlap has only been measured on the 1-GPU proxy.
 """
 

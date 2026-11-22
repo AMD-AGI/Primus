@@ -2632,17 +2632,16 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 out = self.indexer(hidden.detach(), position_ids, cu_seqlens=None)
             self._ovl_indexer = (br, out)
 
-        # PRIMUS_OVERLAP_COMPRESSOR=1 (HCA): the compressor (pool) depends only on `hidden`, so it is issued on a side
+        # PRIMUS_OVERLAP_COMPRESSOR (HCA / CSA): the compressor (pool) depends only on `hidden`, so it is issued on a side
         # stream next to the q / kv path (its backward follows it there). ForkGrad sums the two input gradients in the
         # serial engine's order -- compressor first, then the qkv_a projection (the only other consumer on the concat
-        # path) -- so every bit stays the same. CSA layers are left out: with the indexer already on a side stream,
-        # a third branch measured ~30 us/layer slower in-step (ovl_p_prof_H vs ovl_n_prof_all).
+        # path) -- so every bit stays the same. =1: HCA layers only; =2: CSA layers too (next to the indexer branch).
         self._ovl_pool = None
         if (
-            self.compress_ratio == 128
-            and self.compressor is not None
+            self.compressor is not None
             and _overlap is not None
             and _overlap.enabled("COMPRESSOR")
+            and (self.compress_ratio == 128 or (self.compress_ratio == 4 and _overlap.level("COMPRESSOR") >= 2))
             and cu_seqlens is None
             and _v4_get_cp_group() is None
             and hidden.requires_grad
