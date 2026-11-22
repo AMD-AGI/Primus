@@ -1138,12 +1138,13 @@ class HCPreFn(torch.autograd.Function):
                 if xc["ewm"]:
                     blk = wm
                 n_dx = D // xc["bc"]
-                _hc_b3x_kernel[(n_dx * ts,)](
+                kern = _hc_b3x_kernel
+                ekw = dict(PF=bool(xc["pf"]), BUF=bool(xc["buf"]) and M * KD * 2 < 2 ** 31)
+                kern[(n_dx * ts,)](
                     x3, w, wth, wtl, gh, glo, gth, gtl, coef, pre, combt, dcoll, dnew if dnew is not None else x3, dx,
                     dw_p, M, D, N, M // ts, n_dx, n_dx * ts,
                     BT=xbt, BC=xc["bc"], BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk,
-                    SMEM=smem, SMEM_W=smem_w, DIRECT_W=ctx.direct_w, PF=bool(xc["pf"]),
-                    BUF=bool(xc["buf"]) and M * KD * 2 < 2 ** 31, num_warps=xc["w"],
+                    SMEM=smem, SMEM_W=smem_w, DIRECT_W=ctx.direct_w, num_warps=xc["w"], **ekw,
                 )
             else:
                 assert not ctx.direct_w
