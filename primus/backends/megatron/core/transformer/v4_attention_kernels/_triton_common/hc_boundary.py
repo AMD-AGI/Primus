@@ -329,6 +329,12 @@ def _xrms_cfg():
     if v:
         t = [int(a) for a in v.split(",")]
         c.update(bt=t[0], warps=t[1], pf=bool(t[2]) if len(t) > 2 else False)
+    # hcfuse: PRIMUS_HCFUSE_XRMS_CFG="bt=16,bk=64,chunk=1024,warps=8,stages=2" (changes the partial K order)
+    v = os.environ.get("PRIMUS_HCFUSE_XRMS_CFG", "").strip()
+    if v:
+        for kv in v.split(","):
+            k, x = kv.split("=")
+            c[k.strip()] = int(x)
     return c
 
 
@@ -336,7 +342,7 @@ def xrms_supported(x3, next_w) -> bool:
     M, K, D = x3.shape
     c = XRMS_CFG
     return (next_w is not None and next_w.dtype == torch.bfloat16 and next_w.is_contiguous() and K == 4
-            and next_w.dim() == 2 and next_w.shape[1] == K * D and next_w.shape[0] <= 32 and D % c["chunk"] == 0
+            and next_w.dim() == 2 and next_w.shape[1] == K * D and next_w.shape[0] <= 32 and D % _xrms_cfg()["chunk"] == 0
             and next_w.is_cuda and next_w.data_ptr() != 0)
 
 
@@ -352,6 +358,7 @@ def expand_rms(x3, out_c, post_c, combt_c, next_w):
     p_ss = torch.empty((n_split, M), dtype=torch.float32, device=x3.device)
     _hc_expand_rms_kernel[(triton.cdiv(M, c["bt"]), D // c["chunk"])](
         x3, out_c, post_c, combt_c, new, next_w, p_raw, p_ss, M, D, N,
-        BT=c["bt"], BK=c["bk"], CHUNK=c["chunk"], BN=BN, ORDER=c["order"], PF=c["pf"], num_warps=c["warps"],
+        BT=c["bt"], BK=c["bk"], CHUNK=c["chunk"], BN=BN, ORDER=c["order"], PF=bool(c["pf"]), num_warps=c["warps"],
+        **({"num_stages": c["stages"]} if "stages" in c else {}),
     )
     return new, p_raw, p_ss, n_split

@@ -39,7 +39,7 @@ def _b3x_ldw(W, WTH, WTL, k: gl.constexpr, nb, cb, D, N, BN: gl.constexpr, DIREC
 def _b3x_dx(k: gl.constexpr, gh, gq, wsh, wsl, xk, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
             BT: gl.constexpr, BC: gl.constexpr, HAS_DNEW: gl.constexpr, WMMA: gl.constexpr, OPB: gl.constexpr,
             BLK: gl.constexpr, SKIP_LO: gl.constexpr, ABL: gl.constexpr = 0, BUF: gl.constexpr = False,
-            dDX=None, sxo=0):
+            dDX=None, sxo=0, GQ: gl.constexpr = True):
     pk = gl.expand_dims(gl.load(PRE + tr * 4 + k).to(gl.float32), 1)
     if ABL & 2:
         out = gl.zeros([BT, BC], gl.float32, layout=BLK) - xk.to(gl.float32) * cf + pk * dcv
@@ -50,7 +50,8 @@ def _b3x_dx(k: gl.constexpr, gh, gq, wsh, wsl, xk, cf, PRE, COMBT, tr, dcv, n0, 
         if not SKIP_LO:
             wl = wsl.load(OPB)
             acc = gl.amd.gfx1250.wmma(gh, wl, acc)
-        acc = gl.amd.gfx1250.wmma(gq, wh, acc)
+        if GQ:
+            acc = gl.amd.gfx1250.wmma(gq, wh, acc)
         out = gl.convert_layout(acc, BLK) - xk.to(gl.float32) * cf + pk * dcv
     if HAS_DNEW:
         q0 = gl.expand_dims(gl.load(COMBT + tr * 16 + 0 + k).to(gl.float32), 1)
@@ -67,7 +68,8 @@ def _b3x_dx(k: gl.constexpr, gh, gq, wsh, wsl, xk, cf, PRE, COMBT, tr, dcv, n0, 
 
 @gluon.jit
 def _b3x_load(t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT: gl.constexpr, BN: gl.constexpr,
-              HAS_DNEW: gl.constexpr, OPA: gl.constexpr, ABL: gl.constexpr = 0):
+              HAS_DNEW: gl.constexpr, OPA: gl.constexpr, ABL: gl.constexpr = 0, COEF2=None, HAS_C2: gl.constexpr = False,
+              GQ: gl.constexpr = True):
     KD = 4 * D
     tr = t0 + tb
     tr64 = tr.to(gl.int64)
@@ -80,7 +82,10 @@ def _b3x_load(t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D,
         dcb = x0
     else:
         dcb = gl.load(DC + gl.expand_dims(tr64 * D, 1) + gl.expand_dims(cr, 0))
-    cf = gl.expand_dims(gl.load(COEF + tr), 1)
+    if HAS_C2:  # hcfuse PRIMUS_HCFUSE_BWD: coef = coef_a (pre part) + coef_b (post / comb part)
+        cf = gl.expand_dims(gl.load(COEF + tr) + gl.load(COEF2 + tr), 1)
+    else:
+        cf = gl.expand_dims(gl.load(COEF + tr), 1)
     if HAS_DNEW and not (ABL & 8):
         n0 = gl.load(DNEW + rowoff)
         n1 = gl.load(DNEW + rowoff + D)
@@ -94,11 +99,15 @@ def _b3x_load(t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D,
     ta = t0 + gl.arange(0, BT, layout=gl.SliceLayout(1, OPA))
     goff = gl.expand_dims(ta, 1) * BN + gl.expand_dims(na_r, 0)
     gh = gl.load(GH + goff)
-    gq = gl.load(GL + goff)
     tc = t0 + gl.arange(0, BT, layout=gl.SliceLayout(0, OPA))
     gto = gl.expand_dims(na_c, 1) * M + gl.expand_dims(tc, 0)
     gth = gl.load(GTH + gto)
-    gtl = gl.load(GTL + gto)
+    if GQ:
+        gq = gl.load(GL + goff)
+        gtl = gl.load(GTL + gto)
+    else:  # hcfuse PRIMUS_HCFUSE_B3X_GLO=0: g as bf16 only (no lo products)
+        gq = gh
+        gtl = gth
     return x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl
 
 
@@ -140,7 +149,7 @@ def _b3x_step(t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
               wsh0, wsh1, wsh2, wsh3, wsl0, wsl1, wsl2, wsl3, xs0, xs1, xs2, xs3, accw0, accw1, accw2, accw3,
               PRE, COMBT, DX, tb, cr, D, BT: gl.constexpr, BC: gl.constexpr, HAS_DNEW: gl.constexpr,
               WMMA: gl.constexpr, OPB: gl.constexpr, BLK: gl.constexpr, DIRECT_W: gl.constexpr, ABL: gl.constexpr = 0,
-              BUF: gl.constexpr = False, dDX=None, loc_x=None):
+              BUF: gl.constexpr = False, dDX=None, loc_x=None, GQ: gl.constexpr = True):
     KD = 4 * D
     tr = t0 + tb
     if BUF:
@@ -153,13 +162,13 @@ def _b3x_step(t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
     if not (ABL & 8):
         dcv = dcb.to(gl.float32)
         _b3x_dx(0, gh, gq, wsh0, wsl0, x0, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo, GQ)
         _b3x_dx(1, gh, gq, wsh1, wsl1, x1, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo, GQ)
         _b3x_dx(2, gh, gq, wsh2, wsl2, x2, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo, GQ)
         _b3x_dx(3, gh, gq, wsh3, wsl3, x3, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo, GQ)
     if not (ABL & 1):
         gl.barrier()
         xs0.store(x0)
@@ -169,16 +178,20 @@ def _b3x_step(t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
         gl.barrier()
         xb = xs0.load(OPB)
         accw0 = gl.amd.gfx1250.wmma(gth, xb, accw0)
-        accw0 = gl.amd.gfx1250.wmma(gtl, xb, accw0)
+        if GQ:
+            accw0 = gl.amd.gfx1250.wmma(gtl, xb, accw0)
         xb = xs1.load(OPB)
         accw1 = gl.amd.gfx1250.wmma(gth, xb, accw1)
-        accw1 = gl.amd.gfx1250.wmma(gtl, xb, accw1)
+        if GQ:
+            accw1 = gl.amd.gfx1250.wmma(gtl, xb, accw1)
         xb = xs2.load(OPB)
         accw2 = gl.amd.gfx1250.wmma(gth, xb, accw2)
-        accw2 = gl.amd.gfx1250.wmma(gtl, xb, accw2)
+        if GQ:
+            accw2 = gl.amd.gfx1250.wmma(gtl, xb, accw2)
         xb = xs3.load(OPB)
         accw3 = gl.amd.gfx1250.wmma(gth, xb, accw3)
-        accw3 = gl.amd.gfx1250.wmma(gtl, xb, accw3)
+        if GQ:
+            accw3 = gl.amd.gfx1250.wmma(gtl, xb, accw3)
     return accw0, accw1, accw2, accw3
 
 
@@ -188,7 +201,7 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
                    WMMA: gl.constexpr, OPA: gl.constexpr, OPB: gl.constexpr, BLK: gl.constexpr,
                    SMEM: gl.constexpr, SMEM_W: gl.constexpr, DIRECT_W: gl.constexpr, PF: gl.constexpr = False,
                    ABL: gl.constexpr = 0, BUF: gl.constexpr = False, NMASK: gl.constexpr = False,
-                   UNEVEN: gl.constexpr = False):
+                   UNEVEN: gl.constexpr = False, COEF2=None, HAS_C2: gl.constexpr = False, GQ: gl.constexpr = True):
     tile = gl.program_id(0)
     if tile < N_TILES:
         pid_d = tile % N_D
@@ -247,17 +260,19 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
         if PF:
             # register prefetch: the next step's global loads are issued before this step's math (same arithmetic)
             x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl = _b3x_load(
-                t_lo, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA)
+                t_lo, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA, ABL,
+                COEF2, HAS_C2, GQ)
             for t0 in range(t_lo, t_lo + T_PER, BT):
                 c_x0, c_x1, c_x2, c_x3, c_n0, c_n1, c_n2, c_n3 = x0, x1, x2, x3, n0, n1, n2, n3
                 c_dcb, c_cf, c_gh, c_gq, c_gth, c_gtl = dcb, cf, gh, gq, gth, gtl
                 tn = t_lo + (t0 + BT - t_lo) % T_PER
                 x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl = _b3x_load(
-                    tn, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA)
+                    tn, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA, ABL,
+                    COEF2, HAS_C2, GQ)
                 accw0, accw1, accw2, accw3 = _b3x_step(
                     t0, c_x0, c_x1, c_x2, c_x3, c_n0, c_n1, c_n2, c_n3, c_dcb, c_cf, c_gh, c_gq, c_gth, c_gtl,
                     wsh0, wsh1, wsh2, wsh3, wsl0, wsl1, wsl2, wsl3, xs0, xs1, xs2, xs3, accw0, accw1, accw2, accw3,
-                    PRE, COMBT, DX, tb, cr, D, BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL)
+                    PRE, COMBT, DX, tb, cr, D, BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, False, None, None, GQ)
         elif BUF:
             # buffer ops: int32 tile-local offsets (loop invariant) + scalar row base; x / dnew / dx < 2^31 elements
             nbytes = M * KD * 2
@@ -277,11 +292,12 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
         else:
             for t0 in range(t_lo, t_hi, BT):
                 x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl = _b3x_load(
-                    t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA, ABL)
+                    t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA, ABL,
+                    COEF2, HAS_C2, GQ)
                 accw0, accw1, accw2, accw3 = _b3x_step(
                     t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
                     wsh0, wsh1, wsh2, wsh3, wsl0, wsl1, wsl2, wsl3, xs0, xs1, xs2, xs3, accw0, accw1, accw2, accw3,
-                    PRE, COMBT, DX, tb, cr, D, BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL)
+                    PRE, COMBT, DX, tb, cr, D, BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, False, None, None, GQ)
         nr = gl.arange(0, BN, layout=gl.SliceLayout(1, WMMA))
         cw = c0 + gl.arange(0, BC, layout=gl.SliceLayout(0, WMMA))
         if not (ABL & 1):
