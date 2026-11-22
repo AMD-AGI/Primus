@@ -171,7 +171,12 @@ def indexer_queries_bf16g2(indexer, q_q, position_ids, B, S, H, Hd):
         return None
     if position_ids is None:
         position_ids = torch.arange(S, device=q_q.device)
-    cos, sin = rope(position_ids)
+    from primus.backends.megatron.core.transformer import dual_rope as _dr
+
+    if getattr(_dr, "mb_rope_tbl", lambda: False)() and hasattr(rope, "forward_pos_cast"):
+        cos, sin = rope.forward_pos_cast(position_ids, q_q.dtype)  # membound memo (bf16 tables; same bytes)
+    else:
+        cos, sin = rope(position_ids)
     if tuple(cos.shape[:-1]) != (B, S):
         cos = cos.expand(B, S, -1)
         sin = sin.expand(B, S, -1)
@@ -198,7 +203,13 @@ def indexer_keys_bf16g2(indexer, k_icomp):
     if ((torch.is_grad_enabled() and k_icomp.requires_grad) or _hr._fast_hadamard_transform is not None
             or not k_icomp.is_cuda or k_icomp.dtype != torch.bfloat16 or Hd & (Hd - 1) or not k_icomp.is_contiguous()):
         return None
-    cos, sin = rope.forward_arange(P, k_icomp.device, stride=indexer.compress_ratio)
+    from primus.backends.megatron.core.transformer import dual_rope as _dr
+
+    if getattr(_dr, "mb_rope_tbl", lambda: False)() and hasattr(rope, "forward_arange_cast"):
+        cos, sin = rope.forward_arange_cast(P, k_icomp.device, k_icomp.dtype, indexer.rotary_dim // 2,
+                                            stride=indexer.compress_ratio)  # membound memo (same bytes)
+    else:
+        cos, sin = rope.forward_arange(P, k_icomp.device, stride=indexer.compress_ratio)
     _log_once("k", f"indexer key rope+Hadamard fused (P={P}, Hd={Hd})")
     return rope_hadamard_fused(k_icomp.reshape(B * P, Hd), cos.unsqueeze(0).expand(B, -1, -1),
                                sin.unsqueeze(0).expand(B, -1, -1), _hr._sylvester(Hd, k_icomp.device, k_icomp.dtype),
