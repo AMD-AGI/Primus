@@ -608,7 +608,7 @@ class Compressor(KeepInFp32Mixin, nn.Module):
                 proj = linear_main_grad(hidden, wkg.weight, slot)
             else:
                 proj = None
-                if os.environ.get("PRIMUS_BF16TUNE", "0") == "1":  # frozen indexer compressor (no autograd)
+                if os.environ.get("PRIMUS_BF16TUNE", "0") != "0":  # frozen indexer compressor (no autograd)
                     from primus.backends.megatron.core.fusions.bf16tune import bt_linear
 
                     proj = bt_linear(hidden, wkg.weight, getattr(wkg, "bias", None))
