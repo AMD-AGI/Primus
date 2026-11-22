@@ -52,7 +52,10 @@ Requirements:
 | + fuse-attn F1/F3/F4/F5, graph | 49.9 (A/B 50.90 -> 49.87) | 9.8710 |
 | + densegemm SMALLTILE / EPI2 / CE_BWD_GT, graph | 49.5 (A/B 49.87 -> 49.53) | 9.8710 |
 | + overlap side streams, graph | 49.1 (A/B 49.47 -> 49.10) | 9.8710 |
-| **+ membound QDUAL/PACKQ/GNORM/ROPE_TBL/SMALLS/QNR (this config), graph** | **48.4** (A/B 49.10 -> 48.40) | 9.8712 |
+| + membound QDUAL/PACKQ/GNORM/ROPE_TBL/SMALLS/QNR, graph | 48.4 (A/B 49.10 -> 48.40) | 9.8712 |
+| + wgrad vkq (MoE wgrad scale planes via async VMEM), graph | 48.1 (A/B 48.50 -> 48.13) | 9.8712 |
+| + small batch: membound R2 (QDUAL c4096, PACKQ_SKIP f4096, ROUTER_FWD 128,4), splitk HC_TAILBW 512, attnfwd SMLA_FWD_PIPE, graph | 48.1 (A/B 48.23 -> 48.10) | 9.8712 |
+| **+ attnbwd SMLA_BWD_V2 + Adam HWCVT (this config), graph** | **47.5** (A/B 48.00 -> 47.47) | 9.8712 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -150,6 +153,13 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
   byte-identical): QDUAL picks small-code dual-quant variants per call site (the 29 KB variant paid a 20-45 us cold-code
   penalty after GEMMs), PACKQ packs weight scales inside the quant launch, GNORM does the grad-norm sumsq in 2 launches,
   ROPE_TBL memoises RoPE tables, SMALLS drops small fills/copies, QNR_FWD_BH=8/NW=2 retiles q_norm_rope_fwd2.
+2026-11-22 batch 3 (int A/B, 3 pairs each, all bit-identical vs the previous config):
+- wgrad `PRIMUS_TURBO_MOE_FP8BLK_WGRAD=vkq` (default): vkp with the scale-plane windows loaded by async VMEM instead of the
+  in-order TDM queue (-0.37 ms). The overlap-deferred wgrad path honours vkq (fix 871b510d).
+- membound round 2, splitk `PRIMUS_SPLITK_HC_TAILBW=512`, attnfwd `PRIMUS_SMLA_FWD_PIPE=1` (-0.13 ms together).
+- attnbwd `PRIMUS_SMLA_BWD_V2=1` (CSA sparse-MLA backward: no exposed L2 prefetch, TDM-staged Q/dO/O, fused count scan;
+  855 -> 753 us/layer) and adamfetch `PRIMUS_FP8BLK_ADAM_HWCVT=1` (hardware FP32->BF16 rounding, exhaustively equal to c10
+  RNE; tile Adam 9.36 -> 8.99 ms): -0.53 ms together.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
