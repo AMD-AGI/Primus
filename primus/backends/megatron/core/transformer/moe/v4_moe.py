@@ -1019,7 +1019,7 @@ class DeepseekV4MoE(MegatronModule):
         # order (shared expert, routed experts, router), so every bit stays the same.
         h_r = h_e = hidden
         br = y_shared = None
-        if (
+        shared_ovl = (
             self.shared_expert is not None
             and not self.shared_expert_overlap
             and self.mega_moe_experts is not None
@@ -1030,13 +1030,11 @@ class DeepseekV4MoE(MegatronModule):
             and torch.is_grad_enabled()
             and parallel_state.get_expert_model_parallel_world_size() == 1
             and parallel_state.get_tensor_model_parallel_world_size() == 1
-        ):
-            h_r, h_e, h_s = _overlap.ForkGrad.apply(hidden, 3, (2, 1, 0))
-            with _overlap.branch("branch") as br:
-                y_shared = self.shared_expert(h_s)
-
+        )
         # persist track (PRIMUS_PERSIST_ROUTER_BWD=1, EP = TP = 1, training): the router owns the fork of `hidden`
-        # into its routed / shared consumers, so its backward sums their gradients inside its one-launch kernel.
+        # into its routed / shared consumers, so its backward sums their gradients inside its one-launch kernel
+        # (in ForkGrad's order: (shared + routed) + router). With PRIMUS_OVERLAP_SHARED it replaces ForkGrad: the
+        # router forward is issued first, then the shared expert on the branch stream with the router's alias.
         persist = (
             self.mega_moe_experts is not None
             and os.environ.get("PRIMUS_PERSIST_ROUTER_BWD", "0") == "1"
@@ -1045,13 +1043,26 @@ class DeepseekV4MoE(MegatronModule):
             and parallel_state.get_expert_model_parallel_world_size() == 1
             and parallel_state.get_tensor_model_parallel_world_size() == 1
         )
-        compact = self._route_compact(h_r, token_ids, persist=persist) if self.mega_moe_experts is not None else None
+        compact = None
+        if shared_ovl and persist:
+            c = self._route_compact(hidden, token_ids, persist=True)
+            if c is not None and len(c) == 4:
+                compact = c
+                h_e = c[2]
+                with _overlap.branch("branch") as br:
+                    y_shared = self.shared_expert(c[3])
+        if shared_ovl and compact is None:
+            h_r, h_e, h_s = _overlap.ForkGrad.apply(hidden, 3, (2, 1, 0))
+            with _overlap.branch("branch") as br:
+                y_shared = self.shared_expert(h_s)
+        if compact is None:
+            compact = self._route_compact(h_r, token_ids, persist=persist) if self.mega_moe_experts is not None else None
         if compact is not None:
             # PRIMUS_FUSE_ROUTE=1: router GEMM + one compact route kernel straight into MegaMoE's (idx, weights)
             h_sh = hidden
             if len(compact) == 4:
                 topk_w, topk_idx, a_e, a_s = compact
-                if br is None:  # else ForkGrad already forked `hidden`; the aliases stay unused (no gradient)
+                if br is None:  # else h_e / the shared branch are set above (ForkGrad's or these aliases)
                     h_e, h_sh = a_e, a_s
             else:
                 topk_w, topk_idx = compact

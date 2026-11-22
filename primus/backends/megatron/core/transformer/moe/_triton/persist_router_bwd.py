@@ -338,7 +338,11 @@ class PersistRouterFn(torch.autograd.Function):
         route = (logits, idx_rows, ids, wsave, denom, cnt, dscale, K, ctx.S if ctx.has_loss else 1,
                  ctx.lcoef if ctx.has_loss else 0.0, ctx.scale, ctx.hash, ctx.has_loss)
         H = flat.shape[1]
-        # autograd's accumulation order of the input gradient: (shared + routed) + router
+        cur = torch.cuda.current_stream(dev)
+        for g in (g_e, g_s):  # a branch-stream gradient (PRIMUS_OVERLAP_SHARED) is read on this stream too
+            if g is not None and g.is_cuda:
+                g.record_stream(cur)
+        # autograd's accumulation order of the input gradient (ForkGrad's order): (shared + routed) + router
         gs = [g.reshape(N, H) if g is not None else None for g in (g_s, g_e)]
         if any(g is not None and (not g.is_contiguous() or g.dtype != flat.dtype) for g in (g_s, g_e)):
             gs = [g.reshape(N, H).contiguous().to(flat.dtype) if g is not None else None for g in (g_s, g_e)]
