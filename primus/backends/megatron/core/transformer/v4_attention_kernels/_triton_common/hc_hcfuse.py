@@ -732,3 +732,96 @@ def norm_pre_bwd(x3, pre, gamma, rstd_n, dy, raw, rstd, states, scale_c, base_c,
 __all__ = ["hcfuse_bwd_enabled", "hcfuse_fwd_enabled", "hcfuse_tail_enabled", "side_stream", "norm_pre_bwd",
            "pre_collapse_fwd", "post_tail", "tail_mode"]
 side_stream = _side_stream
+
+
+# ------------------------------------------------------------------------------------------------
+# PRIMUS_HCFUSE_POST=1: expand backward (post_bwd2d) with the 20 per-row reductions on WMMA (Gluon)
+# ------------------------------------------------------------------------------------------------
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+
+    _HAVE_GLUON = True
+except Exception:  # pragma: no cover
+    _HAVE_GLUON = False
+
+
+def hcfuse_post_enabled() -> bool:
+    return _mode("PRIMUS_HCFUSE_POST") > 0
+
+
+if _HAVE_GLUON:
+
+    @gluon.jit
+    def _hcf_post_wmma_kernel(G, X, OUT, POST, DOUT, DPOSTP, DCOMBTP, M, D,
+                              WM: gl.constexpr, OPA: gl.constexpr, OPB: gl.constexpr, BLK: gl.constexpr,
+                              BC: gl.constexpr):
+        """One 1-warp program = 4 rows x BC columns. dcomb^T[t, h, k] = <dnew[t, h], x[t, k]> and
+        dpost[t, h] = <out[t], dnew[t, h]> come from 16x16x32 WMMAs on A = dnew [(t, h) = 16 rows, 32 cols] and
+        B = x / out [32 cols, (t', k) = 16]: only the t == t' diagonal 4x4 blocks are used. dout = sum_h post_h dnew_h
+        on a blocked copy of dnew. Partials per BC column tile, same layout as _hc_post_bwd2d_kernel."""
+        pid_t = gl.program_id(0)
+        pid_c = gl.program_id(1)
+        r0 = pid_t * 4
+        c0 = pid_c * BC
+        KD = 4 * D
+        # WMMA operands
+        a_r = gl.arange(0, 16, layout=gl.SliceLayout(1, OPA))
+        a_k = gl.arange(0, 32, layout=gl.SliceLayout(0, OPA))
+        b_k = gl.arange(0, 32, layout=gl.SliceLayout(1, OPB))
+        b_c = gl.arange(0, 16, layout=gl.SliceLayout(0, OPB))
+        a_off = gl.expand_dims((r0 + a_r // 4).to(gl.int64) * KD + (a_r % 4) * D, 1) + gl.expand_dims(c0 + a_k, 0)
+        b_off = gl.expand_dims(c0 + b_k, 1) + gl.expand_dims((r0 + b_c // 4).to(gl.int64) * KD + (b_c % 4) * D, 0)
+        o_off = gl.expand_dims(c0 + b_k, 1) + gl.expand_dims((r0 + b_c // 4).to(gl.int64) * D, 0)
+        acc = gl.zeros([16, 16], gl.float32, layout=WM)
+        acc2 = gl.zeros([16, 16], gl.float32, layout=WM)
+        for kc in gl.static_range(0, BC, 32):
+            a = gl.load(G + a_off + kc)
+            b = gl.load(X + b_off + kc)
+            bo = gl.load(OUT + o_off + kc)
+            acc = gl.amd.gfx1250.wmma(a, b, acc)
+            acc2 = gl.amd.gfx1250.wmma(a, bo, acc2)
+        # diagonal 4x4 blocks -> partials
+        c_r = gl.expand_dims(gl.arange(0, 16, layout=gl.SliceLayout(1, WM)), 1)
+        c_c = gl.expand_dims(gl.arange(0, 16, layout=gl.SliceLayout(0, WM)), 0)
+        diag = (c_r // 4) == (c_c // 4)
+        row = (r0 + c_r // 4).to(gl.int64)
+        pb = pid_c * M
+        gl.store(DCOMBTP + (pb + row) * 16 + (c_r % 4) * 4 + (c_c % 4), acc, mask=diag)
+        gl.store(DPOSTP + (pb + row) * 4 + (c_r % 4) + c_c * 0, acc2, mask=diag & ((c_c % 4) == 0))
+        # dout on a blocked copy (L1/L2 hit)
+        t_r = gl.arange(0, 4, layout=gl.SliceLayout(1, BLK))
+        t_c = c0 + gl.arange(0, BC, layout=gl.SliceLayout(0, BLK))
+        r64 = (r0 + t_r).to(gl.int64)
+        base = gl.expand_dims(r64 * KD, 1) + gl.expand_dims(t_c, 0)
+        p0 = gl.expand_dims(gl.load(POST + r64 * 4 + 0).to(gl.float32), 1)
+        p1 = gl.expand_dims(gl.load(POST + r64 * 4 + 1).to(gl.float32), 1)
+        p2 = gl.expand_dims(gl.load(POST + r64 * 4 + 2).to(gl.float32), 1)
+        p3 = gl.expand_dims(gl.load(POST + r64 * 4 + 3).to(gl.float32), 1)
+        d = (p0 * gl.load(G + base).to(gl.float32) + p1 * gl.load(G + base + D).to(gl.float32)
+             + p2 * gl.load(G + base + 2 * D).to(gl.float32) + p3 * gl.load(G + base + 3 * D).to(gl.float32))
+        gl.store(DOUT + gl.expand_dims(r64 * D, 1) + gl.expand_dims(t_c, 0), d.to(gl.bfloat16))
+
+    _PL = {}
+
+    def _post_layouts(bc):
+        if bc not in _PL:
+            wm = gl.amd.AMDWMMALayout(version=3, transposed=True, warp_bases=[], instr_shape=[16, 16, 32])
+            opa = gl.DotOperandLayout(operand_index=0, parent=wm, k_width=8)
+            opb = gl.DotOperandLayout(operand_index=1, parent=wm, k_width=8)
+            blk = gl.BlockedLayout([1, 8], [1, 32], [1, 1], [1, 0])
+            _PL[bc] = (wm, opa, opb, blk)
+        return _PL[bc]
+
+
+def post_bwd_wmma(dnew, x3, out_c, post_c, dout, dpost, dcombt, bc=256):
+    """dnew / x3 [M, 4, D] bf16, out_c [M, D] bf16, post_c [M, 4] bf16 -> dout, dpost [D/bc, M, 4], dcombt
+    [D/bc, M, 4, 4] fp32 partials (the _hc_post_bwd2d_kernel layout). Needs M % 4 == 0, D % bc == 0, bc % 32 == 0."""
+    M, K, D = x3.shape
+    wm, opa, opb, blk = _post_layouts(bc)
+    _hcf_post_wmma_kernel[(M // 4, D // bc)](dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
+                                             WM=wm, OPA=opa, OPB=opb, BLK=blk, BC=bc, num_warps=1)
+
+
+def post_wmma_ok(M, K, D, bc=256) -> bool:
+    return _HAVE_GLUON and K == 4 and M % 4 == 0 and D % bc == 0 and bc % 32 == 0
