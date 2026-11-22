@@ -76,6 +76,52 @@ def _ce_bwd_kernel(X, Y, LSE, GO, DX, V, stride_x, stride_go, IGNORE: tl.constex
     tl.store(DX + r64 * V + cols, g.to(DX.dtype.element_ty), mask=msk)
 
 
+@triton.jit
+def _ce_bwd_t_kernel(X, Y, LSE, GO, DX, DXT, T, V, stride_x, stride_go, IGNORE: tl.constexpr, BT: tl.constexpr,
+                     BV: tl.constexpr):
+    # densegemm (PRIMUS_V4_CE_BWD_GT): _ce_bwd_kernel's per-element math on a [BT, BV] tile (same values, bit for
+    # bit), plus the same tile written transposed into DXT [V, T] for the lm_head TN wgrad (no separate transpose).
+    rows = tl.program_id(0) * BT + tl.arange(0, BT)
+    cols = tl.program_id(1) * BV + tl.arange(0, BV)
+    rm = rows < T
+    cm = cols < V
+    y = tl.load(Y + rows, mask=rm, other=IGNORE)
+    go = tl.load(GO + rows * stride_go, mask=rm, other=0.0)
+    go = tl.where(y != IGNORE, go, 0.0)
+    lse = tl.load(LSE + rows, mask=rm, other=0.0)
+    r64 = rows.to(tl.int64)
+    m2 = rm[:, None] & cm[None, :]
+    x = tl.load(X + r64[:, None] * stride_x + cols[None, :], mask=m2, other=0.0).to(tl.float32)
+    g = (tl.exp(x - lse[:, None]) - tl.where(cols[None, :] == y[:, None], 1.0, 0.0)) * go[:, None]
+    gb = g.to(DX.dtype.element_ty)
+    tl.store(DX + r64[:, None] * V + cols[None, :], gb, mask=m2)
+    c64 = cols.to(tl.int64)
+    tl.store(DXT + c64[:, None] * T + rows[None, :], tl.trans(gb), mask=cm[:, None] & rm[None, :])
+
+
+# dx.data_ptr() -> (dx^T [V, T], dx._version) from the last PRIMUS_V4_CE_BWD_GT backward; consumed by pop_grad_t.
+_GT_STASH = {}
+
+
+def ce_bwd_gt_enabled() -> bool:
+    """PRIMUS_V4_CE_BWD_GT=1 (default off; needs PRIMUS_LM_HEAD_WGRAD_TORCH=1 + PRIMUS_LM_HEAD_WGRAD_LAYOUT=tn): the CE
+    backward also writes dlogits^T, which the lm_head TN wgrad uses instead of transposing the 1 GB grad."""
+    return (os.environ.get("PRIMUS_V4_CE_BWD_GT", "0") == "1"
+            and os.environ.get("PRIMUS_LM_HEAD_WGRAD_LAYOUT", "nt").strip().lower() == "tn")
+
+
+def pop_grad_t(g: torch.Tensor):
+    """dlogits^T for the 2-D grad ``g`` if the last CE backward produced it for exactly this tensor and it has not
+    been modified in place since (version counter); else None (caller transposes)."""
+    ent = _GT_STASH.pop(g.data_ptr(), None)
+    if ent is None:
+        return None
+    gt, ver = ent
+    if g.dim() != 2 or tuple(gt.shape) != (g.shape[1], g.shape[0]) or g._version != ver or g.stride(-1) != 1:
+        return None
+    return gt
+
+
 class PrimusCrossEntropyFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp, target, ignore_idx):  # type: ignore[override]
@@ -113,10 +159,20 @@ class PrimusCrossEntropyFn(torch.autograd.Function):
             go = go.expand(T)
         f = CE_CFG
         dx = torch.empty((T, V), dtype=x2d.dtype, device=x2d.device)
-        _ce_bwd_kernel[(T, triton.cdiv(V, f["bwd_block"]))](
-            x2d, y, lse, go, dx, V, x2d.stride(0), go.stride(0), IGNORE=ctx.ignore_idx, BLOCK=f["bwd_block"],
-            num_warps=f["bwd_warps"],
-        )
+        _GT_STASH.clear()
+        if ce_bwd_gt_enabled():
+            dxt = torch.empty((V, T), dtype=x2d.dtype, device=x2d.device)
+            BT, BV = CE_CFG.get("gt_bt", 64), CE_CFG.get("gt_bv", 256)  # ce_real1: 64x256 best (215 vs 282 us)
+            _ce_bwd_t_kernel[(triton.cdiv(T, BT), triton.cdiv(V, BV))](
+                x2d, y, lse, go, dx, dxt, T, V, x2d.stride(0), go.stride(0), IGNORE=ctx.ignore_idx, BT=BT, BV=BV,
+                num_warps=CE_CFG.get("gt_warps", 8),
+            )
+            _GT_STASH[dx.data_ptr()] = (dxt, dx._version)
+        else:
+            _ce_bwd_kernel[(T, triton.cdiv(V, f["bwd_block"]))](
+                x2d, y, lse, go, dx, V, x2d.stride(0), go.stride(0), IGNORE=ctx.ignore_idx, BLOCK=f["bwd_block"],
+                num_warps=f["bwd_warps"],
+            )
         return dx.view(ctx.inp_shape), None, None
 
 
@@ -139,4 +195,5 @@ def primus_parallel_cross_entropy(inp, target, label_smoothing=0.0, reduce_loss=
     return loss
 
 
-__all__ = ["primus_parallel_cross_entropy", "primus_ce_enabled", "PrimusCrossEntropyFn", "CE_CFG"]
+__all__ = ["primus_parallel_cross_entropy", "primus_ce_enabled", "PrimusCrossEntropyFn", "CE_CFG", "pop_grad_t",
+           "ce_bwd_gt_enabled"]

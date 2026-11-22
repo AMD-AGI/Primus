@@ -83,7 +83,18 @@ class _TorchWgradShim:
         if _LAYOUT == "tn" and x.stride(-1) == 1 and g.stride(-1) == 1:
             from primus.backends.megatron.core.fusions.bf16_transpose import transpose_last2
 
-            a, b = transpose_last2(g), transpose_last2(x).t()  # [V, T], [T, H] view of [H, T]
+            gt = None
+            if os.environ.get("PRIMUS_V4_CE_BWD_GT", "0") == "1":  # densegemm: dlogits^T written by the CE backward
+                from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fused_ce import (
+                    pop_grad_t,
+                )
+
+                gt = pop_grad_t(g)
+                if gt is None and not _stats.get("gt_miss_logged"):
+                    _stats["gt_miss_logged"] = True
+                    _log("[Patch:lm_head_wgrad_torch] PRIMUS_V4_CE_BWD_GT: no CE-written grad^T for this grad -> transpose")
+            a = gt if gt is not None else transpose_last2(g)
+            b = transpose_last2(x).t()  # [V, T], [T, H] view of [H, T]
         else:
             a, b = g.t(), x
         if beta0:
