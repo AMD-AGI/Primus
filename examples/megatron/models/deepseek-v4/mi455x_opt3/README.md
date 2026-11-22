@@ -51,7 +51,8 @@ Requirements:
 | + mxgemm persistent mxgk (GG=mxp) + fuse-moe SWB_TDM, graph | 50.8 (A/B 51.13 -> 50.83) | 9.8710 |
 | + fuse-attn F1/F3/F4/F5, graph | 49.9 (A/B 50.90 -> 49.87) | 9.8710 |
 | + densegemm SMALLTILE / EPI2 / CE_BWD_GT, graph | 49.5 (A/B 49.87 -> 49.53) | 9.8710 |
-| **+ overlap side streams (this config), graph** | **49.1** (A/B 49.47 -> 49.10) | 9.8710 |
+| + overlap side streams, graph | 49.1 (A/B 49.47 -> 49.10) | 9.8710 |
+| **+ membound QDUAL/PACKQ/GNORM/ROPE_TBL/SMALLS/QNR (this config), graph** | **48.4** (A/B 49.10 -> 48.40) | 9.8712 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -145,6 +146,10 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
   expert, CSA indexer and HCA compressor forward branches and the main_grad-only wgrads on side streams inside the graph,
   joined after every backward_step. Off when world size > 1 or when DDP grad checks are on. Verified by bit fingerprints
   of params, main_grads and optimizer state.
+- membound (default on, -0.7 ms; loss@20 9.871213 in spread because GNORM changes the grad-norm fp32 sum order; the rest is
+  byte-identical): QDUAL picks small-code dual-quant variants per call site (the 29 KB variant paid a 20-45 us cold-code
+  penalty after GEMMs), PACKQ packs weight scales inside the quant launch, GNORM does the grad-norm sumsq in 2 launches,
+  ROPE_TBL memoises RoPE tables, SMALLS drops small fills/copies, QNR_FWD_BH=8/NW=2 retiles q_norm_rope_fwd2.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
