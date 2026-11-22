@@ -61,6 +61,76 @@ def take_saved_output(t: torch.Tensor) -> bool:
     return rec is not None and rec == (t.data_ptr(), t.numel())
 
 
+def _launch_dsink_param(sink, needs_grad: bool):
+    """PRIMUS_LAUNCH_DSINK=1 (launch line): the bf16 sink Parameter whose ``main_grad`` the backward writes in one
+    launch (Turbo gfx1250 dsink kernel, no reduce / cast / DDP copy), flagged like Turbo's fused-wgrad linears; else
+    None (the regular path)."""
+    if sink is None or not needs_grad or os.environ.get("PRIMUS_LAUNCH_DSINK", "0") not in ("1", "2"):
+
+        return None
+    mg = getattr(sink, "main_grad", None)
+    if not (
+        isinstance(sink, torch.nn.Parameter)
+        and sink.is_cuda
+        and sink.dtype == torch.bfloat16
+        and hasattr(sink, "grad_added_to_main_grad")
+        and isinstance(mg, torch.Tensor)
+        and mg.dtype == torch.bfloat16
+        and mg.is_contiguous()
+        and mg.numel() == sink.numel()
+        and sink.dim() == 1
+        and sink.numel() % 16 == 0
+        and not getattr(sink, "shared", False)
+    ):
+        return None
+    sink._primus_fwd_claim = True  # grad_added_to_main_grad is flagged already in forward
+    sink.grad_added_to_main_grad = True
+    return sink
+
+
+def _sink_arg(sink):
+    """fp32 contiguous sink for the kernels; PRIMUS_LAUNCH_SINK_CAST: a row of the per-step joint cast."""
+    if sink is None:
+        return None
+    if os.environ.get("PRIMUS_LAUNCH_SINK_CAST", "0") == "1":
+        from ._triton_common.launch_sink_cast import sink_f32
+
+        r = sink_f32(sink)
+        if r is not None:
+            return r
+    return sink.float().contiguous()
+
+
+def _launch_dsink_begin(ctx):
+
+    p = getattr(ctx, "sink_param", None)
+    if p is None:
+        return None
+    ctx.sink_param = None
+    from primus_turbo.pytorch.ops.utils import main_grad_first_write
+    from primus_turbo.triton.attention import sparse_mla_dsink as _sd
+
+    acc = not main_grad_first_write(p)
+    _sd.set_main_grad_target(p.main_grad, acc)
+    return p, acc
+
+
+def _launch_dsink_end(st, dsink):
+    """The sink's autograd gradient (a dummy: main_grad already holds it). Falls back to a torch write when the
+    backend did not consume the target (non-gfx1250 backward)."""
+    from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad
+    from primus_turbo.triton.attention import sparse_mla_dsink as _sd
+
+    p, acc = st
+    if _sd.take_main_grad_target() is not None:
+        g = dsink.to(p.dtype)
+        if acc:
+            p.main_grad.add_(g)
+        else:
+            p.main_grad.copy_(g)
+    return _get_dummy_wgrad(list(p.shape), p.dtype)
+
+
 def _fused_glue_on(t: torch.Tensor) -> bool:
     """Fused Triton glue (one kernel for the CSA top-k map / the rope-padded kv) on GPU tensors."""
     return t.is_cuda and os.environ.get("PRIMUS_V4_FUSED_GLUE", "1") == "1"
@@ -316,6 +386,7 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
             kv_g = _glue().rope_pad_kv(latent, pool, _ROPE_PAD)
         else:
             kv_g = _rope_pad_kv(torch.cat([latent, pool], dim=1).reshape(B * (Skv + P), 1, D))
+        ctx.sink_param = _launch_dsink_param(sink, ctx.needs_input_grad[5])
 
         if seq_starts is None and _fused_glue_on(q_bh) and topk_idxs.stride(-1) == 1:
             topk_g = _glue().csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start))
@@ -324,7 +395,7 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
                 _build_csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start), seq_starts)
             )
 
-        sink_arg = sink.float().contiguous() if sink is not None else None
+        sink_arg = _sink_arg(sink)
         o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
@@ -350,10 +421,12 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         sink_arg = None if ctx.sink_was_none else sink_saved
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
+        lst = _launch_dsink_begin(ctx)
         with _band(ctx.band):
             dq_g, dkv_g, dsink = ctx.bwd_fn(
                 q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
             )
+        dsink_mg = _launch_dsink_end(lst, dsink) if lst is not None else None
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv512 = dkv_g[:, 0, :D].reshape(B, Skv + P, D)
@@ -378,7 +451,9 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         dv_local = None
 
         dsink_out = None
-        if not ctx.sink_was_none and dsink is not None:
+        if dsink_mg is not None:
+            dsink_out = dsink_mg
+        elif not ctx.sink_was_none and dsink is not None:
             dsink_out = dsink.to(sink_saved.dtype)
 
         # forward args: (q, k_local, v_local, pool, topk_idxs, sink, swa_window, scale,
@@ -483,8 +558,10 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
             kv_g = _glue().rope_pad_kv(latent, None, _ROPE_PAD)
         else:
             kv_g = _rope_pad_kv(latent.reshape(B * Skv, 1, D))
+        ctx.sink_param = _launch_dsink_param(sink, ctx.needs_input_grad[3])
 
-        sink_arg = sink.float().contiguous() if sink is not None else None
+        sink_arg = _sink_arg(sink)
+
         ctx.band = band
         with _band(band):
             o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
@@ -511,10 +588,12 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         sink_arg = None if ctx.sink_was_none else sink_saved
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
+        lst = _launch_dsink_begin(ctx)
         with _band(ctx.band):
             dq_g, dkv_g, dsink = ctx.bwd_fn(
                 q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
             )
+        dsink_mg = _launch_dsink_end(lst, dsink) if lst is not None else None
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv = dkv_g[:, 0, :D].reshape(B, Skv, D)
@@ -531,10 +610,13 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         dv_bh = None
 
         dsink_out = None
-        if not ctx.sink_was_none and dsink is not None:
+        if dsink_mg is not None:
+            dsink_out = dsink_mg
+        elif not ctx.sink_was_none and dsink is not None:
             dsink_out = dsink.to(sink_saved.dtype)
 
         # forward args: (q, k, v, sink, swa_window, additive_mask, scale, hca_local_seqlen,
+
         #                cp_dwindow, cp_global_start, k_is_latent, seq_starts, fwd_fn, bwd_fn)
         return (
             dq_bh,

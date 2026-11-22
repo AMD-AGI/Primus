@@ -212,9 +212,18 @@ class RoPECache(nn.Module):
             if (ent[0] is position_ids and ent[1] == position_ids._version and ent[2] is inv
                     and ent[3] == inv._version and ent[4] == dtype):
                 return ent[5]
-        cos, sin = self.forward(position_ids)
-        out = (cos.contiguous().to(dtype), sin.contiguous().to(dtype))
+        out = None
+        if os.environ.get("PRIMUS_LAUNCH_ROPE_TBL", "0") == "1":
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.launch_rope_tbl import (
+                rope_table,
+            )
+
+            out = rope_table(position_ids, inv, dtype)  # launch line: the same table in one launch
+        if out is None:
+            cos, sin = self.forward(position_ids)
+            out = (cos.contiguous().to(dtype), sin.contiguous().to(dtype))
         memo.insert(0, (position_ids, position_ids._version, inv, inv._version, dtype, out))
+
         del memo[4:]
         return out
 
