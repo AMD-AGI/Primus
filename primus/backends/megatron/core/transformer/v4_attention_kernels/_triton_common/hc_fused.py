@@ -85,7 +85,9 @@ from .hc_hcfuse import (
     hcfuse_tail_enabled,
     hcfuse_post_enabled,
     norm_pre_bwd,
+    post_bwd_v2,
     post_bwd_wmma,
+    post_mode,
     post_tail,
     post_wmma_ok,
     pre_collapse_fwd,
@@ -1400,7 +1402,10 @@ class HCPostFn(torch.autograd.Function):
                 g_ = bif_grid(M, D, bt, bc, _bif_nprog(dev))
                 _hc_post_bwd_bif_kernel[g_](dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
                                             BT=bt, BC=bc, NPROG=g_[0], num_warps=nw)
-            elif hcfuse_post_enabled() and pbc == 256 and post_wmma_ok(M, K, D, pbc):
+            elif post_mode() == 2 and pbc == 256 and K == 4 and _post_tile() == (1, 1) and D % 256 == 0:
+                # hcfuse: byte-identical Gluon expand backward (no shuffle chains for the 20 row reductions)
+                post_bwd_v2(dnew, x3, out_c, post_c, dout, dpost, dcombt, pbc)
+            elif post_mode() == 1 and pbc == 256 and post_wmma_ok(M, K, D, pbc):
                 # hcfuse: the 20 per-row reductions on WMMA (Gluon), same partial layout
                 post_bwd_wmma(dnew, x3, out_c, post_c, dout, dpost, dcombt, pbc)
             else:
