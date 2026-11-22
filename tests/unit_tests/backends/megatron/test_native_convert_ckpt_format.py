@@ -639,3 +639,29 @@ def test_legacy_format_refused_before_conversion_at_tp2(
         hook._native_main(str(hf_llama), {"out": None, "ckpt_format": "torch"}, _experiment(tp=2))
     assert fake_convert == []
     assert not (tmp_path / "data").exists()
+
+
+def test_ran_out_of_space_texts_argument():
+    """``texts`` narrows the messages that count as out of space; the default is unchanged."""
+    torn = RuntimeError("[enforce fail at inline_container.cc] unexpected pos 10 vs 20")
+    chained = RuntimeError("save failed")
+    chained.__cause__ = torn
+    assert common._ran_out_of_space(chained)
+    no_pos = tuple(t for t in common._OUT_OF_SPACE_TEXT if t != "unexpected pos")
+    assert not common._ran_out_of_space(chained, texts=no_pos)
+    assert common._ran_out_of_space(OSError(errno.ENOSPC, "x"), texts=())
+    assert common._ran_out_of_space(RuntimeError("Disk quota exceeded"), texts=no_pos)
+    with pytest.raises(TypeError, match="iterable of strings"):
+        common._ran_out_of_space(chained, texts="unexpected pos")
+    with pytest.raises(ValueError, match="non-empty"):
+        common._ran_out_of_space(chained, texts=("",))
+    # a one-shot iterable is read once, so a later link of the chain still matches
+    wrapped = RuntimeError("wrap")
+    wrapped.__cause__ = RuntimeError("No space left on device")
+    assert common._ran_out_of_space(wrapped, texts=(t for t in ["No space"]))
+
+
+def test_ran_out_of_space_reads_the_default_at_call_time(monkeypatch):
+    monkeypatch.setattr(common, "_OUT_OF_SPACE_TEXT", ("custom full",))
+    assert common._ran_out_of_space(RuntimeError("custom full"))
+    assert not common._ran_out_of_space(RuntimeError("No space left on device"))

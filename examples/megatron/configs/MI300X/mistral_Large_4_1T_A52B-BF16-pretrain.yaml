@@ -6,30 +6,18 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Mistral Large 4 1T-A52B (text decoder) BF16 pretraining on MI300X.
 #   model: primus/configs/models/megatron/mistral_Large_4_1T_A52B.yaml
 #   Defaults are the full-scale layout.
-#   Layout: TP8 x PP6 x EP32 x expert-TP 1 (sequence parallel on, CP1) = 192 GPUs, 24 nodes x 8
-#   GPUs (data parallel 4, expert data parallel 1), token dispatch by Megatron's alltoall
-#   (use_turbo_deepep false). PP6 puts 12 layers on each stage (starts 0, 12, 24, 36, 48, 60):
-#   every stage starts on a full-indexer layer (indexer_types), as index sharing requires;
-#   layer 35's shared KV latent crosses from stage 2 to stages 3-5.
-#   Not measured on MI300X: the full-scale timing that chose EP32 with alltoall was taken on
-#   MI355X; on MI300X only the depth-reduced one-node runs are checked. Memory is an estimate.
-#   Per GPU, with the distributed optimizer: routed experts 1018B / (PP6 x EP32 = 192) = 5.3B and
-#   the rest 35B / (TP8 x PP6) = 0.7B -> bf16 weights 12 GB + fp32 grads 24 GB + fp32 master and
-#   Adam state 65 GB = ~101 GB of the MI300X's 192 GB before activations.
-#   PP3 on the same 24 nodes (TP8 x PP3 x EP32: data parallel 8, expert data parallel 2) is
-#   ~138 GB before activations (weights 24 GB + grads 48 GB + optimizer state ~66 GB) and leaves
-#   ~54 GB for the activations of 24 layers per stage, the logits and RCCL buffers, as on MI325X;
-#   PP6 is the default for the larger headroom on 192 GB. PP3 is one override set away:
-#   PRIMUS_PP=3 PRIMUS_GBS=128 (16 micro-batches per pipeline at data parallel 8). PP3 on 12
-#   nodes needs ~202 GB and does not fit.
-#   EP8 with Primus-Turbo DeepEP inside a node needs these overrides together:
-#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=9 PRIMUS_GBS=144 on 36 nodes (~132 GB per GPU:
-#   experts 1018B / (PP9 x EP8) = 14.1B, the rest 0.5B; stages start 0, 8, ..., 64).
-#   DeepEP across nodes (EP above 8, e.g. PRIMUS_EP=32 PRIMUS_TURBO_DEEPEP=true) needs an image
-#   whose Primus-Turbo is built with rocSHMEM; at EP >= 16 rocm_arg_validation also requires
-#   turbo_deepep_num_cu <= 32 (the default here). Another PP size must start every stage on a
-#   full-indexer layer. MoE with TP > 1 needs sequence_parallel (Megatron), so keep PRIMUS_SP
-#   true whenever PRIMUS_TP > 1.
+#   Layout: TP8 x PP6 x EP32 (sequence parallel on, CP1) = 192 GPUs on 24 nodes, token dispatch
+#   by Megatron's alltoall (use_turbo_deepep false). Stages start at layers 0, 12, 24, 36, 48, 60.
+#   Default global batch 96 (24 micro-batches of 1 per pipeline at data parallel 4). It differs
+#   from MI325X / MI355X (PP3 on 12 nodes, global batch 64) because PP6 leaves memory headroom on
+#   the MI300X's 192 GB. PP3 on the same 24 nodes: PRIMUS_PP=3 PRIMUS_GBS=128.
+#   EP8 with Primus-Turbo DeepEP inside a node:
+#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=9 PRIMUS_GBS=144 on 36 nodes.
+#   EP above 8 with DeepEP needs an image whose Primus-Turbo is built with rocSHMEM, and
+#   turbo_deepep_num_cu <= 32 at EP >= 16. Every pipeline stage must start on a full-indexer
+#   layer (indexer_types), checked before the model is built: with an even split of the 72
+#   layers, PRIMUS_PP 1, 2, 3, 6, 9 or 18 (PP 4, 8, 12, 24, 36 are refused).
+#   MoE with TP > 1 needs sequence_parallel: keep PRIMUS_SP true whenever PRIMUS_TP > 1.
 #   Depth-reduced runs on one node override the layout (see tests/trainer/test_megatron_trainer.py).
 
 modules:
@@ -108,10 +96,10 @@ modules:
       use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
       # rocm_arg_validation: <= 32 CUs for DeepEP at ep_size >= 16 (EP32); 32 also serves EP8
       turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:32}
-      # not set: use_turbo_fused_act_with_probs (this image's Primus-Turbo swiglu_with_probs takes no
-      # clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
+      # not set: use_turbo_fused_act_with_probs (needs a Primus-Turbo whose swiglu_with_probs
+      # accepts clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
       # release renormalises a softmax over all 128 experts on the top-4, which that op does not take).
-      # moe_router_dtype fp32, moe_permute_fusion and moe_shared_expert_overlap come from mistral_base.yaml
+      # moe_router_dtype fp32, moe_permute_fusion and moe_shared_expert_overlap come from mistral_large4_base.yaml
 
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true

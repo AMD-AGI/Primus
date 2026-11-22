@@ -464,7 +464,7 @@ models:
 |-----------|---------|-------------|
 | `use_legacy_models` | `false` | Use legacy Megatron model code paths. |
 | `deprecated_use_mcore_models` | `false` | Deprecated flag for Megatron-Core models; prefer current `transformer_impl` + stack. |
-| `model_type` | `gpt` | `gpt` or `mamba` family. *Primus:* also model-specific values that `get_model_provider` builds (e.g. `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1`, `inkling`, `mistral_large4`); `muse_spark` is the Muse Spark text decoder (set by `muse_spark_base.yaml`; §11.5); `mistral_large4` is the Mistral Large 4 text decoder (set by `mistral_base.yaml`; §10.8). |
+| `model_type` | `gpt` | `gpt` or `mamba` family. *Primus:* also model-specific values that `get_model_provider` builds (e.g. `deepseek_v4`, `kimi_k3`, `glm5_next`, `zaya1`, `inkling`, `mistral_large4`); `muse_spark` is the Muse Spark text decoder (set by `muse_spark_base.yaml`; §11.5); `mistral_large4` is the Mistral Large 4 text decoder (set by `mistral_large4_base.yaml`; §10.8). |
 | `num_layers` | `24` | Transformer layers (decoder or unified stack). |
 | `encoder_num_layers` | `null` | Encoder depth (encoder–decoder). |
 | `decoder_num_layers` | `null` | Decoder depth. |
@@ -608,9 +608,9 @@ models:
 | `attn_logit_softcapping` | `null` | Softcap for attention logits. |
 | `router_logit_softcapping` | `null` | Softcap for MoE router logits. |
 
-### 10.8 Mistral Large 4 (`model_type: mistral_large4`, `mistral_base.yaml`)
+### 10.8 Mistral Large 4 (`model_type: mistral_large4`, `mistral_large4_base.yaml`)
 
-`model_type: mistral_large4` selects the Mistral Large 4 text decoder (BF16 training; no KV-cache inference; the sparse DSA path, sequence > `index_topk`, does not run with context parallelism; with pipeline parallelism each stage starts on a `full` indexer layer); the list of `model_type` values is in the `model_type` row of 10.1. All keys below are *Primus:* keys (Primus' Mistral Large 4 config, not upstream Megatron arguments).
+`model_type: mistral_large4` selects the Mistral Large 4 text decoder (BF16 training; no KV-cache inference; the sparse DSA path, sequence > `index_topk`, does not run with context parallelism; with pipeline parallelism each stage starts on a `full` indexer layer); the list of `model_type` values is in the `model_type` row of §10.1. All keys below are *Primus:* keys (Primus' Mistral Large 4 config, not upstream Megatron arguments).
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -623,11 +623,13 @@ models:
 | `first_k_dense_replace` | `1` | *Primus:* First layers with a dense MLP; the rest are MoE (`moe_layer_freq` is derived from it). |
 | `freeze_routed_experts` | `false` | *Primus:* Fine-tuning: freeze the routed experts (router, shared expert and the rest stay trainable). |
 | `allow_untrained_indexer` | `false` | *Primus:* Accept `seq_length` > `index_topk` without a checkpoint: the frozen DSA indexer stays random (code-path tests only). |
-| `fused_lerope` | `true` (`mistral_base.yaml`; `false` in a config built without the preset, e.g. the converter's) | *Primus:* Run the rotary embedding through the fused LeRoPE kernel (Triton): the angles are computed in the kernel from the positions and the YaRN inverse frequencies times `exp(lerope.alpha)`. `alpha` is a frozen buffer loaded from the checkpoint (not trained), so the kernel's gradient to the frequencies is not computed in training. `false`, or a CPU tensor: the eager path with a precomputed table. |
+| `fused_lerope` | `true` (`mistral_large4_base.yaml`; `false` in a config built without the preset, e.g. the converter's) | *Primus:* Run the rotary embedding through the fused LeRoPE kernel (Triton): the angles are computed in the kernel from the positions and the YaRN inverse frequencies times `exp(lerope.alpha)`. `alpha` is a frozen buffer loaded from the checkpoint (not trained), so the kernel's gradient to the frequencies is not computed in training. `false`, or a CPU tensor: the eager path with a precomputed table. |
 
 In `deterministic_mode` the model runs Transformer Engine's attention and RMSNorm instead of Primus-Turbo's (`use_turbo_attention` / `use_turbo_rms_norm` are set to `false`): those two Turbo kernels gave different losses from run to run on this model even in that mode. Primus-Turbo grouped GEMM and DeepEP stay on.
 
 With `context_parallel_size` > 1 the model also runs Transformer Engine's core attention (patch `megatron.mistral_large4.turbo_attention_cp` sets `use_turbo_attention` to `false`, with a log line): Primus-Turbo attention runs context parallelism as Ulysses all-to-all, which does not match the p2p ring Megatron's MLA uses.
+
+When the routed experts run on TE GEMMs (not on Primus-Turbo's grouped GEMM: `SequentialMLP`, or TE's grouped GEMM), patch `megatron.mistral_large4.te_gemm_workspace` sets `PRIMUS_TE_GEMM_WORKSPACE_MIB` to `512` unless it is already set, so the base patch `megatron.te.hipblaslt_gemm_workspace` enlarges TE's hipBLASLt workspace (see §11.5).
 
 ---
 

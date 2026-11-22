@@ -100,7 +100,7 @@ def positions_for(sq: int, device, cp_group=None, packed_seq_params=None) -> tor
         cu = cu.to(device=device, dtype=torch.long)
         if cp > 1:
             raise NotImplementedError(
-                "Mistral Large 4 SSMax with packed (THD) sequences and context parallelism"
+                f"Mistral Large 4 SSMax does not support packed (THD) sequences with context parallelism (cp={cp})"
             )
         idx = torch.arange(sq, device=device)
         doc = torch.searchsorted(cu[1:], idx, right=True)

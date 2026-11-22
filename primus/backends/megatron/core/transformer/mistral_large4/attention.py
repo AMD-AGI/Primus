@@ -48,14 +48,12 @@ from megatron.core.transformer.utils import ensure_metadata_has_dp_cp_group
 from megatron.core.utils import make_tp_sharded_tensor_for_checkpoint
 from torch import nn
 
-from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
-    parse_flag,
-)
 from primus.backends.megatron.core.transformer.mistral_large4.lerope_kernel import (
     fused_lerope_available,
     lerope_rotary,
 )
 from primus.backends.megatron.core.transformer.mistral_large4.rotary import apply_ssmax
+from primus.core.utils.flag_utils import bool_flag
 
 __all__ = ["EagerCoreAttention", "MistralLarge4Attention", "MistralLarge4Indexer"]
 
@@ -391,7 +389,9 @@ class MistralLarge4Attention(MLASelfAttention):
         """First sparse forward: the frozen indexer must hold loaded weights, not its init values
         (a run from scratch, also one resumed from its own checkpoint, never trains it)."""
         self._indexer_checked = True
-        allow = parse_flag(getattr(self.config, "allow_untrained_indexer", False), "allow_untrained_indexer")
+        allow = bool_flag(
+            getattr(self.config, "allow_untrained_indexer", False), "allow_untrained_indexer", False
+        )
         if self.indexer.at_init() and not allow:
             raise RuntimeError(
                 f"Mistral Large 4 layer {self.layer_idx}: sparse DSA attention (sequence > index_topk) with an "

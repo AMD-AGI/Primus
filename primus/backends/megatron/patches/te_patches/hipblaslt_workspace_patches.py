@@ -29,6 +29,7 @@ GLM-5's patch sets, is left alone.
 """
 
 import os
+import traceback
 
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
@@ -54,14 +55,62 @@ def _requested_workspace_mib():
     return None
 
 
+# a missing module with one of these names means this environment has no TE PyTorch GEMM module
+# (TE not installed, a JAX- or core-only build, or a TE without cpp_extensions.gemm)
+_TE_ABSENT_MODULES = (
+    "transformer_engine",
+    "transformer_engine.pytorch",
+    "transformer_engine.pytorch.cpp_extensions",
+    "transformer_engine.pytorch.cpp_extensions.gemm",
+)
+
+
 def _needs_te_gemm_workspace_patch(_ctx: PatchContext) -> bool:
-    if _requested_workspace_mib() is None:
+    """True when the variable is set and TE's PyTorch GEMM module imports and has
+    ``get_cublas_workspace_size_bytes``; otherwise False, as before.
+
+    Not gated on model_type: any model opts in by setting the variable (WAN 2.1/2.2, or Mistral
+    Large 4 through megatron.mistral_large4.te_gemm_workspace).
+
+    The variable is an explicit request, so when the resize is skipped the reason is logged (the
+    run may then fail with "HIPBLASLT Error: 6"): no TE GEMM module (``_TE_ABSENT_MODULES``), a
+    module without the size getter, or a TE that fails to import (any ``Exception``: an undefined
+    symbol, its compiled extension, a dependency, a version check), which is logged with its
+    traceback. The condition runs in the patch runner's pre-filter, outside its error handling,
+    so it does not raise an ``Exception``."""
+    requested = _requested_workspace_mib()
+    if requested is None:
         return False
     try:
         from transformer_engine.pytorch.cpp_extensions import gemm as te_gemm
-    except (ImportError, ModuleNotFoundError):
+    except ModuleNotFoundError as exc:
+        if exc.name in _TE_ABSENT_MODULES:
+            warning_rank_0(
+                f"{ENV_VAR}={requested} is set but this environment has no Transformer Engine PyTorch "
+                f"GEMM module ({exc}); TE's GEMM workspace is not resized"
+            )
+            return False
+        return _broken_te_import(requested)
+    except Exception:  # noqa: BLE001 - a broken TE install is reported here, not raised
+        return _broken_te_import(requested)
+    if not hasattr(te_gemm, "get_cublas_workspace_size_bytes"):
+        warning_rank_0(
+            f"{ENV_VAR}={requested} is set but this Transformer Engine has no "
+            "cpp_extensions.gemm.get_cublas_workspace_size_bytes; TE's GEMM workspace is not "
+            "resized (GEMMs that need a larger workspace can fail with 'HIPBLASLT Error: 6')"
+        )
         return False
-    return hasattr(te_gemm, "get_cublas_workspace_size_bytes")
+    return True
+
+
+def _broken_te_import(requested) -> bool:
+    """Log a TE import failure with its traceback (call inside the ``except``) and skip the patch."""
+    warning_rank_0(
+        f"{ENV_VAR}={requested} is set but Transformer Engine fails to import; TE's GEMM workspace "
+        f"is not resized (GEMMs that need a larger workspace can fail with 'HIPBLASLT Error: 6'):\n"
+        f"{traceback.format_exc()}"
+    )
+    return False
 
 
 @register_patch(

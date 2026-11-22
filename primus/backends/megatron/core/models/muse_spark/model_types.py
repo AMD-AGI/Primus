@@ -5,13 +5,18 @@
 ###############################################################################
 
 """Helpers shared by the Muse Spark patches: the model-type condition, flag parsing
-(``bool_flag`` / ``config_flag``) and merged-args access."""
+(``config_flag``; ``bool_flag`` lives in ``primus.core.utils.flag_utils`` and is re-exported here)
+and merged-args access."""
 
 import functools
-import numbers
 
 from primus.backends.megatron.core.models.muse_spark.layer_patterns import MODEL_TYPE
 from primus.core.patches import get_args
+from primus.core.utils.flag_utils import (  # noqa: F401 - re-exported, moved from here
+    FALSE_TEXT,
+    TRUE_TEXT,
+    bool_flag,
+)
 from primus.core.utils.module_utils import error_rank_0
 
 __all__ = [
@@ -66,36 +71,6 @@ def fail_fast(patch_id):
         return wrapper
 
     return decorator
-
-
-TRUE_TEXT = ("1", "true", "yes", "on")
-FALSE_TEXT = ("0", "false", "no", "off")
-
-
-def bool_flag(value, key, default=False) -> bool:
-    """A Muse Spark boolean config key (``key``) as a bool. None (unset) or a blank string
-    (an unset env-substituted value) is ``default``, a bool is
-    used as is, the ints 0 / 1 are False / True, and a string (an env-driven yaml value) is
-    true for 1/true/yes/on and false for 0/false/no/off (any case; surrounding whitespace
-    is stripped); an empty value means ``default``. A numpy bool (``np.bool_``) is used as a bool.
-    Anything else (e.g. a typo such as ``"ture"``, ``2``, ``1.0``) raises ValueError naming
-    ``key``: a typo must not silently turn a feature on or off."""
-    if value is None or (isinstance(value, str) and not value.strip()):
-        # the default is parsed by the same rules (a string default "false" is False)
-        return bool_flag(default, key, False)
-    if isinstance(value, bool):
-        return value
-    if getattr(getattr(value, "dtype", None), "kind", None) == "b" and getattr(value, "ndim", None) == 0:
-        return bool(value)  # np.bool_ (not a numbers.Integral)
-    if isinstance(value, numbers.Integral) and int(value) in (0, 1):
-        return bool(int(value))
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in TRUE_TEXT:
-            return True
-        if text in FALSE_TEXT:
-            return False
-    raise ValueError(f"{key}={value!r} is not a boolean: use true / false (also yes / no, on / off, 1 / 0)")
 
 
 def config_flag(config, key, default) -> bool:

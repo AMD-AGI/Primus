@@ -21,17 +21,16 @@ class PresetLoader:
     """
 
     @staticmethod
-    def load(name: str, framework: str, config_type: str = "models") -> Dict:
+    def preset_path(name: str, framework: str, config_type: str = "models") -> str:
         """
-        Load:
-            primus/configs/<config_type>/<framework>/<name>[.yaml]
-
-        And automatically resolve:
-            - extends: [...]
-            - nested extends
-            - deep merge
-            - env replacement
+        The absolute path of primus/configs/<config_type>/<framework>/<name>[.yaml], the file
+        ``load`` reads (it may not exist). The rule is ``load``'s, unchanged: ``name`` may use
+        ``..`` to reach another directory under primus/configs (module configs extend
+        ``../module_base.yaml``), so the check is containment in primus/configs, not in
+        <config_type>/<framework>; a path outside primus/configs raises ValueError. The path is
+        made absolute, not resolved through symlinks.
         """
+        name = os.fspath(name) if isinstance(name, os.PathLike) else str(name)
         # Handle suffix
         if name.endswith(".yaml") or name.endswith(".yml"):
             filename = name
@@ -49,6 +48,21 @@ class PresetLoader:
         abs_configs_root = os.path.abspath(configs_root)
         if os.path.commonpath([abs_preset_path, abs_configs_root]) != abs_configs_root:
             raise ValueError(f"[Primus] Invalid preset path: path traversal detected for '{preset_path}'.")
+        return abs_preset_path
+
+    @staticmethod
+    def load(name: str, framework: str, config_type: str = "models") -> Dict:
+        """
+        Load:
+            primus/configs/<config_type>/<framework>/<name>[.yaml]
+
+        And automatically resolve:
+            - extends: [...]
+            - nested extends
+            - deep merge
+            - env replacement
+        """
+        abs_preset_path = PresetLoader.preset_path(name, framework, config_type)
 
         if not os.path.exists(abs_preset_path):
             raise FileNotFoundError(

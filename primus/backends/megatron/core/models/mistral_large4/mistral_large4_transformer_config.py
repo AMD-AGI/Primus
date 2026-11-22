@@ -38,8 +38,8 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     kv_sharing_active,
     moe_layer_freq_list,
     normalize_layer_list,
-    parse_flag,
 )
+from primus.core.utils.flag_utils import bool_flag
 
 __all__ = [
     "MistralLarge4TransformerConfig",
@@ -54,6 +54,8 @@ __all__ = [
 class MistralLarge4TransformerConfig(MLATransformerConfig):
     """Config for the Mistral Large 4 text decoder."""
 
+    # no Q-LoRA (MLATransformerConfig defaults to 512; __post_init__ refuses any other value)
+    q_lora_rank: Optional[int] = None
     # 1 = the layer applies rope, 0 = NoPE (HF ``no_rope_layers``).
     no_rope_layers: Optional[Union[str, List[int]]] = None
     # "full" or "shared" per layer (HF ``indexer_types``).
@@ -95,9 +97,11 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
         self.hetereogenous_dist_checkpoint = True
         # a string from an env-substituted override ('no', 'off', '0') is read strictly, not by
         # truthiness: the frozen-indexer check (MistralLarge4Attention) reads this bool
-        self.allow_untrained_indexer = parse_flag(self.allow_untrained_indexer, "allow_untrained_indexer")
+        self.allow_untrained_indexer = bool_flag(
+            self.allow_untrained_indexer, "allow_untrained_indexer", False
+        )
         # the same for the rope kernel switch (attention._rope and the block read it as a bool)
-        self.fused_lerope = parse_flag(self.fused_lerope, "fused_lerope")
+        self.fused_lerope = bool_flag(self.fused_lerope, "fused_lerope", False)
         n = int(self.num_layers)
         self.no_rope_layers = normalize_layer_list(self.no_rope_layers, n, "no_rope_layers", int, 1)
         self.indexer_types = normalize_layer_list(self.indexer_types, n, "indexer_types", str, "full")
@@ -137,7 +141,7 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
 
     def kv_source_layer(self, layer_idx: int) -> int:
         """The layer whose latent layer ``layer_idx`` uses (itself unless it reuses one)."""
-        return int(self.kv_source_layers[layer_idx])
+        return self.kv_source_layers[layer_idx]
 
     def stores_kv(self, layer_idx: int) -> bool:
         """Whether layer ``layer_idx`` keeps its latent for later layers: it is the one KV source

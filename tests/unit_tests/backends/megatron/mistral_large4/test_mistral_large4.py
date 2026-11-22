@@ -589,10 +589,12 @@ def test_converted_checkpoint_loads_strictly(tmp_path):
         ckpt = tmp_path / "torch_dist"
         ckpt.mkdir()
         # the conversion's save: SwiGLU halves written from the model's own memory (no clone)
-        conv.save_without_copies(model)
-        sharded = model.sharded_state_dict()
-        _assert_fc1_halves_alias_model(model, sharded)
-        dist_checkpointing.save(sharded, str(ckpt))
+        with conv.save_without_copies(model):
+            sharded = model.sharded_state_dict()
+            _assert_fc1_halves_alias_model(model, sharded)
+            dist_checkpointing.save(sharded, str(ckpt))
+        # outside the block the model's own sharded_state_dict is back (not the aliasing wrapper)
+        assert "sharded_state_dict" not in vars(model)
 
         torch.manual_seed(1)  # a different random init: every value must come from the checkpoint
         fresh = build_mistral_large4_model(cfg, vocab_size=VOCAB, max_sequence_length=4096)

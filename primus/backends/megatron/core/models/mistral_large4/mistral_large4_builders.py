@@ -8,14 +8,11 @@
 
 import copy
 
-from megatron.core.transformer.spec_utils import import_module
-
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layer_specs import (
     get_mistral_large4_decoder_block_spec,
 )
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
     holds_megatron_checkpoint,
-    parse_flag,
 )
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_model import (
     MistralLarge4Model,
@@ -23,6 +20,7 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_model im
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_transformer_config import (
     MistralLarge4TransformerConfig,
 )
+from primus.core.utils.flag_utils import bool_flag
 
 __all__ = ["build_mistral_large4_model", "mistral_large4_builder", "model_provider"]
 
@@ -107,9 +105,15 @@ def mistral_large4_builder(args, pre_process, post_process, vp_stage=None, confi
         args, "use_legacy_models", False
     ), "Mistral Large 4 requires use_legacy_models=False (Mcore only)."
     check_position_layout(args)
+    check_sparse_context_parallel(args, config)
     check_indexer_source(args, config)
-    spec_name = getattr(args, "spec", None)
-    spec = import_module(spec_name) if spec_name is not None else None
+    check_stage_starts(config, args)
+    if getattr(args, "spec", None) is not None:
+        # the block spec carries the per-layer NoPE / indexer / KV-sharing layout: a generic layer spec
+        # would build another model
+        raise ValueError(
+            f"Mistral Large 4 builds its own decoder block spec; spec={args.spec!r} is not supported (unset it)"
+        )
     model = build_mistral_large4_model(
         config,
         vocab_size=args.padded_vocab_size,
@@ -119,12 +123,10 @@ def mistral_large4_builder(args, pre_process, post_process, vp_stage=None, confi
         untie_embeddings_and_output_weights=args.untie_embeddings_and_output_weights,
         vp_stage=vp_stage,
         pg_collection=pg_collection,
-        spec=spec,
     )
-    check_stage_starts(model, args)
     if _experts_on_expert_groups(args):
         mark_experts_expert_parallel(model)
-    if parse_flag(getattr(args, "freeze_routed_experts", False), "freeze_routed_experts"):
+    if bool_flag(getattr(args, "freeze_routed_experts", False), "freeze_routed_experts", False):
         n = freeze_routed_experts(model)
         print_rank_0(f"[Primus:Mistral-Large-4] freeze_routed_experts: {n} routed-expert tensors frozen")
     return model
@@ -159,24 +161,89 @@ def _runs_sparse(args, cfg) -> bool:
     return int(getattr(args, "seq_length", 0) or 0) > int(cfg.index_topk)
 
 
-def check_stage_starts(model, args) -> None:
-    """At build time: a pipeline stage (or virtual stage) whose first layer is a ``shared``
-    indexer layer has no top-k to reuse, which the sparse path (sequence > index_topk) needs.
-    Refuse that layout when ``seq_length`` can exceed ``index_topk`` (it bounds every document,
-    packed or not), instead of failing on the first long batch."""
-    blocks = [m for m in model.modules() if getattr(m, "_stage_starts_on_shared", False)]
-    if not blocks:
-        return
-    cfg = blocks[0].config
-    if _runs_sparse(args, cfg):
-        first = blocks[0].layer_indices[0]
-        raise ValueError(
-            f"Mistral Large 4: this pipeline stage starts on layer {first}, a 'shared' indexer layer "
-            f"(indexer_types), and seq_length {args.seq_length} > index_topk {cfg.index_topk} runs sparse "
-            "attention, which needs the top-k of the layer before it: choose a pipeline split "
-            "(decoder_first/last_pipeline_num_layers, pipeline_model_parallel_layout) whose stages "
-            "start on full-indexer layers"
+def check_sparse_context_parallel(args, cfg) -> None:
+    """At build time, before any checkpoint is loaded: the sparse DSA path (seq_length >
+    index_topk) does not run with context parallelism; the block's first sparse forward refuses it
+    too, after the whole model is built and loaded. A shorter seq_length runs dense attention with CP."""
+    cp = int(getattr(args, "context_parallel_size", 1) or 1)
+    if cp > 1 and _runs_sparse(args, cfg):
+        raise NotImplementedError(
+            f"Mistral Large 4 DSA sparse attention (seq_length {args.seq_length} > index_topk {cfg.index_topk}) "
+            f"with context_parallel_size {cp} is not supported; use context_parallel_size 1 or "
+            "seq_length <= index_topk"
         )
+
+
+def stage_start_layers(config) -> list:
+    """The first layer (0-based) of every pipeline stage and virtual stage, from the config alone
+    (the same offsets and layer counts Megatron's TransformerBlock builds with); stages without
+    layers are left out."""
+    pp = int(getattr(config, "pipeline_model_parallel_size", 1) or 1)
+    vpp = getattr(config, "virtual_pipeline_model_parallel_size", None)
+    layout = getattr(config, "pipeline_model_parallel_layout", None)
+    starts = []
+    if layout is not None:
+        from megatron.core.transformer.enums import LayerType
+
+        if isinstance(layout, (str, list)):
+            from megatron.core.transformer.pipeline_parallel_layer_layout import (
+                PipelineParallelLayerLayout,
+            )
+
+            layout = PipelineParallelLayerLayout(layout, pp)
+
+        offset = 0
+        for v in range(len(layout.layout[0])):
+            for p in range(pp):
+                n = list(layout.layout[p][v]).count(LayerType.decoder)
+                if n:
+                    starts.append(offset)
+                offset += n
+        return starts
+    if pp == 1:
+        return [0] if config.num_layers else []
+    from megatron.core.transformer.transformer_block import get_num_layers_to_build
+    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
+
+    vp_stages = range(int(vpp)) if vpp else [None]
+    for v in vp_stages:
+        for p in range(pp):
+            if get_num_layers_to_build(config, vp_stage=v, pp_rank=p):
+                starts.append(get_transformer_layer_offset(config, vp_stage=v, pp_rank=p))
+    return starts
+
+
+def check_stage_starts(config, args) -> None:
+    """Before the model is built (no stage is allocated yet): a pipeline stage (or virtual
+    stage) whose first layer is a ``shared`` indexer layer has no top-k to reuse, which the sparse
+    path (sequence > index_topk) needs. Refuse that layout when ``seq_length`` can exceed
+    ``index_topk`` (it bounds every document, packed or not), on every rank alike, instead of
+    after a stage of the model is built or on the first long batch. The error lists the PP sizes
+    (an even split, no VPP) whose stages all start on full-indexer layers for this config
+    (``valid_even_pp_sizes``)."""
+    if not _runs_sparse(args, config):
+        return
+    bad = [i for i in stage_start_layers(config) if config.indexer_types[i] == "shared"]
+    if bad:
+        raise ValueError(
+            f"Mistral Large 4: pipeline stages start on layers {bad}, 'shared' indexer layers "
+            f"(indexer_types), and seq_length {args.seq_length} > index_topk {config.index_topk} runs "
+            "sparse attention, which needs the top-k of the layer before it: choose a pipeline split "
+            "(pipeline_model_parallel_size, decoder_first/last_pipeline_num_layers, "
+            "pipeline_model_parallel_layout) whose stages start on full-indexer layers (for these "
+            f"{config.num_layers} layers with an even split: PP {valid_even_pp_sizes(config)})"
+        )
+
+
+def valid_even_pp_sizes(config) -> list:
+    """The pipeline sizes that split ``config.num_layers`` evenly (no VPP) with every stage
+    starting on a ``full`` indexer layer (for the release's 72 layers: 1, 2, 3, 6, 9, 18)."""
+    n = int(config.num_layers)
+    return [
+        pp
+        for pp in range(1, n + 1)
+        if n % pp == 0 and all(config.indexer_types[s] != "shared" for s in range(0, n, n // pp))
+    ]
 
 
 def check_indexer_source(args, cfg) -> None:
@@ -207,7 +274,7 @@ def check_indexer_source(args, cfg) -> None:
             "sparse attention (checked at the first sparse forward)"
         )
         return
-    if parse_flag(getattr(args, "allow_untrained_indexer", False), "allow_untrained_indexer"):
+    if bool_flag(getattr(args, "allow_untrained_indexer", False), "allow_untrained_indexer", False):
         from megatron.training import print_rank_0
 
         print_rank_0(

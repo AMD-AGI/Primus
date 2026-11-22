@@ -20,11 +20,13 @@ import ast
 import os
 from types import SimpleNamespace
 
-from primus.backends.megatron.checkpoint.native_convert_common import read_hf_config
+from primus.backends.megatron.checkpoint.native_convert_common import (
+    TRACKER_FILENAME,
+    read_hf_config,
+)
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
     DEFAULT_FIRST_K_DENSE_REPLACE,
     LAYER_LISTS,
-    MEGATRON_TRACKER,
     MODEL_TYPE,
     experts_on_turbo_grouped_gemm,
     hf_layer_lists,
@@ -33,9 +35,13 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     moe_layer_freq_list,
     text_config,
 )
+from primus.backends.megatron.patches.te_patches.hipblaslt_workspace_patches import (
+    ENV_VAR,
+)
 from primus.core.config.preset_loader import PresetLoader
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.core.utils.module_utils import log_kv_rank_0, log_rank_0
+from primus.core.utils.flag_utils import bool_flag
+from primus.core.utils.module_utils import log_kv_rank_0, log_rank_0, warning_rank_0
 
 
 def _param(ctx: PatchContext, name):
@@ -44,6 +50,12 @@ def _param(ctx: PatchContext, name):
     params = getattr(ctx.extra.get("module_config", None), "params", None)
     v = getattr(args, name, None)
     return v if v not in (None, "") else getattr(params, name, None)
+
+
+def _flag(args, key: str) -> bool:
+    """A boolean arg parsed strictly (``bool_flag``): a yaml value substituted from the environment
+    can stay a string ('off', 'no', '0' are off; a typo raises), unlike plain truthiness."""
+    return bool_flag(getattr(args, key, False), key, False)
 
 
 def _is_mistral_large4(ctx: PatchContext) -> bool:
@@ -202,29 +214,20 @@ def _comparable(value, name, n):
     return list(lst)[:n]
 
 
-def _preset_path(model: str):
-    """The file ``PresetLoader.load(model, framework="megatron")`` reads (same suffix rule)."""
-    from pathlib import Path
-
-    import primus.configs.models as models_root
-
-    name = model if model.endswith((".yaml", ".yml")) else f"{model}.yaml"
-    return (Path(models_root.__file__).resolve().parent / "megatron" / name).resolve()
-
-
 def _preset_values(params):
     """The model preset's own values of the per-layer keys (to tell a user override from them);
-    None when there is no model preset (no ``model``, or not a Primus preset file). Other load
-    errors (bad YAML, bad ``extends``, path traversal) are raised."""
+    None when there is no model preset: no ``model``, or a name under the presets directory with no
+    preset file there. A path that leads outside primus/configs (an absolute path, or ``..`` past
+    the configs root) raises ValueError from ``PresetLoader.preset_path``, as ``PresetLoader.load``
+    does for it; other load errors (bad YAML, a missing ``extends`` target) are raised too."""
     model = getattr(params, "model", None)
     if not model:
         return None
-    # "not a Primus preset" is decided by the preset file's existence (the path PresetLoader.load
-    # reads), not by its error message: a missing ``extends`` target of an existing preset then
-    # raises from the load below as the broken preset it is
-    path = _preset_path(str(model))
-    # a name outside the presets directory goes to the loader, which refuses it (path traversal)
-    if path.parent == _preset_path("x").parent and not path.is_file():
+    # "not a Primus preset" is decided by the preset file's existence (PresetLoader.preset_path, the
+    # file PresetLoader.load reads; it raises ValueError for a path outside primus/configs), not by
+    # the load's error message: a missing ``extends`` target of an existing preset then raises from
+    # the load below as the broken preset it is
+    if not os.path.isfile(PresetLoader.preset_path(str(model), framework="megatron")):
         # a model that is not a Primus preset: no defaults to tell a user value from, so the caller
         # refuses any value that disagrees with the checkpoint
         return None
@@ -267,7 +270,7 @@ def _is_posttrain(ctx: PatchContext) -> bool:
     """A post-training run: ``stage`` is one of ``POSTTRAIN_STAGES`` (``sft_trainer.yaml``'s ``sft``,
     or ``posttrain``). No ``stage``, ``pretrain``, ``mlperf_pretrain`` or any other value is not."""
     stage = _param(ctx, "stage")
-    return bool(stage) and str(stage).strip().lower() in POSTTRAIN_STAGES
+    return str(stage).strip().lower() in POSTTRAIN_STAGES
 
 
 def _posttrain_without_weights(ctx: PatchContext) -> bool:
@@ -332,7 +335,7 @@ def patch_mistral_large4_posttrain_needs_checkpoint(ctx: PatchContext):
     converted checkpoint)."""
     raise ValueError(
         "Mistral Large 4 fine-tuning has no checkpoint to start from (no pretrained_checkpoint or load "
-        f"directory with {MEGATRON_TRACKER}: point it at the directory that holds that file, not at "
+        f"directory with {TRACKER_FILENAME}: point it at the directory that holds that file, not at "
         f"release/ or iter_N/; pretrained_checkpoint={_param(ctx, 'pretrained_checkpoint')!r}, "
         f"load={_param(ctx, 'load')!r}): "
         f"{_no_checkpoint_reason(_hf_path(ctx))}. Or set pretrained_checkpoint to an already converted checkpoint."
@@ -344,7 +347,7 @@ def patch_mistral_large4_posttrain_needs_checkpoint(ctx: PatchContext):
     backend="megatron",
     phase="build_args",
     priority=PRIORITY_MOE_LAYER_FREQ,  # after layer_lists_from_checkpoint (first_k_dense_replace)
-    description="Mistral Large 4: moe_layer_freq = [0]*first_k_dense_replace + [1]*(num_layers - k)",
+    description="Mistral Large 4: moe_layer_freq = [0]*first_k_dense_replace + [1]*(num_layers - first_k_dense_replace)",
     condition=_is_mistral_large4,
 )
 def patch_mistral_large4_moe_layer_freq(ctx: PatchContext):
@@ -418,7 +421,7 @@ def _deepep_unusable(ctx: PatchContext) -> bool:
     expert tensor-parallel group, ``expert_tensor_parallel_size``, which defaults to TP)."""
     args = get_args(ctx)
     # this model only: args.model_type (is_mistral_large4_args)
-    if not is_mistral_large4_args(args) or not getattr(args, "use_turbo_deepep", False):
+    if not is_mistral_large4_args(args) or not _flag(args, "use_turbo_deepep"):
         return False
     ep = int(getattr(args, "expert_model_parallel_size", 1) or 1)
     return _expert_tp(args) * ep == 1
@@ -455,7 +458,7 @@ def _turbo_attention_with_cp(ctx: PatchContext) -> bool:
     # this model only: args.model_type (is_mistral_large4_args)
     return (
         is_mistral_large4_args(args)
-        and bool(getattr(args, "use_turbo_attention", False))
+        and _flag(args, "use_turbo_attention")
         and int(getattr(args, "context_parallel_size", 1) or 1) > 1
     )
 
@@ -485,8 +488,8 @@ def _turbo_kernels_in_deterministic_mode(ctx: PatchContext) -> bool:
     # this model only: args.model_type (is_mistral_large4_args)
     return (
         is_mistral_large4_args(args)
-        and bool(getattr(args, "deterministic_mode", False))
-        and bool(getattr(args, "use_turbo_attention", False) or getattr(args, "use_turbo_rms_norm", False))
+        and _flag(args, "deterministic_mode")
+        and (_flag(args, "use_turbo_attention") or _flag(args, "use_turbo_rms_norm"))
     )
 
 
@@ -504,7 +507,7 @@ def patch_mistral_large4_turbo_deterministic(ctx: PatchContext):
     Turbo grouped GEMM and DeepEP stay on; outside deterministic mode nothing changes."""
     args = get_args(ctx)
     for key in ("use_turbo_attention", "use_turbo_rms_norm"):
-        if getattr(args, key, False):
+        if _flag(args, key):
             setattr(args, key, False)
             log_kv_rank_0(
                 f"[Patch:megatron.mistral_large4.turbo_deterministic] -{key}",
@@ -528,15 +531,15 @@ def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
 
     In those layouts the experts run through Megatron's ``SequentialMLP`` (one TE linear per
     expert): the same math and the same checkpoint keys (``experts.linear_fc*.weight`` with the
-    expert axis), not TE's own grouped GEMM (see te_gemm_workspace below, which asks main's
-    hipblaslt_gemm_workspace patch for a larger TE GEMM workspace for both and warns for TE's grouped
-    GEMM, untested on ROCm for this model).
+    expert axis), not TE's own grouped GEMM (see te_gemm_workspace below, which asks the base patch
+    megatron.te.hipblaslt_gemm_workspace (te_patches/hipblaslt_workspace_patches.py) for a larger
+    TE GEMM workspace for both and warns for TE's grouped GEMM, untested on ROCm for this model).
     """
     args = get_args(ctx)
     # this model only: args.model_type (is_mistral_large4_args)
-    if not is_mistral_large4_args(args) or not getattr(args, "use_turbo_grouped_gemm", False):
+    if not is_mistral_large4_args(args) or not _flag(args, "use_turbo_grouped_gemm"):
         return False
-    if getattr(args, "use_megatron_fsdp", False):
+    if _flag(args, "use_megatron_fsdp"):
         return True
     if _expert_tp(args) > 1:
         return True  # PrimusTurboGroupedLinear asserts expert-TP 1
@@ -548,7 +551,7 @@ def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
         or getattr(args, "load", None)
         or getattr(args, "pretrained_checkpoint", None)
     )
-    return not getattr(args, "use_distributed_optimizer", False) and sharded_ckpt and uses_ckpt
+    return not _flag(args, "use_distributed_optimizer") and sharded_ckpt and uses_ckpt
 
 
 @register_patch(
@@ -582,17 +585,21 @@ def _experts_on_te_gemms(ctx: PatchContext) -> bool:
     )
 
 
-# TE GEMM workspace (MiB) this model asks for when its experts run on TE GEMMs; read by main's
-# patch megatron.te.hipblaslt_gemm_workspace through PRIMUS_TE_GEMM_WORKSPACE_MIB
+# TE GEMM workspace (MiB) this model asks for when its experts run on TE GEMMs; read by the base
+# patch megatron.te.hipblaslt_gemm_workspace (te_patches/hipblaslt_workspace_patches.py) through
+# its ENV_VAR
 TE_GEMM_WORKSPACE_MIB = 512
-TE_GEMM_WORKSPACE_ENV = "PRIMUS_TE_GEMM_WORKSPACE_MIB"
+
+# the value te_gemm_workspace wrote to os.environ in this run (None: it wrote nothing), so the
+# after_train patch removes only the variable this model set, not one the user set
+_workspace_env_written = {"value": None}
 
 
 @register_patch(
     "megatron.mistral_large4.te_gemm_workspace",
     backend="megatron",
     phase="setup",  # before the before_train phase evaluates megatron.te.hipblaslt_gemm_workspace
-    description="Mistral Large 4: default PRIMUS_TE_GEMM_WORKSPACE_MIB to 512 when the experts run on TE GEMMs "
+    description=f"Mistral Large 4: default {ENV_VAR} to {TE_GEMM_WORKSPACE_MIB} when the experts run on TE GEMMs "
     "(not on Primus-Turbo's grouped GEMM)",
     condition=_experts_on_te_gemms,
 )
@@ -609,25 +616,62 @@ def patch_mistral_large4_te_gemm_workspace(ctx: PatchContext):
     * ``moe_grouped_gemm`` on without Primus-Turbo (TE's own grouped GEMM): failed on ROCm with
       TE's default workspace and is not tested with the larger one; a warning says so.
 
-    The resize itself is main's patch ``megatron.te.hipblaslt_gemm_workspace``
-    (``te_patches/hipblaslt_workspace_patches.py``), which reads ``PRIMUS_TE_GEMM_WORKSPACE_MIB``
-    in the before_train phase. This patch only sets that variable to 512 when the user has not set
+    The resize itself is the base patch ``megatron.te.hipblaslt_gemm_workspace``
+    (``te_patches/hipblaslt_workspace_patches.py``), which reads its ``ENV_VAR`` in the before_train
+    phase. This patch only sets that variable to ``TE_GEMM_WORKSPACE_MIB`` when the user has not set
     it (a value the user sets, also a smaller one, is kept)."""
-    if getattr(get_args(ctx), "moe_grouped_gemm", False):  # here: without Primus-Turbo
+    if _flag(get_args(ctx), "moe_grouped_gemm"):  # here: without Primus-Turbo
         log_rank_0(
             "[Patch:megatron.mistral_large4.te_gemm_workspace] WARNING: TE grouped GEMM experts "
             "(moe_grouped_gemm without Primus-Turbo's grouped GEMM) are not tested for Mistral Large 4 on ROCm "
             "(hipBLASLt error 6 with TE's default workspace); use_turbo_grouped_gemm, or moe_grouped_gemm "
             "false (SequentialMLP), are the tested paths"
         )
-    if os.environ.get(TE_GEMM_WORKSPACE_ENV, "").strip():
-        log_rank_0(
-            f"[Patch:megatron.mistral_large4.te_gemm_workspace] {TE_GEMM_WORKSPACE_ENV}="
-            f"{os.environ[TE_GEMM_WORKSPACE_ENV].strip()} set by the user: kept"
-        )
+    user_value = os.environ.get(ENV_VAR, "").strip()
+    if user_value:
+        try:
+            too_small = int(user_value) < TE_GEMM_WORKSPACE_MIB
+        except ValueError:
+            too_small = False  # the base patch warns about a value that is not a whole number
+        if too_small:
+            warning_rank_0(
+                f"[Patch:megatron.mistral_large4.te_gemm_workspace] {ENV_VAR}={user_value} set by the user: "
+                f"kept, but below the {TE_GEMM_WORKSPACE_MIB} MiB this model's TE expert GEMMs need on gfx950 "
+                "(hipBLASLt error 6 is possible)"
+            )
+        else:
+            log_rank_0(
+                f"[Patch:megatron.mistral_large4.te_gemm_workspace] {ENV_VAR}={user_value} set by the user: kept"
+            )
         return
-    os.environ[TE_GEMM_WORKSPACE_ENV] = str(TE_GEMM_WORKSPACE_MIB)
+    os.environ[ENV_VAR] = str(TE_GEMM_WORKSPACE_MIB)
+    _workspace_env_written["value"] = str(TE_GEMM_WORKSPACE_MIB)
     log_rank_0(
-        f"[Patch:megatron.mistral_large4.te_gemm_workspace] {TE_GEMM_WORKSPACE_ENV}={TE_GEMM_WORKSPACE_MIB} "
+        f"[Patch:megatron.mistral_large4.te_gemm_workspace] {ENV_VAR}={TE_GEMM_WORKSPACE_MIB} "
         "(experts on TE GEMMs); megatron.te.hipblaslt_gemm_workspace enlarges the workspace"
     )
+
+
+def _workspace_env_to_restore(ctx: PatchContext) -> bool:
+    """A Mistral Large 4 run (args.model_type) in which te_gemm_workspace wrote the variable."""
+    # this model only: args.model_type (is_mistral_large4_args)
+    return is_mistral_large4_args(get_args(ctx)) and _workspace_env_written["value"] is not None
+
+
+@register_patch(
+    "megatron.mistral_large4.te_gemm_workspace_restore",
+    backend="megatron",
+    phase="after_train",
+    description=f"Mistral Large 4: remove the {ENV_VAR} default te_gemm_workspace set, so a later run in the "
+    "same process does not inherit it",
+    condition=_workspace_env_to_restore,
+)
+def patch_mistral_large4_te_gemm_workspace_restore(ctx: PatchContext):
+    """Undo te_gemm_workspace after the run: the variable is removed when it still holds the value
+    that patch wrote (a value changed since then is someone else's and is kept). The workspace TE
+    already allocated is not changed; a later run in the same process starts from the user's
+    environment again."""
+    written, _workspace_env_written["value"] = _workspace_env_written["value"], None
+    if os.environ.get(ENV_VAR) == written:
+        del os.environ[ENV_VAR]
+        log_rank_0(f"[Patch:megatron.mistral_large4.te_gemm_workspace_restore] {ENV_VAR} unset")

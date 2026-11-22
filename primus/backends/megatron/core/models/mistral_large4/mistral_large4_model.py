@@ -83,7 +83,7 @@ class MistralLarge4Model(LanguageModule):
                 config=self.config,
                 vocab_size=self.vocab_size,
                 max_sequence_length=self.max_sequence_length,
-                position_embedding_type="none",
+                position_embedding_type=self.position_embedding_type,
                 tp_group=self.pg_collection.tp,
             )
         self.decoder = MistralLarge4TransformerBlock(

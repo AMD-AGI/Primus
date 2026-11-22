@@ -35,6 +35,7 @@ import os
 import shutil
 import sys
 import time
+from typing import Iterable, Optional
 
 import torch
 
@@ -363,17 +364,26 @@ def load_validate_save(model, sd, consumed, store, margs, save_dir, log):
 _OUT_OF_SPACE_TEXT = ("unexpected pos", "No space left on device", "Disk quota exceeded")
 
 
-def _ran_out_of_space(exc: BaseException) -> bool:
+def _ran_out_of_space(exc: BaseException, *, texts: Optional[Iterable[str]] = None) -> bool:
     """Whether ``exc``, or an exception it was raised from, is a write that ran out of space.
 
-    A DCP ``CheckpointException`` includes the errors of its ranks in its text.
+    A DCP ``CheckpointException`` includes the errors of its ranks in its text. ``texts`` are the
+    messages that count as out of space, in place of ``_OUT_OF_SPACE_TEXT`` (read at call time
+    when ``texts`` is None, keyword-only); any iterable of non-empty strings is taken once.
+    ENOSPC / EDQUOT always count. A bare string (read character by character) or an empty string
+    (it matches every error) is refused.
     """
+    if isinstance(texts, str):
+        raise TypeError(f"texts must be an iterable of strings, not the string {texts!r}")
+    texts = _OUT_OF_SPACE_TEXT if texts is None else tuple(texts)
+    if not all(isinstance(t, str) and t for t in texts):
+        raise ValueError(f"texts must be non-empty strings (an empty one matches every error): {texts!r}")
     seen = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
         if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
             return True
-        if any(text in str(exc) for text in _OUT_OF_SPACE_TEXT):
+        if any(text in str(exc) for text in texts):
             return True
         exc = exc.__cause__ or exc.__context__
     return False

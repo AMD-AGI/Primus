@@ -8,6 +8,7 @@
 the posttrain hook's family resolution and the model-provider registration."""
 
 import importlib.util
+import inspect
 import json
 import re
 from pathlib import Path
@@ -29,6 +30,27 @@ from primus.core.patches.context import PatchContext
 
 RELEASE_KV = [*range(39), 35, 40, 41, 42, 35] + [x for i in range(44, 72, 4) for x in (i, i + 1, i + 2, 35)]
 REPO = Path(__file__).resolve().parents[5]
+
+
+# the real lookup, before the autouse fixture below replaces it in each test
+_REAL_GLOBAL_ARGS = mistral_large4_pp_shape_patches._global_args
+
+
+@pytest.fixture(autouse=True)
+def _pp_carrier_run(monkeypatch):
+    """The PP shape wrappers decide at call time from Megatron's global args (``_global_args``).
+    Each test runs with the args of a PP 2 run with KV sharing (the wrappers add the rows); a test
+    that needs another run replaces ``holder["args"]`` (None: no global args)."""
+    holder = {
+        "args": SimpleNamespace(
+            pipeline_model_parallel_size=2,
+            num_layers=4,
+            kv_source_layers=[0, 1, 2, 1],
+            no_rope_layers=[1, 0, 1, 0],
+        )
+    }
+    monkeypatch.setattr(mistral_large4_pp_shape_patches, "_global_args", lambda: holder["args"])
+    return holder
 
 
 def _ctx(phase, backend_args=None, params=None):
@@ -103,15 +125,28 @@ def test_moe_layer_freq_patch(n, k_args, k_params, want):
     assert args.moe_layer_freq == want
 
 
+# the GPU-only packages megatron.training.arguments imports (through its model imports)
+_GPU_ONLY_DEPENDENCIES = ("fla", "mamba_ssm", "causal_conv1d", "transformer_engine")
+
+
 @pytest.fixture
 def megatron_moe_freq_type():
     """Megatron's real ``moe_freq_type`` (``megatron.training.arguments``), the parser the patch
-    calls; the tests that need it are skipped, naming the error, where that module does not import
-    (its GPU-only dependencies: fla, mamba_ssm)."""
+    calls; the tests that need it are skipped, naming the error, only where a GPU-only dependency
+    (fla, mamba_ssm, ...) is missing or needs a GPU at import; any other import error fails."""
     try:
         import megatron.training.arguments  # noqa: F401
-    except Exception as e:  # noqa: BLE001 - ImportError or a dependency failing at import on CPU
+    except ModuleNotFoundError as e:
+        # only a missing optional GPU dependency skips; a missing Megatron or a renamed module fails
+        if (e.name or "").split(".")[0] not in _GPU_ONLY_DEPENDENCIES:
+            raise
         pytest.skip(f"Megatron's parser (megatron.training.arguments) does not import here: {e!r}")
+    except RuntimeError as e:
+        # a GPU-only dependency (mamba_ssm through fla) queries the device at import on a host
+        # without a GPU: torch says "No CUDA GPUs are available" or, on ROCm, "No HIP GPUs are available"
+        if not re.search(r"No (CUDA|HIP) GPUs are available", str(e)):
+            raise
+        pytest.skip(f"Megatron's parser (megatron.training.arguments) needs a GPU to import: {e!r}")
 
 
 @pytest.mark.parametrize(
@@ -483,6 +518,68 @@ def test_pp_wire_foreign_wrapper_over_ours_is_refused(mark):
     assert m._wire_state(_benign_wraps(theirs)) == "foreign"
 
 
+def test_pp_wire_passes_through_for_a_later_run_without_carrier(_pp_carrier_run):
+    """The wrappers stay installed after their run and decide at call time from Megatron's global
+    args: a Mistral Large 4 PP run with KV sharing gets the rows, also once get_model has replaced
+    model_type with a ModelType enum; a later run in the same process without the lists (another
+    model), with PP 1, or with no global args gets Megatron's own shapes and seq_length."""
+    from primus.backends.megatron.patches import mistral_large4_pp_shape_patches as m
+
+    shapes = m.make_get_tensor_shapes(lambda *a, **k: [(8, 1, 8)], 4)
+    seen = {}
+
+    def original(*a, **k):
+        seen.update(k)
+
+    schedule = m.make_interleaved_schedule(original, 4, 8, False)
+    lists = dict(
+        num_layers=8, no_rope_layers=[1, 1, 1, 0, 1, 1, 1, 0], kv_source_layers=[0, 1, 2, 3, 4, 5, 6, 3]
+    )
+    runs = (
+        (SimpleNamespace(model_type=object(), pipeline_model_parallel_size=2, **lists), 4),  # enum model_type
+        (
+            SimpleNamespace(model_type=object(), pipeline_model_parallel_size=2, num_layers=8),
+            0,
+        ),  # another model
+        (SimpleNamespace(model_type=object(), pipeline_model_parallel_size=1, **lists), 0),  # PP 1
+        (None, 0),  # no global args: nothing added
+    )
+    for args, want_rows in runs:
+        _pp_carrier_run["args"] = args
+        assert shapes() == [(8 + want_rows, 1, 8)]
+        schedule(seq_length=8, pg_collection=SimpleNamespace(cp=_Size(1), tp=_Size(1)))
+        assert seen["seq_length"] == 8 + want_rows
+
+
+def test_pp_wire_global_args_lookup(monkeypatch):
+    """_global_args reads Megatron's global args from sys.modules without importing it: None when
+    the module is not loaded or its args are not initialised."""
+    import sys
+    import types
+
+    monkeypatch.delitem(sys.modules, "megatron.training.global_vars", raising=False)
+    assert _REAL_GLOBAL_ARGS() is None
+    fake = types.ModuleType("megatron.training.global_vars")
+
+    def not_initialized():
+        raise AssertionError("args is not initialized.")
+
+    fake.get_args = not_initialized
+    monkeypatch.setitem(sys.modules, "megatron.training.global_vars", fake)
+    assert _REAL_GLOBAL_ARGS() is None
+    args = SimpleNamespace(pipeline_model_parallel_size=2)
+    fake.get_args = lambda: args
+    assert _REAL_GLOBAL_ARGS() is args
+
+
+class _Size:
+    def __init__(self, n):
+        self.n = n
+
+    def size(self):
+        return self.n
+
+
 @pytest.mark.parametrize(
     "s,r,h,want", [(2048, 512, 6144, 171), (4096, 512, 6144, 342), (3, 4, 8, 2), (1, 1, 8, 1)]
 )
@@ -546,6 +643,35 @@ def _cfg(**kw):
     )
     base.update(kw)
     return MistralLarge4TransformerConfig(**base)
+
+
+def test_q_lora_rank_defaults_to_none():
+    """The config has no Q-LoRA by default (Megatron's MLA default is 512); a set rank is refused."""
+    base = _cfg()
+    assert base.q_lora_rank is None
+    from primus.backends.megatron.core.models.mistral_large4.mistral_large4_transformer_config import (
+        MistralLarge4TransformerConfig,
+    )
+
+    kw = {
+        k: getattr(base, k)
+        for k in (
+            "num_layers",
+            "hidden_size",
+            "num_attention_heads",
+            "kv_channels",
+            "kv_lora_rank",
+            "qk_head_dim",
+            "qk_pos_emb_head_dim",
+            "v_head_dim",
+        )
+    }
+    assert (
+        MistralLarge4TransformerConfig(**kw, mscale_all_dim=0.0, use_cpu_initialization=True).q_lora_rank
+        is None
+    )
+    with pytest.raises(ValueError, match="no Q-LoRA"):
+        _cfg(q_lora_rank=32)
 
 
 @pytest.mark.parametrize(
@@ -862,6 +988,10 @@ def test_builder_applies_freeze_and_expert_marks(monkeypatch, freeze, frozen, di
     args.freeze_routed_experts = "maybe"
     with pytest.raises(ValueError, match="freeze_routed_experts"):
         b.mistral_large4_builder(args, True, True, config=cfg)
+    # a generic --spec would replace the per-layer block spec: refused
+    args.freeze_routed_experts, args.spec = False, "megatron.core.models.gpt.gpt_layer_specs.x"
+    with pytest.raises(ValueError, match="spec="):
+        b.mistral_large4_builder(args, True, True, config=cfg)
 
 
 @pytest.mark.parametrize(
@@ -980,6 +1110,63 @@ def test_first_iteration_log_keeps_time_per_iteration():
     log({}, acc, 1e-5, 5, is_first_iteration=True)
     log({}, acc, 1e-5, 6, is_first_iteration=False)
     assert per_iter == [1.0, 2.0]
+
+
+def test_first_log_step_resets_the_logged_timers_only():
+    """interval-time (with the barrier) and the timers Megatron's log step logs are reset, as
+    timers.log(..., reset=True) does on a normal log step; other timers (checkpoint, startup) are
+    untouched, and a logged name without a timer is not created."""
+    from primus.backends.megatron.patches import (
+        mistral_large4_training_log_patches as tl,
+    )
+
+    calls = []
+
+    class FakeTimer:
+        def __init__(self, name):
+            self.name = name
+
+        def elapsed(self, reset=True, barrier=False):
+            calls.append((self.name, reset, barrier))
+            return 0.0
+
+    class FakeTimers:
+        def __init__(self, names):
+            self._timers = {n: FakeTimer(n) for n in names}
+
+        def __call__(self, name, log_level=None):
+            return self._timers[name]
+
+    timers = FakeTimers(["forward-backward", "interval-time", "optimizer", "save-checkpoint"])
+    names = tl.logged_timer_names(1)
+    assert "forward-backward" in names and "batch-generator" not in names
+    assert "batch-generator" in tl.logged_timer_names(2) and tl.logged_timer_names(0) == []
+    done = tl.reset_megatron_timers(timers, names)
+    assert done == ["interval-time", "forward-backward", "optimizer"]
+    assert calls == [
+        ("interval-time", True, True),
+        ("forward-backward", True, False),
+        ("optimizer", True, False),
+    ]
+
+
+def test_logged_timer_names_match_megatron_training_log():
+    """The two lists are Megatron's own timers_to_log (read from the pinned training.py)."""
+    from primus.backends.megatron.patches import (
+        mistral_large4_training_log_patches as tl,
+    )
+
+    src = REPO / "third_party/Megatron-LM/megatron/training/training.py"
+    if not src.is_file():
+        pytest.skip("Megatron-LM source not in the checkout")
+    text = src.read_text()
+    body = text[text.index("def training_log(") :]
+    body = body[: body.index("timers_to_log.extend(RL_LOGGABLE_TIMER_NAMES)")]
+    lists = re.findall(r"timers_to_log\.extend\(\[(.*?)\]\)", body, re.S)
+    assert [re.findall(r"'([^']+)'", x) for x in lists] == [
+        list(tl.LOGGED_TIMERS_LEVEL_1),
+        list(tl.LOGGED_TIMERS_LEVEL_2),
+    ]
 
 
 # ---- PP carrier of the shared latent (split / join of the decoder block) ----------------------
@@ -1372,7 +1559,7 @@ def test_check_indexer_source_refuses_random_sparse_selection(tmp_path):
             with pytest.raises(ValueError, match="seq_length 4096"):
                 b.check_indexer_source(SimpleNamespace(seq_length=4096, allow_untrained_indexer=off), cfg)
         b.check_indexer_source(SimpleNamespace(seq_length=4096, allow_untrained_indexer="yes"), cfg)
-        with pytest.raises(ValueError, match="allow_untrained_indexer must be true or false"):
+        with pytest.raises(ValueError, match="allow_untrained_indexer=.* is not a boolean"):
             b.check_indexer_source(SimpleNamespace(seq_length=4096, allow_untrained_indexer="maybe"), cfg)
     finally:
         if old is None:
@@ -1415,22 +1602,80 @@ def test_sparse_forward_refuses_an_indexer_at_init():
     assert att._indexer_checked
 
 
-def test_check_stage_starts_at_build():
-    """A stage starting on a 'shared' indexer layer is refused at build when seq_length > index_topk."""
+_RELEASE_INDEXER_TYPES = ["full"] * 17 + (["shared", "shared", "full", "full"] * 14)[:55]
+
+
+def _pp_config(pp, vp=None, first=None, last=None, num_layers=72):
+    return SimpleNamespace(
+        num_layers=num_layers,
+        pipeline_model_parallel_size=pp,
+        virtual_pipeline_model_parallel_size=vp,
+        pipeline_model_parallel_layout=None,
+        num_layers_in_first_pipeline_stage=first,
+        num_layers_in_last_pipeline_stage=last,
+        account_for_embedding_in_pipeline_split=False,
+        account_for_loss_in_pipeline_split=False,
+        indexer_types=_RELEASE_INDEXER_TYPES[:num_layers],
+        index_topk=2048,
+    )
+
+
+@pytest.mark.parametrize(
+    "pp,vp,first,last,bad",
+    [
+        (1, None, None, None, None),
+        (2, None, None, None, None),
+        (3, None, None, None, None),
+        (6, None, None, None, None),
+        (9, None, None, None, None),
+        (4, None, None, None, [18, 54]),
+        (8, None, None, None, [18, 45, 54]),
+        (12, None, None, None, [18, 30, 42, 54, 66]),
+        (2, 2, None, None, [18, 54]),
+        (3, 2, None, None, None),
+        (3, None, 20, 20, None),  # stages start at 0, 20, 52
+        (3, None, 18, None, [18, 45]),  # stages start at 0, 18, 45
+    ],
+)
+def test_check_stage_starts_before_build(pp, vp, first, last, bad):
+    """A stage starting on a 'shared' indexer layer is refused from the config alone, before the
+    model is built, when seq_length > index_topk; the dense path (seq_length <= index_topk) accepts it."""
     from primus.backends.megatron.core.models.mistral_large4 import (
         mistral_large4_builders as b,
     )
 
-    blk = torch.nn.Module()
-    blk._stage_starts_on_shared = True
-    blk.layer_indices = [17, 18]
-    blk.config = SimpleNamespace(index_topk=2048)
-    model = torch.nn.Sequential(blk)
-    b.check_stage_starts(model, SimpleNamespace(seq_length=2048))  # dense path only: allowed
-    with pytest.raises(ValueError, match="starts on layer 17"):
-        b.check_stage_starts(model, SimpleNamespace(seq_length=4096))
-    blk._stage_starts_on_shared = False
-    b.check_stage_starts(model, SimpleNamespace(seq_length=4096))
+    cfg = _pp_config(pp, vp, first, last)
+    starts = b.stage_start_layers(cfg)
+    assert starts[0] == 0 and starts == sorted(set(starts))
+    b.check_stage_starts(cfg, SimpleNamespace(seq_length=2048))  # dense path only: always allowed
+    if bad is None:
+        b.check_stage_starts(cfg, SimpleNamespace(seq_length=4096))
+    else:
+        assert [i for i in starts if cfg.indexer_types[i] == "shared"] == bad
+        with pytest.raises(ValueError, match=r"start on layers \[" + str(bad[0])):
+            b.check_stage_starts(cfg, SimpleNamespace(seq_length=4096))
+
+
+def test_valid_even_pp_sizes_from_the_config():
+    """The PP sizes the refusal suggests are computed from the config, not fixed to the release."""
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_builders as b,
+    )
+
+    assert b.valid_even_pp_sizes(_pp_config(1)) == [1, 2, 3, 6, 9, 18]
+    assert b.valid_even_pp_sizes(_pp_config(1, num_layers=20)) == [1, 2, 4, 5]
+    with pytest.raises(ValueError, match=r"these 72 layers with an even split: PP \[1, 2, 3, 6, 9, 18\]"):
+        b.check_stage_starts(_pp_config(4), SimpleNamespace(seq_length=4096))
+
+
+def test_check_stage_starts_runs_before_the_build():
+    """The builder refuses the split before build_mistral_large4_model allocates the stage."""
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_builders as b,
+    )
+
+    src = inspect.getsource(b.mistral_large4_builder)
+    assert src.index("check_stage_starts(config, args)") < src.index("build_mistral_large4_model(")
 
 
 def test_layer_lists_from_checkpoint_refuses_user_overrides(tmp_path, monkeypatch):
@@ -1672,14 +1917,29 @@ def test_posttrain_without_checkpoint_is_refused(tmp_path):
     )
 
 
-def test_preset_values_errors():
-    """A model preset that does not exist reads as None (the caller then refuses a disagreeing
-    value); other errors raise."""
+@pytest.mark.parametrize("case", ["missing", "no_model", "path_traversal", "missing_extends_target"])
+def test_preset_values_cases(case, monkeypatch):
+    """A model preset that does not exist, or no model, reads as None (the caller then refuses a
+    disagreeing value); a path outside primus/configs raises ValueError; an existing preset whose
+    ``extends`` target is missing is a broken preset and raises, not silently None."""
+    from primus.core.config.preset_loader import PresetLoader
+
     P = mistral_large4_args_patches
-    assert P._preset_values(SimpleNamespace(model="no_such_model_preset.yaml")) is None
-    assert P._preset_values(SimpleNamespace(model=None)) is None
-    with pytest.raises(ValueError, match="path traversal"):
-        P._preset_values(SimpleNamespace(model="../../../../etc/passwd"))
+    if case == "missing":
+        assert P._preset_values(SimpleNamespace(model="no_such_model_preset.yaml")) is None
+    elif case == "no_model":
+        assert P._preset_values(SimpleNamespace(model=None)) is None
+    elif case == "path_traversal":
+        with pytest.raises(ValueError, match="path traversal"):
+            P._preset_values(SimpleNamespace(model="../../../../etc/passwd"))
+    else:
+
+        def broken(name, framework, config_type="models"):
+            raise FileNotFoundError(2, "No such file or directory", "/x/missing_base.yaml")
+
+        monkeypatch.setattr(PresetLoader, "load", staticmethod(broken))
+        with pytest.raises(FileNotFoundError, match="missing_base"):
+            P._preset_values(SimpleNamespace(model="mistral_Large_4_1T_A52B.yaml"))
 
 
 def test_block_context_shares_keep_with_moved_layer_copies():
@@ -2137,6 +2397,15 @@ def test_consolidated_store_dequantises_fp8_blocks(tmp_path):
     save_file({"w.weight": w}, str(plain / "model.safetensors"))
     with pytest.raises(RuntimeError, match="stored in FP8"):
         conv.read_weight(conv.common.SafetensorsStore(str(plain)), "w.weight", torch.float32, set())
+    # a weight already dequantised to bf16 that kept its scale is refused, not scaled a second time
+    deq = tmp_path / "deq"
+    deq.mkdir()
+    save_file(
+        {"a.weight": torch.ones(128, 128, dtype=torch.bfloat16), "a.qscale_weight": torch.full((1, 1), 2.0)},
+        str(deq / "model.safetensors"),
+    )
+    with pytest.raises(RuntimeError, match="is not stored in FP8"):
+        conv.read_weight(conv.common.SafetensorsStore(str(deq)), "a.weight", torch.float32, set())
 
 
 @pytest.mark.parametrize("case", ["shape", "missing_key"])
@@ -2696,11 +2965,18 @@ def test_converter_accepts_release_routing_values(topk_method):
         native_loader_mistral_large4_text as conv,
     )
 
-    conv.derive_megatron_fields(
-        _release_text_config(
-            n_group=1, topk_group=1, scoring_func="softmax", norm_topk_prob=True, topk_method=topk_method
-        )
+    cfg = _release_text_config(
+        n_group=1,
+        topk_group=1,
+        scoring_func="softmax",
+        norm_topk_prob=True,
+        topk_method=topk_method,
+        num_experts_per_tok=3,
+        routed_scaling_factor=1.5,
     )
+    fields = conv.derive_megatron_fields(cfg)
+    assert fields["moe_router_topk"] == 3
+    assert fields["moe_router_topk_scaling_factor"] == 1.5
 
 
 def test_check_kv_sources_refuses_a_short_no_rope_list():
@@ -2804,10 +3080,29 @@ def _ws_params(**kw):
     return SimpleNamespace(**base)
 
 
+@pytest.mark.parametrize(
+    "value,want", [("no", False), ("0", False), ("off", False), ("yes", True), (True, True)]
+)
+def test_turbo_switches_are_parsed_strictly(value, want, monkeypatch):
+    """enable_primus_turbo / use_turbo_grouped_gemm / moe_grouped_gemm from an env substitution
+    ('no', '0', 'off') read as off, not as a truthy string; a typo raises."""
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_layout as layout,
+    )
+
+    monkeypatch.setattr(layout.importlib.util, "find_spec", lambda name: object())
+    assert layout.turbo_enabled(SimpleNamespace(enable_primus_turbo=value)) is want
+    on = dict(enable_primus_turbo=True, use_turbo_grouped_gemm=True, moe_grouped_gemm=True)
+    for key in ("use_turbo_grouped_gemm", "moe_grouped_gemm"):
+        cfg = SimpleNamespace(**{**on, key: value})
+        assert layout.experts_on_turbo_grouped_gemm(cfg) is want
+    with pytest.raises(ValueError, match="enable_primus_turbo"):
+        layout.turbo_enabled(SimpleNamespace(enable_primus_turbo="ture"))
+
+
 def test_te_gemm_workspace_defaults_mib_variable(monkeypatch):
-    """Experts on TE GEMMs: PRIMUS_TE_GEMM_WORKSPACE_MIB defaults to 512 (setup phase, before main's
-    megatron.te.hipblaslt_gemm_workspace reads it in before_train); a user value is kept."""
-    import os
+    """Experts on TE GEMMs: PRIMUS_TE_GEMM_WORKSPACE_MIB defaults to 512 (setup phase, before the base
+    patch megatron.te.hipblaslt_gemm_workspace reads it in before_train); a user value is kept."""
 
     from primus.backends.megatron.core.models.mistral_large4 import (
         mistral_large4_layout as layout,
@@ -2816,8 +3111,8 @@ def test_te_gemm_workspace_defaults_mib_variable(monkeypatch):
     from primus.core.patches.patch_registry import PatchRegistry
 
     m = mistral_large4_args_patches
-    env = m.TE_GEMM_WORKSPACE_ENV
-    assert env == hipblaslt_workspace_patches.ENV_VAR  # the one variable main's patch reads
+    env = m.ENV_VAR
+    assert env is hipblaslt_workspace_patches.ENV_VAR  # the one variable the base patch reads
     patch = PatchRegistry.get("megatron.mistral_large4.te_gemm_workspace")
     assert patch.phase == "setup"
     monkeypatch.setattr(layout.importlib.util, "find_spec", lambda name: object())
@@ -2833,30 +3128,64 @@ def test_te_gemm_workspace_defaults_mib_variable(monkeypatch):
 
     # record the variable's original state before the patch writes os.environ directly, so
     # teardown restores it (removes it when it was unset) instead of keeping the patch's 512
-    original = os.environ.get(env)
     monkeypatch.setenv(env, "placeholder")
     monkeypatch.delenv(env)
     m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
     assert hipblaslt_workspace_patches._requested_workspace_mib() == 512
+    warned = []
+    monkeypatch.setattr(m, "warning_rank_0", lambda msg, *a, **k: warned.append(msg))
     monkeypatch.setenv(env, "128")
     m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
     assert hipblaslt_workspace_patches._requested_workspace_mib() == 128  # the user's value wins
-    # the patch wrote os.environ directly: undoing the monkeypatch restores the original state
-    monkeypatch.undo()
-    assert os.environ.get(env) == original
+    assert len(warned) == 1 and "below the 512 MiB" in warned[0]  # but a smaller one is warned about
+    monkeypatch.setenv(env, "1024")
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
+    assert len(warned) == 1
 
 
-def test_preset_values_raises_on_a_missing_extends_target(monkeypatch):
-    """A missing preset is 'no preset' (None); an existing preset whose ``extends`` target is
-    missing is a broken preset and raises, not silently None."""
-    from primus.core.config.preset_loader import PresetLoader
+def test_te_gemm_workspace_is_restored_after_train(monkeypatch):
+    """after_train removes the variable te_gemm_workspace wrote, so a later run in the same process
+    does not inherit 512 (or log it as the user's); a value the user set is never touched."""
+    import os
+
+    from primus.core.patches.patch_registry import PatchRegistry
 
     m = mistral_large4_args_patches
-    assert m._preset_values(SimpleNamespace(model="no_such_preset_xyz.yaml")) is None
+    env = m.ENV_VAR
+    restore = PatchRegistry.get("megatron.mistral_large4.te_gemm_workspace_restore")
+    assert restore.phase == "after_train"
+    monkeypatch.setitem(m._workspace_env_written, "value", None)
+    monkeypatch.setenv(env, "placeholder")
+    monkeypatch.delenv(env)
+    assert restore.condition(_ctx("after_train", params=_ws_params())) is False  # nothing written
 
-    def broken(name, framework, config_type="models"):
-        raise FileNotFoundError(2, "No such file or directory", "/x/missing_base.yaml")
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
+    assert os.environ[env] == "512"
+    assert restore.condition(_ctx("after_train", params=_ws_params())) is True
+    other = _ws_params(model_type="glm5_next")
+    assert restore.condition(_ctx("after_train", params=other)) is False  # another model's run
+    m.patch_mistral_large4_te_gemm_workspace_restore(_ctx("after_train", params=_ws_params()))
+    assert env not in os.environ and m._workspace_env_written["value"] is None
 
-    monkeypatch.setattr(PresetLoader, "load", staticmethod(broken))
-    with pytest.raises(FileNotFoundError, match="missing_base"):
-        m._preset_values(SimpleNamespace(model="mistral_Large_4_1T_A52B.yaml"))
+    # the user's own value: the setup patch keeps it and after_train leaves it
+    monkeypatch.setenv(env, "256")
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
+    assert restore.condition(_ctx("after_train", params=_ws_params())) is False
+    assert os.environ[env] == "256"
+
+
+@pytest.mark.parametrize("cp,seq,raises", [(1, 4096, False), (2, 2048, False), (2, 4096, True)])
+def test_sparse_context_parallel_refused_at_build(cp, seq, raises):
+    """CP > 1 with seq_length > index_topk (the sparse DSA path) is refused when the model is built,
+    before a checkpoint load, not at the first forward."""
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_builders as b,
+    )
+
+    args = SimpleNamespace(context_parallel_size=cp, seq_length=seq)
+    cfg = SimpleNamespace(index_topk=2048)
+    if raises:
+        with pytest.raises(NotImplementedError, match="context_parallel_size 2"):
+            b.check_sparse_context_parallel(args, cfg)
+    else:
+        b.check_sparse_context_parallel(args, cfg)

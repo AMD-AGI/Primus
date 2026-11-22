@@ -17,6 +17,7 @@ model, only with PP > 1 and KV sharing.
 """
 
 import functools
+import sys
 
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
     MODEL_TYPE,
@@ -99,9 +100,13 @@ def _wire_params(fn):
 
 
 def _wants_mistral_large4_pp_shape_patch(ctx: PatchContext) -> bool:
-    args = get_args(ctx)
-    # this model only: args.model_type (is_mistral_large4_args)
-    return is_mistral_large4_args(args) and kv_carrier_needed(
+    # this model only: args.model_type (is_mistral_large4_args, in _run_needs_carrier)
+    return _run_needs_carrier(get_args(ctx))
+
+
+def _carrier_needed_by_lists(args) -> bool:
+    """``args``'s pipeline and per-layer lists make the P2P tensor carry the shared KV latent."""
+    return kv_carrier_needed(
         getattr(args, "kv_source_layers", None),
         int(getattr(args, "num_layers", 0) or 0),
         getattr(args, "pipeline_model_parallel_size", 1),
@@ -109,12 +114,47 @@ def _wants_mistral_large4_pp_shape_patch(ctx: PatchContext) -> bool:
     )
 
 
+def _run_needs_carrier(args) -> bool:
+    """The run of ``args`` is a Mistral Large 4 run whose P2P tensor carries the shared KV latent."""
+    return is_mistral_large4_args(args) and _carrier_needed_by_lists(args)
+
+
+def _current_run_needs_carrier() -> bool:
+    """Whether the run calling a wrapper now needs the carrier rows, decided at call time from
+    Megatron's global args (the same namespace as the Primus params: Megatron's parse_args returns
+    them). The wrappers are module-level and stay installed after their run, so a later run in the
+    same process (a test session, a sweep) must decide from its own args.
+
+    ``model_type`` is not checked here: Megatron's ``get_model`` replaces it with a ``ModelType`` enum
+    before the first P2P call. The per-layer lists decide instead: only this model sets
+    ``kv_source_layers``, so another model's run (no lists) or a run with PP 1 gets Megatron's own
+    shapes. Without global args (none set up in this process) nothing is added. The module is read
+    from ``sys.modules``: a run that set global args has imported it."""
+    args = _global_args()
+    return args is not None and _carrier_needed_by_lists(args)
+
+
+def _global_args():
+    """Megatron's global args, None when this process has set none (Megatron not imported, or its
+    args not initialised)."""
+    global_vars = sys.modules.get("megatron.training.global_vars")
+    if global_vars is None:
+        return None
+    try:
+        return global_vars.get_args()
+    except AssertionError:  # Megatron's "args is not initialized"
+        return None
+
+
 def make_get_tensor_shapes(original, kv_lora_rank: int):
-    """``get_tensor_shapes`` whose ``(s, b, h)`` shapes get the latent's rows: ``s + kv_carrier_rows``."""
+    """``get_tensor_shapes`` whose ``(s, b, h)`` shapes get the latent's rows: ``s + kv_carrier_rows``
+    (Megatron's shapes when the current run does not carry the latent: ``_current_run_needs_carrier``)."""
 
     @functools.wraps(original)
     def get_tensor_shapes(*args, **kwargs):
         shapes = original(*args, **kwargs)
+        if not _current_run_needs_carrier():
+            return shapes
         # [()] with variable_seq_lengths: the sender transmits the real shape, nothing to change
         return [
             (
@@ -142,6 +182,8 @@ def make_interleaved_schedule(original, kv_lora_rank: int, hidden_size: int, seq
 
     @functools.wraps(original)
     def schedule(*args, **kwargs):
+        if not _current_run_needs_carrier():
+            return original(*args, **kwargs)
         if kwargs.get("seq_length") is None:
             raise TypeError(
                 "Mistral Large 4 PP wire: the interleaved schedule was called without seq_length as a "

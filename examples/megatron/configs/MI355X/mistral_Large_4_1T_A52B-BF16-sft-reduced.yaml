@@ -5,14 +5,16 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Mistral Large 4 1T-A52B (text decoder) SFT on MI355X, from the released checkpoint, depth-reduced (16 layers).
 #   model: primus/configs/models/megatron/mistral_Large_4_1T_A52B.yaml
-#   `primus-cli direct -- train posttrain --config <this file> --hf_path <local snapshot>`: hf_path
-#   must be a local directory with the release's config.json (the hook detects the family from it;
-#   a Hub id has no local config.json and would take the Megatron-Bridge path, which does not
-#   support this model; the preset sets no hf_path; download it first, e.g. `hf download mistralai/Mistral-Large-4-1T-A52B`): the posttrain hook
-#   (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py) converts `hf_path`
-#   with the native converter (native_loader_mistral_large4_text: Mistral consolidated names,
-#   block-FP8 dequantised) in one process to a torch_dist checkpoint, which Megatron reshards to
-#   this layout when it loads it.
+#   Download the release first (the preset sets no hf_path), e.g.
+#   `hf download mistralai/Mistral-Large-4-1T-A52B --local-dir <local snapshot>`, then run
+#   `primus-cli direct -- train posttrain --config <this file> --hf_path <local snapshot>`.
+#   hf_path must be that local directory: the posttrain hook detects the model family from its
+#   config.json. A Hub id has no local config.json, so the hook would take the Megatron-Bridge
+#   path, which does not support this model.
+#   The posttrain hook (runner/helpers/hooks/train/posttrain/megatron/01_convert_checkpoints.py)
+#   converts hf_path with the native converter (native_loader_mistral_large4_text: Mistral
+#   consolidated names, block-FP8 dequantised) in one process to a torch_dist checkpoint, which
+#   Megatron reshards to this layout when it loads it.
 #   DEPTH-REDUCED one-node recipe: the full model needs several nodes, so this file fine-tunes
 #   the first 16 of the release's 72 layers on one 8-GPU node. The final norm and head then train on layer-16 states, so the loss is
 #   the cut's, not the released model's (the run logs a warning). The released model as-is is
@@ -94,7 +96,7 @@ modules:
 
       bf16: true
 
-      # Primus-Turbo: grouped GEMM experts; DeepEP dispatch when expert-TP x EP > 1
+      # Primus-Turbo: grouped GEMM experts; DeepEP dispatch only when opted in (below)
       enable_primus_turbo: true
       # TE core attention: the native converter (one process, no Primus-Turbo kernels) writes the
       # checkpoint with TE's core-attention state; Primus-Turbo attention expects other
@@ -104,14 +106,17 @@ modules:
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: true
-      # fused cross-entropy over the 204,800-entry vocabulary, as the pretrain experiments
+      # fused cross-entropy over the 204,800-entry vocabulary (as in the pretrain configs)
       cross_entropy_loss_fusion: true
       cross_entropy_fusion_impl: "te"
-      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:true}
+      # DeepEP off by default (Megatron's alltoall, the dispatcher this recipe was validated with:
+      # fine-tuning from the converted release, finite losses). DeepEP for this model is not
+      # validated yet; PRIMUS_TURBO_DEEPEP=true opts in (EP8 inside one node)
+      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
       # one node (EP8, intra-node DeepEP, no rocm_arg_validation limit): 160 of MI355X's 256 CUs for
       # dispatch / combine, as the other single-node MI355X MoE examples (deepseek_v2_lite pretrain)
       turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:160}
-      # not set: use_turbo_fused_act_with_probs (this image's Primus-Turbo swiglu_with_probs takes no
-      # clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
+      # not set: use_turbo_fused_act_with_probs (needs a Primus-Turbo whose swiglu_with_probs
+      # accepts clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the
       # release renormalises a softmax over all 128 experts on the top-4, which that op does not take).
-      # moe_router_dtype fp32, moe_permute_fusion and moe_shared_expert_overlap come from mistral_base.yaml
+      # moe_router_dtype fp32, moe_permute_fusion and moe_shared_expert_overlap come from mistral_large4_base.yaml

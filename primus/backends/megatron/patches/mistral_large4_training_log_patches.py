@@ -6,9 +6,13 @@
 
 """Mistral Large 4 (``model_type: mistral_large4``): when the first iteration of a run is also a
 log step (``log_interval`` 1, or a resume at ``k * log_interval - 1``), reset the loss accumulators
-and the ``interval-time`` timer after ``training_log``, as a normal log step does; otherwise the
-next log line averages two iterations. Limited to this model so that other models' loss baselines
-are unchanged.
+and the timers Megatron's log step resets (``interval-time`` and the logged per-phase timers) after
+``training_log``, as a normal log step does; otherwise the next log line averages two iterations. Limited to this model (ADR 0030: behaviour only this port
+changes stays a patch of this model) so that other models' loss baselines are unchanged. As a
+result, when the first iteration is a log step, this model's second log line (loss average and
+throughput) covers only its own iterations, while other Primus models on the same version include
+the first iteration in it: those first-interval numbers are not comparable across models. Later
+log lines are the same for every model.
 """
 
 import functools
@@ -22,7 +26,8 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-# set on the training_log wrapper this patch installs (tells an already wrapped training_log)
+# attribute set on the training_log wrapper this patch installs, so a second application detects
+# it and does not wrap again
 _WRAPPED_MARK = "_primus_mistral_large4_first_log"
 _COUNTERS = ("advanced iterations", "skipped iterations", "nan iterations")
 # the parameters of Megatron's training_log the wrapper reads (bound by name)
@@ -51,12 +56,75 @@ def reset_loss_accumulators(total_loss_dict) -> None:
             total_loss_dict[key] = 0.0
 
 
-def make_training_log(original, log_interval_fn, reset_interval_timer=None):
+# the timers Megatron's training_log logs (and resets on a normal log step): its ``timers_to_log``
+# per ``timing_log_level`` (training.py, training_log)
+LOGGED_TIMERS_LEVEL_1 = (
+    "forward-backward",
+    "layernorm-grads-all-reduce",
+    "embedding-grads-all-reduce",
+    "all-grads-sync",
+    "params-all-gather",
+    "optimizer-copy-to-main-grad",
+    "optimizer-unscale-and-check-inf",
+    "optimizer-clip-main-grad",
+    "optimizer-count-zeros",
+    "optimizer-inner-step",
+    "optimizer-copy-main-to-model-params",
+    "optimizer",
+)
+LOGGED_TIMERS_LEVEL_2 = (
+    "batch-generator",
+    "forward-compute",
+    "backward-compute",
+    "forward-recv",
+    "forward-send",
+    "backward-recv",
+    "backward-send",
+    "forward-send-forward-recv",
+    "forward-send-backward-recv",
+    "backward-send-forward-recv",
+    "backward-send-backward-recv",
+    "forward-backward-send-forward-backward-recv",
+)
+
+
+def logged_timer_names(timing_log_level, extra=()) -> list:
+    """The names Megatron's training_log passes to ``timers.log(..., reset=should_reset)``:
+    level 1 and level 2 lists as ``timing_log_level`` selects, plus ``extra`` (the RL timers when
+    ``perform_rl_step``)."""
+    level = int(timing_log_level or 0)
+    names = list(LOGGED_TIMERS_LEVEL_1) if level >= 1 else []
+    if level >= 2:
+        names += LOGGED_TIMERS_LEVEL_2
+    return names + list(extra)
+
+
+def reset_megatron_timers(timers, names) -> list:
+    """Do what Megatron's log step does to its timers when it resets, and nothing more:
+    ``interval-time`` with the barrier (``timers('interval-time').elapsed(barrier=True,
+    reset=True)``), then the logged timers ``names`` (``timers.log(names, reset=True)`` calls
+    ``elapsed(reset=True)`` on each one that exists). A running timer keeps running. Other timers
+    (startup, checkpoint, evaluate) are not touched. Returns the names reset."""
+    timers("interval-time").elapsed(barrier=True, reset=True)
+    done = ["interval-time"]
+    existing = getattr(timers, "_timers", None)
+    for name in names:
+        # Megatron's own timers.log skips a name it has no timer for (``if name in self._timers``);
+        # calling timers(name) would create one
+        if existing is None or name in existing:
+            timers(name).elapsed(reset=True)
+            done.append(name)
+    return done
+
+
+def make_training_log(original, log_interval_fn, reset_timers=None):
     """``training_log`` that, on a first iteration that is a log step, also does what a normal log
-    step does after logging: clears the loss accumulators and iteration counters, and resets
-    Megatron's ``interval-time`` timer (``reset_interval_timer``). Both go together, so the next
-    log line divides the time of its own iterations by their count (throughput, TFLOP/s and
-    tokens/s stay right). ``is_first_iteration`` is forwarded to ``original`` unchanged.
+    step does after logging and Megatron skips on the first iteration (``should_reset = not
+    is_first_iteration``): clears the loss accumulators and iteration counters, and resets
+    the timers Megatron's log step resets (``reset_timers``: ``interval-time`` and the logged
+    per-phase timers such as forward-backward and optimizer, ``reset_megatron_timers``). Both go together, so the next
+    log line divides the time of its own iterations by their count (throughput, TFLOP/s,
+    tokens/s and the per-phase timings cover the same iterations as the loss). ``is_first_iteration`` is forwarded to ``original`` unchanged.
 
     ``log_interval_fn()`` returns Megatron's ``args.log_interval`` (read at call time). The
     arguments are bound by name to ``original``'s signature (no positional index)."""
@@ -78,8 +146,8 @@ def make_training_log(original, log_interval_fn, reset_interval_timer=None):
             and iteration % int(log_interval_fn() or 1) == 0
         ):
             reset_loss_accumulators(total_loss_dict)
-            if reset_interval_timer is not None:
-                reset_interval_timer()
+            if reset_timers is not None:
+                reset_timers()
         return out
 
     setattr(training_log, _WRAPPED_MARK, True)
@@ -121,18 +189,19 @@ def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
         )
         return
 
-    def reset_interval_timer():
-        # elapsed(barrier=True, reset=True) clears the time accumulated so far and keeps the timer
-        # running, with the barrier Megatron's log step uses (training_log:
-        # timers('interval-time').elapsed(barrier=True, reset=should_reset)), so every rank resets at
-        # the same point. It runs right after training_log returns (the first iteration's log
-        # step), not inside it: the next interval also counts the few host operations between the
-        # two, as each later interval does after Megatron's own reset.
+    def reset_timers():
+        # runs right after training_log returns (the first iteration's log step), not inside it:
+        # the next interval also counts the few host operations between the two, as each later
+        # interval does after Megatron's own reset
         from megatron.training.global_vars import get_timers
 
-        get_timers()("interval-time").elapsed(barrier=True, reset=True)
+        args = get_megatron_args()
+        extra = ()
+        if getattr(args, "perform_rl_step", False):
+            extra = tuple(getattr(megatron_training, "RL_LOGGABLE_TIMER_NAMES", ()) or ())
+        reset_megatron_timers(get_timers(), logged_timer_names(getattr(args, "timing_log_level", 0), extra))
 
     megatron_training.training_log = make_training_log(
-        megatron_training.training_log, lambda: get_megatron_args().log_interval, reset_interval_timer
+        megatron_training.training_log, lambda: get_megatron_args().log_interval, reset_timers
     )
     log_rank_0("[Patch:megatron.mistral_large4.first_iteration_log] wrapped training_log")

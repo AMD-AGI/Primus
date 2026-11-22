@@ -44,7 +44,7 @@ model is held on the host in params_dtype: the 16-layer cut needs ~420 GiB in bf
 """
 
 import argparse
-import errno
+import contextlib
 import faulthandler
 import functools
 import json
@@ -95,20 +95,14 @@ def _exception_chain(e):
 def _retryable_write_failure(e) -> bool:
     """True for the intermittent writer failures a retry can fix, anywhere in ``e``'s cause chain:
     torch's ``CheckpointException`` or Megatron's async-writer ``RuntimeError('Worker failure
-    ...')``; False when any exception of the chain is a full disk or quota (ENOSPC / EDQUOT, or
-    its text), which a rewrite of the whole checkpoint would hit again.
-
-    Like ``common._ran_out_of_space`` but without its "unexpected pos" text, which is retried here
-    (the shared helper takes no text list)."""
-    chain = list(_exception_chain(e))
-    for x in chain:
-        if isinstance(x, OSError) and x.errno in (errno.ENOSPC, errno.EDQUOT):
-            return False
-        if any(t in str(x) for t in _NO_SPACE_TEXT):
-            return False
+    ...')``; False when the chain holds a full disk or quota (``common._ran_out_of_space`` without
+    its "unexpected pos" text, which is retried here), which a rewrite of the whole checkpoint
+    would hit again."""
+    if common._ran_out_of_space(e, texts=_NO_SPACE_TEXT):
+        return False
     return any(
         isinstance(x, CheckpointException) or (isinstance(x, RuntimeError) and "Worker failure" in str(x))
-        for x in chain
+        for x in _exception_chain(e)
     )
 
 
@@ -265,13 +259,21 @@ def _stored_is_fp8(store, name: str) -> bool:
 def read_weight(store, name: str, dtype, consumed: set) -> torch.Tensor:
     """``name`` in ``dtype``, dequantised (in fp32) with its ``<name minus .weight>.qscale_weight``
     block scales. An FP8 tensor without that scale is refused (a missing shard or a renamed key would
-    otherwise be cast without scaling: wrong weights, no error)."""
+    otherwise be cast without scaling: wrong weights, no error), and so is a scale beside a tensor that
+    is not FP8 (it would be scaled a second time)."""
     consumed.add(name)
     scale_name = name[: -len(".weight")] + ".qscale_weight" if name.endswith(".weight") else None
     has = getattr(store, "has", None) or (lambda n: n in store.all_keys())
     has_scale = scale_name is not None and has(scale_name)
-    if not has_scale and _stored_is_fp8(store, name):
+    is_fp8 = _stored_is_fp8(store, name)
+    if not has_scale and is_fp8:
         raise RuntimeError(f"{name} is stored in FP8 but has no block scale {scale_name!r} in the checkpoint")
+    if has_scale and not is_fp8:
+        # a weight already dequantised (bf16 / fp32) that kept its scale would be scaled twice
+        raise RuntimeError(
+            f"{name} has a block scale {scale_name!r} but is not stored in FP8: the scale would be applied "
+            "to an already dequantised weight"
+        )
     t = store.get(name, torch.float32)
     if has_scale:
         consumed.add(scale_name)
@@ -302,13 +304,14 @@ def yarn_attention_factor(rope: dict) -> float:
     get_mscale(factor, mscale_all_dim)`` when both mscales are given, else ``get_mscale(factor)``
     (``0.1 * ln(factor) + 1`` for ``factor > 1``)."""
 
-    # Megatron's YaRN mscale (the formula its YaRN rotary embedding applies)
+    if rope.get("attention_factor") is not None:
+        return float(rope["attention_factor"])
+    # Megatron's YaRN mscale (the formula its YaRN rotary embedding applies); imported only when the
+    # config gives no attention_factor, so the release's config is checked without Megatron
     from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
         _yarn_get_mscale as get_mscale,
     )
 
-    if rope.get("attention_factor") is not None:
-        return float(rope["attention_factor"])
     factor = float(rope["factor"])
     if rope.get("mscale") and rope.get("mscale_all_dim"):
         return get_mscale(factor, float(rope["mscale"])) / get_mscale(factor, float(rope["mscale_all_dim"]))
@@ -382,6 +385,8 @@ def derive_megatron_fields(hf_config):
             defaulted,
         )
     n_shared = int(t.get("n_shared_experts", 0) or 0)
+    num_experts = int(t["n_routed_experts"])
+    moe_ffn = int(t["moe_intermediate_size"])
     return dict(
         num_layers=n,
         hidden_size=int(t["hidden_size"]),
@@ -409,11 +414,11 @@ def derive_megatron_fields(hf_config):
         # own YaRN + LeRoPE table and reads neither
         mscale=0.0,
         mscale_all_dim=0.0,
-        num_experts=int(t["n_routed_experts"]),
-        moe_ffn_hidden_size=int(t["moe_intermediate_size"]),
-        moe_shared_expert_intermediate_size=int(t["moe_intermediate_size"]) * n_shared if n_shared else None,
+        num_experts=num_experts,
+        moe_ffn_hidden_size=moe_ffn,
+        moe_shared_expert_intermediate_size=moe_ffn * n_shared if n_shared else None,
         moe_router_topk=int(t["num_experts_per_tok"]),
-        moe_layer_freq=moe_layer_freq_list(first_k, n, int(t["n_routed_experts"])),
+        moe_layer_freq=moe_layer_freq_list(first_k, n, num_experts),
         moe_router_topk_scaling_factor=float(t.get("routed_scaling_factor", 1.0)),
         first_k_dense_replace=first_k,
         **lists,
@@ -518,9 +523,8 @@ def build_margs(fields, args):
     p = argparse.ArgumentParser(allow_abbrev=False)
     p = add_megatron_arguments(p)
     m = p.parse_args([])
-    for k in ARG_FIELDS:
-        setattr(m, k, fields[k])
-    for k in MODEL_FIELDS:  # per-layer lists cut to num_layers by the config
+    # MODEL_FIELDS: per-layer lists cut to num_layers by the config
+    for k in ARG_FIELDS + MODEL_FIELDS:
         setattr(m, k, fields[k])
     m.model_type = MODEL_TYPE
 
@@ -783,11 +787,13 @@ def storage_exact_alias(t: torch.Tensor) -> torch.Tensor:
     return alias
 
 
+@contextlib.contextmanager
 def save_without_copies(model):
-    """Make ``model.sharded_state_dict`` (this instance only: the conversion's save) return
-    ShardedTensors whose data the torch_dist writer does not clone (``storage_exact_alias``).
+    """Inside the block, ``model.sharded_state_dict`` (this instance only: the conversion's save)
+    returns ShardedTensors whose data the torch_dist writer does not clone (``storage_exact_alias``).
     Factories (the SwiGLU split) are built here, as ``dist_checkpointing.save`` would build them;
-    the model's own parameters are untouched, so a retried save sees the same weights."""
+    the model's own parameters are untouched, so a retried save sees the same weights. The
+    instance's own ``sharded_state_dict`` is restored when the block exits."""
     from megatron.core.dist_checkpointing.dict_utils import dict_list_map_inplace
     from megatron.core.dist_checkpointing.mapping import ShardedTensor, apply_factories
 
@@ -806,7 +812,10 @@ def save_without_copies(model):
         return sharded
 
     model.sharded_state_dict = sharded_state_dict
-    return model
+    try:
+        yield model
+    finally:
+        del model.sharded_state_dict  # the class's method again
 
 
 # ---------------------------------------------------------------------------
@@ -876,8 +885,9 @@ def convert(
     # the training builder (model_type mistral_large4) through Primus's model provider
     model = build_model(margs)
     sd, consumed = build_mcore_state_dict(model, store, margs, fields, log)
-    if margs.ckpt_format == "torch_dist":
-        save_without_copies(model)  # one copy of the weights on the host, also while saving
-    _save_with_retry(model, sd, consumed, store, margs, save_dir, log)
+    # torch_dist: one copy of the weights on the host, also while saving
+    aliasing = save_without_copies(model) if margs.ckpt_format == "torch_dist" else contextlib.nullcontext()
+    with aliasing:
+        _save_with_retry(model, sd, consumed, store, margs, save_dir, log)
     common.assert_bridge_free("post-save")
     return save_dir

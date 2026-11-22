@@ -12,7 +12,7 @@
 ###############################################################################
 
 extends:
-  - mistral_base.yaml
+  - mistral_large4_base.yaml
 
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: mistralai/Mistral-Large-4-1T-A52B

@@ -1,5 +1,5 @@
 ###############################################################################
-# Mistral family base (Mistral Large 4 and later releases of its architecture).
+# Mistral Large 4 base (model_type mistral_large4: this architecture and later releases of it).
 #
 # MLA without Q-LoRA, YaRN + learned LeRoPE rope applied interleaved, SSMax query scaling,
 # DSA lightning indexer with index sharing, cross-layer latent KV sharing, softmax top-k MoE

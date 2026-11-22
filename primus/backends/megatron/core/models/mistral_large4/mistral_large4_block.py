@@ -309,9 +309,8 @@ class MistralLarge4TransformerBlock(TransformerBlock):
                     "Mistral Large 4 DSA sparse attention (sequence > index_topk) with context parallelism is "
                     "not supported; use context_parallel_size 1 or seq_length <= index_topk"
                 )
-            # one-time sanity check on the first sparse micro-batch (see _assert)
+            # one-time sanity check on the first sparse micro-batch that carries a mask (see _assert)
             if attention_mask is not None and not getattr(self, "_checked_sparse_mask", False):
-                # the first sparse micro-batch that carries a mask
                 self._check_sparse_mask(attention_mask, full)
                 self._checked_sparse_mask = True
             if not getattr(self, "_logged_sparse", False):

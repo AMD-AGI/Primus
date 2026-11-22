@@ -17,6 +17,7 @@ from typing import List
 
 # torch and the standard library only (no Megatron): the module stays importable before Megatron
 from primus.backends.megatron.checkpoint.native_convert_common import TRACKER_FILENAME
+from primus.core.utils.flag_utils import bool_flag
 
 __all__ = [
     "DEFAULT_FIRST_K_DENSE_REPLACE",
@@ -48,18 +49,13 @@ def is_mistral_large4_args(args) -> bool:
     return getattr(args, "model_type", None) == MODEL_TYPE
 
 
-# Megatron's tracker file (native_convert_common.TRACKER_FILENAME, the converter's constant): a
-# ``load`` / ``pretrained_checkpoint`` directory without it holds no checkpoint (Megatron reads either
-# only through it; a path to ``release/`` or ``iter_N/`` has none)
-MEGATRON_TRACKER = TRACKER_FILENAME
-
-
 def holds_megatron_checkpoint(path) -> bool:
-    """``path`` is a directory with Megatron's tracker file. Without it Megatron only warns and
+    """``path`` is a directory with Megatron's tracker file (``TRACKER_FILENAME``; Megatron reads a
+    checkpoint only through it). Without it Megatron only warns and
     starts from random weights: the load == save auto-resume pattern on its first run, a mistyped
     or stale path, a ``release/`` or ``iter_N/`` subdirectory, or the empty output directory of a
     failed conversion."""
-    return bool(path) and os.path.isfile(os.path.join(str(path), MEGATRON_TRACKER))
+    return bool(path) and os.path.isfile(os.path.join(str(path), TRACKER_FILENAME))
 
 
 def turbo_enabled(cfg) -> bool:
@@ -67,7 +63,7 @@ def turbo_enabled(cfg) -> bool:
     installed, the gate of the shared ``megatron.turbo.*`` patches (``is_primus_turbo_can_patch``).
     Without it the layer specs read every ``use_turbo_*`` switch as off."""
     return (
-        bool(getattr(cfg, "enable_primus_turbo", False))
+        bool_flag(getattr(cfg, "enable_primus_turbo", False), "enable_primus_turbo")
         and importlib.util.find_spec("primus_turbo") is not None
     )
 
@@ -78,8 +74,8 @@ def experts_on_turbo_grouped_gemm(cfg) -> bool:
     ``moe_grouped_gemm``. Otherwise they run on TE GEMMs (``SequentialMLP``, or TE's grouped GEMM)."""
     return (
         turbo_enabled(cfg)
-        and bool(getattr(cfg, "use_turbo_grouped_gemm", False))
-        and bool(getattr(cfg, "moe_grouped_gemm", False))
+        and bool_flag(getattr(cfg, "use_turbo_grouped_gemm", False), "use_turbo_grouped_gemm")
+        and bool_flag(getattr(cfg, "moe_grouped_gemm", False), "moe_grouped_gemm")
     )
 
 
@@ -198,29 +194,6 @@ def normalize_layer_list(value, num_layers: int, name: str, kind=int, default=No
     if len(value) < num_layers:
         raise ValueError(f"{name} has {len(value)} entries, fewer than num_layers={num_layers}")
     return value[:num_layers]
-
-
-def parse_flag(value, name: str) -> bool:
-    """A yes/no setting: a bool, 0/1, or one of true/false/yes/no/on/off/1/0 (any case, surrounding
-    whitespace ignored). ``None`` and an empty (or blank) string read as False: an unset
-    environment substitution such as ``${VAR:}`` gives one.
-
-    The yaml loader turns only 'true' and 'false' from an environment variable into a bool;
-    another word stays a string, which plain truthiness would read as True. Any other value
-    raises ValueError naming ``name`` instead of being guessed."""
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in ("true", "yes", "on", "1"):
-            return True
-        if text in ("false", "no", "off", "0", ""):
-            return False
-    raise ValueError(f"{name} must be true or false, got {value!r}")
 
 
 def moe_layer_freq_list(first_k_dense_replace, num_layers: int, num_experts) -> List[int]:
