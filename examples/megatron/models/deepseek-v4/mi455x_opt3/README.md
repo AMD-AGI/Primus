@@ -65,7 +65,8 @@ Requirements:
 | + overlap2 OVERLAP_CSA_BWD, graph | 46.3 (A/B 46.43 -> 46.37; 12 pairs pooled ~-0.11) | 9.8713 |
 | + quant2 T2='*'/DQ/SWB, graph | 45.7 (A/B 46.40 -> 45.70) | 9.8713 |
 | + swahca SWAHCA_LOOP (layout insurance), graph | 45.7 (A/B neutral) | 9.8713 |
-| **+ bf16grp IDX/ROT/ROT_OA + BF16TUNE=bit (this config), graph** | **45.3** (A/B 45.83 -> 45.33) | 9.8713 |
+| + bf16grp IDX/ROT/ROT_OA + BF16TUNE=bit, graph | 45.3 (A/B 45.83 -> 45.33) | 9.8713 |
+| **+ small batch 2: route3 EARLY=2, hcfuse candC, quant2 T2P + NW=8, gnorm2 sumsq fix (this config), graph** | **45.1** (A/B 45.30 -> 45.10) | 9.8713 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -203,6 +204,10 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
   (bf16rot_mm) reproduces them bit for bit and is faster (o_a wgrad 126.8 -> 114.4, CSA cmp fwd 47.4 -> 37.0, HCA dgrad
   31.9 -> 22.1 us); idx512 (GSU5/832) + q192 grouped split-K: -0.50 ms, bit-identical. Keyed to today's hipBLASLt defaults:
   rerun bf16grp tools/test_rot.py + test_grp.py after any image/hipBLASLt/TunableOp change.
+- small batch 2 (-0.20 ms together, all bit-identical): route3 `PRIMUS_ROUTE3_EARLY=2` (MoE routing tables built on the
+  side queue before the shared-expert join from per-block histograms; works for any routing; `PRIMUS_ROUTE3_TABLES` is
+  benchmark-only and stays 0), hcfuse `PRIMUS_HC_B3X_CFG=...pf2=1` + `PRIMUS_HCFUSE_FOLD_CFG=bwd_ppc=2`, quant2
+  `PRIMUS_QUANT2_T2P='*'` (MB_PACKQ quant on the quant2 core) + `PRIMUS_QUANT2_NW=8`, and gnorm2's _sumsq_multi over-read fix.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
