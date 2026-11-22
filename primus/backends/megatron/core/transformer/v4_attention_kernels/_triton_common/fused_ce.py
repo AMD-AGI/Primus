@@ -136,8 +136,14 @@ class PrimusCrossEntropyFn(torch.autograd.Function):
         S = triton.cdiv(V, blk)
         S2 = triton.next_power_of_2(S)
         dev = inp.device
-        pm = torch.full((T, S2), -float("inf"), dtype=torch.float32, device=dev)
-        pd = torch.zeros((T, S2), dtype=torch.float32, device=dev)
+        if S == S2 and os.environ.get("PRIMUS_MB_SMALLS", "0") == "1":
+            # membound: every (row, split) partial is written by the kernel when S is a power of two, so the
+            # -inf / 0 fills of the unused splits are not needed (two launches less; same bytes)
+            pm = torch.empty((T, S2), dtype=torch.float32, device=dev)
+            pd = torch.empty((T, S2), dtype=torch.float32, device=dev)
+        else:
+            pm = torch.full((T, S2), -float("inf"), dtype=torch.float32, device=dev)
+            pd = torch.zeros((T, S2), dtype=torch.float32, device=dev)
         pxy = torch.empty((T,), dtype=torch.float32, device=dev)
         _ce_fwd_part_kernel[(T, S)](x2d, y, pm, pd, pxy, V, x2d.stride(0), S2, IGNORE=ignore_idx, BLOCK=blk,
                                     num_warps=f["fwd_warps"])

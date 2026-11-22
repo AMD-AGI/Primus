@@ -41,6 +41,7 @@ pp_simulation_result
 # hipify output of the fused Adam clip extension, written next to its .cu at build time
 primus/backends/megatron/patches/te_patches/fused_adam_clip_kernel.hip
 primus/backends/megatron/patches/te_patches/fused_adam_clip_kernel_v9.hip
+primus/backends/megatron/patches/te_patches/fused_adam_clip_kernel_v11.hip
 
 # Slurm job stdout/stderr captures (e.g. spur-<jobid>.out) dropped at the repo root; keep them out of the history.
 spur-*.out

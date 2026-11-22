@@ -102,6 +102,11 @@ from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
     DeepseekV4LearnedRouter,
 )
 
+try:  # PRIMUS_OVERLAP_SHARED (side-stream shared expert); absent in older Primus-Turbo builds
+    from primus_turbo.pytorch.core import overlap as _overlap
+except ImportError:  # pragma: no cover
+    _overlap = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -978,20 +983,46 @@ class DeepseekV4MoE(MegatronModule):
             ``[B, S, D]`` output. Sum of routed-expert and shared-expert
             contributions.
         """
-        compact = self._route_compact(hidden, token_ids) if self.mega_moe_experts is not None else None
+        # PRIMUS_OVERLAP_SHARED=1 (fused MegaMoE path, EP = TP = 1): the shared expert is issued on a side stream
+        # first and runs next to the router + routed experts; autograd runs its backward on that stream too.
+        # ForkGrad hands each consumer its own alias of `hidden` and sums their gradients in the serial engine's
+        # order (shared expert, routed experts, router), so every bit stays the same.
+        h_r = h_e = hidden
+        br = y_shared = None
+        if (
+            self.shared_expert is not None
+            and not self.shared_expert_overlap
+            and self.mega_moe_experts is not None
+            and self.local_experts is None
+            and _overlap is not None
+            and _overlap.enabled("SHARED")
+            and hidden.requires_grad
+            and torch.is_grad_enabled()
+            and parallel_state.get_expert_model_parallel_world_size() == 1
+            and parallel_state.get_tensor_model_parallel_world_size() == 1
+        ):
+            h_r, h_e, h_s = _overlap.ForkGrad.apply(hidden, 3, (2, 1, 0))
+            with _overlap.branch("branch") as br:
+                y_shared = self.shared_expert(h_s)
+
+        compact = self._route_compact(h_r, token_ids) if self.mega_moe_experts is not None else None
         if compact is not None:
             # PRIMUS_FUSE_ROUTE=1: router GEMM + one compact route kernel straight into MegaMoE's (idx, weights)
             topk_w, topk_idx = compact
-            x = hidden.reshape(-1, self.hidden_size).to(torch.bfloat16)
+            x = h_e.reshape(-1, self.hidden_size).to(torch.bfloat16)
             shared = self.shared_expert is not None and not self.shared_expert_overlap
             if shared and os.environ.get("PRIMUS_FUSE_MOE_ADD", "0") == "1" and hidden.dtype == torch.bfloat16:
                 # routed + shared add inside the MegaMoE combine kernel (bit-identical to the bf16 add below)
-                sh = self.shared_expert(hidden)
+                sh = br.done(y_shared) if br is not None else self.shared_expert(hidden)
                 return self.mega_moe_experts(x, topk_idx, topk_w, add=sh.reshape(x.shape)).reshape(hidden.shape)
             out = self.mega_moe_experts(x, topk_idx, topk_w).reshape(hidden.shape).to(hidden.dtype)
             if shared:
-                out = out + self.shared_expert(hidden)
+                out = out + (br.done(y_shared) if br is not None else self.shared_expert(hidden))
             return out
+        if br is not None:
+            probs, _ = self._route(h_r, token_ids)
+            out = self._mega_moe_forward(h_e, probs)
+            return out + br.done(y_shared)
 
         probs, routing_map = self._route(hidden, token_ids)  # [N, E], bool
 

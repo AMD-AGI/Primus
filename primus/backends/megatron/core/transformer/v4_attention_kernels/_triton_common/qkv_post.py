@@ -77,14 +77,18 @@ def _qkv_post_fwd_kernel(XQ, XKV, GQ, GKV, YQ, YKV, RSTDQ, RSTDKV, POS, INV, CSB
 
 
 @triton.jit
-def _kv_dy(DYKV, CSB, r64, c0, W: tl.constexpr, HKV: tl.constexpr, NOPE: tl.constexpr):
+def _kv_dy(DYKV, CSB, r64, c0, W: tl.constexpr, HKV: tl.constexpr, NOPE: tl.constexpr, SDY=0,
+           STRIDED: tl.constexpr = 0):
     """dy of the kv RMSNorm = RoPE adjoint of the incoming kv gradient on columns [c0, c0 + W), rounded to the
     activation dtype like _rope_gen_row_kernel's store (INVERSE: even = a c - b s, odd = a s + b c with (a, b) the
     (even, odd) pair). Partner-column loads instead of tl.split keep the plain load layout, so the RMSNorm
     reductions below see the same layout as _rms_bwd_kernel."""
     RDH: tl.constexpr = HKV // 2 - NOPE // 2
     cols = c0 + tl.arange(0, W)
-    row = DYKV + r64[:, None] * HKV
+    if STRIDED:  # membound PRIMUS_MB_SMALLS: incoming kv gradient with row stride SDY (no contiguous copy)
+        row = DYKV + r64[:, None] * SDY
+    else:
+        row = DYKV + r64[:, None] * HKV
     gk = tl.load(row + cols[None, :])
     g = gk.to(tl.float32)
     gp = tl.load(row + (cols ^ 1)[None, :]).to(tl.float32)
@@ -100,7 +104,7 @@ def _kv_dy(DYKV, CSB, r64, c0, W: tl.constexpr, HKV: tl.constexpr, NOPE: tl.cons
 
 @triton.jit
 def _rms_bwd_part(DY, X, G, RSTD, CSB, DX, DGP, pid, H: tl.constexpr, IS_KV: tl.constexpr, HKV: tl.constexpr,
-                  NOPE: tl.constexpr, RPP: tl.constexpr):
+                  NOPE: tl.constexpr, RPP: tl.constexpr, SDY=0, STRIDED: tl.constexpr = 0):
     """_rms_bwd_kernel's body for one row partition (RB = 2, BH = H, same tile shapes -> same reduction trees); the
     kv dy is the RoPE adjoint of the incoming gradient, rounded like the separate RoPE kernel's store."""
     cols = tl.arange(0, H)
@@ -112,7 +116,9 @@ def _rms_bwd_part(DY, X, G, RSTD, CSB, DX, DGP, pid, H: tl.constexpr, IS_KV: tl.
         off = r64[:, None] * H + cols[None, :]
         x = tl.load(X + off).to(tl.float32)
         if IS_KV:
-            dy = _kv_dy(DY, CSB, r64, 0, H, HKV, NOPE)
+            dy = _kv_dy(DY, CSB, r64, 0, H, HKV, NOPE, SDY, STRIDED)
+        elif STRIDED:
+            dy = tl.load(DY + r64[:, None] * SDY + cols[None, :]).to(tl.float32)
         else:
             dy = tl.load(DY + off).to(tl.float32)
         rstd = tl.load(RSTD + r64)
@@ -126,14 +132,15 @@ def _rms_bwd_part(DY, X, G, RSTD, CSB, DX, DGP, pid, H: tl.constexpr, IS_KV: tl.
 
 @triton.jit
 def _qkv_post_bwd_kernel(DYQ, DYKV, XQ, XKV, GQ, GKV, RSTDQ, RSTDKV, CSB, DGPQ, DGPKV, DXQ, DXKV,
-                         HQ: tl.constexpr, HKV: tl.constexpr, NOPE: tl.constexpr, RPP: tl.constexpr):
+                         HQ: tl.constexpr, HKV: tl.constexpr, NOPE: tl.constexpr, RPP: tl.constexpr, SDQ=0, SDKV=0,
+                         STRIDED: tl.constexpr = 0):
     """Both RMSNorm backwards (+ the kv RoPE adjoint) for one RPP-row partition: programs [0, P) do q, [P, 2P) kv."""
     pid = tl.program_id(0)
     P = tl.num_programs(0) // 2
     if pid < P:
-        _rms_bwd_part(DYQ, XQ, GQ, RSTDQ, CSB, DXQ, DGPQ, pid, HQ, False, HKV, NOPE, RPP)
+        _rms_bwd_part(DYQ, XQ, GQ, RSTDQ, CSB, DXQ, DGPQ, pid, HQ, False, HKV, NOPE, RPP, SDQ, STRIDED)
     else:
-        _rms_bwd_part(DYKV, XKV, GKV, RSTDKV, CSB, DXKV, DGPKV, pid - P, HKV, True, HKV, NOPE, RPP)
+        _rms_bwd_part(DYKV, XKV, GKV, RSTDKV, CSB, DXKV, DGPKV, pid - P, HKV, True, HKV, NOPE, RPP, SDKV, STRIDED)
 
 
 @triton.jit
@@ -223,8 +230,20 @@ class QKVPostFn(torch.autograd.Function):
         qshape, kvshape, HQ, HKV, rd, q_first = ctx.meta
         N = xq.shape[0]
         dev = xq.device
-        dyq2 = dyq.reshape(N, HQ).contiguous()
-        dykv2 = dykv.reshape(N, HKV).contiguous()
+        strided = 0
+        if os.environ.get("PRIMUS_MB_SMALLS", "0") == "1":
+            # membound: row-strided incoming gradients are read in place (a [N, H] view with unit column stride),
+            # no .contiguous() copy; same values, same tiles
+            try:
+                dq_v, dkv_v = dyq.view(N, HQ), dykv.view(N, HKV)
+            except RuntimeError:
+                dq_v = dkv_v = None
+            if dq_v is not None and dq_v.stride(1) == 1 and dkv_v.stride(1) == 1 and (
+                    not dq_v.is_contiguous() or not dkv_v.is_contiguous()):
+                dyq2, dykv2, strided = dq_v, dkv_v, 1
+        if not strided:
+            dyq2 = dyq.reshape(N, HQ).contiguous()
+            dykv2 = dykv.reshape(N, HKV).contiguous()
         rpp = _rpp(N)
         P = triton.cdiv(N, rpp)
         dgpq = torch.empty((P, HQ), dtype=torch.float32, device=dev)
@@ -233,8 +252,13 @@ class QKVPostFn(torch.autograd.Function):
         dxkv = torch.empty(kvshape, dtype=xkv.dtype, device=dev)
         for t in (dyq2, dykv2, xq, xkv, gq, gkv, rq, rkv, csb, dgpq, dgpkv, dxq, dxkv):
             assert t.is_cuda and t.data_ptr() != 0
-        _qkv_post_bwd_kernel[(2 * P,)](dyq2, dykv2, xq, xkv, gq, gkv, rq, rkv, csb, dgpq, dgpkv, dxq, dxkv,
-                                       HQ=HQ, HKV=HKV, NOPE=HKV - rd, RPP=rpp, num_warps=8)
+        if strided:
+            _qkv_post_bwd_kernel[(2 * P,)](dyq2, dykv2, xq, xkv, gq, gkv, rq, rkv, csb, dgpq, dgpkv, dxq, dxkv,
+                                           HQ=HQ, HKV=HKV, NOPE=HKV - rd, RPP=rpp, SDQ=dyq2.stride(0),
+                                           SDKV=dykv2.stride(0), STRIDED=1, num_warps=8)
+        else:
+            _qkv_post_bwd_kernel[(2 * P,)](dyq2, dykv2, xq, xkv, gq, gkv, rq, rkv, csb, dgpq, dgpkv, dxq, dxkv,
+                                           HQ=HQ, HKV=HKV, NOPE=HKV - rd, RPP=rpp, num_warps=8)
         # dgamma: one reduce launch for both (into main_grad on the glue first-write path, like RMSNormG90Fn)
         outs, posts, grads = [], [], []
         from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad, main_grad_first_write
