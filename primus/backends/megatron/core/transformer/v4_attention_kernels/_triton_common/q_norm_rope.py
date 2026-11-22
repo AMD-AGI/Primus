@@ -455,10 +455,14 @@ class QNormRopePadFn(torch.autograd.Function):
         rstd = torch.empty((N, H), dtype=torch.float32, device=x.device)
         bh = _block_h(H)
         if _split_ok():
-            bh2 = min(16, triton.next_power_of_2(max(H, 1)))
+            # PRIMUS_V4_QNR_FWD_BH / _NW (fuseattn): tile of the forward kernel. Any BLOCK_H with num_warps >= 2 keeps
+            # the per-head reduction tree (8 elements x 32 lanes x 2 warps over D = 512), so the bits; [4096, 64, 512]:
+            # BH 16 / 8 warps 44.9 us -> BH 8 / 2 warps 40.2 us (tools/sweep_qnr.py).
+            bh2 = min(int(os.environ.get("PRIMUS_V4_QNR_FWD_BH", "16")), triton.next_power_of_2(max(H, 1)))
+            nw2 = int(os.environ.get("PRIMUS_V4_QNR_FWD_NW", "0")) or (8 if bh2 >= 16 else 4)
             _q_norm_rope_fwd2_kernel[(N, triton.cdiv(H, bh2))](
                 x3, pos_c, inv_c, buf, rstd, H, EPS=float(eps), D=D, NOPE=D - rotary_dim, PAD=pad,
-                BLOCK_PAD=max(triton.next_power_of_2(max(pad, 1)), 1), BLOCK_H=bh2, num_warps=8 if bh2 >= 16 else 4,
+                BLOCK_PAD=max(triton.next_power_of_2(max(pad, 1)), 1), BLOCK_H=bh2, num_warps=nw2,
             )
         else:
           _q_norm_rope_fwd_kernel[(N, triton.cdiv(H, bh))](

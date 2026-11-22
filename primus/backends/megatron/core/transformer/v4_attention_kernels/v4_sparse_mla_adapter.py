@@ -49,6 +49,17 @@ _mask_ok_cache = {}
 
 _BAND_TOPK_CACHE = {}
 
+# PRIMUS_V4_OROPE_INPLACE: (data_ptr, numel) of the output the LAST sparse-MLA forward saved for its backward. The
+# attention module's single exit consumes it right after that forward (take_saved_output), so a stale entry can never
+# match a later, unrelated tensor at a reused address.
+_PENDING_OUT = [None]
+
+
+def take_saved_output(t: torch.Tensor) -> bool:
+    """True if ``t`` is (the start and size of) the output the last sparse-MLA forward saved; clears the record."""
+    rec, _PENDING_OUT[0] = _PENDING_OUT[0], None
+    return rec is not None and rec == (t.data_ptr(), t.numel())
+
 
 def _fused_glue_on(t: torch.Tensor) -> bool:
     """Fused Triton glue (one kernel for the CSA top-k map / the rope-padded kv) on GPU tensors."""
@@ -317,6 +328,7 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
+        _PENDING_OUT[0] = (o_g.data_ptr(), o_g.numel())
         ctx.shapes = (B, H, S, Skv, D, P, W)
         ctx.band = _csa_band_pool(B, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts)
         ctx.scale = float(scale)
@@ -478,6 +490,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
             o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
+        _PENDING_OUT[0] = (o_g.data_ptr(), o_g.numel())
         ctx.shapes = (B, H, S, D, Skv)
         ctx.scale = float(scale)
         ctx.sink_was_none = sink is None

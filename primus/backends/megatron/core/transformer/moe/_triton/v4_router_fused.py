@@ -81,6 +81,7 @@ def _router_fwd_kernel(
     E: tl.constexpr, BM: tl.constexpr, BK: tl.constexpr,
     TOPK: tl.constexpr, KP: tl.constexpr, W_SPLIT: tl.constexpr,
     SCORE_FN: tl.constexpr, HAS_BIAS: tl.constexpr, RENORM: tl.constexpr, SCALE: tl.constexpr, EMU: tl.constexpr,
+    IDXS: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     rm = pid * BM + tl.arange(0, BM)
@@ -135,7 +136,8 @@ def _router_fwd_kernel(
         if SCALE != 1.0:
             wts = wts * SCALE
         km = mrow[:, None] & (kk[None, :] < TOPK)
-        tl.store(IDX + rm[:, None] * TOPK + kk[None, :], idx.to(tl.int64), mask=km)
+        # IDXS > 0: index rows padded to IDXS int64 (fuse track compact route reads them in V4RouterPostFn's layout)
+        tl.store(IDX + rm[:, None] * (IDXS if IDXS > 0 else TOPK) + kk[None, :], idx.to(tl.int64), mask=km)
         tl.store(WTS + rm[:, None] * TOPK + kk[None, :], wts, mask=km)
 
 
@@ -223,23 +225,26 @@ def _w_split(w):
     return 3 if w.dtype == torch.float32 else 1
 
 
-def router_fwd(x, w, bias=None, topk=0, score_function="sqrtsoftplus", scale=1.0):
+def router_fwd(x, w, bias=None, topk=0, score_function="sqrtsoftplus", scale=1.0, idx_pad=False):
     """``logits = x . w^T`` (fp32) and, when ``topk > 0``, the top-k ``(indices int64, weights fp32)``
     of ``score_fn(logits) + bias`` (weights gathered from the unbiased score, renormalized for
-    non-softmax, times ``scale``)."""
+    non-softmax, times ``scale``). ``idx_pad``: indices returned as the whole [N, next_pow2(topk)] row buffer
+    (columns >= topk unwritten)."""
     N, H = x.shape
     E = w.shape[0]
     logits = torch.empty(N, E, dtype=torch.float32, device=x.device)
     k = max(int(topk), 0)
-    idx = torch.empty(N, max(k, 1), dtype=torch.int64, device=x.device)
+    kp = triton.next_power_of_2(max(k, 1))
+    idx = torch.empty(N, kp if idx_pad else max(k, 1), dtype=torch.int64, device=x.device)
     wts = torch.empty(N, max(k, 1), dtype=torch.float32, device=x.device)
     _router_fwd_kernel[(triton.cdiv(N, FWD_BM),)](
         x, w, bias if bias is not None else w, logits, idx, wts, N, H,
         E=E, BM=FWD_BM, BK=FWD_BK, TOPK=k, KP=triton.next_power_of_2(max(k, 1)), W_SPLIT=_w_split(w),
         SCORE_FN=_SCORE_FN[score_function], HAS_BIAS=bias is not None,
-        RENORM=score_function != "softmax", SCALE=float(scale), EMU=_interpreting(), num_warps=4,
+        RENORM=score_function != "softmax", SCALE=float(scale), EMU=_interpreting(), IDXS=kp if idx_pad else 0,
+        num_warps=4,
     )
-    return logits, idx[:, :k], wts[:, :k]
+    return logits, (idx if idx_pad else idx[:, :k]), wts[:, :k]
 
 
 def router_dgrad(dl, w, dx=None, dtype=torch.bfloat16):
@@ -273,8 +278,8 @@ def router_wgrad(dl, x, out=None, dtype=torch.float32, split=WG_SPLIT):
 
 class _RouterFusedFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, w, bias, topk, score_function, scale):
-        logits, idx, wts = router_fwd(x, w, bias, topk, score_function, scale)
+    def forward(ctx, x, w, bias, topk, score_function, scale, idx_pad=False):
+        logits, idx, wts = router_fwd(x, w, bias, topk, score_function, scale, idx_pad)
         ctx.save_for_backward(x, w)
         ctx.mark_non_differentiable(idx, wts)
         if os.environ.get("PRIMUS_GLUE_SMALLS", "0") == "1":
@@ -290,7 +295,7 @@ class _RouterFusedFn(torch.autograd.Function):
         dl = dl.contiguous().float()
         dx = router_dgrad(dl, w, dtype=x.dtype) if ctx.needs_input_grad[0] else None
         dw = router_wgrad(dl, x, dtype=w.dtype) if ctx.needs_input_grad[1] else None
-        return dx, dw, None, None, None, None
+        return dx, dw, None, None, None, None, None
 
 
 def _interpreting():
@@ -316,10 +321,11 @@ def router_fused_supported(x, w, topk=0):
     )
 
 
-def v4_router_fused(x, w, bias=None, topk=0, score_function="sqrtsoftplus", scale=1.0):
+def v4_router_fused(x, w, bias=None, topk=0, score_function="sqrtsoftplus", scale=1.0, idx_pad=False):
     """Autograd entry: returns ``(logits fp32 [N, E], indices int64 [N, topk], weights fp32 [N, topk])``.
-    Gradients flow through ``logits`` only (to x and w); ``bias`` only steers the selection."""
-    return _RouterFusedFn.apply(x, w, bias, int(topk), score_function, float(scale))
+    Gradients flow through ``logits`` only (to x and w); ``bias`` only steers the selection.
+    ``idx_pad``: indices as the padded [N, next_pow2(topk)] row buffer (see router_fwd)."""
+    return _RouterFusedFn.apply(x, w, bias, int(topk), score_function, float(scale), bool(idx_pad))
 
 
 __all__ = [

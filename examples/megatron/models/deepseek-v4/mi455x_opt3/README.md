@@ -43,7 +43,13 @@ Requirements:
 | + glue switches, graph | 56.1 (A/B -1.1 ms) | 9.8695 |
 | + hc config C, graph | 54.8 (A/B -1.3 ms) | 9.8695 |
 | + MoE vkp wgrad sched2, graph | 54.65 (A/B 54.9 -> 54.65) | 9.8695 |
-| **+ wq_a\|\|wkv block-FP8 concat (this config), graph** | **54.4** (A/B 54.8 -> 54.4) | 9.8718 |
+| + wq_a\|\|wkv block-FP8 concat, graph | 54.4 (A/B 54.8 -> 54.4) | 9.8718 |
+| + mxgemm mxgk grouped GEMM (GG=mxk), graph | 54.3 (A/B 54.7 -> 54.3) | 9.8718 |
+| + fuse-moe ROUTE / MOE_BWD / MOE_ADD, graph | 53.07 (A/B 54.27 -> 53.07) | 9.8710 |
+| + adamattn wave-dense tile Adam v10, graph | 51.8 (A/B 53.17 -> 51.83) | 9.8710 |
+| + fuse-hc GRAD_DIRECT / B3X / XRMS, graph | 51.0 (A/B 51.70 -> 51.03) | 9.8710 |
+| + mxgemm persistent mxgk (GG=mxp) + fuse-moe SWB_TDM, graph | 50.8 (A/B 51.13 -> 50.83) | 9.8710 |
+| **+ fuse-attn F1/F3/F4/F5 (this config), graph** | **49.9** (A/B 50.90 -> 49.87) | 9.8710 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -106,6 +112,27 @@ flygg) is available but off (no clear e2e signal). Merged but off: densefp8's `P
 (wq_a||wkv as one block-FP8 op; ON since the 23:25 A/B: 3 pairs 54.8 -> 54.4 ms, loss@20 9.871798 / grad norm 4.159, in spread; dX summed in fp32 over both K parts, closer to fp64), `PRIMUS_TURBO_DSV4UP_DUAL` and
 `PRIMUS_TURBO_DSV4UP_EPI2` (slower in-step / untested). glue `PRIMUS_GLUE_WQB_DYQ` off (slower).
 Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by reboot + `sudo modprobe amdgpu`.
+2026-11-22 batch (int A/B, 3 pairs each, SMU 0):
+- mxgemm `PRIMUS_TURBO_MOE_FP8BLK_GG=mxk` (default): mxgk keeps k256's TDM traffic and pipelines fragments across
+  k-tiles; MegaMoE fwd/dgrad grouped GEMMs -7..9% per pass, bit-identical, -0.4 ms. `k256` selects the previous kernel.
+- fuse-moe `PRIMUS_FUSE_ROUTE` / `PRIMUS_FUSE_MOE_BWD` / `PRIMUS_FUSE_MOE_ADD` (default 1): compact MegaMoE routing from
+  the fused router GEMM, backward glue in two launches, routed + shared add inside the combine; 1777 -> 1409
+  kernels/step, -1.2 ms. Forward bit-identical; the seq-balance-loss part of the learned routers' d logits differs by
+  ~1e-15 (fp32 order), loss@20 9.870956. EP>1 and other router configs keep the dense chain.
+- adamattn `PRIMUS_FP8BLK_ADAM_WAVEDENSE` (default 1): v10 tile Adam with wave-dense row accesses, compile-time BF16
+  store, LDS-only barriers; in-step 10.84 -> 9.39 ms (87% of its HBM floor), bit-identical, -1.33 ms. 0 rebuilds v9.
+- ep: `fused_mega_moe_fp8blk_ep` (Turbo, new files only) runs the fp8_block MegaMoE at EP>1; not wired into Primus yet.
+  Single-GPU emulation at R=1/4/8: y/dx/d topk_w bit-identical to EP=1. Use GG=k256p for EP>1.
+2026-11-22 batch 2 (int A/B, 3 pairs each, SMU 0, all bit-identical; loss@20 9.870956, grad norm 4.157):
+- fuse-hc `PRIMUS_HC_GRAD_DIRECT` / `PRIMUS_HC_B3X` / `PRIMUS_HC_XRMS` (default 1): HC backward writes main_grad in one
+  launch; expand(L) also computes HC(L+1)'s rms-linear partials; B3 handles all 4 streams in one program. -0.67 ms.
+  Bit-identity depends on the Triton main build's codegen: rerun fusehc's test_fusehc.py / calib_expand.py after a bump.
+- mxgemm `PRIMUS_TURBO_MOE_FP8BLK_GG=mxp` (default): persistent mxgk; fuse-moe `PRIMUS_FUSE_MOE_SWB_TDM` (default 1):
+  TDM-streamed Gluon SwiGLU backward + dual quant. Together -0.3 ms.
+- fuse-attn (default 1): `PRIMUS_V4_OROPE_INPLACE` (in-place inverse RoPE of the attention output),
+  `PRIMUS_TURBO_CONCAT_SPLIT_EPI` (wq_a||wkv as one dsv4up GEMM with a split-output epilogue), `PRIMUS_V4_INDEXER_TOPK_TRITON`
+  (CSA indexer top-k as one Triton sort, P in 1024..4096), `PRIMUS_V4_QKV_POST_FUSED` (q_a/kv norms + kv RoPE as one op).
+  -1.03 ms. Optional bit-identical tile knob `PRIMUS_V4_QNR_FWD_BH=8 PRIMUS_V4_QNR_FWD_NW=2` (not enabled).
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 

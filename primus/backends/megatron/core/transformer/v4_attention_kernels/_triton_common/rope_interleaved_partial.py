@@ -691,6 +691,163 @@ def _launch_rope_tail_inplace(x3, pos_c, inv_c, N, H, nope, rd, inverse):
     )
 
 
+@triton.jit
+def _orope_tail_fwd_kernel(
+    X_PTR,  # [N, H, head_dim] rows strided by (SN, SH), last dim contiguous; tail rotated in place
+    SAVE_PTR,  # [N, H, RD] contiguous: receives the original tail bytes
+    POS_PTR,
+    INVFREQ_PTR,
+    N,
+    H,
+    SN,
+    SH,
+    NOPE: tl.constexpr,
+    RD: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """PRIMUS_V4_OROPE_INPLACE: the inverse RoPE of the attention output, in place on the rotary tail only.
+
+    Same fp32 angle (negated), cos / sin, pair rotation and single rounding as ``_rope_gen_row_kernel`` with
+    INVERSE (and as ``_rope_tail_inplace_kernel``), so the rotated tail bytes equal the out-of-place kernel's; the
+    NoPE columns keep their bytes (the row kernel's x*1 - y*0 is the identity up to the sign of a zero). The
+    original tail is copied to SAVE so the backward restores the attention core's saved output exactly."""
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    HALF: tl.constexpr = RD // 2
+    fi = tl.arange(0, HALF)
+    ang = tl.load(POS_PTR + pid_n).to(tl.float32) * tl.load(INVFREQ_PTR + fi).to(tl.float32)
+    ang = -ang
+    c = tl.cos(ang)
+    s = tl.sin(ang)
+    h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    hm = h < H
+    r = tl.arange(0, RD)
+    ptr = X_PTR + pid_n.to(tl.int64) * SN + h[:, None].to(tl.int64) * SH + (NOPE + r)[None, :]
+    raw = tl.load(ptr, mask=hm[:, None], other=0.0)
+    tl.store(SAVE_PTR + (pid_n.to(tl.int64) * H + h[:, None]) * RD + r[None, :], raw, mask=hm[:, None])
+    xv = raw.to(tl.float32)
+    a, b = tl.split(tl.reshape(xv, (BLOCK_H, HALF, 2)))
+    o = tl.reshape(tl.join(a * c[None, :] - b * s[None, :], a * s[None, :] + b * c[None, :]), (BLOCK_H, RD))
+    tl.store(ptr, o.to(X_PTR.dtype.element_ty), mask=hm[:, None])
+
+
+@triton.jit
+def _orope_tail_bwd_kernel(
+    G_PTR,  # [N, H, head_dim] incoming gradient (fresh o_a dX), rows strided by (GSN, GSH); tail rotated in place
+    X_PTR,  # [N, H, head_dim] the attention output (rows strided by (XSN, XSH)); its tail is restored from SAVE
+    SAVE_PTR,  # [N, H, RD]
+    POS_PTR,
+    INVFREQ_PTR,
+    N,
+    H,
+    GSN,
+    GSH,
+    XSN,
+    XSH,
+    NOPE: tl.constexpr,
+    RD: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Backward of ``_orope_tail_fwd_kernel``: the gradient tail is rotated by +position in place with exactly
+    ``_rope_tail_inplace_kernel``'s (INVERSE=False) expressions, and the attention output's tail gets its original
+    bytes back (the attention backward reads it next)."""
+    pid_n = tl.program_id(0)
+    pid_h = tl.program_id(1)
+    HALF: tl.constexpr = RD // 2
+    fi = tl.arange(0, HALF)
+    ang = tl.load(POS_PTR + pid_n).to(tl.float32) * tl.load(INVFREQ_PTR + fi).to(tl.float32)
+    c = tl.cos(ang)
+    s = tl.sin(ang)
+    h = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    hm = h < H
+    r = tl.arange(0, RD)
+    gptr = G_PTR + pid_n.to(tl.int64) * GSN + h[:, None].to(tl.int64) * GSH + (NOPE + r)[None, :]
+    gv = tl.load(gptr, mask=hm[:, None], other=0.0).to(tl.float32)
+    a, b = tl.split(tl.reshape(gv, (BLOCK_H, HALF, 2)))
+    o = tl.reshape(tl.join(a * c[None, :] - b * s[None, :], a * s[None, :] + b * c[None, :]), (BLOCK_H, RD))
+    tl.store(gptr, o.to(G_PTR.dtype.element_ty), mask=hm[:, None])
+    sv = tl.load(SAVE_PTR + (pid_n.to(tl.int64) * H + h[:, None]) * RD + r[None, :], mask=hm[:, None], other=0.0)
+    tl.store(X_PTR + pid_n.to(tl.int64) * XSN + h[:, None].to(tl.int64) * XSH + (NOPE + r)[None, :], sv,
+             mask=hm[:, None])
+
+
+def orope_inplace_supported(x: torch.Tensor, rotary_dim: int) -> bool:
+    """PRIMUS_V4_OROPE_INPLACE=1 (default off) and a layout the in-place inverse-RoPE path handles."""
+    if os.environ.get("PRIMUS_V4_OROPE_INPLACE", "0") != "1":
+        return False
+    head_dim = x.shape[-1]
+    return (
+        x.is_cuda
+        and x.dim() >= 3
+        and x.is_contiguous()
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and _rope_row_ok(head_dim)
+        and rotary_dim >= 2
+        and (rotary_dim & (rotary_dim - 1)) == 0
+        and (head_dim - rotary_dim) % 2 == 0
+        and x.data_ptr() != 0
+    )
+
+
+class OutInvRopeInplaceFn(torch.autograd.Function):
+    """Inverse RoPE of the attention output ``x`` [..., H, head_dim] IN PLACE on its rotary tail.
+
+    Contract (checked by the caller): ``x`` is the attention core's output, which that core saved for its backward,
+    and nothing else reads ``x`` between this op and the attention backward except the o_a projection (which must
+    see the rotated values, forward and wgrad). The forward rotates the tail in place (1/8 of the out-of-place
+    traffic at head_dim 512 / rope 64) and keeps the original tail bytes; the backward rotates the incoming gradient
+    tail in place (it is the o_a projection's fresh dX, as for PRIMUS_V4_ROPE_BWD_INPLACE) and restores the original
+    tail, so the attention backward reads exactly the bytes its forward wrote. Kernel writes do not bump the
+    autograd version counter, so the core's saved-tensor check stays quiet; correctness relies on the order
+    o_a backward -> this backward -> attention backward, which the autograd graph enforces.
+    """
+
+    @staticmethod
+    def forward(ctx, x, pos_flat, inv_freq, rotary_dim):  # type: ignore[override]
+        head_dim = x.shape[-1]
+        H = x.shape[-2]
+        N = x.numel() // (H * head_dim)
+        x3 = x.view(N, H, head_dim)
+        if inv_freq.shape[-1] != rotary_dim // 2:
+            raise ValueError(f"inv_freq last dim must be rotary_dim // 2 ({rotary_dim // 2})")
+        pos_c, inv_c = rope_kernel_vectors(pos_flat, inv_freq)
+        save = torch.empty((N, H, rotary_dim), dtype=x.dtype, device=x.device)
+        nope = head_dim - rotary_dim
+        bh = min(64, triton.next_power_of_2(max(H, 1)))
+        if N:
+            _orope_tail_fwd_kernel[(N, triton.cdiv(H, bh))](
+                x3, save, pos_c, inv_c, N, H, x3.stride(0), x3.stride(1), NOPE=nope, RD=rotary_dim, BLOCK_H=bh,
+                num_warps=4,
+            )
+        ctx.save_for_backward(pos_c, inv_c)
+        ctx.x3, ctx.tail = x3, save
+        ctx.meta = (N, H, head_dim, rotary_dim)
+        return x.view(x.shape)
+
+    @staticmethod
+    def backward(ctx, dout):  # type: ignore[override]
+        pos_c, inv_c = ctx.saved_tensors
+        N, H, head_dim, rotary_dim = ctx.meta
+        x3, save = ctx.x3, ctx.tail
+        ctx.x3 = ctx.tail = None
+        dout3 = _rows_view(dout, N, H, head_dim)
+        bh = min(64, triton.next_power_of_2(max(H, 1)))
+        if N:
+            _orope_tail_bwd_kernel[(N, triton.cdiv(H, bh))](
+                dout3, x3, save, pos_c, inv_c, N, H, dout3.stride(0), dout3.stride(1), x3.stride(0), x3.stride(1),
+                NOPE=head_dim - rotary_dim, RD=rotary_dim, BLOCK_H=bh, num_warps=4,
+            )
+        dx = dout if dout3.data_ptr() == dout.data_ptr() else dout3.view(dout.shape)
+        return dx, None, None, None
+
+
+def out_inv_rope_inplace(x, position_ids, inv_freq, *, rotary_dim: int):
+    """See OutInvRopeInplaceFn; ``position_ids`` broadcastable to ``x.shape[:-2]``."""
+    leading = x.shape[:-2]
+    pos_flat = position_ids.broadcast_to(leading).reshape(-1)
+    return OutInvRopeInplaceFn.apply(x, pos_flat, inv_freq, rotary_dim)
+
+
 _POS_KERNEL_DTYPES = (torch.int64, torch.int32, torch.float32)
 _INVFREQ_KERNEL_DTYPES = (torch.float32, torch.bfloat16, torch.float16)
 
