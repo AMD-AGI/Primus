@@ -42,15 +42,21 @@ class AttGradSlot:
     buffer in its epilogue (dsv4up accumulate=2: bf16(product) + buffer, one rounding -- autograd's bf16 add), so the
     separate add kernel goes away."""
 
-    __slots__ = ("g", "fused")
+    __slots__ = ("g", "fused", "ev", "branch")
 
-    def __init__(self):
-        self.g = self.fused = None
+    def __init__(self, branch=False):
+        self.g = self.fused = self.ev = None
+        self.branch = branch  # PRIMUS_OVERLAP_CSA_BWD: the compressor (dX producer) runs on a branch stream
 
     def take(self, M, K, dtype):
         g, self.g = self.g, None
+        ev, self.ev = self.ev, None
         if g is None or g.dtype != dtype or not g.is_contiguous() or g.numel() != M * K:
             return None
+        if ev is not None:  # PRIMUS_OVERLAP_CSA_BWD: the compressor dX was produced on the compressor branch stream
+            cur = torch.cuda.current_stream(g.device)
+            cur.wait_event(ev)
+            g.record_stream(cur)
         return g.view(M, K)
 
     def untake(self, g):
@@ -89,6 +95,21 @@ def att_gadd_enabled() -> bool:
     return os.environ.get("PRIMUS_FUSE2_ATT_GADD", "0") == "1"
 
 
+def _ovl_wgrad():
+    """overlap module when PRIMUS_OVERLAP_OA_WGRAD has bit 2 (overlap2) and PRIMUS_OVERLAP_WGRAD is active, else None."""
+    try:
+        lv = int(os.environ.get("PRIMUS_OVERLAP_OA_WGRAD", "0"))
+    except ValueError:
+        lv = 0
+    if not lv & 2:
+        return None
+    try:
+        from primus_turbo.pytorch.core import overlap
+    except ImportError:  # pragma: no cover
+        return None
+    return overlap if overlap.enabled("WGRAD") else None
+
+
 class _LinearMainGradFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w, slot=None):
@@ -109,13 +130,26 @@ class _LinearMainGradFn(torch.autograd.Function):
         g2 = g.reshape(-1, g.shape[-1])
         dx = g2.mm(w).view(*ctx.lead, w.shape[1]) if ctx.needs_input_grad[0] else None
         if ctx.slot is not None and dx is not None:
-            ctx.slot.g, ctx.slot = dx, None  # PRIMUS_FUSE2_ATT_GADD: the concat dX GEMM adds into this buffer
+            ctx.slot.g = dx  # PRIMUS_FUSE2_ATT_GADD: the concat dX GEMM adds into this buffer
+            if ctx.slot.branch:  # PRIMUS_OVERLAP_CSA_BWD: running on the compressor branch stream
+                ctx.slot.ev = torch.cuda.Event()
+                ctx.slot.ev.record(torch.cuda.current_stream(dx.device))
+            ctx.slot = None
         wp, ctx.wparam = ctx.wparam, None
         mg = wp.main_grad
-        if main_grad_first_write(wp):
-            torch.mm(g2.t(), x2, out=mg)
+        first = main_grad_first_write(wp)
+
+        def _wgrad(mg=mg, g2=g2, x2=x2, first=first):
+            if first:
+                torch.mm(g2.t(), x2, out=mg)
+            else:
+                mg.add_(torch.mm(g2.t(), x2))
+
+        ovl = _ovl_wgrad()
+        if ovl is not None:  # PRIMUS_OVERLAP_OA_WGRAD (overlap2): same GEMM (+ add) on overlap's deferred wgrad stream
+            ovl.defer(_wgrad, mg, g, g2, x2)
         else:
-            mg.add_(torch.mm(g2.t(), x2))
+            _wgrad()
         return dx, _get_dummy_wgrad(list(w.shape), w.dtype), None
 
 
