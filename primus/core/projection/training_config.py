@@ -95,6 +95,20 @@ class ModelConfig:
     moe_pattern: list = None
     # Hybrid (Mamba/GDN/KDA + attention) stacks: the full model's layer symbols.
     hybrid_layer_types: list = None
+    # Sequence mixer of the hybrid ``M`` layers ("gdn", "kda" or "mamba") and its
+    # dimensions; None falls back to Megatron's defaults (see hybrid_mixer.py).
+    hybrid_mixer: str = None
+    linear_conv_kernel_dim: int = None
+    linear_key_head_dim: int = None
+    linear_value_head_dim: int = None
+    linear_num_key_heads: int = None
+    linear_num_value_heads: int = None
+    mamba_state_dim: int = None
+    mamba_head_dim: int = None
+    mamba_num_groups: int = None
+    mamba_expand: int = None
+    # FLA fused cross-entropy of hybrid models (0 off; None = Primus's default, 1).
+    fused_ce_mode: int = None
     moe_router_topk: int = 0
     moe_shared_expert_intermediate_size: int = 0
     # Optimizer (Muon adds Newton-Schulz orthogonalization compute on 2D weights)
@@ -385,6 +399,10 @@ def megatron_derive_default_args(args):
 
     args.share_embeddings_and_output_weights = not args.untie_embeddings_and_output_weights
     args.hybrid_layer_types = hybrid_layer_types(args)
+    if args.hybrid_layer_types is not None:
+        from primus.core.projection.module_profilers.hybrid_mixer import mixer_kind
+
+        args.hybrid_mixer = mixer_kind(getattr(args, "spec", None))
 
     if args.num_experts is None:
         args.moe_pattern = [0] * args.num_layers

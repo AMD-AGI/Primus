@@ -37,6 +37,16 @@ class LossProfiler(BaseModuleProfiler):
         super().__init__(config, sub_profilers)
         self._gemm_backend = None
 
+    def fla_fused(self) -> bool:
+        """Whether hybrid training's FLA FusedLinearCrossEntropy owns the output head.
+
+        It runs the output GEMM, softmax and all logit/weight gradients chunk by
+        chunk inside the forward pass: one pass over the logits, nothing left
+        for backward and no full logits tensor kept alive.
+        """
+        mc = self.config.model_config
+        return getattr(mc, "hybrid_layer_types", None) is not None and getattr(mc, "fused_ce_mode", None) != 0
+
     def set_gemm_backend(self, backend):
         self._gemm_backend = backend
 
@@ -47,7 +57,7 @@ class LossProfiler(BaseModuleProfiler):
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         mc = self.config.model_config
-        if getattr(mc, "cross_entropy_loss_fusion", False):
+        if getattr(mc, "cross_entropy_loss_fusion", False) or self.fla_fused():
             return 0
         tp = self.config.model_parallel_config.tensor_model_parallel_size
         cp = self.config.model_parallel_config.context_model_parallel_size
@@ -80,6 +90,8 @@ class LossProfiler(BaseModuleProfiler):
         tensor_bytes = tokens * vocab_per_rank * bytes_per_el
 
         fwd_ms = 3.0 * tensor_bytes / (eff_bw * 1e6)
+        if self.fla_fused():
+            return fwd_ms, 0.0
         bwd_ms = 3.0 * tensor_bytes / (eff_bw * 1e6)
         return fwd_ms, bwd_ms
 
