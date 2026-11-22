@@ -67,7 +67,7 @@ def _b3x_dx(k: gl.constexpr, gh, gq, wsh, wsl, xk, cf, PRE, COMBT, tr, dcv, n0, 
 
 @gluon.jit
 def _b3x_load(t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT: gl.constexpr, BN: gl.constexpr,
-              HAS_DNEW: gl.constexpr, OPA: gl.constexpr):
+              HAS_DNEW: gl.constexpr, OPA: gl.constexpr, ABL: gl.constexpr = 0):
     KD = 4 * D
     tr = t0 + tb
     tr64 = tr.to(gl.int64)
@@ -76,9 +76,12 @@ def _b3x_load(t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D,
     x1 = gl.load(X + rowoff + D)
     x2 = gl.load(X + rowoff + 2 * D)
     x3 = gl.load(X + rowoff + 3 * D)
-    dcb = gl.load(DC + gl.expand_dims(tr64 * D, 1) + gl.expand_dims(cr, 0))
+    if ABL & 8:
+        dcb = x0
+    else:
+        dcb = gl.load(DC + gl.expand_dims(tr64 * D, 1) + gl.expand_dims(cr, 0))
     cf = gl.expand_dims(gl.load(COEF + tr), 1)
-    if HAS_DNEW:
+    if HAS_DNEW and not (ABL & 8):
         n0 = gl.load(DNEW + rowoff)
         n1 = gl.load(DNEW + rowoff + D)
         n2 = gl.load(DNEW + rowoff + 2 * D)
@@ -147,15 +150,16 @@ def _b3x_step(t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
         tr64 = tr.to(gl.int64)
         rowoff = gl.expand_dims(tr64 * KD, 1) + gl.expand_dims(cr, 0)
         sxo = 0
-    dcv = dcb.to(gl.float32)
-    _b3x_dx(0, gh, gq, wsh0, wsl0, x0, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-            BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
-    _b3x_dx(1, gh, gq, wsh1, wsl1, x1, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-            BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
-    _b3x_dx(2, gh, gq, wsh2, wsl2, x2, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-            BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
-    _b3x_dx(3, gh, gq, wsh3, wsl3, x3, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
-            BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+    if not (ABL & 8):
+        dcv = dcb.to(gl.float32)
+        _b3x_dx(0, gh, gq, wsh0, wsl0, x0, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+        _b3x_dx(1, gh, gq, wsh1, wsl1, x1, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+        _b3x_dx(2, gh, gq, wsh2, wsl2, x2, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
+        _b3x_dx(3, gh, gq, wsh3, wsl3, x3, cf, PRE, COMBT, tr, dcv, n0, n1, n2, n3, DX, rowoff, D,
+                BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL, BUF, dDX, sxo)
     if not (ABL & 1):
         gl.barrier()
         xs0.store(x0)
@@ -264,18 +268,19 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
         else:
             for t0 in range(t_lo, t_lo + T_PER, BT):
                 x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl = _b3x_load(
-                    t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA)
+                    t0, X, DC, COEF, DNEW, GH, GL, GTH, GTL, tb, cr, na_r, na_c, M, D, BT, BN, HAS_DNEW, OPA, ABL)
                 accw0, accw1, accw2, accw3 = _b3x_step(
                     t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
                     wsh0, wsh1, wsh2, wsh3, wsl0, wsl1, wsl2, wsl3, xs0, xs1, xs2, xs3, accw0, accw1, accw2, accw3,
                     PRE, COMBT, DX, tb, cr, D, BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, ABL)
         nr = gl.arange(0, BN, layout=gl.SliceLayout(1, WMMA))
         cw = c0 + gl.arange(0, BC, layout=gl.SliceLayout(0, WMMA))
-        dwo = DWP + pid_s * BN * KD + gl.expand_dims(nr.to(gl.int64) * KD, 1) + gl.expand_dims(cw, 0)
-        gl.store(dwo, accw0)
-        gl.store(dwo + D, accw1)
-        gl.store(dwo + 2 * D, accw2)
-        gl.store(dwo + 3 * D, accw3)
+        if not (ABL & 1):
+            dwo = DWP + pid_s * BN * KD + gl.expand_dims(nr.to(gl.int64) * KD, 1) + gl.expand_dims(cw, 0)
+            gl.store(dwo, accw0)
+            gl.store(dwo + D, accw1)
+            gl.store(dwo + 2 * D, accw2)
+            gl.store(dwo + 3 * D, accw3)
 
 
 def b3x_enabled() -> bool:
