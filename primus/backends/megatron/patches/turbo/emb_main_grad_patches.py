@@ -92,6 +92,35 @@ def _clear_for_write(out: torch.Tensor, idx: torch.Tensor) -> None:
     _emb_zero_rows_kernel[(N,)](st, cur, out, out.shape[1], BLOCK_D=1024, num_warps=4)
 
 
+@triton.jit
+def _emb_sort_kernel(IDX, SORTED, PERM, N, SH: tl.constexpr, BLOCK: tl.constexpr):
+    """PRIMUS_LAUNCH_EMB_SORT: torch.sort(idx, stable=True) of N <= BLOCK int64 keys in ONE program: the composite
+    key (idx << SH) | position is unique, so its plain sort is the stable sort of idx (same values and perm)."""
+    i = tl.arange(0, BLOCK)
+    m = i < N
+    k = tl.load(IDX + i, mask=m, other=0).to(tl.int64)
+    c = tl.where(m, (k << SH) | i.to(tl.int64), 0x7FFFFFFFFFFFFFFF)
+    c = tl.sort(c)
+    tl.store(SORTED + i, c >> SH, mask=m)
+    tl.store(PERM + i, c & ((1 << SH) - 1), mask=m)
+
+
+def _launch_sort(idx: torch.Tensor, num_rows: int):
+    """(sorted_idx, perm) == torch.sort(idx, stable=True) from one launch, or None when not applicable."""
+    if os.environ.get("PRIMUS_LAUNCH_EMB_SORT", "0") != "1":
+        return None
+    N = idx.numel()
+    if not (idx.is_cuda and idx.dtype == torch.int64 and idx.is_contiguous() and 0 < N <= 8192):
+        return None
+    sh = max(1, (N - 1).bit_length())
+    if num_rows <= 0 or (num_rows - 1).bit_length() + sh > 62:
+        return None
+    sorted_idx = torch.empty_like(idx)
+    perm = torch.empty_like(idx)
+    _emb_sort_kernel[(1,)](idx, sorted_idx, perm, N, SH=sh, BLOCK=triton.next_power_of_2(N), num_warps=16)
+    return sorted_idx, perm
+
+
 def embedding_grad_into(grad: torch.Tensor, indices: torch.Tensor, out: torch.Tensor) -> None:
     """out[:] = embedding_dense_backward(grad, indices, out.shape[0], -1, False), bit for bit (sorted path)."""
     D = out.shape[1]
@@ -100,8 +129,10 @@ def embedding_grad_into(grad: torch.Tensor, indices: torch.Tensor, out: torch.Te
         g = g.contiguous()
     idx = indices.reshape(-1)
     N = idx.numel()
-    sorted_idx, perm = torch.sort(idx, stable=True)
+    r = _launch_sort(idx, out.shape[0])
+    sorted_idx, perm = r if r is not None else torch.sort(idx, stable=True)
     _clear_for_write(out, idx)
+
     BLOCK_D = 1024
     _emb_segment_sum_kernel[(N, triton.cdiv(D, BLOCK_D))](
         g, perm, sorted_idx, out, N, D, g.stride(0), NROWS=_NROWS_PER_THREAD, BLOCK_D=BLOCK_D, num_warps=4

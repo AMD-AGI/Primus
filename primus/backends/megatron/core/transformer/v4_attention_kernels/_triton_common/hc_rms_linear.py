@@ -409,9 +409,11 @@ def _block_n(n: int) -> int:
 
 class HcRmsLinearFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x2d: torch.Tensor, weight: torch.Tensor, eps: float, gslot=None):  # type: ignore[override]
+    def forward(ctx, x2d: torch.Tensor, weight: torch.Tensor, eps: float, gslot=None, wmg=False):  # type: ignore[override]
         assert x2d.dim() == 2 and weight.dim() == 2 and weight.shape[1] == x2d.shape[1]
         ctx.gslot = gslot  # PRIMUS_FUSE2_HEAD_GADD (hc_head.HeadGradSlot) or None
+        ctx.wparam = weight if wmg else None  # PRIMUS_LAUNCH_HEAD_MG: dW straight into weight.main_grad
+        ctx.n_extra = 1 if wmg else 0  # the 5th (wmg) argument is passed only when True
         x2d = x2d.contiguous()
         w = weight.float().contiguous()
         T, KD = x2d.shape
@@ -521,7 +523,16 @@ class HcRmsLinearFn(torch.autograd.Function):
         if acc is not None:
             slot.fused = dx
         dw = dw_p[0, :N] if tsplit == 1 else dw_p.sum(0)[:N]
-        return dx, dw.to(ctx.weight_dtype), None, None
+        return (dx, HcRmsLinearFn._dw_out(ctx, dw), None, None) + (None,) * ctx.n_extra
+
+    @staticmethod
+    def _dw_out(ctx, dw):
+        wp, ctx.wparam = getattr(ctx, "wparam", None), None
+        if wp is not None:
+            from .launch_head_mg import write_mg
+
+            return write_mg(wp, dw)
+        return dw.to(ctx.weight_dtype)
 
     @staticmethod
     def _backward_wmma3(ctx, dlogits, x2d, w3, raw, rstd, N, T, KD, BN):
@@ -544,11 +555,17 @@ class HcRmsLinearFn(torch.autograd.Function):
             num_warps=c["w3_bwd_warps"], num_stages=c["w3_bwd_stages"],
         )
         dw = dw_p[0, :N] if tsplit == 1 else dw_p.sum(0)[:N]
-        return dx, dw.to(ctx.weight_dtype), None, None
+        return (dx, HcRmsLinearFn._dw_out(ctx, dw), None, None) + (None,) * ctx.n_extra
 
 
-def hc_rms_linear(x_flat: torch.Tensor, weight: torch.Tensor, eps: float, gslot=None) -> torch.Tensor:
-    """``F.linear(rms_norm(x_flat), weight)`` in fp32: ``x_flat`` ``[..., Kd]`` -> ``[..., N]`` fp32."""
+
+def hc_rms_linear(x_flat: torch.Tensor, weight: torch.Tensor, eps: float, gslot=None, wmg=False) -> torch.Tensor:
+    """``F.linear(rms_norm(x_flat), weight)`` in fp32: ``x_flat`` ``[..., Kd]`` -> ``[..., N]`` fp32.
+    ``wmg`` (PRIMUS_LAUNCH_HEAD_MG): the caller checked ``launch_head_mg.head_weight_mg(weight)``."""
     lead = x_flat.shape[:-1]
+    if wmg:
+        out = HcRmsLinearFn.apply(x_flat.reshape(-1, x_flat.shape[-1]), weight, eps, gslot, True)
+        return out.reshape(*lead, weight.shape[0])
     out = HcRmsLinearFn.apply(x_flat.reshape(-1, x_flat.shape[-1]), weight, eps, gslot)
+
     return out.reshape(*lead, weight.shape[0])

@@ -494,12 +494,23 @@ class HyperHead(nn.Module):
                 slot = HeadGradSlot()
                 x, x_c = HeadFanOut.apply(x, slot)
         flat = x.flatten(-2)
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common import (
+            launch_head_mg as _lhm,
+        )
+
         if hc_rms_linear_enabled() and flat.is_cuda:
-            mixes = hc_rms_linear(flat, self.fn.weight, self.eps, gslot=slot)  # [..., K]
+            if _lhm.enabled() and _lhm.head_weight_mg(self.fn.weight):
+                # PRIMUS_LAUNCH_HEAD_MG: fn.weight's gradient written straight into its main_grad
+                mixes = hc_rms_linear(flat, self.fn.weight, self.eps, gslot=slot, wmg=True)
+            else:
+                mixes = hc_rms_linear(flat, self.fn.weight, self.eps, gslot=slot)  # [..., K]
         else:
             normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
             mixes = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))  # [..., K]
-        pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
+        pre = _lhm.head_pre(mixes, self.scale, self.base, self.eps) if _lhm.enabled() else None
+        if pre is None:
+            pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
+
         if hc_head_fused_enabled() and hc_head_supported(x_c, pre):
             # hc track: one streaming kernel each way instead of the fp32 [.., K, D] product + reduce + cast
             # (forward bit-identical; backward dx bit-identical, dpre summed in a different fp32 order)
