@@ -759,10 +759,13 @@ class DeepseekV4MoE(MegatronModule):
             probs, routing_map = self.learned_router(hidden)
         return self._apply_force_load_balancing(probs, routing_map)
 
-    def _route_compact(self, hidden: torch.Tensor, token_ids: Optional[torch.Tensor]):
+    def _route_compact(self, hidden: torch.Tensor, token_ids: Optional[torch.Tensor], persist: bool = False):
         """fuse track (PRIMUS_FUSE_ROUTE=1): ``(topk_weights fp32 [N, K], topk_idx int64 [N, K])`` for the MegaMoE
         fp8_block experts at EP=1 straight from the fused router GEMM and one compact route kernel (see
-        ``_triton/v4_route_compact.py``), or None when this layer keeps the dense route chain."""
+        ``_triton/v4_route_compact.py``), or None when this layer keeps the dense route chain.
+        ``persist`` (persist track, PRIMUS_PERSIST_ROUTER_BWD=1): the same forward through ``PersistRouterFn``, which
+        also returns the routed-expert and shared-expert aliases of ``hidden`` so that its backward gets all three
+        input gradients (router backward in 2 launches, see ``_triton/persist_router_bwd.py``); returns a 4-tuple."""
         from primus.backends.megatron.core.transformer.moe._triton.v4_route_compact import (
             fuse_route_enabled,
             pad_rows,
@@ -801,7 +804,30 @@ class DeepseekV4MoE(MegatronModule):
             if seq <= 0 or flat.shape[0] % seq != 0 or seq % 64 != 0:
                 return None
             loss_cfg = (router.seq_balance_loss_coeff, flat.shape[0] // seq, seq)
-        if self.use_hash_router:
+        aliases = None
+        if persist and router.weight.requires_grad and hidden.dtype == torch.bfloat16 and hidden.is_contiguous():
+            # persist track: same forward kernels, one-launch backward (see _triton/persist_router_bwd.py)
+            from primus.backends.megatron.core.transformer.moe._triton.persist_router_bwd import PersistRouterFn
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_boundary import (
+                claim_main_grad,
+            )
+
+            if self.use_hash_router:
+                tab = getattr(router, "_fuse_tid2eid_pad", None)
+                if tab is None or tab[0] != router.tid2eid._version or tab[1].device != flat.device:
+                    tab = (router.tid2eid._version, pad_rows(router.tid2eid.detach()))
+                    router._fuse_tid2eid_pad = tab
+                idx_tab, ids, bias = tab[1], token_ids.reshape(-1), None
+            else:
+                idx_tab, ids = None, None
+                bias = router.expert_bias.detach() if router.expert_bias is not None else None
+            topk_w, topk_idx, loss, h_e, h_s = PersistRouterFn.apply(
+                hidden, router.weight, bias, idx_tab, ids, int(router.topk), router.score_function,
+                float(router.topk_scaling_factor), self._force_lb_mode == "even", loss_cfg,
+                bool(self.use_hash_router), claim_main_grad(router.weight),
+            )
+            aliases = (h_e, h_s)
+        elif self.use_hash_router:
             logits, _, _ = v4_router_fused(flat, router.weight)
             # padded int64 copy of the frozen tid2eid table, built once (eager warm-up, before graph capture)
             tab = getattr(router, "_fuse_tid2eid_pad", None)
@@ -816,9 +842,11 @@ class DeepseekV4MoE(MegatronModule):
                 idx_pad=True,
             )
             ids = None
-        topk_w, topk_idx, loss = route_compact(
-            logits, idx_rows, ids, router.topk, router.topk_scaling_factor, self._force_lb_mode == "even", loss_cfg
-        )
+        if aliases is None:
+            topk_w, topk_idx, loss = route_compact(
+                logits, idx_rows, ids, router.topk, router.topk_scaling_factor, self._force_lb_mode == "even",
+                loss_cfg,
+            )
         if loss_cfg is not None:
             router.last_seq_balance_loss = loss.detach()
             if router.num_layers:
@@ -829,6 +857,8 @@ class DeepseekV4MoE(MegatronModule):
                 log_seq_balance_loss(
                     loss, layer_number=router.layer_number, num_layers=int(router.num_layers), reduce_group=grp
                 )
+        if aliases is not None:
+            return topk_w, topk_idx, aliases[0], aliases[1]
         return topk_w, topk_idx
 
     # ------------------------------------------------------------------
@@ -1005,19 +1035,35 @@ class DeepseekV4MoE(MegatronModule):
             with _overlap.branch("branch") as br:
                 y_shared = self.shared_expert(h_s)
 
-        compact = self._route_compact(h_r, token_ids) if self.mega_moe_experts is not None else None
+        # persist track (PRIMUS_PERSIST_ROUTER_BWD=1, EP = TP = 1, training): the router owns the fork of `hidden`
+        # into its routed / shared consumers, so its backward sums their gradients inside its one-launch kernel.
+        persist = (
+            self.mega_moe_experts is not None
+            and os.environ.get("PRIMUS_PERSIST_ROUTER_BWD", "0") == "1"
+            and hidden.requires_grad
+            and torch.is_grad_enabled()
+            and parallel_state.get_expert_model_parallel_world_size() == 1
+            and parallel_state.get_tensor_model_parallel_world_size() == 1
+        )
+        compact = self._route_compact(h_r, token_ids, persist=persist) if self.mega_moe_experts is not None else None
         if compact is not None:
             # PRIMUS_FUSE_ROUTE=1: router GEMM + one compact route kernel straight into MegaMoE's (idx, weights)
-            topk_w, topk_idx = compact
+            h_sh = hidden
+            if len(compact) == 4:
+                topk_w, topk_idx, a_e, a_s = compact
+                if br is None:  # else ForkGrad already forked `hidden`; the aliases stay unused (no gradient)
+                    h_e, h_sh = a_e, a_s
+            else:
+                topk_w, topk_idx = compact
             x = h_e.reshape(-1, self.hidden_size).to(torch.bfloat16)
             shared = self.shared_expert is not None and not self.shared_expert_overlap
             if shared and os.environ.get("PRIMUS_FUSE_MOE_ADD", "0") == "1" and hidden.dtype == torch.bfloat16:
                 # routed + shared add inside the MegaMoE combine kernel (bit-identical to the bf16 add below)
-                sh = br.done(y_shared) if br is not None else self.shared_expert(hidden)
+                sh = br.done(y_shared) if br is not None else self.shared_expert(h_sh)
                 return self.mega_moe_experts(x, topk_idx, topk_w, add=sh.reshape(x.shape)).reshape(hidden.shape)
             out = self.mega_moe_experts(x, topk_idx, topk_w).reshape(hidden.shape).to(hidden.dtype)
             if shared:
-                out = out + (br.done(y_shared) if br is not None else self.shared_expert(hidden))
+                out = out + (br.done(y_shared) if br is not None else self.shared_expert(h_sh))
             return out
         if br is not None:
             probs, _ = self._route(h_r, token_ids)
