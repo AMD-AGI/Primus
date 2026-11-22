@@ -92,16 +92,17 @@ def _hc_tail_kernel(DWP, PART, DGP, DW_OUT, S_OUT, B_OUT, DG_OUT,
                     NP: tl.constexpr, BLOCK: tl.constexpr, BH: tl.constexpr, BP: tl.constexpr,
                     W_PDT: tl.constexpr, S_PDT: tl.constexpr, B_PDT: tl.constexpr, G_PDT: tl.constexpr,
                     W_ACC: tl.constexpr, S_ACC: tl.constexpr, B_ACC: tl.constexpr, G_ACC: tl.constexpr,
-                    HAS_DG: tl.constexpr, UNROLL4: tl.constexpr = False):
+                    HAS_DG: tl.constexpr, UNROLL4: tl.constexpr = False, BLOCK_W: tl.constexpr = 0):
     """Programs [0, n_dw): dW[i] = sum_s DWP[s, i] (as _hc_reduce_kernel);
     [n_dw, n_dw + NP): PART row j summed (as _hc_reduce_kernel), j < 3 -> dscale[j], else dbase[j - 3];
     [n_dw + NP, ...): dgamma column block (as rmsnorm_g90._rms_dg_reduce_kernel, BH x BP tile)."""
     pid = tl.program_id(0)
-    n_dw = tl.cdiv(N_DW, BLOCK)
+    BW: tl.constexpr = BLOCK_W if BLOCK_W > 0 else BLOCK  # splitk: dW section block (same per-element order)
+    n_dw = tl.cdiv(N_DW, BW)
     if pid < n_dw:
-        o = pid * BLOCK + tl.arange(0, BLOCK)
+        o = pid * BW + tl.arange(0, BW)
         m = o < N_DW
-        acc = tl.zeros((BLOCK,), dtype=tl.float32)
+        acc = tl.zeros((BW,), dtype=tl.float32)
         for s_ in range(0, NS):
             acc += tl.load(DWP + s_ * NTOT + o, mask=m, other=0.0)
         _mg_write(DW_OUT, o, acc, m, W_PDT, W_ACC)
@@ -192,7 +193,11 @@ def hc_tail(dw_p, n, part, dgp, D, params, dtypes, claimed):
     slots.append(_GradSlot(g, dtypes[3], (D,), dev, claimed[3]) if has_dg else None)
     BLOCK, BH, BP = 2048, 64, 64
     n_dw = n * KD_
-    grid = triton.cdiv(n_dw, BLOCK) + NP_ + (triton.cdiv(D, BH) if has_dg else 0)
+    # splitk PRIMUS_SPLITK_HC_TAILBW=<block> (default 0 = BLOCK): more, smaller dW-reduce programs; each dW element is
+    # still the same sequential sum over the S partials (bit-identical for a given S)
+    bw = int(os.environ.get("PRIMUS_SPLITK_HC_TAILBW", "0") or "0")
+    tkw = dict(BLOCK_W=bw) if bw else {}
+    grid = triton.cdiv(n_dw, bw or BLOCK) + NP_ + (triton.cdiv(D, BH) if has_dg else 0)
     dg_out = slots[3].out if has_dg else slots[0].out
     _hc_tail_kernel[(grid,)](
         dw_p, part, dgp if has_dg else part, slots[0].out, slots[1].out, slots[2].out, dg_out,
@@ -201,7 +206,7 @@ def hc_tail(dw_p, n, part, dgp, D, params, dtypes, claimed):
         W_PDT=_TL_DT[dtypes[0]], S_PDT=_TL_DT[dtypes[1]], B_PDT=_TL_DT[dtypes[2]],
         G_PDT=_TL_DT[dtypes[3]] if has_dg else tl.float32,
         W_ACC=slots[0].acc, S_ACC=slots[1].acc, B_ACC=slots[2].acc, G_ACC=slots[3].acc if has_dg else False,
-        HAS_DG=has_dg, UNROLL4=has_dg and dgp.shape[0] % (4 * BP) == 0, num_warps=4,
+        HAS_DG=has_dg, UNROLL4=has_dg and dgp.shape[0] % (4 * BP) == 0, num_warps=4, **tkw,
     )
     return tuple(sl.grad(dt) if sl is not None else None for sl, dt in zip(slots, dtypes))
 
