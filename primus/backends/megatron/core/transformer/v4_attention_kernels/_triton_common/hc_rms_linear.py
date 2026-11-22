@@ -194,6 +194,7 @@ def _hc_rms_linear_bwd_kernel(
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
     PREC: tl.constexpr,
+    ADD_DX: tl.constexpr = False,
 ):
     pid_k = tl.program_id(0)
     pid_s = tl.program_id(1)
@@ -211,9 +212,16 @@ def _hc_rms_linear_bwd_kernel(
         g = tl.load(G + rows[:, None] * BLOCK_N + ncol[None, :], mask=rmask[:, None], other=0.0)  # [BT, BN]
         coef = tl.load(COEF + rows, mask=rmask, other=0.0)
         dx = _dot_f32_x_f32(g, w, PREC) - x.to(tl.float32) * coef[:, None]
+        dxo = dx.to(DX.dtype.element_ty)
+        if ADD_DX:
+            # PRIMUS_FUSE2_HEAD_GADD: DX already holds the collapse's input gradient; add it like autograd's
+            # bf16 accumulation of the two x-gradients (each rounded to bf16 first, fp32 add, one rounding)
+            prev = tl.load(DX + rows[:, None] * stride_dx + ks[None, :], mask=rmask[:, None] & kmask[None, :],
+                           other=0.0)
+            dxo = (prev.to(tl.float32) + dxo.to(tl.float32)).to(DX.dtype.element_ty)
         tl.store(
             DX + rows[:, None] * stride_dx + ks[None, :],
-            dx.to(DX.dtype.element_ty),
+            dxo,
             mask=rmask[:, None] & kmask[None, :],
         )
         # dW^T-block = g^T @ x : x exact bf16 -> split only g
@@ -401,8 +409,9 @@ def _block_n(n: int) -> int:
 
 class HcRmsLinearFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x2d: torch.Tensor, weight: torch.Tensor, eps: float):  # type: ignore[override]
+    def forward(ctx, x2d: torch.Tensor, weight: torch.Tensor, eps: float, gslot=None):  # type: ignore[override]
         assert x2d.dim() == 2 and weight.dim() == 2 and weight.shape[1] == x2d.shape[1]
+        ctx.gslot = gslot  # PRIMUS_FUSE2_HEAD_GADD (hc_head.HeadGradSlot) or None
         x2d = x2d.contiguous()
         w = weight.float().contiguous()
         T, KD = x2d.shape
@@ -479,7 +488,9 @@ class HcRmsLinearFn(torch.autograd.Function):
         _hc_bwd_prep_kernel[(triton.cdiv(T, 64),)](
             dlogits, dlogits.stride(0), raw, rstd, g, coef, T, N, KD, BLOCK_T=64, BLOCK_N=BN, num_warps=4
         )
-        dx = torch.empty_like(x2d)
+        slot, ctx.gslot = ctx.gslot, None
+        acc = slot.take(x2d) if slot is not None else None
+        dx = acc if acc is not None else torch.empty_like(x2d)
         c = _cfg()
         prec = c["bwd_prec"] if x2d.dtype in (torch.bfloat16,) else "ieee"
         BLOCK_T, BLOCK_K, tsplit = c["bwd_bt"], c["bwd_bk"], c["bwd_tsplit"]
@@ -503,11 +514,14 @@ class HcRmsLinearFn(torch.autograd.Function):
             BLOCK_K=BLOCK_K,
             BLOCK_N=BN,
             PREC=prec,
+            ADD_DX=acc is not None,
             num_warps=c["bwd_warps"],
             num_stages=c["bwd_stages"],
         )
+        if acc is not None:
+            slot.fused = dx
         dw = dw_p[0, :N] if tsplit == 1 else dw_p.sum(0)[:N]
-        return dx, dw.to(ctx.weight_dtype), None
+        return dx, dw.to(ctx.weight_dtype), None, None
 
     @staticmethod
     def _backward_wmma3(ctx, dlogits, x2d, w3, raw, rstd, N, T, KD, BN):
@@ -530,11 +544,11 @@ class HcRmsLinearFn(torch.autograd.Function):
             num_warps=c["w3_bwd_warps"], num_stages=c["w3_bwd_stages"],
         )
         dw = dw_p[0, :N] if tsplit == 1 else dw_p.sum(0)[:N]
-        return dx, dw.to(ctx.weight_dtype), None
+        return dx, dw.to(ctx.weight_dtype), None, None
 
 
-def hc_rms_linear(x_flat: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+def hc_rms_linear(x_flat: torch.Tensor, weight: torch.Tensor, eps: float, gslot=None) -> torch.Tensor:
     """``F.linear(rms_norm(x_flat), weight)`` in fp32: ``x_flat`` ``[..., Kd]`` -> ``[..., N]`` fp32."""
     lead = x_flat.shape[:-1]
-    out = HcRmsLinearFn.apply(x_flat.reshape(-1, x_flat.shape[-1]), weight, eps)
+    out = HcRmsLinearFn.apply(x_flat.reshape(-1, x_flat.shape[-1]), weight, eps, gslot)
     return out.reshape(*lead, weight.shape[0])

@@ -496,6 +496,16 @@ class Indexer(nn.Module):
                                                 stride=self.compress_ratio)
         else:
             cos, sin = rope.forward_arange(P, k_icomp.device, stride=self.compress_ratio)
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_rope_hadamard import (
+            fuse2_idx_rot_ok,
+            rope_hadamard,
+        )
+
+        if fuse2_idx_rot_ok(k_icomp.unsqueeze(2), cos, self.rotary_dim):
+            # PRIMUS_FUSE2_IDX_ROT=1: RoPE + Hadamard + scale in one kernel (same roundings)
+            Bk = k_icomp.shape[0]
+            return rope_hadamard(k_icomp.unsqueeze(2), cos.unsqueeze(0).expand(Bk, -1, -1),
+                                 sin.unsqueeze(0).expand(Bk, -1, -1), self.rotary_dim).squeeze(2)
         # ``apply_interleaved_partial_rope`` inserts a singleton head axis into
         # cos / sin, so give it a ``[B, P, 1, Hd]`` view to broadcast against.
         rotated = apply_interleaved_partial_rope(
@@ -525,6 +535,14 @@ class Indexer(nn.Module):
         if tuple(cos.shape[:-1]) != (B, S):
             cos = cos.expand(B, S, -1)
             sin = sin.expand(B, S, -1)
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_rope_hadamard import (
+            fuse2_idx_rot_ok,
+            rope_hadamard,
+        )
+
+        if fuse2_idx_rot_ok(q_i, cos, self.rotary_dim):
+            # PRIMUS_FUSE2_IDX_ROT=1: RoPE + Hadamard + scale in one kernel (same roundings)
+            return rope_hadamard(q_i, cos, sin, self.rotary_dim)
         return rotate_activation(apply_interleaved_partial_rope(q_i, cos, sin, rotary_dim=self.rotary_dim))
 
     def forward(

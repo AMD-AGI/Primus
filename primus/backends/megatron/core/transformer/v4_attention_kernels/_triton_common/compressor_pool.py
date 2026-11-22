@@ -369,6 +369,87 @@ def _window_pool_bwd_kernel(P_PTR, APE_PTR, DO_PTR, DP_PTR, DSC_PTR, NW, R, stri
             tl.store(DP_PTR + zr[:, None] * stride_p + 3 * HD + offs_d[None, :], z, mask=zm)
 
 
+@triton.jit
+def _window_pool_bwd_dape_kernel(P_PTR, APE_PTR, DO_PTR, DP_PTR, PART_PTR, NBN, NW, R, stride_p, GW,
+                                 RATIO: tl.constexpr, HD: tl.constexpr, OVERLAP: tl.constexpr,
+                                 BLOCK_R: tl.constexpr, BLOCK_D: tl.constexpr):
+    """PRIMUS_FUSE2_WPOOL_DAPE: ``_window_pool_bwd_kernel`` for GW consecutive windows per program (each window's
+    math and d(proj) stores unchanged), plus the window-sum of the bf16-rounded dscore in fp32 registers
+    (fixed order: window by window), written as one [R, HD] fp32 partial per program."""
+    pid_g = tl.program_id(0)
+    pid_d = tl.program_id(1)
+    offs_r = tl.arange(0, BLOCK_R)
+    offs_d = pid_d * BLOCK_D + tl.arange(0, BLOCK_D)
+    r_mask = offs_r < R
+    d_mask = offs_d < HD
+    mask = r_mask[:, None] & d_mask[None, :]
+    dt = DP_PTR.dtype.element_ty
+    acc = tl.zeros((BLOCK_R, BLOCK_D), dtype=tl.float32)
+    for g in range(GW):
+        pid_bn = pid_g * GW + g
+        inb = pid_bn < NBN
+        row, kv_c, sc_c, valid = _window_src(pid_bn, offs_r, NW, RATIO, HD, OVERLAP)
+        lmask = mask & valid[:, None] & inb
+        rbase = row.to(tl.int64)[:, None] * stride_p + offs_d[None, :]
+        s = tl.load(P_PTR + rbase + sc_c[:, None], mask=lmask, other=0.0).to(tl.float32)
+        a = tl.load(APE_PTR + offs_r[:, None] * HD + offs_d[None, :], mask=mask, other=0.0).to(tl.float32)
+        s = s + a
+        s = tl.where(r_mask[:, None], s, float("-inf"))
+        s_max = tl.max(s, axis=0)
+        e = tl.exp(s - s_max[None, :])
+        e = tl.where(r_mask[:, None], e, 0.0)
+        denom = tl.sum(e, axis=0)
+        w = e / denom[None, :]
+        kv = tl.load(P_PTR + rbase + kv_c[:, None], mask=lmask, other=0.0).to(tl.float32)
+        dout = tl.load(DO_PTR + pid_bn * HD + offs_d, mask=d_mask & inb, other=0.0).to(tl.float32)
+        dkv = dout[None, :] * w
+        dw = dout[None, :] * kv
+        sum_dw_w = tl.sum(dw * w, axis=0)
+        dscore = w * (dw - sum_dw_w[None, :])
+        tl.store(DP_PTR + rbase + kv_c[:, None], dkv.to(dt), mask=lmask)
+        tl.store(DP_PTR + rbase + sc_c[:, None], dscore.to(dt), mask=lmask)
+        acc += tl.where(mask & inb, dscore.to(dt).to(tl.float32), 0.0)
+        if OVERLAP:
+            zr = (pid_bn * RATIO + offs_r).to(tl.int64)
+            zm = (offs_r < RATIO)[:, None] & d_mask[None, :] & inb & (pid_bn % NW == NW - 1)
+            z = tl.zeros((BLOCK_R, BLOCK_D), dtype=dt)
+            tl.store(DP_PTR + zr[:, None] * stride_p + HD + offs_d[None, :], z, mask=zm)
+            tl.store(DP_PTR + zr[:, None] * stride_p + 3 * HD + offs_d[None, :], z, mask=zm)
+    tl.store(PART_PTR + pid_g.to(tl.int64) * (R * HD) + offs_r[:, None] * HD + offs_d[None, :], acc, mask=mask)
+
+
+@triton.jit
+def _dape_reduce_kernel(PART_PTR, OUT_PTR, NG, NUMEL, BETA: tl.constexpr, NG_P: tl.constexpr, BLOCK: tl.constexpr):
+    """dape = bf16(sum over the NG partials) (the unfused path's bf16 sum), widened to OUT's dtype; BETA: added to
+    OUT (main_grad accumulate) instead of overwriting it."""
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    gs = tl.arange(0, NG_P)
+    m = offs < NUMEL
+    p = tl.load(PART_PTR + gs[:, None].to(tl.int64) * NUMEL + offs[None, :], mask=(gs[:, None] < NG) & m[None, :],
+                other=0.0)
+    v = tl.sum(p, axis=0).to(tl.bfloat16).to(tl.float32)
+    if BETA:
+        v = v + tl.load(OUT_PTR + offs, mask=m, other=0.0).to(tl.float32)
+    tl.store(OUT_PTR + offs, v.to(OUT_PTR.dtype.element_ty), mask=m)
+
+
+def fuse2_wpool_dape_enabled() -> bool:
+    return os.environ.get("PRIMUS_FUSE2_WPOOL_DAPE", "0") == "1"
+
+
+def _ape_main_grad_ok(ape) -> bool:
+    mg = getattr(ape, "main_grad", None)
+    return (
+        isinstance(ape, torch.nn.Parameter)
+        and hasattr(ape, "grad_added_to_main_grad")
+        and isinstance(mg, torch.Tensor)
+        and mg.shape == ape.shape
+        and mg.dtype in (torch.float32, torch.bfloat16)
+        and mg.is_contiguous()
+        and not getattr(ape, "shared", False)
+    )
+
+
 class _WindowPool(torch.autograd.Function):
     @staticmethod
     def forward(ctx, proj, ape, ratio, hd, overlap):
@@ -384,6 +465,14 @@ class _WindowPool(torch.autograd.Function):
                                       BLOCK_R=BLOCK_R, BLOCK_D=BLOCK_D)
         ctx.save_for_backward(p2, ape)
         ctx.meta = (B, S, C, NW, R, ratio, hd, bool(overlap), BLOCK_R, BLOCK_D)
+        # PRIMUS_FUSE2_WPOOL_DAPE: dape summed in the bwd kernel (+ one small reduce); with a DDP main_grad the
+        # reduce writes it there (first write overwrites, later ones add), like the fused-wgrad linears
+        ctx.dape = fuse2_wpool_dape_enabled() and ape.requires_grad
+        ctx.ape_param = None
+        if ctx.dape and _ape_main_grad_ok(ape):
+            ctx.ape_param = ape
+            ape.grad_added_to_main_grad = True
+            ape._primus_fwd_claim = True
         return out.view(B, NW, hd)
 
     @staticmethod
@@ -392,6 +481,29 @@ class _WindowPool(torch.autograd.Function):
         B, S, C, NW, R, ratio, hd, overlap, BLOCK_R, BLOCK_D = ctx.meta
         do2 = dout.reshape(B * NW, hd).contiguous()
         dp = torch.empty_like(p2)
+        if ctx.dape:
+            NBN = B * NW
+            nd = triton.cdiv(hd, BLOCK_D)
+            GW = max(1, min(8, (NBN * nd) // 2048))
+            NG = triton.cdiv(NBN, GW)
+            part = torch.empty((NG, R, hd), dtype=torch.float32, device=p2.device)
+            _window_pool_bwd_dape_kernel[(NG, nd)](p2, ape, do2, dp, part, NBN, NW, R, p2.stride(0), GW, RATIO=ratio,
+                                                   HD=hd, OVERLAP=overlap, BLOCK_R=BLOCK_R, BLOCK_D=BLOCK_D)
+            wp, ctx.ape_param = ctx.ape_param, None
+            beta = False
+            if wp is not None:
+                from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad, main_grad_first_write
+
+                out = wp.main_grad
+                beta = not main_grad_first_write(wp)
+            else:
+                out = torch.empty((R, hd), dtype=ape.dtype, device=p2.device)
+            numel = R * hd
+            ng_p = triton.next_power_of_2(NG)
+            blk = max(16, min(1024, 8192 // ng_p))
+            _dape_reduce_kernel[(triton.cdiv(numel, blk),)](part, out, NG, numel, BETA=beta, NG_P=ng_p, BLOCK=blk)
+            dape = _get_dummy_wgrad(list(ape.shape), ape.dtype) if wp is not None else out
+            return dp.view(B, S, C), dape, None, None, None
         dsc = torch.empty((B * NW, R, hd), dtype=p2.dtype, device=p2.device)
         grid = (B * NW, triton.cdiv(hd, BLOCK_D))
         _window_pool_bwd_kernel[grid](p2, ape, do2, dp, dsc, NW, R, p2.stride(0), RATIO=ratio, HD=hd,

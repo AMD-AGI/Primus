@@ -480,18 +480,31 @@ class HyperHead(nn.Module):
         packed ``K*D`` axis is fused into one Triton FWD + one BWD kernel
         (fp32 output for ``F.linear``). Gated by ``PRIMUS_RMSNORM_TRITON``.
         """
+        slot = None
+        x_c = x
+        if hc_rms_linear_enabled() and x.is_cuda and x.requires_grad and torch.is_grad_enabled():
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_head import (
+                HeadFanOut,
+                HeadGradSlot,
+                head_gadd_enabled,
+            )
+
+            if head_gadd_enabled() and hc_head_fused_enabled() and x.dtype == torch.bfloat16 and x.is_contiguous():
+                # PRIMUS_FUSE2_HEAD_GADD: the two x-gradients are summed inside the rms-linear backward
+                slot = HeadGradSlot()
+                x, x_c = HeadFanOut.apply(x, slot)
         flat = x.flatten(-2)
         if hc_rms_linear_enabled() and flat.is_cuda:
-            mixes = hc_rms_linear(flat, self.fn.weight, self.eps)  # [..., K]
+            mixes = hc_rms_linear(flat, self.fn.weight, self.eps, gslot=slot)  # [..., K]
         else:
             normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
             mixes = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))  # [..., K]
         pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
-        if hc_head_fused_enabled() and hc_head_supported(x, pre):
+        if hc_head_fused_enabled() and hc_head_supported(x_c, pre):
             # hc track: one streaming kernel each way instead of the fp32 [.., K, D] product + reduce + cast
             # (forward bit-identical; backward dx bit-identical, dpre summed in a different fp32 order)
-            return hc_head_collapse(x, pre)
-        return (pre.unsqueeze(-1) * x).sum(dim=-2).to(x.dtype)
+            return hc_head_collapse(x_c, pre, gslot=slot)
+        return (pre.unsqueeze(-1) * x_c).sum(dim=-2).to(x_c.dtype)
 
 
 __all__ = [

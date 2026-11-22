@@ -1418,6 +1418,28 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             return False
         return getattr(self.config, "tensor_model_parallel_size", 1) == 1 and hidden.shape[-1] == wq.shape[1]
 
+    def _fuse2_att_gadd_slot(self, hidden: torch.Tensor, seq_starts):
+        """PRIMUS_FUSE2_ATT_GADD=1 (fuse2, default off): a gradient slot when this compressed layer's input feeds only
+        the concat GEMM and the compressor's main_grad-writing wkv_gate (the indexer reads ``hidden.detach()``)."""
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_main_grad import (
+            AttGradSlot,
+            att_gadd_enabled,
+            fuse2_linear_mg_ok,
+        )
+
+        if not att_gadd_enabled() or self.compress_ratio not in (4, 128) or seq_starts is not None:
+            return None
+        if getattr(self, "_ovl_pool", None) is not None:  # PRIMUS_OVERLAP_COMPRESSOR already issued it (ForkGrad sums)
+            return None
+        comp = getattr(self, "compressor", None)
+        wkg = getattr(comp, "wkv_gate", None) if comp is not None else None
+        if wkg is None or getattr(wkg, "bias", None) is not None or not getattr(comp, "_fuse_proj", False):
+            return None
+        if not (torch.is_grad_enabled() and hidden.requires_grad and hidden.dtype == torch.bfloat16
+                and hidden.is_contiguous() and _v4_get_cp_group() is None and fuse2_linear_mg_ok(hidden, wkg.weight)):
+            return None
+        return AttGradSlot()
+
     def _qkv_a_concat(self, hidden: torch.Tensor):
         """One GEMM for wq_a and wkv -> (q_compressed [B,S,nq], kv_proj [B,S,nkv]) (row-strided views)."""
         wq = self.linear_q_down_proj.weight
@@ -2687,7 +2709,26 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             hidden = h_q
 
         # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one GEMM (see _QKVASplit); else two linears.
-        q_a, kv_a = self._qkv_a_concat(hidden) if self._qkv_a_concat_ok(hidden) else (None, None)
+        q_a, kv_a = None, None
+        if self._qkv_a_concat_ok(hidden):
+            slot = self._fuse2_att_gadd_slot(hidden, seq_starts)
+            if slot is not None:
+                # PRIMUS_FUSE2_ATT_GADD: the concat and the compressor get their own aliases of the input; the
+                # concat's dX GEMM adds into the compressor's dX (autograd's bf16 add, in the GEMM epilogue)
+                from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_main_grad import (
+                    AttFanOut,
+                )
+                from primus_turbo.pytorch.ops.gemm_fp8_concat import request_dx_accum
+
+                h_cat, hidden = AttFanOut.apply(hidden, slot)
+                request_dx_accum(slot)
+                try:
+                    q_a, kv_a = self._qkv_a_concat(h_cat)
+                finally:
+                    request_dx_accum(None)
+                self.compressor._fuse2_dx_slot = slot
+            else:
+                q_a, kv_a = self._qkv_a_concat(hidden)
         if (
             q_a is not None
             and self._fused_q_norm_rope_ok(hidden)

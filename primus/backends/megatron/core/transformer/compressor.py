@@ -596,7 +596,18 @@ class Compressor(KeepInFp32Mixin, nn.Module):
                 glue_window_pool_ok,
             )
 
-            proj = self.wkv_gate(hidden)
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_main_grad import (
+                fuse2_linear_mg_ok,
+                linear_main_grad,
+            )
+
+            wkg = self.wkv_gate
+            if getattr(wkg, "bias", None) is None and fuse2_linear_mg_ok(hidden, wkg.weight):
+                # PRIMUS_FUSE2_COMP_MG=1: same GEMMs, the wgrad written straight into main_grad
+                slot, self._fuse2_dx_slot = getattr(self, "_fuse2_dx_slot", None), None
+                proj = linear_main_grad(hidden, wkg.weight, slot)
+            else:
+                proj = self.wkv_gate(hidden)
             if glue_window_pool_ok(proj, self.ape, self.ratio, self.head_dim, self.overlap):
                 # PRIMUS_GLUE_COMPRESS_POOL=1: window split + overlap stitch folded into the pool kernels
                 return self.kv_norm(fused_window_pool(proj, self.ape, self.ratio, self.head_dim, self.overlap))
