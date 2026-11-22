@@ -212,6 +212,52 @@ def _route_tables_blk_kernel(TOPI, TOPW, CNTB, ROWMAP, RW, INV, POFFS, R, P, NB,
 
 
 @triton.jit
+def _route_tables_chunk_kernel(TOPI, TOPW, CNTB, ROWMAP, RW, INV, POFFS, R, P, NB, NPROG, K: tl.constexpr,
+                               E: tl.constexpr, RB: tl.constexpr, RC: tl.constexpr, CPB: tl.constexpr,
+                               RHP: tl.constexpr, NBP: tl.constexpr, ALIGN: tl.constexpr, TAILB: tl.constexpr):
+    """route3 EARLY=2, chunked: as _route_tables_blk_kernel but CPB programs per route-kernel block, each scattering
+    RC routes (Turbo's scatter chunk size); the routes of the block before the chunk are counted from TOPI."""
+    pid = tl.program_id(0)
+    b = pid // CPB
+    c = pid % CPB
+    e_ar = tl.arange(0, E)
+    cb = tl.arange(0, NBP)
+    cc = tl.load(CNTB + cb[:, None] * E + e_ar[None, :], mask=(cb < NB)[:, None], other=0)
+    cnt = tl.sum(cc, axis=0)
+    before = tl.sum(tl.where((cb < b)[:, None], cc, 0), axis=0)
+    if CPB > 1:
+        h = tl.arange(0, RHP)
+        rh = b * RB + h
+        ih = tl.load(TOPI + rh, mask=(h < c * RC) & (rh < R), other=-1).to(tl.int32)
+        before += tl.sum((ih[:, None] == e_ar[None, :]).to(tl.int32), axis=0)
+    plen = tl.maximum((cnt + ALIGN - 1) // ALIGN, 1) * ALIGN
+    pend = tl.cumsum(plen, 0)
+    pstart = pend - plen
+    if pid == 0:
+        tl.store(POFFS + 1 + e_ar, pend)
+        tl.store(POFFS + e_ar, pstart, mask=e_ar == 0)
+    r = b * RB + c * RC + tl.arange(0, RC)
+    m = r < R
+    idx = tl.load(TOPI + r, mask=m, other=-1).to(tl.int32)
+    oh = (idx[:, None] == e_ar[None, :]).to(tl.int32)
+    pos = tl.sum(oh * ((pstart + before)[None, :] + tl.cumsum(oh, 0) - 1), axis=1)
+    tl.store(ROWMAP + pos, r // K, mask=m)
+    tl.store(RW + pos, tl.load(TOPW + r, mask=m, other=0.0).to(tl.float32), mask=m)
+    tl.store(INV + r, pos, mask=m)
+    pa = tl.arange(0, ALIGN)
+    for e in range(pid, E, NPROG):  # padding rows of expert e
+        lo = tl.sum(tl.where(e_ar == e, pstart + cnt, 0), axis=0)
+        hi = tl.sum(tl.where(e_ar == e, pend, 0), axis=0)
+        rows = lo + pa
+        tl.store(ROWMAP + rows, tl.full((ALIGN,), -1, tl.int32), mask=rows < hi)
+        tl.store(RW + rows, tl.zeros((ALIGN,), dtype=tl.float32), mask=rows < hi)
+    last = tl.sum(tl.where(e_ar == E - 1, pend, 0), axis=0)
+    tr = last + pid * TAILB + tl.arange(0, TAILB)
+    tl.store(ROWMAP + tr, tl.full((TAILB,), -1, tl.int32), mask=tr < P)
+    tl.store(RW + tr, tl.zeros((TAILB,), dtype=tl.float32), mask=tr < P)
+
+
+@triton.jit
 def _route_loss_kernel(CNT_P, SUM_P, CNT, LOSS, NB_SEQ, B, COEF, E: tl.constexpr, BP: tl.constexpr):
     """one program: per sequence b, C_e and S_e summed over its blocks in block order; loss = mean_b sum_e C_e S_e *
     COEF (COEF = alpha * E / (K * S^2))."""
@@ -409,10 +455,19 @@ class Route3Dyn:
         inv = torch.empty((R,), dtype=torch.int32, device=dev)
         poffs = torch.empty((E + 1,), dtype=torch.int32, device=dev)
         rb = bn * K
-        _route_tables_blk_kernel[(nb,)](
-            topi, topw, self.cntb, rowmap, rw, inv, poffs, R, self.P, nb, K=K, E=E, RB=rb,
-            RBP=triton.next_power_of_2(rb), NBP=triton.next_power_of_2(nb), ALIGN=self.align,
-            TAILB=triton.next_power_of_2(max(triton.cdiv(max(self.P - R, 1), nb), 1)), num_warps=8)
+        rc = 128 if rb % 128 == 0 else 0
+        if rc and os.environ.get("PRIMUS_ROUTE3_TBL", "chunk") == "chunk":
+            cpb = rb // rc
+            npg = nb * cpb
+            _route_tables_chunk_kernel[(npg,)](
+                topi, topw, self.cntb, rowmap, rw, inv, poffs, R, self.P, nb, npg, K=K, E=E, RB=rb, RC=rc, CPB=cpb,
+                RHP=triton.next_power_of_2(max((cpb - 1) * rc, 1)), NBP=triton.next_power_of_2(nb), ALIGN=self.align,
+                TAILB=triton.next_power_of_2(max(triton.cdiv(max(self.P - R, 1), npg), 1)), num_warps=4)
+        else:
+            _route_tables_blk_kernel[(nb,)](
+                topi, topw, self.cntb, rowmap, rw, inv, poffs, R, self.P, nb, K=K, E=E, RB=rb,
+                RBP=triton.next_power_of_2(rb), NBP=triton.next_power_of_2(nb), ALIGN=self.align,
+                TAILB=triton.next_power_of_2(max(triton.cdiv(max(self.P - R, 1), nb), 1)), num_warps=8)
         self.tabs = (rowmap, rw, inv, poffs, None)
 
     def routing(self):
