@@ -304,7 +304,8 @@ def _b3x_step_bat(t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
                   accw0, accw1, accw2, accw3, DX, tb, cr, D, BT: gl.constexpr, BC: gl.constexpr,
                   HAS_DNEW: gl.constexpr, WMMA: gl.constexpr, OPB: gl.constexpr, BLK: gl.constexpr,
                   DIRECT_W: gl.constexpr, GQ: gl.constexpr,
-                  p0, a0, b0, c0, d0, p1, a1, b1, c1, d1, p2, a2, b2, c2, d2, p3, a3, b3, c3, d3):
+                  p0, a0, b0, c0, d0, p1, a1, b1, c1, d1, p2, a2, b2, c2, d2, p3, a3, b3, c3, d3,
+                  WAR: gl.constexpr = True):
     """hcfuse BAT: the 4 dx GEMM results and the 4 x planes go through LDS in ONE store / barrier / load round
     (2 barriers per row step instead of one convert_layout round trip per stream plus the x staging). Same
     arithmetic as _b3x_step (dx, dW partials byte-identical)."""
@@ -316,7 +317,8 @@ def _b3x_step_bat(t0, x0, x1, x2, x3, n0, n1, n2, n3, dcb, cf, gh, gq, gth, gtl,
     m1 = _b3x_mm(gh, gq, wsh1, wsl1, BT, BC, WMMA, OPB, DIRECT_W, GQ)
     m2 = _b3x_mm(gh, gq, wsh2, wsl2, BT, BC, WMMA, OPB, DIRECT_W, GQ)
     m3 = _b3x_mm(gh, gq, wsh3, wsl3, BT, BC, WMMA, OPB, DIRECT_W, GQ)
-    gl.barrier()  # the previous step's LDS reads are done
+    if WAR:  # single buffer: the previous step's LDS reads must be done (double-buffered BAT=2 skips this)
+        gl.barrier()
     as0.store(m0)
     as1.store(m1)
     as2.store(m2)
@@ -357,7 +359,8 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
                    SMEM: gl.constexpr, SMEM_W: gl.constexpr, DIRECT_W: gl.constexpr, PF: gl.constexpr = False,
                    ABL: gl.constexpr = 0, BUF: gl.constexpr = False, NMASK: gl.constexpr = False,
                    UNEVEN: gl.constexpr = False, COEF2=None, HAS_C2: gl.constexpr = False, GQ: gl.constexpr = True,
-                   PF2: gl.constexpr = False, BAT: gl.constexpr = False, SMEM_F: gl.constexpr = None):
+                   PF2: gl.constexpr = False, BAT: gl.constexpr = 0, SMEM_F: gl.constexpr = None,
+                   SMEM_X2: gl.constexpr = None):
     tile = gl.program_id(0)
     if tile < N_TILES:
         pid_d = tile % N_D
@@ -414,7 +417,16 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
             t_lo = pid_s * T_PER
             t_hi = t_lo + T_PER
         if PF2:
-            if BAT:
+            if BAT == 2:  # double-buffered: slot alternates per row step, one barrier per step
+                asd0 = gl.allocate_shared_memory(gl.float32, [2, BT, BC], SMEM_F)
+                asd1 = gl.allocate_shared_memory(gl.float32, [2, BT, BC], SMEM_F)
+                asd2 = gl.allocate_shared_memory(gl.float32, [2, BT, BC], SMEM_F)
+                asd3 = gl.allocate_shared_memory(gl.float32, [2, BT, BC], SMEM_F)
+                xsd0 = gl.allocate_shared_memory(gl.bfloat16, [2, BT, BC], SMEM_X2)
+                xsd1 = gl.allocate_shared_memory(gl.bfloat16, [2, BT, BC], SMEM_X2)
+                xsd2 = gl.allocate_shared_memory(gl.bfloat16, [2, BT, BC], SMEM_X2)
+                xsd3 = gl.allocate_shared_memory(gl.bfloat16, [2, BT, BC], SMEM_X2)
+            elif BAT:
                 as0 = gl.allocate_shared_memory(gl.float32, [BT, BC], SMEM_F)
                 as1 = gl.allocate_shared_memory(gl.float32, [BT, BC], SMEM_F)
                 as2 = gl.allocate_shared_memory(gl.float32, [BT, BC], SMEM_F)
@@ -454,7 +466,16 @@ def _hc_b3x_kernel(X, W, WTH, WTL, GH, GL, GTH, GTL, COEF, PRE, COMBT, DC, DNEW,
                 pv3, qa3, qb3, qc3, qd3 = _b3x_rv(tn, tb, PRE, COMBT, 3, HAS_DNEW)
                 if HAS_C2:
                     c_cf = c_cf + c_cf2
-                if BAT:
+                if BAT == 2:
+                    sl = ((t0 - t_lo) // BT) % 2
+                    accw0, accw1, accw2, accw3 = _b3x_step_bat(
+                        t0, c_x0, c_x1, c_x2, c_x3, c_n0, c_n1, c_n2, c_n3, c_dcb, c_cf, c_gh, c_gq, c_gth, c_gtl,
+                        wsh0, wsh1, wsh2, wsh3, wsl0, wsl1, wsl2, wsl3, xsd0.index(sl), xsd1.index(sl), xsd2.index(sl),
+                        xsd3.index(sl), asd0.index(sl), asd1.index(sl), asd2.index(sl), asd3.index(sl),
+                        accw0, accw1, accw2, accw3, DX, tb, cr, D, BT, BC, HAS_DNEW, WMMA, OPB, BLK, DIRECT_W, GQ,
+                        cpv0, cqa0, cqb0, cqc0, cqd0, cpv1, cqa1, cqb1, cqc1, cqd1, cpv2, cqa2, cqb2, cqc2, cqd2,
+                        cpv3, cqa3, cqb3, cqc3, cqd3, False)
+                elif BAT:
                     accw0, accw1, accw2, accw3 = _b3x_step_bat(
                         t0, c_x0, c_x1, c_x2, c_x3, c_n0, c_n1, c_n2, c_n3, c_dcb, c_cf, c_gh, c_gq, c_gth, c_gtl,
                         wsh0, wsh1, wsh2, wsh3, wsl0, wsl1, wsl2, wsl3, xs0, xs1, xs2, xs3, as0, as1, as2, as3,
@@ -566,11 +587,23 @@ def b3x_cfg():
 _LAYOUTS = {}
 
 
-def b3x_smem_f(bt, bc):
-    """fp32 [bt, bc] shared layout for the batched dx GEMM round trip (hcfuse BAT), 16-byte row padding."""
-    key = ("f", bt, bc)
+def b3x_smem_f(bt, bc, nbuf=1):
+    """fp32 [bt, bc] (or [2, bt, bc]) shared layout for the batched dx GEMM round trip (hcfuse BAT), 16-byte row
+    padding."""
+    key = ("f", bt, bc, nbuf)
     if key not in _LAYOUTS:
-        _LAYOUTS[key] = gl.PaddedSharedLayout.with_identity_for([[bc, 4]], [bt, bc], [1, 0])
+        if nbuf == 1:
+            _LAYOUTS[key] = gl.PaddedSharedLayout.with_identity_for([[bc, 4]], [bt, bc], [1, 0])
+        else:
+            _LAYOUTS[key] = gl.PaddedSharedLayout.with_identity_for([[bc, 4]], [nbuf, bt, bc], [2, 1, 0])
+    return _LAYOUTS[key]
+
+
+def b3x_smem_x2(bt, bc):
+    """bf16 [2, bt, bc] double-buffered x staging layout (BAT=2), same padding as the single-buffer smem."""
+    key = ("x2", bt, bc)
+    if key not in _LAYOUTS:
+        _LAYOUTS[key] = gl.PaddedSharedLayout.with_identity_for([[bc, 16]], [2, bt, bc], [2, 1, 0])
     return _LAYOUTS[key]
 
 
