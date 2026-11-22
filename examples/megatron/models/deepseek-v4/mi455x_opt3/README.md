@@ -58,7 +58,8 @@ Requirements:
 | + attnbwd SMLA_BWD_V2 + Adam HWCVT, graph | 47.5 (A/B 48.00 -> 47.47) | 9.8712 |
 | + bf16g2 OA_DGRAD + IDXQ, graph | 47.1 (A/B 47.40 -> 47.10) | 9.8712 |
 | + fuse2 WPOOL_DAPE/COMP_MG/LOSS/PREFETCH=2/HEAD_GADD/ATT_GADD + static loss scale, graph | 47.1 (A/B 47.20 -> 47.07) | 9.8712 |
-| **+ persist ROUTER_BWD + MOE_COMBINE_DW (this config), graph** | **46.8** (A/B 47.10 -> 46.83) | 9.8712 |
+| + persist ROUTER_BWD + MOE_COMBINE_DW, graph | 46.8 (A/B 47.10 -> 46.83) | 9.8712 |
+| **+ csabwd CSABWD_PP (this config), graph** | **46.8** (A/B 46.90 -> 46.77) | 9.8712 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -172,6 +173,9 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
 - persist `PRIMUS_PERSIST_ROUTER_BWD=1` (MoE router backward 7 launches -> 2: route_bwd + one megakernel with a
   wait-free last-arriver split reduce into main_grad) and `PRIMUS_PERSIST_MOE_COMBINE_DW=1` (combine + route_dw in one
   launch): -0.27 ms, byte-identical (961/961 checksum fingerprints).
+- csabwd `PRIMUS_CSABWD_PP=1` (CSA sparse-MLA backward w1 as a warp-specialized ping-pong kernel: score waves and
+  C^T waves one tile apart, 2 waves/SIMD, 464 VGPRs, no spills; CSA call ~754 -> ~670 us): -0.13 ms on int, dq/dkv/dsink
+  sha identical to V2. Needs SMLA_BWD_V2=1 and H=64 (falls back otherwise).
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
