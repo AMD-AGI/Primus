@@ -1,0 +1,28 @@
+# Target cluster: 4 x MI355X nodes (8 GPU/node) run by a customer at a
+# 1000 W per-GPU power limit.  Every trial is projected under that cap and
+# ranked by the throughput it keeps once the cap lowers the clock.
+target_cluster:
+  name: mi355x_4nodes_1000w
+  num_nodes: 4
+  gpus_per_node: 8
+  gpu_arch: mi355x
+  hardware_config: examples/hardware_configs/mi355x.yaml
+  power_cap_w: 1000
+  power_cap_mode: instantaneous
+  power_config: examples/hardware_configs/power_config_example.yaml
+
+available_for_benchmark:
+  has_gpu: false
+  benchmark_gpus: 0
+
+optimization:
+  # Defaults to capped_tokens_per_s_per_gpu when a power cap is set; use
+  # energy_per_token_j to minimize energy instead.
+  objective: capped_tokens_per_s_per_gpu
+  power_policy: throttle      # or "reject": drop configs whose hottest phase exceeds the cap
+  memory_safety_margin: 0.10
+  hbm_capacity_gb: 288.0
+  budget:
+    max_proposals: 30
+    max_perf_calls: 30
+    max_rounds: 8

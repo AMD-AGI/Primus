@@ -25,7 +25,7 @@ from pathlib import Path
 
 import dspy
 
-from .config import AgentConfig
+from .config import AgentConfig, power_prompt_dict
 from .evaluator import Evaluator
 from .history import History
 from .legality import derive_legality
@@ -405,7 +405,8 @@ def run_agent(
             cur_best_idx = best.idx if best else None
             print(
                 f"\n    [round summary] best so far: trial #{cur_best_idx} "
-                f"tps={best.result.get('tokens_per_s_per_gpu') if best else None}"
+                f"{agent_cfg.optimization.objective}="
+                f"{best.result.get(agent_cfg.optimization.objective) if best else None}"
             )
 
             # early stop if no improvement and budget mostly used
@@ -446,5 +447,6 @@ def _cluster_blob(agent_cfg: AgentConfig) -> str:
             "memory_safety_margin": agent_cfg.optimization.memory_safety_margin,
             "has_gpu_for_benchmark": agent_cfg.benchmark_host.has_gpu,
             "benchmark_gpus": agent_cfg.benchmark_host.benchmark_gpus,
+            **power_prompt_dict(agent_cfg),
         }
     )

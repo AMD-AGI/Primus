@@ -186,7 +186,10 @@ def main(argv: list[str] | None = None) -> int:
         ok = "OK" if r.legal else "FAIL"
         warn = (" WARN: " + r.memory_warning) if getattr(r, "memory_warning", None) else ""
         tflops_str = f" tflops={tflops}" if tflops is not None else ""
-        print(f"    [seed #{idx}] {ok} tps={tps}{tflops_str} mem={mem} cfg={sig}{warn}")
+        power_str = ""
+        if r.capped_tokens_per_s_per_gpu is not None:
+            power_str = f" capped_tps={r.capped_tokens_per_s_per_gpu} W={r.avg_power_w}"
+        print(f"    [seed #{idx}] {ok} tps={tps}{tflops_str}{power_str} mem={mem} cfg={sig}{warn}")
 
     # ── LLM agent stage ─────────────────────────────────────────────────
     if not (args.seed_only or args.no_agent):
@@ -237,6 +240,15 @@ def main(argv: list[str] | None = None) -> int:
     if best.result.get("mfu") is not None:
         print(f"  → MFU          = {best.result.get('mfu')}")
     print(f"  → memory/GPU   = {best.result.get('memory_per_gpu_gb')} GB")
+    if best.result.get("capped_tokens_per_s_per_gpu") is not None:
+        cap = agent_cfg.target_cluster.power_cap_w
+        print(
+            f"  → tokens/s/GPU under power cap ({cap or 'TBP'} W) = {best.result.get('capped_tokens_per_s_per_gpu')}"
+        )
+        print(
+            f"  → avg power/GPU = {best.result.get('avg_power_w')} W (slowdown {best.result.get('power_slowdown')}x)"
+        )
+        print(f"  → energy/token  = {best.result.get('energy_per_token_j')} J")
 
     print("\n=== EXPORTS for primus-cli ===")
     print(f"  export PRIMUS_TP={cfg.get('tp')}")

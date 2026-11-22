@@ -181,6 +181,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 | `--sync-free-stage` | Override Sync-Free MoE stage (`0` off; stages `1`-`3` enable additional modeling assumptions). |
 | `--num-virtual-stages-per-pipeline-rank` | Override virtual pipeline stage count for projection. |
 | `--micro-batch-size`, `--global-batch-size` | Override batch sizes for projection without editing the YAML. |
+| `--power-report`, `--power-cap-w`, `--power-cap-mode`, `--power-config` | Add a power projection: per-GPU power, throughput under a power cap, node / cluster / facility power and capacity planning. See [Power projection](./power-projection.md). |
 
 ---
 
@@ -220,4 +221,5 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 - [Preflight diagnostics](./preflight.md)
 - [Post-training workflows](./posttraining.md)
 - [Tuning agent](./tuning-agent.md)
+- [Power projection](./power-projection.md)
 - [Megatron parameters](../03-configuration-reference/megatron-parameters.md)

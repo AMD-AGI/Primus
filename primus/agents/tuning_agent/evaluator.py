@@ -54,6 +54,20 @@ class EvalResult:
     tokens_per_s_per_gpu: float | None = None
     tflops_per_s_per_gpu: float | None = None
     mfu: float | None = None
+    # Power projection (present when the target cluster sets a power cap or
+    # power config).  ``capped_tokens_per_s_per_gpu`` is the throughput after
+    # the cap lowers the clock; ``uncapped_peak_power_w`` is the hottest
+    # phase's draw before capping.
+    avg_power_w: float | None = None
+    uncapped_avg_power_w: float | None = None
+    uncapped_peak_power_w: float | None = None
+    capped_tokens_per_s_per_gpu: float | None = None
+    capped_iteration_ms: float | None = None
+    power_slowdown: float | None = None
+    energy_per_token_j: float | None = None
+    tokens_per_joule_per_gpu: float | None = None
+    facility_power_kw: float | None = None
+    power_feasible: bool | None = None
     source: str = "memory_only"
     stdout_tail: str = ""
     returncode: int = 0
@@ -308,6 +322,19 @@ _RE_TPS = re.compile(rf"Tokens/s/GPU:\s*{_FLOAT}", re.IGNORECASE)
 # on version and output source.
 _RE_TFLOPS = re.compile(rf"TFLOPs?/s/GPU:\s*{_FLOAT}", re.IGNORECASE)
 _RE_MFU = re.compile(rf"\bMFU(?:\s*\(.*?\))?:\s*{_FLOAT}", re.IGNORECASE)
+# Power projection section (``--power-report`` / ``--power-cap-w``).
+_RE_AVG_POWER = re.compile(rf"^\s*Avg Power/GPU:\s*{_FLOAT}\s*W", re.IGNORECASE | re.MULTILINE)
+_RE_UNCAPPED_POWER = re.compile(
+    rf"Uncapped Avg Power/GPU:\s*{_FLOAT}\s*W\s*\(peak phase\s*{_FLOAT}\s*W\)", re.IGNORECASE
+)
+_RE_CAPPED_TPS = re.compile(rf"Power-Capped Throughput:\s*{_FLOAT}", re.IGNORECASE)
+_RE_CAPPED_STEP = re.compile(
+    rf"Power-Capped Step Time:\s*{_FLOAT}\s*ms\s*\(slowdown\s*{_FLOAT}x\)", re.IGNORECASE
+)
+_RE_ENERGY_TOKEN = re.compile(rf"Energy/Token \(GPU\):\s*{_FLOAT}\s*J", re.IGNORECASE)
+_RE_TOKENS_PER_J = re.compile(rf"Tokens/J/GPU:\s*{_FLOAT}", re.IGNORECASE)
+_RE_FACILITY_KW = re.compile(rf"Facility Power:\s*{_FLOAT}\s*kW", re.IGNORECASE)
+_RE_POWER_FEASIBLE = re.compile(r"Power Feasible:\s*(yes|no)", re.IGNORECASE)
 
 
 def _to_float(s: str) -> float | None:
@@ -348,6 +375,24 @@ def _parse_metrics(stdout: str) -> dict:
         out["tflops_per_s_per_gpu"] = _to_float(m.group(1))
     if m := _RE_MFU.search(stdout):
         out["mfu"] = _to_float(m.group(1))
+    if m := _RE_AVG_POWER.search(stdout):
+        out["avg_power_w"] = _to_float(m.group(1))
+    if m := _RE_UNCAPPED_POWER.search(stdout):
+        out["uncapped_avg_power_w"] = _to_float(m.group(1))
+        out["uncapped_peak_power_w"] = _to_float(m.group(2))
+    if m := _RE_CAPPED_TPS.search(stdout):
+        out["capped_tokens_per_s_per_gpu"] = _to_float(m.group(1))
+    if m := _RE_CAPPED_STEP.search(stdout):
+        out["capped_iteration_ms"] = _to_float(m.group(1))
+        out["power_slowdown"] = _to_float(m.group(2))
+    if m := _RE_ENERGY_TOKEN.search(stdout):
+        out["energy_per_token_j"] = _to_float(m.group(1))
+    if m := _RE_TOKENS_PER_J.search(stdout):
+        out["tokens_per_joule_per_gpu"] = _to_float(m.group(1))
+    if m := _RE_FACILITY_KW.search(stdout):
+        out["facility_power_kw"] = _to_float(m.group(1))
+    if m := _RE_POWER_FEASIBLE.search(stdout):
+        out["power_feasible"] = m.group(1).lower() == "yes"
     return out
 
 
@@ -434,7 +479,20 @@ def _build_perf_cmd(
         cmd += ["--enable-zero-bubble"]
     if cfg.target_ep_size is not None:
         cmd += ["--target-ep-size", str(cfg.target_ep_size)]
+    tc = agent_cfg.target_cluster
+    if _power_enabled(tc):
+        cmd += ["--power-report"]
+        if getattr(tc, "power_config", None):
+            cmd += ["--power-config", tc.power_config]
+        if getattr(tc, "power_cap_w", None):
+            cmd += ["--power-cap-w", str(tc.power_cap_w)]
+        if getattr(tc, "power_cap_mode", None):
+            cmd += ["--power-cap-mode", tc.power_cap_mode]
     return cmd
+
+
+def _power_enabled(target_cluster: Any) -> bool:
+    return bool(getattr(target_cluster, "power_cap_w", None) or getattr(target_cluster, "power_config", None))
 
 
 def _build_memory_cmd(
@@ -632,6 +690,9 @@ class Evaluator:
             result.memory_per_gpu_gb = 100.0
             result.tokens_per_s_per_gpu = 1000.0 + (cfg.tp + cfg.pp + cfg.ep)
             result.iteration_ms = 1000.0
+            if _power_enabled(self.cfg.target_cluster):
+                result.capped_tokens_per_s_per_gpu = result.tokens_per_s_per_gpu
+                result.power_feasible = True
             return result
 
         yaml_path = write_trial_yaml(self.arch, cfg, self.trials_dir, tag)
@@ -742,7 +803,7 @@ class Evaluator:
         if rc2 != 0 and result.tokens_per_s_per_gpu is None:
             result.legal = False
             result.reason = f"projection performance failed (rc={rc2}); see stdout_tail"
-        return result
+        return _apply_power_policy(result, self.cfg)
 
     def _evaluate_benchmark(
         self, cfg: TrialConfig, tag: str, yaml_path: Path, result: EvalResult
@@ -795,6 +856,8 @@ class Evaluator:
             if rc1 != 0:
                 result.legal = False
                 result.reason = f"projection performance --benchmark failed (rc={rc1}); " f"see stdout_tail"
+                return result
+            if not _apply_power_policy(result, self.cfg).legal:
                 return result
 
             if not artifact.exists() or artifact.stat().st_size == 0:
@@ -868,6 +931,39 @@ class Evaluator:
                 artifact.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _apply_power_policy(result: EvalResult, agent_cfg: AgentConfig) -> EvalResult:
+    """Enforce the target cluster's power cap on a perf result (in place).
+
+    A cap the workload cannot meet even at the minimum clock is always
+    illegal.  With ``power_policy: reject``, so is a config whose hottest phase
+    would exceed the cap at full clock (i.e. one the cap would throttle).
+    """
+    tc = agent_cfg.target_cluster
+    if not _power_enabled(tc) or not result.legal:
+        return result
+    if result.capped_tokens_per_s_per_gpu is None:
+        result.memory_warning = (
+            result.memory_warning or ""
+        ) + " [power report missing from projection output]"
+        return result
+    if result.power_feasible is False:
+        result.legal = False
+        result.reason = "power cap infeasible: the workload exceeds the cap even at the minimum clock"
+        return result
+    if (
+        getattr(agent_cfg.optimization, "power_policy", "throttle") == "reject"
+        and getattr(tc, "power_cap_w", None)
+        and result.uncapped_peak_power_w is not None
+        and result.uncapped_peak_power_w > tc.power_cap_w
+    ):
+        result.legal = False
+        result.reason = (
+            f"peak phase power {result.uncapped_peak_power_w:.0f} W > cap {tc.power_cap_w:.0f} W "
+            f"(power_policy=reject)"
+        )
+    return result
 
 
 def _tail(s: str, n: int) -> str:

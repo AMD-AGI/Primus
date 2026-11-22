@@ -12,6 +12,11 @@ from pathlib import Path
 
 from .evaluator import EvalResult
 
+# Objectives where lower is better; every other numeric EvalResult field is maximized.
+MINIMIZE_OBJECTIVES = frozenset(
+    {"energy_per_token_j", "avg_power_w", "iteration_ms", "capped_iteration_ms", "memory_per_gpu_gb"}
+)
+
 
 @dataclass
 class TrialRecord:
@@ -87,6 +92,8 @@ class History:
         legal = [t for t in self.trials if t.result.get("legal") and t.result.get(objective) is not None]
         if not legal:
             return None
+        if objective in MINIMIZE_OBJECTIVES:
+            return min(legal, key=lambda t: t.result.get(objective))
         return max(legal, key=lambda t: t.result.get(objective) or 0.0)
 
     def summary_for_llm(self, k: int | None = None) -> str:
@@ -106,7 +113,16 @@ class History:
                 f"recompute={cfg.get('recompute_granularity')}"
             )
             tag = "OK" if r.get("legal") else f"REJECT({r.get('reason','')[:60]})"
-            lines.append(f"#{t.idx:03d} [{t.source:9s}] {tag:40s} tps={tps_s:>10s} mem={mem_s:>8s} | {cfg_s}")
+            power_s = ""
+            capped = r.get("capped_tokens_per_s_per_gpu")
+            watts = r.get("avg_power_w")
+            if isinstance(capped, (int, float)):
+                power_s = f" capped_tps={capped:>10,.0f}"
+                if isinstance(watts, (int, float)):
+                    power_s += f" W={watts:>6.0f}"
+            lines.append(
+                f"#{t.idx:03d} [{t.source:9s}] {tag:40s} tps={tps_s:>10s}{power_s} mem={mem_s:>8s} | {cfg_s}"
+            )
         return "\n".join(lines) if lines else "(no trials yet)"
 
 

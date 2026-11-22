@@ -1,0 +1,38 @@
+# Example --power-config for `primus-cli projection performance`.
+#
+# Everything is optional.  Without this file the power projection uses the
+# GPU's published total board power (TBP) as the cap and generic defaults for
+# everything else.  Replace the infrastructure numbers with your bill of
+# materials, and calibrate the GPU profile with `projection power-fit`.
+
+power:
+  gpu_arch: mi355x            # defaults to --gpu-arch
+  cap_w: 1200                 # per-GPU board power cap; --power-cap-w overrides
+  cap_mode: instantaneous     # or "average" (cap only the iteration average)
+  model: parametric           # registered power model (plugins may add more)
+  # profile_files:            # fitted profiles from `projection power-fit`
+  #   - mi355x_power.yaml
+  # profile:                  # inline profile overrides
+  #   idle_w: 200
+  #   alpha: 2.5
+  # footprint:                # override what the simulation recorder measured
+  #   matrix_utilization: 0.6
+  #   non_matrix_fraction: 0.15
+
+infrastructure:
+  cpu_sockets: 2
+  cpu_w_per_socket: 360
+  host_other_w: 800           # DRAM, storage, fans, BMC, board
+  nic_w: 25                   # per NIC; one scale-out NIC per GPU by default
+  frontend_nics: 1
+  psu_efficiency: 0.94
+  switch_w: 1500              # per scale-out switch
+  switch_radix: 64
+  pue: 1.3
+  rack_power_kw: 130          # optional: report racks needed
+
+capacity:
+  facility_power_kw: 5000     # or it_power_kw
+  caps_w: [1400, 1200, 1000, 800]
+  # max_nodes: 64
+  # node_multiple: 4

@@ -82,6 +82,16 @@ class TargetCluster:
     gpu_arch: str = "mi355x"
     hardware_config: str | None = None  # path to existing primus hardware yaml
     gpu_clock_mhz: int | None = None
+    # Per-GPU board power limit the customer runs at (W).  When set (or when
+    # ``power_config`` is), every perf evaluation also projects power and the
+    # throughput the GPUs keep once the cap lowers their clock.
+    power_cap_w: float | None = None
+    power_config: str | None = None  # path to a projection --power-config yaml
+    power_cap_mode: str | None = None  # "instantaneous" (default) | "average"
+
+    @property
+    def power_enabled(self) -> bool:
+        return bool(self.power_cap_w or self.power_config)
 
 
 @dataclass
@@ -105,6 +115,10 @@ class OptimizationConfig:
     objective: str = "tokens_per_s_per_gpu"
     memory_safety_margin: float = 0.10
     hbm_capacity_gb: float = 192.0  # MI300X/MI325X/MI355X = 192/256/288
+    # Under a power cap: "throttle" ranks configs by the throughput they keep
+    # after the cap lowers the clock (what the GPUs actually do); "reject"
+    # additionally drops configs whose hottest phase would exceed the cap.
+    power_policy: str = "throttle"
     budget: Budget = field(default_factory=Budget)
     axes: dict[str, bool] = field(
         default_factory=lambda: {
@@ -142,6 +156,25 @@ class AgentConfig:
     extra_prompt: str = ""
 
 
+def power_prompt_dict(agent_cfg: AgentConfig) -> dict[str, Any]:
+    """Power-constraint fields for the cluster blob the LLM sees (empty when unset)."""
+    tc = agent_cfg.target_cluster
+    if not tc.power_enabled:
+        return {}
+    return {
+        "power_cap_w_per_gpu": tc.power_cap_w,
+        "power_cap_mode": tc.power_cap_mode or "instantaneous",
+        "power_policy": agent_cfg.optimization.power_policy,
+        "objective": agent_cfg.optimization.objective,
+        "power_note": (
+            "GPUs lower their clock to stay under the cap, so configs that keep the matrix "
+            "units busiest draw the most power and lose the most throughput. Rank by "
+            "capped_tokens_per_s_per_gpu; prefer configs with fewer exposed bubbles and "
+            "communication only when the capped number says so."
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
@@ -173,6 +206,9 @@ def load_config(target_cluster_yaml: Path, workload_yaml: Path, out_dir: Path | 
         gpu_arch=str(tc_raw.get("gpu_arch", "mi355x")),
         hardware_config=tc_raw.get("hardware_config"),
         gpu_clock_mhz=tc_raw.get("gpu_clock_mhz"),
+        power_cap_w=float(tc_raw["power_cap_w"]) if tc_raw.get("power_cap_w") else None,
+        power_config=tc_raw.get("power_config"),
+        power_cap_mode=tc_raw.get("power_cap_mode"),
     )
 
     benchmark_host = BenchmarkHost(
@@ -182,10 +218,19 @@ def load_config(target_cluster_yaml: Path, workload_yaml: Path, out_dir: Path | 
     )
 
     budget_raw = (opt_raw.get("budget") or {}) if isinstance(opt_raw, dict) else {}
+    objective = opt_raw.get("objective")
+    if not objective:
+        # Under a power cap the uncapped throughput is not what the cluster
+        # will deliver; rank by the power-capped throughput instead.
+        objective = "capped_tokens_per_s_per_gpu" if target_cluster.power_enabled else "tokens_per_s_per_gpu"
+    power_policy = str(opt_raw.get("power_policy", "throttle"))
+    if power_policy not in ("throttle", "reject"):
+        raise ValueError(f"optimization.power_policy must be 'throttle' or 'reject', got '{power_policy}'")
     optimization = OptimizationConfig(
-        objective=opt_raw.get("objective", "tokens_per_s_per_gpu"),
+        objective=objective,
         memory_safety_margin=float(opt_raw.get("memory_safety_margin", 0.10)),
         hbm_capacity_gb=float(opt_raw.get("hbm_capacity_gb", 192.0)),
+        power_policy=power_policy,
         budget=Budget(
             max_proposals=int(budget_raw.get("max_proposals", 30)),
             max_perf_calls=int(budget_raw.get("max_perf_calls", 30)),

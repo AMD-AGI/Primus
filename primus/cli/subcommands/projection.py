@@ -59,6 +59,15 @@ def run(args, overrides):
     """
     Entry point for the 'projection' subcommand.
     """
+    if args.suite == "power-fit":
+        from primus.core.projection.power.cli import run_power_fit
+
+        return run_power_fit(args)
+    if args.suite == "power-sample":
+        from primus.core.projection.power.cli import run_power_sample
+
+        return run_power_sample(args)
+
     framework = _experiment_framework(args)
 
     if args.suite == "memory":
@@ -475,6 +484,9 @@ def _add_performance_args(parser):
         default=False,
         help=_argparse.SUPPRESS,
     )
+    from primus.core.projection.power.cli import add_power_projection_args
+
+    add_power_projection_args(parser)
 
 
 def register_subcommand(subparsers):
@@ -499,6 +511,14 @@ def register_subcommand(subparsers):
         # One bench, both projections (perf + OOM-accurate memory)
         primus projection both --config exp.yaml --benchmark-gpus 8 \\
             --target-nodes 32
+
+        # Performance under a 1000 W per-GPU power cap
+        primus projection performance --config exp.yaml --target-nodes 4 \\
+            --power-cap-w 1000
+
+        # Calibrate the power model to telemetry
+        primus projection power-fit --telemetry amdsmi.csv --gpu-arch mi355x \\
+            --out mi355x_power.yaml
 
     Args:
         subparsers: argparse subparsers object from main.py
@@ -562,6 +582,23 @@ def register_subcommand(subparsers):
     # it should NOT be a memory-load alias here because the orchestrator
     # always runs a fresh bench.
     _add_perf_compute_baseline_arg(both)
+
+    # ---------- power ----------
+    from primus.core.projection.power.cli import (
+        add_power_fit_args,
+        add_power_sample_args,
+    )
+
+    power_fit = suite_parsers.add_parser(
+        "power-fit",
+        help="Fit a GPU power profile to measured telemetry (amd-smi / rocm-smi logs).",
+    )
+    add_power_fit_args(power_fit)
+    power_sample = suite_parsers.add_parser(
+        "power-sample",
+        help="Record power / clock / activity telemetry from a local GPU for power-fit.",
+    )
+    add_power_sample_args(power_sample)
 
     parser.set_defaults(func=run)
     return parser

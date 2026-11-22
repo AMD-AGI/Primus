@@ -46,6 +46,7 @@ Core workflows and day-to-day usage.
 - [Micro-benchmarking](./02-user-guide/micro-benchmarking.md): GEMM, RCCL, and dense-GEMM benchmark suites
 - [Preflight](./02-user-guide/preflight.md): cluster diagnostics and environment validation
 - [Projection](./02-user-guide/projection.md): memory and performance projection tools
+- [Power projection](./02-user-guide/power-projection.md): per-GPU / cluster power, throughput under a power cap, telemetry calibration and capacity planning under a power budget
 - [Tuning agent](./02-user-guide/tuning-agent.md): LLM-driven search for an optimal training configuration (uses projection as an oracle)
 - [Primus tools](./02-user-guide/primus-tools.md): catalog of all Primus tools and ecosystem projects with how-to starting points
 

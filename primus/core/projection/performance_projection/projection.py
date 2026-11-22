@@ -38,8 +38,11 @@ from primus.core.projection.module_profilers.optimizer import OptimizerProfiler
 from primus.core.projection.performance_projection.simulator import (
     SchedulerSimulationRunner,
 )
+from primus.core.projection.power.footprint import OpRecorder
 from primus.core.projection.simulation_backends.base import (
     HBM_BANDWIDTH_ENV,
+    resolve_hbm_bytes_per_ms,
+    resolve_peak_tflops,
     set_calibrated_hbm_bandwidth,
     set_hbm_bandwidth_override,
     user_hbm_bandwidth_gbps,
@@ -58,6 +61,10 @@ from primus.core.projection.training_config import (
 
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
+
+# Inputs to the power projection gathered along the way: the simulate-mode op
+# footprint and the pipeline simulation's mean bubble ratio.  Reset per run.
+_POWER_INPUTS: Dict[str, Any] = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2557,6 +2564,7 @@ def _report_simulation_results(sim_results, training_config):
         mp_cfg = training_config.model_parallel_config
         param_mem_cache: Dict[int, float] = {}
         rank_stats = []
+        rank_bubble_ratios: List[float] = []
         for rank_idx, scheduled_layers in enumerate(per_rank):
             fwd_time = sum(
                 end - start
@@ -2582,6 +2590,7 @@ def _report_simulation_results(sim_results, training_config):
             total_layer_time = fwd_time + bwd_time + wgrad_time
             bubble_time = max(0.0, step_time_ms - total_layer_time)
             bubble_ratio = bubble_time / step_time_ms
+            rank_bubble_ratios.append(bubble_ratio)
 
             activation_trace = scheduled_layers.get("activation_memory_usage") or []
             peak_activation = (
@@ -2605,6 +2614,9 @@ def _report_simulation_results(sim_results, training_config):
                     total_peak_gb,
                 )
             )
+
+        if rank_bubble_ratios:
+            _POWER_INPUTS["bubble_ratio"] = sum(rank_bubble_ratios) / len(rank_bubble_ratios)
 
         tokens_per_step = seq_len * micro_batch_size * micro_batches
         tokens_per_gpu_sec = tokens_per_step * 1000 / step_time_ms / num_gpus
@@ -3359,12 +3371,23 @@ def _run_layer_simulation(primus_config, args):
         print("[Primus:Performance Projection] Starting layer simulation...")
         print("=" * 100)
 
-    # Run simulation (model=None – no GPU required)
-    profiling_results = model_profiler.run_layer_benchmark(
-        model=None,
-        batch_size=batch_size,
-        seq_len=seq_len,
-    )
+    # Record matrix-op FLOPs / bytes / time for the power projection's
+    # workload footprint (scale-free ratios; best effort).
+    recorder = OpRecorder(
+        peak_tflops=resolve_peak_tflops(gemm_backend, sdpa_backend, dtype="bf16"),
+        hbm_gbps=resolve_hbm_bytes_per_ms(gemm_backend, sdpa_backend) / 1.0e6,
+    ).install(gemm_backend, sdpa_backend)
+    try:
+        # Run simulation (model=None – no GPU required)
+        profiling_results = model_profiler.run_layer_benchmark(
+            model=None,
+            batch_size=batch_size,
+            seq_len=seq_len,
+        )
+    finally:
+        recorder.uninstall()
+    if recorder.num_ops:
+        _POWER_INPUTS["footprint"] = recorder.footprint()
     return profiling_results
 
 
@@ -3476,6 +3499,7 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     ideal_time = total_compute_per_mb * micro_batches
     bubble_time = step_time_ms - ideal_time
     bubble_ratio = bubble_time / step_time_ms if step_time_ms > 0 else 0
+    _POWER_INPUTS["bubble_ratio"] = max(0.0, bubble_ratio)
 
     print("[Primus:Performance Projection] Megatron ZB Schedule Results:")
     print(f"  Step time: {step_time_ms:.2f} ms")
@@ -3715,6 +3739,90 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
     num_params = param_profiler.estimated_num_params(pp_rank * mp_group)
 
     return num_params * bytes_per_param / _BYTES_PER_GB
+
+
+def _power_projection_enabled(args) -> bool:
+    from primus.core.projection.power.projector import POWER_CAP_ENV
+
+    return bool(
+        getattr(args, "power_report", False)
+        or getattr(args, "power_config", None)
+        or getattr(args, "power_cap_w", None)
+        or os.getenv(POWER_CAP_ENV)
+    )
+
+
+def _projected_base_clock_mhz(args, profiling_results) -> Optional[float]:
+    """Compute clock the projected times correspond to, when it is not the peak."""
+    if getattr(args, "gpu_clock_mhz", None):
+        return float(args.gpu_clock_mhz)
+    env_clock = os.getenv("PRIMUS_GPU_CLOCK_MHZ")
+    if env_clock:
+        return float(env_clock)
+    calib = profiling_results.get("_hardware_calibration") if isinstance(profiling_results, dict) else None
+    if isinstance(calib, dict):
+        eff = (calib.get("compute") or {}).get("effective_clock_mhz")
+        if eff:
+            return float(eff)
+    return None
+
+
+def _projected_gpu_arch(args, profiling_results) -> Optional[str]:
+    """--gpu-arch, else the benchmarked device recorded by hardware calibration."""
+    if getattr(args, "gpu_arch", None):
+        return args.gpu_arch
+    calib = profiling_results.get("_hardware_calibration") if isinstance(profiling_results, dict) else None
+    device = (calib or {}).get("device") if isinstance(calib, dict) else None
+    if isinstance(device, dict):
+        return device.get("profile_key") or device.get("gcn_arch") or None
+    return None
+
+
+def _run_power_projection(
+    args,
+    profiling_results,
+    *,
+    iteration_ms: float,
+    compute_span_ms: float,
+    pipeline_simulated: bool,
+    exposed_comm_ms: float,
+    optimizer_ms: float,
+    comm_breakdown: Dict[str, float],
+    tokens_per_iter: float,
+    num_gpus: int,
+    num_nodes: int,
+    gpus_per_node: int,
+    hardware_config_dict: Optional[Dict[str, Any]],
+):
+    """Per-GPU power under the cap, node/cluster power and capacity plan."""
+    from primus.core.projection.power.footprint import IterationBreakdown
+    from primus.core.projection.power.projector import PowerConfig, project_power
+
+    bubble_ms = compute_span_ms * _POWER_INPUTS.get("bubble_ratio", 0.0) if pipeline_simulated else 0.0
+    overlapped = max(0.0, sum(v for v in comm_breakdown.values() if v) - exposed_comm_ms)
+    breakdown = IterationBreakdown(
+        iteration_ms=iteration_ms,
+        compute_span_ms=compute_span_ms,
+        bubble_ms=bubble_ms,
+        exposed_comm_ms=exposed_comm_ms,
+        optimizer_ms=optimizer_ms,
+        overlapped_comm_ms=min(overlapped, max(0.0, compute_span_ms - bubble_ms)),
+    )
+    report = project_power(
+        breakdown,
+        tokens_per_iteration=tokens_per_iter,
+        num_gpus=num_gpus,
+        num_nodes=num_nodes,
+        gpus_per_node=gpus_per_node,
+        gpu_arch=_projected_gpu_arch(args, profiling_results),
+        config=PowerConfig.from_yaml(getattr(args, "power_config", None)),
+        footprint=_POWER_INPUTS.get("footprint"),
+        cap_w=getattr(args, "power_cap_w", None),
+        cap_mode=getattr(args, "power_cap_mode", None),
+        hardware_config=hardware_config_dict,
+        base_clock_mhz=_projected_base_clock_mhz(args, profiling_results),
+    )
+    return report
 
 
 def _run_multinode_projection(
@@ -4167,8 +4275,7 @@ def _run_multinode_projection(
         print(f"   Tokens/s/GPU: {target_tokens_per_sec_per_gpu:,.0f}")
         print("=" * 100)
 
-    # Return results for final summary
-    return {
+    result = {
         "target_nodes": target_nodes,
         "target_gpus": target_world_size,
         "tp": tp,
@@ -4179,6 +4286,29 @@ def _run_multinode_projection(
         "iteration_time_ms": full_iteration_time_ms,
         "tokens_per_sec_per_gpu": target_tokens_per_sec_per_gpu,
     }
+
+    if _power_projection_enabled(args):
+        report = _run_power_projection(
+            args,
+            profiling_results,
+            iteration_ms=full_iteration_time_ms,
+            compute_span_ms=projected_time_ms if time_includes_all_microbatches else compute_total,
+            pipeline_simulated=time_includes_all_microbatches,
+            exposed_comm_ms=grad_ar_per_iteration_ms,
+            optimizer_ms=optimizer_step_ms,
+            comm_breakdown=breakdown,
+            tokens_per_iter=tokens_per_iter,
+            num_gpus=target_world_size,
+            num_nodes=target_nodes,
+            gpus_per_node=gpus_per_node,
+            hardware_config_dict=hardware_config_dict,
+        )
+        if report is not None:
+            if is_rank_0:
+                report.print()
+            result["power"] = report.as_dict()
+
+    return result
 
 
 def launch_projection_from_cli(args, overrides):
@@ -4207,6 +4337,7 @@ def launch_projection_from_cli(args, overrides):
 
     set_hbm_bandwidth_override(getattr(args, "hbm_bandwidth_gbps", None))
     set_calibrated_hbm_bandwidth(None)
+    _POWER_INPUTS.clear()
 
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
@@ -5284,7 +5415,7 @@ def launch_projection_from_cli(args, overrides):
 
         # Run multinode projection
         benchmark_ep = reduction_info.get("benchmark_ep", reduction_info.get("original_ep", None))
-        _run_multinode_projection(
+        return _run_multinode_projection(
             training_config,
             benchmarked_time_ms,
             profiling_results,

@@ -25,7 +25,7 @@ import json
 from datetime import datetime
 from typing import Callable
 
-from .config import AgentConfig
+from .config import AgentConfig, power_prompt_dict
 from .evaluator import EvalResult, Evaluator
 from .history import History
 from .legality import AxisLegality, TrialConfig, fill_defaults_from_baseline
@@ -55,7 +55,7 @@ def _safe_load_json(s: str) -> dict | None:
 
 
 def _result_for_llm(r: EvalResult) -> dict:
-    return {
+    out = {
         "legal": r.legal,
         "reason": r.reason,
         "memory_per_gpu_gb": r.memory_per_gpu_gb,
@@ -67,6 +67,16 @@ def _result_for_llm(r: EvalResult) -> dict:
         "derived_dp": r.derived_dp,
         "config": r.config,
     }
+    if r.capped_tokens_per_s_per_gpu is not None:
+        out.update(
+            capped_tokens_per_s_per_gpu=r.capped_tokens_per_s_per_gpu,
+            avg_power_w=r.avg_power_w,
+            uncapped_peak_power_w=r.uncapped_peak_power_w,
+            power_slowdown=r.power_slowdown,
+            energy_per_token_j=r.energy_per_token_j,
+            tokens_per_joule_per_gpu=r.tokens_per_joule_per_gpu,
+        )
+    return out
 
 
 def _tag(cfg: TrialConfig, idx: int) -> str:
@@ -219,6 +229,7 @@ def build_tools(
                 "memory_safety_margin": agent_cfg.optimization.memory_safety_margin,
                 "has_gpu_for_benchmark": agent_cfg.benchmark_host.has_gpu,
                 "benchmark_gpus": agent_cfg.benchmark_host.benchmark_gpus,
+                **power_prompt_dict(agent_cfg),
             }
         )
 

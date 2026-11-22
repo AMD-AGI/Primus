@@ -386,7 +386,11 @@ agent:
 | `target_cluster.hardware_config` | `null` | Path to a Primus hardware YAML for communication modeling. |
 | `available_for_benchmark.has_gpu` | `false` | When `true`, the `benchmark` profiling path is enabled. |
 | `available_for_benchmark.benchmark_gpus` | `0` | GPUs the agent may use for sub-node benchmarking. |
-| `optimization.objective` | `tokens_per_s_per_gpu` | The scalar maximized by the search. |
+| `target_cluster.power_cap_w` | `null` | Per-GPU board power limit the customer runs at (W). Enables power projection on every trial. See [Power projection](./power-projection.md#tuning-agent-under-a-power-cap). |
+| `target_cluster.power_cap_mode` | `instantaneous` | `instantaneous` caps every phase; `average` caps only the iteration average. |
+| `target_cluster.power_config` | `null` | Optional `--power-config` YAML (fitted profile, infrastructure, capacity budget). |
+| `optimization.objective` | `tokens_per_s_per_gpu` (`capped_tokens_per_s_per_gpu` with a power cap) | The scalar optimized by the search. `energy_per_token_j`, `avg_power_w`, `iteration_ms`, `capped_iteration_ms` and `memory_per_gpu_gb` are minimized; everything else is maximized. |
+| `optimization.power_policy` | `throttle` | `throttle` ranks configs by the throughput left after the cap lowers the clock; `reject` also drops configs whose hottest phase exceeds `power_cap_w`. |
 | `optimization.memory_safety_margin` | `0.10` | Feasibility cap: `projected_mem ≤ HBM × (1 − margin)`. |
 | `optimization.hbm_capacity_gb` | `192.0` | Per-GPU HBM capacity used for the cap. |
 | `optimization.budget.*` | see above | Stops the search when any budget is exhausted. |
