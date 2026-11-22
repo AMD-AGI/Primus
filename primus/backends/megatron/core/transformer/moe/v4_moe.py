@@ -102,6 +102,11 @@ from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
     DeepseekV4LearnedRouter,
 )
 
+try:  # PRIMUS_OVERLAP_SHARED (side-stream shared expert); absent in older Primus-Turbo builds
+    from primus_turbo.pytorch.core import overlap as _overlap
+except ImportError:  # pragma: no cover
+    _overlap = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -906,6 +911,29 @@ class DeepseekV4MoE(MegatronModule):
             ``[B, S, D]`` output. Sum of routed-expert and shared-expert
             contributions.
         """
+        # PRIMUS_OVERLAP_SHARED=1 (fused MegaMoE path, EP = TP = 1): the shared expert is issued on a side stream
+        # first and runs next to the router + routed experts; autograd runs its backward on that stream too.
+        # ForkGrad hands each consumer its own alias of `hidden` and sums their gradients in the serial engine's
+        # order (shared expert, routed experts, router), so every bit stays the same.
+        if (
+            self.shared_expert is not None
+            and not self.shared_expert_overlap
+            and self.mega_moe_experts is not None
+            and self.local_experts is None
+            and _overlap is not None
+            and _overlap.enabled("SHARED")
+            and hidden.requires_grad
+            and torch.is_grad_enabled()
+            and parallel_state.get_expert_model_parallel_world_size() == 1
+            and parallel_state.get_tensor_model_parallel_world_size() == 1
+        ):
+            h_r, h_e, h_s = _overlap.ForkGrad.apply(hidden, 3, (2, 1, 0))
+            with _overlap.branch("branch") as br:
+                y_shared = self.shared_expert(h_s)
+            probs, _ = self._route(h_r, token_ids)
+            out = self._mega_moe_forward(h_e, probs)
+            return out + br.done(y_shared)
+
         probs, routing_map = self._route(hidden, token_ids)  # [N, E], bool
 
         if self.local_experts is not None:

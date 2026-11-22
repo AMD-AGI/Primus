@@ -77,6 +77,11 @@ from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
 from primus.backends.megatron.core.transformer.indexer import Indexer
+
+try:  # PRIMUS_OVERLAP_INDEXER (side-stream CSA indexer); absent in older Primus-Turbo builds
+    from primus_turbo.pytorch.core import overlap as _overlap
+except ImportError:  # pragma: no cover
+    _overlap = None
 from primus.backends.megatron.core.transformer.indexer_distill_loss import (
     V4IndexerLossAutoScaler,
     compute_indexer_distill_loss,
@@ -2116,9 +2121,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # from leaking into the layers below (the open-source reference detaches
         # the same way), and when the indexer is frozen it also stops autograd
         # from building a subgraph whose output is discarded.
-        topk_idxs, topk_scores = self.indexer(
-            hidden.detach(), position_ids, cu_seqlens=cu_seqlens
-        )  # [B, S, K]
+        ovl_idx, self._ovl_indexer = getattr(self, "_ovl_indexer", None), None
+        if ovl_idx is not None:  # PRIMUS_OVERLAP_INDEXER: issued on a side stream at the top of forward()
+            br, out = ovl_idx
+            topk_idxs, topk_scores = br.done(*out)
+        else:
+            topk_idxs, topk_scores = self.indexer(
+                hidden.detach(), position_ids, cu_seqlens=cu_seqlens
+            )  # [B, S, K]
 
         # 2b) Indexer distillation. argTopK is not differentiable and the
         # scores are otherwise discarded, so this loss is the indexer's only
@@ -2574,6 +2584,24 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 "fail."
             )
         device, dtype = hidden.device, hidden.dtype
+
+        # PRIMUS_OVERLAP_INDEXER=1: the CSA indexer (forward only: detached input, frozen params, integer top-k out)
+        # depends on nothing but `hidden`, so it is issued on a side stream here and runs next to the q / kv
+        # projections and the compressor; _csa_forward waits for it. Same kernels and inputs -> same top-k.
+        self._ovl_indexer = None
+        if (
+            self.compress_ratio == 4
+            and self.indexer is not None
+            and _overlap is not None
+            and _overlap.enabled("INDEXER")
+            and cu_seqlens is None
+            and _v4_get_cp_group() is None
+            and not (self.indexer_distill_enabled and self.training and torch.is_grad_enabled())
+            and not any(p.requires_grad for p in self.indexer.parameters())
+        ):
+            with _overlap.branch("indexer") as br:
+                out = self.indexer(hidden.detach(), position_ids, cu_seqlens=None)
+            self._ovl_indexer = (br, out)
 
         # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one GEMM (see _QKVASplit); else two linears.
         q_a, kv_a = self._qkv_a_concat(hidden) if self._qkv_a_concat_ok(hidden) else (None, None)
