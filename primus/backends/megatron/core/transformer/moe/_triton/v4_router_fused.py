@@ -237,12 +237,20 @@ def router_fwd(x, w, bias=None, topk=0, score_function="sqrtsoftplus", scale=1.0
     kp = triton.next_power_of_2(max(k, 1))
     idx = torch.empty(N, kp if idx_pad else max(k, 1), dtype=torch.int64, device=x.device)
     wts = torch.empty(N, max(k, 1), dtype=torch.float32, device=x.device)
+    bk, extra = FWD_BK, {}
+    cfg = os.environ.get("PRIMUS_MB_ROUTER_FWD", "")
+    if cfg and _w_split(w) == 1 and not _interpreting():
+        # membound: "BK,NUM_STAGES" for a bf16 router weight (the per-output sums run over the same 32-deep k-steps
+        # in the same order for any BK / pipelining depth: bit-identical, bench_router.py); default off
+        b, ns = (int(v) for v in cfg.split(","))
+        if H % b == 0:
+            bk, extra = b, {"num_stages": ns}
     _router_fwd_kernel[(triton.cdiv(N, FWD_BM),)](
         x, w, bias if bias is not None else w, logits, idx, wts, N, H,
-        E=E, BM=FWD_BM, BK=FWD_BK, TOPK=k, KP=triton.next_power_of_2(max(k, 1)), W_SPLIT=_w_split(w),
+        E=E, BM=FWD_BM, BK=bk, TOPK=k, KP=triton.next_power_of_2(max(k, 1)), W_SPLIT=_w_split(w),
         SCORE_FN=_SCORE_FN[score_function], HAS_BIAS=bias is not None,
         RENORM=score_function != "softmax", SCALE=float(scale), EMU=_interpreting(), IDXS=kp if idx_pad else 0,
-        num_warps=4,
+        num_warps=4, **extra,
     )
     return logits, (idx if idx_pad else idx[:, :k]), wts[:, :k]
 

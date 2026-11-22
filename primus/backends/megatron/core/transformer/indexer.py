@@ -489,7 +489,13 @@ class Indexer(nn.Module):
             return k_icomp
 
         P = k_icomp.shape[1]
-        cos, sin = rope.forward_arange(P, k_icomp.device, stride=self.compress_ratio)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl():  # membound: memoised contiguous cast table (same bytes, no per-call copies)
+            cos, sin = rope.forward_arange_cast(P, k_icomp.device, k_icomp.dtype, self.rotary_dim // 2,
+                                                stride=self.compress_ratio)
+        else:
+            cos, sin = rope.forward_arange(P, k_icomp.device, stride=self.compress_ratio)
         # ``apply_interleaved_partial_rope`` inserts a singleton head axis into
         # cos / sin, so give it a ``[B, P, 1, Hd]`` view to broadcast against.
         rotated = apply_interleaved_partial_rope(
@@ -509,7 +515,13 @@ class Indexer(nn.Module):
         B, S = q_i.shape[0], q_i.shape[1]
         if position_ids is None:
             position_ids = torch.arange(S, device=q_i.device)
-        cos, sin = rope(position_ids)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl() and hasattr(rope, "forward_pos_cast"):
+            # membound: one table per step for all CSA layers (memoised on the position_ids tensor), pre-cast
+            cos, sin = rope.forward_pos_cast(position_ids, q_i.dtype)
+        else:
+            cos, sin = rope(position_ids)
         if tuple(cos.shape[:-1]) != (B, S):
             cos = cos.expand(B, S, -1)
             sin = sin.expand(B, S, -1)
