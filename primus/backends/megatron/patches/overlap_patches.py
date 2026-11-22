@@ -54,6 +54,29 @@ def patch_overlap_join(ctx: PatchContext) -> None:
 
     backward_step._primus_overlap_join = True
     sched.backward_step = backward_step
+
+    # Megatron's DDP grad checks (--check_for_nan_in_loss_and_grad, the eager default; --check_for_large_grads) read
+    # each bucket's main_grad from the backward hooks, i.e. before the join, and PRIMUS_GRAD_NORM_FROM_NAN_CHECK takes
+    # the grad norm from that read. With them on, every switch falls back to the serial path (decided once, before the
+    # first step's forward). The graph runner passes --check_for_nan_in_loss_and_grad False.
+    import megatron.training.training as mt
+    from megatron.training import get_args
+
+    orig_ts = mt.train_step
+
+    def train_step(*args, **kwargs):
+        if not train_step._checked:
+            train_step._checked = True
+            a = get_args()
+            if getattr(a, "check_for_nan_in_loss_and_grad", False) or getattr(a, "check_for_large_grads", False):
+                for k in overlap._FLAGS:
+                    overlap._FLAGS[k] = 0
+                log_rank_0("[Patch:overlap] DDP grad checks read main_grad inside the backward hooks -> all "
+                           "PRIMUS_OVERLAP switches off (serial path)")
+        return orig_ts(*args, **kwargs)
+
+    train_step._checked = False
+    mt.train_step = train_step
     on = [k for k in _SWITCHES if os.environ.get(f"PRIMUS_OVERLAP_{k}", "0") == "1"]
     log_rank_0(f"[Patch:overlap] side-stream join after backward_step installed; switches on: {on}")
 
