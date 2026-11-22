@@ -627,7 +627,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
             if kind in per_kind:
                 continue
             if is_rank_0:
-                print(f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})...")
+                print(
+                    f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})..."
+                )
             shapes, kwargs = profiler.require_bench_inputs(LAYER, module, batch_size, seq_len)
             with kernel_report.scope(kernel_report.layer_scope("dense", None)):
                 fwd, bwd, mem = benchmark_layer(
@@ -656,6 +658,102 @@ class LanguageModelProfiler(BaseModuleProfiler):
             "backward_time_ms": avg[1],
             "activation_memory_bytes": int(avg[2]),
             "attention": dict(zero, window_variants=None),
+            "mlp": dict(zero, a2a_forward_time_ms=0.0, a2a_backward_time_ms=0.0),
+            "hybrid_kinds": {
+                k: {"forward_time_ms": f, "backward_time_ms": b, "count": counts.get(k, 0)}
+                for k, (f, b, _m) in per_kind.items()
+            },
+        }
+        return {layer_idx: dict(layer_stats) for layer_idx in self.layers}
+
+    def _run_hybrid_layer_simulation(self, full_types, batch_size, seq_len) -> dict:
+        """Simulate one layer of each kind in a hybrid stack, weighted by the full model's mix.
+
+        Mirrors :meth:`_run_hybrid_layer_benchmark`.  Hybrid layers are
+        single-purpose: ``*`` is attention only, ``-`` a dense MLP, ``E`` a MoE
+        MLP and ``M`` a sequence mixer (GDN / KDA / Mamba2), each with one pre-norm
+        and one residual add.
+        """
+        from collections import Counter
+
+        from .hybrid_mixer import mixer_activation_bytes, mixer_time_ms
+        from .transformer_layer import (
+            _deepep_exposed_a2a_ms,
+            _deepep_overlap_efficiency,
+            _estimate_moe_a2a_time_ms,
+            _estimate_tp_allreduce_time_ms,
+            _layer_comm_ms,
+            _layer_ln_res_ms,
+        )
+
+        cfg = self.config
+        mp = cfg.model_parallel_config
+        tp = mp.tensor_model_parallel_size
+        cp = getattr(mp, "context_parallel_size", 1) or 1
+        tokens = batch_size * seq_len // cp
+        selective = getattr(mp, "recompute_granularity", None) == "selective"
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+
+        dense = self.sub_profilers["dense_transformer_layer"]
+        ln_fwd, ln_bwd = (t / 2 for t in _layer_ln_res_ms(cfg, batch_size, seq_len, self._gemm_backend))
+        ln_mem = dense.get_sub_profiler("layer_norm").estimated_activation_memory(batch_size, seq_len)
+        tp_ar = _estimate_tp_allreduce_time_ms(cfg, batch_size, seq_len)
+
+        def sublayer(sub, kind):
+            fwd = sub.measured_forward_time(batch_size, seq_len)
+            bwd = sub.measured_backward_time(batch_size, seq_len)
+            if kind == "E":
+                a2a = _estimate_moe_a2a_time_ms(cfg, batch_size, seq_len, self._gemm_backend)
+                eff = _deepep_overlap_efficiency(cfg)
+                comm_f = _layer_comm_ms(tp_ar + a2a, fwd, tp_ar + _deepep_exposed_a2a_ms(a2a, fwd, eff))
+                comm_b = _layer_comm_ms(tp_ar + a2a, bwd, tp_ar + _deepep_exposed_a2a_ms(a2a, bwd, eff))
+            else:
+                comm_f = _layer_comm_ms(tp_ar, fwd, tp_ar)
+                comm_b = _layer_comm_ms(tp_ar, bwd, tp_ar)
+            if kind == "*" and selective:
+                bwd += fwd
+            return fwd + comm_f, bwd + comm_b, sub.measured_activation_memory(batch_size, seq_len)
+
+        per_kind = {}
+        for kind in sorted(set(str(k) for k in full_types)):
+            if kind == "M":
+                fwd, bwd = mixer_time_ms(cfg.model_config, tokens, self._gemm_backend, tp=tp)
+                mem = mixer_activation_bytes(cfg.model_config, tokens, tp=tp)
+                label = f"{cfg.model_config.hybrid_mixer or 'mamba'} mixer"
+            elif kind == "*":
+                fwd, bwd, mem = sublayer(dense.get_sub_profiler("self_attention"), kind)
+                label = "attention"
+            elif kind == "E":
+                fwd, bwd, mem = sublayer(
+                    self.sub_profilers["moe_transformer_layer"].get_sub_profiler("mlp"), kind
+                )
+                label = "MoE MLP"
+            elif kind == "-":
+                fwd, bwd, mem = sublayer(dense.get_sub_profiler("mlp"), kind)
+                label = "MLP"
+            else:
+                raise ValueError(f"Unsupported hybrid layer kind {kind!r}")
+            per_kind[kind] = (fwd + ln_fwd, bwd + ln_bwd, mem + ln_mem)
+            if is_rank_0:
+                print(f"\n[Primus:Performance Projection] Simulating hybrid '{kind}' layer ({label})...")
+                print(f"  Forward time:  {per_kind[kind][0]:.2f} ms (simulated)")
+                print(f"  Backward time: {per_kind[kind][1]:.2f} ms (simulated)")
+
+        counts = Counter(str(k) for k in full_types)
+        total = len(full_types)
+        avg = [sum(counts[k] * per_kind[k][i] for k in counts) / total for i in range(3)]
+        if is_rank_0:
+            mix = ", ".join(f"{counts[k]}x'{k}'" for k in sorted(counts))
+            print(f"  Hybrid mix ({mix}): {avg[0]:.2f} ms fwd, {avg[1]:.2f} ms bwd per layer on average")
+
+        zero = {"forward_time_ms": 0.0, "backward_time_ms": 0.0, "activation_memory_bytes": 0}
+        layer_stats = {
+            "type": "dense",
+            "compress_ratio": None,
+            "forward_time_ms": avg[0],
+            "backward_time_ms": avg[1],
+            "activation_memory_bytes": int(avg[2]),
+            "attention": dict(zero),
             "mlp": dict(zero, a2a_forward_time_ms=0.0, a2a_backward_time_ms=0.0),
             "hybrid_kinds": {
                 k: {"forward_time_ms": f, "backward_time_ms": b, "count": counts.get(k, 0)}
@@ -788,8 +886,16 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 loss_fwd = loss_profiler.measured_forward_time(batch_size, seq_len)
                 loss_bwd = loss_profiler.measured_backward_time(batch_size, seq_len)
                 loss_mem = loss_profiler.estimated_activation_memory(batch_size, seq_len)
+                fla_fused = is_simulation_mode and loss_profiler.fla_fused()
+                if fla_fused:
+                    out_forward, out_backward = out_forward + out_backward, 0.0
+                    cp = getattr(self.config.model_parallel_config, "context_parallel_size", 1) or 1
+                    out_mem = batch_size * seq_len // cp * self.config.model_config.hidden_size * 2
                 if is_rank_0:
-                    fused_label = "(fused – 0)" if loss_fwd == 0.0 else "(unfused)"
+                    if fla_fused:
+                        fused_label = "(FLA fused linear CE, grads in fwd)"
+                    else:
+                        fused_label = "(fused – 0)" if loss_fwd == 0.0 else "(unfused)"
                     print(
                         f"  Loss {fused_label} -> fwd: {loss_fwd:.2f} ms, "
                         f"bwd: {loss_bwd:.2f} ms, "
@@ -804,10 +910,14 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 }
 
         full_hybrid_types = getattr(self.config.model_config, "hybrid_layer_types", None)
+        final_results = None
         if model is not None and full_hybrid_types and parts.layer_types and not is_simulation_mode:
             final_results = self._run_hybrid_layer_benchmark(
                 all_layers, parts.layer_types, full_hybrid_types, batch_size, seq_len
             )
+        elif full_hybrid_types and is_simulation_mode:
+            final_results = self._run_hybrid_layer_simulation(full_hybrid_types, batch_size, seq_len)
+        if final_results is not None:
             if embedding_stats is not None:
                 final_results["embedding"] = embedding_stats
             if output_stats is not None:
