@@ -543,6 +543,12 @@ def _bf16g2_mm_or_none():
     return _BF16G2_STATE["mm"]
 
 
+def _bt_mm_oa(a, b, out):
+    from primus.backends.megatron.core.fusions.bf16tune import bt_mm
+
+    return bt_mm(a, b, out=out)
+
+
 class _GroupedOAProjFn(torch.autograd.Function):
     """Grouped-O ``o_a`` down-projection ``[B,S,G,d] x [G,r,d] -> [B,S,G*r]`` without layout copies.
 
@@ -616,15 +622,50 @@ class _GroupedOAProjFn(torch.autograd.Function):
                 from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad, main_grad_first_write
 
                 mg = ctx.wparam.main_grad.view(G, r, d)
-                if main_grad_first_write(ctx.wparam):  # beta 0: the GEMM writes main_grad (= param.grad's bits)
-                    torch.bmm(do.transpose(1, 2), x2.transpose(0, 1), out=mg)
-                else:  # the DDP hook's add, done here
-                    mg.add_(torch.bmm(do.transpose(1, 2), x2.transpose(0, 1)))
+                first = main_grad_first_write(ctx.wparam)  # decided at issue time (host), like the serial path
+
+                bt = os.environ.get("PRIMUS_BF16TUNE", "0") != "0"  # bf16tune: the planned o_a wgrad kernel
+
+                def _wgrad(mg=mg, do=do, x2=x2, first=first, bt=bt):
+                    if first:  # beta 0: the GEMM writes main_grad (= param.grad's bits)
+                        if not bt or _bt_mm_oa(do.transpose(1, 2), x2.transpose(0, 1), mg) is None:
+                            torch.bmm(do.transpose(1, 2), x2.transpose(0, 1), out=mg)
+                    else:  # the DDP hook's add, done here
+                        t = _bt_mm_oa(do.transpose(1, 2), x2.transpose(0, 1), None) if bt else None
+                        mg.add_(torch.bmm(do.transpose(1, 2), x2.transpose(0, 1)) if t is None else t)
+
+                if _ovl_oa_wgrad():
+                    # PRIMUS_OVERLAP_OA_WGRAD: same bmm (+ add) on overlap's "wgrad" stream, joined after the backward
+                    _overlap.defer(_wgrad, mg, dout, do, x2)
+                else:
+                    _wgrad()
                 dw = _get_dummy_wgrad(list(wshape), w.dtype)
                 ctx.wparam = None
             else:
                 dw = torch.bmm(do.transpose(1, 2), x2.transpose(0, 1))  # [G, r, d], contiguous
         return dx, dw, None
+
+
+def _ovl_oa_wgrad() -> bool:
+    """PRIMUS_OVERLAP_OA_WGRAD bit 1 (overlap2, default off; needs PRIMUS_OVERLAP_WGRAD): the grouped o_a BF16 wgrad
+    (main_grad writer) runs on overlap's deferred "wgrad" stream. Bit 2 (fuse2_main_grad.py): the compressor wkv_gate
+    wgrad. With bit 1 the layer uses the out-of-place inverse RoPE: PRIMUS_V4_OROPE_INPLACE restores the o_a input's
+    rotary tail in place right after the o_a backward (the sparse-MLA backward reads it), i.e. while the deferred wgrad
+    still reads that tensor."""
+    try:
+        lv = int(os.environ.get("PRIMUS_OVERLAP_OA_WGRAD", "0"))
+    except ValueError:
+        lv = 0
+    return bool(lv & 1) and _overlap is not None and _overlap.enabled("WGRAD")
+
+
+def _ovl_csa_bwd() -> bool:
+    """PRIMUS_OVERLAP_CSA_BWD=1 (overlap2, default off; needs PRIMUS_OVERLAP_COMPRESSOR >= 1): CSA layers fork the
+    compressor (as OVERLAP_COMPRESSOR=2) and the sparse-MLA backward leaves its dKV gathers on that branch stream, so
+    the dQ chain (q norm/rope bwd, quant, wq_b dgrad) runs next to dKV gather + compressor backward."""
+    return (
+        os.environ.get("PRIMUS_OVERLAP_CSA_BWD", "0") == "1" and _overlap is not None and _overlap.enabled("COMPRESSOR")
+    )
 
 
 def _oa_main_grad_ok(weight: torch.Tensor) -> bool:
@@ -1850,7 +1891,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 take_saved_output,
             )
 
-            if take_saved_output(attn):
+            if take_saved_output(attn) and not (self.linear_o_a is not None and _ovl_oa_wgrad()):
                 return out_inv_rope_inplace(attn, position_ids, rope.inv_freq, rotary_dim=self.rotary_dim)
         return apply_rope_from_positions(
             attn,
@@ -2298,22 +2339,34 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             # Hand the kernel the un-broadcast latent when CP gave us one: it reads a
             # single key row per position anyway, and the broadcast view's gradient would
             # be an 8 GiB [B, H, Skv, D] buffer that is zero except at head 0.
-            return v4_csa_attention_v2(
-                q_bh,
-                k_local_bh if kv_latent is None else kv_latent,
-                v_local_bh if kv_latent is None else None,
-                pool,
-                topk_idxs=topk_idxs,
-                sink=self.attn_sink,
-                swa_window=int(self.attn_sliding_window),
-                attn_dropout=self.attn_dropout,
-                training=self.training,
-                scale=self._attention_scale(),
-                cp_dwindow=cp_dwindow,
-                cp_global_start=cp_global_start,
-                k_is_latent=kv_latent is not None,
-                seq_starts=seq_starts,
-            )
+            dkv_holder, self._ovl_csa_dkv = getattr(self, "_ovl_csa_dkv", None), None
+            if dkv_holder is not None:  # PRIMUS_OVERLAP_CSA_BWD: picked up by this adapter call's forward
+                from primus.backends.megatron.core.transformer.v4_attention_kernels import (
+                    v4_sparse_mla_adapter as _smla,
+                )
+
+                if kv_latent is not None and seq_starts is None and cp_dwindow == 0:
+                    _smla._CSA_DKV_SLOT[0] = dkv_holder
+            try:
+                return v4_csa_attention_v2(
+                    q_bh,
+                    k_local_bh if kv_latent is None else kv_latent,
+                    v_local_bh if kv_latent is None else None,
+                    pool,
+                    topk_idxs=topk_idxs,
+                    sink=self.attn_sink,
+                    swa_window=int(self.attn_sliding_window),
+                    attn_dropout=self.attn_dropout,
+                    training=self.training,
+                    scale=self._attention_scale(),
+                    cp_dwindow=cp_dwindow,
+                    cp_global_start=cp_global_start,
+                    k_is_latent=kv_latent is not None,
+                    seq_starts=seq_starts,
+                )
+            finally:
+                if dkv_holder is not None:
+                    _smla._CSA_DKV_SLOT[0] = None
         if be == "flydsl_v1":
             return self._v4_csa_attention_flydsl(
                 q_bh,
@@ -2690,26 +2743,46 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # serial engine's order -- compressor first, then the qkv_a projection (the only other consumer on the concat
         # path) -- so every bit stays the same. =1: HCA layers only; =2: CSA layers too (next to the indexer branch).
         self._ovl_pool = None
-        if (
+        self._ovl_csa_dkv = None
+        csa_bwd = self.compress_ratio == 4 and _ovl_csa_bwd()
+        fork_ok = (
             self.compressor is not None
             and _overlap is not None
             and _overlap.enabled("COMPRESSOR")
-            and (self.compress_ratio == 128 or (self.compress_ratio == 4 and _overlap.level("COMPRESSOR") >= 2))
             and cu_seqlens is None
             and _v4_get_cp_group() is None
             and hidden.requires_grad
             and torch.is_grad_enabled()
             and self._qkv_a_concat_ok(hidden)
             and not (self.indexer_distill_enabled and self.training)
+        )
+        # PRIMUS_OVERLAP_CSA_BWD with FUSE2_ATT_GADD: the CSA compressor is forked AFTER the qkv_a concat (below), so
+        # autograd issues the compressor backward before the concat backward and the concat's dX GEMM can still add
+        # into the compressor's dX in its epilogue (the slot waits for the branch); ForkGrad's separate add goes away.
+        csa_late = (
+            fork_ok and csa_bwd and _overlap.level("COMPRESSOR") < 2 and self._csa_backend == "triton_v2"
+            and self._fuse2_att_gadd_slot(hidden, seq_starts) is not None
+        )
+        if fork_ok and not csa_late and (
+            self.compress_ratio == 128
+            or (self.compress_ratio == 4 and (_overlap.level("COMPRESSOR") >= 2 or csa_bwd))
         ):
             h_q, h_c = _overlap.ForkGrad.apply(hidden, 2, (1, 0))
             with _overlap.branch("compressor") as brc:
                 pool_ovl = self._build_compressed_pool(h_c, None)
             self._ovl_pool = (brc, pool_ovl)
             hidden = h_q
+            if csa_bwd and self._csa_backend == "triton_v2":
+                # PRIMUS_OVERLAP_CSA_BWD: the CSA sparse-MLA backward leaves its dKV gathers on this branch stream
+                from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                    CSADkvHolder,
+                )
+
+                self._ovl_csa_dkv = CSADkvHolder(brc.side)
 
         # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one GEMM (see _QKVASplit); else two linears.
         q_a, kv_a = None, None
+        csa_dkv_joined = False
         if self._qkv_a_concat_ok(hidden):
             slot = self._fuse2_att_gadd_slot(hidden, seq_starts)
             if slot is not None:
@@ -2720,6 +2793,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 )
                 from primus_turbo.pytorch.ops.gemm_fp8_concat import request_dx_accum
 
+                slot.branch = csa_late
                 h_cat, hidden = AttFanOut.apply(hidden, slot)
                 request_dx_accum(slot)
                 try:
@@ -2727,6 +2801,15 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 finally:
                     request_dx_accum(None)
                 self.compressor._fuse2_dx_slot = slot
+                if csa_late:  # PRIMUS_OVERLAP_CSA_BWD: compressor on the branch, after the concat (see above)
+                    from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                        CSADkvHolder,
+                    )
+
+                    with _overlap.branch("compressor") as brc:
+                        pool_ovl = self._build_compressed_pool(hidden, None)
+                    self._ovl_pool = (brc, pool_ovl)
+                    self._ovl_csa_dkv = CSADkvHolder(brc.side)
             else:
                 q_a, kv_a = self._qkv_a_concat(hidden)
         if (
@@ -2743,6 +2826,15 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 eps_q=self.q_layernorm.eps, eps_kv=self.kv_layernorm.eps, rotary_dim=self.rotary_dim,
                 q_first=getattr(self, "_qkv_a_fp8_order", "q_kv") == "q_kv",
             )
+            if self._ovl_csa_dkv is not None:
+                # PRIMUS_OVERLAP_CSA_BWD: created before the q path's ops, so its backward (the wait for the dKV
+                # gathers) runs after the dQ chain has been issued
+                from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                    CSADkvJoin,
+                )
+
+                kv_r = CSADkvJoin.apply(kv_r, self._ovl_csa_dkv)
+                csa_dkv_joined = True
             q = self._apply_q_norm_rope(hidden, position_ids, q_compressed=q_c, q_normed=True)
             kv = kv_r.view(B, S, 1, self.head_dim)
         elif self._fused_q_norm_rope_ok(hidden):
@@ -2758,6 +2850,8 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
             # (V4's single-latent design: K and V share the rope-applied kv).
             q, kv = self._apply_rope_q_k(q, kv, position_ids)
+        if not csa_dkv_joined:
+            self._ovl_csa_dkv = None  # PRIMUS_OVERLAP_CSA_BWD needs the join on the fused qkv_post path
 
         if self.compress_ratio == 0 and self._use_core_attention:
             # Plan-3 P22: dense layer, Turbo / TE flash path.  Causal + SWA

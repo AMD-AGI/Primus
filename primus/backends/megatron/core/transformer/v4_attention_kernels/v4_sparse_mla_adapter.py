@@ -54,6 +54,49 @@ _BAND_TOPK_CACHE = {}
 # match a later, unrelated tensor at a reused address.
 _PENDING_OUT = [None]
 
+# PRIMUS_OVERLAP_CSA_BWD (overlap2): (stream, keep list) while the CSA backward runs with its dKV gathers left on the
+# compressor branch stream (see CSADkvJoin); read by the Turbo gfx1250 backward glue.
+_DKV_SIDE = contextvars.ContextVar("v4_sparse_mla_dkv_side", default=None)
+# The attention module hands the next CSA adapter call its CSADkvJoin holder here (consumed by that forward).
+_CSA_DKV_SLOT = [None]
+
+
+def dkv_side_hint():
+    return _DKV_SIDE.get()
+
+
+class CSADkvHolder:
+    """Shared by the CSA adapter call and the CSADkvJoin node on its kv input: the dKV stream, and (once the
+    backward has left the dKV work on it) the event the kv-gradient consumer must wait for plus the tensors that
+    stream still uses."""
+
+    __slots__ = ("stream", "event", "keep")
+
+    def __init__(self, stream):
+        self.stream, self.event, self.keep = stream, None, None
+
+
+class CSADkvJoin(torch.autograd.Function):
+    """Identity on the CSA latent kv, applied right after it is produced (before the q path's wq_b / q norm-rope
+    ops), so autograd runs this node's backward after the dQ chain. Its backward makes the current stream wait for
+    the dKV work that the CSA adapter backward left on the branch stream, then releases that work's tensors."""
+
+    @staticmethod
+    def forward(ctx, x, holder):
+        ctx.holder = holder
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g):
+        h, ctx.holder = ctx.holder, None
+        if h is not None and h.event is not None:
+            cur = torch.cuda.current_stream(g.device if g is not None else None)
+            cur.wait_event(h.event)
+            if g is not None:
+                g.record_stream(cur)  # allocated on the branch stream, read here
+            h.event = h.keep = None
+        return g, None
+
 
 def take_saved_output(t: torch.Tensor) -> bool:
     """True if ``t`` is (the start and size of) the output the last sparse-MLA forward saved; clears the record."""
@@ -405,6 +448,9 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         ctx.scale = float(scale)
         ctx.sink_was_none = sink is None
         ctx.bwd_fn = bwd_fn
+        ctx.dkv_holder, _CSA_DKV_SLOT[0] = _CSA_DKV_SLOT[0], None  # PRIMUS_OVERLAP_CSA_BWD
+        if not (ctx.k_is_latent and kv_g.dtype == q_bh.dtype and isinstance(ctx.band, tuple)):
+            ctx.dkv_holder = None
         # Return a VIEW, not a copy. The kernel's `o_g` is contiguous [B*S, H, D], i.e.
         # already BSHD; every caller immediately does `out_bh.transpose(1, 2).contiguous()`
         # to get back to BSHD, so a `.contiguous()` here would materialise BHSD only for
@@ -422,16 +468,34 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
         lst = _launch_dsink_begin(ctx)
-        with _band(ctx.band):
-            dq_g, dkv_g, dsink = ctx.bwd_fn(
-                q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-            )
+        holder, ctx.dkv_holder = ctx.dkv_holder, None
+        keep = []
+        tok = _DKV_SIDE.set((holder.stream, keep)) if holder is not None else None
+        try:
+            with _band(ctx.band):
+                dq_g, dkv_g, dsink = ctx.bwd_fn(
+                    q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+                )
+        finally:
+            if tok is not None:
+                _DKV_SIDE.reset(tok)
         dsink_mg = _launch_dsink_end(lst, dsink) if lst is not None else None
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv512 = dkv_g[:, 0, :D].reshape(B, Skv + P, D)
         dlatent = dkv512[:, :Skv, :]
-        dpool = dkv512[:, Skv:, :].contiguous()
+        if keep:
+            # PRIMUS_OVERLAP_CSA_BWD: dkv is being produced on the branch stream; the pool part is split off there
+            # (its consumer, the compressor backward, runs on that stream) and the latent part's consumer waits
+            # in CSADkvJoin, after the dQ chain has been issued.
+            with torch.cuda.stream(holder.stream):
+                dpool = dkv512[:, Skv:, :].contiguous()
+                ev = torch.cuda.Event()
+                ev.record(holder.stream)
+            keep.append(dkv_g)
+            holder.event, holder.keep = ev, keep
+        else:
+            dpool = dkv512[:, Skv:, :].contiguous()
 
         if ctx.k_is_latent:
             # Gradient has the latent's own [B, Skv, 1, D] shape -- 128 MiB at 1M/CP=8

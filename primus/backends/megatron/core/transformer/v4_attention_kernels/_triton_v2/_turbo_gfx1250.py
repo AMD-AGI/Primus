@@ -75,6 +75,25 @@ def sparse_mla_fwd_turbo_gfx1250(q, kv, topk_indices, attn_sink, kv_lora_rank, s
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _bwd_takes_dkv_stream() -> bool:
+    import inspect
+
+    _, bwd = _kernels()
+    return "dkv_stream" in inspect.signature(bwd).parameters
+
+
+def _dkv_side_kwargs():
+    """PRIMUS_OVERLAP_CSA_BWD: (stream, keep list) set by the CSA adapter's backward -> Turbo leaves the dKV gathers
+    on that stream (no join); only for the CSA band map and a Turbo build that has the kwargs."""
+    from ..v4_sparse_mla_adapter import dkv_side_hint
+
+    h = dkv_side_hint()
+    if h is None or _band_pool() is None or not _bwd_takes_dkv_stream():
+        return {}
+    return {"dkv_stream": h[0], "dkv_keep": h[1]}
+
+
 def sparse_mla_bwd_turbo_gfx1250(q, kv, o, do, topk_indices, lse, attn_sink, kv_lora_rank, scale):
     _, bwd = _kernels()
     return bwd(
@@ -89,4 +108,5 @@ def sparse_mla_bwd_turbo_gfx1250(q, kv, o, do, topk_indices, lse, attn_sink, kv_
         scale=float(scale),
         use_swa=_use_band_kernels(),
         **({"band_pool": _band_pool()} if _band_pool() is not None else {}),
+        **_dkv_side_kwargs(),
     )
