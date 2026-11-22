@@ -17,6 +17,8 @@ from primus.backends.megatron.core.fusions.bf16tune import bt_mm as _bt_mm
 from primus.backends.megatron.core.fusions.bf16tune import enabled as _bt_enabled
 
 _BT = _bt_enabled()
+# bf16grp: PRIMUS_BF16GRP_PAIR=1 -> the compressor dgrad + wgrad (beta 0, not deferred) as ONE bf16rot2 launch
+_BT_PAIR = _BT and os.environ.get("PRIMUS_BF16GRP_PAIR", "0") == "1"
 
 
 def fuse2_linear_mg_ok(x: torch.Tensor, w: torch.Tensor, env: str = "PRIMUS_FUSE2_COMP_MG") -> bool:
@@ -136,7 +138,17 @@ class _LinearMainGradFn(torch.autograd.Function):
         x2, w = ctx.saved_tensors
         g2 = g.reshape(-1, g.shape[-1])
         dx = None
-        if ctx.needs_input_grad[0]:
+        pre = None  # bf16grp pair path: (main_grad, first, wgrad done) decided before the GEMMs
+        if _BT_PAIR and ctx.needs_input_grad[0] and _ovl_wgrad() is None:
+            from primus.backends.megatron.core.fusions.bf16grp import compressor_bwd_pair
+
+            pmg = ctx.wparam.main_grad
+            pfirst = main_grad_first_write(ctx.wparam)
+            dxp = compressor_bwd_pair(g2, w, x2, pmg) if pfirst else None  # dgrad + wgrad (into main_grad)
+            pre = (pmg, pfirst, dxp is not None)
+            if dxp is not None:
+                dx = dxp.view(*ctx.lead, w.shape[1])
+        if dx is None and ctx.needs_input_grad[0]:
             dx = _bt_mm(g2, w) if _BT else None
             dx = (g2.mm(w) if dx is None else dx).view(*ctx.lead, w.shape[1])
         if ctx.slot is not None and dx is not None:
@@ -146,8 +158,11 @@ class _LinearMainGradFn(torch.autograd.Function):
                 ctx.slot.ev.record(torch.cuda.current_stream(dx.device))
             ctx.slot = None
         wp, ctx.wparam = ctx.wparam, None
-        mg = wp.main_grad
-        first = main_grad_first_write(wp)
+        if pre is None:
+            mg = wp.main_grad
+            first = main_grad_first_write(wp)
+        else:
+            mg, first = pre[0], pre[1]
 
         def _wgrad(mg=mg, g2=g2, x2=x2, first=first):
             if first:
@@ -157,7 +172,9 @@ class _LinearMainGradFn(torch.autograd.Function):
                 mg.add_(torch.mm(g2.t(), x2))
 
         ovl = _ovl_wgrad()
-        if ovl is not None:  # PRIMUS_OVERLAP_OA_WGRAD (overlap2): same GEMM (+ add) on overlap's deferred wgrad stream
+        if pre is not None and pre[2]:
+            pass  # bf16grp: the wgrad ran in the dgrad's launch (beta 0 into main_grad)
+        elif ovl is not None:  # PRIMUS_OVERLAP_OA_WGRAD (overlap2): same GEMM (+ add) on overlap's deferred wgrad stream
             ovl.defer(_wgrad, mg, g, g2, x2)
         else:
             _wgrad()

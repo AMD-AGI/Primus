@@ -624,7 +624,8 @@ class _GroupedOAProjFn(torch.autograd.Function):
                 mg = ctx.wparam.main_grad.view(G, r, d)
                 first = main_grad_first_write(ctx.wparam)  # decided at issue time (host), like the serial path
 
-                bt = os.environ.get("PRIMUS_BF16TUNE", "0") != "0"  # bf16tune: the planned o_a wgrad kernel
+                bt = (os.environ.get("PRIMUS_BF16TUNE", "0") != "0"  # bf16tune: the planned o_a wgrad kernel
+                      or os.environ.get("PRIMUS_BF16GRP_ROT_OA", "0") == "1")  # bf16grp: bf16rot (bit-identical)
 
                 def _wgrad(mg=mg, do=do, x2=x2, first=first, bt=bt):
                     if first:  # beta 0: the GEMM writes main_grad (= param.grad's bits)

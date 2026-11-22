@@ -89,3 +89,43 @@ def indexer_pair(indexer, hidden: torch.Tensor):
         return None
     yc, yq = mm(probs, tile=_TILE)
     return yc.view(B, S, -1), yq.view(B, S, -1)
+
+
+# ---- PRIMUS_BF16GRP_PAIR: compressor backward dgrad + wgrad in one launch (bf16rot2_mm, StaggerU order) ----
+_PAIR = os.environ.get("PRIMUS_BF16GRP_PAIR", "0") == "1"
+# (T, n, H) -> (wgrad tile, tpad, dgrad tile, tpad); shapes whose int kernels are untuned SAV DepthU-128 (StaggerU)
+_PAIR_PLAN = {
+    (4096, 2048, 4096): ("256x128s3", 16, "256x256", 16),  # CSA compressor wkv_gate
+}
+
+
+def compressor_bwd_pair(g2: torch.Tensor, w: torch.Tensor, x2: torch.Tensor, mg: torch.Tensor):
+    """dX = g2 @ w (returned) and main_grad = g2^T @ x2 (beta 0, written into mg) in ONE launch, bit-identical to the
+    int hipBLASLt pair (untuned SAV kernels = sequential K with a StaggerU start). None if not planned."""
+    if not _PAIR or g2.dtype != torch.bfloat16 or w.dtype != torch.bfloat16 or x2.dtype != torch.bfloat16:
+        return None
+    if g2.dim() != 2 or w.dim() != 2 or x2.dim() != 2 or mg.dtype != torch.bfloat16 or not mg.is_contiguous():
+        return None
+    if g2.stride(1) != 1 or w.stride(1) != 1 or x2.stride(1) != 1:
+        return None
+    T, n = g2.shape
+    H = w.shape[1]
+    plan = _PAIR_PLAN.get((T, n, H))
+    if plan is None or tuple(w.shape) != (n, H) or tuple(x2.shape) != (T, H) or tuple(mg.shape) != (n, H):
+        return None
+    if "pair" not in _STATE:
+        try:
+            from primus_turbo.gluon.gemm.bf16grp_gemm import bf16rot2_mm
+
+            _STATE["pair"] = bf16rot2_mm
+            print("[bf16grp] compressor dgrad + wgrad in one launch (bf16rot2)", flush=True)
+        except Exception as ex:  # noqa: BLE001
+            _STATE["pair"] = None
+            print(f"[bf16grp] bf16rot2 unavailable ({type(ex).__name__}: {ex})", flush=True)
+    fn = _STATE["pair"]
+    if fn is None:
+        return None
+    wt, wp, dt, dp = plan
+    dx = torch.empty(T, H, device=g2.device, dtype=torch.bfloat16)
+    fn((g2.t(), x2, mg, wt, wp), (g2, w, dx, dt, dp))
+    return dx
