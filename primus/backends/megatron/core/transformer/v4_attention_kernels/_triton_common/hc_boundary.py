@@ -246,7 +246,7 @@ def _xrms_one(NEW, W, off, rm2, ncol, nm, wcol, x0, x1, x2, x3, o, cb, r64, rm, 
 @triton.jit
 def _hc_expand_rms_kernel(X, OUT, POST, COMBT, NEW, W, P_RAW, P_SS, M, D, N,
                           BT: tl.constexpr, BK: tl.constexpr, CHUNK: tl.constexpr, BN: tl.constexpr,
-                          ORDER: tl.constexpr, PF: tl.constexpr = False):
+                          ORDER: tl.constexpr, PF: tl.constexpr = False, SUM4: tl.constexpr = False):
     """One program = BT rows x CHUNK columns x all 4 output streams. new_h is written (bf16) and, as the next HC's
     _hc_fwd_wmma3_kernel would, P_RAW[s] = new_h[:, chunk] @ W^T[chunk] and P_SS[s] = sum(new_h[:, chunk]^2) with
     s = h * (D / CHUNK) + pid_c (the wmma3 chunk index of KD columns h * D + pid_c * CHUNK ...)."""
@@ -306,18 +306,23 @@ def _hc_expand_rms_kernel(X, OUT, POST, COMBT, NEW, W, P_RAW, P_SS, M, D, N,
         a3, s3 = _xrms_one(NEW, W, off + 3 * D, rm2, ncol, nm, 3 * D + cols, x0, x1, x2, x3, o, cb, r64, rm, POST, 3,
                            KD, ORDER, a3, s3)
     NCH = D // CHUNK
-    for h in tl.static_range(4):
-        if h == 0:
-            a, s = a0, s0
-        elif h == 1:
-            a, s = a1, s1
-        elif h == 2:
-            a, s = a2, s2
-        else:
-            a, s = a3, s3
-        orow = (h * NCH + pid_c) * M + r64
-        tl.store(P_RAW + orow[:, None] * BN + ncol[None, :], a, mask=rm2)
-        tl.store(P_SS + orow, s, mask=rm)
+    if SUM4:  # hcfuse: one partial per chunk (the 4 streams summed here; the consumer sums D / CHUNK partials)
+        orow = pid_c * M + r64
+        tl.store(P_RAW + orow[:, None] * BN + ncol[None, :], (a0 + a1) + (a2 + a3), mask=rm2)
+        tl.store(P_SS + orow, (s0 + s1) + (s2 + s3), mask=rm)
+    else:
+        for h in tl.static_range(4):
+            if h == 0:
+                a, s = a0, s0
+            elif h == 1:
+                a, s = a1, s1
+            elif h == 2:
+                a, s = a2, s2
+            else:
+                a, s = a3, s3
+            orow = (h * NCH + pid_c) * M + r64
+            tl.store(P_RAW + orow[:, None] * BN + ncol[None, :], a, mask=rm2)
+            tl.store(P_SS + orow, s, mask=rm)
 
 
 XRMS_CFG = dict(bt=32, bk=128, chunk=1024, warps=8, order=1, pf=False)  # order 1 = (c0x0 + c1x1) + (c2x2 + c3x3): the production expand tree (calib_expand.py)
@@ -352,13 +357,15 @@ def expand_rms(x3, out_c, post_c, combt_c, next_w):
     c = _xrms_cfg()
     N = next_w.shape[0]
     BN = max(16, triton.next_power_of_2(N))
-    n_split = K * D // c["chunk"]
+    sum4 = bool(c.get("sum4", 0))
+    n_split = (D if sum4 else K * D) // c["chunk"]
     new = torch.empty_like(x3)
     p_raw = torch.empty((n_split, M, BN), dtype=torch.float32, device=x3.device)
     p_ss = torch.empty((n_split, M), dtype=torch.float32, device=x3.device)
     _hc_expand_rms_kernel[(triton.cdiv(M, c["bt"]), D // c["chunk"])](
         x3, out_c, post_c, combt_c, new, next_w, p_raw, p_ss, M, D, N,
         BT=c["bt"], BK=c["bk"], CHUNK=c["chunk"], BN=BN, ORDER=c["order"], PF=bool(c["pf"]), num_warps=c["warps"],
+        **({"SUM4": True} if sum4 else {}),
         **({"num_stages": c["stages"]} if "stages" in c else {}),
     )
     return new, p_raw, p_ss, n_split

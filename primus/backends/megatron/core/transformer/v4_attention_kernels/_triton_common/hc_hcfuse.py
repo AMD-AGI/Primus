@@ -49,6 +49,12 @@ def hcfuse_fwd_enabled() -> bool:
     return _mode("PRIMUS_HCFUSE_FWD") > 0
 
 
+def tail_mode() -> int:
+    """1 = side-stream tail || post_bwd2d (measured +5 us per boundary in-step: the fork / join costs more than the
+    overlap); 2 = one launch with post_bwd2d programs + tail programs."""
+    return _mode("PRIMUS_HCFUSE_TAIL")
+
+
 def hcfuse_tail_enabled() -> bool:
     """PRIMUS_HCFUSE_TAIL=1: HCPreFn(L).backward also runs HCPostFn(L-1)'s expand backward (post_bwd2d) on the main stream,
     with dnew = its own dx, while the tail (dW / dscale / dbase / dgamma -> main_grad) runs on a side stream; both are
@@ -79,7 +85,7 @@ def _cfg(name, default):
 
 
 BWD_CFG = dict(ppc=2, rs=32, nw=8, rb=1, srs=1, snw=1)  # srs/snw: Sinkhorn kernel of modes 2/3
-FWD_CFG = dict(rs=32, nw=8, srs=1, snw=1)
+FWD_CFG = dict(rs=32, nw=8, srs=1, snw=1, ppc=4)
 
 
 @triton.jit
@@ -385,6 +391,15 @@ def pre_collapse_fwd(x3, p_raw, p_ss, n_split, scale_c, base_c, gamma, eps, n_it
     y = torch.empty((M, D), dtype=x3.dtype, device=dev)
     rstd_n = torch.empty((M,), dtype=torch.float32, device=dev)
     mode = _mode("PRIMUS_HCFUSE_FWD")
+    if mode == 6:
+        nprog_s = triton.cdiv(M, c["rs"])
+        nprog_c = min(M, c["ppc"] * _n_cu(dev))
+        _hcf_pre_collapse2_kernel[(nprog_s + nprog_c,)](
+            x3, p_raw, p_ss, scale_c, base_c, gamma, raw, rstd, states, pre, post, combt, y, rstd_n,
+            M, D, nprog_s, nprog_c, float(eps), float(norm_eps),
+            EPS=float(eps), BN=BN, NS=int(n_split), N_ITERS=int(n_iters), RS=c["rs"], BD=BD, num_warps=c["nw"],
+        )
+        return raw, rstd, states, pre, post, combt, y, rstd_n
     if mode == 1:
         nprog_s = triton.cdiv(M, c["rs"])
         _hcf_pre_collapse_fwd_kernel[(nprog_s + M,)](
@@ -394,19 +409,26 @@ def pre_collapse_fwd(x3, p_raw, p_ss, n_split, scale_c, base_c, gamma, eps, n_it
         )
         return raw, rstd, states, pre, post, combt, y, rstd_n
     main = torch.cuda.current_stream(dev)
-    side = _side_stream(dev) if mode == 2 else main
-    if mode == 2:
+    side = _side_stream(dev) if mode in (2, 4) else main
+    if mode in (2, 4):
         side.wait_stream(main)
     with torch.cuda.stream(side):
         _hcf_sk_fwd_kernel[(triton.cdiv(M, c["srs"]),)](
             p_raw, p_ss, scale_c, base_c, raw, rstd, states, post, combt, M, D, float(eps),
             EPS=float(eps), BN=BN, NS=int(n_split), N_ITERS=int(n_iters), RS=c["srs"], num_warps=c["snw"],
         )
-    _hcf_collapse_fwd_kernel[(M,)](
-        x3, p_raw, p_ss, scale_c, base_c, gamma, pre, y, rstd_n, M, D, float(eps), float(norm_eps),
-        EPS=float(eps), BN=BN, NS=int(n_split), BD=BD, num_warps=c["nw"],
-    )
-    if mode == 2:
+    if mode in (4, 5):  # persistent collapse rows, partials prefetched one row block ahead
+        nprog = min(M, c["ppc"] * _n_cu(dev))
+        _hcf_collapse_persist_kernel[(nprog,)](
+            x3, p_raw, p_ss, scale_c, base_c, gamma, pre, y, rstd_n, M, D, float(eps), float(norm_eps), nprog,
+            EPS=float(eps), BN=BN, NS=int(n_split), BD=BD, RB=1, num_warps=c["nw"],
+        )
+    else:
+        _hcf_collapse_fwd_kernel[(M,)](
+            x3, p_raw, p_ss, scale_c, base_c, gamma, pre, y, rstd_n, M, D, float(eps), float(norm_eps),
+            EPS=float(eps), BN=BN, NS=int(n_split), BD=BD, num_warps=c["nw"],
+        )
+    if mode in (2, 4):
         main.wait_stream(side)
     return raw, rstd, states, pre, post, combt, y, rstd_n
 
@@ -437,6 +459,218 @@ def _hcf_collapse_fwd_kernel(X, P_RAW, P_SS, SCALE, BASE, GAMMA, PRE, Y, RSTDN, 
                              EPS: tl.constexpr, BN: tl.constexpr, NS: tl.constexpr, BD: tl.constexpr):
     _hcf_collapse_fwd(tl.program_id(0), X, P_RAW, P_SS, SCALE, BASE, GAMMA, PRE, Y, RSTDN, M, D, eps_rms, norm_eps,
                       EPS, BN, NS, BD)
+
+
+@triton.jit
+def _ld_parts(P_RAW, P_SS, t64, rm, M, BN: tl.constexpr, NS: tl.constexpr):
+    """Raw (unsummed) rms-linear partials of the pre logits for rows t64: [NS, RB, 4] and [NS, RB]."""
+    sidx = tl.arange(0, NS)
+    kk = tl.arange(0, 4)
+    pr = tl.load(P_RAW + sidx[:, None, None] * (M * BN) + t64[None, :, None] * BN + kk[None, None, :],
+                 mask=rm[None, :, None], other=0.0)
+    ps = tl.load(P_SS + sidx[:, None] * M + t64[None, :], mask=rm[None, :], other=0.0)
+    return pr, ps
+
+
+@triton.jit
+def _hcf_collapse_persist_kernel(X, P_RAW, P_SS, SCALE, BASE, GAMMA, PRE, Y, RSTDN, M, D, eps_rms, norm_eps, NPROG,
+                                 EPS: tl.constexpr, BN: tl.constexpr, NS: tl.constexpr, BD: tl.constexpr,
+                                 RB: tl.constexpr):
+    _hcf_collapse_persist(tl.program_id(0), X, P_RAW, P_SS, SCALE, BASE, GAMMA, PRE, Y, RSTDN, M, D, eps_rms, norm_eps,
+                          NPROG, EPS, BN, NS, BD, RB)
+
+
+@triton.jit
+def _hcf_pre_collapse2_kernel(X, P_RAW, P_SS, SCALE, BASE, GAMMA, RAW, RSTD, STATES, PRE, POST, COMBT, Y, RSTDN,
+                              M, D, NPROG_S, NPROG_C, eps_rms, norm_eps, EPS: tl.constexpr, BN: tl.constexpr,
+                              NS: tl.constexpr, N_ITERS: tl.constexpr, RS: tl.constexpr, BD: tl.constexpr):
+    """FWD mode 6: one launch = Sinkhorn programs (first) + persistent collapse programs (pre computed per row from
+    prefetched partials)."""
+    pid = tl.program_id(0)
+    if pid < NPROG_S:
+        _hcf_sk_fwd(pid, P_RAW, P_SS, SCALE, BASE, RAW, RSTD, STATES, POST, COMBT, M, D, eps_rms,
+                    EPS, 4, BN, NS, N_ITERS, RS)
+    else:
+        _hcf_collapse_persist(pid - NPROG_S, X, P_RAW, P_SS, SCALE, BASE, GAMMA, PRE, Y, RSTDN, M, D, eps_rms,
+                              norm_eps, NPROG_C, EPS, BN, NS, BD, 1)
+
+
+@triton.jit
+def _hcf_collapse_persist(pid, X, P_RAW, P_SS, SCALE, BASE, GAMMA, PRE, Y, RSTDN, M, D, eps_rms, norm_eps, NPROG,
+                          EPS: tl.constexpr, BN: tl.constexpr, NS: tl.constexpr, BD: tl.constexpr, RB: tl.constexpr):
+    """Persistent rows (as _hc_norm_dpre_bwd_kernel): pre from the rms-linear partials (prefetched one row block ahead
+    with the x rows, summed at use), then the folded-norm collapse (as _hc_collapse_norm_fwd_kernel)."""
+    K: tl.constexpr = 4
+    cols = tl.arange(0, BD)
+    cm = cols < D
+    kk = tl.arange(0, K)
+    g = tl.load(GAMMA + cols, mask=cm, other=0.0).to(tl.float32)
+    s0 = tl.load(SCALE + 0).to(tl.float32)
+    b_pre = tl.load(BASE + kk).to(tl.float32)
+    KD = K * D
+    STEP = NPROG * RB
+    rows = pid * RB + tl.arange(0, RB)
+    rm = rows < M
+    t64 = rows.to(tl.int64)
+    m2 = rm[:, None] & cm[None, :]
+    a0, a1, a2, a3 = _ld_rows4(X, t64, cols, m2, D)
+    pr, ps = _ld_parts(P_RAW, P_SS, t64, rm, M, BN, NS)
+    for r0 in range(pid * RB, M, STEP):
+        x0, x1, x2, x3 = a0, a1, a2, a3
+        cpr, cps = pr, ps
+        tc, rmc, m2c = t64, rm, m2
+        rows = r0 + STEP + tl.arange(0, RB)
+        rm = rows < M
+        t64 = rows.to(tl.int64)
+        m2 = rm[:, None] & cm[None, :]
+        a0, a1, a2, a3 = _ld_rows4(X, t64, cols, m2, D)
+        pr, ps = _ld_parts(P_RAW, P_SS, t64, rm, M, BN, NS)
+
+        raw_pre = tl.sum(cpr, axis=0)  # [RB, 4]
+        ss = tl.sum(cps, axis=0)  # [RB]
+        rstd = 1.0 / tl.sqrt(ss / KD + eps_rms)
+        pre = tl.sigmoid((raw_pre * rstd[:, None]) * s0 + b_pre[None, :]) + EPS
+        pre_b = pre.to(tl.bfloat16)
+        k2 = kk[None, :]
+        tl.store(PRE + tc[:, None] * K + k2, pre_b, mask=rmc[:, None])
+        pf = pre_b.to(tl.float32)
+        p0 = tl.sum(tl.where(k2 == 0, pf, 0.0), axis=1)
+        p1 = tl.sum(tl.where(k2 == 1, pf, 0.0), axis=1)
+        p2 = tl.sum(tl.where(k2 == 2, pf, 0.0), axis=1)
+        p3 = tl.sum(tl.where(k2 == 3, pf, 0.0), axis=1)
+        h = _collapse_bf16(x0, x1, x2, x3, p0, p1, p2, p3)
+        rn = 1.0 / tl.sqrt(tl.sum(h * h, axis=1) / D + norm_eps)
+        y = (h * rn[:, None] * g[None, :]).to(Y.dtype.element_ty)
+        tl.store(Y + tc[:, None] * D + cols[None, :], y, mask=m2c)
+        tl.store(RSTDN + tc, rn, mask=rmc)
+
+
+
+# ------------------------------------------------------------------------------------------------
+# PRIMUS_HCFUSE_TAIL=2: one launch = post_bwd2d(L-1) programs + the GRAD_DIRECT tail(L) programs
+# ------------------------------------------------------------------------------------------------
+@triton.jit
+def _post_body(pid_t, pid_c, G, X, OUT, POST, DOUT, DPOSTP, DCOMBTP, M, D, K: tl.constexpr, BT: tl.constexpr,
+               BC: tl.constexpr):
+    """_hc_post_bwd2d_kernel for one (row tile, column tile)."""
+    t = pid_t * BT + tl.arange(0, BT)
+    cc = pid_c * BC + tl.arange(0, BC)
+    kk = tl.arange(0, K)
+    KK: tl.constexpr = K * K
+    tm = t < M
+    t64 = t.to(tl.int64)
+    KD = K * D
+    x3 = tl.load(X + t64[:, None, None] * KD + kk[None, :, None] * D + cc[None, None, :],
+                 mask=tm[:, None, None], other=0.0).to(tl.float32)
+    o = tl.load(OUT + t64[:, None] * D + cc[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+    post = tl.load(POST + t64[:, None] * K + kk[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+    dout = tl.zeros((BT, BC), dtype=tl.float32)
+    pbase = pid_c * M
+    for h in tl.static_range(K):
+        g_h = tl.load(G + t64[:, None] * KD + h * D + cc[None, :], mask=tm[:, None], other=0.0).to(tl.float32)
+        post_h = tl.sum(tl.where(kk[None, :] == h, post, 0.0), axis=1)
+        dout += post_h[:, None] * g_h
+        tl.store(DPOSTP + (pbase + t64) * K + h, tl.sum(o * g_h, axis=1), mask=tm)
+        dch = tl.sum(x3 * g_h[:, None, :], axis=2)
+        tl.store(DCOMBTP + (pbase + t64[:, None]) * KK + h * K + kk[None, :], dch, mask=tm[:, None])
+    tl.store(DOUT + t64[:, None] * D + cc[None, :], dout.to(DOUT.dtype.element_ty), mask=tm[:, None])
+
+
+@triton.jit
+def _mg_write2(OUT, offs, v, m, PDT: tl.constexpr, ACC: tl.constexpr):
+    gp = v.to(PDT).to(tl.float32)
+    if ACC:
+        gp = tl.load(OUT + offs, mask=m, other=0.0).to(tl.float32) + gp
+    tl.store(OUT + offs, gp.to(OUT.dtype.element_ty), mask=m)
+
+
+@triton.jit
+def _tail_body(pid, DWP, PART, DGP, DW_OUT, S_OUT, B_OUT, DG_OUT, NS, NTOT, P, N_DW, P2, D,
+               NP: tl.constexpr, BLOCK: tl.constexpr, BH: tl.constexpr, BP: tl.constexpr,
+               W_PDT: tl.constexpr, S_PDT: tl.constexpr, B_PDT: tl.constexpr, G_PDT: tl.constexpr,
+               W_ACC: tl.constexpr, S_ACC: tl.constexpr, B_ACC: tl.constexpr, G_ACC: tl.constexpr,
+               HAS_DG: tl.constexpr, BW: tl.constexpr):
+    """hc_boundary._hc_tail_kernel for one program (dW: same per-element sequential sum over the S partials)."""
+    n_dw = tl.cdiv(N_DW, BW)
+    if pid < n_dw:
+        o = pid * BW + tl.arange(0, BW)
+        m = o < N_DW
+        acc = tl.zeros((BW,), dtype=tl.float32)
+        for s_ in range(0, NS):
+            acc += tl.load(DWP + s_ * NTOT + o, mask=m, other=0.0)
+        _mg_write2(DW_OUT, o, acc, m, W_PDT, W_ACC)
+    elif pid < n_dw + NP:
+        j = pid - n_dw
+        acc2 = tl.zeros((BLOCK,), dtype=tl.float32)
+        for p0 in range(0, P, BLOCK):
+            r = p0 + tl.arange(0, BLOCK)
+            acc2 += tl.load(PART + j * P + r, mask=r < P, other=0.0)
+        v = tl.sum(acc2, axis=0)
+        if j < 3:
+            _mg_write2(S_OUT, j, v, True, S_PDT, S_ACC)
+        else:
+            _mg_write2(B_OUT, j - 3, v, True, B_PDT, B_ACC)
+    elif HAS_DG:
+        cols = (pid - n_dw - NP) * BH + tl.arange(0, BH)
+        cm = cols < D
+        acc3 = tl.zeros((BP, BH), dtype=tl.float32)
+        for p0 in range(0, P2, BP):
+            pr = p0 + tl.arange(0, BP)
+            acc3 += tl.load(DGP + pr[:, None] * D + cols[None, :], mask=(pr[:, None] < P2) & cm[None, :], other=0.0)
+        _mg_write2(DG_OUT, cols, tl.sum(acc3, axis=0), cm, G_PDT, G_ACC)
+
+
+@triton.jit
+def _hcf_post_tail_kernel(G, X, OUT, POST, DOUT, DPOSTP, DCOMBTP, M, D, NT, NTAIL,
+                          DWP, PART, DGP, DW_OUT, S_OUT, B_OUT, DG_OUT, NS, NTOT, P, N_DW, P2,
+                          K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr,
+                          NP: tl.constexpr, BLOCK: tl.constexpr, BH: tl.constexpr, BP: tl.constexpr,
+                          W_PDT: tl.constexpr, S_PDT: tl.constexpr, B_PDT: tl.constexpr, G_PDT: tl.constexpr,
+                          W_ACC: tl.constexpr, S_ACC: tl.constexpr, B_ACC: tl.constexpr, G_ACC: tl.constexpr,
+                          HAS_DG: tl.constexpr, BW: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid < NTAIL:  # tail programs first: dispatched at the start, they overlap the post programs
+        _tail_body(pid, DWP, PART, DGP, DW_OUT, S_OUT, B_OUT, DG_OUT, NS, NTOT, P, N_DW, P2, D,
+                   NP, BLOCK, BH, BP, W_PDT, S_PDT, B_PDT, G_PDT, W_ACC, S_ACC, B_ACC, G_ACC, HAS_DG, BW)
+    else:
+        q = pid - NTAIL
+        _post_body(q % NT, q // NT, G, X, OUT, POST, DOUT, DPOSTP, DCOMBTP, M, D, K, BT, BC)
+
+
+TAIL2_CFG = dict(nw=1, block=512, bw=512, bh=32, bp=32)
+
+
+def post_tail(dx, xp, outp, postp, doutp, dpostp, dcombtp, pbt, pbc, dw_p, n, part, dgp, D, params, dtypes, claimed):
+    """One launch: post_bwd2d(L-1) (dnew = dx) + the GRAD_DIRECT tail(L). Returns the 4 gradients for autograd."""
+    from .hc_boundary import _GradSlot, _TL_DT
+
+    M = xp.shape[0]
+    K = xp.shape[1]
+    S_, BN_, KD_ = dw_p.shape
+    dev = dw_p.device
+    NP_, P_ = part.shape
+    w, s_, b, g = params
+    slots = [_GradSlot(w, dtypes[0], (n, KD_), dev, claimed[0]), _GradSlot(s_, dtypes[1], (3,), dev, claimed[1]),
+             _GradSlot(b, dtypes[2], (n,), dev, claimed[2])]
+    has_dg = dgp is not None
+    slots.append(_GradSlot(g, dtypes[3], (D,), dev, claimed[3]) if has_dg else None)
+    c = _cfg("TAIL2", TAIL2_CFG)
+    n_dw = n * KD_
+    nt = triton.cdiv(M, pbt)
+    npost = nt * (D // pbc)
+    ntail = triton.cdiv(n_dw, c["bw"]) + NP_ + (triton.cdiv(D, c["bh"]) if has_dg else 0)
+    dg_out = slots[3].out if has_dg else slots[0].out
+    _hcf_post_tail_kernel[(npost + ntail,)](
+        dx, xp, outp, postp, doutp, dpostp, dcombtp, M, D, nt, ntail,
+        dw_p, part, dgp if has_dg else part, slots[0].out, slots[1].out, slots[2].out, dg_out,
+        S_, BN_ * KD_, P_, n_dw, dgp.shape[0] if has_dg else 0,
+        K=K, BT=pbt, BC=pbc, NP=NP_, BLOCK=c["block"], BH=c["bh"], BP=c["bp"],
+        W_PDT=_TL_DT[dtypes[0]], S_PDT=_TL_DT[dtypes[1]], B_PDT=_TL_DT[dtypes[2]],
+        G_PDT=_TL_DT[dtypes[3]] if has_dg else tl.float32,
+        W_ACC=slots[0].acc, S_ACC=slots[1].acc, B_ACC=slots[2].acc, G_ACC=slots[3].acc if has_dg else False,
+        HAS_DG=has_dg, BW=c["bw"], num_warps=c["nw"],
+    )
+    return tuple(sl.grad(dt) if sl is not None else None for sl, dt in zip(slots, dtypes))
 
 
 def _n_cu(dev) -> int:
@@ -495,5 +729,6 @@ def norm_pre_bwd(x3, pre, gamma, rstd_n, dy, raw, rstd, states, scale_c, base_c,
     return dh, gh, glo, gth, gtl, coef_a, coef_b, part, dgp
 
 
-__all__ = ["hcfuse_bwd_enabled", "hcfuse_fwd_enabled", "hcfuse_tail_enabled", "side_stream", "norm_pre_bwd", "pre_collapse_fwd"]
+__all__ = ["hcfuse_bwd_enabled", "hcfuse_fwd_enabled", "hcfuse_tail_enabled", "side_stream", "norm_pre_bwd",
+           "pre_collapse_fwd", "post_tail", "tail_mode"]
 side_stream = _side_stream
