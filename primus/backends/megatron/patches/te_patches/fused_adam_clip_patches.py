@@ -39,6 +39,7 @@ from primus.core.utils.module_utils import log_rank_0
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
 _EXTENSION_NAME = "primus_te_fused_adam_clip_v10"
 _EXTENSION_NAME_V9 = "primus_te_fused_adam_clip_v9"
+_EXTENSION_NAME_V11 = "primus_te_fused_adam_clip_v11"
 _extension = None
 
 
@@ -51,6 +52,15 @@ def _wavedense_enabled() -> bool:
     Adam reads and writes each tile row with whole-wave contiguous accesses and a compile-time BF16 store, -10% on
     the MegaMoE expert tiles, bit-identical outputs. 0 builds the previous v9 source (fused_adam_clip_kernel_v9.cu)."""
     return os.environ.get("PRIMUS_FP8BLK_ADAM_WAVEDENSE", "0") == "1"
+
+
+def _hwcvt_enabled() -> bool:
+    """PRIMUS_FP8BLK_ADAM_HWCVT=1 (with PRIMUS_FP8BLK_ADAM_WAVEDENSE=1): build the v11 source
+    (fused_adam_clip_kernel_v11.cu): the v10 kernels with the FP32->BF16 roundings of the moments and the BF16 weight
+    done by the hardware converter (v_cvt_pk_bf16_f32 + c10's 0x7FC0 for NaN; bit-identical to c10's integer RNE for
+    all 2^32 inputs), which also brings the tile kernel to 62 VGPRs (4 blocks per CU), and 16-byte BF16 stores in the
+    chunk kernel. Outputs byte-identical to v10."""
+    return _wavedense_enabled() and os.environ.get("PRIMUS_FP8BLK_ADAM_HWCVT", "0") == "1"
 
 
 def _bf16_writeback_enabled() -> bool:
@@ -265,10 +275,17 @@ def _load_extension():
     from torch.utils.cpp_extension import load
 
     wavedense = _wavedense_enabled()
-    source = Path(__file__).with_name("fused_adam_clip_kernel.cu" if wavedense else "fused_adam_clip_kernel_v9.cu")
+    hwcvt = _hwcvt_enabled()
+    if hwcvt:
+        source_name, ext_name = "fused_adam_clip_kernel_v11.cu", _EXTENSION_NAME_V11
+    elif wavedense:
+        source_name, ext_name = "fused_adam_clip_kernel.cu", _EXTENSION_NAME
+    else:
+        source_name, ext_name = "fused_adam_clip_kernel_v9.cu", _EXTENSION_NAME_V9
+    source = Path(__file__).with_name(source_name)
     # No -std flag: torch adds the one its headers need, and torch 2.14's need C++20.
     _extension = load(
-        name=_EXTENSION_NAME if wavedense else _EXTENSION_NAME_V9,
+        name=ext_name,
         sources=[str(source)],
         extra_cflags=["-O3"],
         extra_cuda_cflags=["-O3"],
