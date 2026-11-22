@@ -13,6 +13,11 @@ import os
 
 import torch
 
+from primus.backends.megatron.core.fusions.bf16tune import bt_mm as _bt_mm
+from primus.backends.megatron.core.fusions.bf16tune import enabled as _bt_enabled
+
+_BT = _bt_enabled()
+
 
 def fuse2_linear_mg_ok(x: torch.Tensor, w: torch.Tensor, env: str = "PRIMUS_FUSE2_COMP_MG") -> bool:
     if os.environ.get(env, "0") != "1":
@@ -114,7 +119,9 @@ class _LinearMainGradFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w, slot=None):
         x2 = x.reshape(-1, x.shape[-1])
-        out = torch.mm(x2, w.t())
+        out = _bt_mm(x2, w.t()) if _BT else None  # PRIMUS_BF16TUNE: planned shapes on Gluon bf16g2 / split-K
+        if out is None:
+            out = torch.mm(x2, w.t())
         ctx.save_for_backward(x2, w)
         ctx.wparam = w
         ctx.slot = slot
@@ -128,7 +135,10 @@ class _LinearMainGradFn(torch.autograd.Function):
 
         x2, w = ctx.saved_tensors
         g2 = g.reshape(-1, g.shape[-1])
-        dx = g2.mm(w).view(*ctx.lead, w.shape[1]) if ctx.needs_input_grad[0] else None
+        dx = None
+        if ctx.needs_input_grad[0]:
+            dx = _bt_mm(g2, w) if _BT else None
+            dx = (g2.mm(w) if dx is None else dx).view(*ctx.lead, w.shape[1])
         if ctx.slot is not None and dx is not None:
             ctx.slot.g = dx  # PRIMUS_FUSE2_ATT_GADD: the concat dX GEMM adds into this buffer
             if ctx.slot.branch:  # PRIMUS_OVERLAP_CSA_BWD: running on the compressor branch stream
@@ -141,7 +151,8 @@ class _LinearMainGradFn(torch.autograd.Function):
 
         def _wgrad(mg=mg, g2=g2, x2=x2, first=first):
             if first:
-                torch.mm(g2.t(), x2, out=mg)
+                if not _BT or _bt_mm(g2.t(), x2, out=mg) is None:  # PRIMUS_BF16TUNE: planned shapes on Gluon
+                    torch.mm(g2.t(), x2, out=mg)
             else:
                 mg.add_(torch.mm(g2.t(), x2))
 

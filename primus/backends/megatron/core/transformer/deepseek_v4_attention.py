@@ -543,6 +543,12 @@ def _bf16g2_mm_or_none():
     return _BF16G2_STATE["mm"]
 
 
+def _bt_mm_oa(a, b, out):
+    from primus.backends.megatron.core.fusions.bf16tune import bt_mm
+
+    return bt_mm(a, b, out=out)
+
+
 class _GroupedOAProjFn(torch.autograd.Function):
     """Grouped-O ``o_a`` down-projection ``[B,S,G,d] x [G,r,d] -> [B,S,G*r]`` without layout copies.
 
@@ -618,11 +624,15 @@ class _GroupedOAProjFn(torch.autograd.Function):
                 mg = ctx.wparam.main_grad.view(G, r, d)
                 first = main_grad_first_write(ctx.wparam)  # decided at issue time (host), like the serial path
 
-                def _wgrad(mg=mg, do=do, x2=x2, first=first):
+                bt = os.environ.get("PRIMUS_BF16TUNE", "0") != "0"  # bf16tune: the planned o_a wgrad kernel
+
+                def _wgrad(mg=mg, do=do, x2=x2, first=first, bt=bt):
                     if first:  # beta 0: the GEMM writes main_grad (= param.grad's bits)
-                        torch.bmm(do.transpose(1, 2), x2.transpose(0, 1), out=mg)
+                        if not bt or _bt_mm_oa(do.transpose(1, 2), x2.transpose(0, 1), mg) is None:
+                            torch.bmm(do.transpose(1, 2), x2.transpose(0, 1), out=mg)
                     else:  # the DDP hook's add, done here
-                        mg.add_(torch.bmm(do.transpose(1, 2), x2.transpose(0, 1)))
+                        t = _bt_mm_oa(do.transpose(1, 2), x2.transpose(0, 1), None) if bt else None
+                        mg.add_(torch.bmm(do.transpose(1, 2), x2.transpose(0, 1)) if t is None else t)
 
                 if _ovl_oa_wgrad():
                     # PRIMUS_OVERLAP_OA_WGRAD: same bmm (+ add) on overlap's "wgrad" stream, joined after the backward
