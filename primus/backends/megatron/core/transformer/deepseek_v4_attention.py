@@ -119,6 +119,8 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (
     apply_rope_from_positions,
+    orope_inplace_supported,
+    out_inv_rope_inplace,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -1779,6 +1781,15 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         if self.rotary_dim == 0:
             return attn
         rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+        if orope_inplace_supported(attn, self.rotary_dim) and torch.is_grad_enabled() and attn.requires_grad:
+            # PRIMUS_V4_OROPE_INPLACE=1: ``attn`` is the sparse-MLA output its backward saved; de-rotate its tail in
+            # place and restore it in the backward (same bytes as below; see OutInvRopeInplaceFn).
+            from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                take_saved_output,
+            )
+
+            if take_saved_output(attn):
+                return out_inv_rope_inplace(attn, position_ids, rope.inv_freq, rotary_dim=self.rotary_dim)
         return apply_rope_from_positions(
             attn,
             position_ids,
