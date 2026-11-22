@@ -49,7 +49,8 @@ Requirements:
 | + adamattn wave-dense tile Adam v10, graph | 51.8 (A/B 53.17 -> 51.83) | 9.8710 |
 | + fuse-hc GRAD_DIRECT / B3X / XRMS, graph | 51.0 (A/B 51.70 -> 51.03) | 9.8710 |
 | + mxgemm persistent mxgk (GG=mxp) + fuse-moe SWB_TDM, graph | 50.8 (A/B 51.13 -> 50.83) | 9.8710 |
-| **+ fuse-attn F1/F3/F4/F5 (this config), graph** | **49.9** (A/B 50.90 -> 49.87) | 9.8710 |
+| + fuse-attn F1/F3/F4/F5, graph | 49.9 (A/B 50.90 -> 49.87) | 9.8710 |
+| **+ densegemm SMALLTILE / EPI2 / CE_BWD_GT (this config), graph** | **49.5** (A/B 49.87 -> 49.53) | 9.8710 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -133,6 +134,12 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
   `PRIMUS_TURBO_CONCAT_SPLIT_EPI` (wq_a||wkv as one dsv4up GEMM with a split-output epilogue), `PRIMUS_V4_INDEXER_TOPK_TRITON`
   (CSA indexer top-k as one Triton sort, P in 1024..4096), `PRIMUS_V4_QKV_POST_FUSED` (q_a/kv norms + kv RoPE as one op).
   -1.03 ms. Optional bit-identical tile knob `PRIMUS_V4_QNR_FWD_BH=8 PRIMUS_V4_QNR_FWD_NW=2` (not enabled).
+- densegemm (default on, bit-identical, -0.33 ms): `PRIMUS_TURBO_DSV4UP_SMALLTILE` sends the listed dense GEMMs
+  ("MxNxK[a]:tile", a = beta-1 accumulate call) to the dsv4s smaller-output-tile kernel (wq_b dgrad 64 -> 128 tiles,
+  98.6 -> 74.8 us/layer); `PRIMUS_TURBO_DSV4UP_EPI2=1` double-buffered epilogue; `PRIMUS_V4_CE_BWD_GT=1` fused-CE backward
+  also writes dlogits^T for the lm_head TN wgrad (removes the 119 us transpose). Set SMALLTILE to empty to disable.
+  Dense block-FP8 GEMMs on full grids are at ~85-90% of the measured L2->LDS delivery limit (~24.5 TB/s, ~59 B/clk/CU,
+  shader clock ~1.59 GHz under WMMA; mx8w/densegemm REPORTs).
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
