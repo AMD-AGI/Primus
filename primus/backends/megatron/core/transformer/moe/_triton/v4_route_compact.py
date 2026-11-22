@@ -103,13 +103,24 @@ def _load_route(LOGITS, IDX, IDS, n_offs, n_mask, e_idx, k_idx, E: tl.constexpr,
 @triton.jit
 def _route_fwd_kernel(LOGITS, IDX, IDS, TOPW, TOPI, WSAVE, DENOM, CNT_P, SUM_P, N, K,
                       E: tl.constexpr, KP: tl.constexpr, BN: tl.constexpr, SCALE: tl.constexpr, HASH: tl.constexpr,
-                      SLOT_EVEN: tl.constexpr, LOSS: tl.constexpr):
+                      SLOT_EVEN: tl.constexpr, LOSS: tl.constexpr,
+                      RINV=None, PADROWS=None, RWP=None, NPAD=None, RW_OUT: tl.constexpr = 0, PADB: tl.constexpr = 1,
+                      CNTB=None, TBL_CNT: tl.constexpr = 0):
     pid = tl.program_id(0)
     n_offs = pid * BN + tl.arange(0, BN)
     n_mask = n_offs < N
     e_idx = tl.arange(0, E)
     k_idx = tl.arange(0, KP)
     logits, idx, km = _load_route(LOGITS, IDX, IDS, n_offs, n_mask, e_idx, k_idx, E, K, KP, HASH)
+    if RW_OUT:
+        # route3: MegaMoE pool route weights for the static force-LB-even tables (Turbo even_routing_tables):
+        # route (n, k) lives at pool row RINV[n*K + k] (stored below); the padding rows PADROWS get 0 (this
+        # program's share). Issued first so the table loads overlap the routing math.
+        prow = tl.load(RINV + n_offs[:, None].to(tl.int64) * K + k_idx[None, :], mask=km, other=0)
+        pr = pid * PADB + tl.arange(0, PADB)
+        pm = pr < NPAD
+        zrow = tl.load(PADROWS + pr, mask=pm, other=0)
+        tl.store(RWP + zrow, tl.zeros((PADB,), dtype=tl.float32), mask=pm)
     scores = _score_post(logits)
     w = _gather_k(scores, idx, e_idx, k_idx, KP)
     w = tl.where(km, w, 0.0)
@@ -137,6 +148,15 @@ def _route_fwd_kernel(LOGITS, IDX, IDS, TOPW, TOPI, WSAVE, DENOM, CNT_P, SUM_P, 
         topi = ((n_offs[:, None].to(tl.int64) * K + k_idx[None, :]) % E).to(tl.int32)
     tl.store(TOPW + n_offs[:, None].to(tl.int64) * K + k_idx[None, :], topw, mask=km)
     tl.store(TOPI + n_offs[:, None].to(tl.int64) * K + k_idx[None, :], topi.to(tl.int64), mask=km)
+    if RW_OUT:
+        tl.store(RWP + prow, topw, mask=km)
+    if TBL_CNT:
+        # route3 EARLY=2: this block's expert histogram of the final expert ids (for _route_tables_blk_kernel)
+        oh = tl.zeros((BN, E), dtype=tl.int32)
+        for k in tl.static_range(KP):
+            ck = tl.sum(tl.where(k_idx[None, :] == k, topi, 0), axis=1)
+            oh += ((e_idx[None, :] == ck[:, None]) & n_mask[:, None] & (k < K)).to(tl.int32)
+        tl.store(CNTB + pid * E + e_idx, tl.sum(oh, axis=0))
     if LOSS:
         sa = tl.sqrt(_softplus_acc(logits))
         sa = tl.where(n_mask[:, None], sa, 0.0)
@@ -147,6 +167,94 @@ def _route_fwd_kernel(LOGITS, IDX, IDS, TOPW, TOPI, WSAVE, DENOM, CNT_P, SUM_P, 
             cnt += ((e_idx[None, :] == col[:, None]) & n_mask[:, None] & (k < K)).to(tl.float32)
         tl.store(CNT_P + pid * E + e_idx, tl.sum(cnt, axis=0))
         tl.store(SUM_P + pid * E + e_idx, tl.sum(aff, axis=0))
+
+
+@triton.jit
+def _route_tables_blk_kernel(TOPI, TOPW, CNTB, ROWMAP, RW, INV, POFFS, R, P, NB, K: tl.constexpr, E: tl.constexpr,
+                             RB: tl.constexpr, RBP: tl.constexpr, NBP: tl.constexpr, ALIGN: tl.constexpr,
+                             TAILB: tl.constexpr):
+    """route3 EARLY=2: Turbo build_routing_blk's tables (count > offs > scatter) in ONE launch, no cross-program
+    hand-off: program b owns the routes of route-kernel block b ([b*RB, (b+1)*RB)) and recomputes the expert offsets
+    from all blocks' histograms CNTB [NB, E] (written by _route_fwd_kernel, the previous launch). Same pool rows (token
+    order within an expert = route order), POFFS, padding (ROWMAP -1, RW 0) and tail as the three Turbo kernels."""
+    pid = tl.program_id(0)
+    e_ar = tl.arange(0, E)
+    cb = tl.arange(0, NBP)
+    c = tl.load(CNTB + cb[:, None] * E + e_ar[None, :], mask=(cb < NB)[:, None], other=0)
+    cnt = tl.sum(c, axis=0)
+    before = tl.sum(tl.where((cb < pid)[:, None], c, 0), axis=0)
+    plen = tl.maximum((cnt + ALIGN - 1) // ALIGN, 1) * ALIGN
+    pend = tl.cumsum(plen, 0)
+    pstart = pend - plen
+    if pid == 0:
+        tl.store(POFFS + 1 + e_ar, pend)
+        tl.store(POFFS + e_ar, pstart, mask=e_ar == 0)
+    j = tl.arange(0, RBP)
+    r = pid * RB + j
+    m = (j < RB) & (r < R)
+    idx = tl.load(TOPI + r, mask=m, other=-1).to(tl.int32)
+    oh = (idx[:, None] == e_ar[None, :]).to(tl.int32)
+    pos = tl.sum(oh * ((pstart + before)[None, :] + tl.cumsum(oh, 0) - 1), axis=1)
+    tl.store(ROWMAP + pos, r // K, mask=m)
+    tl.store(RW + pos, tl.load(TOPW + r, mask=m, other=0.0).to(tl.float32), mask=m)
+    tl.store(INV + r, pos, mask=m)
+    pa = tl.arange(0, ALIGN)
+    for e in range(pid, E, NB):  # padding rows of expert e
+        lo = tl.sum(tl.where(e_ar == e, pstart + cnt, 0), axis=0)
+        hi = tl.sum(tl.where(e_ar == e, pend, 0), axis=0)
+        rows = lo + pa
+        tl.store(ROWMAP + rows, tl.full((ALIGN,), -1, tl.int32), mask=rows < hi)
+        tl.store(RW + rows, tl.zeros((ALIGN,), dtype=tl.float32), mask=rows < hi)
+    last = tl.sum(tl.where(e_ar == E - 1, pend, 0), axis=0)
+    tr = last + pid * TAILB + tl.arange(0, TAILB)  # this program's share of the unused tail [last, P)
+    tl.store(ROWMAP + tr, tl.full((TAILB,), -1, tl.int32), mask=tr < P)
+    tl.store(RW + tr, tl.zeros((TAILB,), dtype=tl.float32), mask=tr < P)
+
+
+@triton.jit
+def _route_tables_chunk_kernel(TOPI, TOPW, CNTB, ROWMAP, RW, INV, POFFS, R, P, NB, NPROG, K: tl.constexpr,
+                               E: tl.constexpr, RB: tl.constexpr, RC: tl.constexpr, CPB: tl.constexpr,
+                               RHP: tl.constexpr, NBP: tl.constexpr, ALIGN: tl.constexpr, TAILB: tl.constexpr):
+    """route3 EARLY=2, chunked: as _route_tables_blk_kernel but CPB programs per route-kernel block, each scattering
+    RC routes (Turbo's scatter chunk size); the routes of the block before the chunk are counted from TOPI."""
+    pid = tl.program_id(0)
+    b = pid // CPB
+    c = pid % CPB
+    e_ar = tl.arange(0, E)
+    cb = tl.arange(0, NBP)
+    cc = tl.load(CNTB + cb[:, None] * E + e_ar[None, :], mask=(cb < NB)[:, None], other=0)
+    cnt = tl.sum(cc, axis=0)
+    before = tl.sum(tl.where((cb < b)[:, None], cc, 0), axis=0)
+    if CPB > 1:
+        h = tl.arange(0, RHP)
+        rh = b * RB + h
+        ih = tl.load(TOPI + rh, mask=(h < c * RC) & (rh < R), other=-1).to(tl.int32)
+        before += tl.sum((ih[:, None] == e_ar[None, :]).to(tl.int32), axis=0)
+    plen = tl.maximum((cnt + ALIGN - 1) // ALIGN, 1) * ALIGN
+    pend = tl.cumsum(plen, 0)
+    pstart = pend - plen
+    if pid == 0:
+        tl.store(POFFS + 1 + e_ar, pend)
+        tl.store(POFFS + e_ar, pstart, mask=e_ar == 0)
+    r = b * RB + c * RC + tl.arange(0, RC)
+    m = r < R
+    idx = tl.load(TOPI + r, mask=m, other=-1).to(tl.int32)
+    oh = (idx[:, None] == e_ar[None, :]).to(tl.int32)
+    pos = tl.sum(oh * ((pstart + before)[None, :] + tl.cumsum(oh, 0) - 1), axis=1)
+    tl.store(ROWMAP + pos, r // K, mask=m)
+    tl.store(RW + pos, tl.load(TOPW + r, mask=m, other=0.0).to(tl.float32), mask=m)
+    tl.store(INV + r, pos, mask=m)
+    pa = tl.arange(0, ALIGN)
+    for e in range(pid, E, NPROG):  # padding rows of expert e
+        lo = tl.sum(tl.where(e_ar == e, pstart + cnt, 0), axis=0)
+        hi = tl.sum(tl.where(e_ar == e, pend, 0), axis=0)
+        rows = lo + pa
+        tl.store(ROWMAP + rows, tl.full((ALIGN,), -1, tl.int32), mask=rows < hi)
+        tl.store(RW + rows, tl.zeros((ALIGN,), dtype=tl.float32), mask=rows < hi)
+    last = tl.sum(tl.where(e_ar == E - 1, pend, 0), axis=0)
+    tr = last + pid * TAILB + tl.arange(0, TAILB)
+    tl.store(ROWMAP + tr, tl.full((TAILB,), -1, tl.int32), mask=tr < P)
+    tl.store(RW + tr, tl.zeros((TAILB,), dtype=tl.float32), mask=tr < P)
 
 
 @triton.jit
@@ -230,7 +338,7 @@ class RouteCompactFn(torch.autograd.Function):
     ``loss_cfg``: None or (coeff, batch, seq_len) of the sequence-balance loss."""
 
     @staticmethod
-    def forward(ctx, logits, idx_rows, ids, topk, scale, slot_even, loss_cfg):
+    def forward(ctx, logits, idx_rows, ids, topk, scale, slot_even, loss_cfg, tables=None):
         N, E = logits.shape
         K = int(topk)
         KP = triton.next_power_of_2(K)
@@ -258,9 +366,22 @@ class RouteCompactFn(torch.autograd.Function):
             sum_p = torch.empty((nb, E), dtype=torch.float32, device=dev)
         else:
             cnt_p = sum_p = topw  # unused
+        rw_kw = {}
+        if isinstance(tables, Route3Dyn):
+            tables.cntb = torch.empty((nb, E), dtype=torch.int32, device=dev)
+            rw_kw = dict(CNTB=tables.cntb, TBL_CNT=1)
+        elif tables is not None:
+            # route3: also write the MegaMoE pool route weights (tables.rw) of the static even tables
+            assert slot_even and tables.inv.numel() == N * K and tables.padrows.dtype == torch.int32
+            tables.rw = torch.empty((tables.P,), dtype=torch.float32, device=dev)
+            npad = tables.padrows.numel()
+            rw_kw = dict(RINV=tables.inv, PADROWS=tables.padrows if npad else tables.inv, RWP=tables.rw, NPAD=npad,
+                         RW_OUT=1, PADB=triton.next_power_of_2(max(triton.cdiv(npad, nb), 1)))
         _route_fwd_kernel[(nb,)](logits, idx_rows, ids, topw, topi, wsave, denom, cnt_p, sum_p, N, K, E=E, KP=KP, BN=_BN,
                                  SCALE=float(scale), HASH=int(hash_), SLOT_EVEN=int(slot_even), LOSS=int(has_loss),
-                                 num_warps=4)
+                                 num_warps=4, **rw_kw)
+        if isinstance(tables, Route3Dyn):
+            tables.build(topi, topw, nb, _BN)
         cnt = None
         if has_loss:
             cnt = torch.empty((B, E), dtype=torch.float32, device=dev)
@@ -284,7 +405,7 @@ class RouteCompactFn(torch.autograd.Function):
         N, E = logits.shape
         K = ctx.K
         if dtopw is None and not ctx.has_loss:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
         if dtopw is None:
             dtopw = torch.zeros((N, K), dtype=torch.float32, device=logits.device)
         dtopw = dtopw.contiguous().float()
@@ -301,7 +422,89 @@ class RouteCompactFn(torch.autograd.Function):
             logits, idx_rows, ids, wsave, denom, dtopw, cnt, dscale, dl, N, K, ctx.S if ctx.has_loss else 1,
             ctx.lcoef if ctx.has_loss else 0.0, E=E, KP=triton.next_power_of_2(K), BN=_BN, SCALE=ctx.scale,
             HASH=int(ctx.hash), LOSS=int(ctx.has_loss), num_warps=4)
-        return dl, None, None, None, None, None, None
+        return dl, None, None, None, None, None, None, None
+
+
+class Route3Tables:
+    """route3 (PRIMUS_ROUTE3_TABLES=1): the static MegaMoE pool tables of force-LB-even routing
+    (Turbo ``even_routing_tables``) plus this call's route weights ``rw`` (written by _route_fwd_kernel)."""
+
+    def __init__(self, rowmap, inv, poffs, perm, padrows, P):
+        self.rowmap, self.inv, self.poffs, self.perm, self.padrows, self.P = rowmap, inv, poffs, perm, padrows, int(P)
+        self.rw = None
+
+    def routing(self):
+        assert self.rw is not None
+        return (self.rowmap, self.rw, self.inv, self.poffs, self.perm)
+
+
+class Route3Dyn:
+    """route3 EARLY=2 (any routing): MegaMoE pool tables from the route kernel's per-block histograms + one
+    _route_tables_blk_kernel launch (replaces Turbo's count > offs > scatter; same bytes)."""
+
+    def __init__(self, E, P, align):
+        self.E, self.P, self.align = int(E), int(P), int(align)
+        self.cntb = None
+        self.tabs = None
+
+    def build(self, topi, topw, nb, bn):
+        N, K = topi.shape
+        R, E, dev = N * K, self.E, topi.device
+        rowmap = torch.empty((self.P,), dtype=torch.int32, device=dev)
+        rw = torch.empty((self.P,), dtype=torch.float32, device=dev)
+        inv = torch.empty((R,), dtype=torch.int32, device=dev)
+        poffs = torch.empty((E + 1,), dtype=torch.int32, device=dev)
+        rb = bn * K
+        rc = 128 if rb % 128 == 0 else 0
+        if rc and os.environ.get("PRIMUS_ROUTE3_TBL", "chunk") == "chunk":
+            cpb = rb // rc
+            npg = nb * cpb
+            _route_tables_chunk_kernel[(npg,)](
+                topi, topw, self.cntb, rowmap, rw, inv, poffs, R, self.P, nb, npg, K=K, E=E, RB=rb, RC=rc, CPB=cpb,
+                RHP=triton.next_power_of_2(max((cpb - 1) * rc, 1)), NBP=triton.next_power_of_2(nb), ALIGN=self.align,
+                TAILB=triton.next_power_of_2(max(triton.cdiv(max(self.P - R, 1), npg), 1)), num_warps=4)
+        else:
+            _route_tables_blk_kernel[(nb,)](
+                topi, topw, self.cntb, rowmap, rw, inv, poffs, R, self.P, nb, K=K, E=E, RB=rb,
+                RBP=triton.next_power_of_2(rb), NBP=triton.next_power_of_2(nb), ALIGN=self.align,
+                TAILB=triton.next_power_of_2(max(triton.cdiv(max(self.P - R, 1), nb), 1)), num_warps=8)
+        self.tabs = (rowmap, rw, inv, poffs, None)
+
+    def routing(self):
+        assert self.tabs is not None
+        return self.tabs
+
+
+def route3_tables_enabled() -> bool:
+    return os.environ.get("PRIMUS_ROUTE3_TABLES", "0") == "1"
+
+
+def route3_static_tables(force_lb_mode, N, K, E, device):
+    """route3 guard: the static force-LB-even pool tables, or None (-> the dynamic int path, untouched) unless
+    PRIMUS_ROUTE3_TABLES=1 AND force-load-balancing "even" is on (the only mode where the expert of route r is
+    r % E whatever the router picks; real training has no forced routing)."""
+    if force_lb_mode != "even" or not route3_tables_enabled():
+        return None
+    from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import even_routing_tables
+
+    t = even_routing_tables(int(N), int(K), int(E), device)
+    return Route3Tables(*t) if t is not None else None
+
+
+def route3_early_mode() -> int:
+    """PRIMUS_ROUTE3_EARLY (any routing): 1 = build the MegaMoE pool tables (same Turbo kernels, same inputs) right
+    after the route kernel, i.e. before the shared-expert join, instead of inside the MegaMoE forward after it;
+    2 = the same tables from the route kernel's block histograms + ONE merged launch (Route3Dyn). 0 = off."""
+    return int(os.environ.get("PRIMUS_ROUTE3_EARLY", "0"))
+
+
+def route3_dyn_tables(N, K, E):
+    """Route3Dyn for EARLY=2, else None."""
+    if route3_early_mode() != 2:
+        return None
+    from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import _ALIGN, routing_pool_rows
+
+    return Route3Dyn(E, routing_pool_rows(int(N), int(K), int(E)), _ALIGN)
 
 
 def pad_rows(idx: torch.Tensor) -> torch.Tensor:
@@ -313,8 +516,9 @@ def pad_rows(idx: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def route_compact(logits, idx_rows, ids, topk, scale, slot_even, loss_cfg):
-    return RouteCompactFn.apply(logits, idx_rows, ids, int(topk), float(scale), bool(slot_even), loss_cfg)
+def route_compact(logits, idx_rows, ids, topk, scale, slot_even, loss_cfg, tables=None):
+    return RouteCompactFn.apply(logits, idx_rows, ids, int(topk), float(scale), bool(slot_even), loss_cfg, tables)
 
 
-__all__ = ["fuse_route_enabled", "pad_rows", "route_compact", "RouteCompactFn"]
+__all__ = ["fuse_route_enabled", "pad_rows", "route_compact", "RouteCompactFn", "Route3Tables",
+           "route3_tables_enabled", "route3_static_tables", "route3_early_mode", "route3_dyn_tables", "Route3Dyn"]

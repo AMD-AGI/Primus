@@ -350,8 +350,9 @@ class MegaMoEFP8BlockExperts(MegaMoEExperts):
     def _wgrad_accum_pattern(self, config: TransformerConfig) -> Optional[str]:
         return "megatron" if mega_moe_wgrad_accum_fusion(config) else None
 
-    def forward(self, x, topk_idx, topk_weights, add=None):
-        """``add``: optional [T, H] added to the output inside the combine kernel (fuse track routed + shared add)."""
+    def forward(self, x, topk_idx, topk_weights, add=None, routing=None, add_join=None):
+        """``add``: optional [T, H] added to the output inside the combine kernel (fuse track routed + shared add).
+        ``routing`` (route3): precomputed pool tables for these routes (see fused_mega_moe_fp8blk)."""
         from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import (
             FP8BlockWeightCache,
             fused_mega_moe_fp8blk,
@@ -371,6 +372,8 @@ class MegaMoEFP8BlockExperts(MegaMoEExperts):
             activation=self.activation,
             accumulate_wgrad=self.wgrad_accum_pattern is not None,
             **({} if add is None else {"add": add}),
+            **({} if routing is None else {"routing": routing}),
+            **({} if add_join is None else {"add_join": add_join}),
         )
 
 

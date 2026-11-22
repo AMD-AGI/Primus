@@ -362,7 +362,7 @@ class PersistRouterFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, hidden, w, bias, idx_tab, ids, topk, score_function, scale, slot_even, loss_cfg, hash_, claimed,
-                stash):
+                stash, tables=None):
         H = hidden.shape[-1]
         flat = hidden.reshape(-1, H)
         if hash_:
@@ -371,7 +371,7 @@ class PersistRouterFn(torch.autograd.Function):
         else:
             logits, idx_rows, _ = router_fwd(flat, w, bias, topk, score_function, scale, idx_pad=True)
         rc = _Ctx()
-        topw, topi, loss = RouteCompactFn.forward(rc, logits, idx_rows, ids, topk, scale, slot_even, loss_cfg)
+        topw, topi, loss = RouteCompactFn.forward(rc, logits, idx_rows, ids, topk, scale, slot_even, loss_cfg, tables)
         logits_, idx_rows_, ids_, wsave, denom, cnt = rc.saved
         ctx.save_for_backward(flat, w, logits_, idx_rows_, ids_, wsave, denom, cnt)
         ctx.has_loss, ctx.hash, ctx.K, ctx.scale = rc.has_loss, rc.hash, rc.K, rc.scale
@@ -409,7 +409,7 @@ class PersistRouterFn(torch.autograd.Function):
         )
 
         stash, ctx.stash = ctx.stash, None
-        nones = (None,) * 11
+        nones = (None,) * 12
         if (stash is not None and ctx.claimed and ctx.needs_input_grad[0] and ctx.needs_input_grad[1]
                 and direct_main_grad(w) is not None and not _ddp_grad_checks_on()):
             slot = _GradSlot(w, w.dtype, tuple(w.shape), dev, ctx.claimed)
