@@ -66,7 +66,8 @@ Requirements:
 | + quant2 T2='*'/DQ/SWB, graph | 45.7 (A/B 46.40 -> 45.70) | 9.8713 |
 | + swahca SWAHCA_LOOP (layout insurance), graph | 45.7 (A/B neutral) | 9.8713 |
 | + bf16grp IDX/ROT/ROT_OA + BF16TUNE=bit, graph | 45.3 (A/B 45.83 -> 45.33) | 9.8713 |
-| **+ small batch 2: route3 EARLY=2, hcfuse candC, quant2 T2P + NW=8, gnorm2 sumsq fix (this config), graph** | **45.1** (A/B 45.30 -> 45.10) | 9.8713 |
+| + small batch 2: route3 EARLY=2, hcfuse candC, quant2 T2P + NW=8, gnorm2 sumsq fix, graph | 45.1 (A/B 45.30 -> 45.10) | 9.8713 |
+| **+ hcfuse POST=2 + B3X bat=1 (this config), graph** | **44.9** (A/B 45.10 -> 44.90) | 9.8713 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -208,6 +209,9 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
   side queue before the shared-expert join from per-block histograms; works for any routing; `PRIMUS_ROUTE3_TABLES` is
   benchmark-only and stays 0), hcfuse `PRIMUS_HC_B3X_CFG=...pf2=1` + `PRIMUS_HCFUSE_FOLD_CFG=bwd_ppc=2`, quant2
   `PRIMUS_QUANT2_T2P='*'` (MB_PACKQ quant on the quant2 core) + `PRIMUS_QUANT2_NW=8`, and gnorm2's _sumsq_multi over-read fix.
+- hcfuse round 2 `PRIMUS_HCFUSE_POST=2` (Gluon _hc_post_bwd2d that reproduces the int kernel's DPP reduction tree in-thread;
+  36.3 -> ~29 us) + B3X `bat=1` (per-stream dx WMMA results + x staging through LDS in one round per row step; 70.3 -> 62.5
+  us): -0.20 ms, byte-identical.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
