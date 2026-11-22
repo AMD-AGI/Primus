@@ -62,7 +62,8 @@ Requirements:
 | + csabwd CSABWD_PP, graph | 46.8 (A/B 46.90 -> 46.77) | 9.8712 |
 | + launch DSINK=2/QCAT/SMLA_GLUE/HEAD_MG/SINK_CAST/EMB_SORT/ROPE_TBL, graph | 46.5 (A/B 46.73 -> 46.47) | 9.8712 |
 | + optbytes EMB_SUMSQ/DENSE_SKIP_BF16/EMB_SKIP_BF16, graph | 46.4 (A/B 46.50 -> 46.37) | 9.8713 |
-| **+ overlap2 OVERLAP_CSA_BWD (this config), graph** | **46.3** (A/B 46.43 -> 46.37; 12 pairs pooled ~-0.11) | 9.8713 |
+| + overlap2 OVERLAP_CSA_BWD, graph | 46.3 (A/B 46.43 -> 46.37; 12 pairs pooled ~-0.11) | 9.8713 |
+| **+ quant2 T2='*'/DQ/SWB (this config), graph** | **45.7** (A/B 46.40 -> 45.70) | 9.8713 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -188,6 +189,13 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
 - overlap2 `PRIMUS_OVERLAP_CSA_BWD=1`: CSA attention bwd dKV gathers + compressor bwd on the compressor branch,
   parallel to the dQ chain (join node on qkv_post's kv): ~-0.1 ms, bit-identical (961/961). The gathers slow ~2x beside the
   dQ chain (both HBM-bound), which caps the gain. Keeps the 2.7 GB interm until the join. `PRIMUS_OVERLAP_OA_WGRAD` stays 0.
+- quant2 `PRIMUS_QUANT2_T2='*' PRIMUS_QUANT2_DQ=1 PRIMUS_QUANT2_SWB=1`: new Gluon dual-quant core (persistent, 2-stage TDM
+  128x128 ring in LDS; row pass lane=row, column pass via ds_load_tr16_b128, no cross-lane amax; in-warp layout change so
+  q/qT stores coalesce) for every quant_dual_t2 site, the MegaMoE dispatch gather+quant (TDM gather, OOB zero fill) and
+  the two quants inside the SwiGLU-bwd TDM kernel: -0.70 ms, byte-identical (wq_b dY 52.9 -> 37.1 us, 85% of floor).
+- swahca `PRIMUS_SWAHCA_LOOP=1` (insurance, neutral: int A/B 45.70 -> 45.75): SWA/HCA sparse-MLA bwd with runtime loops
+  (hot loop 21 -> 15 KB cr0, 33 -> 20 KB cr128). Int's kernel ran in two code-placement modes (cr0 127-132 vs 156-162 us,
+  cr128 235-244 vs 269-279 us); the loop kernel has one mode at every 4 B offset (cr0 134-139, cr128 232-241). Bit-identical.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 

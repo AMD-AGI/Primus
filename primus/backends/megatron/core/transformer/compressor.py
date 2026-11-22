@@ -607,8 +607,9 @@ class Compressor(KeepInFp32Mixin, nn.Module):
                 slot, self._fuse2_dx_slot = getattr(self, "_fuse2_dx_slot", None), None
                 proj = linear_main_grad(hidden, wkg.weight, slot)
             else:
-                proj = None
-                if os.environ.get("PRIMUS_BF16TUNE", "0") != "0":  # frozen indexer compressor (no autograd)
+                # PRIMUS_BF16GRP_IDX: the indexer computed this projection in its grouped launch (bit-identical)
+                proj = self.__dict__.pop("_bf16grp_proj", None)
+                if proj is None and os.environ.get("PRIMUS_BF16TUNE", "0") != "0":  # frozen indexer compressor
                     from primus.backends.megatron.core.fusions.bf16tune import bt_linear
 
                     proj = bt_linear(hidden, wkg.weight, getattr(wkg, "bias", None))
