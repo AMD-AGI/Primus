@@ -48,14 +48,14 @@ except Exception:  # pragma: no cover
     _HAVE_GLUON = False
 
 if _HAVE_GLUON:  # fuse-hc all-stream B3 (import errors must surface, not silently drop the gluon B3)
-    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled
+    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled, b3x_layouts
 else:  # pragma: no cover
 
     def b3x_enabled() -> bool:
         return False
 
     def b3x_cfg():
-        return 64, 4, False
+        return dict(bc=64, w=8, bt=32, pf=0, ewm=0, buf=0)
 
 from .hc_bif import (
     _hc_collapse_bif_kernel,
@@ -951,7 +951,7 @@ class HCPreFn(torch.autograd.Function):
                 stash = None
         # fuse-hc PRIMUS_HC_B3X: the all-stream B3 reads bf16 fn.weight directly (no W^T hi/lo split needed)
         direct_w = (b3x_enabled() and _gl_b3_ok(M, D, K) and w.dtype == torch.bfloat16 and w.is_contiguous()
-                    and x.dtype == torch.bfloat16 and D % b3x_cfg()[0] == 0)
+                    and x.dtype == torch.bfloat16 and D % b3x_cfg()["bc"] == 0)
         if stash is not None:
             _, _, wth_s, wtl_s, p_raw, p_ss, n_split = stash
             if wth_s is None and _gl_b3_ok(M, D, K) and not direct_w:  # W^T hi/lo for B3 (same kernel / bits as the wmma3 branch)
@@ -1130,16 +1130,20 @@ class HCPreFn(torch.autograd.Function):
             n_tiles = n_d * ts
             dx = torch.empty_like(x3)
             dw_p = torch.empty((ts, BN, KD), dtype=torch.float32, device=dev)
-            if b3x_enabled() and D % b3x_cfg()[0] == 0:
+            if b3x_enabled() and D % b3x_cfg()["bc"] == 0:
                 # fuse-hc: all 4 streams per program (x / dnew / dcollapsed loaded once per tile), same bits
-                xbc, xnw, xpf = b3x_cfg()
-                wm, opa, opb, blk, smem = _gl_layouts(bt, xbc, xnw)
-                n_dx = D // xbc
+                xc = b3x_cfg()
+                xbt = xc["bt"] if (M // ts) % xc["bt"] == 0 else bt
+                wm, opa, opb, blk, smem, smem_w = b3x_layouts(xbt, xc["bc"], xc["w"])
+                if xc["ewm"]:
+                    blk = wm
+                n_dx = D // xc["bc"]
                 _hc_b3x_kernel[(n_dx * ts,)](
                     x3, w, wth, wtl, gh, glo, gth, gtl, coef, pre, combt, dcoll, dnew if dnew is not None else x3, dx,
                     dw_p, M, D, N, M // ts, n_dx, n_dx * ts,
-                    BT=bt, BC=xbc, BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk, SMEM=smem,
-                    SMEM_W=_gl_smem_w(BN, xbc), DIRECT_W=ctx.direct_w, PF=xpf, num_warps=xnw,
+                    BT=xbt, BC=xc["bc"], BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk,
+                    SMEM=smem, SMEM_W=smem_w, DIRECT_W=ctx.direct_w, PF=bool(xc["pf"]),
+                    BUF=bool(xc["buf"]) and M * KD * 2 < 2 ** 31, num_warps=xc["w"],
                 )
             else:
                 assert not ctx.direct_w
