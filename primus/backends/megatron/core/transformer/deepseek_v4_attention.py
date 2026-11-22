@@ -1937,7 +1937,13 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # for prefill and indexes ``start_pos + 1 - ratio`` for decode -- both
         # land on the window's first token. Positions stay deterministic, so the
         # cached table is still reused every forward.
-        cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl():  # membound: memoised contiguous cast table (same bytes, no per-call copies)
+            cos, sin = self.rope.compress_rope.forward_arange_cast(P, device, pooled.dtype, self.rotary_dim // 2,
+                                                                   stride=self.compress_ratio)
+        else:
+            cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
         cos = cos.unsqueeze(0).expand(B, -1, -1)
