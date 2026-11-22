@@ -81,6 +81,11 @@ no_fp8_weight_transpose_cache: false
 
 # parallelism
 decoder_pipeline_manual_split_list: null # int list
+# Start the last-stage expert-parameter all-gather before the first activation arrives.
+early_expert_param_gather: false
+# Run this many PP0 decoder layers of microbatch 2 before the first gradient exchange.
+# Requires two non-interleaved stages and activation memory for the additional prefix.
+pipeline_forward_prefix_layers: 0
 
 # MoE comm & comp Overlap
 patch_moe_overlap: false

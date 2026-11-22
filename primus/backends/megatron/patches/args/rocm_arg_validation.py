@@ -210,6 +210,15 @@ def warn_turbo_grouped_gemm_without_expandable_segments(args) -> None:
 
 
 def validate_args_on_rocm(args):
+    if getattr(args, "early_expert_param_gather", False) or getattr(
+        args, "pipeline_forward_prefix_layers", 0
+    ):
+        from primus.backends.megatron.patches.parallelism.forward_prefix_patches import (
+            validate_pipeline_prefetch,
+        )
+
+        validate_pipeline_prefetch(args)
+
     # Primus-Turbo auto-tuning
     use_turbo_autotune = getattr(args, "use_turbo_autotune", False)
     if use_turbo_autotune:

@@ -1,0 +1,60 @@
+# Synthetic GPT-OSS throughput benchmark on 8 nodes with 8 MI355X GPUs per node.
+# The parent uses bias-free SwiGLU experts and QK normalization, MBS 8 and GBS 2048.
+extends:
+  - gpt_oss_120B-FP8-pretrain.yaml
+exp_name: ${PRIMUS_EXP_NAME:gpt_oss_120B-FP8-tensorwise-64gpu}
+env:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+modules:
+  pre_trainer:
+    overrides:
+      train_data_path: null
+      moe_router_force_load_balancing_type: even
+      train_iters: 25
+      log_interval: 1
+      log_avg_skip_iterations: 5
+      log_avg_reset_interval: 25
+      profile: false
+      use_pytorch_profiler: false
+      profile_step_start: 10
+      profile_step_end: 12
+      seed: 1234
+
+      # Eight accumulated microbatches across 32 dense replicas. PP1 owns 16 layers and the head.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
+      virtual_pipeline_model_parallel_size: null
+      expert_model_parallel_size: 8
+      decoder_first_pipeline_num_layers: 20
+      early_expert_param_gather: true
+      pipeline_forward_prefix_layers: 4
+      seq_length: 4096
+      max_position_embeddings: 4096
+
+      fp8_recipe: tensorwise
+      use_turbo_gemm: true
+      turbo_gemm_backend: fp8:flydsl,fp4:flydsl,other:hipblaslt
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: fp8:flydsl,fp4:flydsl,other:hipblaslt
+      turbo_fused_grouped_gemm: true
+      turbo_fp8_permute: true
+      use_turbo_deepep: true
+      turbo_deepep_num_cu: 160
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+      use_turbo_fused_act_with_probs: true
+      moe_router_fusion: true
+      moe_router_dtype: fp32
+      moe_use_fused_router_with_aux_score: true
+      moe_shared_expert_overlap: false
+
+      sink_sliding_window: 128
+      use_turbo_fused_qk_rmsnorm_rope: true
+      use_turbo_rms_norm: true
+      use_turbo_norm_te_linear: true
+      cross_entropy_fusion_impl: te
+      ddp_num_buckets: 24
+      ddp_average_in_collective: true
+      grad_reduce_in_bf16: true
+      recompute_num_layers: 0
