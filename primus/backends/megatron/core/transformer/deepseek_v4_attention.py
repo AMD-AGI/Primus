@@ -77,6 +77,11 @@ from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
 from primus.backends.megatron.core.transformer.indexer import Indexer
+
+try:  # PRIMUS_OVERLAP_INDEXER (side-stream CSA indexer); absent in older Primus-Turbo builds
+    from primus_turbo.pytorch.core import overlap as _overlap
+except ImportError:  # pragma: no cover
+    _overlap = None
 from primus.backends.megatron.core.transformer.indexer_distill_loss import (
     V4IndexerLossAutoScaler,
     compute_indexer_distill_loss,
@@ -519,6 +524,23 @@ def _fp8_grouped_o_a(attn_g: torch.Tensor, wo_a_w: torch.Tensor) -> torch.Tensor
 
 
 _OA_DGRAD_TN = os.environ.get("PRIMUS_V4_OA_DGRAD_TN", "0") == "1"
+# bf16g2: o_a dgrad as an NN Gluon GEMM on w itself (no [G, d, r] transpose of w); bit-identical to the hipBLASLt
+# TN / NN solutions (same per-output K order). Needs Triton main (Gluon cdna5); falls back to the paths below.
+_BF16G2_OA_DGRAD = os.environ.get("PRIMUS_BF16G2_OA_DGRAD", "0") == "1"
+_BF16G2_STATE = {}
+
+
+def _bf16g2_mm_or_none():
+    """primus_turbo bf16g2_mm if importable (Gluon cdna5 / gfx1250), else None (logged once)."""
+    if "mm" not in _BF16G2_STATE:
+        try:
+            from primus_turbo.gluon.gemm.bf16g2_gemm import bf16g2_mm
+
+            _BF16G2_STATE["mm"] = bf16g2_mm
+        except Exception as e:  # noqa: BLE001
+            _BF16G2_STATE["mm"] = None
+            logging.getLogger(__name__).warning(f"bf16g2 unavailable ({type(e).__name__}: {e}); using hipBLASLt")
+    return _BF16G2_STATE["mm"]
 
 
 class _GroupedOAProjFn(torch.autograd.Function):
@@ -567,7 +589,15 @@ class _GroupedOAProjFn(torch.autograd.Function):
         dx = None
         if ctx.needs_input_grad[0]:
             dx = x2.new_empty(BS, G, d)
-            if _OA_DGRAD_TN and w.stride(-1) == 1:
+            g2 = _bf16g2_mm_or_none() if _BF16G2_OA_DGRAD else None
+            if (g2 is not None and w.stride(-1) == 1 and do.stride(-1) == 1 and w.dtype == torch.bfloat16
+                    and do.dtype == torch.bfloat16 and r % 128 == 0 and r >= 384):
+                # NN: B = w [G, r(K), d(N)], N contiguous; 256x256 tiles, 16-element row pad for the MN-major tile
+                g2(do, w, dx.transpose(0, 1), tile="256x256", tpad=16)
+                if not _BF16G2_STATE.get("logged"):
+                    _BF16G2_STATE["logged"] = True
+                    print(f"[bf16g2] o_a dgrad NN Gluon (G={G}, T={BS}, r={r}, d={d})", flush=True)
+            elif _OA_DGRAD_TN and w.stride(-1) == 1:
                 # TN: K (= r) contiguous for both operands. With the TunableOp entry for
                 # tn_4096_4096_1024_B_8_ld_1024_8192_32768 (tunableop_dsv4_gfx1250_bf16{bit,all}_0.csv) hipBLASLt
                 # runs ~20% faster than the tuned NN form and bit-identical to it; without the entry the default
@@ -1399,6 +1429,8 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
 
         if not att_gadd_enabled() or self.compress_ratio not in (4, 128) or seq_starts is not None:
             return None
+        if getattr(self, "_ovl_pool", None) is not None:  # PRIMUS_OVERLAP_COMPRESSOR already issued it (ForkGrad sums)
+            return None
         comp = getattr(self, "compressor", None)
         wkg = getattr(comp, "wkv_gate", None) if comp is not None else None
         if wkg is None or getattr(wkg, "bias", None) is not None or not getattr(comp, "_fuse_proj", False):
@@ -1957,7 +1989,13 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # for prefill and indexes ``start_pos + 1 - ratio`` for decode -- both
         # land on the window's first token. Positions stay deterministic, so the
         # cached table is still reused every forward.
-        cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl():  # membound: memoised contiguous cast table (same bytes, no per-call copies)
+            cos, sin = self.rope.compress_rope.forward_arange_cast(P, device, pooled.dtype, self.rotary_dim // 2,
+                                                                   stride=self.compress_ratio)
+        else:
+            cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
         cos = cos.unsqueeze(0).expand(B, -1, -1)
@@ -1965,6 +2003,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         pool_kv = pooled.unsqueeze(2)  # [B, P, 1, head_dim]
         pool_kv = apply_interleaved_partial_rope(pool_kv, cos, sin, rotary_dim=self.rotary_dim)
         return pool_kv.squeeze(2)  # [B, P, head_dim]
+
+    def _pool_or_overlap(self, hidden: torch.Tensor, cu_seqlens=None) -> torch.Tensor:
+        """The compressed pool: the one forward() issued on a side stream (PRIMUS_OVERLAP_COMPRESSOR), or built now."""
+        ovl, self._ovl_pool = getattr(self, "_ovl_pool", None), None
+        if ovl is not None:
+            br, pool = ovl
+            return br.done(pool)
+        return self._build_compressed_pool(hidden, cu_seqlens)
 
     def _hca_extra_kv(
         self,
@@ -1987,7 +2033,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         """
         B, S, _ = hidden.shape
         device, dtype = hidden.device, hidden.dtype
-        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
+        pool = self._pool_or_overlap(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # Broadcast pool across all H query-heads: [B, P, head_dim] -> [B, P, H, head_dim].
@@ -2148,7 +2194,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             kv_latent = kv
 
         # 1) Compressed pool with compress-base RoPE.
-        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
+        pool = self._pool_or_overlap(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # 2) Indexer top-K per query. The indexer is fed a *detached* hidden
@@ -2157,9 +2203,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # from leaking into the layers below (the open-source reference detaches
         # the same way), and when the indexer is frozen it also stops autograd
         # from building a subgraph whose output is discarded.
-        topk_idxs, topk_scores = self.indexer(
-            hidden.detach(), position_ids, cu_seqlens=cu_seqlens
-        )  # [B, S, K]
+        ovl_idx, self._ovl_indexer = getattr(self, "_ovl_indexer", None), None
+        if ovl_idx is not None:  # PRIMUS_OVERLAP_INDEXER: issued on a side stream at the top of forward()
+            br, out = ovl_idx
+            topk_idxs, topk_scores = br.done(*out)
+        else:
+            topk_idxs, topk_scores = self.indexer(
+                hidden.detach(), position_ids, cu_seqlens=cu_seqlens
+            )  # [B, S, K]
 
         # 2b) Indexer distillation. argTopK is not differentiable and the
         # scores are otherwise discarded, so this loss is the indexer's only
@@ -2615,6 +2666,47 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 "fail."
             )
         device, dtype = hidden.device, hidden.dtype
+
+        # PRIMUS_OVERLAP_INDEXER=1: the CSA indexer (forward only: detached input, frozen params, integer top-k out)
+        # depends on nothing but `hidden`, so it is issued on a side stream here and runs next to the q / kv
+        # projections and the compressor; _csa_forward waits for it. Same kernels and inputs -> same top-k.
+        self._ovl_indexer = None
+        if (
+            self.compress_ratio == 4
+            and self.indexer is not None
+            and _overlap is not None
+            and _overlap.enabled("INDEXER")
+            and cu_seqlens is None
+            and _v4_get_cp_group() is None
+            and not (self.indexer_distill_enabled and self.training and torch.is_grad_enabled())
+            and not any(p.requires_grad for p in self.indexer.parameters())
+        ):
+            with _overlap.branch("indexer") as br:
+                out = self.indexer(hidden.detach(), position_ids, cu_seqlens=None)
+            self._ovl_indexer = (br, out)
+
+        # PRIMUS_OVERLAP_COMPRESSOR (HCA / CSA): the compressor (pool) depends only on `hidden`, so it is issued on a side
+        # stream next to the q / kv path (its backward follows it there). ForkGrad sums the two input gradients in the
+        # serial engine's order -- compressor first, then the qkv_a projection (the only other consumer on the concat
+        # path) -- so every bit stays the same. =1: HCA layers only; =2: CSA layers too (next to the indexer branch).
+        self._ovl_pool = None
+        if (
+            self.compressor is not None
+            and _overlap is not None
+            and _overlap.enabled("COMPRESSOR")
+            and (self.compress_ratio == 128 or (self.compress_ratio == 4 and _overlap.level("COMPRESSOR") >= 2))
+            and cu_seqlens is None
+            and _v4_get_cp_group() is None
+            and hidden.requires_grad
+            and torch.is_grad_enabled()
+            and self._qkv_a_concat_ok(hidden)
+            and not (self.indexer_distill_enabled and self.training)
+        ):
+            h_q, h_c = _overlap.ForkGrad.apply(hidden, 2, (1, 0))
+            with _overlap.branch("compressor") as brc:
+                pool_ovl = self._build_compressed_pool(h_c, None)
+            self._ovl_pool = (brc, pool_ovl)
+            hidden = h_q
 
         # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one GEMM (see _QKVASplit); else two linears.
         q_a, kv_a = None, None
