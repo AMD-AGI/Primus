@@ -26,7 +26,7 @@ def _rope_tbl_kernel(POS, INV, COS, SIN, n, R: tl.constexpr, BR: tl.constexpr, R
     rm = r < n
     cm = c < R
     p = tl.load(POS + r, mask=rm, other=0).to(tl.float32)
-    inv = tl.load(INV + c, mask=cm, other=0.0)
+    inv = tl.load(INV + c, mask=cm, other=0.0).to(tl.float32)  # bf16 buffer (Float16Module) -> fp32, exact
     f = p[:, None] * inv[None, :]
     o = r.to(tl.int64)[:, None] * R + c[None, :]
     m = rm[:, None] & cm[None, :]
@@ -36,7 +36,9 @@ def _rope_tbl_kernel(POS, INV, COS, SIN, n, R: tl.constexpr, BR: tl.constexpr, R
 
 def rope_table(position_ids: torch.Tensor, inv_freq: torch.Tensor, dtype):
     """(cos, sin) == (cos(pos.float()[..., None] * inv).to(dtype), sin(...).to(dtype)), contiguous; or None."""
-    if not (position_ids.is_cuda and inv_freq.is_cuda and inv_freq.dtype == torch.float32 and inv_freq.dim() == 1
+    if not (position_ids.is_cuda and inv_freq.is_cuda and inv_freq.dim() == 1
+            and inv_freq.dtype in (torch.float32, torch.bfloat16, torch.float16)
+
             and inv_freq.is_contiguous() and dtype in (torch.bfloat16, torch.float16, torch.float32)
             and not position_ids.dtype.is_floating_point and position_ids.numel() > 0):
         return None
