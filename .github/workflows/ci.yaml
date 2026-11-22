@@ -756,6 +756,270 @@ jobs:
           [ -n "$owner" ] && find "${GITHUB_WORKSPACE}" -user 0 -exec chown "$owner" {} + 2>/dev/null
           IN
 
+  run-unittest-torch-gfx950:
+    permissions:
+      contents: read
+      actions: read # let "Write runtime summary" list this job's own steps for auto-discovered timing
+    needs: [build-docker]
+    # Keep the test steps' tier args and deselects in sync with run-unittest-torch.
+    # PRs: ci:gpu label, not draft; fork PRs get neither the image nor the SaFE secrets and skip it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'ci:gpu') &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    # A CPU-only runner runs the test steps on an MI355X workload it submits, over the SaFE SSH gateway.
+    runs-on: primus-safe-mi355
+    # Includes the wait for a GPU node.
+    timeout-minutes: 480
+    env:
+      # workspace:priority in fallback order; priority 2 needs the workspace manager role.
+      GPU_WORKSPACES: crusoe-primus-turbo-cicd:2 crusoe-tas-shared:1 crusoe-hyperloom-dev:1
+      QUEUE_MINUTES: 10
+      IMAGE: docker.io/tasimage/primus:${{ needs.build-docker.outputs.image_tag }}
+      PASS_ENV: PRIMUS_CI_FULL
+    steps:
+      - run: echo "🎉 Begin Primus Unit Test (gfx950)."
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+      - name: Decide E2E scope (torch)
+        run: |
+          # Fail-safe: default to running all E2E (push/release/dispatch, or any
+          # diff failure). On PRs, narrow to the suites the changed files affect.
+          M=1; T=1
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            git fetch --no-tags --depth=200 origin "${{ github.base_ref }}" 2>/dev/null || true
+            changed="$(git diff --name-only "${base}" HEAD 2>/dev/null || true)"
+            if [[ -n "${changed}" ]]; then
+              e2e="$(printf '%s\n' "${changed}" | python3 tools/ci/select_tests.py)"
+              echo "Selected torch E2E scope: ${e2e:-<none>}"
+              if [[ "${e2e}" != "all" ]]; then
+                echo "${e2e}" | grep -qw megatron   || M=0
+                echo "${e2e}" | grep -qw torchtitan || T=0
+              fi
+            fi
+          fi
+          echo "RUN_MEGATRON_E2E=${M}" >> "$GITHUB_ENV"
+          echo "RUN_TORCHTITAN_E2E=${T}" >> "$GITHUB_ENV"
+      # The GPU steps run in order on one MI355X workload, submitted by the first of them.
+      - name: Install Primus on an MI355X workload
+        id: gpu
+        shell: bash .github/scripts/safe_job.sh start {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+          SAFE_SSH_KEY: ${{ secrets.SAFE_SSH_KEY }}
+          IMAGE_PULL_USER: tasimage
+          IMAGE_PULL_TOKEN: ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+        run: |
+          set -e
+          [[ $(rocminfo) == *gfx950* ]] || { echo "::error::No gfx950 GPU in the workload"; exit 1; }
+          # E2E tokenizers and HF assets, downloaded by the prepare hooks on first use.
+          printf '%s\n' "GITHUB_WORKSPACE=${PWD}" "UT_LOG_PATH=${PWD}/ut_out" \
+            "DATA_PATH=/shared_nfs/github-runners/_data-primus" >> "$SAFE_ENV"
+          pip install -r requirements.txt
+      - name: Run CLI Shell and Runner Tests
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          set -e
+          echo "Running Primus CLI shell tests..."
+          bash ./tests/runner/run_all_tests.sh
+          echo "Running Primus runner pytest tests..."
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
+          pytest -q ./tests/runner/ --junitxml="${GITHUB_WORKSPACE}/test-reports/runner.xml"
+      - name: Run Primus Core Tests
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          set -e
+          export HSA_NO_SCRATCH_RECLAIM=1
+          # torch 2.14's native bmm outer-product kernel overflows its index at 2^32 elements.
+          export TORCH_DISABLE_NATIVE_JIT=1
+          mkdir -p "${GITHUB_WORKSPACE}/test-reports"
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] && TIER_ARGS=(--run-slow)
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/unit_tests/ "${TIER_ARGS[@]}" \
+            --cov=primus --cov-branch --cov-report=term-missing:skip-covered \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/core-unit.xml" \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward \
+            --deselect=tests/unit_tests/core/projection/test_performance_projection.py::test_limit_layers_moe_with_dense_keeps_two \
+            --deselect=tests/unit_tests/backends/megatron/diffusion/test_te_vs_local_spec_attention.py::TestTEvsLocalSpecAttention::test_single_pass_te_vs_local
+      - name: Snapshot unit-test coverage
+        if: ${{ !cancelled() && steps.gpu.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          # .coverage_unit (not .coverage.unit) avoids coverage combine treating it as a .coverage.* shard.
+          python -m coverage json -o coverage_unit.json 2>/dev/null || true
+          cp .coverage .coverage_unit 2>/dev/null || true
+      - name: Setup E2E training coverage
+        if: ${{ !cancelled() && steps.gpu.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          # Record coverage of the training subprocesses (primus-cli -> torchrun -> python); see
+          # run-unittest-torch. No branch=true: it crashed all 8 ranks in test_memory_benchmark.
+          set -e
+          SP=$(python -c "import site; print(site.getsitepackages()[0])")
+          echo "import coverage; coverage.process_startup()" > "$SP/primus_e2e_coverage.pth"
+          printf '[run]\nparallel = true\nsource = primus\nsigterm = true\n' > .coveragerc_e2e
+          printf '%s\n' "COVERAGE_PROCESS_START=${PWD}/.coveragerc_e2e" "COVERAGE_FILE=${PWD}/.coverage_e2e" >> "$SAFE_ENV"
+      - name: Run Primus Model Tests -- Megatron-LM
+        if: env.RUN_MEGATRON_E2E == '1'
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          STEP_ENV: HF_TOKEN
+        run: |
+          set -e
+          export MASTER_PORT=10009 HSA_NO_SCRATCH_RECLAIM=1
+          export GPU_ARCHS="$(python3 -c 'import torch; print(torch.cuda.get_device_properties(0).gcnArchName.split(":")[0])')"
+          echo "Detected GPU_ARCHS=${GPU_ARCHS}"
+          rm -rf "${UT_LOG_PATH}"
+          mkdir -p "${UT_LOG_PATH}"
+          # Mamba / SSM tests: see run-unittest-torch.
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_megatron_trainer.py "${TIER_ARGS[@]}" \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_130M_bridge_pretrain \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_mamba_370M \
+            --deselect tests/trainer/test_megatron_trainer.py::TestMegatronTrainer::test_zebra_mamba_1B_hybrid \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/megatron-e2e.xml"
+      - name: Run Primus Model Tests -- TorchTitan
+        if: env.RUN_TORCHTITAN_E2E == '1'
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          STEP_ENV: HF_TOKEN
+        run: |
+          set -e
+          export MASTER_PORT=10009 HSA_NO_SCRATCH_RECLAIM=1
+          rm -rf "${UT_LOG_PATH}"
+          mkdir -p "${UT_LOG_PATH}"
+          # deepseek_v3_671b and deepseek_v3_16b_fp8: see run-unittest-torch.
+          TIER_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || TIER_ARGS=(-m "not weekly")
+          MAXFAIL_ARGS=()
+          [[ "${PRIMUS_CI_FULL:-0}" == "1" ]] || MAXFAIL_ARGS=(--maxfail=1)
+          pytest "${MAXFAIL_ARGS[@]}" -s ./tests/trainer/test_torchtitan_trainer.py "${TIER_ARGS[@]}" \
+            --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_671b \
+            --deselect tests/trainer/test_torchtitan_trainer.py::TestTorchTitanTrainer::test_deepseek_v3_16b_fp8 \
+            --junitxml="${GITHUB_WORKSPACE}/test-reports/torchtitan-e2e.xml"
+      - name: Run Primus CLI tool smoke (benchmark / preflight, E2E coverage)
+        if: ${{ !cancelled() && steps.gpu.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          # Best-effort, as in run-unittest-torch.
+          export HSA_NO_SCRATCH_RECLAIM=1
+          OUT="${UT_LOG_PATH}/cli_smoke"; mkdir -p "$OUT"
+          cli() { python -m primus.cli.main "$@" || true; }
+          cli benchmark gemm --M 512 --N 512 --K 512 --duration 2 --output-file "$OUT/gemm.md"
+          cli benchmark gemm-dense --seqlen 256 --hidden-size 512 --intermediate-size 512 --duration 2 --output-file "$OUT/gemm_dense.md"
+          cli benchmark gemm-deepseek --seqlen 256 --hidden-size 512 --intermediate-size 512 --moe-intermediate-size 512 --duration 2 --output-file "$OUT/gemm_deepseek.md"
+          cli benchmark attention --backend flash --mbs-list 1,2 --report-csv-path "$OUT/attn.csv"
+          cli preflight --host --gpu --dump-path "$OUT/preflight"
+          NGPU=$(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 1)
+          [ "$NGPU" -ge 2 ] && torchrun --nproc_per_node="$NGPU" -m primus.cli.main benchmark rccl --op all_reduce all_gather --min-bytes 1K --max-bytes 256K --num-sizes 2 --iters 3 --warmup 1 --output-file "$OUT/rccl.md" || true
+          [ "$NGPU" -ge 8 ] && torchrun --nproc_per_node=8 -m primus.cli.main benchmark strided-allgather --sizes-mb 8 --iters 3 --warmup 1 || true
+      - name: Build torch coverage json (unit + E2E)
+        if: ${{ !cancelled() && steps.gpu.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash .github/scripts/safe_job.sh {0}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          set -euo pipefail
+          unset COVERAGE_PROCESS_START
+          shopt -s nullglob
+          e2e_shards=(.coverage_e2e.*)
+          if [ ${#e2e_shards[@]} -gt 0 ]; then
+            COVERAGE_FILE=.coverage_e2e python -m coverage combine
+          fi
+          if [ ! -s .coverage_e2e ]; then
+            echo "::warning::no torch E2E coverage data; skipping coverage_combined.json"
+            exit 0
+          fi
+          parts=(.coverage_e2e)
+          if [ -s .coverage_unit ]; then
+            # Branch and statement data do not combine: project .coverage_unit to lines first.
+            python -c "import coverage; src=coverage.CoverageData(basename='.coverage_unit'); src.read(); dst=coverage.CoverageData(basename='.coverage_unit_lines'); [dst.add_lines({f: src.lines(f)}) for f in src.measured_files()]; dst.write()"
+            parts=(.coverage_unit_lines .coverage_e2e)
+          fi
+          COVERAGE_FILE=.coverage_all python -m coverage combine --keep "${parts[@]}"
+          COVERAGE_FILE=.coverage_all python -m coverage json -o coverage_combined.json
+      - name: Fetch test reports and coverage
+        if: ${{ !cancelled() && steps.gpu.outcome == 'success' }}
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          bash .github/scripts/safe_job.sh fetch test-reports coverage_unit.json coverage_combined.json
+          # Named apart from run-unittest-torch's: coverage-summary picks the files by name.
+          for f in coverage_unit coverage_combined; do [ -f "$f.json" ] && mv "$f.json" "${f}_gfx950.json"; done; true
+      - name: Fetch UT logs
+        if: failure() && steps.gpu.outcome == 'success'
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: bash .github/scripts/safe_job.sh fetch ut_out
+      - name: Delete the GPU workload
+        if: always()
+        env:
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: bash .github/scripts/safe_job.sh delete
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: torch-gfx950-test-reports
+          path: test-reports/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload UT logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: torch-gfx950-ut-logs
+          path: ut_out/
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Write test summary
+        if: always()
+        run: python3 tools/ci/junit_summary.py --title "torch (gfx950)" test-reports/*.xml >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Write runtime summary
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/ci/runtime_summary.py --title "torch (gfx950)" >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload torch coverage json
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-torch-gfx950
+          path: |
+            coverage_unit_gfx950.json
+            coverage_combined_gfx950.json
+          if-no-files-found: ignore
+
   run-unittest-jax:
     permissions:
       contents: read
@@ -945,7 +1209,7 @@ jobs:
     # table. Uses module-level JSON (not coverage data), so no cross-runner path
     # mapping is needed: torch (megatron/torchtitan) and jax (maxtext) E2E cover
     # near-disjoint modules and are merged per module by max covered lines.
-    needs: [run-unittest-torch, run-unittest-jax]
+    needs: [run-unittest-torch, run-unittest-torch-gfx950, run-unittest-jax]
     # Same ci:gpu gate as GPU UT.
     if: >-
       always() &&
@@ -965,9 +1229,10 @@ jobs:
         run: |
           unit=$(find cov-artifacts -name coverage_unit.json | head -1)
           torch=$(find cov-artifacts -name coverage_combined.json | head -1)
+          torch_gfx950=$(find cov-artifacts -name coverage_combined_gfx950.json | head -1)
           jax=$(find cov-artifacts -name coverage_maxtext_e2e.json | head -1)
           if [ -n "$unit" ]; then
-            python tools/ci/coverage_summary.py "$unit" "Unit vs Unit+E2E (torch + jax)" $torch $jax >> "$GITHUB_STEP_SUMMARY"
+            python tools/ci/coverage_summary.py "$unit" "Unit vs Unit+E2E (torch + jax)" $torch $torch_gfx950 $jax >> "$GITHUB_STEP_SUMMARY"
           else
             echo "No unit coverage artifact found; skipping combined summary." >> "$GITHUB_STEP_SUMMARY"
           fi
