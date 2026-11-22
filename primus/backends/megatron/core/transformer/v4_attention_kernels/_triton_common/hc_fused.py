@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover
     _HAVE_GLUON = False
 
 if _HAVE_GLUON:  # fuse-hc all-stream B3 (import errors must surface, not silently drop the gluon B3)
-    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled, b3x_layouts, b3x_splitk_kw, b3x_splitk_ts
+    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled, b3x_layouts, b3x_smem_f, b3x_splitk_kw, b3x_splitk_ts
 else:  # pragma: no cover
 
     def b3x_splitk_ts() -> int:
@@ -1228,6 +1228,8 @@ class HCPreFn(torch.autograd.Function):
                     ekw["GQ"] = False  # hcfuse: g in bf16 only for dx and dW (drops the lo WMMA products)
                 if xc.get("pf2") and not ekw["BUF"]:
                     ekw["PF2"] = True  # hcfuse: prefetch of every per-step load (PRIMUS_HC_B3X_CFG ...,pf2=1)
+                    if xc.get("bat"):  # hcfuse: one LDS round trip per step for the 4 dx GEMMs + x staging
+                        ekw.update(BAT=True, SMEM_F=b3x_smem_f(xbt, xc["bc"]))
                 abl = int(os.environ.get("PRIMUS_HCFUSE_B3X_ABL", "0") or "0")  # bench-only ablation bits (wrong output)
                 if abl:
                     ekw["ABL"] = abl
