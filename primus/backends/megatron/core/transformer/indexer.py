@@ -870,6 +870,15 @@ class Indexer(nn.Module):
             _dist.all_reduce(scores, group=self.tp_group)
 
         topk_eff = min(K, P)
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_topk import (
+            indexer_topk,
+            indexer_topk_supported,
+        )
+
+        if topk_eff == K and indexer_topk_supported(scores, topk_eff):
+            # PRIMUS_V4_INDEXER_TOPK_TRITON=1: torch.topk (sorted) + the -inf -> -1 sentinel in one Triton launch,
+            # same values / indices bit for bit (see indexer_topk.py).
+            return indexer_topk(scores, topk_eff)
         topk_scores, topk_idxs = scores.topk(topk_eff, dim=-1)  # [B, S, topk_eff]
         return self._finalize_topk(topk_idxs, topk_scores, topk_eff, K, B, S)
 

@@ -117,8 +117,14 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.q_norm_rope import (
     q_norm_rope_pad,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.qkv_post import (
+    qkv_post,
+    qkv_post_supported,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (
     apply_rope_from_positions,
+    orope_inplace_supported,
+    out_inv_rope_inplace,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -1452,12 +1458,18 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         return hd >= 2 and (hd & (hd - 1)) == 0 and hidden.dtype in (torch.bfloat16, torch.float16)
 
     def _apply_q_norm_rope(
-        self, hidden: torch.Tensor, position_ids: torch.Tensor, q_compressed: Optional[torch.Tensor] = None
+        self,
+        hidden: torch.Tensor,
+        position_ids: torch.Tensor,
+        q_compressed: Optional[torch.Tensor] = None,
+        q_normed: bool = False,
     ) -> torch.Tensor:
-        """``_apply_q`` + Q RoPE in one fused kernel (same math, see ``q_norm_rope``)."""
+        """``_apply_q`` + Q RoPE in one fused kernel (same math, see ``q_norm_rope``). ``q_normed``: ``q_compressed``
+        already went through ``q_layernorm`` (PRIMUS_V4_QKV_POST_FUSED)."""
         if q_compressed is None:
             q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
-        q_compressed = self.q_layernorm(q_compressed)
+        if not q_normed:
+            q_compressed = self.q_layernorm(q_compressed)
         dyq_slot = None
         if _glue_wqb_dyq_ok(self.linear_q_up_proj):
             # PRIMUS_GLUE_WQB_DYQ=1: the wq_b FP8 GEMM opens a dY-prequant slot; the q norm/rope backward fills it
@@ -1779,6 +1791,15 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         if self.rotary_dim == 0:
             return attn
         rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+        if orope_inplace_supported(attn, self.rotary_dim) and torch.is_grad_enabled() and attn.requires_grad:
+            # PRIMUS_V4_OROPE_INPLACE=1: ``attn`` is the sparse-MLA output its backward saved; de-rotate its tail in
+            # place and restore it in the backward (same bytes as below; see OutInvRopeInplaceFn).
+            from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                take_saved_output,
+            )
+
+            if take_saved_output(attn):
+                return out_inv_rope_inplace(attn, position_ids, rope.inv_freq, rotary_dim=self.rotary_dim)
         return apply_rope_from_positions(
             attn,
             position_ids,
@@ -2577,7 +2598,23 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
 
         # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one GEMM (see _QKVASplit); else two linears.
         q_a, kv_a = self._qkv_a_concat(hidden) if self._qkv_a_concat_ok(hidden) else (None, None)
-        if self._fused_q_norm_rope_ok(hidden):
+        if (
+            q_a is not None
+            and self._fused_q_norm_rope_ok(hidden)
+            and qkv_post_supported(q_a, kv_a, self.q_layernorm, self.kv_layernorm, self.rotary_dim)
+        ):
+            # PRIMUS_V4_QKV_POST_FUSED=1: q_layernorm, kv_layernorm and the kv RoPE as one op (fwd 3 -> 1 launch,
+            # bwd 5 -> 2), bit-identical (see qkv_post.py).
+            rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+            q_c, kv_r = qkv_post(
+                q_a, kv_a, self.q_layernorm.weight, self.kv_layernorm.weight,
+                position_ids.broadcast_to((B, S)).reshape(-1), rope.inv_freq,
+                eps_q=self.q_layernorm.eps, eps_kv=self.kv_layernorm.eps, rotary_dim=self.rotary_dim,
+                q_first=getattr(self, "_qkv_a_fp8_order", "q_kv") == "q_kv",
+            )
+            q = self._apply_q_norm_rope(hidden, position_ids, q_compressed=q_c, q_normed=True)
+            kv = kv_r.view(B, S, 1, self.head_dim)
+        elif self._fused_q_norm_rope_ok(hidden):
             # One pass for per-head RMSNorm + RoPE on Q, written straight into the
             # zero-padded buffer the sparse-MLA adapter consumes (no pad copy).
             q = self._apply_q_norm_rope(hidden, position_ids, q_compressed=q_a)  # [B, S, H, head_dim] view
