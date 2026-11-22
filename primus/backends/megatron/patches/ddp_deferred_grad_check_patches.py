@@ -144,6 +144,20 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
         # so take it here, once, over every bucket (the same reduction the l2norm would do).
         if not use_triton:
             return None
+        if os.environ.get("PRIMUS_MB_GNORM", "0") == "1":
+            r = _sumsq_all_buckets_multi(ddp)
+            if (r is not None and os.environ.get("PRIMUS_MB_GNORM_CHECK", "0") == "1"
+                    and not torch.cuda.is_current_stream_capturing()):
+                full = None  # debug: the upstream loop (fresh flags already consumed -> full grads, no folding)
+                for bg in list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", [])):
+                    for b in bg.buckets:
+                        if b.grad_data is not None and b.grad_data.numel() > 0:
+                            n = grad_sumsq(b.grad_data)
+                            full = n if full is None else full + n
+                print(f"[membound GNORM_CHECK] multi {r.item():.9e} full {full.item():.9e} "
+                      f"rel {abs(r.item() - full.item()) / max(abs(full.item()), 1e-30):.3e}", flush=True)
+            if r is not None:
+                return r
         acc = None
         folded = []
         for bg in list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", [])):
@@ -162,6 +176,35 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
             n = torch.cat(folded).sum()
             acc = n if acc is None else acc + n
         return acc
+
+    mb_plans = {}
+
+    def _sumsq_all_buckets_multi(ddp):
+        # membound (PRIMUS_MB_GNORM=1): the same ranges and folded buffers as _sumsq_all_buckets, reduced in two
+        # launches (all partials, then one fixed-order final sum) instead of ~3 launches per range. The plan
+        # (device tables) is built in an eager step and reused under graph capture; None -> upstream loop.
+        ranges, folded = [], []
+        for bg in list(getattr(ddp, "bucket_groups", [])) + list(getattr(ddp, "expert_parallel_bucket_groups", [])):
+            for b in bg.buckets:
+                g = b.grad_data
+                if g is None or g.numel() == 0:
+                    continue
+                if not (g.is_cuda and g.is_contiguous()):
+                    return None
+                rr, fb = _bucket_ranges(b, g.numel())
+                folded += fb
+                ranges += [g[lo:hi] for lo, hi in rr]
+        if not ranges or len({r.dtype for r in ranges}) != 1 or any(f.dtype != torch.float32 for f in folded):
+            return None
+        key = (tuple((r.data_ptr(), r.numel()) for r in ranges), tuple((f.data_ptr(), f.numel()) for f in folded))
+        plan = mb_plans.get(key)
+        if plan is None:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            from primus.backends.megatron.core.distributed.grad_sumsq import MultiSumsq
+
+            plan = mb_plans[key] = MultiSumsq(ranges, folded)
+        return plan() if plan.ok else None
 
     def finish_grad_sync(self, *args, **kwargs):
         # Run upstream first: without overlap_grad_reduce it is what calls start_grad_sync
