@@ -203,11 +203,21 @@ def _build_mx_gemm(shape: GemmShape, device, batch):
     return call, [a, b, sa, sb, c, quads]
 
 
+def _matrix_rates(gcn_arch: str, rates: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+    """FLOPs per CU per clock by dtype: *rates* (e.g. from the GEMM backend), else the built-in table."""
+    return dict(rates) if rates else _MFMA_FLOPS_PER_CU_PER_CLK.get(gcn_arch, {})
+
+
 def mfma_bound_clock_mhz(
-    flops: float, time_ms: float, gcn_arch: str, num_cus: int, dtype: str = "bf16"
+    flops: float,
+    time_ms: float,
+    gcn_arch: str,
+    num_cus: int,
+    dtype: str = "bf16",
+    rates: Optional[Dict[str, float]] = None,
 ) -> Optional[float]:
     """Lowest clock (MHz) that sustains ``flops / time_ms`` of *dtype* at 100 % MFMA use."""
-    per_clk = _MFMA_FLOPS_PER_CU_PER_CLK.get(gcn_arch, {}).get(dtype)
+    per_clk = _matrix_rates(gcn_arch, rates).get(dtype)
     if per_clk is None or time_ms <= 0 or num_cus <= 0:
         return None
     flops_per_s = flops / (time_ms / 1e3)
@@ -243,6 +253,48 @@ def make_origami_predictor(profile_key: str, num_cus: int) -> Optional[Callable[
     return predict
 
 
+def make_backend_predictor(backend_name: str, profile_key: str, num_cus: int):
+    """``(predict, backend)`` from the registered GEMM backend *backend_name*, else ``(None, None)``.
+
+    ``predict(clock_mhz, shape) -> ms`` like :func:`make_origami_predictor`, for
+    backends registered through ``register_gemm_backend`` (including
+    out-of-tree plugins), whose hardware profile *profile_key* names.
+    *backend* is one instance, for its ``hbm_bandwidth_gbps`` and
+    ``matrix_flops_per_cu_per_clk()``.  ``(None, None)`` when the backend is
+    not registered, not available, or does not know *profile_key*.
+    """
+    from primus.core.projection.simulation_backends.base import get_gemm_backend_factory
+
+    factory = get_gemm_backend_factory(backend_name)
+    if factory is None:
+        return None, None
+
+    def build(mhz):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return factory(gpu_arch=profile_key, gpu_clock_mhz=mhz, n_cu_override=num_cus)
+
+    try:
+        probe = build(None)
+        if not probe.is_available():
+            return None, None
+    except Exception:
+        return None, None  # e.g. the backend does not know profile_key
+
+    backends: Dict[int, object] = {}
+
+    def predict(clock_mhz: float, shape: GemmShape) -> float:
+        mhz = int(round(clock_mhz))
+        backend = backends.get(mhz)
+        if backend is None:
+            backend = backends[mhz] = build(mhz)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return backend.simulate_gemm(
+                shape.m, shape.n, shape.k, shape.dtype, batch=shape.batch
+            ).forward_time_ms
+
+    return predict, probe
+
+
 def solve_clock_mhz(
     predict_ms: Callable[[float], float],
     measured_ms: float,
@@ -270,9 +322,9 @@ def solve_clock_mhz(
     return 0.5 * (lo + hi), False
 
 
-def _aggregate_mfma_bound_mhz(measurements, total_ms, gcn_arch, num_cus) -> Optional[float]:
+def _aggregate_mfma_bound_mhz(measurements, total_ms, gcn_arch, num_cus, rates=None) -> Optional[float]:
     """MFMA bound for all GEMMs together: total MFMA cycles needed / total time."""
-    rates = _MFMA_FLOPS_PER_CU_PER_CLK.get(gcn_arch, {})
+    rates = _matrix_rates(gcn_arch, rates)
     if total_ms <= 0 or num_cus <= 0 or any(shape.dtype not in rates for shape, _, _ in measurements):
         return None
     cycles = sum(count * shape.flops / (num_cus * rates[shape.dtype]) for shape, count, _ in measurements)
@@ -285,6 +337,8 @@ def back_calculate_compute_clock(
     num_cus: int,
     predictor: Optional[Callable[[float, GemmShape], float]],
     live_sclk_mhz: Optional[float] = None,
+    matrix_rates: Optional[Dict[str, float]] = None,
+    model: str = "origami",
 ) -> Dict:
     """Effective clock from ``[(shape, occurrences, measured_ms), ...]``.
 
@@ -306,7 +360,7 @@ def back_calculate_compute_clock(
             "measured_ms": measured_ms,
             "achieved_tflops": shape.flops / (measured_ms / 1e3) / 1e12,
             "mfma_bound_clock_mhz": mfma_bound_clock_mhz(
-                shape.flops, measured_ms, gcn_arch, num_cus, shape.dtype
+                shape.flops, measured_ms, gcn_arch, num_cus, shape.dtype, matrix_rates
             ),
             "origami_clock_mhz": None,
             "origami_clamped": None,
@@ -320,17 +374,21 @@ def back_calculate_compute_clock(
     total_ms = sum(count * ms for _, count, ms in measurements)
     result = {
         "gemms": rows,
-        "mfma_bound_clock_mhz": _aggregate_mfma_bound_mhz(measurements, total_ms, gcn_arch, num_cus),
+        "mfma_bound_clock_mhz": _aggregate_mfma_bound_mhz(
+            measurements, total_ms, gcn_arch, num_cus, matrix_rates
+        ),
         "effective_clock_mhz": None,
         "clamped": None,
         "method": None,
+        "model": model if predictor is not None else None,
     }
     if modelled:
         mhz, clamped = solve_clock_mhz(
             lambda f: sum(count * predictor(f, shape) for shape, count, _ in modelled),
             sum(count * ms for _, count, ms in modelled),
         )
-        result.update(effective_clock_mhz=mhz, clamped=clamped, method="origami-inversion")
+        method = "origami-inversion" if model == "origami" else "model-inversion"
+        result.update(effective_clock_mhz=mhz, clamped=clamped, method=method)
     elif live_sclk_mhz:
         result.update(effective_clock_mhz=live_sclk_mhz, method="live-sclk")
     elif result["mfma_bound_clock_mhz"] is not None:

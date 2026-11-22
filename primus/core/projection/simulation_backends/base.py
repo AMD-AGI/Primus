@@ -72,6 +72,15 @@ class GEMMSimulationBackend(ABC):
         """
         return None
 
+    def matrix_flops_per_cu_per_clk(self) -> Optional[Dict[str, float]]:
+        """Dense matrix-core FLOPs per CU per clock by dtype (``"bf16"``, ``"fp8"``, ...), or *None*.
+
+        Hardware calibration uses it for its matrix-core lower bound on parts
+        whose rates it has no built-in table for.  Concrete backends override
+        this when the target architecture is known.
+        """
+        return None
+
     @abstractmethod
     def simulate_gemm(
         self,

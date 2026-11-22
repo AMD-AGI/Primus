@@ -2774,7 +2774,11 @@ def _run_hardware_calibration(training_config, framework, rank, args):
     if rank == 0:
         print(f"{_HW_TAG} Measuring effective compute clock (workload GEMMs) and STREAM bandwidth...")
     try:
-        return run_hardware_calibration(training_config)
+        return run_hardware_calibration(
+            training_config,
+            gemm_backend=getattr(args, "gemm_backend", None),
+            gpu_arch=getattr(args, "gpu_arch", None),
+        )
     except Exception as exc:
         print(f"{_HW_TAG} WARNING: rank {rank} calibration failed: {type(exc).__name__}: {exc}")
         return {"error": f"{type(exc).__name__}: {exc}"}

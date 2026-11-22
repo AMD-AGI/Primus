@@ -115,6 +115,8 @@ Before the layer benchmark, each bench GPU measures its compute clock and memory
 
 Opt out with `--skip-hw-calibration`. Override the bandwidth with `--hbm-bandwidth-gbps`.
 
+**GPUs without a built-in profile.** The clock model is the projection's `--gemm-backend`, which can be an installed plugin, with Origami as the fallback. On a GPU that Primus does not recognise, `--gpu-arch` names that backend's hardware profile. The backend then also supplies the spec HBM peak (`hbm_bandwidth_gbps`) and the matrix-core rates (`matrix_flops_per_cu_per_clk()`) for the lower bound. Without such a backend, calibration still measures STREAM and reports the live SCLK.
+
 ### Projecting to a specific node count
 
 ```bash

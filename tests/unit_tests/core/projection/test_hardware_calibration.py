@@ -508,6 +508,148 @@ def test_amdsmi_reader_averages_xcds_and_drops_invalid(monkeypatch):
         device_info.AmdSmiClockReader("0000:ff:00.0")
 
 
+def test_amdsmi_reader_falls_back_to_per_aid_uclk(monkeypatch):
+    """Parts that report UCLK per AID leave current_uclk at "N/A"; the mean of the valid AIDs is used."""
+    from primus.core.projection.hardware_calibration import device_info
+
+    fake = SimpleNamespace(
+        amdsmi_init=lambda: None,
+        amdsmi_shut_down=lambda: None,
+        amdsmi_get_processor_handles=lambda: ["h0"],
+        amdsmi_get_gpu_device_bdf=lambda h: "0000:01:00.0",
+        amdsmi_get_gpu_metrics_info=lambda h: {
+            "current_gfxclks": [1500, 1460],
+            "current_uclk": "N/A",
+            "current_uclk_aid": [1000, 1200, 65535],
+        },
+    )
+    monkeypatch.setattr(device_info, "_import_amdsmi", lambda: fake)
+    reading = device_info.AmdSmiClockReader("0000:01:00.0").read()
+    assert reading.mclk_mhz == pytest.approx(1100.0)
+
+
+# ---------------------------------------------------------------------------
+# Clock model from a registered (e.g. out-of-tree) GEMM backend
+# ---------------------------------------------------------------------------
+
+_FAKE_RATES = {"bf16": 1000.0, "fp8": 2000.0}
+
+
+def _fake_backend_factory(known_profiles=("fake-arch",), hbm_gbps=1234.0):
+    from primus.core.projection.simulation_backends.base import (
+        GEMMSimulationBackend,
+        SimulationResult,
+    )
+
+    class FakeBackend(GEMMSimulationBackend):
+        def __init__(self, gpu_arch=None, gpu_clock_mhz=None, n_cu_override=None, **_):
+            if gpu_arch not in known_profiles:
+                raise ValueError(f"unknown profile {gpu_arch}")
+            self.clock = gpu_clock_mhz or 1000
+            self.n_cu = n_cu_override
+
+        def name(self):
+            return "fake"
+
+        def is_available(self):
+            return True
+
+        @property
+        def hbm_bandwidth_gbps(self):
+            return hbm_gbps
+
+        def matrix_flops_per_cu_per_clk(self):
+            return dict(_FAKE_RATES)
+
+        def simulate_gemm(self, m, n, k, dtype="bf16", trans_a=False, trans_b=False, batch=1):
+            flops = 2.0 * m * n * k * batch
+            ms = flops / (self.n_cu * _FAKE_RATES["bf16"] * self.clock * 1e6) * 1e3
+            return SimulationResult(forward_time_ms=ms)
+
+    return FakeBackend
+
+
+def _unknown_device(**kw):
+    from primus.core.projection.hardware_calibration.device_info import DeviceInfo
+
+    fields = dict(
+        index=0,
+        name="test device",
+        gcn_arch="gfx1250",
+        num_cus=100,
+        total_memory_bytes=1,
+        profile_key=None,
+        peak_hbm_gbps=None,
+        max_sclk_mhz=None,
+        max_mclk_mhz=None,
+    )
+    fields.update(kw)
+    return DeviceInfo(**fields)
+
+
+@pytest.fixture
+def fake_backend(monkeypatch):
+    from primus.core.projection.simulation_backends import base
+
+    monkeypatch.setitem(base._GEMM_BACKEND_REGISTRY, "fake", _fake_backend_factory())
+    return "fake"
+
+
+def test_backend_predictor_inverts_to_the_true_clock(fake_backend):
+    from primus.core.projection.hardware_calibration.compute_clock import (
+        make_backend_predictor,
+    )
+
+    predict, backend = make_backend_predictor(fake_backend, "fake-arch", 100)
+    assert backend.hbm_bandwidth_gbps == 1234.0
+    shape = GemmShape(8192, 8192, 8192)
+    measured_ms = predict(1700.0, shape)
+    result = back_calculate_compute_clock(
+        [(shape, 1, measured_ms)], "gfx1250", 100, predict, matrix_rates=_FAKE_RATES, model="fake"
+    )
+    assert result["method"] == "model-inversion" and result["model"] == "fake"
+    assert result["effective_clock_mhz"] == pytest.approx(1700.0, abs=1.0)
+    # The backend's matrix rates give the lower bound on an arch with no built-in table.
+    assert result["mfma_bound_clock_mhz"] == pytest.approx(1700.0, abs=1.0)
+
+
+def test_backend_predictor_unknown_backend_or_profile_is_none(fake_backend):
+    from primus.core.projection.hardware_calibration.compute_clock import (
+        make_backend_predictor,
+    )
+
+    assert make_backend_predictor("not-registered", "fake-arch", 100) == (None, None)
+    assert make_backend_predictor(fake_backend, "other-arch", 100) == (None, None)
+
+
+def test_clock_model_uses_gpu_arch_only_on_an_unrecognised_device(fake_backend):
+    from primus.core.projection.hardware_calibration.calibration import _clock_model
+
+    model = _clock_model(_unknown_device(), gemm_backend=fake_backend, gpu_arch="Fake-Arch")
+    assert (model["name"], model["profile_key"], model["profile_source"]) == (
+        "fake",
+        "fake-arch",
+        "--gpu-arch",
+    )
+    assert model["peak_hbm_gbps"] == 1234.0 and model["matrix_rates"] == _FAKE_RATES
+    # A recognised device keeps its own profile: --gpu-arch names the projection target, not the bench GPU.
+    known = _unknown_device(gcn_arch="gfx942", profile_key="mi300x", peak_hbm_gbps=5300.0)
+    model = _clock_model(known, gemm_backend=fake_backend, gpu_arch="fake-arch")
+    assert model["profile_key"] == "mi300x" and model["profile_source"] == "device"
+    assert model["name"] != "fake" and model["peak_hbm_gbps"] == 5300.0
+    # Nothing to model with: no profile at all.
+    model = _clock_model(_unknown_device(), gemm_backend=fake_backend, gpu_arch=None)
+    assert model["predictor"] is None and model["peak_hbm_gbps"] is None
+
+
+def test_report_names_a_non_origami_clock_model():
+    from primus.core.projection.hardware_calibration.calibration import _model_label
+
+    comp = {"model": "fake", "model_profile_key": "fake-arch", "model_profile_source": "--gpu-arch"}
+    assert _model_label(comp) == "fake (fake-arch from --gpu-arch)"
+    assert _model_label({"model": "origami", "model_profile_source": "device"}) == "Origami"
+
+
 # ---------------------------------------------------------------------------
 # Memory-clock arithmetic
 # ---------------------------------------------------------------------------
@@ -831,12 +973,30 @@ def test_run_hardware_calibration_helper_returns_error_payload(monkeypatch):
         "primus.core.projection.hardware_calibration.calibration_skip_reason", lambda args=None: None
     )
 
-    def boom(_config):
+    def boom(_config, **_kwargs):
         raise RuntimeError("no device")
 
     monkeypatch.setattr("primus.core.projection.hardware_calibration.run_hardware_calibration", boom)
     out = projection._run_hardware_calibration(_training_config(), "megatron", 0, SimpleNamespace())
     assert out == {"error": "RuntimeError: no device"}
+
+
+def test_run_hardware_calibration_helper_passes_the_gemm_model_args(monkeypatch):
+    from primus.core.projection.performance_projection import projection
+
+    monkeypatch.setattr(
+        "primus.core.projection.hardware_calibration.calibration_skip_reason", lambda args=None: None
+    )
+    seen = {}
+
+    def record(_config, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    monkeypatch.setattr("primus.core.projection.hardware_calibration.run_hardware_calibration", record)
+    args = SimpleNamespace(gemm_backend="fake", gpu_arch="fake-arch")
+    projection._run_hardware_calibration(_training_config(), "megatron", 0, args)
+    assert seen == {"gemm_backend": "fake", "gpu_arch": "fake-arch"}
 
 
 def test_run_hardware_calibration_helper_skips_jax_backends(monkeypatch):

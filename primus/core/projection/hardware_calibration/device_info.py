@@ -243,6 +243,10 @@ class AmdSmiClockReader:
         if not xcds and _valid_clock(metrics.get("current_gfxclk")):
             xcds = [int(metrics["current_gfxclk"])]
         mclk = metrics.get("current_uclk")
+        if not _valid_clock(mclk):
+            # Parts that report UCLK per AID leave current_uclk unset.
+            aids = [v for v in (metrics.get("current_uclk_aid") or []) if _valid_clock(v)]
+            mclk = sum(aids) / len(aids) if aids else None
         return ClockReading(
             sclk_mhz=sum(xcds) / len(xcds) if xcds else None,
             mclk_mhz=float(mclk) if _valid_clock(mclk) else None,
