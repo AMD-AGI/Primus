@@ -21,7 +21,7 @@ import os
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
-_SWITCHES = ("WGRAD", "MOE_WGRAD", "SHARED", "INDEXER")
+_SWITCHES = ("WGRAD", "MOE_WGRAD", "SHARED", "INDEXER", "COMPRESSOR")
 
 
 def _is_enabled(ctx=None) -> bool:

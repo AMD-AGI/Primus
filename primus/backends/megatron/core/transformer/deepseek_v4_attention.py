@@ -1951,6 +1951,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         pool_kv = apply_interleaved_partial_rope(pool_kv, cos, sin, rotary_dim=self.rotary_dim)
         return pool_kv.squeeze(2)  # [B, P, head_dim]
 
+    def _pool_or_overlap(self, hidden: torch.Tensor, cu_seqlens=None) -> torch.Tensor:
+        """The compressed pool: the one forward() issued on a side stream (PRIMUS_OVERLAP_COMPRESSOR), or built now."""
+        ovl, self._ovl_pool = getattr(self, "_ovl_pool", None), None
+        if ovl is not None:
+            br, pool = ovl
+            return br.done(pool)
+        return self._build_compressed_pool(hidden, cu_seqlens)
+
     def _hca_extra_kv(
         self,
         hidden: torch.Tensor,
@@ -1972,7 +1980,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         """
         B, S, _ = hidden.shape
         device, dtype = hidden.device, hidden.dtype
-        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
+        pool = self._pool_or_overlap(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # Broadcast pool across all H query-heads: [B, P, head_dim] -> [B, P, H, head_dim].
@@ -2133,7 +2141,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             kv_latent = kv
 
         # 1) Compressed pool with compress-base RoPE.
-        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
+        pool = self._pool_or_overlap(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # 2) Indexer top-K per query. The indexer is fed a *detached* hidden
@@ -2623,6 +2631,30 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             with _overlap.branch("indexer") as br:
                 out = self.indexer(hidden.detach(), position_ids, cu_seqlens=None)
             self._ovl_indexer = (br, out)
+
+        # PRIMUS_OVERLAP_COMPRESSOR=1 (HCA): the compressor (pool) depends only on `hidden`, so it is issued on a side
+        # stream next to the q / kv path (its backward follows it there). ForkGrad sums the two input gradients in the
+        # serial engine's order -- compressor first, then the qkv_a projection (the only other consumer on the concat
+        # path) -- so every bit stays the same. CSA layers are left out: with the indexer already on a side stream,
+        # a third branch measured ~30 us/layer slower in-step (ovl_p_prof_H vs ovl_n_prof_all).
+        self._ovl_pool = None
+        if (
+            self.compress_ratio == 128
+            and self.compressor is not None
+            and _overlap is not None
+            and _overlap.enabled("COMPRESSOR")
+            and cu_seqlens is None
+            and _v4_get_cp_group() is None
+            and hidden.requires_grad
+            and torch.is_grad_enabled()
+            and self._qkv_a_concat_ok(hidden)
+            and not (self.indexer_distill_enabled and self.training)
+        ):
+            h_q, h_c = _overlap.ForkGrad.apply(hidden, 2, (1, 0))
+            with _overlap.branch("compressor") as brc:
+                pool_ovl = self._build_compressed_pool(h_c, None)
+            self._ovl_pool = (brc, pool_ovl)
+            hidden = h_q
 
         # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one GEMM (see _QKVASplit); else two linears.
         q_a, kv_a = self._qkv_a_concat(hidden) if self._qkv_a_concat_ok(hidden) else (None, None)
