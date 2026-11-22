@@ -46,6 +46,36 @@ def _rope_hadamard_kernel(X, COS, SIN, HM, OUT, R, H, NORM,
     tl.store(OUT + rows[:, None].to(tl.int64) * HD + cols[None, :], y.to(dt), mask=rmask[:, None])
 
 
+@triton.jit
+def _rope_hadamard_v2_kernel(X, COS, SIN, HM, OUT, R, H, NORM,
+                             HD: tl.constexpr, NOPE: tl.constexpr, RD_HALF: tl.constexpr, BR: tl.constexpr):
+    """Same math as _rope_hadamard_kernel with contiguous row loads: the rope partner of every tail element comes
+    from a register-level pair swap; rot = x*c + sgn*(partner*s) is, element by element, the same bf16 expression
+    (even: e*c - o*s, odd: o*c + e*s)."""
+    pid = tl.program_id(0)
+    rows = pid * BR + tl.arange(0, BR)
+    rmask = rows < R
+    pos = rows // H
+    dt = X.dtype.element_ty
+    cols = tl.arange(0, HD)
+    x = tl.load(X + rows[:, None].to(tl.int64) * HD + cols[None, :], mask=rmask[:, None], other=0.0)
+    a, b = tl.split(tl.reshape(x, (BR, HD // 2, 2)))
+    partner = tl.reshape(tl.join(b, a), (BR, HD))
+    is_tail = cols >= NOPE
+    ci = tl.where(is_tail, (cols - NOPE) // 2, 0)
+    cm = rmask[:, None] & is_tail[None, :]
+    c = tl.load(COS + pos[:, None].to(tl.int64) * RD_HALF + ci[None, :], mask=cm, other=0.0).to(dt)
+    s = tl.load(SIN + pos[:, None].to(tl.int64) * RD_HALF + ci[None, :], mask=cm, other=0.0).to(dt)
+    ps = partner * s
+    ps = tl.where((cols % 2 == 0)[None, :], -ps, ps)
+    rot = x * c + ps
+    xr = tl.where(is_tail[None, :], rot, x)
+    hm = tl.load(HM + cols[:, None] * HD + cols[None, :])
+    acc = tl.dot(xr, hm)
+    y = acc.to(dt).to(tl.float32) * NORM
+    tl.store(OUT + rows[:, None].to(tl.int64) * HD + cols[None, :], y.to(dt), mask=rmask[:, None])
+
+
 _HM = {}
 
 
@@ -62,6 +92,8 @@ def _hmat(n, device, dtype):
 
 def fuse2_idx_rot_ok(x: torch.Tensor, cos: torch.Tensor, rotary_dim: int) -> bool:
     if os.environ.get("PRIMUS_FUSE2_IDX_ROT", "0") != "1":
+        return False
+    if os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1":  # bf16g2's GEMM+RoPE+Hadamard fusion wins when both are on
         return False
     hd = x.shape[-1]
     nope = hd - rotary_dim
@@ -92,6 +124,7 @@ def rope_hadamard(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, rotary_
     norm = hd ** -0.5 if norm is None else norm
     BR = int(os.environ.get("PRIMUS_FUSE2_IDX_ROT_BR", "64"))
     nw = int(os.environ.get("PRIMUS_FUSE2_IDX_ROT_NW", "4"))
-    _rope_hadamard_kernel[(triton.cdiv(R, BR),)](x, c, s, hm, out, R, H, float(norm), HD=hd, NOPE=hd - rotary_dim,
-                                                RD_HALF=rd_half, BR=BR, num_warps=nw)
+    kern = _rope_hadamard_v2_kernel if os.environ.get("PRIMUS_FUSE2_IDX_ROT_V", "2") == "2" else _rope_hadamard_kernel
+    kern[(triton.cdiv(R, BR),)](x, c, s, hm, out, R, H, float(norm), HD=hd, NOPE=hd - rotary_dim,
+                                RD_HALF=rd_half, BR=BR, num_warps=nw)
     return out

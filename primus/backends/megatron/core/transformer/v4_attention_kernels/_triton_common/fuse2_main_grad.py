@@ -36,13 +36,67 @@ def fuse2_linear_mg_ok(x: torch.Tensor, w: torch.Tensor, env: str = "PRIMUS_FUSE
     )
 
 
+class AttGradSlot:
+    """PRIMUS_FUSE2_ATT_GADD: the attention input feeds the wq_a||wkv concat GEMM and the compressor's wkv_gate.
+    The compressor backward (autograd runs it first) leaves its dX here; the concat backward's dX GEMM adds into that
+    buffer in its epilogue (dsv4up accumulate=2: bf16(product) + buffer, one rounding -- autograd's bf16 add), so the
+    separate add kernel goes away."""
+
+    __slots__ = ("g", "fused")
+
+    def __init__(self):
+        self.g = self.fused = None
+
+    def take(self, M, K, dtype):
+        g, self.g = self.g, None
+        if g is None or g.dtype != dtype or not g.is_contiguous() or g.numel() != M * K:
+            return None
+        return g.view(M, K)
+
+    def untake(self, g):
+        self.g = g
+
+
+class AttFanOut(torch.autograd.Function):
+    """``x -> (x_concat, x_rest)`` aliases so the two input gradients meet here, not in autograd's add."""
+
+    @staticmethod
+    def forward(ctx, x, slot):
+        ctx.slot = slot
+        return x.view_as(x), x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g_cat, g_rest):
+        slot, ctx.slot = ctx.slot, None
+        fused = slot.fused if slot is not None else None
+        if slot is not None:
+            slot.fused = slot.g = None
+        if fused is not None:
+            fp = fused.data_ptr()
+            if g_cat is None or g_rest is None or g_cat.data_ptr() != fp or g_rest.data_ptr() != fp:
+                # the concat's dX was added into a compressor dX that is not the whole x_rest gradient: the
+                # in-place sum cannot be undone, so refuse instead of returning a wrong gradient
+                raise RuntimeError("PRIMUS_FUSE2_ATT_GADD: unexpected extra consumer of the attention input")
+            return g_cat, None
+        if g_cat is None:
+            return g_rest, None
+        if g_rest is None:
+            return g_cat, None
+        return g_rest + g_cat, None  # autograd's order: compressor first, then the concat
+
+
+def att_gadd_enabled() -> bool:
+    return os.environ.get("PRIMUS_FUSE2_ATT_GADD", "0") == "1"
+
+
 class _LinearMainGradFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, w):
+    def forward(ctx, x, w, slot=None):
         x2 = x.reshape(-1, x.shape[-1])
         out = torch.mm(x2, w.t())
         ctx.save_for_backward(x2, w)
         ctx.wparam = w
+        ctx.slot = slot
         ctx.lead = x.shape[:-1]
         w.grad_added_to_main_grad = True  # set in forward, like Turbo's fused-wgrad linears
         return out.view(*x.shape[:-1], w.shape[0])
@@ -54,15 +108,17 @@ class _LinearMainGradFn(torch.autograd.Function):
         x2, w = ctx.saved_tensors
         g2 = g.reshape(-1, g.shape[-1])
         dx = g2.mm(w).view(*ctx.lead, w.shape[1]) if ctx.needs_input_grad[0] else None
+        if ctx.slot is not None and dx is not None:
+            ctx.slot.g, ctx.slot = dx, None  # PRIMUS_FUSE2_ATT_GADD: the concat dX GEMM adds into this buffer
         wp, ctx.wparam = ctx.wparam, None
         mg = wp.main_grad
         if main_grad_first_write(wp):
             torch.mm(g2.t(), x2, out=mg)
         else:
             mg.add_(torch.mm(g2.t(), x2))
-        return dx, _get_dummy_wgrad(list(w.shape), w.dtype)
+        return dx, _get_dummy_wgrad(list(w.shape), w.dtype), None
 
 
-def linear_main_grad(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+def linear_main_grad(x: torch.Tensor, w: torch.Tensor, slot=None) -> torch.Tensor:
     w._primus_fwd_claim = True  # grad_added_to_main_grad is flagged already in forward
-    return _LinearMainGradFn.apply(x, w)
+    return _LinearMainGradFn.apply(x, w, slot)

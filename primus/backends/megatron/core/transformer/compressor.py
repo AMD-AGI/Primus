@@ -604,7 +604,8 @@ class Compressor(KeepInFp32Mixin, nn.Module):
             wkg = self.wkv_gate
             if getattr(wkg, "bias", None) is None and fuse2_linear_mg_ok(hidden, wkg.weight):
                 # PRIMUS_FUSE2_COMP_MG=1: same GEMMs, the wgrad written straight into main_grad
-                proj = linear_main_grad(hidden, wkg.weight)
+                slot, self._fuse2_dx_slot = getattr(self, "_fuse2_dx_slot", None), None
+                proj = linear_main_grad(hidden, wkg.weight, slot)
             else:
                 proj = self.wkv_gate(hidden)
             if glue_window_pool_ok(proj, self.ape, self.ratio, self.head_dim, self.overlap):

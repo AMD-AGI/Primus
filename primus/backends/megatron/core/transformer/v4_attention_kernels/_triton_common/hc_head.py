@@ -164,9 +164,54 @@ class HCLiftFn(torch.autograd.Function):
         return dh
 
 
+class HeadGradSlot:
+    """PRIMUS_FUSE2_HEAD_GADD: the HyperHead input feeds the rms-linear mix (flattened) and the collapse. The
+    collapse backward (autograd runs it first) leaves its x-gradient here; the rms-linear backward adds its own into
+    that buffer in-kernel (bf16 + bf16 -> fp32 -> bf16, autograd's add) instead of the separate 268 MB-traffic add."""
+
+    __slots__ = ("g", "fused")
+
+    def __init__(self):
+        self.g = self.fused = None
+
+    def take(self, like):
+        g, self.g = self.g, None
+        if g is None or g.dtype != like.dtype or not g.is_contiguous() or g.numel() != like.numel():
+            return None
+        return g.view(like.shape)
+
+
+class HeadFanOut(torch.autograd.Function):
+    """``x -> (x_rms, x_collapse)`` aliases: their two gradients meet here instead of in autograd's add."""
+
+    @staticmethod
+    def forward(ctx, x, slot):
+        ctx.slot = slot
+        return x.view_as(x), x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g_r, g_c):
+        slot, ctx.slot = ctx.slot, None
+        fused = slot.fused if slot is not None else None
+        if slot is not None:
+            slot.fused = slot.g = None
+        if fused is not None and g_r is not None and g_c is not None and g_r.data_ptr() == fused.data_ptr() \
+                and g_c.data_ptr() == fused.data_ptr():
+            return g_r, None  # the rms-linear backward already added the collapse's gradient (in its buffer)
+        if g_r is None:
+            return g_c, None
+        if g_c is None:
+            return g_r, None
+        return g_c + g_r, None  # autograd's order: collapse first, then the rms-linear
+
+
+def head_gadd_enabled() -> bool:
+    return os.environ.get("PRIMUS_FUSE2_HEAD_GADD", "0") == "1"
+
+
 class HCHeadCollapseFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, pre):  # x [..., 4, D] bf16, pre [..., 4] fp32 -> [..., D] bf16
+    def forward(ctx, x, pre, gslot=None):  # x [..., 4, D] bf16, pre [..., 4] fp32 -> [..., D] bf16
         lead = x.shape[:-2]
         D = x.shape[-1]
         x3 = x.reshape(-1, 4, D)
@@ -180,6 +225,7 @@ class HCHeadCollapseFn(torch.autograd.Function):
         ctx.save_for_backward(x3, p2)
         ctx.lead = lead
         ctx.pre_shape = pre.shape
+        ctx.gslot = gslot
         return y.view(*lead, D)
 
     @staticmethod
@@ -194,7 +240,9 @@ class HCHeadCollapseFn(torch.autograd.Function):
             _ok_ptr(g, dx, dpre)
             _hc_head_bwd_kernel[(M,)](g, x3, p2, dx, dpre, D, BD=triton.next_power_of_2(D), num_warps=4,
                                       enable_fp_fusion=False)
-            return dx.view(*ctx.lead, K, D), dpre.view(ctx.pre_shape).to(p2.dtype)
+            if ctx.gslot is not None:
+                ctx.gslot.g, ctx.gslot = dx, None
+            return dx.view(*ctx.lead, K, D), dpre.view(ctx.pre_shape).to(p2.dtype), None
         # exact: the fp32 products go through the same torch reduce as the eager autograd (sum_to over the last dim
         # of a contiguous [..., 4, D] fp32 tensor), so dpre is bit-identical
         prod = torch.empty((*ctx.lead, K, D), dtype=torch.float32, device=x3.device)
@@ -203,7 +251,9 @@ class HCHeadCollapseFn(torch.autograd.Function):
         _hc_head_bwd_prod_kernel[(M, triton.cdiv(D, bd))](g, x3, p2, dx, prod, D, BD=bd,
                                                            num_warps=8 if bd >= 4096 else 4, enable_fp_fusion=False)
         dpre = prod.sum(dim=(prod.dim() - 1,), keepdim=True)
-        return dx.view(*ctx.lead, K, D), dpre.view(ctx.pre_shape).to(p2.dtype)
+        if ctx.gslot is not None:
+            ctx.gslot.g, ctx.gslot = dx, None
+        return dx.view(*ctx.lead, K, D), dpre.view(ctx.pre_shape).to(p2.dtype), None
 
 
 def hc_lift_supported(h: torch.Tensor, K: int) -> bool:
@@ -219,8 +269,8 @@ def hc_lift(h: torch.Tensor) -> torch.Tensor:
     return HCLiftFn.apply(h)
 
 
-def hc_head_collapse(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
-    return HCHeadCollapseFn.apply(x, pre)
+def hc_head_collapse(x: torch.Tensor, pre: torch.Tensor, gslot=None) -> torch.Tensor:
+    return HCHeadCollapseFn.apply(x, pre, gslot)
 
 
 __all__ = ["hc_lift", "hc_head_collapse", "hc_lift_enabled", "hc_head_fused_enabled", "hc_lift_supported",
