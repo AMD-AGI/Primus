@@ -193,6 +193,9 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
   128x128 ring in LDS; row pass lane=row, column pass via ds_load_tr16_b128, no cross-lane amax; in-warp layout change so
   q/qT stores coalesce) for every quant_dual_t2 site, the MegaMoE dispatch gather+quant (TDM gather, OOB zero fill) and
   the two quants inside the SwiGLU-bwd TDM kernel: -0.70 ms, byte-identical (wq_b dY 52.9 -> 37.1 us, 85% of floor).
+- swahca `PRIMUS_SWAHCA_LOOP=1` (insurance, neutral: int A/B 45.70 -> 45.75): SWA/HCA sparse-MLA bwd with runtime loops
+  (hot loop 21 -> 15 KB cr0, 33 -> 20 KB cr128). Int's kernel ran in two code-placement modes (cr0 127-132 vs 156-162 us,
+  cr128 235-244 vs 269-279 us); the loop kernel has one mode at every 4 B offset (cr0 134-139, cr128 232-241). Bit-identical.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
