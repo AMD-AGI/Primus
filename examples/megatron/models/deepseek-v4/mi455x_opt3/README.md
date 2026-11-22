@@ -55,7 +55,8 @@ Requirements:
 | + membound QDUAL/PACKQ/GNORM/ROPE_TBL/SMALLS/QNR, graph | 48.4 (A/B 49.10 -> 48.40) | 9.8712 |
 | + wgrad vkq (MoE wgrad scale planes via async VMEM), graph | 48.1 (A/B 48.50 -> 48.13) | 9.8712 |
 | + small batch: membound R2 (QDUAL c4096, PACKQ_SKIP f4096, ROUTER_FWD 128,4), splitk HC_TAILBW 512, attnfwd SMLA_FWD_PIPE, graph | 48.1 (A/B 48.23 -> 48.10) | 9.8712 |
-| **+ attnbwd SMLA_BWD_V2 + Adam HWCVT (this config), graph** | **47.5** (A/B 48.00 -> 47.47) | 9.8712 |
+| + attnbwd SMLA_BWD_V2 + Adam HWCVT, graph | 47.5 (A/B 48.00 -> 47.47) | 9.8712 |
+| **+ bf16g2 OA_DGRAD + IDXQ (this config), graph** | **47.1** (A/B 47.40 -> 47.10) | 9.8712 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -160,6 +161,8 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
 - attnbwd `PRIMUS_SMLA_BWD_V2=1` (CSA sparse-MLA backward: no exposed L2 prefetch, TDM-staged Q/dO/O, fused count scan;
   855 -> 753 us/layer) and adamfetch `PRIMUS_FP8BLK_ADAM_HWCVT=1` (hardware FP32->BF16 rounding, exhaustively equal to c10
   RNE; tile Adam 9.36 -> 8.99 ms): -0.53 ms together.
+- bf16g2 `PRIMUS_BF16G2_OA_DGRAD=1` (o_a dgrad as a Gluon NN GEMM, bitdiff 0 vs hipBLASLt, no w transposes) and
+  `PRIMUS_BF16G2_IDXQ=1` (indexer query/key RoPE + Hadamard + scale chains fused): -0.30 ms together.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
