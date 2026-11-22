@@ -11,6 +11,7 @@ Entry points:
 * :func:`project_power` -- power on top of a performance projection result.
 * :func:`fit_power_profile` / :func:`load_telemetry` -- calibrate the model to
   measured telemetry.
+* :func:`measure_window` -- validated GPU power and energy over a load window.
 * :func:`capacity_plan` -- cluster throughput under a facility power budget.
 """
 
@@ -49,13 +50,21 @@ from primus.core.projection.power.telemetry import (
     TelemetrySample,
     fit_power_profile,
     load_telemetry,
+    load_telemetry_files,
     make_telemetry_sampler,
+)
+from primus.core.projection.power.window import (
+    MeasurementWindow,
+    WindowMeasurement,
+    measure_window,
 )
 
 __all__ = [
     "GPUPowerProfile",
     "InfraConfig",
     "IterationBreakdown",
+    "MeasurementWindow",
+    "WindowMeasurement",
     "OpRecorder",
     "ParametricPowerModel",
     "Phase",
@@ -71,7 +80,9 @@ __all__ = [
     "fit_power_profile",
     "get_power_model",
     "load_telemetry",
+    "load_telemetry_files",
     "make_telemetry_sampler",
+    "measure_window",
     "project_power",
     "public_archs",
     "register_power_model",

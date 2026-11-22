@@ -25,10 +25,12 @@ import contextlib
 import csv
 import json
 import math
+import os
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from primus.core.projection.power.specs import (
@@ -124,6 +126,26 @@ def _to_float(value: Any) -> Optional[float]:
     return float(m.group()) if m else None
 
 
+def _to_unix_seconds(value: Any) -> Optional[float]:
+    """Epoch seconds / ms / us / ns, or an ISO-8601 string, as Unix seconds."""
+    if value is None or value == "":
+        return None
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return None
+    if not math.isfinite(t):
+        return None
+    for scale in (1e9, 1e6, 1e3):  # ns, us, ms since the epoch
+        if t > 1e11 * scale / 1e3:
+            return t / scale
+    return t
+
+
 def _normalize_fractions(samples: List[TelemetrySample]) -> None:
     """Activities given in percent (0-100) are rescaled to [0, 1]."""
     for name in ("busy", "hbm", "matrix", "link"):
@@ -145,9 +167,11 @@ def parse_csv_rows(rows: Iterable[Dict[str, Any]], headers: Sequence[str]) -> Li
         if power is None or power <= 0:
             continue
         kw: Dict[str, Any] = {"power_w": power}
-        for name in ("sclk_mhz", "busy", "hbm", "matrix", "link", "timestamp"):
+        for name in ("sclk_mhz", "busy", "hbm", "matrix", "link"):
             if name in mapping:
                 kw[name] = _to_float(row.get(mapping[name]))
+        if "timestamp" in mapping:
+            kw["timestamp"] = _to_unix_seconds(row.get(mapping["timestamp"]))
         if "device" in mapping:
             kw["device"] = str(row.get(mapping["device"]))
         samples.append(TelemetrySample(**kw))
@@ -177,6 +201,22 @@ def load_telemetry(path: str) -> List[TelemetrySample]:
             break
     reader = csv.DictReader(lines[start:])
     return parse_csv_rows(list(reader), reader.fieldnames or [])
+
+
+def load_telemetry_files(paths: Sequence[str]) -> List[TelemetrySample]:
+    """Load several logs; with more than one, GPU ids are prefixed by the file name.
+
+    Each host numbers its GPUs from 0, so logs from different hosts would
+    otherwise merge into the same device.
+    """
+    samples: List[TelemetrySample] = []
+    for path in paths:
+        rows = load_telemetry(path)
+        if len(paths) > 1:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            rows = [replace(s, device=f"{stem}:{s.device if s.device is not None else '0'}") for s in rows]
+        samples.extend(rows)
+    return samples
 
 
 # ---------------------------------------------------------------------------

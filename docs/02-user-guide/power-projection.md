@@ -132,21 +132,50 @@ The cap defaults to the GPU's published TBP. Override it with `--power-cap-w`, `
 On a node running the workload (or a sweep of workloads at different power caps):
 
 ```bash
-# Built-in sampler (amdsmi Python bindings)
-primus-cli projection power-sample --device 0 --duration-s 120 --out run.jsonl
+# Built-in sampler (amdsmi Python bindings): runs the workload and records its load window
+primus-cli projection power-sample --device 0 1 2 3 4 5 6 7 \
+    --command "bash run_pretrain.sh" --out run.jsonl     # also writes run.window.json
 
 # Or any amd-smi / rocm-smi CSV log with power, clock and activity columns
 amd-smi metric --power --clock --usage --csv --watch 1 > run.csv
 ```
 
-The parser recognizes common amd-smi and rocm-smi column names (socket power, GFX clock, GFX activity, UMC activity, and so on), skips limit, cap and temperature columns, and converts percentages to fractions.
+The parser recognizes common amd-smi and rocm-smi column names (socket power, GFX clock, GFX activity, UMC activity, and so on), skips limit, cap and temperature columns, and converts percentages to fractions. Timestamps may be epoch seconds, milliseconds, microseconds, nanoseconds or ISO-8601. When several logs are given (one per host), GPU ids are prefixed with the file name so that each host's GPU 0 stays separate.
+
+### Load window and validity
+
+Telemetry usually runs longer than the load: it includes warmup, idle gaps and teardown. Within the load window, each GPU's power is interpolated at the window edges and integrated with the trapezoid rule, giving per-GPU average power and GPU energy. The measurement is valid only when every GPU's trace covers the whole window. Otherwise the values are withheld and the reasons are listed:
+
+| Reason | Meaning |
+|--------|---------|
+| `invalid_window` | The window's end is not after its start. |
+| `no_samples` / `missing_timestamps` | There is nothing to integrate. |
+| `window_not_covered` | A GPU has no sample at or before the start, or at or after the end. |
+| `sample_gap_exceeds_max` | Consecutive samples of a GPU are more than 3 s apart (`--max-gap-s`). |
+| `device_count_mismatch` | The number of GPUs in the log differs from the number sampled. |
+
+`power-sample --command` records the window around the command, with `--pre-roll-s` of sampling on either side so both edges have a sample. It writes the window and the verdict to `<out>.window.json` and prints a line like this illustrative one:
+
+```text
+  Power Valid: yes | 8 GPU(s), 612.4 s | Avg Power/GPU: 1186.2 W | GPU Energy: 5811431.0 J
+```
+
+Energy and power cover GPU board power only. They exclude host, network, cooling and facility power.
 
 ### 2. Fit a profile
 
 ```bash
-primus-cli projection power-fit --telemetry run.jsonl run2.csv \
-    --gpu-arch mi355x --out mi355x_power.yaml
+primus-cli projection power-fit --telemetry run.jsonl --window-file run.window.json \
+    --trim-s 60 5 --gpu-arch mi355x --out mi355x_power.yaml
 ```
+
+Choose the load window with one of:
+
+- `--window-file` (from `power-sample`, or any JSON with `start_unix`/`end_unix` or `benchmark_start_time_unix`/`benchmark_end_time_unix`)
+- `--window START END` (Unix seconds)
+- `--auto-window` (from the first to the last sample with GFX activity of at least 50%)
+
+`--trim-s HEAD TAIL` drops warmup and teardown from the window. A window that fails validation stops the fit unless you pass `--allow-invalid-window`. Without a window, every sample is fitted and the command prints a warning. To pin idle power, fit a separate log that includes an idle period.
 
 The fit solves non-negative least squares for idle power and the activity coefficients. When the clock varies by more than 5% across the samples, it also fits `alpha` by grid search. Logging at several power caps gives clock variation for free. Without a matrix-utilization column, pass the MFU the training log reported with `--matrix-utilization`, or the busy and matrix terms are fitted as one.
 
@@ -258,8 +287,8 @@ Objectives where lower is better are minimized: `energy_per_token_j`, `avg_power
 | `--power-config` | Power YAML (`power`, `infrastructure`, `capacity`), or a fitted profile file. |
 | `--power-cap-w` | Per-GPU board power cap in W. Default: published TBP. Also `PRIMUS_POWER_CAP_W`. |
 | `--power-cap-mode` | `instantaneous` (default) or `average`. |
-| `projection power-fit` | Fit a profile to telemetry: `--telemetry`, `--gpu-arch`, `--out`, `--matrix-utilization`, `--tbp-w`, `--peak-clock-mhz`, `--fit-alpha {auto,yes,no}`. |
-| `projection power-sample` | Record telemetry from a local GPU: `--device`, `--duration-s`, `--interval-ms`, `--out`. |
+| `projection power-fit` | Fit a profile to telemetry: `--telemetry`, `--gpu-arch`, `--out`, `--matrix-utilization`, `--tbp-w`, `--peak-clock-mhz`, `--fit-alpha {auto,yes,no}`, plus the load window: `--window` / `--window-file` / `--auto-window`, `--trim-s`, `--max-gap-s`, `--allow-invalid-window`. |
+| `projection power-sample` | Record telemetry from local GPUs: `--device` (one or more), `--command` or `--duration-s`, `--interval-ms`, `--pre-roll-s`, `--out` (plus `<out>.window.json`). |
 | `PRIMUS_POWER_PROFILE_DIR` | Directories of private profile YAMLs. |
 
 ### Result dictionary
