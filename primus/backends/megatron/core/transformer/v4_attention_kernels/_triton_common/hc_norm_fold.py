@@ -226,6 +226,19 @@ def _qnorm_dual_quant_kernel(X, GAMMA, Y, RSTD, QR, SR, QC, SC, M, N, eps,
 FOLD_CFG = dict(fwd_rb=1, fwd_warps=8, bwd_rb=1, bwd_warps=8, bwd_ppc=4, qb=128, qn_warps=16)
 
 
+def _fold_cfg():
+    """FOLD_CFG with the hcfuse override PRIMUS_HCFUSE_FOLD_CFG="bwd_warps=16,bwd_ppc=2,..." (warps / rows / programs
+    per CU of the folded-norm kernels; changes reduction trees and the dgamma partial grouping, so off = int)."""
+    v = os.environ.get("PRIMUS_HCFUSE_FOLD_CFG", "").strip()
+    if not v:
+        return FOLD_CFG
+    c = dict(FOLD_CFG)
+    for kv in v.split(","):
+        k, x = kv.split("=")
+        c[k.strip()] = int(x)
+    return c
+
+
 def _ue8m0() -> bool:
     return os.environ.get("PRIMUS_TURBO_FP8_BLOCK_UE8M0", "0").strip().lower() in ("1", "true")
 
@@ -246,7 +259,7 @@ def collapse_norm_fwd(x3, pre, gamma, eps, fp8=False):
     M, K, D = x3.shape
     assert K == 4
     BD = triton.next_power_of_2(D)
-    f = FOLD_CFG
+    f = _fold_cfg()
     y = torch.empty((M, D), dtype=x3.dtype, device=x3.device)
     rstd = torch.empty((M,), dtype=torch.float32, device=x3.device)
     fp8 = bool(fp8) and BD == D and D % f["qb"] == 0
@@ -270,7 +283,7 @@ def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc, reduce=True):
     M, K, D = x3.shape
     BD = triton.next_power_of_2(D)
     assert BD == D and D % bc == 0
-    f = FOLD_CFG
+    f = _fold_cfg()
     dev = x3.device
     dh = torch.empty((M, D), dtype=x3.dtype, device=dev)
     nc = D // bc

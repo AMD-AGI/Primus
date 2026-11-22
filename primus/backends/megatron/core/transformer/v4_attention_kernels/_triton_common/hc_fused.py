@@ -79,6 +79,19 @@ from .hc_boundary import (
     xrms_supported,
 )
 from .hc_expand import _hc_expand_fwd_kernel
+from .hc_hcfuse import (
+    hcfuse_bwd_enabled,
+    hcfuse_fwd_enabled,
+    hcfuse_tail_enabled,
+    hcfuse_post_enabled,
+    norm_pre_bwd,
+    post_bwd_wmma,
+    post_tail,
+    post_wmma_ok,
+    pre_collapse_fwd,
+    side_stream,
+    tail_mode,
+)
 from .hc_norm_fold import collapse_norm_fwd, norm_dpre_bwd
 from .hc_rms_linear import (
     HC_CFG,
@@ -164,6 +177,19 @@ def _post_tile():
         bt, nw = (int(s) for s in v.split(","))
         return bt, nw
     return HCF_CFG["t2_bt"], HCF_CFG["t2_warps"]
+
+
+def _post_bc(D) -> int:
+    """hcfuse PRIMUS_HCFUSE_POST_BC=<bc>: column tile of _hc_post_bwd2d_kernel (default t2_bc = 256). A wider tile means
+    fewer dpost / dcomb^T partials (D / bc) and fewer cross-lane reductions per element; changes their sum order."""
+    v = int(os.environ.get("PRIMUS_HCFUSE_POST_BC", "0") or "0")
+    return v if (v and D % v == 0) else HCF_CFG["t2_bc"]
+
+
+def _dpre_bc(D) -> int:
+    """hcfuse PRIMUS_HCFUSE_DPRE_BC=<bc>: column tile of the folded-norm dpre partials (default t2_bc = 256)."""
+    v = int(os.environ.get("PRIMUS_HCFUSE_DPRE_BC", "0") or "0")
+    return v if (v and D % v == 0) else HCF_CFG["t2_bc"]
 
 
 def _hc_nocast() -> bool:
@@ -481,6 +507,7 @@ def _hc_pre_bwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_D: tl.constexpr,
     PARTS: tl.constexpr = False,
+    NCP: tl.constexpr = 0,
 ):
     pid = tl.program_id(0)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -536,9 +563,14 @@ def _hc_pre_bwd_kernel(
     if HAS_POST and PARTS:
         dpost = tl.zeros((BLOCK_M, K), dtype=tl.float32)
         dm_ = tl.zeros((BLOCK_M, K, K), dtype=tl.float32)
-        for c in range(0, NC):
-            dpost += tl.load(DPOST + c * M * K + r2 * K + kk[None, :], mask=m2, other=0.0)
-            dm_ += tl.load(DCOMBT + c * M * KK + r3 * KK + j3 * K + i3, mask=m3, other=0.0)
+        if NCP > 0:  # hcfuse PRIMUS_HCFUSE_POST_BC: NCP post partials (unrolled, all loads in flight)
+            for c in tl.static_range(NCP):
+                dpost += tl.load(DPOST + c * M * K + r2 * K + kk[None, :], mask=m2, other=0.0)
+                dm_ += tl.load(DCOMBT + c * M * KK + r3 * KK + j3 * K + i3, mask=m3, other=0.0)
+        else:
+            for c in range(0, NC):
+                dpost += tl.load(DPOST + c * M * K + r2 * K + kk[None, :], mask=m2, other=0.0)
+                dm_ += tl.load(DCOMBT + c * M * KK + r3 * KK + j3 * K + i3, mask=m3, other=0.0)
     elif HAS_POST:
         dpost = tl.load(DPOST + r2 * K + kk[None, :], mask=m2, other=0.0)
         dm_ = tl.load(DCOMBT + r3 * KK + j3 * K + i3, mask=m3, other=0.0)  # dcomb[i, j] = dcomb^T[j, i]
@@ -919,16 +951,25 @@ def _hc_expand_rms_fwd_kernel(X, OUT, POST, COMBT, NEW, WTH, WTL, P_RAW, P_SS, M
 # ------------------------------------------------------------------------------------------------
 
 
+def _hcf_debug(msg):
+    """PRIMUS_HCFUSE_DEBUG_FILE=<path>: append one line per event (Python side only, i.e. at graph capture)."""
+    path = os.environ.get("PRIMUS_HCFUSE_DEBUG_FILE", "")
+    if path:
+        with open(path, "a") as fh:
+            fh.write(msg + "\n")
+
+
 class HCLink:
     """Carries the post-side backward results (dnew, dpost, dcomb^T) to the pre-side backward."""
 
-    __slots__ = ("dnew", "dpost", "dcombt", "nc")
+    __slots__ = ("dnew", "dpost", "dcombt", "nc", "pre")
 
     def __init__(self):
         self.nc = 0
         self.dnew = None
         self.dpost = None
         self.dcombt = None
+        self.pre = None  # hcfuse TAIL: (data_ptr of the dnew it was computed for, dout) precomputed by HCPreFn(L+1)
 
 
 class HCPreFn(torch.autograd.Function):
@@ -999,21 +1040,30 @@ class HCPreFn(torch.autograd.Function):
         two_d = f["two_d"] and D % f["t2_bc"] == 0
         fold = gamma is not None and two_d and K == 4 and triton.next_power_of_2(D) == D
         rstd_n = None
-        raw = torch.empty((M, BN), dtype=torch.float32, device=dev)
-        rstd = torch.empty((M,), dtype=torch.float32, device=dev)
-        states = torch.empty((M, 2 * n_iters, K, K), dtype=torch.float32, device=dev)
-        pre = torch.empty((M, K), dtype=x.dtype, device=dev)
-        post = torch.empty((M, K), dtype=x.dtype, device=dev)
-        combt = torch.empty((M, K, K), dtype=x.dtype, device=dev)
-        coll = torch.empty(x.shape[:-2] + (D,), dtype=x.dtype, device=dev)
-        bm = f["rm_bm"] if two_d else f["row_bm"]
-        _hc_pre_fwd_kernel[(triton.cdiv(M, bm),)](
-            x3, p_raw, p_ss, scale_c, base_c, raw, rstd, states, pre, post, combt, coll,
-            M, D, n_split, float(eps),
-            EPS=float(eps), K=K, BN=BN, N_ITERS=int(n_iters), BLOCK_M=bm, BLOCK_D=f["row_bd"],
-            DO_COLL=not two_d, num_warps=f["rm_warps"] if two_d else f["row_warps"],
-        )
-        if fold:
+        # hcfuse PRIMUS_HCFUSE_FWD: finalize + Sinkhorn programs and the folded-norm collapse rows in one launch
+        hcf_fwd = hcfuse_fwd_enabled() and fold and not f["fold_fp8"] and K == 4 and p_raw.shape[2] == BN
+        if hcf_fwd:
+            raw, rstd, states, pre, post, combt, y2, rstd_n = pre_collapse_fwd(
+                x3, p_raw, p_ss, n_split, scale_c, base_c, gamma.contiguous(), eps, n_iters, norm_eps)
+            coll = y2.view(x.shape[:-2] + (D,))
+        else:
+            raw = torch.empty((M, BN), dtype=torch.float32, device=dev)
+            rstd = torch.empty((M,), dtype=torch.float32, device=dev)
+            states = torch.empty((M, 2 * n_iters, K, K), dtype=torch.float32, device=dev)
+            pre = torch.empty((M, K), dtype=x.dtype, device=dev)
+            post = torch.empty((M, K), dtype=x.dtype, device=dev)
+            combt = torch.empty((M, K, K), dtype=x.dtype, device=dev)
+            coll = torch.empty(x.shape[:-2] + (D,), dtype=x.dtype, device=dev)
+            bm = f["rm_bm"] if two_d else f["row_bm"]
+            _hc_pre_fwd_kernel[(triton.cdiv(M, bm),)](
+                x3, p_raw, p_ss, scale_c, base_c, raw, rstd, states, pre, post, combt, coll,
+                M, D, n_split, float(eps),
+                EPS=float(eps), K=K, BN=BN, N_ITERS=int(n_iters), BLOCK_M=bm, BLOCK_D=f["row_bd"],
+                DO_COLL=not two_d, num_warps=f["rm_warps"] if two_d else f["row_warps"],
+            )
+        if hcf_fwd:
+            pass
+        elif fold:
             # y = rmsnorm(collapse) * gamma replaces the collapsed output (the sub-block skips its norm)
             y2, rstd_n, fq = collapse_norm_fwd(x3, pre, gamma.contiguous(), norm_eps, fp8=f["fold_fp8"])
             coll = y2.view(x.shape[:-2] + (D,))
@@ -1049,6 +1099,11 @@ class HCPreFn(torch.autograd.Function):
             ctx.direct = (weight, scale, base, gamma if fold else None)
             ctx.claimed = tuple(claim_main_grad(p) if p is not None else False for p in ctx.direct)
         ctx.link = link
+        # hcfuse PRIMUS_HCFUSE_TAIL: the previous HC's expand state (x, out, post, link), set by HCPostFn.forward
+        prevp = getattr(x, "_hcf_post", None)
+        if prevp is not None:
+            x._hcf_post = None
+        ctx.prevp = prevp if (prevp is not None and hcfuse_tail_enabled() and ctx.direct is not None) else None
         ctx.eps = float(eps)
         ctx.n_iters = int(n_iters)
         ctx.weight_dtype = weight.dtype
@@ -1091,9 +1146,20 @@ class HCPreFn(torch.autograd.Function):
         dgamma = None
         dgp = None
         tail = use_gl and ctx.direct is not None
-        if ctx.fold and tail:
-            nc = D // f["t2_bc"]
-            dcoll, dprep, dgp = norm_dpre_bwd(x3, pre, gamma, rstd_n, dcoll, f["t2_bc"], reduce=False)
+        # hcfuse PRIMUS_HCFUSE_BWD: folded-norm bwd + HC row math in one launch (B3X adds coef_a + coef_b)
+        hcf = (hcfuse_bwd_enabled() and ctx.fold and tail and has_post and link.nc > 0 and K == 4
+               and b3x_enabled() and D % b3x_cfg()["bc"] == 0 and not b3x_cfg()["buf"])
+        c2kw = {}
+        if hcf:
+            nc = link.nc
+            dcoll, gh, glo, gth, gtl, coef, coef_b, part, dgp = norm_pre_bwd(
+                x3, pre, gamma, rstd_n, dcoll, raw, rstd, states, scale_c, base_c, link.dpost, link.dcombt, nc,
+                ctx.eps, ctx.n_iters)
+            c2kw = dict(COEF2=coef_b, HAS_C2=True)
+        elif ctx.fold and tail:
+            dbc = _dpre_bc(D)
+            nc = D // dbc
+            dcoll, dprep, dgp = norm_dpre_bwd(x3, pre, gamma, rstd_n, dcoll, dbc, reduce=False)
             n_prog = triton.cdiv(M, f["rm_bm"])
             part = torch.empty((NP, n_prog), dtype=torch.float32, device=dev)
         elif ctx.fold:
@@ -1121,14 +1187,16 @@ class HCPreFn(torch.autograd.Function):
         else:
             nc = 0
             dprep = g
-        _hc_pre_bwd_kernel[(n_prog,)](
-            x3, dcoll, raw, rstd, states, scale_c, base_c,
-            link.dpost if has_post else g, link.dcombt if has_post else g,
-            g, coef, part, gh, glo, gth, gtl, dprep, nc, M, D,
-            HAS_POST=has_post, SPLIT_G=use_gl, PARTS=two_d, EPS=ctx.eps, K=K, BN=BN, NP=NP, N_ITERS=ctx.n_iters,
-            BLOCK_M=f["rm_bm"] if two_d else f["row_bm"], BLOCK_D=f["row_bd"],
-            num_warps=f["rm_warps"] if two_d else f["row_warps"],
-        )
+        if not hcf:
+            _hc_pre_bwd_kernel[(n_prog,)](
+                x3, dcoll, raw, rstd, states, scale_c, base_c,
+                link.dpost if has_post else g, link.dcombt if has_post else g,
+                g, coef, part, gh, glo, gth, gtl, dprep, nc, M, D,
+                HAS_POST=has_post, SPLIT_G=use_gl, PARTS=two_d, EPS=ctx.eps, K=K, BN=BN, NP=NP, N_ITERS=ctx.n_iters,
+                BLOCK_M=f["rm_bm"] if two_d else f["row_bm"], BLOCK_D=f["row_bd"],
+                num_warps=f["rm_warps"] if two_d else f["row_warps"],
+                **({"NCP": link.nc} if (has_post and two_d and link.nc != nc) else {}),
+            )
         if use_gl:
             bt, bc, ts, nw = f["gl_bt"], f["gl_bc"], f["gl_tsplit"], f["gl_warps"]
             wm, opa, opb, blk, smem = _gl_layouts(bt, bc, nw)
@@ -1156,11 +1224,19 @@ class HCPreFn(torch.autograd.Function):
                 n_dx = D // xc["bc"]
                 kern = _hc_b3x_kernel
                 ekw.update(PF=bool(xc["pf"]), BUF=bool(xc["buf"]) and M * KD * 2 < 2 ** 31)
+                if os.environ.get("PRIMUS_HCFUSE_B3X_GLO", "1") == "0" and not ekw["BUF"]:
+                    ekw["GQ"] = False  # hcfuse: g in bf16 only for dx and dW (drops the lo WMMA products)
+                if xc.get("pf2") and not ekw["BUF"]:
+                    ekw["PF2"] = True  # hcfuse: prefetch of every per-step load (PRIMUS_HC_B3X_CFG ...,pf2=1)
+                abl = int(os.environ.get("PRIMUS_HCFUSE_B3X_ABL", "0") or "0")  # bench-only ablation bits (wrong output)
+                if abl:
+                    ekw["ABL"] = abl
                 kern[(n_dx * ts,)](
                     x3, w, wth, wtl, gh, glo, gth, gtl, coef, pre, combt, dcoll, dnew if dnew is not None else x3, dx,
                     dw_p, M, D, N, M // ts, n_dx, n_dx * ts,
                     BT=xbt, BC=xc["bc"], BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk,
                     SMEM=smem, SMEM_W=smem_w, DIRECT_W=ctx.direct_w, num_warps=xc["w"], **ekw, **b3x_splitk_kw(),
+                    **c2kw,
                 )
             else:
                 assert not ctx.direct_w
@@ -1179,7 +1255,38 @@ class HCPreFn(torch.autograd.Function):
             if tail:
                 # fuse-hc: dW / dscale / dbase / dgamma reductions in one launch, straight into main_grad
                 gd = (ctx.weight_dtype, ctx.scale_dtype, ctx.base_dtype, gamma.dtype if ctx.fold else torch.float32)
-                gw, gs, gb, gg = hc_tail(dw_p, N, part, dgp if ctx.fold else None, D, ctx.direct, gd, ctx.claimed)
+                prevp = ctx.prevp
+                ctx.prevp = None
+                if prevp is not None and all(c for c, p in zip(ctx.claimed, ctx.direct) if p is not None) \
+                        and prevp[0].shape == x3.shape and D % f["t2_bc"] == 0:
+                    # hcfuse TAIL: tail on a side stream || expand backward of the previous HC (dnew = dx) on main
+                    xp, outp, postp, linkp = prevp
+                    pbc = _post_bc(D)
+                    ncp = D // pbc
+                    doutp = torch.empty((M, D), dtype=outp.dtype, device=dev)
+                    dpostp = torch.empty((ncp, M, K), dtype=torch.float32, device=dev)
+                    dcombtp = torch.empty((ncp, M, K, K), dtype=torch.float32, device=dev)
+                    pbt, pw = _post_tile()
+                    if tail_mode() == 2:  # one launch: post_bwd2d programs + tail programs
+                        gw, gs, gb, gg = post_tail(dx, xp, outp, postp, doutp, dpostp, dcombtp, pbt, pbc, dw_p, N,
+                                                   part, dgp if ctx.fold else None, D, ctx.direct, gd, ctx.claimed)
+                    else:
+                        main = torch.cuda.current_stream(dev)
+                        side = side_stream(dev)
+                        side.wait_stream(main)
+                        with torch.cuda.stream(side):
+                            gw, gs, gb, gg = hc_tail(dw_p, N, part, dgp if ctx.fold else None, D, ctx.direct, gd,
+                                                     ctx.claimed)
+                        _hc_post_bwd2d_kernel[(triton.cdiv(M, pbt), ncp)](
+                            dx, xp, outp, postp, doutp, dpostp, dcombtp, M, D,
+                            K=K, BT=pbt, BC=pbc, num_warps=pw,
+                        )
+                        main.wait_stream(side)
+                    linkp.dnew, linkp.dpost, linkp.dcombt, linkp.nc = dx, dpostp, dcombtp, ncp
+                    linkp.pre = (dx.data_ptr(), doutp)
+                    _hcf_debug(f"TAIL precomputed post_bwd for prev HC (M={M}, D={D})")
+                else:
+                    gw, gs, gb, gg = hc_tail(dw_p, N, part, dgp if ctx.fold else None, D, ctx.direct, gd, ctx.claimed)
                 ctx.direct = None
                 return dx.view(ctx.x_shape), gw, gs, gb, None, None, None, gg, None
             dw, psum = _hc_reduce(dw_p, N, part)
@@ -1256,10 +1363,21 @@ class HCPostFn(torch.autograd.Function):
         res = new.view(x.shape)
         if stash is not None:
             res._hc_stash = stash
+        if hcfuse_tail_enabled() and f["two_d"] and D % f["t2_bc"] == 0 and not _bif_ok(D, K, "bif_post"):
+            res._hcf_post = (x3, out_c, post_c, link)  # picked up by the next HCPreFn (hcfuse TAIL)
         return res
 
     @staticmethod
     def backward(ctx, dnew):  # type: ignore[override]
+        link = ctx.link
+        pre = link.pre if link is not None else None
+        if pre is not None:
+            link.pre = None
+            if dnew.is_contiguous() and dnew.data_ptr() == pre[0]:
+                # hcfuse TAIL: computed by the next HCPreFn.backward for this very dnew (its dx)
+                _hcf_debug("TAIL used precomputed dout")
+                return None, pre[1].view(ctx.out_shape), None, None, None, None
+            _hcf_debug("TAIL precomputed dout NOT used (dnew differs): recomputing")
         x3, out_c, post_c = ctx.saved_tensors
         M, K, D = x3.shape
         dnew = dnew.contiguous().view(M, K, D)
@@ -1268,7 +1386,8 @@ class HCPostFn(torch.autograd.Function):
         f = HCF_CFG
         link = ctx.link
         if f["two_d"] and D % f["t2_bc"] == 0:
-            nc = D // f["t2_bc"]
+            pbc = _post_bc(D)
+            nc = D // pbc
             dpost = torch.empty((nc, M, K), dtype=torch.float32, device=dev)
             dcombt = torch.empty((nc, M, K, K), dtype=torch.float32, device=dev)
             if _bif_ok(D, K, "bif_post"):
@@ -1276,11 +1395,14 @@ class HCPostFn(torch.autograd.Function):
                 g_ = bif_grid(M, D, bt, bc, _bif_nprog(dev))
                 _hc_post_bwd_bif_kernel[g_](dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
                                             BT=bt, BC=bc, NPROG=g_[0], num_warps=nw)
+            elif hcfuse_post_enabled() and pbc == 256 and post_wmma_ok(M, K, D, pbc):
+                # hcfuse: the 20 per-row reductions on WMMA (Gluon), same partial layout
+                post_bwd_wmma(dnew, x3, out_c, post_c, dout, dpost, dcombt, pbc)
             else:
                 pbt, pw = _post_tile()
                 _hc_post_bwd2d_kernel[(triton.cdiv(M, pbt), nc)](
                     dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
-                    K=K, BT=pbt, BC=f["t2_bc"], num_warps=pw,
+                    K=K, BT=pbt, BC=pbc, num_warps=pw,
                 )
             link.nc = nc
         else:
