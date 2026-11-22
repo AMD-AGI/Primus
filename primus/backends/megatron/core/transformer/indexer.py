@@ -671,6 +671,12 @@ class Indexer(nn.Module):
         # PRIMUS_V4_FP8_INDEXER_PROJ knob routes these through MXFP8. No TP
         # gather/scatter (duplicated linears).
         proj = _fp8_linear if _indexer_fp8_proj_enabled() else (lambda lin, x: lin(x))
+        if not _indexer_fp8_proj_enabled() and os.environ.get("PRIMUS_BF16TUNE", "0") == "1":
+            from primus.backends.megatron.core.fusions.bf16tune import bt_linear
+
+            def proj(lin, x):  # PRIMUS_BF16TUNE: planned shapes (frozen projections only) on Gluon bf16g2
+                y = bt_linear(x, lin.weight, lin.bias)
+                return lin(x) if y is None else y
         if self._fuse_qw_proj:
             dqw = proj(self.w_dq_w, hidden)  # [B, S, dq_rank + local H] in one GEMM
             q_q = dqw[..., : self.dq_rank]  # [B, S, dq_rank]
