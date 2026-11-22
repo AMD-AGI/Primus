@@ -56,7 +56,8 @@ Requirements:
 | + wgrad vkq (MoE wgrad scale planes via async VMEM), graph | 48.1 (A/B 48.50 -> 48.13) | 9.8712 |
 | + small batch: membound R2 (QDUAL c4096, PACKQ_SKIP f4096, ROUTER_FWD 128,4), splitk HC_TAILBW 512, attnfwd SMLA_FWD_PIPE, graph | 48.1 (A/B 48.23 -> 48.10) | 9.8712 |
 | + attnbwd SMLA_BWD_V2 + Adam HWCVT, graph | 47.5 (A/B 48.00 -> 47.47) | 9.8712 |
-| **+ bf16g2 OA_DGRAD + IDXQ (this config), graph** | **47.1** (A/B 47.40 -> 47.10) | 9.8712 |
+| + bf16g2 OA_DGRAD + IDXQ, graph | 47.1 (A/B 47.40 -> 47.10) | 9.8712 |
+| **+ fuse2 WPOOL_DAPE/COMP_MG/LOSS/PREFETCH=2/HEAD_GADD/ATT_GADD + static loss scale (this config), graph** | **47.1** (A/B 47.20 -> 47.07) | 9.8712 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -163,6 +164,10 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
   RNE; tile Adam 9.36 -> 8.99 ms): -0.53 ms together.
 - bf16g2 `PRIMUS_BF16G2_OA_DGRAD=1` (o_a dgrad as a Gluon NN GEMM, bitdiff 0 vs hipBLASLt, no w transposes) and
   `PRIMUS_BF16G2_IDXQ=1` (indexer query/key RoPE + Hadamard + scale chains fused): -0.30 ms together.
+- fuse2 (cross-kernel glue): `PRIMUS_FUSE2_WPOOL_DAPE/COMP_MG/LOSS/HEAD_GADD/ATT_GADD=1`, `PRIMUS_FUSE2_PREFETCH=2`,
+  `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=1`: -0.13 ms on int (it measured -0.82 on the older base; overlap, ROPE_TBL and IDXQ now
+  cover part of it). `PRIMUS_FUSE2_IDX_ROT` stays 0 (no-op under IDXQ; fallback when IDXQ is off). PREFETCH consumes one extra
+  batch at the end of training; LOSS covers the plain GPT loss_func only (other paths use Megatron's code).
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
