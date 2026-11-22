@@ -95,6 +95,26 @@ def _fp8blk_skip_bf16_enabled() -> bool:
     return _fp8blk_megamoe_enabled() and os.environ.get("PRIMUS_FP8BLK_ADAM_SKIP_BF16", "0") == "1"
 
 
+def _optb_dense_skip_bf16_enabled() -> bool:
+    """optbytes PRIMUS_OPTB_DENSE_SKIP_BF16=1 (with PRIMUS_FP8BLK_ADAM_QUANT=1): the tile Adam does not store the BF16
+    copy of the dense FP8-block weights (Turbo fp8blk_weight_cache targets) either. Their GEMMs read the Adam-written
+    FP8 cache; a cache miss (Turbo lookup / the concat fallback) runs the weight's materialize hook first, as do the
+    Megatron BF16 readers (_BF16_READERS). DP group of size 1 only."""
+    return _fp8blk_enabled() and os.environ.get("PRIMUS_OPTB_DENSE_SKIP_BF16", "0") == "1"
+
+
+def _optb_emb_skip_bf16_enabled() -> bool:
+    """optbytes PRIMUS_OPTB_EMB_SKIP_BF16=1: the chunk Adam does not store the BF16 word-embedding weight; the
+    PRIMUS_EMB_MAIN_GRAD forward gathers from the FP32 master and rounds RNE (same bytes). DP group of size 1 only."""
+    return _bf16_writeback_enabled() and os.environ.get("PRIMUS_OPTB_EMB_SKIP_BF16", "0") == "1"
+
+
+def _optb_poison_enabled() -> bool:
+    """PRIMUS_OPTB_SKIP_POISON=1 (debug): fill every skipped BF16 weight with NaN right after each Adam launch, so
+    any reader that was not routed through a materialize hook / the FP32 master turns the loss into NaN."""
+    return os.environ.get("PRIMUS_OPTB_SKIP_POISON", "0") == "1"
+
+
 class _BF16Materializer:
     """Rebuilds a skipped BF16 weight (the param-buffer view) from its FP32 master shard, on the current stream,
     once per optimizer update (``stale`` is set on the host each time the Adam kernel is queued for it)."""
@@ -317,7 +337,7 @@ def _metadata_key(chunk_size: int, tensor_lists, writeback_by_param_ptr) -> tupl
     )
 
 
-def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
+def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None, skip_bf16_ptrs=()):
     if len(tensor_lists) != 4:
         raise RuntimeError(
             "PRIMUS_FUSED_ADAM_CLIP currently requires TE's four-list "
@@ -369,7 +389,8 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
             if not writeback.is_contiguous() or writeback.numel() != tensors[1].numel():
                 raise RuntimeError("PRIMUS_FUSED_ADAM_BF16_WRITEBACK received an incompatible destination")
         addresses.extend(tensor.data_ptr() for tensor in tensors)
-        addresses.append(0 if writeback is None else writeback.data_ptr())
+        # optbytes EMB_SKIP_BF16: BF16 address 0 -> the chunk kernel skips the BF16 store of this tensor
+        addresses.append(0 if writeback is None or tensors[1].data_ptr() in skip_bf16_ptrs else writeback.data_ptr())
         numel = tensors[0].numel()
         sizes.append(numel)
         chunk_offsets.append(total_chunks)
@@ -530,6 +551,7 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
         inner_optimizer._primus_bf16_writeback_by_param_ptr = writeback_by_param_ptr
         inner_optimizer._primus_bf16_writeback_tensors = writeback_tensors
         inner_optimizer._primus_fp8blk_by_param_ptr = fp8blk_by_param_ptr
+        inner_optimizer._primus_optb_chunk_skip = getattr(distributed_optimizer, "_primus_optb_chunk_skip", {})
         distributed_optimizer._primus_bf16_writeback_active = True
         return
 
@@ -538,6 +560,7 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
     fp8blk_by_param_ptr = {}
     megamoe_count = 0
     skip_bf16_count = 0
+    optb_chunk_skip = {}  # optbytes EMB_SKIP_BF16: FP32 master ptr -> materializer (chunk Adam BF16 address 0)
     if _fp8blk_enabled():
         from primus_turbo.pytorch.core import fp8blk_weight_cache
     for shard_main_group, model_group in zip(
@@ -574,6 +597,12 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
                 # parameter), so 128x128 tiles can be formed inside the optimizer.
                 cache = fp8blk_weight_cache.attach(model_param)
                 cache.ready = False
+                dp_group = getattr(distributed_optimizer.buffers[gbuf_index], "data_parallel_group", None)
+                if _optb_dense_skip_bf16_enabled() and dp_group is not None and dp_group.size() == 1:
+                    # optbytes: Turbo lookup() runs this hook on a cache miss, before reading the BF16 weight
+                    cache.materializer = _BF16Materializer(shard_model_param, shard_main_param)
+                    setattr(model_param, "_fp8blk_materialize", cache.materializer)
+                    skip_bf16_count += 1
                 fp8blk_by_param_ptr[shard_main_param.data_ptr()] = (model_param, cache)
             elif (
                 _fp8blk_megamoe_enabled()
@@ -600,6 +629,21 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
                         skip_bf16_count += 1
                     fp8blk_by_param_ptr[shard_main_param.data_ptr()] = (model_param, target)
                     megamoe_count += 1
+            elif _optb_emb_skip_bf16_enabled() and getattr(model_param, "_primus_optb_emb", False):
+                dp_group = getattr(distributed_optimizer.buffers[gbuf_index], "data_parallel_group", None)
+                if (
+                    dp_group is not None
+                    and dp_group.size() == 1
+                    and world_range.size == model_param.numel()
+                    and shard_model_param.data_ptr() == model_param.data_ptr()
+                    and shard_main_param.is_contiguous()
+                ):
+                    # optbytes: chunk Adam gets BF16 address 0; the embedding forward reads the FP32 master
+                    mat = _BF16Materializer(shard_model_param, shard_main_param)
+                    setattr(model_param, "_fp8blk_materialize", mat)
+                    model_param._primus_optb_master = shard_main_param.view(model_param.shape)
+                    optb_chunk_skip[shard_main_param.data_ptr()] = mat
+                    skip_bf16_count += 1
 
     expected_masters = sum(len(group) for group in distributed_optimizer.shard_fp32_from_float16_groups)
     if len(writeback_by_param_ptr) != expected_masters:
@@ -614,7 +658,13 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
     inner_optimizer._primus_bf16_writeback_by_param_ptr = writeback_by_param_ptr
     inner_optimizer._primus_bf16_writeback_tensors = writeback_tensors
     inner_optimizer._primus_fp8blk_by_param_ptr = fp8blk_by_param_ptr
+    distributed_optimizer._primus_optb_chunk_skip = optb_chunk_skip
+    inner_optimizer._primus_optb_chunk_skip = optb_chunk_skip
     distributed_optimizer._primus_bf16_writeback_active = True
+    if _optb_dense_skip_bf16_enabled() or _optb_emb_skip_bf16_enabled():
+        log_rank_0(f"[Patch:{_PATCH_KEY}] optbytes: {skip_bf16_count} weights skip the BF16 store "
+                   f"(dense {sum(1 for _, c in fp8blk_by_param_ptr.values() if getattr(c, 'materializer', None) is not None)}"
+                   f" incl. MegaMoE, embedding {len(optb_chunk_skip)})")
     if _fp8blk_enabled():
         log_rank_0(
             f"[Patch:{_PATCH_KEY}] PRIMUS_FP8BLK_ADAM_QUANT: {len(fp8blk_by_param_ptr)} weights "
@@ -765,7 +815,7 @@ def _install_patch() -> None:
             )
         # Turbo block-FP8 GEMMs tag the weights they quantize and use the optimizer-written cache.
         os.environ["PRIMUS_TURBO_FP8_WCACHE"] = "1"
-    if _fp8blk_skip_bf16_enabled():
+    if _fp8blk_skip_bf16_enabled() or _optb_dense_skip_bf16_enabled() or _optb_emb_skip_bf16_enabled():
         _wrap_bf16_readers()
 
     extension = _load_extension()
@@ -868,16 +918,21 @@ def _install_patch() -> None:
                         materializer = getattr(cache, "materializer", None)
                         if materializer is not None:
                             materializer.stale = True  # the BF16 weight now lags the FP32 master
+                            if _optb_poison_enabled() and not isinstance(cache, _MegaMoEAdamTarget):
+                                materializer.model_buf.fill_(float("nan"))  # optbytes debug: catch BF16 readers
                     sel_set = set(sel)
                     tensor_lists = [
                         [t for i, t in enumerate(lst) if i not in sel_set] for lst in tensor_lists
                     ]
                     if not tensor_lists[0]:
                         return
+            optb_skip = getattr(self, "_primus_optb_chunk_skip", None) or {}
             key = _metadata_key(chunk_size, tensor_lists, writeback_by_param_ptr)
+            if optb_skip:
+                key = key + (tuple(sorted(optb_skip)),)
             metadata = self._primus_adam_metadata_cache.get(key)
             if metadata is None:
-                metadata = _build_metadata(chunk_size, tensor_lists, writeback_by_param_ptr)
+                metadata = _build_metadata(chunk_size, tensor_lists, writeback_by_param_ptr, skip_bf16_ptrs=optb_skip)
                 self._primus_adam_metadata_cache[key] = metadata
             (
                 addresses,
@@ -908,6 +963,13 @@ def _install_patch() -> None:
                 self._primus_clip_norm,
                 float(self._primus_clip_max_norm),
             )
+            if optb_skip:
+                for p in tensor_lists[1]:
+                    mat = optb_skip.get(p.data_ptr())
+                    if mat is not None:
+                        mat.stale = True  # the BF16 embedding now lags the FP32 master
+                        if _optb_poison_enabled():
+                            mat.model_buf.fill_(float("nan"))
 
         # FusedAdam.step calls this attribute through TE's existing
         # multi_tensor_applier, so all Python-side grouping remains unchanged.
