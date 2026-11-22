@@ -103,13 +103,23 @@ def _load_route(LOGITS, IDX, IDS, n_offs, n_mask, e_idx, k_idx, E: tl.constexpr,
 @triton.jit
 def _route_fwd_kernel(LOGITS, IDX, IDS, TOPW, TOPI, WSAVE, DENOM, CNT_P, SUM_P, N, K,
                       E: tl.constexpr, KP: tl.constexpr, BN: tl.constexpr, SCALE: tl.constexpr, HASH: tl.constexpr,
-                      SLOT_EVEN: tl.constexpr, LOSS: tl.constexpr):
+                      SLOT_EVEN: tl.constexpr, LOSS: tl.constexpr,
+                      RINV=None, PADROWS=None, RWP=None, NPAD=None, RW_OUT: tl.constexpr = 0, PADB: tl.constexpr = 1):
     pid = tl.program_id(0)
     n_offs = pid * BN + tl.arange(0, BN)
     n_mask = n_offs < N
     e_idx = tl.arange(0, E)
     k_idx = tl.arange(0, KP)
     logits, idx, km = _load_route(LOGITS, IDX, IDS, n_offs, n_mask, e_idx, k_idx, E, K, KP, HASH)
+    if RW_OUT:
+        # route3: MegaMoE pool route weights for the static force-LB-even tables (Turbo even_routing_tables):
+        # route (n, k) lives at pool row RINV[n*K + k] (stored below); the padding rows PADROWS get 0 (this
+        # program's share). Issued first so the table loads overlap the routing math.
+        prow = tl.load(RINV + n_offs[:, None].to(tl.int64) * K + k_idx[None, :], mask=km, other=0)
+        pr = pid * PADB + tl.arange(0, PADB)
+        pm = pr < NPAD
+        zrow = tl.load(PADROWS + pr, mask=pm, other=0)
+        tl.store(RWP + zrow, tl.zeros((PADB,), dtype=tl.float32), mask=pm)
     scores = _score_post(logits)
     w = _gather_k(scores, idx, e_idx, k_idx, KP)
     w = tl.where(km, w, 0.0)
@@ -137,6 +147,8 @@ def _route_fwd_kernel(LOGITS, IDX, IDS, TOPW, TOPI, WSAVE, DENOM, CNT_P, SUM_P, 
         topi = ((n_offs[:, None].to(tl.int64) * K + k_idx[None, :]) % E).to(tl.int32)
     tl.store(TOPW + n_offs[:, None].to(tl.int64) * K + k_idx[None, :], topw, mask=km)
     tl.store(TOPI + n_offs[:, None].to(tl.int64) * K + k_idx[None, :], topi.to(tl.int64), mask=km)
+    if RW_OUT:
+        tl.store(RWP + prow, topw, mask=km)
     if LOSS:
         sa = tl.sqrt(_softplus_acc(logits))
         sa = tl.where(n_mask[:, None], sa, 0.0)
@@ -230,7 +242,7 @@ class RouteCompactFn(torch.autograd.Function):
     ``loss_cfg``: None or (coeff, batch, seq_len) of the sequence-balance loss."""
 
     @staticmethod
-    def forward(ctx, logits, idx_rows, ids, topk, scale, slot_even, loss_cfg):
+    def forward(ctx, logits, idx_rows, ids, topk, scale, slot_even, loss_cfg, tables=None):
         N, E = logits.shape
         K = int(topk)
         KP = triton.next_power_of_2(K)
@@ -258,9 +270,17 @@ class RouteCompactFn(torch.autograd.Function):
             sum_p = torch.empty((nb, E), dtype=torch.float32, device=dev)
         else:
             cnt_p = sum_p = topw  # unused
+        rw_kw = {}
+        if tables is not None:
+            # route3: also write the MegaMoE pool route weights (tables.rw) of the static even tables
+            assert slot_even and tables.inv.numel() == N * K and tables.padrows.dtype == torch.int32
+            tables.rw = torch.empty((tables.P,), dtype=torch.float32, device=dev)
+            npad = tables.padrows.numel()
+            rw_kw = dict(RINV=tables.inv, PADROWS=tables.padrows if npad else tables.inv, RWP=tables.rw, NPAD=npad,
+                         RW_OUT=1, PADB=triton.next_power_of_2(max(triton.cdiv(npad, nb), 1)))
         _route_fwd_kernel[(nb,)](logits, idx_rows, ids, topw, topi, wsave, denom, cnt_p, sum_p, N, K, E=E, KP=KP, BN=_BN,
                                  SCALE=float(scale), HASH=int(hash_), SLOT_EVEN=int(slot_even), LOSS=int(has_loss),
-                                 num_warps=4)
+                                 num_warps=4, **rw_kw)
         cnt = None
         if has_loss:
             cnt = torch.empty((B, E), dtype=torch.float32, device=dev)
@@ -284,7 +304,7 @@ class RouteCompactFn(torch.autograd.Function):
         N, E = logits.shape
         K = ctx.K
         if dtopw is None and not ctx.has_loss:
-            return None, None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
         if dtopw is None:
             dtopw = torch.zeros((N, K), dtype=torch.float32, device=logits.device)
         dtopw = dtopw.contiguous().float()
@@ -301,7 +321,24 @@ class RouteCompactFn(torch.autograd.Function):
             logits, idx_rows, ids, wsave, denom, dtopw, cnt, dscale, dl, N, K, ctx.S if ctx.has_loss else 1,
             ctx.lcoef if ctx.has_loss else 0.0, E=E, KP=triton.next_power_of_2(K), BN=_BN, SCALE=ctx.scale,
             HASH=int(ctx.hash), LOSS=int(ctx.has_loss), num_warps=4)
-        return dl, None, None, None, None, None, None
+        return dl, None, None, None, None, None, None, None
+
+
+class Route3Tables:
+    """route3 (PRIMUS_ROUTE3_TABLES=1): the static MegaMoE pool tables of force-LB-even routing
+    (Turbo ``even_routing_tables``) plus this call's route weights ``rw`` (written by _route_fwd_kernel)."""
+
+    def __init__(self, rowmap, inv, poffs, perm, padrows, P):
+        self.rowmap, self.inv, self.poffs, self.perm, self.padrows, self.P = rowmap, inv, poffs, perm, padrows, int(P)
+        self.rw = None
+
+    def routing(self):
+        assert self.rw is not None
+        return (self.rowmap, self.rw, self.inv, self.poffs, self.perm)
+
+
+def route3_tables_enabled() -> bool:
+    return os.environ.get("PRIMUS_ROUTE3_TABLES", "0") == "1"
 
 
 def pad_rows(idx: torch.Tensor) -> torch.Tensor:
@@ -313,8 +350,9 @@ def pad_rows(idx: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def route_compact(logits, idx_rows, ids, topk, scale, slot_even, loss_cfg):
-    return RouteCompactFn.apply(logits, idx_rows, ids, int(topk), float(scale), bool(slot_even), loss_cfg)
+def route_compact(logits, idx_rows, ids, topk, scale, slot_even, loss_cfg, tables=None):
+    return RouteCompactFn.apply(logits, idx_rows, ids, int(topk), float(scale), bool(slot_even), loss_cfg, tables)
 
 
-__all__ = ["fuse_route_enabled", "pad_rows", "route_compact", "RouteCompactFn"]
+__all__ = ["fuse_route_enabled", "pad_rows", "route_compact", "RouteCompactFn", "Route3Tables",
+           "route3_tables_enabled"]

@@ -768,8 +768,10 @@ class DeepseekV4MoE(MegatronModule):
         router alias of ``PersistForkFn`` (``stash`` links the two backwards: router backward in 2 launches, see
         ``_triton/persist_router_bwd.py``)."""
         from primus.backends.megatron.core.transformer.moe._triton.v4_route_compact import (
+            Route3Tables,
             fuse_route_enabled,
             pad_rows,
+            route3_tables_enabled,
             route_compact,
         )
 
@@ -805,6 +807,16 @@ class DeepseekV4MoE(MegatronModule):
             if seq <= 0 or flat.shape[0] % seq != 0 or seq % 64 != 0:
                 return None
             loss_cfg = (router.seq_balance_loss_coeff, flat.shape[0] // seq, seq)
+        # route3 (PRIMUS_ROUTE3_TABLES=1): with force-LB "even" the MegaMoE pool tables (rowmap / inv / offsets / LPT
+        # order) do not depend on the router: static (built once, eagerly), and the route kernel writes the pool route
+        # weights itself -> no count / offsets / scatter launches between the shared-expert join and the dispatch.
+        r3 = None
+        if self._force_lb_mode == "even" and route3_tables_enabled():
+            from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import even_routing_tables
+
+            t3 = even_routing_tables(flat.shape[0], int(router.topk), int(router.weight.shape[0]), flat.device)
+            if t3 is not None:
+                r3 = Route3Tables(*t3)
         aliases = None
         if persist and router.weight.requires_grad and hidden.dtype == torch.bfloat16 and hidden.is_contiguous():
             # persist track: same forward kernels, one-launch backward (see _triton/persist_router_bwd.py)
@@ -825,7 +837,7 @@ class DeepseekV4MoE(MegatronModule):
             topk_w, topk_idx, loss = PersistRouterFn.apply(
                 hidden, router.weight, bias, idx_tab, ids, int(router.topk), router.score_function,
                 float(router.topk_scaling_factor), self._force_lb_mode == "even", loss_cfg,
-                bool(self.use_hash_router), claim_main_grad(router.weight), stash,
+                bool(self.use_hash_router), claim_main_grad(router.weight), stash, r3,
             )
             aliases = True
         elif self.use_hash_router:
@@ -846,7 +858,7 @@ class DeepseekV4MoE(MegatronModule):
         if aliases is None:
             topk_w, topk_idx, loss = route_compact(
                 logits, idx_rows, ids, router.topk, router.topk_scaling_factor, self._force_lb_mode == "even",
-                loss_cfg,
+                loss_cfg, r3,
             )
         if loss_cfg is not None:
             router.last_seq_balance_loss = loss.detach()
@@ -858,7 +870,7 @@ class DeepseekV4MoE(MegatronModule):
                 log_seq_balance_loss(
                     loss, layer_number=router.layer_number, num_layers=int(router.num_layers), reduce_group=grp
                 )
-        return topk_w, topk_idx
+        return topk_w, topk_idx, (r3.routing() if r3 is not None else None)
 
     # ------------------------------------------------------------------
 
@@ -1066,14 +1078,22 @@ class DeepseekV4MoE(MegatronModule):
         )
         if compact is not None:
             # PRIMUS_FUSE_ROUTE=1: router GEMM + one compact route kernel straight into MegaMoE's (idx, weights)
-            topk_w, topk_idx = compact
+            topk_w, topk_idx, routing = compact
+            rkw = {} if routing is None else {"routing": routing}  # route3: precomputed MegaMoE pool tables
             x = h_e.reshape(-1, self.hidden_size).to(torch.bfloat16)
             shared = self.shared_expert is not None and not self.shared_expert_overlap
             if shared and os.environ.get("PRIMUS_FUSE_MOE_ADD", "0") == "1" and hidden.dtype == torch.bfloat16:
                 # routed + shared add inside the MegaMoE combine kernel (bit-identical to the bf16 add below)
+                if br is not None and os.environ.get("PRIMUS_ROUTE3_LATE_JOIN", "0") == "1":
+                    # route3 LATE_JOIN: the main stream waits for the shared-expert branch right before the combine
+                    # (its only reader) instead of before the MegaMoE call: dispatch quant / fc1 / SwiGLU / fc2 may
+                    # run beside the shared expert. Same kernels and inputs -> same bits.
+                    sh, join = _late_join(br, y_shared)
+                    return self.mega_moe_experts(x, topk_idx, topk_w, add=sh.reshape(x.shape), add_join=join,
+                                                 **rkw).reshape(hidden.shape)
                 sh = br.done(y_shared) if br is not None else self.shared_expert(h_sh)
-                return self.mega_moe_experts(x, topk_idx, topk_w, add=sh.reshape(x.shape)).reshape(hidden.shape)
-            out = self.mega_moe_experts(x, topk_idx, topk_w).reshape(hidden.shape).to(hidden.dtype)
+                return self.mega_moe_experts(x, topk_idx, topk_w, add=sh.reshape(x.shape), **rkw).reshape(hidden.shape)
+            out = self.mega_moe_experts(x, topk_idx, topk_w, **rkw).reshape(hidden.shape).to(hidden.dtype)
             if shared:
                 out = out + (br.done(y_shared) if br is not None else self.shared_expert(h_sh))
             return out
@@ -1103,6 +1123,23 @@ class DeepseekV4MoE(MegatronModule):
         if self.shared_expert is not None and not self.shared_expert_overlap:
             out = out + self.shared_expert(hidden)
         return out
+
+
+def _late_join(br, t):
+    """route3: ``br.done(t)`` split in two: the autograd-tracked branch output now (no wait), and a callable that
+    makes the main stream wait for the branch and marks the output as used by the main stream (call it right before
+    the first main-stream reader of the output)."""
+    from primus_turbo.pytorch.core.overlap import _BranchOutput
+
+    if isinstance(t, torch.Tensor) and t.requires_grad and torch.is_grad_enabled():
+        with torch.cuda.stream(br.side):
+            t = _BranchOutput.apply(t)
+
+    def join():
+        br.main.wait_stream(br.side)
+        t.record_stream(br.main)
+
+    return t, join
 
 
 __all__ = ["DeepseekV4MoE", "DeepseekV4MoESubmodules"]
