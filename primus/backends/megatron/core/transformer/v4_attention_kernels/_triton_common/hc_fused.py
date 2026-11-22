@@ -55,7 +55,7 @@ else:  # pragma: no cover
         return False
 
     def b3x_cfg():
-        return 128, 8
+        return 64, 4, False
 
 from .hc_bif import (
     _hc_collapse_bif_kernel,
@@ -66,13 +66,9 @@ from .hc_bif import (
 )
 from .hc_boundary import (
     claim_main_grad,
-    dpre_bwd_enabled,
     expand_rms,
     grad_direct_enabled,
     hc_tail,
-    norm_dpre_prebwd,
-    pre_collapse_norm,
-    prenorm_enabled,
     xrms_enabled,
     xrms_supported,
 )
@@ -997,30 +993,21 @@ class HCPreFn(torch.autograd.Function):
         two_d = f["two_d"] and D % f["t2_bc"] == 0
         fold = gamma is not None and two_d and K == 4 and triton.next_power_of_2(D) == D
         rstd_n = None
-        prenorm = fold and prenorm_enabled() and not f["fold_fp8"] and x.dtype == torch.bfloat16
-        if prenorm:
-            # fuse-hc: pre row math + collapse + folded norm in one launch (same bits as the two kernels below)
-            raw, rstd, states, pre, post, combt, y2, rstd_n = pre_collapse_norm(
-                x3, p_raw, p_ss, n_split, scale_c, base_c, eps, n_iters, gamma.contiguous(), norm_eps, BN)
-            coll = y2.view(x.shape[:-2] + (D,))
-        else:
-            raw = torch.empty((M, BN), dtype=torch.float32, device=dev)
-            rstd = torch.empty((M,), dtype=torch.float32, device=dev)
-            states = torch.empty((M, 2 * n_iters, K, K), dtype=torch.float32, device=dev)
-            pre = torch.empty((M, K), dtype=x.dtype, device=dev)
-            post = torch.empty((M, K), dtype=x.dtype, device=dev)
-            combt = torch.empty((M, K, K), dtype=x.dtype, device=dev)
-            coll = torch.empty(x.shape[:-2] + (D,), dtype=x.dtype, device=dev)
-            bm = f["rm_bm"] if two_d else f["row_bm"]
-            _hc_pre_fwd_kernel[(triton.cdiv(M, bm),)](
-                x3, p_raw, p_ss, scale_c, base_c, raw, rstd, states, pre, post, combt, coll,
-                M, D, n_split, float(eps),
-                EPS=float(eps), K=K, BN=BN, N_ITERS=int(n_iters), BLOCK_M=bm, BLOCK_D=f["row_bd"],
-                DO_COLL=not two_d, num_warps=f["rm_warps"] if two_d else f["row_warps"],
-            )
-        if prenorm:
-            pass
-        elif fold:
+        raw = torch.empty((M, BN), dtype=torch.float32, device=dev)
+        rstd = torch.empty((M,), dtype=torch.float32, device=dev)
+        states = torch.empty((M, 2 * n_iters, K, K), dtype=torch.float32, device=dev)
+        pre = torch.empty((M, K), dtype=x.dtype, device=dev)
+        post = torch.empty((M, K), dtype=x.dtype, device=dev)
+        combt = torch.empty((M, K, K), dtype=x.dtype, device=dev)
+        coll = torch.empty(x.shape[:-2] + (D,), dtype=x.dtype, device=dev)
+        bm = f["rm_bm"] if two_d else f["row_bm"]
+        _hc_pre_fwd_kernel[(triton.cdiv(M, bm),)](
+            x3, p_raw, p_ss, scale_c, base_c, raw, rstd, states, pre, post, combt, coll,
+            M, D, n_split, float(eps),
+            EPS=float(eps), K=K, BN=BN, N_ITERS=int(n_iters), BLOCK_M=bm, BLOCK_D=f["row_bd"],
+            DO_COLL=not two_d, num_warps=f["rm_warps"] if two_d else f["row_warps"],
+        )
+        if fold:
             # y = rmsnorm(collapse) * gamma replaces the collapsed output (the sub-block skips its norm)
             y2, rstd_n, fq = collapse_norm_fwd(x3, pre, gamma.contiguous(), norm_eps, fp8=f["fold_fp8"])
             coll = y2.view(x.shape[:-2] + (D,))
@@ -1055,7 +1042,6 @@ class HCPreFn(torch.autograd.Function):
         if grad_direct_enabled() and wth.dtype == torch.bfloat16 and (not fold or ctx.gamma_needs_grad):
             ctx.direct = (weight, scale, base, gamma if fold else None)
             ctx.claimed = tuple(claim_main_grad(p) if p is not None else False for p in ctx.direct)
-        ctx.dpre_bwd = fold and dpre_bwd_enabled()
         ctx.link = link
         ctx.eps = float(eps)
         ctx.n_iters = int(n_iters)
@@ -1098,23 +1084,8 @@ class HCPreFn(torch.autograd.Function):
         two_d = f["two_d"] and D % f["t2_bc"] == 0 and (not has_post or link.nc > 0)
         dgamma = None
         dgp = None
-        fused_dpre = ctx.fold and ctx.dpre_bwd and two_d and (not has_post or link.nc == D // f["t2_bc"])
         tail = use_gl and ctx.direct is not None
-        if fused_dpre:
-            # fuse-hc: norm backward + dpre + the _hc_pre_bwd row math in one persistent launch
-            nc = D // f["t2_bc"]
-            dcoll, dgp, g, coef, part, gh, glo, gth, gtl = norm_dpre_prebwd(
-                x3, pre, gamma, rstd_n, dcoll, raw, rstd, states, scale_c, base_c,
-                link.dpost if has_post else None, link.dcombt if has_post else None, nc, ctx.eps, ctx.n_iters,
-                BN, N, use_gl)
-            if not tail:
-                from .rmsnorm_g90 import _rms_dg_reduce_kernel
-
-                dgamma = torch.empty_like(gamma)
-                _rms_dg_reduce_kernel[(triton.cdiv(D, 64),)](dgp, dgamma, dgp.shape[0], D, BH=64, BP=64, num_warps=4)
-                if not ctx.gamma_needs_grad:
-                    dgamma = None
-        elif ctx.fold and tail:
+        if ctx.fold and tail:
             nc = D // f["t2_bc"]
             dcoll, dprep, dgp = norm_dpre_bwd(x3, pre, gamma, rstd_n, dcoll, f["t2_bc"], reduce=False)
             n_prog = triton.cdiv(M, f["rm_bm"])
@@ -1144,15 +1115,14 @@ class HCPreFn(torch.autograd.Function):
         else:
             nc = 0
             dprep = g
-        if not fused_dpre:
-            _hc_pre_bwd_kernel[(n_prog,)](
-                x3, dcoll, raw, rstd, states, scale_c, base_c,
-                link.dpost if has_post else g, link.dcombt if has_post else g,
-                g, coef, part, gh, glo, gth, gtl, dprep, nc, M, D,
-                HAS_POST=has_post, SPLIT_G=use_gl, PARTS=two_d, EPS=ctx.eps, K=K, BN=BN, NP=NP, N_ITERS=ctx.n_iters,
-                BLOCK_M=f["rm_bm"] if two_d else f["row_bm"], BLOCK_D=f["row_bd"],
-                num_warps=f["rm_warps"] if two_d else f["row_warps"],
-            )
+        _hc_pre_bwd_kernel[(n_prog,)](
+            x3, dcoll, raw, rstd, states, scale_c, base_c,
+            link.dpost if has_post else g, link.dcombt if has_post else g,
+            g, coef, part, gh, glo, gth, gtl, dprep, nc, M, D,
+            HAS_POST=has_post, SPLIT_G=use_gl, PARTS=two_d, EPS=ctx.eps, K=K, BN=BN, NP=NP, N_ITERS=ctx.n_iters,
+            BLOCK_M=f["rm_bm"] if two_d else f["row_bm"], BLOCK_D=f["row_bd"],
+            num_warps=f["rm_warps"] if two_d else f["row_warps"],
+        )
         if use_gl:
             bt, bc, ts, nw = f["gl_bt"], f["gl_bc"], f["gl_tsplit"], f["gl_warps"]
             wm, opa, opb, blk, smem = _gl_layouts(bt, bc, nw)
@@ -1162,14 +1132,14 @@ class HCPreFn(torch.autograd.Function):
             dw_p = torch.empty((ts, BN, KD), dtype=torch.float32, device=dev)
             if b3x_enabled() and D % b3x_cfg()[0] == 0:
                 # fuse-hc: all 4 streams per program (x / dnew / dcollapsed loaded once per tile), same bits
-                xbc, xnw = b3x_cfg()
+                xbc, xnw, xpf = b3x_cfg()
                 wm, opa, opb, blk, smem = _gl_layouts(bt, xbc, xnw)
                 n_dx = D // xbc
                 _hc_b3x_kernel[(n_dx * ts,)](
                     x3, w, wth, wtl, gh, glo, gth, gtl, coef, pre, combt, dcoll, dnew if dnew is not None else x3, dx,
                     dw_p, M, D, N, M // ts, n_dx, n_dx * ts,
                     BT=bt, BC=xbc, BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk, SMEM=smem,
-                    SMEM_W=_gl_smem_w(BN, xbc), DIRECT_W=ctx.direct_w, num_warps=xnw,
+                    SMEM_W=_gl_smem_w(BN, xbc), DIRECT_W=ctx.direct_w, PF=xpf, num_warps=xnw,
                 )
             else:
                 assert not ctx.direct_w
