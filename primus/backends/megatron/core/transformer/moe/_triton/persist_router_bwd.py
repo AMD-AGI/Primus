@@ -291,6 +291,19 @@ class _Ctx:
         pass
 
 
+def _ddp_grad_checks_on() -> bool:
+    """Megatron's DDP grad checks (--check_for_nan_in_loss_and_grad, the eager default; --check_for_large_grads) read
+    each bucket's main_grad from the backward hooks (PRIMUS_GRAD_NORM_FROM_NAN_CHECK takes the grad norm from that
+    read): the router weight's main_grad must then be written before its hook, so the stash hand-off is not used."""
+    try:
+        from megatron.training import get_args
+
+        a = get_args()
+    except Exception:  # noqa: BLE001 -- no Megatron args (unit tests)
+        return False
+    return bool(getattr(a, "check_for_nan_in_loss_and_grad", False) or getattr(a, "check_for_large_grads", False))
+
+
 class RouterStash:
     """Hand-off from PersistRouterFn's backward (no kernels: d top-k weights + route state) to PersistForkFn's backward
     (the two launches). Lives for one forward/backward of one MoE layer."""
@@ -398,7 +411,7 @@ class PersistRouterFn(torch.autograd.Function):
         stash, ctx.stash = ctx.stash, None
         nones = (None,) * 11
         if (stash is not None and ctx.claimed and ctx.needs_input_grad[0] and ctx.needs_input_grad[1]
-                and direct_main_grad(w) is not None):
+                and direct_main_grad(w) is not None and not _ddp_grad_checks_on()):
             slot = _GradSlot(w, w.dtype, tuple(w.shape), dev, ctx.claimed)
             stash.job = (route, flat, w, dtopw, slot.out, w.dtype, slot.acc)
             return (None, slot.grad(w.dtype)) + nones
