@@ -768,10 +768,11 @@ class DeepseekV4MoE(MegatronModule):
         router alias of ``PersistForkFn`` (``stash`` links the two backwards: router backward in 2 launches, see
         ``_triton/persist_router_bwd.py``)."""
         from primus.backends.megatron.core.transformer.moe._triton.v4_route_compact import (
-            Route3Tables,
             fuse_route_enabled,
             pad_rows,
-            route3_tables_enabled,
+            route3_dyn_tables,
+            route3_early_mode,
+            route3_static_tables,
             route_compact,
         )
 
@@ -810,13 +811,9 @@ class DeepseekV4MoE(MegatronModule):
         # route3 (PRIMUS_ROUTE3_TABLES=1): with force-LB "even" the MegaMoE pool tables (rowmap / inv / offsets / LPT
         # order) do not depend on the router: static (built once, eagerly), and the route kernel writes the pool route
         # weights itself -> no count / offsets / scatter launches between the shared-expert join and the dispatch.
-        r3 = None
-        if self._force_lb_mode == "even" and route3_tables_enabled():
-            from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import even_routing_tables
-
-            t3 = even_routing_tables(flat.shape[0], int(router.topk), int(router.weight.shape[0]), flat.device)
-            if t3 is not None:
-                r3 = Route3Tables(*t3)
+        r3 = route3_static_tables(self._force_lb_mode, flat.shape[0], router.topk, router.weight.shape[0], flat.device)
+        if r3 is None:  # route3 EARLY=2 (any routing): merged dynamic pool tables right after the route kernel
+            r3 = route3_dyn_tables(flat.shape[0], router.topk, router.weight.shape[0])
         aliases = None
         if persist and router.weight.requires_grad and hidden.dtype == torch.bfloat16 and hidden.is_contiguous():
             # persist track: same forward kernels, one-launch backward (see _triton/persist_router_bwd.py)
@@ -870,7 +867,13 @@ class DeepseekV4MoE(MegatronModule):
                 log_seq_balance_loss(
                     loss, layer_number=router.layer_number, num_layers=int(router.num_layers), reduce_group=grp
                 )
-        return topk_w, topk_idx, (r3.routing() if r3 is not None else None)
+        routing = r3.routing() if r3 is not None else None
+        if routing is None and route3_early_mode() == 1:
+            # route3 EARLY (any routing): the pool tables right after the route kernel, before the shared-expert join
+            from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk import early_routing_tables
+
+            routing = early_routing_tables(topk_idx, topk_w, int(router.weight.shape[0]))
+        return topk_w, topk_idx, routing
 
     # ------------------------------------------------------------------
 
@@ -1084,11 +1087,13 @@ class DeepseekV4MoE(MegatronModule):
             shared = self.shared_expert is not None and not self.shared_expert_overlap
             if shared and os.environ.get("PRIMUS_FUSE_MOE_ADD", "0") == "1" and hidden.dtype == torch.bfloat16:
                 # routed + shared add inside the MegaMoE combine kernel (bit-identical to the bf16 add below)
-                if br is not None and os.environ.get("PRIMUS_ROUTE3_LATE_JOIN", "0") == "1":
+                lj = os.environ.get("PRIMUS_ROUTE3_LATE_JOIN", "0")
+                if br is not None and lj in ("1", "dq"):
                     # route3 LATE_JOIN: the main stream waits for the shared-expert branch right before the combine
                     # (its only reader) instead of before the MegaMoE call: dispatch quant / fc1 / SwiGLU / fc2 may
                     # run beside the shared expert. Same kernels and inputs -> same bits.
                     sh, join = _late_join(br, y_shared)
+                    join.after_dispatch = lj == "dq"  # "dq": join right after the dispatch quant (before fc1)
                     return self.mega_moe_experts(x, topk_idx, topk_w, add=sh.reshape(x.shape), add_join=join,
                                                  **rkw).reshape(hidden.shape)
                 sh = br.done(y_shared) if br is not None else self.shared_expert(h_sh)
