@@ -104,6 +104,10 @@ class MultiSumsq:
         for x in list(ranges) + list(extras):
             if not x.is_contiguous() or (x.dtype == torch.bfloat16 and (x.data_ptr() % 32 or x.numel() % 16)):
                 self.ok = False
+            if x.dtype == torch.float32 and x.numel() % 16:
+                # the kernel's tl.multiple_of(n0, 16) hint (bf16 branch) also reaches the fp32 branch's mask: an fp32
+                # partial buffer whose length is not a multiple of 16 would be over-read -> upstream loop instead
+                self.ok = False
             ptrs.append(x.data_ptr())
             ns.append(x.numel())
             poff.append(poff[-1] + triton.cdiv(x.numel(), self.CHUNK))
