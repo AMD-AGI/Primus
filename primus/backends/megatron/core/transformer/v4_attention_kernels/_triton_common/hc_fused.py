@@ -48,8 +48,14 @@ except Exception:  # pragma: no cover
     _HAVE_GLUON = False
 
 if _HAVE_GLUON:  # fuse-hc all-stream B3 (import errors must surface, not silently drop the gluon B3)
-    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled, b3x_layouts
+    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled, b3x_layouts, b3x_splitk_kw, b3x_splitk_ts
 else:  # pragma: no cover
+
+    def b3x_splitk_ts() -> int:
+        return 0
+
+    def b3x_splitk_kw():
+        return {}
 
     def b3x_enabled() -> bool:
         return False
@@ -1127,24 +1133,34 @@ class HCPreFn(torch.autograd.Function):
             bt, bc, ts, nw = f["gl_bt"], f["gl_bc"], f["gl_tsplit"], f["gl_warps"]
             wm, opa, opb, blk, smem = _gl_layouts(bt, bc, nw)
             n_d = D // bc
+            if b3x_enabled() and D % b3x_cfg()["bc"] == 0:
+                # splitk PRIMUS_SPLITK_HC_TS=<ts>: more, shorter B3X programs (row splits); the dW partials are
+                # summed by the tail / _hc_reduce in one fixed order (deterministic; dW bits differ from ts = 8)
+                ts_x = b3x_splitk_ts()
+                if ts_x and M % b3x_cfg()["bt"] == 0 and M // b3x_cfg()["bt"] >= ts_x and not b3x_cfg()["pf"]:
+                    ts = ts_x
             n_tiles = n_d * ts
             dx = torch.empty_like(x3)
             dw_p = torch.empty((ts, BN, KD), dtype=torch.float32, device=dev)
             if b3x_enabled() and D % b3x_cfg()["bc"] == 0:
                 # fuse-hc: all 4 streams per program (x / dnew / dcollapsed loaded once per tile), same bits
                 xc = b3x_cfg()
+                ekw = {}
                 xbt = xc["bt"] if (M // ts) % xc["bt"] == 0 else bt
+                if b3x_splitk_ts() and ts == b3x_splitk_ts() and M % (ts * xc["bt"]) != 0:
+                    xbt = xc["bt"]
+                    ekw["UNEVEN"] = True  # splitk: ts does not divide M / bt (uneven fixed row splits)
                 wm, opa, opb, blk, smem, smem_w = b3x_layouts(xbt, xc["bc"], xc["w"])
                 if xc["ewm"]:
                     blk = wm
                 n_dx = D // xc["bc"]
                 kern = _hc_b3x_kernel
-                ekw = dict(PF=bool(xc["pf"]), BUF=bool(xc["buf"]) and M * KD * 2 < 2 ** 31)
+                ekw.update(PF=bool(xc["pf"]), BUF=bool(xc["buf"]) and M * KD * 2 < 2 ** 31)
                 kern[(n_dx * ts,)](
                     x3, w, wth, wtl, gh, glo, gth, gtl, coef, pre, combt, dcoll, dnew if dnew is not None else x3, dx,
                     dw_p, M, D, N, M // ts, n_dx, n_dx * ts,
                     BT=xbt, BC=xc["bc"], BN=BN, HAS_DNEW=dnew is not None, WMMA=wm, OPA=opa, OPB=opb, BLK=blk,
-                    SMEM=smem, SMEM_W=smem_w, DIRECT_W=ctx.direct_w, num_warps=xc["w"], **ekw,
+                    SMEM=smem, SMEM_W=smem_w, DIRECT_W=ctx.direct_w, num_warps=xc["w"], **ekw, **b3x_splitk_kw(),
                 )
             else:
                 assert not ctx.direct_w
