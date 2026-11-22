@@ -63,7 +63,9 @@ Requirements:
 | + launch DSINK=2/QCAT/SMLA_GLUE/HEAD_MG/SINK_CAST/EMB_SORT/ROPE_TBL, graph | 46.5 (A/B 46.73 -> 46.47) | 9.8712 |
 | + optbytes EMB_SUMSQ/DENSE_SKIP_BF16/EMB_SKIP_BF16, graph | 46.4 (A/B 46.50 -> 46.37) | 9.8713 |
 | + overlap2 OVERLAP_CSA_BWD, graph | 46.3 (A/B 46.43 -> 46.37; 12 pairs pooled ~-0.11) | 9.8713 |
-| **+ quant2 T2='*'/DQ/SWB (this config), graph** | **45.7** (A/B 46.40 -> 45.70) | 9.8713 |
+| + quant2 T2='*'/DQ/SWB, graph | 45.7 (A/B 46.40 -> 45.70) | 9.8713 |
+| + swahca SWAHCA_LOOP (layout insurance), graph | 45.7 (A/B neutral) | 9.8713 |
+| **+ bf16grp IDX/ROT/ROT_OA + BF16TUNE=bit (this config), graph** | **45.3** (A/B 45.83 -> 45.33) | 9.8713 |
 
 Contribution of each switch (graph mode, turning one off from the all-on 83.2 ms config, before the MegaMoE switch):
 HC fused -4.9, dsv4up -2.8, fused router -2.3, TunableOp -1.6, fused CE -1.0, HC fold -0.8, grad-norm reuse -0.5,
@@ -196,6 +198,11 @@ Node note: the SMU stuck state recurred at 22:53 (timings ~8% slow); fixed by re
 - swahca `PRIMUS_SWAHCA_LOOP=1` (insurance, neutral: int A/B 45.70 -> 45.75): SWA/HCA sparse-MLA bwd with runtime loops
   (hot loop 21 -> 15 KB cr0, 33 -> 20 KB cr128). Int's kernel ran in two code-placement modes (cr0 127-132 vs 156-162 us,
   cr128 235-244 vs 269-279 us); the loop kernel has one mode at every 4 B offset (cr0 134-139, cr128 232-241). Bit-identical.
+- bf16grp `PRIMUS_BF16GRP_IDX/ROT/ROT_OA=1` + `PRIMUS_BF16TUNE=bit`: hipBLASLt's untuned SAV DepthU-128 BF16 kernels sum K
+  sequentially with a Tensile StaggerU start (tile tn starts at K-iter (tn mod 32) mod (K/128)); bf16g2 with that start
+  (bf16rot_mm) reproduces them bit for bit and is faster (o_a wgrad 126.8 -> 114.4, CSA cmp fwd 47.4 -> 37.0, HCA dgrad
+  31.9 -> 22.1 us); idx512 (GSU5/832) + q192 grouped split-K: -0.50 ms, bit-identical. Keyed to today's hipBLASLt defaults:
+  rerun bf16grp tools/test_rot.py + test_grp.py after any image/hipBLASLt/TunableOp change.
 `PRIMUS_TURBO_MOE_FP8BLK_VERIFY=1` checks the optimizer-written bytes against `quant_w_128x128` every step
 (debug only, ~+15 ms/step).
 
