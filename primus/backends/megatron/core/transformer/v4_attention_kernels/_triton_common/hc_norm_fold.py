@@ -262,8 +262,9 @@ def collapse_norm_fwd(x3, pre, gamma, eps, fp8=False):
     return y, rstd, ((q, s) if fp8 else None)
 
 
-def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc):
-    """-> dh [M, D] (bf16, = HC dcoll), dprep [D/bc, M, 4] fp32 partials, dgamma (gamma dtype)."""
+def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc, reduce=True):
+    """-> dh [M, D] (bf16, = HC dcoll), dprep [D/bc, M, 4] fp32 partials, dgamma (gamma dtype); with
+    ``reduce=False`` the [P, D] fp32 dgamma partials instead of dgamma (fuse-hc reduces them in its tail launch)."""
     from .rmsnorm_g90 import _rms_dg_reduce_kernel
 
     M, K, D = x3.shape
@@ -280,6 +281,8 @@ def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc):
     _hc_norm_dpre_bwd_kernel[(nprog,)](
         x3, pre, gamma, rstd, dy, dh, dprep, dgp, M, D, BD=BD, RB=rb, BC=bc, NPROG=nprog, num_warps=f["bwd_warps"],
     )
+    if not reduce:
+        return dh, dprep, dgp
     dg = torch.empty_like(gamma)
     _rms_dg_reduce_kernel[(triton.cdiv(D, 64),)](dgp, dg, nprog, D, BH=64, BP=64, num_warps=4)
     return dh, dprep, dg
