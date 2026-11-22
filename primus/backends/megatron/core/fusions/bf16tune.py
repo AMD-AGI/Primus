@@ -26,7 +26,13 @@ import os
 import torch
 
 _MODE = os.environ.get("PRIMUS_BF16TUNE", "0")
-_ON = _MODE not in ("", "0")
+_BT_ON = _MODE not in ("", "0")
+# bf16grp line: PRIMUS_BF16GRP_ROT=1 -> the untuned hipBLASLt SAV DepthU-128 sites (CSA compressor fwd / dgrad / wgrad,
+# HCA compressor dgrad) on bf16rot_mm = bf16g2 with hipBLASLt's StaggerU K start (bit-identical to the int kernels);
+# PRIMUS_BF16GRP_ROT_OA=1 -> the grouped o_a wgrad too. Independent of PRIMUS_BF16TUNE (its plan wins on overlap).
+_ROT = os.environ.get("PRIMUS_BF16GRP_ROT", "0") == "1"
+_ROT_OA = os.environ.get("PRIMUS_BF16GRP_ROT_OA", "0") == "1"
+_ON = _BT_ON or _ROT or _ROT_OA
 
 # name: (ndim, M, N, K, A K-contiguous, B N-contiguous) -- training layouts at S=4096, H=4096
 _SHAPES = {
@@ -57,12 +63,23 @@ _OACSA = {
 _FULL = dict(_HCAIDX, **_OACSA)
 _HCA = dict(_BIT, hca_fwd="g2:256x128s3", hca_dgrad="g2:256x256:t16")  # e2e loss shift -0.0002 (idx512 split-K: -0.0033)
 _PLANS = {"1": _FULL, "hcaidx": _HCAIDX, "hca": _HCA, "oacsa": _OACSA, "bit": _BIT, "bitoacsa": dict(_BIT, **_OACSA)}
-if _ON and _MODE not in _PLANS:
+_ROT_PLAN = {  # bf16grp microbench winners (L2 flushed, after a GEMM, median of 30), bitdiff 0 vs the int kernels
+    "csa_fwd": "rot:256x128",  # 47.4 -> 37.0 us
+    "csa_dgrad": "rot:256x256:t16",  # 43.6 -> 35.5
+    "csa_wgrad": "rot:256x128s3:t16",  # 43.5 -> 38.3
+    "hca_dgrad": "rot:256x256:t16",  # 31.9 -> 22.1
+}
+_ROT_PLAN_OA = {"oa_wgrad": "rot:256x256:t16"}  # 126.8 -> 114.4
+if _BT_ON and _MODE not in _PLANS:
     raise ValueError(f"PRIMUS_BF16TUNE={_MODE!r}: expected 0 or one of {sorted(_PLANS)}")
 
 
 def _parse_plan():
-    plan = dict(_PLANS[_MODE])
+    plan = dict(_PLANS[_MODE]) if _BT_ON else {}
+    for on, rp in ((_ROT, _ROT_PLAN), (_ROT_OA, _ROT_PLAN_OA)):
+        if on:
+            for k, v in rp.items():
+                plan.setdefault(k, v)  # bf16tune's own plan entry wins
     for item in filter(None, os.environ.get("PRIMUS_BF16TUNE_PLAN", "").split(",")):
         k, v = item.split("=")
         plan[k.strip()] = v.strip()
@@ -71,7 +88,7 @@ def _parse_plan():
         if spec != "off" and name in _SHAPES:
             f = spec.split(":")
             kind, tile = f[0], f[1]
-            splits = 1 if kind == "g2" else int(kind[2:])
+            splits = 1 if kind == "g2" else (0 if kind == "rot" else int(kind[2:]))  # 0: bf16rot (StaggerU order)
             kw = {"tpad": int(t[1:]) for t in f[2:] if t.startswith("t")}
             by_shape[_SHAPES[name]] = (name, splits, tile, kw)
     return by_shape
@@ -86,7 +103,12 @@ def _impl():
             from primus_turbo.gluon.gemm.bf16g2_gemm import bf16g2_mm
             from primus_turbo.gluon.gemm.bf16g2_splitk import bf16g2_splitk_mm
 
+            rot = None
+            if _ROT or _ROT_OA:
+                from primus_turbo.gluon.gemm.bf16grp_gemm import bf16rot_mm as rot
+
             _STATE["impl"] = (bf16g2_mm, bf16g2_splitk_mm)
+            _STATE["rot"] = rot
             _STATE["plan"] = _parse_plan()
             print(f"[bf16tune] mode {_MODE}, Gluon GEMM plan: {sorted(v[0] + '=' + str(v[1:]) for v in _STATE['plan'].values())}",
                   flush=True)
@@ -124,6 +146,11 @@ def bt_mm(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None):
         out = torch.empty(shape, device=a.device, dtype=torch.bfloat16)
     elif tuple(out.shape) != shape or out.dtype != torch.bfloat16 or out.stride(-1) != 1:
         return None
+    if splits == 0:  # bf16grp: bf16rot_mm (bf16g2 + hipBLASLt StaggerU K start)
+        rot = _STATE.get("rot")
+        if rot is None or K % 128 or K < 384:
+            return None
+        return rot(a, b, out, tile=tile, **kw)
     if K % (128 * splits) or K // splits < 384:
         return None
     g2, sk = impl

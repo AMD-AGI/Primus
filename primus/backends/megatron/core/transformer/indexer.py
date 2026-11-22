@@ -592,6 +592,15 @@ class Indexer(nn.Module):
         )
 
         cp_group = get_cp_group()
+        _grp = None
+        if cu_seqlens is None and cp_group is None and os.environ.get("PRIMUS_BF16GRP_IDX", "0") == "1":
+            # PRIMUS_BF16GRP_IDX: the compressor's wkv_gate and w_dq_w (same input, frozen) as ONE grouped split-K
+            # GEMM launch + one reduce, bit-identical to the two hipBLASLt GSU calls (fusions/bf16grp.py)
+            from primus.backends.megatron.core.fusions.bf16grp import indexer_pair
+
+            _grp = indexer_pair(self, hidden)
+            if _grp is not None:
+                self.indexer_compressor.__dict__["_bf16grp_proj"] = _grp[0]
         if cu_seqlens is not None:
             # Per-sequence key pool, matching the attention-side pool exactly -- the
             # top-K indices produced here address THAT pool, so the two must be laid out
@@ -630,6 +639,8 @@ class Indexer(nn.Module):
                 k_icomp = build_global_pool(k_local, cp_group)
         elif cp_group is None:
             k_icomp = self.indexer_compressor(hidden)  # [B, P, Hd]
+            if _grp is not None:  # consumed by the compressor (never left behind for a later call)
+                self.indexer_compressor.__dict__.pop("_bf16grp_proj", None)
         else:
             from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
                 build_global_pool,
@@ -678,7 +689,7 @@ class Indexer(nn.Module):
                 y = bt_linear(x, lin.weight, lin.bias)
                 return lin(x) if y is None else y
         if self._fuse_qw_proj:
-            dqw = proj(self.w_dq_w, hidden)  # [B, S, dq_rank + local H] in one GEMM
+            dqw = proj(self.w_dq_w, hidden) if _grp is None else _grp[1]  # [B, S, dq_rank + local H] in one GEMM
             q_q = dqw[..., : self.dq_rank]  # [B, S, dq_rank]
             w_i = dqw[..., self.dq_rank :]  # [B, S, H]
         else:

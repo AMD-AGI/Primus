@@ -543,6 +543,9 @@ def _bf16g2_mm_or_none():
     return _BF16G2_STATE["mm"]
 
 
+_BF16GRP_OA_PAIR = os.environ.get("PRIMUS_BF16GRP_OA_PAIR", "0") == "1"
+
+
 def _bt_mm_oa(a, b, out):
     from primus.backends.megatron.core.fusions.bf16tune import bt_mm
 
@@ -593,13 +596,24 @@ class _GroupedOAProjFn(torch.autograd.Function):
         r = w.shape[1]
         do = dout.reshape(BS, G, r).transpose(0, 1)  # [G, BS, r] strided view
         dx = None
+        oa_pair = None  # bf16grp PRIMUS_BF16GRP_OA_PAIR: (main_grad view, first, wgrad done in the dgrad's launch)
         if ctx.needs_input_grad[0]:
             dx = x2.new_empty(BS, G, d)
             g2 = _bf16g2_mm_or_none() if _BF16G2_OA_DGRAD else None
             if (g2 is not None and w.stride(-1) == 1 and do.stride(-1) == 1 and w.dtype == torch.bfloat16
                     and do.dtype == torch.bfloat16 and r % 128 == 0 and r >= 384):
-                # NN: B = w [G, r(K), d(N)], N contiguous; 256x256 tiles, 16-element row pad for the MN-major tile
-                g2(do, w, dx.transpose(0, 1), tile="256x256", tpad=16)
+                if (_BF16GRP_OA_PAIR and ctx.needs_input_grad[1] and ctx.wparam is not None
+                        and not _ovl_oa_wgrad()):
+                    # dgrad (bf16g2 order) + wgrad (hipBLASLt StaggerU order, beta 0 into main_grad) in ONE launch
+                    from primus.backends.megatron.core.fusions.bf16grp import oa_bwd_pair
+                    from primus_turbo.pytorch.ops.utils import main_grad_first_write
+
+                    pmg = ctx.wparam.main_grad.view(G, r, d)
+                    pfirst = main_grad_first_write(ctx.wparam)
+                    oa_pair = (pmg, pfirst, bool(pfirst) and oa_bwd_pair(do, w, x2, dx, pmg))
+                if oa_pair is None or not oa_pair[2]:
+                    # NN: B = w [G, r(K), d(N)], N contiguous; 256x256 tiles, 16-element row pad for the MN-major tile
+                    g2(do, w, dx.transpose(0, 1), tile="256x256", tpad=16)
                 if not _BF16G2_STATE.get("logged"):
                     _BF16G2_STATE["logged"] = True
                     print(f"[bf16g2] o_a dgrad NN Gluon (G={G}, T={BS}, r={r}, d={d})", flush=True)
@@ -621,10 +635,14 @@ class _GroupedOAProjFn(torch.autograd.Function):
             if ctx.wparam is not None:
                 from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad, main_grad_first_write
 
-                mg = ctx.wparam.main_grad.view(G, r, d)
-                first = main_grad_first_write(ctx.wparam)  # decided at issue time (host), like the serial path
+                if oa_pair is None:
+                    mg = ctx.wparam.main_grad.view(G, r, d)
+                    first = main_grad_first_write(ctx.wparam)  # decided at issue time (host), like the serial path
+                else:
+                    mg, first = oa_pair[0], oa_pair[1]
 
-                bt = os.environ.get("PRIMUS_BF16TUNE", "0") != "0"  # bf16tune: the planned o_a wgrad kernel
+                bt = (os.environ.get("PRIMUS_BF16TUNE", "0") != "0"  # bf16tune: the planned o_a wgrad kernel
+                      or os.environ.get("PRIMUS_BF16GRP_ROT_OA", "0") == "1")  # bf16grp: bf16rot (bit-identical)
 
                 def _wgrad(mg=mg, do=do, x2=x2, first=first, bt=bt):
                     if first:  # beta 0: the GEMM writes main_grad (= param.grad's bits)
@@ -634,7 +652,9 @@ class _GroupedOAProjFn(torch.autograd.Function):
                         t = _bt_mm_oa(do.transpose(1, 2), x2.transpose(0, 1), None) if bt else None
                         mg.add_(torch.bmm(do.transpose(1, 2), x2.transpose(0, 1)) if t is None else t)
 
-                if _ovl_oa_wgrad():
+                if oa_pair is not None and oa_pair[2]:
+                    pass  # bf16grp: the wgrad ran in the dgrad's launch (beta 0 into main_grad)
+                elif _ovl_oa_wgrad():
                     # PRIMUS_OVERLAP_OA_WGRAD: same bmm (+ add) on overlap's "wgrad" stream, joined after the backward
                     _overlap.defer(_wgrad, mg, dout, do, x2)
                 else:
