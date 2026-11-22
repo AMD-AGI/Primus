@@ -4,11 +4,12 @@
 indexer compressor (4096 -> 512) and indexer q/w projection (4096 -> 192) forwards.
 
 PRIMUS_BF16TUNE (default 0; off = int byte-for-byte). Modes (TunableOp file chosen in opt3_best.env, Gluon plan here):
-  1        all winners: bf16tune CSV (o_a wgrad, CSA fwd/dgrad, HCA wgrad tuned) + Gluon HCA fwd/dgrad, idx512, q192
+  1        all winners: CSA fwd on its tuned TunableOp entry (bf16tune CSV), everything else on Gluon (_FULL)
   bit      bit-identical subset only: int CSV + Gluon split-K HCA fwd (S=4), HCA wgrad (S=4), q192 (S=8), whose fixed
            fp32 partial order reproduces hipBLASLt's GSU4 / GSU8 kernels bit for bit
-  hcaidx   HCA + indexer shapes: CSV with the HCA wgrad entry + the full Gluon plan
-  oacsa    o_a wgrad + CSA: CSV with those entries, no Gluon
+  hcaidx   HCA + indexer shapes (int CSV, Gluon): e2e loss@20 9.867921 -> fails the gate (idx512 split-K)
+  hca      bit + HCA fwd / dgrad non-split bf16g2 (int CSV): e2e loss@20 9.871006 (shift -0.0002)
+  oacsa    o_a wgrad + CSA: CSA fwd tuned (bf16tune_oacsa CSV), Gluon o_a wgrad / CSA dgrad / CSA wgrad
   bitoacsa bit + oacsa
 For mode 1:
   * opt3_best.env points TunableOp at tunableop_dsv4_gfx1250_bf16tune_.csv (int bf16 CSV + tuned entries for these
@@ -54,7 +55,8 @@ _OACSA = {
     "csa_wgrad": "g2:256x128s3:t16",  # 43.7 -> 37.9
 }
 _FULL = dict(_HCAIDX, **_OACSA)
-_PLANS = {"1": _FULL, "hcaidx": _HCAIDX, "oacsa": _OACSA, "bit": _BIT, "bitoacsa": dict(_BIT, **_OACSA)}
+_HCA = dict(_BIT, hca_fwd="g2:256x128s3", hca_dgrad="g2:256x256:t16")  # e2e loss shift -0.0002 (idx512 split-K: -0.0033)
+_PLANS = {"1": _FULL, "hcaidx": _HCAIDX, "hca": _HCA, "oacsa": _OACSA, "bit": _BIT, "bitoacsa": dict(_BIT, **_OACSA)}
 if _ON and _MODE not in _PLANS:
     raise ValueError(f"PRIMUS_BF16TUNE={_MODE!r}: expected 0 or one of {sorted(_PLANS)}")
 
