@@ -283,6 +283,93 @@ def test_live_sclk_used_when_origami_is_unavailable():
     assert result["method"] == "live-sclk" and result["effective_clock_mhz"] == 1700.0
 
 
+def _matrix_loop(clock_mhz=1500.0, utilisation=0.9, num_cus=100, rate=1000.0, time_ms=100.0):
+    flops = clock_mhz * 1e6 * utilisation * num_cus * rate * time_ms / 1e3
+    return {
+        "dtype": "bf16",
+        "waves_per_cu": 16,
+        "iterations": 1000,
+        "flops": flops,
+        "achieved_tflops": flops / (time_ms / 1e3) / 1e12,
+        "settle": {"settled": True, "settle_s": 0.5},
+        "trials": 5,
+        "time_ms": time_ms,
+        "clock_mhz": clock_mhz,
+        "min_wave_mhz": clock_mhz - 10,
+        "max_wave_mhz": clock_mhz + 10,
+        "realtime_counter_mhz": 100.0,
+    }
+
+
+def test_matrix_loop_clock_is_the_fallback_after_live_sclk():
+    shape = GemmShape(8192, 8192, 8192)
+    rates = {"bf16": 1000.0}
+    loop = _matrix_loop()
+    result = back_calculate_compute_clock(
+        [(shape, 1, 2.0)], "gfx-test", 100, None, matrix_rates=rates, matrix_loop=loop
+    )
+    assert result["method"] == "matrix-loop-cycle-counter" and result["effective_clock_mhz"] == 1500.0
+    # The rate clock is the cycle-counter clock times the loop's matrix-core utilisation.
+    assert result["matrix_loop"]["rate_clock_mhz"] == pytest.approx(1350.0)
+    live = back_calculate_compute_clock(
+        [(shape, 1, 2.0)], "gfx-test", 100, None, live_sclk_mhz=1450.0, matrix_loop=_matrix_loop()
+    )
+    assert live["method"] == "live-sclk" and live["matrix_loop"]["rate_clock_mhz"] is None
+    failed = back_calculate_compute_clock(
+        [(shape, 1, 2.0)], "gfx-test", 100, None, matrix_rates=rates, matrix_loop={"error": "boom"}
+    )
+    assert failed["method"] == "mfma-peak-lower-bound"
+
+
+def test_matrix_loop_clock_from_counters():
+    import torch
+
+    from primus.core.projection.hardware_calibration.matrix_core_loop import (
+        _clock_from_counters,
+    )
+
+    # Two waves over a 10 ms kernel with a 100 MHz real-time counter: 1500 and 1520 MHz.
+    times = torch.tensor([[0, 15_000_000, 0, 1_000_000], [5, 5 + 7_600_000, 500_000, 1_000_000]])
+    clock = _clock_from_counters(times.flatten(), kernel_ms=10.0)
+    assert clock["realtime_counter_mhz"] == pytest.approx(100.0)
+    assert (clock["min_wave_mhz"], clock["max_wave_mhz"]) == pytest.approx((1500.0, 1520.0))
+
+
+def test_matrix_loop_settles_on_its_own_counter():
+    from primus.core.projection.hardware_calibration.matrix_core_loop import (
+        _settle_on_counter,
+    )
+
+    clocks = iter([1900.0, 1800.0, 1700.0, 1702.0, 1701.0, 1700.0])
+    settle = _settle_on_counter(lambda: next(clocks), min_s=0.0, max_s=60.0)
+    assert settle["settled"] and settle["settled_mhz"] == 1701.0 and settle["signal"] == "cycle-counter"
+    never = _settle_on_counter(iter([1000.0, 2000.0] * 10).__next__, min_s=0.0, max_s=0.0)
+    assert never["settled"] is False
+
+
+def test_matrix_loop_runs_only_with_flydsl_on_a_supported_arch(monkeypatch):
+    from primus.core.projection.hardware_calibration import (
+        calibration,
+        matrix_core_loop,
+    )
+
+    assert "no matrix-core loop" in matrix_core_loop.matrix_loop_unavailable_reason("gfx942")
+    monkeypatch.setattr(matrix_core_loop.importlib.util, "find_spec", lambda name: None)
+    assert matrix_core_loop.matrix_loop_unavailable_reason("gfx1250") == "flydsl is not installed"
+    assert calibration._run_matrix_loop(None, _unknown_device(), None) is None
+
+
+def test_matrix_loop_failure_is_recorded_not_raised(monkeypatch):
+    from primus.core.projection.hardware_calibration import calibration
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no kernel")
+
+    monkeypatch.setattr(calibration, "matrix_loop_unavailable_reason", lambda arch: None)
+    monkeypatch.setattr(calibration, "run_matrix_core_loop", boom)
+    assert calibration._run_matrix_loop(None, _unknown_device(), None) == {"error": "RuntimeError: no kernel"}
+
+
 def _fake_timer(monkeypatch, failing):
     from primus.core.projection.hardware_calibration import calibration
 
@@ -919,6 +1006,26 @@ def test_clock_hint_only_for_a_real_clock():
     assert "--gpu-clock-mhz 1600" in format_calibration_report(payload)
 
 
+def test_report_shows_both_matrix_loop_clocks():
+    payload = _payload(clock=1500.0)
+    loop = _matrix_loop()
+    loop.update(rate_clock_mhz=1350.0, observed_sclk={"median_mhz": 1480.0})
+    payload["compute"].update(method="matrix-loop-cycle-counter", matrix_loop=loop)
+    report = format_calibration_report(payload)
+    assert "Effective compute clock: 1500 MHz (shader-cycle counter in the matrix-core loop" in report
+    assert "--gpu-clock-mhz 1500" in report
+    assert "Matrix-core loop (bf16 WMMA, 16 waves/CU, settled after 0.5s)" in report
+    assert (
+        "clock from shader-cycle counter: 1500 MHz (waves 1490-1510; real-time counter 100.0 MHz)" in report
+    )
+    assert "clock from matrix-core rate:     1350 MHz (90% matrix-core utilisation" in report
+    assert "observed SCLK during the loop: median 1480 MHz (+1.4% cycle counter vs observed)" in report
+    loop["rate_clock_mhz"] = None
+    assert "n/a (no FLOPs/CU/clock rate for this part)" in format_calibration_report(payload)
+    payload["compute"]["matrix_loop"] = {"error": "RuntimeError: no kernel"}
+    assert "Matrix-core loop failed: RuntimeError: no kernel" in format_calibration_report(payload)
+
+
 def test_report_shows_gemm_dtype_and_fallback_note():
     payload = _payload()
     payload["compute"]["gemms"][0]["dtype"] = "fp8"
@@ -1107,6 +1214,30 @@ def test_mx_gemms_run_natively_or_fall_back_to_fp8():
             assert measured.dtype == dtype and note is None
         else:
             assert measured.dtype == "fp8" and f"{dtype} unavailable" in note
+
+
+@requires_gpu
+def test_matrix_loop_cycle_counter_clock_is_plausible():
+    import torch
+
+    from primus.core.projection.hardware_calibration.matrix_core_loop import (
+        matrix_loop_unavailable_reason,
+        run_matrix_core_loop,
+    )
+
+    props = torch.cuda.get_device_properties(0)
+    reason = matrix_loop_unavailable_reason(props.gcnArchName.split(":")[0])
+    if reason:
+        pytest.skip(reason)
+    loop = run_matrix_core_loop(
+        torch.device("cuda", 0),
+        props.multi_processor_count,
+        min_settle_s=0.0,
+        trials=3,
+        target_kernel_ms=20.0,
+    )
+    assert loop["achieved_tflops"] > 0 and loop["realtime_counter_mhz"] > 0
+    assert 100 < loop["min_wave_mhz"] <= loop["clock_mhz"] <= loop["max_wave_mhz"] < 4000
 
 
 @requires_gpu

@@ -15,6 +15,9 @@ Two estimates are produced from the same measurements:
 * **MFMA-peak lower bound.**  The clock the part would need to sustain the
   achieved FLOP rate at 100 % matrix-core utilisation.  The real clock is at
   least this; it needs no performance model, so it is always available.
+
+Where it runs, the matrix-core loop (:mod:`.matrix_core_loop`) adds the clock
+read from the shader-cycle counter under full matrix-core load.
 """
 
 from __future__ import annotations
@@ -339,6 +342,7 @@ def back_calculate_compute_clock(
     live_sclk_mhz: Optional[float] = None,
     matrix_rates: Optional[Dict[str, float]] = None,
     model: str = "origami",
+    matrix_loop: Optional[Dict] = None,
 ) -> Dict:
     """Effective clock from ``[(shape, occurrences, measured_ms), ...]``.
 
@@ -347,7 +351,9 @@ def back_calculate_compute_clock(
     occurrences in the workload, so the GEMMs that dominate the workload
     dominate the answer.  Per-GEMM clocks show the spread.  When no GEMM can
     be inverted -- no Origami, or only natively timed MX GEMMs -- the live
-    SCLK sampled during the GEMMs is used, else the MFMA-peak lower bound.
+    SCLK sampled during the GEMMs is used, then the cycle-counter clock of
+    *matrix_loop* (a :func:`run_matrix_core_loop` result, which gains its
+    ``rate_clock_mhz``), else the MFMA-peak lower bound.
     """
     modelled = [m for m in measurements if m[0].dtype in ORIGAMI_MODELLED_DTYPES]
     if predictor is None:
@@ -381,7 +387,19 @@ def back_calculate_compute_clock(
         "clamped": None,
         "method": None,
         "model": model if predictor is not None else None,
+        "matrix_loop": matrix_loop,
     }
+    loop_clock = None
+    if matrix_loop and "error" not in matrix_loop:
+        matrix_loop["rate_clock_mhz"] = mfma_bound_clock_mhz(
+            matrix_loop["flops"],
+            matrix_loop["time_ms"],
+            gcn_arch,
+            num_cus,
+            matrix_loop["dtype"],
+            matrix_rates,
+        )
+        loop_clock = matrix_loop["clock_mhz"]
     if modelled:
         mhz, clamped = solve_clock_mhz(
             lambda f: sum(count * predictor(f, shape) for shape, count, _ in modelled),
@@ -391,6 +409,8 @@ def back_calculate_compute_clock(
         result.update(effective_clock_mhz=mhz, clamped=clamped, method=method)
     elif live_sclk_mhz:
         result.update(effective_clock_mhz=live_sclk_mhz, method="live-sclk")
+    elif loop_clock:
+        result.update(effective_clock_mhz=loop_clock, method="matrix-loop-cycle-counter")
     elif result["mfma_bound_clock_mhz"] is not None:
         result.update(effective_clock_mhz=result["mfma_bound_clock_mhz"], method="mfma-peak-lower-bound")
     return result

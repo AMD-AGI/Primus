@@ -36,6 +36,10 @@ from primus.core.projection.hardware_calibration.gemm_shapes import (
     collect_workload_gemms,
     select_calibration_gemms,
 )
+from primus.core.projection.hardware_calibration.matrix_core_loop import (
+    matrix_loop_unavailable_reason,
+    run_matrix_core_loop,
+)
 from primus.core.projection.hardware_calibration.stream_bandwidth import (
     DEFAULT_ARRAY_MIB,
     analyze_memory_clock,
@@ -206,6 +210,7 @@ def _measure_with_reader(
         live_sclk,
         matrix_rates=model["matrix_rates"],
         model=model["name"] or "origami",
+        matrix_loop=_run_matrix_loop(device, info, reader),
     )
     for row, (shape, _), settle in zip(compute["gemms"], selected, settles):
         row["settle"] = settle
@@ -245,6 +250,30 @@ def _measure_with_reader(
         ),
     }
     return {"device": info.to_dict(), "compute": compute, "memory": memory}
+
+
+def _run_matrix_loop(device, info, reader) -> Optional[Dict[str, Any]]:
+    """The matrix-core loop's result with the SCLK sampled during it; *None* where it cannot run.
+
+    A failure is recorded under ``"error"`` rather than raised: the loop is a
+    cross-check, and the GEMM-based clock does not depend on it.
+    """
+    import torch
+
+    if matrix_loop_unavailable_reason(info.gcn_arch) is not None:
+        return None
+    try:
+        with ClockSampler(reader) as loop_clocks:
+            # Full settle: the clock moves when the load switches from GEMMs to matrix cores only.
+            result = run_matrix_core_loop(
+                device, info.num_cus, sampler=loop_clocks, min_settle_s=DEFAULT_MIN_SETTLE_S
+            )
+    except torch.cuda.OutOfMemoryError:
+        raise
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    result["observed_sclk"] = loop_clocks.summary()["sclk"]
+    return result
 
 
 def _time_workload_gemm(shape, device, gcn_arch=None, **timing_kwargs):
@@ -385,6 +414,35 @@ def _model_label(comp: Dict[str, Any]) -> str:
     return label
 
 
+def _matrix_loop_lines(loop: Optional[Dict[str, Any]]) -> List[str]:
+    if not loop:
+        return []
+    if "error" in loop:
+        return [f"  Matrix-core loop failed: {loop['error']}"]
+    lines = [
+        f"  Matrix-core loop ({loop['dtype']} WMMA, {loop['waves_per_cu']} waves/CU, "
+        f"settled after {_settle_label(loop.get('settle'))}): {loop['achieved_tflops']:.1f} TFLOPS",
+        f"    clock from shader-cycle counter: {loop['clock_mhz']:.0f} MHz "
+        f"(waves {loop['min_wave_mhz']:.0f}-{loop['max_wave_mhz']:.0f}; "
+        f"real-time counter {loop['realtime_counter_mhz']:.1f} MHz)",
+    ]
+    rate = loop.get("rate_clock_mhz")
+    if rate:
+        lines.append(
+            f"    clock from matrix-core rate:     {rate:.0f} MHz "
+            f"({rate / loop['clock_mhz']:.0%} matrix-core utilisation at the cycle-counter clock)"
+        )
+    else:
+        lines.append("    clock from matrix-core rate:     n/a (no FLOPs/CU/clock rate for this part)")
+    sclk = loop.get("observed_sclk")
+    if sclk:
+        lines.append(
+            f"    observed SCLK during the loop: median {sclk['median_mhz']:.0f} MHz "
+            f"({loop['clock_mhz'] / sclk['median_mhz'] - 1:+.1%} cycle counter vs observed)"
+        )
+    return lines
+
+
 def format_calibration_report(payload: Dict[str, Any]) -> str:
     per_rank = payload.get("per_rank") or []
     if "error" in payload:
@@ -431,6 +489,12 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
             "Origami cannot invert these GEMMs)"
         )
         lines.append(f"  MFMA-peak lower bound:   {_fmt(comp.get('mfma_bound_clock_mhz'))} MHz")
+    elif comp.get("method") == "matrix-loop-cycle-counter":
+        lines.append(
+            f"  Effective compute clock: {eff:.0f} MHz (shader-cycle counter in the matrix-core loop{pct}; "
+            "no GEMM model or live SCLK)"
+        )
+        lines.append(f"  MFMA-peak lower bound:   {_fmt(comp.get('mfma_bound_clock_mhz'))} MHz")
     elif comp.get("method") == "mfma-peak-lower-bound":
         lines.append(
             f"  Effective compute clock: >= {eff:.0f} MHz (MFMA-peak lower bound{pct}; "
@@ -458,7 +522,8 @@ def format_calibration_report(payload: Dict[str, Any]) -> str:
         lines.append(
             f"  WARNING: SCLK did not settle within {SETTLE_TIMEOUT_S:g} s for every GEMM; clocks may be unstable"
         )
-    if eff and comp.get("method") in _INVERSION_METHODS + ("live-sclk",):
+    lines += _matrix_loop_lines(comp.get("matrix_loop"))
+    if eff and comp.get("method") in _INVERSION_METHODS + ("live-sclk", "matrix-loop-cycle-counter"):
         lines.append(f"  To simulate at this clock: --gpu-clock-mhz {eff:.0f}")
 
     stream = mem["stream"]
