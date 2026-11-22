@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover
     _HAVE_GLUON = False
 
 if _HAVE_GLUON:  # fuse-hc all-stream B3 (import errors must surface, not silently drop the gluon B3)
-    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled, b3x_layouts, b3x_splitk_kw, b3x_splitk_ts
+    from .hc_b3x import _hc_b3x_kernel, b3x_cfg, b3x_enabled, b3x_layouts, b3x_smem_f, b3x_smem_x2, b3x_splitk_kw, b3x_splitk_ts
 else:  # pragma: no cover
 
     def b3x_splitk_ts() -> int:
@@ -85,7 +85,9 @@ from .hc_hcfuse import (
     hcfuse_tail_enabled,
     hcfuse_post_enabled,
     norm_pre_bwd,
+    post_bwd_v2,
     post_bwd_wmma,
+    post_mode,
     post_tail,
     post_wmma_ok,
     pre_collapse_fwd,
@@ -1228,6 +1230,11 @@ class HCPreFn(torch.autograd.Function):
                     ekw["GQ"] = False  # hcfuse: g in bf16 only for dx and dW (drops the lo WMMA products)
                 if xc.get("pf2") and not ekw["BUF"]:
                     ekw["PF2"] = True  # hcfuse: prefetch of every per-step load (PRIMUS_HC_B3X_CFG ...,pf2=1)
+                    if xc.get("bat"):  # hcfuse: one LDS round trip per step for the 4 dx GEMMs + x staging
+                        # [2, bt, bc] buffers (BAT=2) take the 2-D layout of one slot (memdesc_index convention)
+                        ekw.update(BAT=int(xc["bat"]), SMEM_F=b3x_smem_f(xbt, xc["bc"]))
+                        if xc["bat"] == 2:
+                            ekw["SMEM_X2"] = smem
                 abl = int(os.environ.get("PRIMUS_HCFUSE_B3X_ABL", "0") or "0")  # bench-only ablation bits (wrong output)
                 if abl:
                     ekw["ABL"] = abl
@@ -1395,7 +1402,10 @@ class HCPostFn(torch.autograd.Function):
                 g_ = bif_grid(M, D, bt, bc, _bif_nprog(dev))
                 _hc_post_bwd_bif_kernel[g_](dnew, x3, out_c, post_c, dout, dpost, dcombt, M, D,
                                             BT=bt, BC=bc, NPROG=g_[0], num_warps=nw)
-            elif hcfuse_post_enabled() and pbc == 256 and post_wmma_ok(M, K, D, pbc):
+            elif post_mode() == 2 and pbc == 256 and K == 4 and _post_tile() == (1, 1) and D % 256 == 0:
+                # hcfuse: byte-identical Gluon expand backward (no shuffle chains for the 20 row reductions)
+                post_bwd_v2(dnew, x3, out_c, post_c, dout, dpost, dcombt, pbc)
+            elif post_mode() == 1 and pbc == 256 and post_wmma_ok(M, K, D, pbc):
                 # hcfuse: the 20 per-row reductions on WMMA (Gluon), same partial layout
                 post_bwd_wmma(dnew, x3, out_c, post_c, dout, dpost, dcombt, pbc)
             else:
