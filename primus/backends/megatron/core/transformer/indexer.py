@@ -639,7 +639,12 @@ class Indexer(nn.Module):
         # so arange(P) is the right position set. Rotating the LOCAL pool first would give
         # every rank positions 0..P_local-1: correct on rank 0, silently the wrong phase
         # everywhere else, with no error and no shape mismatch to catch it.
-        k_icomp = self._rotate_keys(k_icomp)  # [B, P, Hd]
+        k_rot = None
+        if os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1":  # bf16g2: RoPE + Hadamard + scale in one kernel
+            from primus.backends.megatron.core.fusions.idx_q_fused import indexer_keys_bf16g2
+
+            k_rot = indexer_keys_bf16g2(self, k_icomp)
+        k_icomp = self._rotate_keys(k_icomp) if k_rot is None else k_rot  # [B, P, Hd]
         P = k_icomp.shape[1]
         k_icomp = k_icomp.unsqueeze(2)  # [B, P, 1, Hd]
 
@@ -655,11 +660,16 @@ class Indexer(nn.Module):
         else:
             q_q = proj(self.w_dq, hidden)  # [B, S, dq_rank]
             w_i = proj(self.w_w, hidden)  # [B, S, H]
-        q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd)  # [B, S, H, Hd]
+        q_g2 = None
+        if os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1" and not _indexer_fp8_proj_enabled():
+            from primus.backends.megatron.core.fusions.idx_q_fused import indexer_queries_bf16g2
+
+            q_g2 = indexer_queries_bf16g2(self, q_q, position_ids, B, S, H, Hd)  # bf16g2: w_iuq + rotation fused
+        q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd) if q_g2 is None else None  # [B, S, H, Hd]
         # Queries are rotated at their own token positions, then Hadamard-rotated
         # like the keys, so the ReLU'd dot product sees both operands in the same
         # basis the reference scores in.
-        q_i = self._rotate_queries(q_i, position_ids)
+        q_i = self._rotate_queries(q_i, position_ids) if q_g2 is None else q_g2
 
         # Score temperature (see ``self.score_scale``). Applied on ``w_i``
         # because every scoring branch below multiplies by it before summing
