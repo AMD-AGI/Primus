@@ -31,11 +31,15 @@ sequence, and the exit is ``ulysses_a2a_o_gemm``.
 MLA only, ``per_head`` (Megatron's per-head Ulysses: every head up-projected on the local tokens,
 then one all-to-all of q, k, v).
 
-``attn`` (GQA only) fuses the all-to-alls into the attention instead of the projections:
+``attn`` fuses the all-to-alls into the attention instead of the projections:
 
     x [s/cp, 1, h] --linear_qkv--> q, k, v [s/cp, 1, heads, d] (local tokens, every head)
       -> q/k layernorm -> RoPE at the tokens' sequence positions
       --ulysses_mega_attn--> o [s/cp, 1, heads, d] --linear_proj--> [s/cp, 1, h]
+
+With MLA the up-projections run on the local tokens for every head (as ``per_head``), k_pe and q_pe
+are rotated at the tokens' sequence positions, and ``ulysses_mega_attn`` runs the gfx950 MLA
+attention (q / k 192, v 128) at the module's (YaRN) softmax scale.
 
 ``ulysses_mega_attn`` is one kernel each way (pull q / k / v, attention on the local heads, push O;
 pull dO, the backward, push dq / dk / dv). Its sequence split is striped: chunk ``c`` of
@@ -67,7 +71,7 @@ _ATTN_OPS = "primus_turbo.pytorch.ops.attention.ulysses_mega_attn"
 def _impl(args) -> str:
     impl = getattr(args, "turbo_mega_ulysses_impl", None) or "fused"
     valid = (
-        ("fused", "serial", "per_head")
+        ("fused", "serial", "per_head", "attn")
         if getattr(args, "multi_latent_attention", False)
         else ("fused", "serial", "attn")
     )
@@ -78,6 +82,17 @@ def _impl(args) -> str:
 def _mega_attn_heads_ok(hq, hkv, cp) -> bool:
     group = hq // hkv if hkv and hq % hkv == 0 else 0
     return hq % cp == 0 and hkv % cp == 0 and group >= 2 and group & (group - 1) == 0
+
+
+# the head dims of the FlyDSL MLA attention (q / k nope + rope, v)
+_MLA_ATTN_DIMS = (192, 128)
+# the MLA forward's q block: a sequence chunk holds whole q blocks
+_MLA_ATTN_BLOCK = 256
+
+
+def _mla_attn_dims(args):
+    dims = [getattr(args, name, None) for name in ("qk_head_dim", "qk_pos_emb_head_dim", "v_head_dim")]
+    return None if None in dims else (dims[0] + dims[1], dims[2])
 
 
 def _seq_chunk(args) -> int:
@@ -123,22 +138,33 @@ def _unsupported(args):
         if "mla_up_proj" in (getattr(args, "recompute_modules", None) or []):
             return "recomputing the MLA up-projection (recompute_modules: mla_up_proj) is not supported"
     if _impl(args) == "attn":
+        mla = getattr(args, "multi_latent_attention", False)
         mbs = int(getattr(args, "micro_batch_size", 1) or 1)
         cs = _seq_chunk(args)
         seq = int(getattr(args, "seq_length", 0) or 0)
         hq = getattr(args, "num_attention_heads", None)
         hkv = getattr(args, "num_query_groups", None) if getattr(args, "group_query_attention", False) else hq
+        block = _MLA_ATTN_BLOCK if mla else 128
         if mbs != 1:
             return f"turbo_mega_ulysses_impl=attn needs micro_batch_size=1 (got {mbs})"
-        if hq is not None and hkv is not None and not _mega_attn_heads_ok(hq, hkv, cp):
+        if mla:
+            dims = _mla_attn_dims(args)
+            if dims is not None and dims != _MLA_ATTN_DIMS:
+                return (
+                    f"turbo_mega_ulysses_impl=attn with MLA needs q / k head dim {_MLA_ATTN_DIMS[0]} and v "
+                    f"{_MLA_ATTN_DIMS[1]} (the FlyDSL MLA attention's), got {dims[0]} / {dims[1]}"
+                )
+            if hq is not None and hq % cp:
+                return f"turbo_mega_ulysses_impl=attn needs the {hq} heads to split over CP={cp}"
+        elif hq is not None and hkv is not None and not _mega_attn_heads_ok(hq, hkv, cp):
             return (
                 f"turbo_mega_ulysses_impl=attn needs the heads to split over CP={cp} and a power-of-two "
                 f"GQA group >= 2 (the FlyDSL backward's), got {hq} q / {hkv} kv heads"
             )
-        if cs < 0 or cs % 128 or (seq and cs and seq % (cs * cp)):
+        if cs < 0 or cs % block or (seq and seq % ((cs or block) * cp)):
             return (
-                f"turbo_mega_ulysses_seq_chunk={cs} must be 0 or a multiple of 128 whose CP stripe "
-                f"(seq_chunk * CP) divides seq_length={seq}"
+                f"turbo_mega_ulysses_seq_chunk={cs} must be 0 or a multiple of {block} whose CP stripe "
+                f"(seq_chunk * CP, or {block} * CP when 0) divides seq_length={seq}"
             )
     return None
 
@@ -467,15 +493,33 @@ def _seq_to_heads(tensors, group):
 def _make_mla_forward(args):
     from megatron.core.models.common.embeddings.rope_utils import apply_rotary_pos_emb
     from megatron.core.transformer.enums import AttnMaskType
-    from primus_turbo.pytorch.ops import flash_attn_func
-    from primus_turbo.pytorch.ops.attention.ulysses_fused_a2a import ulysses_a2a_o_gemm
-    from primus_turbo.pytorch.ops.attention.ulysses_mla_latent import (
-        ulysses_mla_latent_up_proj,
-    )
 
     impl = _impl(args)
+    if impl == "attn":
+        import inspect
+
+        from primus_turbo.pytorch.ops.attention.ulysses_mega_attn import (
+            ulysses_mega_attn,
+        )
+
+        if "softmax_scale" not in inspect.signature(ulysses_mega_attn).parameters:
+            raise RuntimeError(
+                f"{_PATCH} the installed Primus-Turbo's ulysses_mega_attn has no MLA support "
+                "(no softmax_scale); turbo_mega_ulysses_impl=attn with MLA needs a newer Primus-Turbo"
+            )
+        seq_chunk = _seq_chunk(args)
+        positions = {}
+    else:
+        from primus_turbo.pytorch.ops import flash_attn_func
+        from primus_turbo.pytorch.ops.attention.ulysses_fused_a2a import (
+            ulysses_a2a_o_gemm,
+        )
+        from primus_turbo.pytorch.ops.attention.ulysses_mla_latent import (
+            ulysses_mla_latent_up_proj,
+        )
+
+        o_op = ulysses_a2a_o_gemm if impl == "fused" else _serial_a2a_o_gemm
     no_cp = _NoCPGroup()
-    o_op = ulysses_a2a_o_gemm if impl == "fused" else _serial_a2a_o_gemm
 
     def rope(t, emb, cfg, mscale):
         return apply_rotary_pos_emb(
@@ -518,6 +562,15 @@ def _make_mla_forward(args):
         n, rank = cp_group.size(), cp_group.rank()
         s_local, b = hidden_states.shape[:2]
         heads, dn, dr, dv = cfg.num_attention_heads, cfg.qk_head_dim, cfg.qk_pos_emb_head_dim, cfg.v_head_dim
+        if impl == "attn":
+            _raise_unsupported(
+                {
+                    f"micro-batch size {b}": b != 1,
+                    f"head dims {dn} + {dr} / {dv}": (dn + dr, dv) != _MLA_ATTN_DIMS,
+                    f"{heads} heads on {n} ranks": heads % n != 0,
+                },
+                " with MLA and turbo_mega_ulysses_impl=attn",
+            )
 
         q_c, kv_combined = self._qkv_down_projection(hidden_states)
         c_kv, k_pe = torch.split(kv_combined, [cfg.kv_lora_rank, dr], dim=-1)
@@ -530,12 +583,26 @@ def _make_mla_forward(args):
         # full-sequence frequencies: a size-1 group keeps YaRN from slicing them zigzag
         emb = self.rotary_pos_emb(s_local * n, cp_group=no_cp)
         emb, mscale = emb if isinstance(emb, tuple) else (emb, 1.0)
-        k_pe = rope(k_pe.unsqueeze(-2), emb[rank * s_local : (rank + 1) * s_local], cfg, mscale).squeeze(-2)
+        if impl == "attn":
+            at = (s_local, n, rank, emb.device)
+            if at not in positions:
+                positions[at] = _local_positions(s_local, n, rank, seq_chunk, emb.device)
+            emb_local = emb[positions[at]]
+        else:
+            emb_local = emb[rank * s_local : (rank + 1) * s_local]
+        k_pe = rope(k_pe.unsqueeze(-2), emb_local, cfg, mscale).squeeze(-2)
 
-        if impl == "per_head":
+        if impl in ("per_head", "attn"):
             q = F.linear(q_c, w_q).view(s_local, b, heads, dn + dr)
             k_nope, v = F.linear(c_kv, w_kv).view(s_local, b, heads, dn + dv).split([dn, dv], dim=-1)
             k = torch.cat((k_nope, k_pe.unsqueeze(-2).expand(s_local, b, heads, dr)), dim=-1)
+            if impl == "attn":
+                q_nope, q_pe = q.split([dn, dr], dim=-1)
+                q = torch.cat((q_nope, rope(q_pe, emb_local, cfg, mscale)), dim=-1)
+                o = ulysses_mega_attn(
+                    q, k, v, cp_group, seq_chunk=seq_chunk, softmax_scale=self.softmax_scale
+                )
+                return self.linear_proj(o.view(s_local, b, heads * dv))
             q, k, v = _seq_to_heads([q, k, v], cp_group)
         else:
             kv_latent = torch.cat((c_kv, k_pe), dim=-1)
@@ -567,6 +634,7 @@ _IMPL_DESCRIPTION = {
     (True, "fused"): "latent AgGemm / GemmRS + A2AGemm / GemmA2A",
     (True, "serial"): "latent RCCL all-gather + GEMM, o all-to-all + GEMM in series",
     (True, "per_head"): "per-head q/k/v all-to-all (Megatron Ulysses), o all-to-all + GEMM in series",
+    (True, "attn"): "local up-projections / o_proj, all-to-alls fused into the attention (ulysses_mega_attn)",
 }
 
 
@@ -593,7 +661,9 @@ def patch_mega_ulysses(ctx: PatchContext):
         forward = _make_gqa_forward(args)
     if impl == "attn":
         mcore_utils._get_batch_on_this_cp_rank_per_sequence_balancing = _striped_cp_split(_seq_chunk(args))
-        split = "contiguous" if _seq_chunk(args) == 0 else f"striped CP split ({_seq_chunk(args)}-token chunks)"
+        split = (
+            "contiguous" if _seq_chunk(args) == 0 else f"striped CP split ({_seq_chunk(args)}-token chunks)"
+        )
     else:
         mcore_utils._get_batch_on_this_cp_rank_per_sequence_balancing = _contiguous_cp_split
         split = "contiguous CP split"
@@ -606,6 +676,4 @@ def patch_mega_ulysses(ctx: PatchContext):
     else:
         from megatron.core.transformer.attention import SelfAttention as attention_cls
     attention_cls.forward = forward
-    log_rank_0(
-        f"{_PATCH} {attention_cls.__name__} -> {_IMPL_DESCRIPTION[(mla, impl)]}, {split}"
-    )
+    log_rank_0(f"{_PATCH} {attention_cls.__name__} -> {_IMPL_DESCRIPTION[(mla, impl)]}, {split}")
