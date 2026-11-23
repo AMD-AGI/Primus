@@ -134,6 +134,9 @@ fused_probs_mul: false
 # Scale BF16 gradients by the clip coefficient (clip_grad_by_total_norm_fp32) with one Triton
 # launch per tensor instead of TE's multi_tensor_scale_tensor; compared with TE on the first call.
 bitwise_clip_scale: false
+# Add the word-embedding gradient into main_grad for the rows the micro-batch touches instead of
+# building the dense [vocab, hidden] gradient and adding all of it (untied embeddings, TP 1).
+embedding_rows_grad: false
 
 # ===== MXFP4 Weight De-oscillation =====
 # Snap weight elements whose MXFP4-quantized value oscillates while the fp32
