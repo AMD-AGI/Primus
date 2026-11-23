@@ -158,7 +158,58 @@ def test_attn_needs_mega_attn_ops(eligible_env, monkeypatch, missing, expected):
     assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is expected
 
 
-@pytest.mark.parametrize("mla, impl", [(False, "per_head"), (False, "unfused"), (True, "unfused"), (True, "attn")])
+def _mla_attn_params(**overrides):
+    params = _params(
+        multi_latent_attention=True,
+        q_lora_rank=1536,
+        turbo_mega_ulysses_impl="attn",
+        context_parallel_size=8,
+        micro_batch_size=1,
+        seq_length=32768,
+        num_attention_heads=128,
+        qk_head_dim=128,
+        qk_pos_emb_head_dim=64,
+        v_head_dim=128,
+    )
+    for key, val in overrides.items():
+        setattr(params, key, val)
+    return params
+
+
+@pytest.mark.parametrize("heads, seq_chunk", [(128, None), (64, 256), (64, 512), (128, 0)])
+def test_mla_attn_enabled_when_eligible(eligible_env, heads, seq_chunk):
+    params = _mla_attn_params(num_attention_heads=heads, turbo_mega_ulysses_seq_chunk=seq_chunk)
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(micro_batch_size=2),
+        dict(num_attention_heads=60),
+        dict(qk_head_dim=64),
+        dict(v_head_dim=192),
+        dict(turbo_mega_ulysses_seq_chunk=128),
+        dict(turbo_mega_ulysses_seq_chunk=256, seq_length=4096 + 1024),
+        dict(turbo_mega_ulysses_seq_chunk=0, seq_length=8 * 256 + 8 * 128),
+    ],
+)
+def test_mla_attn_unsupported_settings_keep_stock_path(eligible_env, overrides):
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(_mla_attn_params(**overrides))) is False
+
+
+@pytest.mark.parametrize("missing, expected", [(set(), True), ({_ATTN_OPS}, False), ({_MLA_OPS}, True)])
+def test_mla_attn_needs_mega_attn_ops(eligible_env, monkeypatch, missing, expected):
+    monkeypatch.setattr(mega_ulysses_patches, "_missing_ops", _missing_ops)
+    monkeypatch.setattr(
+        mega_ulysses_patches.importlib.util,
+        "find_spec",
+        lambda name: None if name in missing else SimpleNamespace(name=name),
+    )
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(_mla_attn_params())) is expected
+
+
+@pytest.mark.parametrize("mla, impl", [(False, "per_head"), (False, "unfused"), (True, "unfused")])
 def test_invalid_impl_raises(eligible_env, mla, impl):
     params = _params(multi_latent_attention=mla, q_lora_rank=1536, turbo_mega_ulysses_impl=impl)
     with pytest.raises(AssertionError, match="turbo_mega_ulysses_impl"):
