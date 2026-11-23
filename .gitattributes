@@ -6,3 +6,7 @@ primus/_thirdparty.lock text eol=lf
 
 # Docker helper scripts must remain executable by Bash on Windows checkouts too.
 examples/specforge/docker/*.sh text eol=lf
+
+# Frozen smoke fixtures and manifests have byte-stable checksums.
+tests/trainer/fixtures/specforge/* text eol=lf
+tests/scripts/specforge_smoke*.json text eol=lf
