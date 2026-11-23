@@ -26,6 +26,10 @@ def fresh_checks(monkeypatch):
     from primus.backends.megatron.core.fusions import bitwise_check
 
     monkeypatch.setattr(bitwise_check, "_results", {})
+    # Each test compiles Megatron's quick_gelu afresh, as a training process does before its first
+    # GEGLU call. Recompiled for dynamic shapes after other tests' shapes, Inductor's kernel can
+    # return +0.0 for a -0.0 input (see fused_clamped_geglu's docstring), failing the -0.0 probe.
+    torch._dynamo.reset()
 
 
 @pytest.mark.parametrize("shape", [(64, 2, 2 * 1536), (37, 1, 2 * 1000)])

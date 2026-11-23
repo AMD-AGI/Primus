@@ -34,6 +34,11 @@ Only the input is saved for backward (the eager path keeps the clamped halves, `
 ``b``). Inputs that eager would not compute this way (``quick_gelu`` not compiled) are not
 eligible, nor are clamp bounds or offsets that BF16 does not hold exactly: eager compares and
 clamps against the BF16 value, the kernels against the FP32 one.
+
+The kernels give ``quick_gelu(-0.0) = -0.0``, as Inductor's kernel does when it first compiles
+``quick_gelu``. Recompiled for dynamic shapes, that kernel returned +0.0 in one case on gfx1250
+(2-D, 256 elements, after two 3-D shapes). A process whose ``quick_gelu`` was compiled that way
+before the first eligible call fails the self-check's -0.0 probe and keeps the eager branch.
 """
 
 from __future__ import annotations
