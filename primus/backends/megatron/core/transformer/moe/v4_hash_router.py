@@ -56,6 +56,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_fused import (
+    is_fused_router_enabled as _v4_router_fused_enabled,
+)
+from primus.backends.megatron.core.transformer.moe._triton.v4_router_fused import (
+    router_fused_supported,
+    v4_router_fused,
+)
 from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
     is_triton_path_enabled as _v4_router_triton_enabled,
 )
@@ -218,7 +225,10 @@ class DeepseekV4HashRouter(nn.Module):
         #     )
 
         # Learned scores (fp32) over the full expert axis.
-        logits = F.linear(flat_hidden.to(torch.float32), self.weight.to(torch.float32))
+        if _v4_router_fused_enabled() and router_fused_supported(flat_hidden, self.weight):
+            logits, _, _ = v4_router_fused(flat_hidden, self.weight)
+        else:
+            logits = F.linear(flat_hidden.to(torch.float32), self.weight.to(torch.float32))
 
         # Static expert assignment from the table — cast to long for gather.
         indices = self.tid2eid[flat_ids].long()  # [N, K]

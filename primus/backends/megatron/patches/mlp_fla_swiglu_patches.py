@@ -169,11 +169,13 @@ def _resolve_fla_swiglu(config, is_expert: bool):
             from fla.modules.activations import swiglu
 
             swiglu_fn = swiglu
-        except ImportError:
-            # use_fla_fused_swiglu defaults to on, so a missing FLA install is a
-            # normal configuration rather than an error: leave swiglu_fn as None
+        except (
+            Exception
+        ):  # noqa: BLE001 -- ImportError, or an FLA that fails to initialise under the installed Triton
+            # use_fla_fused_swiglu defaults to on, so a missing or unusable FLA install
+            # is a normal configuration rather than an error: leave swiglu_fn as None
             # and let Megatron's own activation run. The opt-in fc2 path below
-            # does report its ImportError, since that one was asked for.
+            # does report its failure, since that one was asked for.
             swiglu_fn = None
 
     swiglu_linear_fn = None
@@ -184,8 +186,8 @@ def _resolve_fla_swiglu(config, is_expert: bool):
                 from fla.modules.activations import swiglu_linear
 
                 swiglu_linear_fn = swiglu_linear
-            except ImportError:
-                reason = "flash-linear-attention is not installed"
+            except Exception:  # noqa: BLE001
+                reason = "flash-linear-attention is not installed or not usable with this Triton"
         if reason not in _DECISIONS_LOGGED:
             _DECISIONS_LOGGED.add(reason)
             log_rank_0(

@@ -10,6 +10,13 @@ from primus.core.utils.torch_compat import ensure_torch_jit_script
 
 ensure_torch_jit_script()
 
+from primus.backends.megatron.core.dsv4_features import (
+    apply_defaults as _apply_dsv4_defaults,
+)
+
+# Fill the DeepSeek-V4 fast-path defaults before any module that reads them at import time is loaded.
+_apply_dsv4_defaults()
+
 from primus.backends.megatron.megatron_adapter import MegatronAdapter
 from primus.backends.megatron.megatron_pretrain_trainer import MegatronPretrainTrainer
 from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer

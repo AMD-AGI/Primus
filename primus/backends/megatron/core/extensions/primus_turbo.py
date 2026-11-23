@@ -134,7 +134,7 @@ from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
 from primus.core.utils.gpu_arch import is_gfx1250
-from primus.core.utils.module_utils import warning_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 _dummy_wgrads = {}
 
@@ -435,7 +435,10 @@ def _bridge_weight_grad(
                 # the dummy wgrad returned below means they are not recoverable from
                 # param.grad either. The fused path above is immune because its beta=1
                 # epilogue accumulates on every microbatch regardless of the flag.
-                if _is_gfx1250():
+                if _main_grad_first_write(weight):
+                    # PRIMUS_WGRAD_BETA0: first write of the step, the buffer clear was skipped
+                    weight.main_grad.copy_(grad_quantized_weight)
+                elif _is_gfx1250():
                     inplace_add_triton_(weight.main_grad, grad_quantized_weight)
                 else:
                     weight.main_grad.add_(grad_quantized_weight)
@@ -463,9 +466,38 @@ def _bridge_weight_grad(
         # and therefore the gemm -- actually sees.
         quantized_weight.main_grad = weight.main_grad
         quantized_weight.grad_added_to_main_grad = weight.grad_added_to_main_grad
+        quantized_weight._primus_mg_param = (
+            weight  # first-write policy (PRIMUS_WGRAD_BETA0) resolves the parameter
+        )
 
     # wrapper quantized_weight and quantized_weight_trans into PrimusTurboQuantizedTensorPair
     return x, PrimusTurboQuantizedTensorPair(data=quantized_weight, data_t=quantized_weight_trans)
+
+
+def _main_grad_first_write(weight) -> bool:
+    """PRIMUS_WGRAD_BETA0 first-write policy (Turbo-registered); False (accumulate) when unavailable."""
+    try:
+        from primus_turbo.pytorch.ops.utils import main_grad_first_write
+    except ImportError:
+        return False
+    return main_grad_first_write(weight)
+
+
+def _g90_block_wgrad_fuse(weight) -> bool:
+    if os.environ.get("PRIMUS_TURBO_G90_WGRAD_FUSE", "0").strip().lower() not in ("1", "true"):
+        return False
+    # Turbo's default is dsv4up (it runs as g90 when the Gluon kernels are off); both take the fused epilogue.
+    if os.environ.get("PRIMUS_TURBO_FP8_BLOCK_KERNEL", "dsv4up") not in ("g90", "dsv4up"):
+        return False
+    mg = getattr(weight, "main_grad", None)
+    return (
+        isinstance(weight, torch.Tensor)
+        and weight.dim() == 2
+        and isinstance(mg, torch.Tensor)
+        and mg.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and mg.shape == weight.shape
+        and mg.is_contiguous()
+    )
 
 
 def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor, grouped: bool = False) -> Optional[str]:
@@ -476,10 +508,11 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor, grouped: bool = Fals
     over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``, and for the
     grouped-GEMM experts (``grouped``) by ``turbo_grouped_gemm_wgrad_accum_fusion``.
 
-    Only the BF16/FP16 GEMMs, the FP8 current-scaling (tensorwise) ones, and
-    non-preshuffled MXFP4 GEMMs (FlyDSL ``gemm_fp4_accum_impl``) carry that
-    epilogue. FP8 block / MXFP8 scaling and preshuffled or non-MX FP4 recipes
-    keep the framework's separate add.
+    Only the BF16/FP16 GEMMs, the FP8 current-scaling (tensorwise) ones,
+    non-preshuffled MXFP4 GEMMs (FlyDSL ``gemm_fp4_accum_impl``) and, on gfx1250, the
+    dense FP8 block-scaling GEMMs (g90 / dsv4up, ``PRIMUS_TURBO_G90_WGRAD_FUSE``) carry
+    that epilogue. Grouped FP8 block, MXFP8 and preshuffled or non-MX FP4 recipes keep
+    the framework's separate add.
 
     ``weight`` must be the real parameter, not a quantized buffer: the buffer carries
     no ``main_grad``. On the multi-microbatch path the parameter's attributes are
@@ -508,7 +541,17 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor, grouped: bool = Fals
             return None
     elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
         quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-        if quant_config is None or not quant_config.current_scaling():
+        if quant_config is None:
+            return None
+        if quant_config.block_scaling():
+            # PRIMUS_TURBO_G90_WGRAD_FUSE=1 with the gfx1250 dense kernels (PRIMUS_TURBO_FP8_BLOCK_KERNEL=g90 / dsv4up):
+            # the wgrad epilogue writes main_grad itself (beta 1 = old + acc in fp32, rounded once; beta 0 on the
+            # step's first write under PRIMUS_WGRAD_BETA0). Grouped weights and the other BLOCKWISE kernels keep the
+            # framework's separate add (the grouped variable-K Triton backend rejects inplace_add_to_out).
+            if not _g90_block_wgrad_fuse(weight):
+                return None
+            weight._primus_fwd_claim = True  # Turbo flags grad_added_to_main_grad already in forward
+        elif not quant_config.current_scaling():
             return None
     elif weight.dtype not in (torch.bfloat16, torch.float16):
         return None
@@ -1091,6 +1134,58 @@ def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, tra
         return _get_fp8_autocast_for_quant_recipe(qparams.training_recipe)
 
 
+# ---------------------------------------------------------------------------
+# Block-FP8 recipe (DeepSeek-V3/V4 paper, no Transformer Engine).
+#
+# PRIMUS_TURBO_FP8_BLOCK=1: Megatron runs WITHOUT --fp8 (BF16 everywhere: embedding, output head, router,
+# norms, attention core); the Turbo dense linears and the Turbo grouped MoE experts quantize themselves to
+# FP8 E4M3 with 128-element block scaling -- activations and output grads in 1x128 tiles (plus the transposed
+# 1x128 tiles for wgrad), weights in 128x128 blocks -- and run the Turbo BLOCKWISE GEMMs (fwd, dgrad, wgrad).
+# Scales are UE8M0 (powers of two); PRIMUS_TURBO_FP8_BLOCK_UE8M0 defaults to 1 in this mode. The kernel choice
+# lives in Turbo's BLOCKWISE dispatch (gemm_fp8 / grouped_gemm_fp8).
+# ---------------------------------------------------------------------------
+@lru_cache(maxsize=None)
+def _fp8_block_mode() -> bool:
+    block = os.environ.get("PRIMUS_TURBO_FP8_BLOCK", "0").strip().lower() in ("1", "true")
+    if block:
+        os.environ.setdefault("PRIMUS_TURBO_FP8_BLOCK_UE8M0", "1")
+        log_rank_0(
+            f"[precision] Turbo block-FP8 recipe on (ue8m0={os.environ['PRIMUS_TURBO_FP8_BLOCK_UE8M0']}); "
+            f"primus_turbo imported from {primus_turbo_torch.__file__}"
+        )
+    return block
+
+
+@lru_cache(maxsize=None)
+def _block_quant_config() -> PrimusTurboQuantConfig:
+    # 1x128 activation / grad tiles, 128x128 weight blocks; UE8M0 rounding happens inside Turbo's quant kernels.
+    return PrimusTurboQuantConfig(
+        granularity=ScalingGranularity.BLOCKWISE, format=Format.E4M3, block_size=128
+    )
+
+
+@contextmanager
+def _block_fp8_precision():
+    """Temporarily switch the Turbo low-precision state to block FP8 (TE's own state is left alone)."""
+    mgr = PrimusTurboLowPrecisionGlobalStateManager
+    saved = (mgr.PRIMUS_TURBO_FP8_ENABLED, mgr.PRIMUS_TURBO_FP4_ENABLED, mgr.PRIMUS_TURBO_QUANT_CONFIG)
+    mgr.PRIMUS_TURBO_FP8_ENABLED = True
+    mgr.PRIMUS_TURBO_FP4_ENABLED = False
+    mgr.PRIMUS_TURBO_QUANT_CONFIG = _block_quant_config()
+    try:
+        yield
+    finally:
+        mgr.PRIMUS_TURBO_FP8_ENABLED, mgr.PRIMUS_TURBO_FP4_ENABLED, mgr.PRIMUS_TURBO_QUANT_CONFIG = saved
+
+
+def _dense_precision_context(x: torch.Tensor, weight: torch.Tensor):
+    return _block_fp8_precision() if _fp8_block_mode() else nullcontext()
+
+
+def _grouped_precision_context():
+    return _block_fp8_precision() if _fp8_block_mode() else nullcontext()
+
+
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
     """
     Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
@@ -1431,7 +1526,7 @@ class PrimusTurboLinear(TELinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -1641,7 +1736,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -1854,7 +1949,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -2082,7 +2177,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context(x, self.weight):
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -2686,7 +2781,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
-        with quant_context:
+        with quant_context, _grouped_precision_context():
             out = self.forward_internal(x, m_splits)
         return out
 
