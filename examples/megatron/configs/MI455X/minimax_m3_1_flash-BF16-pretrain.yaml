@@ -27,3 +27,7 @@ modules:
       wandb_project: "Primus_MiniMax_M3_1_Flash_Pretrain"
       sparse_attention_freq: 1
       sparse_disable_index_value: 1
+      # Turbo's RMSNorm in front of TE's linear instead of TE's fused LayerNormLinear: TE's
+      # rmsnorm_bwd_general_kernel took 0.9 ms per call at hidden 6144 (6.3 ms a step on the
+      # 1-GPU proxy: the four qkv and three dense fc1 input norms); Turbo's takes ~0.03 ms.
+      use_turbo_norm_te_linear: true
