@@ -15,7 +15,9 @@ DDP hook that the gradient is in the buffer already; the hook still runs, so the
 registered for its bucket's reduction as before.
 
 That protocol drops every other gradient of the parameter, so the path is taken only for
-embeddings of a ``GPTModel`` built without ``share_embeddings_and_output_weights``. Tensor
+embeddings of a ``GPTModel`` built without ``share_embeddings_and_output_weights`` and without
+multi-token prediction (whose layers look the embedding up again: autograd would sum those
+lookups' gradients before the hook's single ``add_``, the rows would be added one by one). Tensor
 parallelism, GTP rematerialisation, ``deterministic_mode``, ``reduce_scatter_embeddings``, module
 hooks and every case ``embedding_rows_grad.eligible`` does not cover keep Megatron's forward;
 the route may change between micro-batches of a step (the dense route clears the flag in its
@@ -60,23 +62,34 @@ def _dense_forward(original_forward, module, input_):
 def make_forward(original_forward):
     """``VocabParallelEmbedding.forward`` with the row-wise gradient where it applies."""
     logged = []
+    fell_back = []
+
+    def dense(module, input_, why):
+        if why not in fell_back:
+            fell_back.append(why)
+            log_rank_0(f"[Patch:{_PATCH_KEY}] word embedding keeps Megatron's gradient: {why}")
+        return _dense_forward(original_forward, module, input_)
 
     def forward(self, input_):
         # eligibility before any work; everything else is Megatron's forward
         if not getattr(self, _UNTIED, False):
             return original_forward(self, input_)
-        if (
-            (self.tp_group is not None and self.tp_group.size() > 1)  # None: one rank, as get_pg_size
-            or getattr(self, "gtp_remat_size", 1) > 1
-            or self.deterministic_mode
-            or self.reduce_scatter_embeddings
-            or _has_hooks(self)
-        ):
-            return _dense_forward(original_forward, self, input_)
+        if self.tp_group is not None and self.tp_group.size() > 1:  # None: one rank, as get_pg_size
+            return dense(self, input_, "tensor parallelism")
+        if getattr(self, "gtp_remat_size", 1) > 1:
+            return dense(self, input_, "GTP rematerialisation")
+        if self.deterministic_mode:
+            return dense(self, input_, "deterministic_mode")
+        if self.reduce_scatter_embeddings:
+            return dense(self, input_, "reduce_scatter_embeddings")
+        if _has_hooks(self):
+            return dense(self, input_, "module hooks (such as overlap_param_gather's)")
         # Imported here: only a run with the switch on needs Triton.
         from primus.backends.megatron.core.fusions import embedding_rows_grad as erg
 
-        if not erg.eligible(input_, self.weight) or not erg.checked(input_, self.weight):
+        if not erg.eligible(input_, self.weight):
+            return dense(self, input_, "ids or weight the kernel does not cover")
+        if not erg.checked(input_, self.weight):
             return _dense_forward(original_forward, self, input_)
         if not logged:
             logged.append(True)
@@ -90,11 +103,17 @@ def make_forward(original_forward):
 
 
 def mark_untied(model) -> None:
-    """Allow the path for ``model``'s word embedding when no output layer shares its weight."""
+    """Allow the path for ``model``'s word embedding when the lookup is its weight's only use: no
+    output layer shares the weight and no multi-token-prediction layer looks it up again."""
     embedding = getattr(model, "embedding", None)
     word_embeddings = getattr(embedding, "word_embeddings", None)
-    if word_embeddings is not None and getattr(model, "share_embeddings_and_output_weights", True) is False:
-        setattr(word_embeddings, _UNTIED, True)
+    if word_embeddings is None or getattr(model, "share_embeddings_and_output_weights", True) is not False:
+        return
+    if getattr(model, "mtp_process", False) or getattr(
+        getattr(model, "config", None), "mtp_num_layers", None
+    ):
+        return
+    setattr(word_embeddings, _UNTIED, True)
 
 
 @register_patch(

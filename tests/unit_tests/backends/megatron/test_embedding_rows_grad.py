@@ -315,11 +315,14 @@ def test_only_untied_gpt_embeddings_are_marked():
         mark_untied,
     )
 
-    def model(shared):
+    def model(shared, mtp_process=False, mtp_num_layers=None):
         word = SimpleNamespace()
         return (
             SimpleNamespace(
-                embedding=SimpleNamespace(word_embeddings=word), share_embeddings_and_output_weights=shared
+                embedding=SimpleNamespace(word_embeddings=word),
+                share_embeddings_and_output_weights=shared,
+                mtp_process=mtp_process,
+                config=SimpleNamespace(mtp_num_layers=mtp_num_layers),
             ),
             word,
         )
@@ -330,6 +333,11 @@ def test_only_untied_gpt_embeddings_are_marked():
     m, word = model(True)
     mark_untied(m)
     assert not hasattr(word, _UNTIED)
+    # multi-token prediction looks the embedding up again: the rows would be added lookup by lookup
+    for kwargs in ({"mtp_process": True, "mtp_num_layers": 1}, {"mtp_num_layers": 2}):
+        m, word = model(False, **kwargs)
+        mark_untied(m)
+        assert not hasattr(word, _UNTIED)
     mark_untied(SimpleNamespace())  # no embedding on this stage / model class
 
 

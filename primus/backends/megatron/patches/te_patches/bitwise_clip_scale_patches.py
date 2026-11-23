@@ -31,7 +31,7 @@ def make_bitwise_scale(original, applier):
     logged = []
 
     def log_once(msg):
-        if not logged:
+        if msg not in logged:
             logged.append(msg)
             log_rank_0(f"[Patch:{_PATCH_KEY}] {msg}")
 
@@ -42,7 +42,7 @@ def make_bitwise_scale(original, applier):
 
         # eligibility before any work; everything else is TE's call, unchanged
         if not clip_scale.eligible(tensor_lists, coeff):
-            log_once("first call is not an in-place scale of contiguous BF16 CUDA tensors; using TE")
+            log_once("a call is not an in-place scale of contiguous BF16 CUDA tensors; TE scales it")
             return original(chunk_size, noop_flag, tensor_lists, coeff)
 
         def te_scale(tensors, c):

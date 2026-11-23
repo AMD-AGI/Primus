@@ -109,7 +109,7 @@ def _launch(x: torch.Tensor, w: torch.Tensor, eps: float, zero_centered: bool) -
 
 def _aten_block_is_32x8(N: int) -> bool:
     """ATen's ``launch_vectorized_layer_norm_kernel`` picks 32 x 8 threads for this row width."""
-    if torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size != 32:
+    if getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "warp_size", None) != 32:
         return False
     ty = 8
     while (ty // 2) * 32 >= N // 4 and ty > 1:

@@ -135,12 +135,14 @@ fused_probs_mul: false
 # launch per tensor instead of TE's multi_tensor_scale_tensor; compared with TE on the first call.
 bitwise_clip_scale: false
 # Add the word-embedding gradient into main_grad for the rows the micro-batch touches instead of
-# building the dense [vocab, hidden] gradient and adding all of it (untied embeddings, TP 1).
+# building the dense [vocab, hidden] gradient and adding all of it (untied embeddings, TP 1, no
+# multi-token prediction).
 embedding_rows_grad: false
 # Hold the gradients of up to K-1 micro-batches per parameter and add K of them into main_grad in
 # one pass (the same additions and roundings in the same order). 0 or 1: off. Costs up to K-1
 # extra BF16 copies of the rank's parameters in memory; K is capped at 8. No effect on parameters
-# whose gradient is accumulated by the GEMM itself (gradient_accumulation_fusion).
+# whose gradient is accumulated by the GEMM itself (gradient_accumulation_fusion). Checked bit for
+# bit on one GPU only (DP = EP = 1); keep 0 for multi-GPU runs until it is checked there.
 grad_accum_group: 0
 
 # ===== MXFP4 Weight De-oscillation =====

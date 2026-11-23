@@ -156,9 +156,12 @@ three extra BF16 gradients per parameter of the rank: on the 4-layer proxy at GB
 per step for a peak of 116.7 -> 166.8 GB allocated and 125.6 -> 181.7 GB reserved. It pays only where
 a rank runs several micro-batches per step and the gradients reach DDP's hook: with
 `gradient_accumulation_fusion` on, the linear and expert weight gradients go straight into the buffer
-and nothing is left to group or to hold.
-`msa_fused_qk_norm_rope` also stays off for q/k norms with module hooks, such as DDP's parameter
-all-gather under `overlap_param_gather`. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
+and nothing is left to group or to hold. It was checked bit for bit on one GPU only (DP = EP = 1), so
+leave it at 0 for multi-GPU runs until it is checked there.
+`msa_fused_qk_norm_rope` and `embedding_rows_grad` also stay off for modules with hooks, such as DDP's
+parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs why), and
+`embedding_rows_grad` stays off with multi-token prediction (`mtp_num_layers`), whose layers look
+the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
 off; apart from `msa_shared_tile_staging` the FlyDSL MSA kernels have no switch other than
