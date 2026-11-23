@@ -153,6 +153,21 @@ def test_same_slot_families_merge_into_one_gap():
     assert len(attn) == 1 and {"kda_chunk_size", "linear_conv_kernel_dim"} <= set(attn[0].keys)
 
 
+def test_hybrid_stacks_priced_by_the_hybrid_mixer_are_not_gaps():
+    rep = coverage.detect_op_gaps(
+        {
+            "is_hybrid_model": True,
+            "hybrid_attention_ratio": 0.25,
+            "use_short_conv": True,
+            "linear_conv_kernel_dim": 4,
+            "linear_key_head_dim": 128,
+            "mamba_head_dim": 64,
+        },
+        baseline={},
+    )
+    assert rep.gaps == []
+
+
 def test_hybrid_pattern_symbols_name_the_op():
     rep = coverage.detect_op_gaps(
         {"hybrid_override_pattern": "*-M-M-*-", "is_hybrid_model": True}, baseline={}

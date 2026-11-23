@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from dataclasses import asdict, dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
@@ -71,6 +72,10 @@ _SELECTORS: Tuple[Tuple[str, frozenset, str, Tuple[str, ...]], ...] = (
         ("mamba_", "hybrid_", "linear_", "use_short_conv", "is_hybrid_model"),
     ),
 )
+# Parameters a new mixer shares with the built-in hybrid mixers, which read them
+# (``module_profilers/hybrid_mixer.py``): reported with an attention-slot gap
+# unless an op model or an acknowledgement owns them, never as a gap of their own.
+_MIXER_PARAM_PREFIXES = ("linear_", "mamba_", "conv_")
 # Megatron hybrid layer symbols ('*' attention, '-' MLP, 'E' MoE are built in).
 _PATTERN_SYMBOLS = {"m": "mamba", "g": "gated_delta_net", "k": "kda"}
 
@@ -113,6 +118,7 @@ _NOT_OPS = re.compile(
 # when it concludes an op is negligible instead of writing a model for it.
 _ACKNOWLEDGED: Dict[str, str] = {
     "hybrid_attention_enabled": "DeepSeek-V4 attention, priced from compress_ratios in AttentionProfiler",
+    "use_short_conv": "GDN / KDA short causal conv, priced in hybrid_mixer's element-wise streaming term",
     "hc_use_sinkhorn": "mHC Sinkhorn, priced in the V4 attention memory-bound block (PRIMUS_HC_SINKHORN_ITERS)",
     "hc_sinkhorn_iters": "mHC Sinkhorn iterations, read from PRIMUS_HC_SINKHORN_ITERS",
     "hc_post_mult": "mHC output scale: elementwise, inside the mHC expand pass",
@@ -273,8 +279,8 @@ def _acknowledged() -> Dict[str, str]:
 
             for k, v in (yaml.safe_load(path.read_text()) or {}).items():
                 out[str(k)] = str(v)
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.warn(f"ignoring unreadable {path}: {exc}", stacklevel=2)
     return out
 
 
@@ -315,6 +321,7 @@ def detect_op_gaps(
     consumed = (
         set(_model_config_fields()) | set(_projection_tokens()) | set(extra_consumed) | set(_acknowledged())
     )
+    owned = set(extra_consumed) | set(_acknowledged())
     for cls in ops:
         try:
             present = cls.matches(view)
@@ -323,10 +330,13 @@ def detect_op_gaps(
         for k, vals in cls.claims.items():
             claimed.setdefault(k, set()).update(str(v).lower() for v in vals)
         if present:
-            consumed.update(cls.consumes)
-            consumed.update(cls.claims)
-            consumed.update(getattr(cls, "ignores", {}))
+            for keys in (cls.consumes, cls.claims, getattr(cls, "ignores", {})):
+                consumed.update(keys)
+                owned.update(keys)
             report.covered_by[cls.name] = ", ".join(dict.fromkeys((*cls.claims, *cls.consumes)))
+
+    def _free(key: str) -> bool:
+        return key not in consumed or (key.startswith(_MIXER_PARAM_PREFIXES) and key not in owned)
 
     def _claimed(key: str, val: str) -> bool:
         vals = claimed.get(key, set())
@@ -352,7 +362,7 @@ def detect_op_gaps(
         params = {
             k: v
             for k, v in flat.items()
-            if k != key and any(k.startswith(p) for p in absorbs) and is_active(v) and k not in consumed
+            if k != key and any(k.startswith(p) for p in absorbs) and is_active(v) and _free(k)
         }
         absorbed.update(params)
         absorbed.add(key)
@@ -382,7 +392,7 @@ def detect_op_gaps(
         params = {
             k: v
             for k, v in flat.items()
-            if any(k.startswith(p) for p in absorbs) and is_active(v) and k not in consumed
+            if any(k.startswith(p) for p in absorbs) and is_active(v) and _free(k)
         }
         absorbed.update(params)
         absorbed.add(key)
@@ -429,6 +439,15 @@ def detect_op_gaps(
                 keys=merged,
             )
         )
+    for g in report.gaps:
+        if g.slot == SLOT_ATTENTION:
+            g.keys.update(
+                {
+                    k: v
+                    for k, v in flat.items()
+                    if k.startswith(_MIXER_PARAM_PREFIXES) and k not in g.keys and _free(k) and is_active(v)
+                }
+            )
     return report
 
 
