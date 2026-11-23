@@ -169,7 +169,7 @@ the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel confi
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
 off; apart from `msa_shared_tile_staging`, `msa_lean_masks`, `msa_aligned_block_walk`,
-`msa_dq_from_ds` and `msa_owner_carry` the FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
+`msa_dq_from_ds`, `msa_owner_carry` and `msa_ds_chunk_store` the FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
 **Relaxed-numerics MSA options.** Two options are not bit-identical to the reference FlyDSL
 kernels. With `msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
@@ -185,10 +185,12 @@ it also writes it to a transient buffer (4 KB per token and block: 1.1 GB per la
 `dQ = scale * dS K` from it, without staging V or computing `S` and `dS` a second time. The terms
 are the same; `dS` is the dK/dV kernel's instead of the dQ kernel's own and `delta` is summed in
 another order, so `dq`, `dk` and `dv` differ in their last bits (deterministic; the first call for
-a shape compares the two paths). One further option changes an MSA operator kernel without changing
-a bit, and is switched off with the relaxed ones: `msa_owner_carry` (the forward keeps each
+a shape compares the two paths). Two further options change MSA operator kernels without changing
+a bit, and are switched off with the relaxed ones: `msa_owner_carry` (the forward keeps each
 step's tile owner in its loop state instead of re-reading the table; the first call for a shape
-compares every output bit).
+compares every output bit) and `msa_ds_chunk_store` (with `msa_dq_from_ds`, the dK/dV kernel
+writes `dS` through one buffer descriptor per workgroup instead of one per record, while a
+(batch, KV head) slice of the buffer is at most 2 GiB, i.e. up to S 32768 at top-k 16).
 `--msa_exact_numerics True` turns these options, and any other
 option of this kind, off and reproduces the reference kernels' losses bit for bit.
 

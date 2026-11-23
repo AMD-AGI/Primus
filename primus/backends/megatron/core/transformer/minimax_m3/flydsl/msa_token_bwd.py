@@ -1059,6 +1059,9 @@ _RED_CACHE: dict = {}
 _DS_OK: dict = {}
 _DS_CHECK_TOL = 1.0e-3
 _DS_MAX_BYTES = 16 * 2**30
+# msa_ds_chunk_store: the dK/dV kernel addresses a (batch, KV head) slice of the dS buffer with 32-bit
+# byte offsets through one descriptor; larger slices keep one descriptor per record
+_DS_SLICE_MAX_BYTES = 2**31
 
 
 def _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots) -> bool:
@@ -1121,6 +1124,7 @@ def msa_token_bwd(
     step_mask_skip=False,
     dq_from_ds=False,
     walk_slots=None,
+    ds_chunk_store=False,
 ):
     """Gradients of ``msa_token_fwd``.
 
@@ -1151,6 +1155,12 @@ def msa_token_bwd(
             runs both paths on that call's tensors and keeps the reference kernels unless ``dq``,
             ``dk`` and ``dv`` agree within ``_DS_CHECK_TOL`` (and are finite). Shapes whose ``dS``
             buffer would exceed ``_DS_MAX_BYTES`` keep the reference kernels.
+        ds_chunk_store: with ``dq_from_ds`` (``msa_ds_chunk_store``): the same ``dS`` bytes and the same
+            arithmetic: the dK/dV kernel stores ``dS`` through one buffer descriptor per
+            workgroup instead of one per record (``build_dkdv_w32``), only while a (batch, KV
+            head) slice of the buffer is at most ``_DS_SLICE_MAX_BYTES``; larger shapes keep the
+            per-record stores. Bit-identical to ``dq_from_ds`` without it (unit-tested); the
+            first-call comparison of ``dq_from_ds`` runs with it.
         walk_slots: with ``dq_from_ds`` and a permuted ``block_table`` (``msa_aligned_block_walk``),
             the int32 ``[B, Hkv, S, topk]`` slot of each walk position in the table ``plan`` was
             built from.
@@ -1183,7 +1193,18 @@ def msa_token_bwd(
         else:
             args = (dout, q, k, v, out, lse, block_table, softmax_scale, block_size)
             kwargs = dict(plan=plan, shared_tiles=shared_tiles, step_mask_skip=step_mask_skip)
-            key = (S, B, Hkv, topk, block_size, float(softmax_scale), walk_slots is not None)
+            if ds_chunk_store:
+                kwargs["ds_chunk_store"] = True  # the comparison runs the variant that will be used
+            key = (
+                S,
+                B,
+                Hkv,
+                topk,
+                block_size,
+                float(softmax_scale),
+                walk_slots is not None,
+                bool(ds_chunk_store),
+            )
             decided = _DS_OK.get(key)
             if decided is None:
                 return _ds_first_call(key, args, kwargs, walk_slots)
@@ -1294,6 +1315,10 @@ def msa_token_bwd(
             kv_key = ("step_mask_skip",) + kv_key
         if emit:
             kv_key = ("emit_ds",) + kv_key
+        # msa_ds_chunk_store: one dS descriptor per workgroup needs a (batch, KV head) slice of at most 2 GiB
+        chunk_store = emit and bool(ds_chunk_store) and S * topk * block_size * HPW * 2 <= _DS_SLICE_MAX_BYTES
+        if chunk_store:
+            kv_key = ("ds_chunk_store",) + kv_key
         fn = _DKDV_CACHE.get(kv_key)
         if fn is None:
             if w32:
@@ -1308,6 +1333,7 @@ def msa_token_bwd(
                     topk,
                     **({"step_mask_skip": True} if skip else {}),
                     **({"emit_ds": True} if emit else {}),
+                    **({"ds_chunk_store": True} if chunk_store else {}),
                 )
             else:
                 built = build_dkdv(Hkv, block_size, float(softmax_scale), topk)

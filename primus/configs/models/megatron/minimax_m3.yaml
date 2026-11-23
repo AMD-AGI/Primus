@@ -114,6 +114,9 @@ msa_dq_from_ds: false
 # state instead of being re-read from the table. Bit-identical outputs, checked on first use; an
 # MSA operator kernel option, so msa_exact_numerics turns it off.
 msa_owner_carry: false
+# gfx1250 flydsl kernels with msa_dq_from_ds: the dK/dV kernel stores dS through one buffer
+# descriptor per workgroup instead of one per record (same bytes); msa_exact_numerics turns it off.
+msa_ds_chunk_store: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 

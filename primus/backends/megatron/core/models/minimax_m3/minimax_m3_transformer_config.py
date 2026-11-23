@@ -236,6 +236,16 @@ class MSATransformerConfig(TransformerConfig):
     without it and keeps that one on a mismatch. It changes an MSA operator kernel, so it is
     grouped with the relaxed-numerics options: msa_exact_numerics turns it off."""
 
+    msa_ds_chunk_store: bool = False
+    """flydsl backend on gfx1250, with msa_dq_from_ds: the dK/dV kernel writes its dS records
+    through one buffer descriptor per workgroup (the (batch, KV head) slice of the dS buffer, with
+    a per-lane record offset) instead of one descriptor per record, with the entry ids carried in
+    the loop state next to their tokens (flydsl/msa_token_bwd_w32.py, ds_chunk_store). The same
+    bytes go to the same records, so dq / dk / dv are bit-identical to msa_dq_from_ds without it.
+    Used while a slice (S * topk records of 4 KB) is at most 2 GiB (32-bit offsets); larger shapes
+    keep the per-record stores. Part of the msa_dq_from_ds path: its first-call comparison runs
+    with it, and msa_exact_numerics turns it off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for

@@ -493,12 +493,20 @@ def build_dkdv_w32(
     tokens_per_step: int = 4,
     step_mask_skip: bool = False,
     emit_ds: bool = False,
+    ds_chunk_store: bool = False,
 ):
     """dK/dV with the Q / dO rows of each step staged by the Tensor Data Mover.
 
     ``emit_ds`` (``msa_dq_from_ds``): the bf16 dS operand of every live (token, block) entry is
     also written to ``DS`` (see ``build_dq_ds_w32``), each lane its 16 heads of one key; each
     record is written by exactly one workgroup, so the buffer is deterministic.
+
+    ``ds_chunk_store`` (``msa_ds_chunk_store``, with ``emit_ds``): the same bytes to the same records
+    through one buffer descriptor per workgroup (the chunk's (batch, KV head) slice of ``DS``,
+    ``S * topk`` records, which the caller guarantees is at most 2 GiB) with a per-lane record
+    offset, instead of one descriptor per record: the entry ids ride in the loop state next to
+    the tokens they were loaded for (no second load), and each lane issues its two 16-byte
+    stores once instead of four half-masked ones.
 
     ``step_mask_skip`` (``msa_lean_masks``): a step whose tokens are all live entries at or
     after the wave's last key skips the causal / tail select of ``P`` (it would keep ``P``): a
@@ -529,6 +537,8 @@ def build_dkdv_w32(
     KV_W = 2 * TK * STRIDE * 2  # per wave: K tile then V tile, 16 keys x STRIDE bf16
     LDS_BYTES = KV_OFF + waves * KV_W
     DS_BYTES = block_size * HPW * 2  # one (token, slot) record of the dS buffer
+    CHUNK_DS = bool(emit_ds) and bool(ds_chunk_store)
+    NTK = 2 * tps if CHUNK_DS else tps  # loop-state values per step: tokens (+ their entry ids)
 
     @flyc.kernel(known_block_size=[threads, 1, 1])
     def k_fn(
@@ -615,6 +625,16 @@ def build_dkdv_w32(
         c_sl = fx.Float32(scale * _LOG2E)
         c_log2e = fx.Float32(_LOG2E)
         c_zero = fx.Float32(0.0)
+        if const_expr(CHUNK_DS):
+            # the chunk's (batch, KV head) slice of DS: S * topk records, at most 2 GiB (caller)
+            ds_nent = fx.Int32(Sn * fx.Index(topk))
+            ds_ent0 = fx.Int32(bg * Sn * fx.Index(topk))
+            ds_chunk_rsrc = buffer_ops.create_buffer_resource(
+                DS,
+                max_size=False,
+                num_records_bytes=_raw(Sn * fx.Index(topk * DS_BYTES)),
+                base_byte_offset=bg * Sn * fx.Index(topk * DS_BYTES),
+            )
 
         kv0 = blk * fx.Index(block_size) + wave * fx.Index(TK)
         key = kv0 + lo
@@ -656,14 +676,18 @@ def build_dkdv_w32(
 
         def load_tokens(r0):
             tok = []
+            ents = []
             for j in range_constexpr(tps):
                 r = r0 + fx.Int32(j)
                 r = fx.Int32(ArithValue(r < t_end).select(_raw(r), _raw(t_end - fx.Int32(1))))
                 e = sload(ent_rsrc, fx.Index(r))
+                ents.append(e)
                 t = fx.Int32(e // fx.Int32(topk)) - tok_base
                 # An empty chunk reads the previous row's last entry, which can belong to an
                 # earlier (batch, KV head) and give t < 0; the TDM copy is not bounds-checked.
                 tok.append(fx.Int32(ArithValue(t < fx.Int32(0)).select(_raw(fx.Int32(0)), _raw(t))))
+            if const_expr(CHUNK_DS):
+                return tok + ents
             return tok
 
         def head_row(t_i32, head):
@@ -731,9 +755,9 @@ def build_dkdv_w32(
             dv_acc = [it[DT + dt] for dt in range_constexpr(DT)]
             r0 = t_begin + fx.Int32(i)
             tok = [it[NA + j] for j in range_constexpr(tps)]
-            lse_st = it[NA + tps]
-            dl_st = it[NA + tps + 1]
-            tok_n = [it[NA + tps + 2 + j] for j in range_constexpr(tps)]
+            lse_st = it[NA + NTK]
+            dl_st = it[NA + NTK + 1]
+            tok_n = [it[NA + NTK + 2 + j] for j in range_constexpr(NTK)]
             valid = [ArithValue(r0 + fx.Int32(j) < t_end) for j in range_constexpr(tps)]
             istep = i // fx.Index(tps)
 
@@ -814,7 +838,30 @@ def build_dkdv_w32(
                     # lane group 0 holds token 2*pr's dS[head 0..15, key lo], group 1 token 2*pr+1's:
                     # 32 bytes at [entry, key, head] of the entry's record. Dead tail entries of
                     # the chunk (clamped duplicates) are not stored.
-                    for jj in range_constexpr(2):
+                    if const_expr(CHUNK_DS):
+                        e0 = it[NA + tps + 2 * pr]
+                        e1 = it[NA + tps + 2 * pr + 1]
+                        second = ArithValue(half == fx.Index(1))
+                        ent_l = fx.Int32(second.select(_raw(e1), _raw(e0))) - ds_ent0
+                        live = _andb(
+                            ArithValue(r0 + fx.Int32(2 * pr) + fx.Int32(half) < t_end),
+                            _andb(ArithValue(ent_l >= fx.Int32(0)), ArithValue(ent_l < ds_nent)),
+                        )
+                        rec = fx.Index(ent_l) * fx.Index(DS_BYTES) + (wave * fx.Index(TK) + lo) * fx.Index(
+                            HPW * 2
+                        )
+                        for part in range_constexpr(2):
+                            piece = Vec.from_elements(
+                                [Vec(dsB)[part * 8 + i] for i in range_constexpr(8)], elem
+                            )
+                            buffer_ops.buffer_store(
+                                _raw(piece),
+                                ds_chunk_rsrc,
+                                rec + fx.Index(part * 16),
+                                mask=_raw(live),
+                                offset_is_bytes=True,
+                            )
+                    for jj in range_constexpr(0 if CHUNK_DS else 2):
                         rj = r0 + fx.Int32(2 * pr + jj)
                         rj_c = fx.Int32(ArithValue(rj < t_end).select(_raw(rj), _raw(t_end - fx.Int32(1))))
                         ent_j = sload(ent_rsrc, fx.Index(rj_c))

@@ -245,7 +245,9 @@ def test_switches_turn_it_off():
     from primus.backends.megatron.core.transformer.minimax_m3.attention import MinimaxSparseAttention
 
     assert MSATransformerConfig.__dataclass_fields__["msa_dq_from_ds"].default is False
-    assert MinimaxSparseAttention._dq_from_ds(_fake_attention(), None) == {"dq_from_ds": True}
+    assert MinimaxSparseAttention._dq_from_ds(_fake_attention(), None) == {
+        "dq_from_ds": True
+    }  # msa_ds_chunk_store unset
     slots = torch.zeros(1, 1, 4, 4, dtype=torch.int64)
     kwargs = MinimaxSparseAttention._dq_from_ds(_fake_attention(), (None, slots))
     assert kwargs["dq_from_ds"] is True and kwargs["walk_slots"].dtype == torch.int32

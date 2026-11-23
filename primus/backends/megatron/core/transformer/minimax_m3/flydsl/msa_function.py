@@ -34,6 +34,7 @@ class _MSAAttention(torch.autograd.Function):
         dq_from_ds=False,
         walk_slots=None,
         owner_carry=False,
+        ds_chunk_store=False,
     ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
@@ -58,6 +59,7 @@ class _MSAAttention(torch.autograd.Function):
         ctx.step_mask_skip = step_mask_skip
         ctx.dq_from_ds = dq_from_ds
         ctx.walk_slots = walk_slots
+        ctx.ds_chunk_store = ds_chunk_store
         ctx.mark_non_differentiable(*outs[1:])
         return outs
 
@@ -79,8 +81,9 @@ class _MSAAttention(torch.autograd.Function):
             step_mask_skip=ctx.step_mask_skip,
             dq_from_ds=ctx.dq_from_ds,
             walk_slots=ctx.walk_slots,
+            ds_chunk_store=ctx.ds_chunk_store,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None
 
 
 def msa_attention(
@@ -98,6 +101,7 @@ def msa_attention(
     dq_from_ds=False,
     walk_slots=None,
     owner_carry=False,
+    ds_chunk_store=False,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
@@ -116,8 +120,9 @@ def msa_attention(
     from the dK/dV kernel's dS. With a ``walk_table`` it needs ``walk_slots``, the int32 slot of
     each walk position in ``block_table``; without them the backward keeps the reference dQ kernel.
 
-    ``owner_carry`` (``msa_owner_carry``): the forward with fewer scalar table loads per step;
-    same bits as without it (``msa_token_fwd_wave32``).
+    ``owner_carry`` (``msa_owner_carry``) and ``ds_chunk_store`` (``msa_ds_chunk_store``, with
+    ``dq_from_ds``): the forward / the dS stores with fewer scalar table loads and buffer
+    descriptors per step; same bits as without them (``msa_token_fwd_wave32``, ``msa_token_bwd``).
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
@@ -148,4 +153,5 @@ def msa_attention(
         bool(dq_from_ds),
         walk_slots if dq_from_ds else None,
         bool(owner_carry),
+        bool(ds_chunk_store) and bool(dq_from_ds),
     )

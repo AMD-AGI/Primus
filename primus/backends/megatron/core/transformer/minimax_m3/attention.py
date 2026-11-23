@@ -77,7 +77,7 @@ _MSA_FUSIONS = (
 )
 # Options whose arithmetic is not bit-identical to the reference flydsl kernels (reordered sums);
 # msa_exact_numerics turns every one of them off.
-_MSA_RELAXED = ("msa_aligned_block_walk", "msa_dq_from_ds", "msa_owner_carry")
+_MSA_RELAXED = ("msa_aligned_block_walk", "msa_dq_from_ds", "msa_owner_carry", "msa_ds_chunk_store")
 _FUSIONS_LOGGED = False
 
 
@@ -300,9 +300,11 @@ class MinimaxSparseAttention(SelfAttention):
             or not self._gfx1250
         ):
             return {}
+        # msa_ds_chunk_store rides on this path (the dK/dV kernel's dS stores); same conditions
+        lean = {"ds_chunk_store": True} if getattr(config, "msa_ds_chunk_store", False) else {}
         if walk is None:
-            return {"dq_from_ds": True}
-        return {"dq_from_ds": True, "walk_slots": walk[1].to(torch.int32)}
+            return {"dq_from_ds": True, **lean}
+        return {"dq_from_ds": True, "walk_slots": walk[1].to(torch.int32), **lean}
 
     def _owner_carry(self) -> dict:
         """``msa_owner_carry``: the keyword argument that turns it on for the MSA forward, or none
