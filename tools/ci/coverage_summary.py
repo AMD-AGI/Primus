@@ -17,8 +17,9 @@ Modes:
 
 Layout: top-level groups are bold rows sorted by coverage; core/backends also
 get indented per-area detail rows. The headline percentage gets a tier emoji
-(_TIER_THRESHOLDS) and a curated "Notes" column flags widely-shared infra or a
-known low-coverage cause (NOTES) -- both are reading aids, not quality gates.
+(_TIER_THRESHOLDS), and the "Notes" column, derived from the numbers, marks
+Primus core, the modules where more tests gain the most (_RAISE_SHARE) and why a
+low one is low -- both are reading aids, not quality gates.
 
 What counts toward a total vs. what gets its own row are deliberately
 decoupled decisions -- see classify().
@@ -96,25 +97,14 @@ def _priority(group: str) -> int:
     return PRIORITY.get(group, _DEFAULT_PRIORITY)
 
 
-# Curated, best-effort context -- not exhaustive. Flags infra whose coverage
-# matters more than its size suggests, and low-coverage areas with a known,
-# persistent cause, so it isn't re-litigated every read. Keyed like the table
-# (group, or "<group>/<detail>"); update alongside any fix or new finding.
-# <br> forces cell wrapping so one long note can't stretch the whole column.
-NOTES = {
-    "primus (top-level)": "loose primus/ modules, no sub-package;<br>auto-folded by path depth",
-    "core": "\U0001F511 Primus core;<br>imported by every run",
-    "backends/megatron": (
-        "100+ patches gated by fp8 / MoE /<br>zero-bubble-pp / fsdp2 flags;<br>"
-        "CI E2E now runs 15+ model configs/PR<br>(weekly tier adds ~10 more)"
-    ),
-    "backends/transformer_engine": "fp8 GEMM / attn-overlap kernels;<br>only hit when an E2E enables fp8",
-    "backends/diffusion": "no E2E trainer suite yet<br>(unit-tested only)",
-}
+# A module below green that holds at least this share of all uncovered lines is
+# marked as the place where more tests gain the most.
+_RAISE_SHARE = 0.05
 
 _LEGEND = (
     "\U0001F7E2 >=50% / \U0001F7E1 >=25% / \U0001F534 <25% (next to module) "
-    "&nbsp;\u00b7&nbsp; \U0001F511 Primus core\n"
+    "&nbsp;\u00b7&nbsp; \U0001F511 Primus core, imported by every run "
+    f"&nbsp;\u00b7&nbsp; \u2b06\ufe0f below 50% and has >={_RAISE_SHARE:.0%} of all uncovered lines: worth raising\n"
 )
 
 
@@ -163,7 +153,20 @@ def render(units: list, title: str, e2es: list = None) -> str:
     def e2e_cov(group, key):
         return ca.get(group, {}).get(key, [0])[0] if two else 0
 
-    def row(label, key, cov, stmts, e2e, bold=False):
+    def note(group, cov, stmts, e2e, leaf):
+        # Rows with detail rows below them leave the reasons to those.
+        parts = ["\U0001F511"] if group in PRIORITY else []
+        hit = e2e if two else cov
+        if leaf and stmts and _pct(hit, stmts) < _TIER_THRESHOLDS[0][0]:
+            if gap and stmts - hit >= _RAISE_SHARE * gap:
+                parts.append("\u2b06\ufe0f has %.0f%% of all uncovered lines" % (100.0 * (stmts - hit) / gap))
+            if not hit:
+                parts.append("no test runs it")
+            elif two and e2e == cov:
+                parts.append("E2E adds no lines")
+        return "; ".join(parts)
+
+    def row(label, cov, stmts, e2e, bold=False, notes=""):
         # Tier dot rides next to the module name (leftmost), so it reads as a
         # per-module health mark and leaves the right-aligned % columns clean.
         # It goes *after* any &emsp; indent so detail-row dots stay indented.
@@ -178,7 +181,7 @@ def render(units: list, title: str, e2es: list = None) -> str:
         rest = label[len(indent) :]
         label_cell = "%s%s%s%s%s" % (indent, dot, w, rest, w)
         cells = [label_cell] + ["%s%s%s" % (w, x, w) for x in vals]
-        cells.append(NOTES.get(key, ""))
+        cells.append(notes)
         return "| " + " | ".join(cells) + " |"
 
     def group_totals(group):
@@ -198,6 +201,7 @@ def render(units: list, title: str, e2es: list = None) -> str:
     tc = sum(group_totals(g)[0] for g in groups)
     tn = sum(group_totals(g)[1] for g in groups)
     te = sum(group_totals(g)[2] for g in groups) if two else 0
+    gap = tn - (te if two else tc)
     excl = ", ".join(sorted(OMIT_MODULES))
 
     out = ["## Primus coverage - %s\n" % title]
@@ -222,15 +226,17 @@ def render(units: list, title: str, e2es: list = None) -> str:
 
     for group in sorted(groups, key=lambda g: (_priority(g), -_pct(group_totals(g)[0], group_totals(g)[1]))):
         cov, stmts, e2e = group_totals(group)
-        out.append(row("`%s`" % group, group, cov, stmts, e2e, bold=True))
+        leaf = group not in DETAILED_GROUPS
+        out.append(row("`%s`" % group, cov, stmts, e2e, True, note(group, cov, stmts, e2e, leaf)))
         if group in DETAILED_GROUPS:
             # k == group is a folded loose file (see classify()), already
             # counted in group_totals() above -- no row of its own here.
             details = ((k, v) for k, v in pa[group].items() if k != group and v[1] > 0 and (two or v[0] > 0))
             for k, v in sorted(details, key=lambda kv: -_pct(kv[1][0], kv[1][1])):
-                out.append(row("&emsp;`%s`" % k, k, v[0], v[1], e2e_cov(group, k)))
+                e2e = e2e_cov(group, k)
+                out.append(row("&emsp;`%s`" % k, v[0], v[1], e2e, notes=note(k, v[0], v[1], e2e, True)))
 
-    out.append(row("TOTAL", None, tc, tn, te, bold=True))
+    out.append(row("TOTAL", tc, tn, te, bold=True))
     return "\n".join(out)
 
 
