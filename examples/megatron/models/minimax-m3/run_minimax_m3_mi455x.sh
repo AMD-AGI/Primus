@@ -77,10 +77,12 @@ if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE}" && ! -r "${HIPBLASLT_TUNING_OVERRID
     echo "cannot read HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE}" >&2
     exit 2
 fi
-# Primus's HIP Adam applies the clip coefficient in-kernel and writes the BF16 parameters, so the
-# step has no host sync, no separate grad scale and no parameter copy. Megatron then logs no grad
-# norm. The other two need the first.
-export PRIMUS_FUSED_ADAM_CLIP=${PRIMUS_FUSED_ADAM_CLIP:-1}
+# 1: Primus's HIP Adam applies the clip coefficient in-kernel and writes the BF16 parameters, so
+# the step has no host sync, no separate grad scale and no parameter copy. Megatron then logs no
+# grad norm. The other two need the first. The BF16 writeback needs separate FP32 master
+# parameters, which the config's precision-aware optimizer (BF16 grads and moments) does not keep,
+# so the default is 0.
+export PRIMUS_FUSED_ADAM_CLIP=${PRIMUS_FUSED_ADAM_CLIP:-0}
 export PRIMUS_FUSED_ADAM_BF16_WRITEBACK=${PRIMUS_FUSED_ADAM_BF16_WRITEBACK:-${PRIMUS_FUSED_ADAM_CLIP}}
 export PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=${PRIMUS_STATIC_BF16_LOSS_SCALE_CPU:-${PRIMUS_FUSED_ADAM_CLIP}}
 

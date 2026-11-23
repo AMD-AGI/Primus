@@ -82,10 +82,19 @@ modules:
       overlap_param_gather: false
       use_torch_fsdp2: false
       use_distributed_optimizer: true
+      # BF16 gradient buffer and Adam moments, as in the MI455X DeepSeek-V3 recipe. On the
+      # one-GPU M3.1-Flash proxy (4 layers, GBS 8): 402 -> 372 ms per step, peak 200 -> 117 GB.
+      # Not bit-identical to FP32 main grads (iteration-6 lm loss 11.95907 vs 11.95885).
+      # Needs PRIMUS_FUSED_ADAM_CLIP=0, the launcher's default.
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
       # Fusing the wgrad accumulation into the fp32 main_grad was 14-16% slower (15% on the
-      # EP4 baseline with 8 micro-batches per step): hipBLASLt
-      # picks a 3.7x slower kernel for fp32-output GEMMs on gfx1250. Into a bf16 main_grad
-      # it is 1% faster.
+      # EP4 baseline with 8 micro-batches per step): hipBLASLt picks a 3.7x slower kernel for
+      # fp32-output GEMMs on gfx1250. Into the bf16 main_grad it needs an expert grouped GEMM
+      # whose wgrad accumulates: FlyDSL's cannot (Primus-Turbo 0.6.1), and the Triton backend,
+      # which can, costs more than the fusion saves (406.5 vs 372.1 ms on the proxy above).
       gradient_accumulation_fusion: false
       # The check is a norm over every gradient each step: 5 ms at EP4 with 8 layers.
       check_for_nan_in_loss_and_grad: false

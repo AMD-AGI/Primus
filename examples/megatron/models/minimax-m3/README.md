@@ -105,14 +105,16 @@ has; with a FlyDSL that lacks them, building an MSA layer stops with an `ImportE
   as the default image's does, and to `False` and `triton` otherwise. Asking for `flydsl` without
   those kernels stops the launcher before training. Primus-Turbo's own default backend fails with
   `invalid argument for fmha_bwd` here. MSA layers are unaffected.
-- Optimizer: `PRIMUS_FUSED_ADAM_CLIP` (default `1`) runs Primus's HIP Adam, which applies the
-  gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and
+- Optimizer: the MI455X configs keep BF16 gradients and Adam moments
+  (`use_precision_aware_optimizer`, `main_grads_dtype`, `exp_avg_dtype`, `exp_avg_sq_dtype`), as the
+  MI455X DeepSeek-V3 recipe does. `PRIMUS_FUSED_ADAM_CLIP` (default `0`) at `1` runs Primus's HIP Adam,
+  which applies the gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and
   `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU` (default: the value of `PRIMUS_FUSED_ADAM_CLIP`) also have it
-  write the BF16 parameters and keep the loss scale on the host. Megatron then logs no grad norm. With
-  `PRIMUS_FUSED_ADAM_CLIP=0` Adam is Primus's Triton AdamW (`use_triton_fused_adam`, on by default),
-  and `--use_triton_fused_adam False` keeps TE's FusedAdam. `--use_precision_aware_optimizer True`
-  needs `PRIMUS_FUSED_ADAM_CLIP=0`: the BF16 writeback needs separate FP32 master parameters, and the
-  run stops at the first step without them.
+  write the BF16 parameters and keep the loss scale on the host. Megatron then logs no grad norm. The
+  BF16 writeback needs separate FP32 master parameters, so `PRIMUS_FUSED_ADAM_CLIP=1` also needs
+  `--use_precision_aware_optimizer False`; the run stops at the first step otherwise. At `0` Adam is
+  Primus's Triton AdamW (`use_triton_fused_adam`, on by default), and `--use_triton_fused_adam False`
+  keeps TE's FusedAdam.
 - `HIPBLASLT_TUNING_OVERRIDE_FILE` (default: the file in `hipblaslt_tuning/`; empty: hipBLASLt's own
   kernel choice): see hipBLASLt tuning below. A file of your own may be given relative to the current
   directory; the launcher checks that it can be read and mounts it into the container.
@@ -146,7 +148,7 @@ training runs as root in the new container, so the files it creates are owned by
 container it runs as the container's user, which has to be root for the Triton patch. Iterations 1–2
 compile the FlyDSL and Triton kernels (iteration 1 takes about 30 s), so the ms/iter on this page is
 Primus's average over iterations 3–10 (`log_avg_skip_iterations=2`). Memory is the logged
-`hip mem usage`, which counts the whole device, other processes included. With the default
+`hip mem usage`, which counts the whole device, other processes included. With
 `PRIMUS_FUSED_ADAM_CLIP=1`, check that the log has `[Patch:megatron.optimizer.te_fused_adam_clip]
 enabled`: when its HIP extension does not build, Primus logs the error and trains without it.
 
@@ -281,17 +283,18 @@ The expert GEMMs are Primus-Turbo's Triton kernels (`_grouped_bf16_persistent_ge
 `PrimusTurboRowParallelGroupedLinear`), not TE's grouped GEMM. In the trace every FlyDSL kernel is
 named `k_fn_0`; the launching Python frame tells MSA forward, MSA backward and the indexer apart.
 
-The three Adam paths, on the same node. The runs in each column ran side by side: one GPU each on
+The three Adam paths, on the same node, with the FP32 gradients and Adam moments of the time (before
+the BF16 recipe under Optimizer above). The runs in each column ran side by side: one GPU each on
 separate GPUs, and EP2 on GPUs 0–1 and 2–3.
 
 | Adam | Settings | 1 GPU | EP2 | lm loss, iteration 10 (1 GPU / EP2) |
 | --- | --- | --- | --- | --- |
-| Primus HIP fused Adam (default) | `PRIMUS_FUSED_ADAM_CLIP=1` | 142.9 ms | 130.1 ms | 10.98864 / 10.31194 |
+| Primus HIP fused Adam | `PRIMUS_FUSED_ADAM_CLIP=1` | 142.9 ms | 130.1 ms | 10.98864 / 10.31194 |
 | Primus Triton AdamW | `PRIMUS_FUSED_ADAM_CLIP=0` | 157.5 ms | 138.5 ms | 10.98862 / 10.31211 |
 | TE FusedAdam | `PRIMUS_FUSED_ADAM_CLIP=0 --use_triton_fused_adam False` | 157.9 ms | not run | 10.98837 / – |
 
 Triton AdamW is 10% slower than the HIP Adam on one GPU and 6.5% slower on EP2, and on one GPU no faster
-than TE's FusedAdam, so the default stays `PRIMUS_FUSED_ADAM_CLIP=1`. Triton AdamW and TE FusedAdam
+than TE's FusedAdam, so with FP32 gradients the default was `PRIMUS_FUSED_ADAM_CLIP=1`. Triton AdamW and TE FusedAdam
 log the grad norm (10.378 and 10.379 at iteration 10 on one GPU); the HIP Adam does not.
 
 The unit tests pass on gfx1250: `tests/unit_tests/backends/megatron/test_minimax_m3_*.py`,
