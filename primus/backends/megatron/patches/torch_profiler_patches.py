@@ -12,9 +12,14 @@ from Megatron's training.train(). Logic mirrors trainer.py L1277-1298.
 """
 
 import inspect
+import os
 
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
+
+
+def _light() -> bool:
+    return os.environ.get("PRIMUS_PROFILE_LIGHT", "0") == "1"
 
 
 def _is_called_from_training_train() -> bool:
@@ -54,8 +59,10 @@ def _create_primus_prof(args, exp_name: str, original_profile):
             worker_name=worker_name,
             use_gzip=getattr(args, "torch_profiler_use_gzip", False),
         ),
-        record_shapes=getattr(args, "torch_profiler_record_shapes", True),
-        with_stack=getattr(args, "torch_profiler_with_stack", True),
+        # PRIMUS_PROFILE_LIGHT=1: no shapes / python stacks, so the profiled step's host side
+        # (launch overhead, GPU idle) is close to an unprofiled step.
+        record_shapes=getattr(args, "torch_profiler_record_shapes", True) and not _light(),
+        with_stack=getattr(args, "torch_profiler_with_stack", True) and not _light(),
     )
 
 
