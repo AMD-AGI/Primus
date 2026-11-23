@@ -71,6 +71,7 @@ _MSA_FUSIONS = (
     "msa_fused_indexer_loss",
     "msa_fused_indexer_loss_scatter",
     "msa_fused_select_plan",
+    "msa_shared_rope_tables",
 )
 _FUSIONS_LOGGED = False
 
@@ -262,8 +263,9 @@ class MinimaxSparseAttention(SelfAttention):
             )
             # RopeTables, not apply_rope_fusion; see the note in indexer.py. The indexer reuses
             # q_rope's tables.
-            q_rope = RopeTables(q_pos_emb)
-            k_rope = q_rope if k_pos_emb is q_pos_emb else RopeTables(k_pos_emb)
+            share = self.config.msa_shared_rope_tables
+            q_rope = RopeTables(q_pos_emb, shared=share)
+            k_rope = q_rope if k_pos_emb is q_pos_emb else RopeTables(k_pos_emb, shared=share)
 
         # [sq, b, np, hn] / [sq, b, ng, hn] -- upstream's projections, q/k norms and rope.
         # The Triton fusions are imported only when switched on: the eager backend needs no Triton.

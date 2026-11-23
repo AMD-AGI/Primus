@@ -92,6 +92,7 @@ msa_backend: flydsl
 msa_fused_qk_norm_rope: false
 msa_fused_indexer_loss: false
 msa_fused_indexer_loss_scatter: false
+msa_shared_rope_tables: false
 msa_fused_select_plan: false
 # gfx1250 flydsl kernels: adjacent tokens share a workgroup and one staging of each K/V tile they
 # have in common; bit-identical, checked on first use (MSATransformerConfig).

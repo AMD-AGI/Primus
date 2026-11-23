@@ -4,8 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""``msa_fused_indexer_loss_scatter`` (the indexer-loss backward writes the block-score gradient
-itself): the same bits as the path it replaces, and the fallbacks."""
+"""``msa_shared_rope_tables`` (RoPE tables kept per ``freqs`` tensor) and
+``msa_fused_indexer_loss_scatter`` (the indexer-loss backward writes the block-score gradient
+itself): the same bits as the paths they replace, and the fallbacks."""
 
 import pytest
 import torch
@@ -17,9 +18,21 @@ needs_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GP
 @pytest.fixture
 def clean(monkeypatch):
     from primus.backends.megatron.core.fusions import bitwise_check
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
 
     monkeypatch.setattr(bitwise_check, "_results", {})
+    RopeTables._shared.clear()
     yield bitwise_check
+    RopeTables._shared.clear()
+
+
+def _freqs(seq=64, rot=8, seed=0):
+    gen = torch.Generator().manual_seed(seed)
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    return (torch.rand(seq, 1, 1, rot, generator=gen) * 50.0).to(dev)
+
+
+# ---------------------------------------------------------------- msa_shared_rope_tables
 
 
 def test_switches_default_to_off():
@@ -28,7 +41,96 @@ def test_switches_default_to_off():
     )
 
     fields = MSATransformerConfig.__dataclass_fields__
+    assert fields["msa_shared_rope_tables"].default is False
     assert fields["msa_fused_indexer_loss_scatter"].default is False
+
+
+def test_unshared_tables_are_recomputed_per_object(clean):
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    freqs = _freqs()
+    a, b = RopeTables(freqs), RopeTables(freqs)
+    assert a.cos_sin(torch.bfloat16)[0] is not b.cos_sin(torch.bfloat16)[0]
+    assert not RopeTables._shared and not clean._results
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_shared_tables_are_reused_and_bitwise(clean, require_bitwise, dtype):
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    freqs = _freqs()
+    want = RopeTables(freqs).cos_sin(dtype)
+    first = RopeTables(freqs, shared=True)
+    cos0, sin0 = first.cos_sin(dtype)
+    for _ in range(3):
+        again = RopeTables(freqs, shared=True)
+        cos1, sin1 = again.cos_sin(dtype)
+        require_bitwise(
+            any(k[0] == "msa_shared_rope_tables" and v for k, v in clean._results.items()),
+            "msa_shared_rope_tables",
+        )
+        assert cos1 is cos0 and sin1 is sin0
+    assert clean.same_bits(cos0, want[0]) and clean.same_bits(sin0, want[1])
+    x = torch.randn(64, 2, 3, 12, device=freqs.device).to(dtype)
+    assert clean.same_bits(again.apply(x), RopeTables(freqs).apply(x))
+    assert len(clean._results) == 1, "one check per freqs shape and dtype set"
+
+
+def test_shared_tables_miss_on_another_or_changed_freqs(clean):
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    freqs = _freqs()
+    cos0 = RopeTables(freqs, shared=True).cos_sin(torch.float32)[0]
+    other = freqs.clone()  # equal values, another tensor: its own tables
+    assert RopeTables(other, shared=True).cos_sin(torch.float32)[0] is not cos0
+    freqs.mul_(2.0)  # written in place: the kept tables are stale
+    fresh = RopeTables(freqs, shared=True).cos_sin(torch.float32)
+    assert fresh[0] is not cos0
+    assert clean.same_bits(fresh[0], torch.cos(freqs)) and clean.same_bits(fresh[1], torch.sin(freqs))
+    # the entry was replaced by the new version's tables
+    assert RopeTables(freqs, shared=True).cos_sin(torch.float32)[0] is fresh[0]
+    grad_freqs = _freqs().requires_grad_()
+    RopeTables(grad_freqs, shared=True).cos_sin(torch.float32)
+    assert id(grad_freqs) not in RopeTables._shared
+
+
+def test_shared_tables_stay_out_of_a_cuda_graph_capture(clean, monkeypatch):
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    freqs = _freqs()
+    if not freqs.is_cuda:
+        pytest.skip("needs a GPU")
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    RopeTables(freqs, shared=True).cos_sin(torch.float32)
+    assert not RopeTables._shared
+
+
+def test_shared_tables_of_a_freed_freqs_are_not_reused(clean):
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    freqs = _freqs()
+    RopeTables(freqs, shared=True).cos_sin(torch.float32)
+    key = id(freqs)
+    del freqs
+    assert RopeTables._shared[key][0]() is None
+    for seed in range(1, 12):  # more tensors than the dict keeps
+        f = _freqs(seed=seed)
+        t = RopeTables(f, shared=True).cos_sin(torch.float32)
+        assert clean.same_bits(t[0], torch.cos(f))
+    assert len(RopeTables._shared) <= RopeTables._SHARED_MAX
+
+
+def test_shared_tables_keep_recomputing_when_the_check_fails(clean, monkeypatch):
+    from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
+
+    freqs = _freqs()
+    RopeTables(freqs, shared=True).cos_sin(torch.float32)
+    monkeypatch.setattr(clean, "same_bits", lambda a, b: False)
+    second = RopeTables(freqs, shared=True)
+    monkeypatch.undo()
+    cos0 = RopeTables._shared[id(freqs)][2][torch.float32][0]
+    assert second.cos_sin(torch.float32)[0] is not cos0
+    assert torch.equal(second.cos_sin(torch.float32)[0], cos0)
 
 
 # ------------------------------------------------------- msa_fused_indexer_loss_scatter

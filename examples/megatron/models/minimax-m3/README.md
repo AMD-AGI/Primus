@@ -146,9 +146,11 @@ where a rank runs several micro-batches per step and the gradients reach DDP's h
 buffer and nothing is left to group or to hold), and around the MSA attention
 `msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the gfx1250
 MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens per
-workgroup and stage a K/V tile they share once), and a launch cut, `msa_fused_indexer_loss_scatter`
-(the indexer-loss backward writes the block-score gradient from its last kernel, without the zero
-fill, clamp and `scatter_add_`; rows of up to 64 blocks, i.e. sequences up to 8192). Each one compares
+workgroup and stage a K/V tile they share once), and two launch cuts, `msa_shared_rope_tables` (the
+cos / sin RoPE tables are kept per rotary `freqs` tensor, not recomputed in every layer call) and
+`msa_fused_indexer_loss_scatter` (the indexer-loss backward writes the block-score gradient from
+its last kernel, without the zero fill, clamp and `scatter_add_`; rows of up to 64 blocks, i.e.
+sequences up to 8192). Each one compares
 itself with the path it replaces on its first call and keeps that path, with a warning in the log,
 if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).
 `msa_fused_qk_norm_rope` also stays off for q/k norms with module hooks, such as DDP's parameter
