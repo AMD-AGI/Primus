@@ -141,6 +141,7 @@ from megatron.core.transformer.multi_latent_attention import (
 )
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import MLATransformerConfig
+from megatron.core.typed_torch import apply_module
 from megatron.core.utils import (
     deprecate_inference_params,
     nvtx_range_pop,
@@ -161,6 +162,33 @@ logger = logging.getLogger(__name__)
 # The zero-width-positional-head warning is per-process, not per-layer: 24
 # identical lines per rank would bury it.
 _warned_about_zero_width_pos_emb = False
+
+
+class _NopeKeyValue(torch.autograd.Function):
+    """``key = cat(kv[..., :qk], k_pos_emb broadcast over the heads)`` and ``value = kv[..., qk:]``.
+
+    The values of upstream's ``split`` / ``cat`` / ``contiguous`` chain, written as slice copies: on gfx1250 the
+    last-dim ``cat`` of 128-wide pieces and its backward run well below bandwidth. The head broadcast's gradient is
+    the sum over heads, as autograd's ``expand`` backward computes it.
+    """
+
+    @staticmethod
+    def forward(ctx, kv: Tensor, k_pos_emb: Tensor, qk_dim: int):
+        heads, pe = kv.size(-2), k_pos_emb.size(-1)
+        key = kv.new_empty(*kv.shape[:-1], qk_dim + pe)
+        key[..., :qk_dim].copy_(kv[..., :qk_dim])
+        key[..., qk_dim:].copy_(k_pos_emb.unsqueeze(-2).expand(*k_pos_emb.shape[:-1], heads, pe))
+        value = kv[..., qk_dim:].contiguous()
+        ctx.qk_dim = qk_dim
+        return key, value
+
+    @staticmethod
+    def backward(ctx, d_key: Tensor, d_value: Tensor):
+        qk_dim = ctx.qk_dim
+        d_kv = d_key.new_empty(*d_key.shape[:-1], qk_dim + d_value.size(-1))
+        d_kv[..., :qk_dim].copy_(d_key[..., :qk_dim])
+        d_kv[..., qk_dim:].copy_(d_value)
+        return d_kv, d_key[..., qk_dim:].sum(dim=-2), None
 
 
 def apply_sigmoid_output_gate(x: Tensor, gate: Tensor) -> Tensor:
@@ -386,6 +414,62 @@ class KimiK3MLASelfAttention(MLASelfAttention):
             "%s. Set qk_head_dim=128 and qk_pos_emb_head_dim=64 for the released geometry.",
             self.q_head_dim**-0.5,
         )
+
+    def get_query_key_value_tensors(
+        self,
+        hidden_states,
+        key_value_states=None,
+        position_ids=None,
+        packed_seq_params=None,
+        inference_context=None,
+        *,
+        inference_params=None,
+    ):
+        """Upstream's ``query`` / ``key`` / ``value``, without NoPE's no-op copies on the plain training path.
+
+        With the zero-width rotary table, upstream splits ``q`` into its 128 + 64 halves, passes the 64 through
+        ``apply_rotary_pos_emb`` (a ``cat`` with an empty tensor), concatenates the halves back and does the same
+        for ``k_pos_emb``: copies of q- and k-sized tensors, with their backward splits and cats, for a ``query``
+        that equals ``q`` element for element. Here ``query`` is ``q`` and ``key`` is built with its one needed
+        copy (the 64 MQA-shared dims broadcast over the heads). Every other configuration (RoPE, packed
+        sequences, inference, up-projection recompute, RoPE fusion, cached latents, tensor parallelism) takes
+        upstream's method.
+        """
+        if (
+            not self.mla_use_nope
+            or packed_seq_params is not None
+            or inference_context is not None
+            or inference_params is not None
+            or self.recompute_up_proj
+            or self.config.apply_rope_fusion
+            or self.cache_mla_latents
+            or self.config.tensor_model_parallel_size > 1
+        ):
+            return super().get_query_key_value_tensors(
+                hidden_states,
+                key_value_states,
+                position_ids,
+                packed_seq_params,
+                inference_context,
+                inference_params=inference_params,
+            )
+        assert hidden_states.ndim == 3, f"hidden_states should be 3D, [s, b, n*h], got {hidden_states.ndim}D"
+        q_compressed, kv_combined = self._qkv_down_projection(hidden_states)
+        kv_compressed, k_pos_emb = torch.split(
+            kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
+        )
+        if self.config.q_lora_rank is not None:
+            q_compressed = apply_module(self.q_layernorm)(q_compressed)
+            q, _ = self.linear_q_up_proj(q_compressed)
+        else:
+            q, _ = self.linear_q_proj(q_compressed)
+        kv_compressed = apply_module(self.kv_layernorm)(kv_compressed)
+        heads = self.num_attention_heads_per_partition
+        query = q.view(*q.size()[:-1], heads, self.q_head_dim).contiguous()
+        kv, _ = self.linear_kv_up_proj(kv_compressed)
+        kv = kv.view(*kv.size()[:-1], heads, self.config.qk_head_dim + self.config.v_head_dim)
+        key, value = _NopeKeyValue.apply(kv, k_pos_emb, self.config.qk_head_dim)
+        return query, key, value, q_compressed, kv_compressed
 
     def forward(
         self,
