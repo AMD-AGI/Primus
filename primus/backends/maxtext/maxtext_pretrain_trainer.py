@@ -111,6 +111,12 @@ class MaxTextPretrainTrainer(BaseTrainer):
         """
         log_rank_0("MaxTextPretrainTrainer.init() - initializing MaxText training")
 
+        from primus.backends.maxtext.patches._source_patch_utils import (
+            raise_on_source_patch_failures,
+        )
+
+        raise_on_source_patch_failures()
+
         # MaxText normally starts under absl.app.run, which parses absl flags.
         # Primus calls initialize()/run() directly, and grain reads absl flags when
         # it starts worker processes (grain_worker_count > 0): unparsed, the first

@@ -122,7 +122,7 @@ TorchTitan integration uses the same Primus configuration surface (CLI flags + Y
 
 ## JAX MaxText patch notes
 
-Primus integrates JAX MaxText as a backend for running LLaMA and related transformer models on AMD GPUs. At the moment, Primus does not apply any additional patch-layer arguments on top of MaxText—the MaxText configuration surface (YAML + CLI) is used as-is.
+Primus integrates JAX MaxText as a backend for running LLaMA and related transformer models on AMD GPUs. The MaxText configuration surface (YAML + CLI) is used as-is, plus the ROCm `release/v26.10` additions below, which Primus layers onto any ROCm/maxtext `rocm-main` checkout as patches instead of requiring a forked MaxText.
 
 Use this section together with:
 
@@ -140,4 +140,32 @@ Use this section together with:
   - DeepSeek-V2 16B
   - Mixtral-8x7B
   - Grok1
-- There are no extra Primus-only flags for MaxText yet; as we add MaxText-specific patches (e.g., ROCm optimizations, logging helpers), they will be documented in tables here in the same style as the Megatron-LM and TorchTitan patch notes.
+
+### ROCm/maxtext release/v26.10 patches
+
+The commits `38d321cff`..`2fb48f50e` of [ROCm/maxtext `release/v26.10`](https://github.com/ROCm/maxtext/commits/release/v26.10) are carried as Primus patches on top of `third_party/maxtext` (`3beddbaac`), so a MaxText bumped to the `rocm-main` tip trains the same way as `release/v26.10`. All patches run in the `setup` phase. Each one first checks whether the installed MaxText already contains its change and skips if so (a no-op on `release/v26.10` itself). Source-rewrite patches match exact anchors in MaxText. If an anchor is missing or ambiguous, `MaxTextPretrainTrainer.init()` raises before training starts instead of training without the change.
+
+New config keys (set them like any other MaxText key):
+
+| New Argument | Default Value | Description | Patched Files | Notes |
+| ------------ | ------------- | ----------- | ------------- | ----- |
+| `use_turbo_grouped_gemm` | `false` | Primus-Turbo grouped GEMM for MoE sparse matmul. | `maxtext.layers.moe.RoutedMoE.sparse_matmul` | Requires `sparse_matmul=True`, `megablox=False`, `use_tokamax_gmm=False`, no `quantization`, bf16/fp16 `dtype`, and `primus_turbo`. Supports ring-of-experts with `use_ragged_sort`. Implementation: `primus/backends/maxtext/kernels/turbo_grouped_gemm.py`. |
+| `turbo_grouped_gemm_backend` | `ck` | `ck`, `hipblaslt` or `flydsl` (gfx950). | | Read only when `use_turbo_grouped_gemm` is on. |
+| `turbo_grouped_gemm_quant` | `bf16` | `bf16` or `fp8` (per-tensor e4m3 forward, dA and dW). | | `fp8` needs backend `flydsl` or `hipblaslt` on gfx950. |
+| `expert_balance` | `false` | Replace the router logits with a deterministic rotation so tokens spread uniformly over the experts. | `maxtext.layers.moe.RoutedMoE.dense_matmul` | Benchmarking aid; changes model numerics. |
+| `jax_distributed_heartbeat_timeout_seconds` | `100` | Heartbeat timeout passed to every `jax.distributed.initialize`. | `maxtext.utils.max_utils.maybe_initialize_jax_distributed_system` | Increase for slow NFS checkpoint restores ("stop sending heartbeats"). |
+
+Always-on behavior (no flag; leave the patch id out of `PRIMUS_PATCHES` to disable):
+
+| Patch id | Change | Patched Files |
+| -------- | ------ | ------------- |
+| `maxtext.config.v26_10_fields` | Adds the keys above to `MaxTextConfig` (subclass bound as `pyconfig`'s default `config_class`). | `maxtext.configs.types.MaxTextConfig`, `maxtext.configs.pyconfig` |
+| `maxtext.train.sync_before_loop` | `sync_global_devices` barrier right before the training loop. | `maxtext.trainers.pre_train.train.train_loop` |
+| `maxtext.train.sync_each_step` | `jax.block_until_ready` on the train state after every step. | `maxtext.trainers.pre_train.train.training_loop_iteration` |
+| `maxtext.train.device_info` | Logs every device and writes `<base_output_directory>/device_info.json`. | `maxtext.utils.max_utils.print_system_information`, `maxtext.trainers.pre_train.train.initialize` |
+| `maxtext.moe.routing_maps_remat` | Saves the router top-k ids (`moe_routing_maps`) across remat in the `minimal*` policies. | `maxtext.layers.moe.RoutedMoE.get_topk`, `maxtext.layers.nnx_decoders.NNXDecoder.minimal_policy` |
+| `maxtext.attention.synthetic_causal_mask` | `dataset_type: synthetic` uses a causal mask instead of building the S x S mask in TE attention. | `maxtext.layers.attention_op.AttentionOp.cudnn_flash_attention` |
+| `maxtext.models.query_pre_attn_scalar` | `query_pre_attn_scalar=head_dim**-0.5` in the Gemma, Gemma2, Llama2, Mistral and Mixtral decoder layers. | `maxtext.models.{gemma,gemma2,llama2,mistral,mixtral}.*DecoderLayer.__init__` |
+| `maxtext.lora.set_mesh_unbox` | Unboxes restored LoRA params under `jax.set_mesh(mesh)` (flax 0.12.2). | `maxtext.utils.lora_utils.setup_initial_lora_state` |
+
+`maxtext.moe.turbo_grouped_gemm` also gives the `jax.lax.ragged_dot` fallback the same ring-of-experts `group_offset` window. The `src/maxtext/examples/shardings.py` part of `4270c96a1` is a standalone example script and is not ported.
