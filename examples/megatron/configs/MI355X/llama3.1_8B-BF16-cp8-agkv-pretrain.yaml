@@ -3,6 +3,11 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-cp8-agkv-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# The all-gather-KV kernels wait on the peers' kernels; with the runner's 2 hardware queues the
+# overlapped grad reduce-scatter / param all-gather share the attention's queue and deadlock it.
+env:
+  GPU_MAX_HW_QUEUES: "8"
+
 modules:
   pre_trainer:
     framework: megatron

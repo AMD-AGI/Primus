@@ -285,6 +285,19 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
         warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
+@lru_cache(maxsize=1)
+def _warn_agkv_hw_queues() -> None:
+    """The all-gather-KV kernels wait on the peers' kernels. With few hardware queues an RCCL kernel
+    (the overlapped grad reduce-scatter / param all-gather) shares the attention's queue and can run
+    after it on one rank and before it on another, which deadlocks the ranks."""
+    queues = os.environ.get("GPU_MAX_HW_QUEUES", "4")
+    if not queues.isdigit() or int(queues) < 8:
+        warning_rank_0(
+            f"GPU_MAX_HW_QUEUES={queues}: turbo allgather CP can deadlock against the overlapped "
+            "collectives with fewer than 8 hardware queues; set GPU_MAX_HW_QUEUES=8"
+        )
+
+
 def _is_gfx1250() -> bool:
     """Return True iff the local GPU is a gfx1250 device (:func:`primus.core.utils.gpu_arch.is_gfx1250`).
 
@@ -1202,6 +1215,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             self.agkv_mode = args.turbo_agkv_mode
             self.agkv_group = pg_collection.cp
             self.attn = primus_turbo_torch.ops.flash_attn_agkv_func
+            _warn_agkv_hw_queues()
 
         self.attn_kwargs = {}
         if self.config.context_parallel_size > 1 and self.agkv_mode is None:
