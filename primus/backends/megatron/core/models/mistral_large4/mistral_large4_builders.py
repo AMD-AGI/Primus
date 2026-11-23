@@ -295,9 +295,9 @@ def check_indexer_source(args, cfg) -> None:
 def check_position_layout(args) -> None:
     """Rope / SSMax positions are the block's own (0..s-1, or per document with packed THD
     sequences); per-document positions or masks in an unpacked batch are not supported."""
-    packed = bool(getattr(args, "use_packed_attention", False))
+    packed = bool_flag(getattr(args, "use_packed_attention", None), "use_packed_attention", False)
     for flag in ("reset_position_ids", "reset_attention_mask"):
-        if getattr(args, flag, False) and not packed:
+        if bool_flag(getattr(args, flag, None), flag, False) and not packed:
             raise NotImplementedError(
                 f"Mistral Large 4: {flag} without packed (THD) sequences is not supported; rope / SSMax "
                 "positions restart per document only with packed sequences"

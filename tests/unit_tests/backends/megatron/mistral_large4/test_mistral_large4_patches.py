@@ -254,6 +254,7 @@ def test_deepep_single_rank(tp, etp, ep, deepep, hit):
         ({"ckpt_format": "torch_dist", "pretrained_checkpoint": "/ckpt"}, True),  # SFT from a checkpoint
         ({"ckpt_format": "torch_dist", "save": "/ckpt", "use_distributed_optimizer": True}, False),
         ({"ckpt_format": "torch", "save": "/ckpt"}, False),
+        ({"ckpt_format": None, "save": "/ckpt"}, True),  # unset: Megatron's default torch_dist
         ({"ckpt_format": "torch_dist"}, False),  # nothing saved or loaded: Turbo grouped GEMM kept
         ({"use_megatron_fsdp": True, "use_turbo_grouped_gemm": False}, False),
         ({"tensor_model_parallel_size": 8, "expert_tensor_parallel_size": 8}, True),
@@ -261,7 +262,7 @@ def test_deepep_single_rank(tp, etp, ep, deepep, hit):
         ({"tensor_model_parallel_size": 2, "expert_tensor_parallel_size": None}, True),  # ETP defaults to TP
     ],
 )
-def test_turbo_grouped_gemm_fallback(overrides, hit):
+def test_turbo_grouped_gemm_fallback(overrides, hit, monkeypatch):
     params = SimpleNamespace(
         model_type="mistral_large4",
         use_turbo_grouped_gemm=True,
@@ -283,8 +284,12 @@ def test_turbo_grouped_gemm_fallback(overrides, hit):
     assert not mistral_large4_args_patches._turbo_grouped_gemm_unusable(ctx)
     params.model_type = "mistral_large4"
     if hit:
+        warned = []
+        monkeypatch.setattr(mistral_large4_args_patches, "warning_rank_0", warned.append)
+        reason = mistral_large4_args_patches._turbo_grouped_gemm_unusable_reason(params)
         mistral_large4_args_patches.patch_mistral_large4_turbo_grouped_gemm_fallback(ctx)
         assert params.use_turbo_grouped_gemm is False and params.moe_grouped_gemm is False
+        assert len(warned) == 1 and reason in warned[0]  # the one reason that applies, as a warning
 
 
 # ---- PP shape patch -------------------------------------------------------------------------
@@ -2541,10 +2546,10 @@ def test_turbo_kernels_off_in_deterministic_mode(model, det, attn, rms, hit):
         assert params.use_turbo_grouped_gemm is True and params.use_turbo_deepep is True
 
 
-def test_layer_lists_from_preset_warns_for_a_hub_id(tmp_path, monkeypatch):
+def test_warn_preset_layer_lists_warns_for_a_hub_id(tmp_path, monkeypatch):
     from primus.core.patches.patch_registry import PatchRegistry
 
-    patch = PatchRegistry.get("megatron.mistral_large4.layer_lists_from_preset")
+    patch = PatchRegistry.get("megatron.mistral_large4.warn_preset_layer_lists")
     args = SimpleNamespace(num_layers=4)
     hub = _ctx(
         "build_args", args, SimpleNamespace(model_type="mistral_large4", stage="sft", hf_path="mistralai/X")
@@ -2563,9 +2568,9 @@ def test_layer_lists_from_preset_warns_for_a_hub_id(tmp_path, monkeypatch):
         _ctx("build_args", args, SimpleNamespace(model_type="mistral_large4", hf_path="mistralai/X"))
     )
     seen = []
-    monkeypatch.setattr(mistral_large4_args_patches, "log_rank_0", seen.append)
-    mistral_large4_args_patches.patch_mistral_large4_layer_lists_from_preset(hub)
-    assert "mistralai/X" in seen[0] and "WARNING" in seen[0]
+    monkeypatch.setattr(mistral_large4_args_patches, "warning_rank_0", seen.append)
+    mistral_large4_args_patches.patch_mistral_large4_warn_preset_layer_lists(hub)
+    assert "mistralai/X" in seen[0]
 
 
 def test_sparse_core_attention_recompute_passes_only_tensors(monkeypatch):
@@ -3118,6 +3123,7 @@ def test_te_gemm_workspace_defaults_mib_variable(monkeypatch):
     monkeypatch.setattr(layout.importlib.util, "find_spec", lambda name: object())
 
     # Primus-Turbo grouped GEMM: not applied
+    monkeypatch.setitem(m._workspace_env_written, "value", None)
     assert patch.condition(_ctx("setup", params=_ws_params())) is False
     # another model: not applied
     other = _ws_params(model_type="glm5_next", use_turbo_grouped_gemm=False)
@@ -3172,6 +3178,19 @@ def test_te_gemm_workspace_is_restored_after_train(monkeypatch):
     m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
     assert restore.condition(_ctx("after_train", params=_ws_params())) is False
     assert os.environ[env] == "256"
+
+    # a run that raised before after_train: the next run's setup removes the 512 it left (not
+    # taken as the user's) and writes its own default again
+    monkeypatch.delenv(env)
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
+    logged = []
+    monkeypatch.setattr(m, "log_rank_0", logged.append)
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
+    assert any("left by an earlier run" in x for x in logged)
+    assert not any("set by the user" in x for x in logged)
+    assert os.environ[env] == "512" and m._workspace_env_written["value"] == "512"
+    m.patch_mistral_large4_te_gemm_workspace_restore(_ctx("after_train", params=_ws_params()))
+    assert env not in os.environ
 
 
 @pytest.mark.parametrize("cp,seq,raises", [(1, 4096, False), (2, 2048, False), (2, 4096, True)])

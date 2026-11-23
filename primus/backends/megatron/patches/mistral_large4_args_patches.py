@@ -151,8 +151,8 @@ def patch_mistral_large4_layer_lists_from_checkpoint(ctx: PatchContext):
     if n < hf_n:
         # a depth-reduced run of the checkpoint (its first n layers, as the converter maps them);
         # the lists are cut to n by the model config. Said loudly: the head trains on layer-n states
-        log_rank_0(
-            f"[Patch:megatron.mistral_large4.layer_lists_from_checkpoint] WARNING: depth-reduced fine-tuning: "
+        warning_rank_0(
+            f"[Patch:megatron.mistral_large4.layer_lists_from_checkpoint] depth-reduced fine-tuning: "
             f"num_layers {n} of the checkpoint's {hf_n}; the final norm and head see layer-{n} states, so "
             f"the loss is the cut's, not the full model's (set num_layers {hf_n} for the full model)"
         )
@@ -160,8 +160,8 @@ def patch_mistral_large4_layer_lists_from_checkpoint(ctx: PatchContext):
     # the converter uses the same function, so both sides build the same layout
     values, defaulted = hf_layer_lists(dict(t, num_hidden_layers=hf_n))
     for k in defaulted:
-        log_rank_0(
-            f"[Patch:megatron.mistral_large4.layer_lists_from_checkpoint] WARNING: {path}/config.json has no {k}; "
+        warning_rank_0(
+            f"[Patch:megatron.mistral_large4.layer_lists_from_checkpoint] {path}/config.json has no {k}; "
             f"using the HF default {values[k][:n]}"
         )
     if t.get("first_k_dense_replace") is not None:
@@ -170,8 +170,8 @@ def patch_mistral_large4_layer_lists_from_checkpoint(ctx: PatchContext):
         # the converter uses the model's default for it (DEFAULT_FIRST_K_DENSE_REPLACE): so does
         # training, rather than the preset's or the user's value
         values["first_k_dense_replace"] = DEFAULT_FIRST_K_DENSE_REPLACE
-        log_rank_0(
-            f"[Patch:megatron.mistral_large4.layer_lists_from_checkpoint] WARNING: {path}/config.json has no "
+        warning_rank_0(
+            f"[Patch:megatron.mistral_large4.layer_lists_from_checkpoint] {path}/config.json has no "
             f"first_k_dense_replace; using the default {DEFAULT_FIRST_K_DENSE_REPLACE}, as the converter does"
         )
     preset = _preset_values(params) or {}
@@ -236,7 +236,7 @@ def _preset_values(params):
 
 
 @register_patch(
-    "megatron.mistral_large4.layer_lists_from_preset",
+    "megatron.mistral_large4.warn_preset_layer_lists",
     backend="megatron",
     phase="build_args",
     priority=PRIORITY_LAYER_LISTS,
@@ -246,14 +246,14 @@ def _preset_values(params):
     and _is_posttrain(ctx)
     and not _has_local_config(_hf_path(ctx)),
 )
-def patch_mistral_large4_layer_lists_from_preset(ctx: PatchContext):
+def patch_mistral_large4_warn_preset_layer_lists(ctx: PatchContext):
     """A post-training run whose ``hf_path`` is unset (e.g. started from an already converted
     ``pretrained_checkpoint``), a Hub id or a directory without ``config.json``: the per-layer
     lists cannot be read from the checkpoint here, so the preset's are used. Logged as a warning,
     because a depth-reduced cut keeps chosen layers whose lists differ from the release's first
     entries; the posttrain hook passes the local snapshot when it converts."""
-    log_rank_0(
-        "[Patch:megatron.mistral_large4.layer_lists_from_preset] WARNING: hf_path "
+    warning_rank_0(
+        "[Patch:megatron.mistral_large4.warn_preset_layer_lists] hf_path "
         f"{_hf_path(ctx)!r} is not a local directory with a config.json; using the preset's no_rope_layers / indexer_types / "
         "kv_source_layers / first_k_dense_replace. Set hf_path to the local checkpoint directory to "
         "take them from the checkpoint."
@@ -364,8 +364,8 @@ def patch_mistral_large4_moe_layer_freq(ctx: PatchContext):
     if int(experts or 0) and 1 not in derived:
         # moe_layer_freq_list caps first_k_dense_replace at num_layers: every layer is dense, the
         # MoE settings build nothing (a depth-reduced run shorter than the dense prefix)
-        log_rank_0(
-            "[Patch:megatron.mistral_large4.moe_layer_freq] WARNING: first_k_dense_replace="
+        warning_rank_0(
+            "[Patch:megatron.mistral_large4.moe_layer_freq] first_k_dense_replace="
             f"{k if k is not None else 'default'} >= num_layers={int(args.num_layers)}: every layer is dense, "
             f"no MoE layer is built although num_experts={experts}"
         )
@@ -525,8 +525,9 @@ def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
     * Megatron-FSDP (``use_megatron_fsdp``): its post-forward release walks
       ``module.parameters()`` and finds the views in no FSDP bucket (KeyError);
     * expert tensor parallelism > 1: the assertion;
-    * the non-distributed optimizer's sharded checkpoint (``torch_dist`` / ``fsdp_dtensor``
-      save or load without ``use_distributed_optimizer``): the optimizer holds ``weights``, the
+    * the non-distributed optimizer's sharded checkpoint (any ``ckpt_format`` but the legacy
+      ``torch``, e.g. ``torch_dist`` / ``fsdp_dtensor``, saved or loaded without
+      ``use_distributed_optimizer``): the optimizer holds ``weights``, the
       model's sharded state dict names the views (KeyError in ``sharded_state_dict``).
 
     In those layouts the experts run through Megatron's ``SequentialMLP`` (one TE linear per
@@ -537,21 +538,35 @@ def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
     """
     args = get_args(ctx)
     # this model only: args.model_type (is_mistral_large4_args)
+    return is_mistral_large4_args(args) and _turbo_grouped_gemm_unusable_reason(args) is not None
+
+
+def _turbo_grouped_gemm_unusable_reason(args):
+    """The one reason (text) Primus-Turbo's grouped linear cannot run this Mistral Large 4 run's
+    experts, None when it can (or the run is another model's, or does not use it)."""
+    # this model only: args.model_type (is_mistral_large4_args)
     if not is_mistral_large4_args(args) or not _flag(args, "use_turbo_grouped_gemm"):
-        return False
+        return None
     if _flag(args, "use_megatron_fsdp"):
-        return True
+        return "Megatron-FSDP (use_megatron_fsdp)"
     if _expert_tp(args) > 1:
-        return True  # PrimusTurboGroupedLinear asserts expert-TP 1
-    # only when a sharded checkpoint is saved or loaded (a run that does neither keeps Turbo);
-    # an unset ckpt_format is Megatron's default, torch_dist
-    sharded_ckpt = getattr(args, "ckpt_format", None) != "torch"
+        return f"expert tensor parallelism {_expert_tp(args)} > 1"  # PrimusTurboGroupedLinear asserts 1
+    # only when a sharded checkpoint is saved or loaded (a run that does neither keeps Turbo). Every
+    # format other than the legacy ``torch`` one goes through sharded_state_dict (torch_dist,
+    # fsdp_dtensor, and Megatron's other dist-checkpoint backends); unset is Megatron's default,
+    # torch_dist
+    ckpt_format = getattr(args, "ckpt_format", None) or "torch_dist"
     uses_ckpt = bool(
         getattr(args, "save", None)
         or getattr(args, "load", None)
         or getattr(args, "pretrained_checkpoint", None)
     )
-    return not _flag(args, "use_distributed_optimizer") and sharded_ckpt and uses_ckpt
+    if ckpt_format != "torch" and uses_ckpt and not _flag(args, "use_distributed_optimizer"):
+        return (
+            f"sharded checkpoint (ckpt_format {ckpt_format}) saved or loaded without "
+            "use_distributed_optimizer"
+        )
+    return None
 
 
 @register_patch(
@@ -564,12 +579,17 @@ def _turbo_grouped_gemm_unusable(ctx: PatchContext) -> bool:
 )
 def patch_mistral_large4_turbo_grouped_gemm_fallback(ctx: PatchContext):
     args = get_args(ctx)
+    reason = _turbo_grouped_gemm_unusable_reason(args)
     args.use_turbo_grouped_gemm = False
     args.moe_grouped_gemm = False
+    warning_rank_0(
+        "[Patch:megatron.mistral_large4.turbo_grouped_gemm_fallback] use_turbo_grouped_gemm and "
+        f"moe_grouped_gemm set to False: {reason} is not supported by Primus-Turbo's grouped linear; "
+        "the routed experts run as SequentialMLP (one TE linear per expert, slower)"
+    )
     log_kv_rank_0(
         "[Patch:megatron.mistral_large4.turbo_grouped_gemm_fallback] -use_turbo_grouped_gemm/-moe_grouped_gemm",
-        "False/False (Megatron-FSDP, expert-TP > 1, or sharded checkpoint without the distributed optimizer: "
-        "SequentialMLP experts)",
+        "False/False",
     )
 
 
@@ -621,12 +641,23 @@ def patch_mistral_large4_te_gemm_workspace(ctx: PatchContext):
     phase. This patch only sets that variable to ``TE_GEMM_WORKSPACE_MIB`` when the user has not set
     it (a value the user sets, also a smaller one, is kept)."""
     if _flag(get_args(ctx), "moe_grouped_gemm"):  # here: without Primus-Turbo
-        log_rank_0(
-            "[Patch:megatron.mistral_large4.te_gemm_workspace] WARNING: TE grouped GEMM experts "
+        warning_rank_0(
+            "[Patch:megatron.mistral_large4.te_gemm_workspace] TE grouped GEMM experts "
             "(moe_grouped_gemm without Primus-Turbo's grouped GEMM) are not tested for Mistral Large 4 on ROCm "
             "(hipBLASLt error 6 with TE's default workspace); use_turbo_grouped_gemm, or moe_grouped_gemm "
             "false (SequentialMLP), are the tested paths"
         )
+    stale = _workspace_env_written["value"]
+    if stale is not None:
+        # an earlier run in this process wrote the variable and raised before after_train restored
+        # it: a value still equal to what it wrote is that run's, not the user's (removed here)
+        _workspace_env_written["value"] = None
+        if os.environ.get(ENV_VAR) == stale:
+            del os.environ[ENV_VAR]
+            log_rank_0(
+                f"[Patch:megatron.mistral_large4.te_gemm_workspace] {ENV_VAR}={stale} left by an earlier "
+                "run in this process (not restored): removed"
+            )
     user_value = os.environ.get(ENV_VAR, "").strip()
     if user_value:
         try:

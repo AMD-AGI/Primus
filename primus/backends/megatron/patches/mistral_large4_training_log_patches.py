@@ -24,7 +24,7 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     is_mistral_large4_args,
 )
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 # attribute set on the training_log wrapper this patch installs, so a second application detects
 # it and does not wrap again
@@ -167,9 +167,9 @@ def _is_this_model(ctx: PatchContext) -> bool:
     # those take (*args, **kwargs) without functools.wraps, so this wrapper binds its arguments by
     # name only on Megatron's own training_log; installed first, it is the innermost wrapper
     priority=10,
-    description="Mistral Large 4: reset the loss accumulators on a first iteration that is a log step "
-    "(otherwise, e.g. with log_interval 1 or after a resume, the next log line prints a two-iteration "
-    "average)",
+    description="Mistral Large 4: reset the loss accumulators and logged timers on a first iteration that "
+    "is a log step (otherwise, e.g. with log_interval 1 or after a resume, the next log line prints a "
+    "two-iteration average)",
     condition=_is_this_model,
 )
 def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
@@ -183,8 +183,8 @@ def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
     if missing:
         # another wrapper or a Megatron with a different signature: the wrapper could not see the
         # arguments it needs, so it is not installed (instead of installing a silent no-op)
-        log_rank_0(
-            "[Patch:megatron.mistral_large4.first_iteration_log] WARNING: training_log has no "
+        warning_rank_0(
+            "[Patch:megatron.mistral_large4.first_iteration_log] training_log has no "
             f"parameter(s) {missing}; not wrapped (with log_interval 1 or after a resume, the next log line may average two iterations)"
         )
         return

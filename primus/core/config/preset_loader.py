@@ -5,7 +5,7 @@
 ###############################################################################
 
 import os
-from typing import Dict
+from typing import Dict, Union
 
 from primus.configs import models as MODELS_ROOT
 from primus.core.config.merge_utils import deep_merge
@@ -21,16 +21,21 @@ class PresetLoader:
     """
 
     @staticmethod
-    def preset_path(name: str, framework: str, config_type: str = "models") -> str:
+    def preset_path(name: Union[str, os.PathLike], framework: str, config_type: str = "models") -> str:
         """
         The absolute path of primus/configs/<config_type>/<framework>/<name>[.yaml], the file
-        ``load`` reads (it may not exist). The rule is ``load``'s, unchanged: ``name`` may use
+        ``load`` reads (it may not exist). ``name`` is a str or a str ``os.PathLike``; any other
+        type (None, an int, bytes) raises TypeError. ``name`` may use
         ``..`` to reach another directory under primus/configs (module configs extend
         ``../module_base.yaml``), so the check is containment in primus/configs, not in
         <config_type>/<framework>; a path outside primus/configs raises ValueError. The path is
         made absolute, not resolved through symlinks.
         """
-        name = os.fspath(name) if isinstance(name, os.PathLike) else str(name)
+        name = os.fspath(name) if isinstance(name, os.PathLike) else name
+        if not isinstance(name, str):
+            raise TypeError(
+                f"[Primus] preset name must be a str or a str os.PathLike, not {type(name).__name__}"
+            )
         # Handle suffix
         if name.endswith(".yaml") or name.endswith(".yml"):
             filename = name

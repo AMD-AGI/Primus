@@ -5,14 +5,15 @@
 ###############################################################################
 
 """Helpers shared by the Muse Spark patches: the model-type condition, flag parsing
-(``config_flag``; ``bool_flag`` lives in ``primus.core.utils.flag_utils`` and is re-exported here)
+(``config_flag``; ``bool_flag``, ``TRUE_TEXT`` and ``FALSE_TEXT`` live in
+``primus.core.utils.flag_utils`` and are re-exported here, where base defined them)
 and merged-args access."""
 
 import functools
 
 from primus.backends.megatron.core.models.muse_spark.layer_patterns import MODEL_TYPE
 from primus.core.patches import get_args
-from primus.core.utils.flag_utils import (  # noqa: F401 - re-exported, moved from here
+from primus.core.utils.flag_utils import (  # noqa: F401 - re-exported
     FALSE_TEXT,
     TRUE_TEXT,
     bool_flag,
@@ -20,8 +21,10 @@ from primus.core.utils.flag_utils import (  # noqa: F401 - re-exported, moved fr
 from primus.core.utils.module_utils import error_rank_0
 
 __all__ = [
+    "FALSE_TEXT",
     "MODEL_TYPE",
     "MergedArgs",
+    "TRUE_TEXT",
     "backend_args_of",
     "bool_flag",
     "config_flag",

@@ -45,6 +45,7 @@ model is held on the host in params_dtype: the 16-layer cut needs ~420 GiB in bf
 
 import argparse
 import contextlib
+import errno
 import faulthandler
 import functools
 import json
@@ -76,9 +77,9 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
 SAVE_ATTEMPTS = 3
 
 
-# A full disk or quota (common's out-of-space texts, without torch's bare "unexpected pos": that one
-# is also the intermittent writer failure retried here, and check_free_space has already refused a
-# save that does not fit before the write started)
+# A full disk or quota: common's out-of-space texts without torch's bare "unexpected pos" (that
+# one is also the intermittent writer failure retried here, and check_free_space has already
+# refused a save that does not fit before the write started)
 _NO_SPACE_TEXT = tuple(t for t in common._OUT_OF_SPACE_TEXT if t != "unexpected pos")
 
 
@@ -92,17 +93,24 @@ def _exception_chain(e):
         e = e.__cause__ or e.__context__
 
 
+def _out_of_space(x) -> bool:
+    """``x`` itself is a full disk or quota (ENOSPC / EDQUOT or a ``_NO_SPACE_TEXT`` message)."""
+    if isinstance(x, OSError) and x.errno in (errno.ENOSPC, errno.EDQUOT):
+        return True
+    return any(text in str(x) for text in _NO_SPACE_TEXT)
+
+
 def _retryable_write_failure(e) -> bool:
     """True for the intermittent writer failures a retry can fix, anywhere in ``e``'s cause chain:
     torch's ``CheckpointException`` or Megatron's async-writer ``RuntimeError('Worker failure
-    ...')``; False when the chain holds a full disk or quota (``common._ran_out_of_space`` without
-    its "unexpected pos" text, which is retried here), which a rewrite of the whole checkpoint
-    would hit again."""
-    if common._ran_out_of_space(e, texts=_NO_SPACE_TEXT):
+    ...')``; False when the chain holds a full disk or quota (``_out_of_space``), which a rewrite
+    of the whole checkpoint would hit again."""
+    chain = list(_exception_chain(e))
+    if any(_out_of_space(x) for x in chain):
         return False
     return any(
         isinstance(x, CheckpointException) or (isinstance(x, RuntimeError) and "Worker failure" in str(x))
-        for x in _exception_chain(e)
+        for x in chain
     )
 
 

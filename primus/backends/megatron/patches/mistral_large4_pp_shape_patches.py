@@ -128,15 +128,15 @@ def _current_run_needs_carrier() -> bool:
     ``model_type`` is not checked here: Megatron's ``get_model`` replaces it with a ``ModelType`` enum
     before the first P2P call. The per-layer lists decide instead: only this model sets
     ``kv_source_layers``, so another model's run (no lists) or a run with PP 1 gets Megatron's own
-    shapes. Without global args (none set up in this process) nothing is added. The module is read
-    from ``sys.modules``: a run that set global args has imported it."""
+    shapes. Without global args (none set up in this process) nothing is added."""
     args = _global_args()
     return args is not None and _carrier_needed_by_lists(args)
 
 
 def _global_args():
     """Megatron's global args, None when this process has set none (Megatron not imported, or its
-    args not initialised)."""
+    args not initialised). The module is read from ``sys.modules``: a run that set global args has
+    imported it."""
     global_vars = sys.modules.get("megatron.training.global_vars")
     if global_vars is None:
         return None

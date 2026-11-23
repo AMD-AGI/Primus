@@ -7,8 +7,8 @@
 """Strict yes/no parsing of config values (a YAML value from an environment substitution other
 than true/false stays a string, which plain truthiness would read as True).
 
-``bool_flag`` moved here unchanged from ``primus.backends.megatron.core.models.muse_spark.model_types``
-(which re-exports it with ``TRUE_TEXT`` / ``FALSE_TEXT``), so other models share one parser."""
+Shared by all models; ``muse_spark.model_types`` re-exports ``bool_flag``, ``TRUE_TEXT`` and
+``FALSE_TEXT``."""
 
 import numbers
 

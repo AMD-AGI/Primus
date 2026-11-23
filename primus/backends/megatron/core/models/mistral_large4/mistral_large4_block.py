@@ -366,6 +366,30 @@ class MistralLarge4TransformerBlock(TransformerBlock):
             return [(list(range(i, min(i + num, n))), True) for i in range(0, n, num)]
         return [([i], i < num) for i in range(n)]  # block: the first num layers of the stage
 
+    def _plan(self):
+        """``_chunks()`` with, per chunk, its layers, whether one consumes / stores the shared
+        latent, and the top-k sources it reads from earlier chunks. Built-time facts only
+        (layers, recompute settings), so computed once per mode (train / eval) and cached."""
+        cache = self.__dict__.setdefault("_plan_cache", {})
+        key = bool(self.training)
+        if key not in cache:
+            plan = []
+            for idxs, recompute in self._chunks():
+                layers = [self.layers[i] for i in idxs]
+                attns = [layer.self_attention for layer in layers]
+                own = {a.layer_idx for a in attns}
+                plan.append(
+                    (
+                        layers,
+                        recompute,
+                        any(a.consumes_kv for a in attns),
+                        any(a.stores_kv for a in attns),
+                        tuple(sorted({a.index_source_idx for a in attns} - own)),
+                    )
+                )
+            cache[key] = plan
+        return cache[key]
+
     def forward(
         self,
         hidden_states,
@@ -408,20 +432,11 @@ class MistralLarge4TransformerBlock(TransformerBlock):
             tensor_parallel.get_cuda_rng_tracker().fork() if self.config.sequence_parallel else nullcontext()
         )
         with rng:
-            for idxs, recompute in self._chunks():
-                layers = [self.layers[i] for i in idxs]
-                consumes = any(layer.self_attention.consumes_kv for layer in layers)
-                stores = any(layer.self_attention.stores_kv for layer in layers)
-
+            for layers, recompute, consumes, stores, sources in self._plan():
                 # top-k of earlier chunks that this chunk's shared layers reuse: captured now, and
                 # restored when run() starts, so a full-recompute backward (chunks recomputed last
                 # first, after later full layers replaced ctx's one entry) sees the same top-k
-                own = {layer.self_attention.layer_idx for layer in layers}
-                incoming = {
-                    k: ctx["topk"][k]
-                    for k in {layer.self_attention.index_source_idx for layer in layers} - own
-                    if k in ctx["topk"]
-                }
+                incoming = {k: ctx["topk"][k] for k in sources if k in ctx["topk"]}
 
                 def run(h, *lat, _layers=layers, _stores=stores, _incoming=incoming):
                     lat = lat[0] if lat else None

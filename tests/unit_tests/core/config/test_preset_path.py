@@ -29,3 +29,16 @@ def test_preset_path_is_the_file_load_reads(mock_models_root):
         PresetLoader.load("my_model", "fw")
         mock_exists.assert_any_call(want)
         mock_parse.assert_called_once_with(want)
+
+
+class _BytesPath:
+    def __fspath__(self):
+        return b"my_model"
+
+
+@pytest.mark.parametrize("name", [None, 3, b"my_model", _BytesPath()])
+def test_preset_path_refuses_a_name_that_is_not_text(name):
+    with pytest.raises(TypeError, match="preset name must be a str"):
+        PresetLoader.preset_path(name, "fw")
+    with pytest.raises(TypeError, match="preset name must be a str"):
+        PresetLoader.load(name, "fw")

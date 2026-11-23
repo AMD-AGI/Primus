@@ -67,7 +67,7 @@ _TE_ABSENT_MODULES = (
 
 def _needs_te_gemm_workspace_patch(_ctx: PatchContext) -> bool:
     """True when the variable is set and TE's PyTorch GEMM module imports and has
-    ``get_cublas_workspace_size_bytes``; otherwise False, as before.
+    ``get_cublas_workspace_size_bytes``; otherwise False.
 
     Not gated on model_type: any model opts in by setting the variable (WAN 2.1/2.2, or Mistral
     Large 4 through megatron.mistral_large4.te_gemm_workspace).
