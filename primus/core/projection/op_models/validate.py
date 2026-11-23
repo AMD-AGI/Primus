@@ -240,7 +240,6 @@ def validate_op_model(
     try:
         matched = bool(cls.matches(mc))
     except Exception as exc:
-        matched = False
         rep.add("matches", FAIL, f"matches() raised {exc!r}")
     else:
         rep.add(

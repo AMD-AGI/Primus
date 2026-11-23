@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Sequence, Type
 from .base import SLOTS, OpModel
 
 _REGISTRY: Dict[str, Type[OpModel]] = {}
-_DISCOVERED = False
+_STATE = {"discovered": False}
 _ERRORS: Dict[str, str] = {}
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
@@ -73,10 +73,9 @@ def _extra_dirs() -> List[Path]:
 
 
 def discover_op_models(force: bool = False) -> Dict[str, Type[OpModel]]:
-    global _DISCOVERED
-    if _DISCOVERED and not force:
+    if _STATE["discovered"] and not force:
         return dict(_REGISTRY)
-    _DISCOVERED = True
+    _STATE["discovered"] = True
     from . import generated
 
     for info in pkgutil.iter_modules(generated.__path__):

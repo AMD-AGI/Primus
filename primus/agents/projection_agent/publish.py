@@ -37,7 +37,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-from .bringup import BringupResult, _op_models_dir, acknowledge_keys
+from .bringup import BringupResult, acknowledge_keys
 
 MODES = ("off", "commit", "push", "pr")
 
@@ -113,7 +113,7 @@ def _module_meta(path: Path) -> Tuple[str, Tuple[str, ...]]:
             try:
                 refs = tuple(str(r) for r in ast.literal_eval(node.value))
             except ValueError:
-                pass
+                refs = ()  # built at import time, not a literal: the PR body lists none
     return doc, refs
 
 
