@@ -69,6 +69,8 @@ modules:
       msa_fused_qk_norm_rope: true
       msa_fused_indexer_loss: true
       msa_fused_select_plan: true
+      # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens
+      msa_shared_tile_staging: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.

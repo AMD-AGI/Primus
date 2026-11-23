@@ -92,6 +92,9 @@ msa_backend: flydsl
 msa_fused_qk_norm_rope: false
 msa_fused_indexer_loss: false
 msa_fused_select_plan: false
+# gfx1250 flydsl kernels: adjacent tokens share a workgroup and one staging of each K/V tile they
+# have in common; bit-identical, checked on first use (MSATransformerConfig).
+msa_shared_tile_staging: false
 
 # MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared
 moe_layer_freq: "([0]*3+[1]*57)"

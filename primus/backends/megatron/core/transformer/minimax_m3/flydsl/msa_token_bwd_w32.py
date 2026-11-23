@@ -13,7 +13,10 @@ Data Mover; S and dP read K / V rows from it, and dQ reads K^T with
 ``ds_load_tr16_b128`` (lane row ``half*16 + lane%8`` then +8, column
 ``((lane//8)%2)*8``: each lane gets keys ``half*16 + 0..15`` of one column, the
 K order of a transposed copy). The grid is the forward's "lpt" order. Keys past
-``S`` are zero-filled, as an out-of-range buffer load reads 0.
+``S`` are zero-filled, as an out-of-range buffer load reads 0. A workgroup holds
+``DQ_TOKENS_PER_WG`` waves (adjacent tokens of one KV group, one query block); they step in
+lockstep and a K/V tile several of them select at the same step is staged once (the
+forward's scheme).
 
 dK/dV is one wave per 16 keys of a block; the two lane halves split K on QK,
 and each holds 8 of the 16 heads. In the dS/P contractions the lane halves take
@@ -36,7 +39,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl._mlir.dialects import rocdl as _rocdl
-from flydsl.expr import arith, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.rocdl import tdm_ops
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
@@ -60,6 +63,12 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import 
 _LOG2E = 1.4426950408889634
 DT = D // 16
 WAVE = 32
+DQ_TOKENS_PER_WG = 2
+
+
+def dq_tokens_per_wg(S: int, block_size: int) -> int:
+    t = DQ_TOKENS_PER_WG
+    return t if S % t == 0 and block_size % t == 0 else 1
 
 
 def _andb(a, b):
@@ -97,8 +106,44 @@ def _store_f32x8(rsrc, elem_offset, v8f):
         )
 
 
-def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
+def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float, tokens_per_wg: int = 1):
+    """Build the wave32 dQ kernel; ``tokens_per_wg`` adjacent tokens share a workgroup.
+
+    Why the lockstep layout (``tokens_per_wg > 1``) cannot deadlock or hang the GPU:
+
+    * The only synchronization it adds is one ``gpu.barrier()`` per loop iteration. There is no
+      spin-wait, no flag, counter or atomic, and no wait on state another workgroup writes.
+    * Every wave of a workgroup runs the same number of barriers. The loop runs ``n_steps``
+      iterations and has no early exit, ``break`` or wave-dependent branch around the barrier.
+      ``n_steps = min(tok_wg // block_size + 1, topk) * steps_per_block`` is computed from the
+      workgroup's grid position alone (``tok_wg`` is the workgroup's highest token,
+      ``S - 1 - (block_idx.x // (B * Hkv)) * tokens_per_wg``), ``S`` and build constants: never
+      from the block table or any tensor contents, and never from the wave's index. A ``-1``
+      padded table entry only masks that step's keys (``blk_ok``); it does not shorten the loop.
+      Query blocks with fewer visible blocks than ``topk`` give a smaller ``n_steps``, the same for
+      all waves of the workgroup; ``n_steps`` is at least one block's steps.
+    * ``tensor_wait`` only waits for Tensor Data Mover copies the wave itself issued (its own
+      counter), so no wave waits on a copy whose issue is another wave's decision: a wave that
+      does not own a tile issues nothing, waits for nothing, and reads the owner's slot only
+      after the barrier that follows the owner's own ``tensor_wait``.
+      (``tensor_wait`` with nothing issued is relied on to return at once, as the tables whose
+      tiles are all shared exercise: most waves then never issue.)
+    * Which wave owns a tile is a pure function of the (read-only) table rows of the workgroup's
+      tokens, evaluated identically by every wave; it decides who copies, not how many barriers
+      run. A wrong or adversarial table (out-of-range ids) reads zero-filled keys, as in the
+      one-token kernel; it cannot change the trip count.
+    * Eligibility: the dispatcher builds this layout only when ``S`` and ``block_size`` are
+      multiples of ``tokens_per_wg`` (then the workgroup's tokens share one query block, and
+      the group's ``n_steps`` is each token's own, which the bitwise self-check also proves on
+      the first call); otherwise it runs the one-token kernel, and the launcher refuses
+      (``ValueError``) an ``S`` the layout does not divide before anything is launched.
+      ``tokens_per_wg=1`` emits no barrier at all.
+    """
     NBUF = 2  # LDS ring stages
+    # waves per workgroup = adjacent tokens of one (b, kv group), in lockstep; a step's K/V tile
+    # is staged once for every wave that needs it (the forward's scheme)
+    WPG = tokens_per_wg
+    assert block_size % WPG == 0
     elem = fx.BFloat16
     Hkv = num_kv_heads
     Hq = Hkv * HPW
@@ -110,7 +155,7 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
     STAGE = 2 * T_BYTES  # K then V
     LDS_BYTES = NBUF * STAGE
 
-    @flyc.kernel(known_block_size=[WAVE, 1, 1])
+    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1])
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -125,10 +170,19 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
         B: fx.Int32,
     ):
         v8_ty = ir.VectorType.get([8], elem.ir_type)
-        smem = fx.SharedAllocator().allocate(LDS_BYTES)
-        lds_base = fx.Int32(fx.ptrtoint(smem.peek().ptr))
+        smem = fx.SharedAllocator().allocate(LDS_BYTES * WPG)
+        lds_wg = fx.Int32(fx.ptrtoint(smem.peek().ptr))
+        # Everything the shared layout adds is under a build-time `WPG > 1`: tokens_per_wg=1 emits
+        # the one-token-per-workgroup kernel unchanged (no barrier, no owner lookup).
+        if const_expr(WPG > 1):
+            tid = fx.Index(gpu.thread_idx.x)
+            wave_u = fx.Index(
+                fx.Int32(rocdl.readfirstlane(fx.Int32.ir_type, _raw(fx.Int32(tid // fx.Index(WAVE)))))
+            )
+            lane = tid % fx.Index(WAVE)
+        else:
+            lane = fx.Index(gpu.thread_idx.x)
 
-        lane = fx.Index(gpu.thread_idx.x)
         lo = lane % fx.Index(16)
         half = lane // fx.Index(16)
         grp0 = ArithValue(half == fx.Index(0))
@@ -138,7 +192,10 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
         # workgroups cycle through (b, g), so each XCD's L2 holds one KV group's K/V.
         raw = fx.Index(gpu.block_idx.x)
         bgn = Bn * fx.Index(Hkv)
-        tok = Sn - fx.Index(1) - raw // bgn
+        if const_expr(WPG > 1):
+            tok = Sn - fx.Index(1) - ((raw // bgn) * fx.Index(WPG) + wave_u)
+        else:
+            tok = Sn - fx.Index(1) - raw // bgn
         bg = raw % bgn
         b = bg // fx.Index(Hkv)
         g = bg % fx.Index(Hkv)
@@ -201,8 +258,22 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
         tok_i32 = fx.Int32(tok)
         n_vis = tok_i32 // fx.Int32(block_size) + fx.Int32(1)
         n_valid = fx.Int32(ArithValue(n_vis < fx.Int32(topk)).select(_raw(n_vis), _raw(fx.Int32(topk))))
-        n_steps = fx.Index(n_valid) * fx.Index(SPB)
+        if const_expr(WPG > 1):
+            # The trip count of the lockstep loop (one barrier per step) comes from the workgroup's
+            # grid position, not from the wave: the workgroup's highest token. Its tokens share a
+            # query block (S and block_size are multiples of WPG), so this is each token's own count.
+            tok_wg = fx.Int32(Sn - fx.Index(1) - (raw // bgn) * fx.Index(WPG))
+            n_vis_wg = tok_wg // fx.Int32(block_size) + fx.Int32(1)
+            n_steps = fx.Index(
+                fx.Int32(ArithValue(n_vis_wg < fx.Int32(topk)).select(_raw(n_vis_wg), _raw(fx.Int32(topk))))
+            ) * fx.Index(SPB)
+        else:
+            n_steps = fx.Index(n_valid) * fx.Index(SPB)
         tbl_row = ((b * fx.Index(Hkv) + g) * Sn + tok) * fx.Index(topk)
+        # wave w has token tok_wave0 - w (all in one query block: same n_steps); tbl_row0 is the
+        # lowest token's (the last wave's) table row
+        if const_expr(WPG > 1):
+            tbl_row0 = ((b * fx.Index(Hkv) + g) * Sn + (tok + wave_u - fx.Index(WPG - 1))) * fx.Index(topk)
 
         ptr3 = ir.Type.parse("!llvm.ptr<3>")
 
@@ -241,13 +312,35 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
             )
             fx.copy_atom_call(atom, g_view, l_view)
 
+        # LDS: NBUF stages x WPG slots of STAGE bytes; a step's tile is staged once per workgroup,
+        # by the lowest wave that needs it, into that wave's slot (the forward's scheme).
         def stage_base(jj):
-            return lds_base + fx.Int32(jj % fx.Index(NBUF)) * fx.Int32(STAGE)
+            return lds_wg + fx.Int32(jj % fx.Index(NBUF)) * fx.Int32(STAGE * WPG)
 
-        def issue(jj, kv0):
-            sb = stage_base(jj)
-            tdm_tile(K, kv0, sb)
-            tdm_tile(V, kv0, sb + fx.Int32(T_BYTES))
+        def owner_of(jj):
+            mine = step_kv0(step_blk(jj), jj)
+            own = fx.Int32(WPG - 1)
+            for w2i in range_constexpr(WPG):
+                w2 = WPG - 1 - w2i
+                row2 = tbl_row0 + fx.Index((WPG - 1 - w2) * topk)
+                b2 = fx.Int32(
+                    buffer_ops.buffer_load(t_rsrc, row2 + jj // fx.Index(SPB), vec_width=1, is_scalar=True)
+                )
+                own = fx.Int32(ArithValue(step_kv0(b2, jj) == mine).select(_raw(fx.Int32(w2)), _raw(own)))
+            return own, mine
+
+        def issue(js, jj):
+            if const_expr(WPG > 1):
+                own, kv0 = owner_of(jj)
+                if own == fx.Int32(wave_u):
+                    sb = stage_base(js) + fx.Int32(wave_u) * fx.Int32(STAGE)
+                    tdm_tile(K, kv0, sb)
+                    tdm_tile(V, kv0, sb + fx.Int32(T_BYTES))
+            else:
+                kv0 = step_kv0(step_blk(jj), jj)
+                sb = stage_base(js)
+                tdm_tile(K, kv0, sb)
+                tdm_tile(V, kv0, sb + fx.Int32(T_BYTES))
 
         def step_blk(jj):
             return fx.Int32(
@@ -271,7 +364,7 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
 
         for pj in range_constexpr(NBUF - 1):
             jj = sel_idx(fx.Index(pj) < n_steps, fx.Index(pj), fx.Index(0))
-            issue(fx.Index(pj), step_kv0(step_blk(jj), jj))
+            issue(fx.Index(pj), jj)
 
         c_zero_v8 = Vec.filled(8, 0.0, fx.Float32)
         init = [c_zero_v8 for _ in range_constexpr(DT)]
@@ -282,10 +375,16 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
             blk_ok = ArithValue(blk >= fx.Int32(0))
             kv0 = step_kv0(blk, j)
             tdm_ops.tensor_wait(2 * (NBUF - 2))
+            if const_expr(WPG > 1):
+                gpu.barrier()  # every owner's step-j tile landed; every wave is done with step j-1's stage
             j_f = j + fx.Index(NBUF - 1)
             j_c = sel_idx(j_f < n_steps, j_f, j)
-            issue(j_f, step_kv0(step_blk(j_c), j_c))
-            sb = stage_base(j)
+            issue(j_f, j_c)
+            if const_expr(WPG > 1):
+                own_j, _ = owner_of(j)
+                sb = stage_base(j) + own_j * fx.Int32(STAGE)
+            else:
+                sb = stage_base(j)
             kb = sb + r_lane
             vb = sb + fx.Int32(T_BYTES) + r_lane
             ktb = sb + t_lane
@@ -331,7 +430,13 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float):
     @flyc.jit
     def launch(Q, K, V, DO, O, LSE, DELTA, TBL, DQ, S, B, stream):
         k_fn(Q, K, V, DO, O, LSE, DELTA, TBL, DQ, S, B).launch(
-            grid=(fx.Index(S) * fx.Index(B) * fx.Index(Hkv), 1, 1), block=(WAVE, 1, 1), stream=stream
+            grid=(
+                (fx.Index(S) if WPG == 1 else fx.Index(S) // fx.Index(WPG)) * fx.Index(B) * fx.Index(Hkv),
+                1,
+                1,
+            ),
+            block=(WAVE * WPG, 1, 1),
+            stream=stream,
         )
 
     launch.compile = lambda *a: flyc.compile(launch, *a)

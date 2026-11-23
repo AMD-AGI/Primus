@@ -144,14 +144,17 @@ on the 4-layer proxy at GBS 8 the peak goes from 116.7 to 166.8 GB allocated and
 where a rank runs several micro-batches per step and the gradients reach DDP's hook: with
 `gradient_accumulation_fusion` on, the linear and expert weight gradients go straight into the
 buffer and nothing is left to group or to hold), and around the MSA attention
-`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`. Each one compares
+`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the gfx1250
+MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens per
+workgroup and stage a K/V tile they share once). Each one compares
 itself with the path it replaces on its first call and keeps that path, with a warning in the log,
 if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).
 `msa_fused_qk_norm_rope` also stays off for q/k norms with module hooks, such as DDP's parameter
 all-gather under `overlap_param_gather`. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
-off; the FlyDSL MSA kernels themselves have no switch other than `PRIMUS_MSA_BACKEND=eager`.
+off; apart from `msa_shared_tile_staging` the FlyDSL MSA kernels have no switch other than
+`PRIMUS_MSA_BACKEND=eager`.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a

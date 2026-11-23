@@ -18,15 +18,18 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
 
 class _MSAAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan):
+    def forward(ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan, shared_tiles=False):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
-        outs = msa_token_fwd(q, k, v, block_table, softmax_scale, block_size, return_slot_lse=return_slot_lse)
+        outs = msa_token_fwd(
+            q, k, v, block_table, softmax_scale, block_size, return_slot_lse=return_slot_lse, shared_tiles=shared_tiles
+        )
         o, lse = outs[0], outs[1]
         ctx.save_for_backward(q, k, v, o, lse, block_table)
         ctx.softmax_scale = softmax_scale
         ctx.block_size = block_size
         ctx.plan = plan
+        ctx.shared_tiles = shared_tiles
         ctx.mark_non_differentiable(*outs[1:])
         return outs
 
@@ -34,18 +37,30 @@ class _MSAAttention(torch.autograd.Function):
     def backward(ctx, dout, *_):
         q, k, v, o, lse, block_table = ctx.saved_tensors
         dq, dk, dv = msa_token_bwd(
-            dout, q, k, v, o, lse, block_table, ctx.softmax_scale, ctx.block_size, plan=ctx.plan
+            dout,
+            q,
+            k,
+            v,
+            o,
+            lse,
+            block_table,
+            ctx.softmax_scale,
+            ctx.block_size,
+            plan=ctx.plan,
+            shared_tiles=ctx.shared_tiles,
         )
-        return dq, dk, dv, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None
 
 
-def msa_attention(q, k, v, block_table, softmax_scale, block_size=128, return_slot_lse=False, plan=None):
+def msa_attention(
+    q, k, v, block_table, softmax_scale, block_size=128, return_slot_lse=False, plan=None, shared_tiles=False
+):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
     ``block_table`` is the indexer's ``[B, Hkv, S, topk]`` selection and
     ``plan`` its :class:`BlockPlan`, when the indexer built one; the backward
     builds it otherwise. Returns ``(o, lse)``, or ``(o, lse, slot_lse)``; only
-    ``o`` carries a gradient.
+    ``o`` carries a gradient. ``shared_tiles`` is ``msa_shared_tile_staging`` (gfx1250 kernels).
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
@@ -53,4 +68,6 @@ def msa_attention(q, k, v, block_table, softmax_scale, block_size=128, return_sl
         block_table = table  # select_plan's int32 copy of the same table
     else:
         block_table = block_table.to(torch.int32).contiguous()
-    return _MSAAttention.apply(q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan)
+    return _MSAAttention.apply(
+        q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan, bool(shared_tiles)
+    )

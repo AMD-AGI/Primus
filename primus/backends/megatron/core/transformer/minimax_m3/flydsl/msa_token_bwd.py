@@ -1054,7 +1054,9 @@ _DKDV_CACHE: dict = {}
 _RED_CACHE: dict = {}
 
 
-def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, block_size=128, plan=None):
+def msa_token_bwd(
+    dout, q, k, v, out, lse, block_table, softmax_scale=None, block_size=128, plan=None, shared_tiles=False
+):
     """Gradients of ``msa_token_fwd``.
 
     Args:
@@ -1063,6 +1065,11 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
         out, lse: the forward's outputs.
         plan: ``block_table``'s :class:`BlockPlan`, if the caller already built
             it; built here otherwise.
+        shared_tiles: gfx1250 only (``msa_shared_tile_staging``): the dQ kernel runs adjacent
+            tokens in one workgroup with one staging of each K/V tile they share. The first
+            call for a shape runs both layouts on that call's tensors and compares every bit of
+            ``dq`` and ``delta`` (``bitwise_check``); on a mismatch the run keeps one token per
+            workgroup.
 
     Returns:
         ``dq`` ``[S, B, Hq, 128]``, ``dk`` and ``dv`` ``[S, B, Hkv, 128]``, bf16.
@@ -1082,30 +1089,55 @@ def msa_token_bwd(dout, q, k, v, out, lse, block_table, softmax_scale=None, bloc
 
     out = out.contiguous()
 
-    dq = torch.empty_like(q)
     dk = torch.empty_like(k)
     dv = torch.empty_like(v)
-    delta = torch.empty((S, B, Hq), dtype=torch.float32, device=q.device)  # written by the dq kernel
     n_chunks = plan.n_chunks
     ws = torch.empty((n_chunks, 2, block_size, D), dtype=torch.float32, device=q.device)
     check_buffer_bytes(q=q, k=k, v=v, block_table=block_table, entries=plan.entries, workspace=ws)
     stream = torch.cuda.current_stream()
+    w32 = "gfx1250" in get_hip_arch()
 
-    dq_args = (q, k, v, dout, out, lse, delta, block_table, dq, int(S), int(B), stream)
-    dq_key = (Hkv, topk, block_size, float(softmax_scale))
-    fn = _DQ_CACHE.get(dq_key)
-    if fn is None:
-        if "gfx1250" in get_hip_arch():
-            from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
-                build_dq_w32,
-            )
+    def run_dq(tpw):
+        if tpw > 1 and (S % tpw or block_size % tpw):
+            # the lockstep layout's barrier count is workgroup-uniform only for these shapes
+            raise ValueError(f"msa_shared_tile_staging dQ: S={S} block_size={block_size}")
+        dq = torch.empty_like(q)
+        delta = torch.empty((S, B, Hq), dtype=torch.float32, device=q.device)  # written by the dq kernel
+        dq_args = (q, k, v, dout, out, lse, delta, block_table, dq, int(S), int(B), stream)
+        dq_key = (Hkv, topk, block_size, float(softmax_scale), tpw)
+        fn = _DQ_CACHE.get(dq_key)
+        if fn is None:
+            if w32:
+                from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
+                    build_dq_w32,
+                )
 
-            built = build_dq_w32(Hkv, topk, block_size, float(softmax_scale))
-        else:
-            built = build_dq(Hkv, topk, block_size, float(softmax_scale))
-        fn = built.compile(*dq_args)
-        _DQ_CACHE[dq_key] = fn
-    fn(*dq_args)
+                built = build_dq_w32(Hkv, topk, block_size, float(softmax_scale), tokens_per_wg=tpw)
+            else:
+                built = build_dq(Hkv, topk, block_size, float(softmax_scale))
+            fn = built.compile(*dq_args)
+            _DQ_CACHE[dq_key] = fn
+        fn(*dq_args)
+        return dq, delta
+
+    # eligibility first: the shared layout is the gfx1250 kernel's and needs an S / block size it divides
+    tpw = 1
+    if shared_tiles and w32:
+        from primus.backends.megatron.core.fusions import bitwise_check
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
+            dq_tokens_per_wg,
+        )
+
+        tpw = dq_tokens_per_wg(int(S), block_size)
+        if tpw > 1 and not bitwise_check.passed(
+            "msa_shared_tile_staging dQ",
+            lambda: run_dq(tpw),
+            lambda: run_dq(1),
+            # everything the kernel is built from or lays its grid out by
+            key=(S, B, Hkv, topk, block_size, float(softmax_scale), tpw),
+        ):
+            tpw = 1
+    dq, delta = run_dq(tpw)
 
     kv_args = (
         q,

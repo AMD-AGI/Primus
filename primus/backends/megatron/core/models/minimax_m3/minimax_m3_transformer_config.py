@@ -166,6 +166,14 @@ class MSATransformerConfig(TransformerConfig):
     bookkeeping, identical by construction; shapes past select_plan.supported() keep the eager
     path."""
 
+    msa_shared_tile_staging: bool = False
+    """flydsl backend on gfx1250: the MSA forward and dQ kernels run 4 / 2 adjacent tokens of a KV
+    group per workgroup, in lockstep, and stage a K/V tile that several of them select at the same
+    step once (flydsl/msa_token_fwd_w32.py, msa_token_bwd_w32.py). Each token keeps its own step
+    order and arithmetic; the first call for a shape compares every output bit with the
+    one-token-per-workgroup kernels and keeps those on a mismatch. Needs S and the block size to be
+    multiples of 4 / 2, else unchanged."""
+
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not
     differentiable, so this loss is the only gradient its projections ever receive."""
