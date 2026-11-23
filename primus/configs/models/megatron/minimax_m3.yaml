@@ -110,6 +110,10 @@ msa_aligned_block_walk: false
 # gfx1250 flydsl kernels: dQ from the dK/dV kernel's dS (a slim dQ kernel, no V staging, no second
 # S / dS computation). Relaxed numerics; msa_exact_numerics turns it off.
 msa_dq_from_ds: false
+# gfx1250 flydsl MSA forward with msa_shared_tile_staging: the step's tile owner rides in the loop
+# state instead of being re-read from the table. Bit-identical outputs, checked on first use; an
+# MSA operator kernel option, so msa_exact_numerics turns it off.
+msa_owner_carry: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 

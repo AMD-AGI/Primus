@@ -84,6 +84,9 @@ modules:
       msa_aligned_block_walk: true
       # relaxed numerics: dQ from the dK/dV kernel's dS (4 KB of transient buffer per token and block)
       msa_dq_from_ds: true
+      # MSA operator kernel, same bits, fewer scalar loads per step (off under
+      # msa_exact_numerics): the forward carries its tile owner
+      msa_owner_carry: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.

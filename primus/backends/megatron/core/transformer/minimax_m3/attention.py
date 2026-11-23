@@ -77,7 +77,7 @@ _MSA_FUSIONS = (
 )
 # Options whose arithmetic is not bit-identical to the reference flydsl kernels (reordered sums);
 # msa_exact_numerics turns every one of them off.
-_MSA_RELAXED = ("msa_aligned_block_walk", "msa_dq_from_ds")
+_MSA_RELAXED = ("msa_aligned_block_walk", "msa_dq_from_ds", "msa_owner_carry")
 _FUSIONS_LOGGED = False
 
 
@@ -304,6 +304,22 @@ class MinimaxSparseAttention(SelfAttention):
             return {"dq_from_ds": True}
         return {"dq_from_ds": True, "walk_slots": walk[1].to(torch.int32)}
 
+    def _owner_carry(self) -> dict:
+        """``msa_owner_carry``: the keyword argument that turns it on for the MSA forward, or none
+        when the switch is off, ``msa_exact_numerics`` is set, the kernels are not the gfx1250 ones
+        or ``msa_shared_tile_staging`` is off (no tile owner to carry). It changes a kernel of the
+        MSA operator, so it is handled as a relaxed-numerics option and ``msa_exact_numerics``
+        turns it off, although its outputs are bit-identical (checked on the first call)."""
+        config = self.config
+        if (
+            not getattr(config, "msa_owner_carry", False)
+            or getattr(config, "msa_exact_numerics", False)
+            or not getattr(config, "msa_shared_tile_staging", False)
+            or not self._gfx1250
+        ):
+            return {}
+        return {"owner_carry": True}
+
     def msa_core(
         self,
         query: torch.Tensor,
@@ -334,6 +350,7 @@ class MinimaxSparseAttention(SelfAttention):
             step_mask_skip=getattr(self.config, "msa_lean_masks", False),
             **({} if walk is None else {"walk_table": walk[0]}),
             **self._dq_from_ds(walk),
+            **self._owner_carry(),
         )
         if not want_loss:
             return outs[0], None

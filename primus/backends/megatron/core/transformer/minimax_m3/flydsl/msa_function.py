@@ -33,6 +33,7 @@ class _MSAAttention(torch.autograd.Function):
         step_mask_skip=False,
         dq_from_ds=False,
         walk_slots=None,
+        owner_carry=False,
     ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
@@ -46,6 +47,7 @@ class _MSAAttention(torch.autograd.Function):
             return_slot_lse=return_slot_lse,
             shared_tiles=shared_tiles,
             step_mask_skip=step_mask_skip,
+            owner_carry=owner_carry,
         )
         o, lse = outs[0], outs[1]
         ctx.save_for_backward(q, k, v, o, lse, block_table)
@@ -78,7 +80,7 @@ class _MSAAttention(torch.autograd.Function):
             dq_from_ds=ctx.dq_from_ds,
             walk_slots=ctx.walk_slots,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None
 
 
 def msa_attention(
@@ -95,6 +97,7 @@ def msa_attention(
     step_mask_skip=False,
     dq_from_ds=False,
     walk_slots=None,
+    owner_carry=False,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
@@ -112,6 +115,9 @@ def msa_attention(
     ``dq_from_ds`` (``msa_dq_from_ds``, relaxed numerics; ``msa_token_bwd``): the backward takes dQ
     from the dK/dV kernel's dS. With a ``walk_table`` it needs ``walk_slots``, the int32 slot of
     each walk position in ``block_table``; without them the backward keeps the reference dQ kernel.
+
+    ``owner_carry`` (``msa_owner_carry``): the forward with fewer scalar table loads per step;
+    same bits as without it (``msa_token_fwd_wave32``).
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
@@ -141,4 +147,5 @@ def msa_attention(
         bool(step_mask_skip),
         bool(dq_from_ds),
         walk_slots if dq_from_ds else None,
+        bool(owner_carry),
     )

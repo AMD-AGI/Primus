@@ -83,6 +83,7 @@ def build_fwd_wave32(
     emit_slot_lse: bool = False,
     tokens_per_wg: int = 1,
     step_mask_skip: bool = False,
+    carry_owner: bool = False,
 ):
     """Build the wave32 forward kernel; ``tokens_per_wg`` adjacent tokens share a workgroup.
 
@@ -125,6 +126,9 @@ def build_fwd_wave32(
       ``tokens_per_wg=1`` emits no barrier at all.
     """
     NBUF = 2
+    # carry_owner: the step's tile owner and block id are loop-carried from the previous
+    # iteration's issue (lockstep layout with the 2-stage ring only)
+    CARRY = bool(carry_owner) and tokens_per_wg > 1 and NBUF == 2
     # waves per workgroup = adjacent tokens of one (b, kv group); they run their steps in
     # lockstep and a step's K/V tile is staged once for every wave that needs it
     WPG = tokens_per_wg
@@ -314,7 +318,8 @@ def build_fwd_wave32(
         def owner_of(jj):
             # first wave of the workgroup whose step-jj tile (kv0) equals this wave's
             # (wave_u itself when no lower wave shares it)
-            mine = step_kv0(step_blk(jj), jj)
+            my_blk = step_blk(jj)
+            mine = step_kv0(my_blk, jj)
             own = fx.Int32(WPG - 1)
             for w2i in range_constexpr(WPG):
                 w2 = WPG - 1 - w2i
@@ -323,11 +328,20 @@ def build_fwd_wave32(
                     buffer_ops.buffer_load(t_rsrc, row2 + jj // fx.Index(SPB), vec_width=1, is_scalar=True)
                 )
                 own = sel_i32(ArithValue(step_kv0(b2, jj) == mine), fx.Int32(w2), own)
+            if const_expr(CARRY):
+                return own, mine, my_blk
             return own, mine
 
         def issue(js, jj):
             # stage of step js, tile of step jj (jj = js, or the clamped last step)
-            if const_expr(WPG > 1):
+            if const_expr(CARRY):
+                own, kv0, blk_jj = owner_of(jj)
+                if own == fx.Int32(wave_u):
+                    sb = stage_base(js) + fx.Int32(wave_u) * fx.Int32(STAGE)
+                    tdm_tile(K, kv0, sb, KROW)
+                    tdm_tile(V, kv0, sb + fx.Int32(K_BYTES), VROW)
+                return own, blk_jj
+            elif const_expr(WPG > 1):
                 own, kv0 = owner_of(jj)
                 if own == fx.Int32(wave_u):
                     sb = stage_base(js) + fx.Int32(wave_u) * fx.Int32(STAGE)
@@ -356,14 +370,23 @@ def build_fwd_wave32(
         # prologue: stages 0 .. NBUF-2 in flight
         for pj in range_constexpr(NBUF - 1):
             jj = fx.Index(sel_i32(ArithValue(fx.Index(pj) < n_steps), fx.Int32(pj), fx.Int32(0)))
-            issue(fx.Index(pj), jj)
+            if const_expr(CARRY):
+                own_0, blk_0 = issue(fx.Index(pj), jj)
+            else:
+                issue(fx.Index(pj), jj)
+        if const_expr(CARRY):
+            NST = len(init)
+            init = init + [own_0, blk_0]
         results = init
         for j, it in range(fx.Index(0), n_steps, fx.Index(1), init=init):
             m_cur = it[0]
             l_cur = it[1]
             o_cur = [it[2 + dt] for dt in range_constexpr(DT)]
             sub = j % fx.Index(SPB)
-            blk = step_blk(j)
+            if const_expr(CARRY):
+                blk = it[NST + 1]
+            else:
+                blk = step_blk(j)
             blk_ok = ArithValue(blk >= c_i0)
             kv0 = step_kv0(blk, j)
             # step j's tiles landed; then put step j+NBUF-1 in flight into the stage step j-1 used
@@ -373,11 +396,17 @@ def build_fwd_wave32(
                 gpu.barrier()  # every owner's step-j tile landed; every wave is done with step j-1's stage
             j_f = j + fx.Index(NBUF - 1)
             j_c = fx.Index(sel_i32(ArithValue(j_f < n_steps), fx.Int32(j_f), fx.Int32(j)))
-            issue(j_f, j_c)
-            if const_expr(WPG > 1):
+            if const_expr(CARRY):
+                # this step's owner and block came with the previous iteration's issue; the next
+                # step's are read here, off this step's critical path
+                own_n, blk_n = issue(j_f, j_c)
+                sb = stage_base(j) + it[NST] * fx.Int32(STAGE)
+            elif const_expr(WPG > 1):
+                issue(j_f, j_c)
                 own_j, _ = owner_of(j)
                 sb = stage_base(j) + own_j * fx.Int32(STAGE)
             else:
+                issue(j_f, j_c)
                 sb = stage_base(j)
             kb = sb + k_lane
             vb = sb + fx.Int32(K_BYTES) + v_lane
@@ -458,6 +487,8 @@ def build_fwd_wave32(
                         offset_is_bytes=True,
                     )
                 out = out + [ls_new]
+            if const_expr(CARRY):
+                out = out + [own_n, blk_n]
             results = yield out
 
         tdm_ops.tensor_wait(0)  # no TDM write may outlive the wave
@@ -535,6 +566,7 @@ def msa_token_fwd_wave32(
     return_slot_lse=False,
     shared_tiles=False,
     step_mask_skip=False,
+    owner_carry=False,
     **config,
 ):
     """Wave32 MSA forward. Same tensors as ``msa_token_fwd``; ``waves`` is ignored.
@@ -569,7 +601,7 @@ def msa_token_fwd_wave32(
     q, k, v, block_table = (t.contiguous() for t in (q, k, v, block_table))
     slse_shape = (S, B, Hq, topk) if return_slot_lse else (1,)
 
-    def run(tpw, skip=False):
+    def run(tpw, skip=False, carry=False):
         if tpw > 1 and (S % tpw or block_size % tpw or remap != "lpt"):
             # the lockstep layout's barrier count is workgroup-uniform only for these shapes
             raise ValueError(f"msa_shared_tile_staging forward: S={S} block_size={block_size} remap={remap}")
@@ -580,6 +612,8 @@ def msa_token_fwd_wave32(
         key = (Hkv, topk, block_size, float(softmax_scale), remap, bool(return_slot_lse), tpw)
         if skip:
             key = ("step_mask_skip",) + key  # tokens_per_wg stays the last element
+        if carry:
+            key = ("owner_carry",) + key
         entry = _CACHE.get(key)
         args = (q, k, v, block_table, o, lse, slse, int(S), int(B), torch.cuda.current_stream())
         if entry is None:
@@ -592,6 +626,7 @@ def msa_token_fwd_wave32(
                 emit_slot_lse=bool(return_slot_lse),
                 tokens_per_wg=tpw,
                 **({"step_mask_skip": True} if skip else {}),
+                **({"carry_owner": True} if carry else {}),
             )
             entry = fn.compile(*args)
             _CACHE[key] = entry
@@ -615,4 +650,16 @@ def msa_token_fwd_wave32(
         lambda: run(tpw, False),
         key=(S, B, Hkv, topk, block_size, float(softmax_scale), remap, bool(return_slot_lse), tpw),
     )
-    return run(tpw, skip)
+    # msa_owner_carry: the same arithmetic on the same operands (only the scalar table loads
+    # move), so it is held to the same standard: every bit of the first call, per shape
+    carry = (
+        bool(owner_carry)
+        and tpw > 1
+        and bitwise_check.passed(
+            "msa_owner_carry forward",
+            lambda: run(tpw, skip, True),
+            lambda: run(tpw, skip, False),
+            key=(S, B, Hkv, topk, block_size, float(softmax_scale), remap, bool(return_slot_lse), tpw, skip),
+        )
+    )
+    return run(tpw, skip, carry)

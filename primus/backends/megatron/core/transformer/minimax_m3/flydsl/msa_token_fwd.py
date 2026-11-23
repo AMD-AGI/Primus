@@ -775,6 +775,7 @@ def msa_token_fwd(
     return_slot_lse=False,
     shared_tiles=False,
     step_mask_skip=False,
+    owner_carry=False,
     **config,
 ):
     """MSA forward.
@@ -815,6 +816,7 @@ def msa_token_fwd(
             return_slot_lse,
             shared_tiles=shared_tiles,
             step_mask_skip=step_mask_skip,
+            owner_carry=owner_carry,
             **config,
         )
     S, B, Hq, Dq = q.shape

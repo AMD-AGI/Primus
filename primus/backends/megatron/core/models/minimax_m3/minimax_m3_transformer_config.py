@@ -227,6 +227,15 @@ class MSATransformerConfig(TransformerConfig):
     a shape compares dq / dk / dv with the reference kernels (tolerance 1e-3) and keeps those
     otherwise; dS buffers above 16 GiB keep them too. msa_exact_numerics turns it off."""
 
+    msa_owner_carry: bool = False
+    """flydsl backend on gfx1250, with msa_shared_tile_staging: the MSA forward keeps each step's
+    tile owner and block id in its loop state, read once when the step's tiles are issued one
+    iteration earlier, instead of re-reading the workgroup's table entries in the step (flydsl/
+    msa_token_fwd_w32.py, carry_owner). Same operands and arithmetic: the outputs are
+    bit-identical, and the first call for a shape compares every output bit with the kernel
+    without it and keeps that one on a mismatch. It changes an MSA operator kernel, so it is
+    grouped with the relaxed-numerics options: msa_exact_numerics turns it off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for
