@@ -133,7 +133,9 @@ example `--use_turbo_autotune True`.
 **Bitwise kernels.** The experiment yaml turns on kernels that replace an existing path with
 bit-identical outputs and gradients: `fused_clamped_geglu` (the clamped quick-GEGLU of the dense MLPs
 and the experts), `fused_probs_mul` (the experts' routing-probs multiply), `deferred_cross_entropy`
-(TE's cross entropy with its gradient built in the backward), and around the MSA attention
+(TE's cross entropy with its gradient built in the backward), `bitwise_clip_scale` (the gradient-clip
+scale of the BF16 gradients, which TE's `multi_tensor_scale_tensor` runs at a fifth of the memory
+bandwidth), and around the MSA attention
 `msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`. Each one compares
 itself with the path it replaces on its first call and keeps that path, with a warning in the log,
 if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).

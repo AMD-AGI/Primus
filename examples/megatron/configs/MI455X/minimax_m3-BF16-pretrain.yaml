@@ -161,6 +161,7 @@ modules:
       # bitwise kernel replacements (primus_megatron_module.yaml)
       fused_clamped_geglu: true
       fused_probs_mul: true
+      bitwise_clip_scale: true
 
       # training control. A full gc.collect() takes about 280 ms here, longer than
       # the 1-GPU step, and collects nothing, so not every iteration.

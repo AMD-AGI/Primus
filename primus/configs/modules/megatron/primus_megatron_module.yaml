@@ -131,6 +131,9 @@ fused_clamped_geglu: false
 # Multiply the Primus grouped experts' activation by the routing probs, (act * probs).to(act.dtype),
 # in one Triton kernel each way instead of the FP32 product and casts.
 fused_probs_mul: false
+# Scale BF16 gradients by the clip coefficient (clip_grad_by_total_norm_fp32) with one Triton
+# launch per tensor instead of TE's multi_tensor_scale_tensor; compared with TE on the first call.
+bitwise_clip_scale: false
 
 # ===== MXFP4 Weight De-oscillation =====
 # Snap weight elements whose MXFP4-quantized value oscillates while the fp32
