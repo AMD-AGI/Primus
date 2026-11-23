@@ -87,8 +87,10 @@ def _log_fusions_once(config) -> None:
     log_rank_0(f"MinimaxSparseAttention ({config.msa_backend}): Triton fusions {', '.join(on) or 'off'}")
     if config.msa_backend == "flydsl":
         shared = "on" if getattr(config, "msa_shared_tile_staging", False) else "off"
+        lean = "on" if getattr(config, "msa_lean_masks", False) else "off"
         log_rank_0(
-            f"MinimaxSparseAttention (flydsl): msa_shared_tile_staging {shared} (gfx1250 kernels only)"
+            f"MinimaxSparseAttention (flydsl): msa_shared_tile_staging {shared}, msa_lean_masks "
+            f"{lean} (gfx1250 kernels only)"
         )
 
 
@@ -273,6 +275,7 @@ class MinimaxSparseAttention(SelfAttention):
             return_slot_lse=want_loss,
             plan=block_plan,
             shared_tiles=getattr(self.config, "msa_shared_tile_staging", False),
+            step_mask_skip=getattr(self.config, "msa_lean_masks", False),
         )
         if not want_loss:
             return outs[0], None

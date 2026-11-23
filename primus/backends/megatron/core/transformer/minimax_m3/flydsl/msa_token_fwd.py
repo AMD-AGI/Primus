@@ -774,6 +774,7 @@ def msa_token_fwd(
     block_size=128,
     return_slot_lse=False,
     shared_tiles=False,
+    step_mask_skip=False,
     **config,
 ):
     """MSA forward.
@@ -789,6 +790,8 @@ def msa_token_fwd(
             share of the head's attention.
         shared_tiles: gfx1250 only (``msa_shared_tile_staging``): adjacent tokens share a
             workgroup and one staging of each K/V tile they have in common; same bits.
+        step_mask_skip: gfx1250 only (``msa_lean_masks``): steps whose keys are all visible
+            skip the per-key causal compare and select; same bits.
         config: ``build_fwd`` tuning knobs (``step_keys``, ``k_via_lds``, ``remap``,
             ``waves``).
 
@@ -811,6 +814,7 @@ def msa_token_fwd(
             block_size,
             return_slot_lse,
             shared_tiles=shared_tiles,
+            step_mask_skip=step_mask_skip,
             **config,
         )
     S, B, Hq, Dq = q.shape

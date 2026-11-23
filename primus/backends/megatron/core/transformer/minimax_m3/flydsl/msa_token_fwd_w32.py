@@ -82,8 +82,17 @@ def build_fwd_wave32(
     remap: str = "lpt",
     emit_slot_lse: bool = False,
     tokens_per_wg: int = 1,
+    step_mask_skip: bool = False,
 ):
     """Build the wave32 forward kernel; ``tokens_per_wg`` adjacent tokens share a workgroup.
+
+    ``step_mask_skip`` (``msa_lean_masks``): a step whose 32 keys are all visible to the
+    wave's token (a valid slot whose last key is at or before the token: every step outside the
+    token's own block) takes its scores straight from the WMMA accumulators, and only the other
+    steps run the per-key ``key <= token`` compare and select. The condition is wave-uniform (one
+    token per wave, the block id is a scalar load), so it is a scalar branch, and where the mask
+    is all-true the select returns its first operand: the same bits. It adds no barrier and no
+    wait, and the trip count is untouched.
 
     Why the lockstep layout (``tokens_per_wg > 1``) cannot deadlock or hang the GPU:
 
@@ -374,21 +383,39 @@ def build_fwd_wave32(
             vb = sb + fx.Int32(K_BYTES) + v_lane
 
             # S[key, head] = K[key] · Q[head]. A row = lane%16 = key in the tile.
-            tiles = []
+            accs = []
             for t in range_constexpr(KPS // TK):
                 acc = Vec.filled(8, 0.0, fx.Float32)
                 for ks in range_constexpr(KS):
                     ka = kb + fx.Int32((t * TK * KROW + ks * 32) * 2)
                     a_k = cat_bf16_16(lds_b128(ka), lds_b128(ka + fx.Int32(16)))
                     acc = wmma_f32_16x16x32_bf16(a_k, q_packs[ks], acc)
-                # lane holds keys (t*16 + half*8 + i) of head lo
-                scores = []
-                key0 = kv0 + fx.Int32(t * TK) + fx.Int32(half) * fx.Int32(8)
-                for i in range_constexpr(8):
-                    ok = andb(blk_ok, ArithValue(key0 + fx.Int32(i) <= tok_i32))
-                    raw_s = fx.Float32(_raw(Vec(acc)[i]))
-                    scores.append(fx.Float32(ok.select(_raw(raw_s), _raw(c_neg_inf))))
-                tiles.append(scores)
+                accs.append(acc)
+
+            def masked_tiles():
+                out_tiles = []
+                for t in range_constexpr(KPS // TK):
+                    # lane holds keys (t*16 + half*8 + i) of head lo
+                    scores = []
+                    key0 = kv0 + fx.Int32(t * TK) + fx.Int32(half) * fx.Int32(8)
+                    for i in range_constexpr(8):
+                        ok = andb(blk_ok, ArithValue(key0 + fx.Int32(i) <= tok_i32))
+                        raw_s = fx.Float32(_raw(Vec(accs[t])[i]))
+                        scores.append(fx.Float32(ok.select(_raw(raw_s), _raw(c_neg_inf))))
+                    out_tiles.append(scores)
+                return out_tiles
+
+            if const_expr(step_mask_skip):
+                tiles = [
+                    [fx.Float32(_raw(Vec(accs[t])[i])) for i in range_constexpr(8)]
+                    for t in range_constexpr(KPS // TK)
+                ]
+                # every key of the step visible: valid slot and its last key <= the wave's token
+                all_ok = andb(blk_ok, ArithValue(kv0 + fx.Int32(KPS - 1) <= tok_i32))
+                if sel_i32(all_ok, fx.Int32(0), fx.Int32(1)) == fx.Int32(1):
+                    tiles = masked_tiles()
+            else:
+                tiles = masked_tiles()
 
             lmax = tiles[0][0]
             for x in tiles[0][1:] + tiles[1]:
@@ -507,9 +534,16 @@ def msa_token_fwd_wave32(
     block_size=128,
     return_slot_lse=False,
     shared_tiles=False,
+    step_mask_skip=False,
     **config,
 ):
     """Wave32 MSA forward. Same tensors as ``msa_token_fwd``; ``waves`` is ignored.
+
+    ``step_mask_skip`` (config ``msa_lean_masks``) builds the kernel whose fully visible steps
+    skip the causal compare and select (``build_fwd_wave32``). The first call for a shape runs the
+    kernel with and without it on that call's tensors and compares every bit of ``o``, ``lse`` and
+    ``slot_lse`` (``bitwise_check``); on a mismatch, or a FlyDSL whose build of the branch fails,
+    the run keeps the kernel without it.
 
     ``shared_tiles`` (config ``msa_shared_tile_staging``) runs ``FWD_TOKENS_PER_WG`` adjacent
     tokens per workgroup with one staging of each K/V tile they share. The first call for a
@@ -535,7 +569,7 @@ def msa_token_fwd_wave32(
     q, k, v, block_table = (t.contiguous() for t in (q, k, v, block_table))
     slse_shape = (S, B, Hq, topk) if return_slot_lse else (1,)
 
-    def run(tpw):
+    def run(tpw, skip=False):
         if tpw > 1 and (S % tpw or block_size % tpw or remap != "lpt"):
             # the lockstep layout's barrier count is workgroup-uniform only for these shapes
             raise ValueError(f"msa_shared_tile_staging forward: S={S} block_size={block_size} remap={remap}")
@@ -544,6 +578,8 @@ def msa_token_fwd_wave32(
         slse = torch.empty(slse_shape, dtype=torch.float32, device=q.device)
         check_buffer_bytes(q=q, k=k, v=v, block_table=block_table, slot_lse=slse)
         key = (Hkv, topk, block_size, float(softmax_scale), remap, bool(return_slot_lse), tpw)
+        if skip:
+            key = ("step_mask_skip",) + key  # tokens_per_wg stays the last element
         entry = _CACHE.get(key)
         args = (q, k, v, block_table, o, lse, slse, int(S), int(B), torch.cuda.current_stream())
         if entry is None:
@@ -555,6 +591,7 @@ def msa_token_fwd_wave32(
                 remap=remap,
                 emit_slot_lse=bool(return_slot_lse),
                 tokens_per_wg=tpw,
+                **({"step_mask_skip": True} if skip else {}),
             )
             entry = fn.compile(*args)
             _CACHE[key] = entry
@@ -571,4 +608,11 @@ def msa_token_fwd_wave32(
         key=(S, B, Hkv, topk, block_size, float(softmax_scale), remap, bool(return_slot_lse), tpw),
     ):
         tpw = 1
-    return run(tpw)
+    # msa_lean_masks: decided once per shape, against the same layout without it
+    skip = bool(step_mask_skip) and bitwise_check.passed(
+        "msa_lean_masks forward",
+        lambda: run(tpw, True),
+        lambda: run(tpw, False),
+        key=(S, B, Hkv, topk, block_size, float(softmax_scale), remap, bool(return_slot_lse), tpw),
+    )
+    return run(tpw, skip)

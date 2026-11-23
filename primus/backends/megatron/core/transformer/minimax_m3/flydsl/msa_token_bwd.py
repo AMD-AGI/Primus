@@ -1055,7 +1055,18 @@ _RED_CACHE: dict = {}
 
 
 def msa_token_bwd(
-    dout, q, k, v, out, lse, block_table, softmax_scale=None, block_size=128, plan=None, shared_tiles=False
+    dout,
+    q,
+    k,
+    v,
+    out,
+    lse,
+    block_table,
+    softmax_scale=None,
+    block_size=128,
+    plan=None,
+    shared_tiles=False,
+    step_mask_skip=False,
 ):
     """Gradients of ``msa_token_fwd``.
 
@@ -1070,6 +1081,11 @@ def msa_token_bwd(
             call for a shape runs both layouts on that call's tensors and compares every bit of
             ``dq`` and ``delta`` (``bitwise_check``); on a mismatch the run keeps one token per
             workgroup.
+
+        step_mask_skip: gfx1250 only (``msa_lean_masks``): the dQ kernel's fully visible steps
+            skip the per-key causal compare and select (``build_dq_w32``). Checked like
+            ``shared_tiles``: the first call for a shape compares every bit of ``dq`` and ``delta``
+            with the kernel without it and keeps that kernel on a mismatch.
 
     Returns:
         ``dq`` ``[S, B, Hq, 128]``, ``dk`` and ``dv`` ``[S, B, Hkv, 128]``, bf16.
@@ -1097,7 +1113,7 @@ def msa_token_bwd(
     stream = torch.cuda.current_stream()
     w32 = "gfx1250" in get_hip_arch()
 
-    def run_dq(tpw):
+    def run_dq(tpw, skip=False):
         if tpw > 1 and (S % tpw or block_size % tpw):
             # the lockstep layout's barrier count is workgroup-uniform only for these shapes
             raise ValueError(f"msa_shared_tile_staging dQ: S={S} block_size={block_size}")
@@ -1105,6 +1121,8 @@ def msa_token_bwd(
         delta = torch.empty((S, B, Hq), dtype=torch.float32, device=q.device)  # written by the dq kernel
         dq_args = (q, k, v, dout, out, lse, delta, block_table, dq, int(S), int(B), stream)
         dq_key = (Hkv, topk, block_size, float(softmax_scale), tpw)
+        if skip:
+            dq_key = ("step_mask_skip",) + dq_key  # tokens_per_wg stays the last element
         fn = _DQ_CACHE.get(dq_key)
         if fn is None:
             if w32:
@@ -1112,7 +1130,14 @@ def msa_token_bwd(
                     build_dq_w32,
                 )
 
-                built = build_dq_w32(Hkv, topk, block_size, float(softmax_scale), tokens_per_wg=tpw)
+                built = build_dq_w32(
+                    Hkv,
+                    topk,
+                    block_size,
+                    float(softmax_scale),
+                    tokens_per_wg=tpw,
+                    **({"step_mask_skip": True} if skip else {}),
+                )
             else:
                 built = build_dq(Hkv, topk, block_size, float(softmax_scale))
             fn = built.compile(*dq_args)
@@ -1137,39 +1162,69 @@ def msa_token_bwd(
             key=(S, B, Hkv, topk, block_size, float(softmax_scale), tpw),
         ):
             tpw = 1
-    dq, delta = run_dq(tpw)
+    skip = False
+    if step_mask_skip and w32:
+        from primus.backends.megatron.core.fusions import bitwise_check
 
-    kv_args = (
-        q,
-        k,
-        v,
-        dout,
-        lse,
-        delta,
-        plan.chunks,
-        plan.entries,
-        ws,
-        int(S),
-        int(B),
-        int(n_blocks),
-        int(plan.entries.numel()),
-        int(n_chunks),
-        stream,
-    )
-    kv_key = (Hkv, block_size, float(softmax_scale), topk)
-    fn = _DKDV_CACHE.get(kv_key)
-    if fn is None:
-        if "gfx1250" in get_hip_arch():
-            from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
-                build_dkdv_w32,
-            )
+        # msa_lean_masks: decided once per shape, against the same layout without it
+        skip = bitwise_check.passed(
+            "msa_lean_masks dQ",
+            lambda: run_dq(tpw, True),
+            lambda: run_dq(tpw, False),
+            key=(S, B, Hkv, topk, block_size, float(softmax_scale), tpw),
+        )
+    dq, delta = run_dq(tpw, skip)
 
-            built = build_dkdv_w32(Hkv, block_size, float(softmax_scale), topk)
-        else:
-            built = build_dkdv(Hkv, block_size, float(softmax_scale), topk)
-        fn = built.compile(*kv_args)
-        _DKDV_CACHE[kv_key] = fn
-    fn(*kv_args)
+    def run_kv(skip, ws_out):
+        kv_args = (
+            q,
+            k,
+            v,
+            dout,
+            lse,
+            delta,
+            plan.chunks,
+            plan.entries,
+            ws_out,
+            int(S),
+            int(B),
+            int(n_blocks),
+            int(plan.entries.numel()),
+            int(n_chunks),
+            stream,
+        )
+        kv_key = (Hkv, block_size, float(softmax_scale), topk)
+        if skip:
+            kv_key = ("step_mask_skip",) + kv_key
+        fn = _DKDV_CACHE.get(kv_key)
+        if fn is None:
+            if w32:
+                from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
+                    build_dkdv_w32,
+                )
+
+                built = build_dkdv_w32(
+                    Hkv, block_size, float(softmax_scale), topk, **({"step_mask_skip": True} if skip else {})
+                )
+            else:
+                built = build_dkdv(Hkv, block_size, float(softmax_scale), topk)
+            fn = built.compile(*kv_args)
+            _DKDV_CACHE[kv_key] = fn
+        fn(*kv_args)
+        return (ws_out,)
+
+    skip = False
+    if step_mask_skip and w32:
+        from primus.backends.megatron.core.fusions import bitwise_check
+
+        # the dK/dV kernel's own check: its fp32 chunk partials, bit for bit
+        skip = bitwise_check.passed(
+            "msa_lean_masks dK/dV",
+            lambda: run_kv(True, torch.empty_like(ws)),
+            lambda: run_kv(False, torch.empty_like(ws)),
+            key=(S, B, Hkv, topk, block_size, float(softmax_scale), int(n_chunks)),
+        )
+    run_kv(skip, ws)
 
     red_args = (ws, plan.chunk_ptr, dk, dv, int(S), int(B), int(n_blocks), int(n_chunks), stream)
     red_key = (Hkv, block_size)

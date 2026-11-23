@@ -99,6 +99,10 @@ msa_fused_select_plan: false
 # gfx1250 flydsl kernels: adjacent tokens share a workgroup and one staging of each K/V tile they
 # have in common; bit-identical, checked on first use (MSATransformerConfig).
 msa_shared_tile_staging: false
+# gfx1250 flydsl kernels: masks decided per step / per lane where a per-element select cannot
+# change the result (fully visible steps skip the causal compare); bit-identical, checked on
+# first use (MSATransformerConfig).
+msa_lean_masks: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 

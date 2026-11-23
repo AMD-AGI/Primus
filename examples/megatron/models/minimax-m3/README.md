@@ -139,7 +139,11 @@ bandwidth), `embedding_rows_grad` (the word-embedding gradient is added into the
 the rows the micro-batch touches, not as a dense vocabulary-sized tensor), and around the MSA attention
 `msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the gfx1250
 MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens per
-workgroup and stage a K/V tile they share once), and two launch cuts, `msa_shared_rope_tables` (the
+workgroup and stage a K/V tile they share once) and `msa_lean_masks` (the forward, dQ and dK/dV
+kernels and the indexer's scoring kernel skip the per-key causal compare and select on steps whose
+keys are all visible, which is every step outside a token's own block, and the indexer's dK kernel
+reads the zeros of its WMMA's unused half from a pad instead of selecting them per element; the
+skipped selects would return their input), and two launch cuts, `msa_shared_rope_tables` (the
 cos / sin RoPE tables are kept per rotary `freqs` tensor, not recomputed in every layer call) and
 `msa_fused_indexer_loss_scatter` (the indexer-loss backward writes the block-score gradient from
 its last kernel, without the zero fill, clamp and `scatter_add_`; rows of up to 64 blocks, i.e.
@@ -164,8 +168,8 @@ parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs wh
 the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
-off; apart from `msa_shared_tile_staging` the FlyDSL MSA kernels have no switch other than
-`PRIMUS_MSA_BACKEND=eager`.
+off; apart from `msa_shared_tile_staging` and `msa_lean_masks` the FlyDSL MSA kernels have no
+switch other than `PRIMUS_MSA_BACKEND=eager`.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a

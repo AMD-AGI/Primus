@@ -106,8 +106,19 @@ def _store_f32x8(rsrc, elem_offset, v8f):
         )
 
 
-def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float, tokens_per_wg: int = 1):
+def build_dq_w32(
+    num_kv_heads: int,
+    topk: int,
+    block_size: int,
+    scale: float,
+    tokens_per_wg: int = 1,
+    step_mask_skip: bool = False,
+):
     """Build the wave32 dQ kernel; ``tokens_per_wg`` adjacent tokens share a workgroup.
+
+    ``step_mask_skip`` (``msa_lean_masks``): as in the forward (``build_fwd_wave32``), a step
+    whose 32 keys are all visible to the wave's token skips the per-key causal compare and select
+    of ``P``; the condition is wave-uniform and the skipped selects would return ``P``: same bits.
 
     Why the lockstep layout (``tokens_per_wg > 1``) cannot deadlock or hang the GPU:
 
@@ -389,7 +400,7 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float, to
             vb = sb + fx.Int32(T_BYTES) + r_lane
             ktb = sb + t_lane
 
-            ds_tiles = []
+            s_accs, dp_accs = [], []
             for t in range_constexpr(KPS // TK):
                 s_acc = Vec.filled(8, 0.0, fx.Float32)
                 dp_acc = Vec.filled(8, 0.0, fx.Float32)
@@ -399,15 +410,46 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float, to
                     a_v = cat_bf16_16(lds_b128(vb + o_), lds_b128(vb + o_ + fx.Int32(16)))
                     s_acc = wmma_f32_16x16x32_bf16(a_k, q_packs[ks], s_acc)
                     dp_acc = wmma_f32_16x16x32_bf16(a_v, do_packs[ks], dp_acc)
+                s_accs.append(s_acc)
+                dp_accs.append(dp_acc)
+
+            probs = [
+                [
+                    fx.Float32(
+                        rocdl.exp2(
+                            fx.Float32.ir_type, _raw(fx.Float32(_raw(Vec(s_accs[t])[i])) * c_sl - lse2)
+                        )
+                    )
+                    for i in range_constexpr(8)
+                ]
+                for t in range_constexpr(KPS // TK)
+            ]
+
+            def masked_probs(pr):
+                out_tiles = []
+                for t in range_constexpr(KPS // TK):
+                    key0 = kv0 + fx.Int32(t * TK) + fx.Int32(half) * fx.Int32(8)
+                    row_ = []
+                    for i in range_constexpr(8):
+                        ok = _andb(blk_ok, ArithValue(key0 + fx.Int32(i) <= tok_i32))
+                        row_.append(fx.Float32(ok.select(_raw(pr[t][i]), _raw(c_zero))))
+                    out_tiles.append(row_)
+                return out_tiles
+
+            if const_expr(step_mask_skip):
+                # every key of the step visible: valid slot and its last key <= the wave's token
+                all_ok = _andb(blk_ok, ArithValue(kv0 + fx.Int32(KPS - 1) <= tok_i32))
+                if fx.Int32(all_ok.select(_raw(fx.Int32(0)), _raw(fx.Int32(1)))) == fx.Int32(1):
+                    probs = masked_probs(probs)
+            else:
+                probs = masked_probs(probs)
+
+            ds_tiles = []
+            for t in range_constexpr(KPS // TK):
                 ds = []
-                key0 = kv0 + fx.Int32(t * TK) + fx.Int32(half) * fx.Int32(8)
                 for i in range_constexpr(8):
-                    ok = _andb(blk_ok, ArithValue(key0 + fx.Int32(i) <= tok_i32))
-                    score = fx.Float32(_raw(Vec(s_acc)[i]))
-                    prob = fx.Float32(rocdl.exp2(fx.Float32.ir_type, _raw(score * c_sl - lse2)))
-                    prob = fx.Float32(ok.select(_raw(prob), _raw(c_zero)))
-                    dp = fx.Float32(_raw(Vec(dp_acc)[i]))
-                    ds.append(prob * (dp - delta))
+                    dp = fx.Float32(_raw(Vec(dp_accs[t])[i]))
+                    ds.append(probs[t][i] * (dp - delta))
                 ds_tiles.append(ds)
             dsB = pack_pair_bf16(ds_tiles[0], ds_tiles[1])
 
@@ -443,8 +485,19 @@ def build_dq_w32(num_kv_heads: int, topk: int, block_size: int, scale: float, to
     return launch
 
 
-def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, tokens_per_step: int = 4):
+def build_dkdv_w32(
+    num_kv_heads: int,
+    block_size: int,
+    scale: float,
+    topk: int,
+    tokens_per_step: int = 4,
+    step_mask_skip: bool = False,
+):
     """dK/dV with the Q / dO rows of each step staged by the Tensor Data Mover.
+
+    ``step_mask_skip`` (``msa_lean_masks``): a step whose tokens are all live entries at or
+    after the wave's last key skips the causal / tail select of ``P`` (it would keep ``P``): a
+    wave-uniform scalar branch after the step's two barriers; trip count and barriers unchanged.
 
     S / dP read Q / dO rows from LDS (row-major, STRIDE), dV / dK read them transposed with
     ``ds_load_tr16_b128`` (lane row half*16 + lane%8, column ((lane//8)%2)*8: each lane gets
@@ -559,6 +612,7 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
         kv0 = blk * fx.Index(block_size) + wave * fx.Index(TK)
         key = kv0 + lo
         key_i32 = fx.Int32(key)
+        wave_last_key = uniform(fx.Int32(kv0) + fx.Int32(TK - 1))
         kv_row = ((key * Bn + b) * fx.Index(Hkv) + g) * fx.Index(D)
         k_ops, v_ops = [], []
         for ks in range_constexpr(KS):
@@ -713,20 +767,40 @@ def build_dkdv_w32(num_kv_heads: int, block_size: int, scale: float, topk: int, 
                 dl1 = lds_f32x4(dl_lds + lb + fx.Int32(16))
                 lse8 = [lse0[0], lse0[1], lse0[2], lse0[3], lse1[0], lse1[1], lse1[2], lse1[3]]
                 dl8 = [dl0[0], dl0[1], dl0[2], dl0[3], dl1[0], dl1[1], dl1[2], dl1[3]]
-                ok = _andb(ArithValue(key_i32 <= tok[j]), valid[j])
-                probs, dss = [], []
+                probs, dpd = [], []
                 for r in range_constexpr(8):
                     score = fx.Float32(_raw(Vec(s_acc)[r]))
                     lse_r = fx.Float32(_raw(lse8[r]))
-                    prob = fx.Float32(rocdl.exp2(fx.Float32.ir_type, _raw(score * c_sl - lse_r * c_log2e)))
-                    prob = fx.Float32(ok.select(_raw(prob), _raw(c_zero)))
-                    probs.append(prob)
-                    dss.append(prob * (fx.Float32(_raw(Vec(dp_acc)[r])) - fx.Float32(_raw(dl8[r]))))
-                return probs, dss
+                    probs.append(
+                        fx.Float32(rocdl.exp2(fx.Float32.ir_type, _raw(score * c_sl - lse_r * c_log2e)))
+                    )
+                    dpd.append(fx.Float32(_raw(Vec(dp_acc)[r])) - fx.Float32(_raw(dl8[r])))
+                return probs, dpd
+
+            def masked(j, probs):
+                ok = _andb(ArithValue(key_i32 <= tok[j]), valid[j])
+                return [fx.Float32(ok.select(_raw(p), _raw(c_zero))) for p in probs]
+
+            if const_expr(step_mask_skip):
+                # every key of the wave visible to every token of the step, and all its entries
+                # live: wave-uniform (scalar token loads, the wave's key range), so a scalar branch
+                all_ok = ArithValue(r0 + fx.Int32(tps - 1) < t_end)
+                for j in range_constexpr(tps):
+                    all_ok = _andb(all_ok, ArithValue(wave_last_key <= tok[j]))
+                need_mask = fx.Int32(all_ok.select(_raw(fx.Int32(0)), _raw(fx.Int32(1))))
 
             for pr in range_constexpr(tps // 2):
-                probs0, dss0 = probs_and_ds(2 * pr)
-                probs1, dss1 = probs_and_ds(2 * pr + 1)
+                probs0, dpd0 = probs_and_ds(2 * pr)
+                probs1, dpd1 = probs_and_ds(2 * pr + 1)
+                if const_expr(step_mask_skip):
+                    if need_mask == fx.Int32(1):
+                        probs0 = masked(2 * pr, probs0)
+                        probs1 = masked(2 * pr + 1, probs1)
+                else:
+                    probs0 = masked(2 * pr, probs0)
+                    probs1 = masked(2 * pr + 1, probs1)
+                dss0 = [p * d for p, d in zip(probs0, dpd0)]
+                dss1 = [p * d for p, d in zip(probs1, dpd1)]
                 pB = pack_pair_bf16(probs0, probs1)
                 dsB = pack_pair_bf16(dss0, dss1)
                 new_dk, new_dv = [], []

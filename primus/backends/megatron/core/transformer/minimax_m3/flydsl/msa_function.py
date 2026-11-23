@@ -19,7 +19,17 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
 class _MSAAttention(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan, shared_tiles=False
+        ctx,
+        q,
+        k,
+        v,
+        block_table,
+        softmax_scale,
+        block_size,
+        return_slot_lse,
+        plan,
+        shared_tiles=False,
+        step_mask_skip=False,
     ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
@@ -32,6 +42,7 @@ class _MSAAttention(torch.autograd.Function):
             block_size,
             return_slot_lse=return_slot_lse,
             shared_tiles=shared_tiles,
+            step_mask_skip=step_mask_skip,
         )
         o, lse = outs[0], outs[1]
         ctx.save_for_backward(q, k, v, o, lse, block_table)
@@ -39,6 +50,7 @@ class _MSAAttention(torch.autograd.Function):
         ctx.block_size = block_size
         ctx.plan = plan
         ctx.shared_tiles = shared_tiles
+        ctx.step_mask_skip = step_mask_skip
         ctx.mark_non_differentiable(*outs[1:])
         return outs
 
@@ -57,19 +69,30 @@ class _MSAAttention(torch.autograd.Function):
             ctx.block_size,
             plan=ctx.plan,
             shared_tiles=ctx.shared_tiles,
+            step_mask_skip=ctx.step_mask_skip,
         )
-        return dq, dk, dv, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None
 
 
 def msa_attention(
-    q, k, v, block_table, softmax_scale, block_size=128, return_slot_lse=False, plan=None, shared_tiles=False
+    q,
+    k,
+    v,
+    block_table,
+    softmax_scale,
+    block_size=128,
+    return_slot_lse=False,
+    plan=None,
+    shared_tiles=False,
+    step_mask_skip=False,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
     ``block_table`` is the indexer's ``[B, Hkv, S, topk]`` selection and
     ``plan`` its :class:`BlockPlan`, when the indexer built one; the backward
     builds it otherwise. Returns ``(o, lse)``, or ``(o, lse, slot_lse)``; only
-    ``o`` carries a gradient. ``shared_tiles`` is ``msa_shared_tile_staging`` (gfx1250 kernels).
+    ``o`` carries a gradient. ``shared_tiles`` is ``msa_shared_tile_staging`` and ``step_mask_skip``
+    ``msa_lean_masks`` (gfx1250 kernels, both bit-identical).
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
@@ -78,5 +101,14 @@ def msa_attention(
     else:
         block_table = block_table.to(torch.int32).contiguous()
     return _MSAAttention.apply(
-        q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan, bool(shared_tiles)
+        q,
+        k,
+        v,
+        block_table,
+        softmax_scale,
+        block_size,
+        return_slot_lse,
+        plan,
+        bool(shared_tiles),
+        bool(step_mask_skip),
     )

@@ -196,6 +196,18 @@ class MSATransformerConfig(TransformerConfig):
     one-token-per-workgroup kernels and keeps those on a mismatch. Needs S and the block size to be
     multiples of 4 / 2, else unchanged."""
 
+    msa_lean_masks: bool = False
+    """flydsl backend on gfx1250: the MSA kernels make their masking decisions per step or per lane
+    where a per-element select cannot change the result. The forward, dQ and dK/dV kernels and the
+    indexer's scoring kernel skip the per-key causal compare and select on steps / key blocks
+    whose keys are all visible to the wave's token(s) -- every step outside a token's own block
+    -- behind a wave-uniform scalar branch; the indexer's dK kernel loads the zeros of the WMMA's
+    unused K half from an LDS pad instead of selecting them per element (flydsl/
+    msa_token_fwd_w32.py, msa_token_bwd_w32.py, index_block_max.py). The skipped selects would
+    return their input and the pad holds the same zeros, so the bits are the same; the first call
+    for a shape compares every output bit of each kernel with the kernel without it and keeps
+    that one on a mismatch."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for

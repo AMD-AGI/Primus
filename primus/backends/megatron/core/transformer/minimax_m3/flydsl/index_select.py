@@ -81,7 +81,11 @@ def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_pla
 class _FusedSelect(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, select_from_block_scores, block_size, plan_slot):
-        raw, argmax = index_block_max(q, k, block_size)
+        indexer = getattr(select_from_block_scores, "__self__", None)
+        # msa_lean_masks: bit-identical scoring and dK kernels, each checked on its first call
+        lean = bool(getattr(getattr(indexer, "config", None), "msa_lean_masks", False))
+        ctx.lean = lean
+        raw, argmax = index_block_max(q, k, block_size, mask_skip=lean)
         ctx.set_materialize_grads(False)
         ctx.block_size = block_size
         want_plan = bool(plan_slot) and plan_slot[0] is True  # fused_select_blocks: grad was on
@@ -127,7 +131,7 @@ class _FusedSelect(torch.autograd.Function):
             keys_c = keys.clamp_min(0)
         dq = index_dq(g, keys_c, k.reshape(S, B, D), H)
         plan = ctx.plan_slot[0] if ctx.plan_slot else build_block_plan(block_indices, ctx.block_size)
-        dk = index_dk(plan, g, keys, q, ctx.block_size)
+        dk = index_dk(plan, g, keys, q, ctx.block_size, lean=ctx.lean)
         return dq, dk.reshape(k.shape), None, None, None
 
 
