@@ -47,6 +47,15 @@ GLUON_MIN_TRITON: Tuple[int, int] = (3, 9)
 
 # --- model tier: read only by DeepSeek-V4 code -------------------------------------------------
 _MODEL_DEFAULTS: Dict[str, str] = {
+    # HyperConnection
+    "PRIMUS_HC_FUSED": "1",
+    "PRIMUS_HC_FOLD_NORM": "1",
+    "PRIMUS_HC_HEAD_FUSED": "1",
+    "PRIMUS_HC_LIFT_FUSED": "1",
+    "PRIMUS_HC_GRAD_DIRECT": "1",
+    "PRIMUS_HC_XRMS": "1",
+    "PRIMUS_LAUNCH_HEAD_MG": "1",
+    "PRIMUS_FUSE2_HEAD_GADD": "1",
     # attention glue
     "PRIMUS_DSA_GFX1250_TURBO": "1",
     "PRIMUS_V4_QKV_A_CONCAT": "1",
@@ -66,6 +75,9 @@ _MODEL_DEFAULTS: Dict[str, str] = {
     "PRIMUS_FUSE2_WPOOL_DAPE": "1",
     "PRIMUS_FUSE2_COMP_MG": "1",
     "PRIMUS_FUSE2_ATT_GADD": "1",
+    # loss / smalls
+    "PRIMUS_V4_FUSED_CE": "1",
+    "PRIMUS_V4_CE_BWD_GT": "1",
     "PRIMUS_GLUE_SMALLS": "1",
     "PRIMUS_MB_SMALLS": "1",
     # MoE routing
@@ -88,11 +100,19 @@ _RECIPE_DEFAULTS: Dict[str, str] = {
     "PRIMUS_FP8BLK_ADAM_SKIP_BF16": "1",
     "PRIMUS_OPTB_DENSE_SKIP_BF16": "1",
     "PRIMUS_OPTB_EMB_SKIP_BF16": "1",
+    "PRIMUS_OPTB_EMB_SUMSQ": "1",
     "PRIMUS_GRAD_NORM_FROM_NAN_CHECK": "1",
     "PRIMUS_MB_GNORM": "1",
     # wgrad into main_grad
     "PRIMUS_WGRAD_BETA0": "1",
     "PRIMUS_TURBO_G90_WGRAD_FUSE": "1",
+    "PRIMUS_LM_HEAD_WGRAD_TORCH": "1",
+    "PRIMUS_LM_HEAD_WGRAD_LAYOUT": "tn",
+    "PRIMUS_EMB_MAIN_GRAD": "1",
+    "PRIMUS_GLUE_EMB_TOUCHED": "1",
+    "PRIMUS_LAUNCH_EMB_SORT": "1",
+    "PRIMUS_FUSE2_LOSS": "1",
+    "PRIMUS_STATIC_BF16_LOSS_SCALE_CPU": "1",
 }
 
 # Component kill switches: ``X=0`` turns every name in the group off (unless that name is set explicitly).
@@ -111,7 +131,9 @@ _KILL_GROUPS: Dict[str, Tuple[str, ...]] = {
 _BITWISE_OFF: Dict[str, str] = {
     "PRIMUS_MB_GNORM": "0",
     "PRIMUS_TURBO_MOE_WGRAD_SUMSQ": "0",
+    "PRIMUS_OPTB_EMB_SUMSQ": "0",
     "PRIMUS_V4_QKV_A_CONCAT": "0",
+    "PRIMUS_LM_HEAD_WGRAD_LAYOUT": "nt",
     "PRIMUS_FUSE2_WPOOL_DAPE": "0",
     "PRIMUS_FUSE_ROUTE": "0",
     "PRIMUS_GLUE_RMSNORM": "0",
