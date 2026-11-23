@@ -136,7 +136,14 @@ and the experts), `fused_probs_mul` (the experts' routing-probs multiply), `defe
 (TE's cross entropy with its gradient built in the backward), `bitwise_clip_scale` (the gradient-clip
 scale of the BF16 gradients, which TE's `multi_tensor_scale_tensor` runs at a fifth of the memory
 bandwidth), `embedding_rows_grad` (the word-embedding gradient is added into the gradient buffer for
-the rows the micro-batch touches, not as a dense vocabulary-sized tensor), and around the MSA attention
+the rows the micro-batch touches, not as a dense vocabulary-sized tensor), `grad_accum_group: 4` (the
+gradient buffer takes the gradients of four micro-batches in one pass, with the same additions and
+roundings in the same order; it holds up to three extra BF16 gradients per parameter of the rank:
+on the 4-layer proxy at GBS 8 the peak goes from 116.7 to 166.8 GB allocated and from 125.6 to
+181.7 GB reserved, for 358.4 -> 343.4 ms per step, so set it to 0 when memory is short. It pays
+where a rank runs several micro-batches per step and the gradients reach DDP's hook: with
+`gradient_accumulation_fusion` on, the linear and expert weight gradients go straight into the
+buffer and nothing is left to group or to hold), and around the MSA attention
 `msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`. Each one compares
 itself with the path it replaces on its first call and keeps that path, with a warning in the log,
 if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).

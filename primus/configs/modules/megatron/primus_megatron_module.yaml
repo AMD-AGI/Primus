@@ -137,6 +137,11 @@ bitwise_clip_scale: false
 # Add the word-embedding gradient into main_grad for the rows the micro-batch touches instead of
 # building the dense [vocab, hidden] gradient and adding all of it (untied embeddings, TP 1).
 embedding_rows_grad: false
+# Hold the gradients of up to K-1 micro-batches per parameter and add K of them into main_grad in
+# one pass (the same additions and roundings in the same order). 0 or 1: off. Costs up to K-1
+# extra BF16 copies of the rank's parameters in memory; K is capped at 8. No effect on parameters
+# whose gradient is accumulated by the GEMM itself (gradient_accumulation_fusion).
+grad_accum_group: 0
 
 # ===== MXFP4 Weight De-oscillation =====
 # Snap weight elements whose MXFP4-quantized value oscillates while the fp32

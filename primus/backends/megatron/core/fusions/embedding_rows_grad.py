@@ -105,6 +105,12 @@ class _RowsGradEmbedding(torch.autograd.Function):
                 f"{weight.dtype} and shape {(*ids.shape, weight.shape[1])}, got {grad_output.dtype} "
                 f"{tuple(grad_output.shape)}"
             )
+        if getattr(weight, "_primus_held_grads", None):
+            # grad_accum_group holds dense gradients of earlier micro-batches (a step that
+            # changed route): they come first
+            from primus.backends.megatron.core.fusions.grouped_grad_accum import flush_held
+
+            flush_held(weight)
         add_embedding_grad_(weight.main_grad.view(weight.shape), grad_output.contiguous(), ids)
         weight.grad_added_to_main_grad = True
         # Megatron's convention for a gradient already in main_grad (TE's fused wgrad
