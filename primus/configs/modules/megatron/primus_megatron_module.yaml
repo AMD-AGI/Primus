@@ -87,6 +87,10 @@ patch_moe_overlap: false
 
 # perf
 pp_warmup: false # set to true to decrease iter-1 time when using pp
+# With check_for_nan_in_loss_and_grad and rerun_mode disabled: read the NaN / Inf checks of
+# the step's losses and grad buckets with one host sync before the optimizer step, instead
+# of one sync per check. A NaN / Inf still raises the same error before the update.
+defer_nan_check: false
 
 # tool
 dump_pp_data: false

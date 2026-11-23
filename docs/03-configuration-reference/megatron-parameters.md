@@ -61,6 +61,7 @@ models:
 | `rampup_batch_size` | `null` | Optional batch-size ramp schedule string / config. |
 | `decrease_batch_size_if_needed` | `false` | Allow shrinking batch if memory is insufficient. |
 | `check_for_nan_in_loss_and_grad` | `true` | Abort on NaNs in loss or gradients. |
+| `defer_nan_check` | `false` | *Primus:* with `check_for_nan_in_loss_and_grad` and `rerun_mode: disabled`, read the step's NaN / Inf checks of the micro-batch losses and gradient buckets with one host sync before the optimizer step instead of one sync per check (see `primus_megatron_module.yaml`). A NaN / Inf still raises the same error before the parameters are updated, reported at the end of the step. |
 | `check_for_spiky_loss` | `false` | Detect abnormal loss spikes. |
 | `check_for_large_grads` | `false` | Detect abnormally large gradients. |
 | `make_vocab_size_divisible_by` | `128` | Pads vocabulary size for efficient kernels / partitioning. |

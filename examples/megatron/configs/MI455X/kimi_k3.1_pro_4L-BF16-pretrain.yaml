@@ -192,6 +192,8 @@ modules:
       # ---------- host-side overhead / MoE stability ----------
       manual_gc: true
       manual_gc_interval: 50
+      # NaN / Inf loss and grad checks stay on, read with one host sync per step.
+      defer_nan_check: true
 
       # FP8 off (bf16 sweep; prior FP8 hybrid showed no gain over bf16). Re-enable
       # per-run via CLI `--fp8 hybrid`.
