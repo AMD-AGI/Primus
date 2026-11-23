@@ -28,7 +28,8 @@ env:
 #   - batch sized like the other one-node MI455X proxies (sequence 7168 -> 4096,
 #     global batch 128 -> 64, 8 micro-batches per rank);
 #   - recompute off (MI355X: full), manual_gc_interval 1 -> 50,
-#     gradient_accumulation_fusion on, moe_router_bwd_bf16 on;
+#     gradient_accumulation_fusion on, moe_router_bwd_bf16 and
+#     moe_router_fwd_flydsl (FlyDSL router logits GEMM) on;
 #   - Turbo FlyDSL MLA attention (create_attention_mask_in_dataloader: false),
 #     DeepEP on at 64 CUs, and a hipBLASLt tuning table (env block above);
 #   - the attention-residual mixer on FlyDSL (attn_res_backend: flydsl, MI355X:
@@ -148,6 +149,7 @@ modules:
       situ_backend: ${PRIMUS_SITU_BACKEND:flydsl}
       moe_router_dtype: fp32
       moe_router_bwd_bf16: true
+      moe_router_fwd_flydsl: true
       optimizer: adam
 
       # ---------- ckpt ----------
