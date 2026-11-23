@@ -113,8 +113,16 @@ def test_missing_turbo_ops_keep_stock_path(eligible_env, monkeypatch, mla, missi
     assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is expected
 
 
-def test_attn_enabled_when_eligible(eligible_env):
-    params = _params(turbo_mega_ulysses_impl="attn", micro_batch_size=1, seq_length=32768)
+@pytest.mark.parametrize("hq, hkv", [(32, 4), (64, 4), (32, 8), (64, 8)])
+def test_attn_enabled_when_eligible(eligible_env, hq, hkv):
+    params = _params(
+        turbo_mega_ulysses_impl="attn",
+        micro_batch_size=1,
+        seq_length=32768,
+        group_query_attention=True,
+        num_attention_heads=hq,
+        num_query_groups=hkv,
+    )
     assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is True
 
 
@@ -125,6 +133,10 @@ def test_attn_enabled_when_eligible(eligible_env):
         dict(turbo_mega_ulysses_seq_chunk=192),
         dict(turbo_mega_ulysses_seq_chunk=-128),
         dict(turbo_mega_ulysses_seq_chunk=256, seq_length=1536),
+        dict(group_query_attention=True, num_attention_heads=96, num_query_groups=8),
+        dict(group_query_attention=True, num_attention_heads=48, num_query_groups=8),
+        dict(group_query_attention=True, num_attention_heads=32, num_query_groups=2),
+        dict(group_query_attention=False, num_attention_heads=32),
     ],
 )
 def test_attn_unsupported_settings_keep_stock_path(eligible_env, overrides):
