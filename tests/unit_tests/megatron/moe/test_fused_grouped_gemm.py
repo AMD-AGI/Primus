@@ -27,7 +27,7 @@ from megatron.core.num_microbatches_calculator import (  # noqa: E402
 )
 from megatron.core.process_groups_config import ProcessGroupCollection  # noqa: E402
 from megatron.core.transformer.transformer_config import TransformerConfig  # noqa: E402
-from megatron.training.global_vars import set_args  # noqa: E402
+from megatron.training import global_vars  # noqa: E402
 from primus_turbo.pytorch.core.low_precision import (  # noqa: E402
     Format,
     ScaleDtype,
@@ -175,8 +175,9 @@ def _quant_config(fp8_recipe: str) -> PrimusTurboQuantConfig:
     raise ValueError(f"unhandled fp8 recipe {fp8_recipe!r}")
 
 
-def _build_mlp(config: TransformerConfig, pg_collection, *, fused: bool) -> PrimusGroupedMLP:
-    set_args(_make_args(fused=fused))
+def _build_mlp(config: TransformerConfig, pg_collection, monkeypatch, *, fused: bool) -> PrimusGroupedMLP:
+    # Later tests in the session must not see these Turbo settings as Megatron's args.
+    monkeypatch.setattr(global_vars, "_GLOBAL_ARGS", _make_args(fused=fused))
     submodules = TEGroupedMLPSubmodules(
         linear_fc1=PrimusTurboColumnParallelGroupedLinear,
         linear_fc2=PrimusTurboRowParallelGroupedLinear,
@@ -329,7 +330,9 @@ def _run_grouped_mlp(
 @pytest.mark.parametrize("fp8_recipe", ["tensorwise", "mxfp8"])
 @pytest.mark.parametrize("group_lens_name", sorted(_GROUP_LENS))
 @pytest.mark.parametrize("num_microbatches", [1, 2])
-def test_fused_grouped_gemm_matches_unfused(pg_collection, fp8_recipe, group_lens_name, num_microbatches):
+def test_fused_grouped_gemm_matches_unfused(
+    pg_collection, monkeypatch, fp8_recipe, group_lens_name, num_microbatches
+):
     """``turbo_fused_grouped_gemm`` on and off must both compute the naive MLP.
 
     Both sides run under the same FP8 autocast over identical inputs, so the
@@ -345,8 +348,8 @@ def test_fused_grouped_gemm_matches_unfused(pg_collection, fp8_recipe, group_len
     group_lens = _GROUP_LENS[group_lens_name]
     config = _build_config(fp8_recipe)
 
-    unfused_mlp = _build_mlp(config, pg_collection, fused=False)
-    fused_mlp = _build_mlp(config, pg_collection, fused=True)
+    unfused_mlp = _build_mlp(config, pg_collection, monkeypatch, fused=False)
+    fused_mlp = _build_mlp(config, pg_collection, monkeypatch, fused=True)
     assert unfused_mlp.turbo_fused_grouped_gemm is False
     assert fused_mlp.turbo_fused_grouped_gemm is True
     _copy_weights(fused_mlp, unfused_mlp)
