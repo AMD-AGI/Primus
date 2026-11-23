@@ -28,9 +28,235 @@ the same Function serves all backends (backward returns ``None`` for them).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import os
+import weakref
 from typing import Callable, Optional
 
 import torch
+
+# Set while a fwd / bwd kernel runs on a "canonical band" top-k map: B == 1, no CP, no
+# packing, the 128-row sliding window [t-127, t] in slot order, plus (HCA) the causal pool
+# kv row Skv' + p visible iff t >= cr * (p + 1) - 1 with cr = S / P. A backend may then
+# use closed-form band kernels that do not read the indices (Turbo gfx1250 use_swa=True).
+_BAND_HINT = contextvars.ContextVar("v4_sparse_mla_band_hint", default=False)
+_SWA_BAND_W = 128
+# id(mask) -> (weakref to mask, mask._version, ok). Not a WeakKeyDictionary: tensor keys
+# compare with the elementwise __eq__.
+_mask_ok_cache = {}
+
+
+_BAND_TOPK_CACHE = {}
+
+# PRIMUS_V4_OROPE_INPLACE: (data_ptr, numel) of the output the LAST sparse-MLA forward saved for its backward. The
+# attention module's single exit consumes it right after that forward (take_saved_output), so a stale entry can never
+# match a later, unrelated tensor at a reused address.
+_PENDING_OUT = [None]
+
+# PRIMUS_OVERLAP (CSA_BWD): (stream, keep list) while the CSA backward runs with its dKV gathers left on the
+# compressor branch stream (see CSADkvJoin); read by the Turbo gfx1250 backward glue.
+_DKV_SIDE = contextvars.ContextVar("v4_sparse_mla_dkv_side", default=None)
+# The attention module hands the next CSA adapter call its CSADkvJoin holder here (consumed by that forward).
+_CSA_DKV_SLOT = [None]
+
+
+def dkv_side_hint():
+    return _DKV_SIDE.get()
+
+
+# PRIMUS_LAUNCH_DSINK: a one-entry list holding the sink's ``(main_grad, accumulate)`` while a sparse-MLA backward
+# runs. The Primus-Turbo gfx1250 backward wrapper takes the entry and passes it as ``dsink_main_grad``; an entry
+# left in place means the backend returned dsink instead (the adapter then writes main_grad itself).
+_DSINK_MG = contextvars.ContextVar("v4_sparse_mla_dsink_mg", default=None)
+
+
+def dsink_mg_hint():
+    return _DSINK_MG.get()
+
+
+class CSADkvHolder:
+    """Shared by the CSA adapter call and the CSADkvJoin node on its kv input: the dKV stream, and (once the
+    backward has left the dKV work on it) the event the kv-gradient consumer must wait for plus the tensors that
+    stream still uses."""
+
+    __slots__ = ("stream", "event", "keep")
+
+    def __init__(self, stream):
+        self.stream, self.event, self.keep = stream, None, None
+
+
+class CSADkvJoin(torch.autograd.Function):
+    """Identity on the CSA latent kv, applied right after it is produced (before the q path's wq_b / q norm-rope
+    ops), so autograd runs this node's backward after the dQ chain. Its backward makes the current stream wait for
+    the dKV work that the CSA adapter backward left on the branch stream, then releases that work's tensors.
+    """
+
+    @staticmethod
+    def forward(ctx, x, holder):
+        ctx.holder = holder
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g):
+        h, ctx.holder = ctx.holder, None
+        if h is not None and h.event is not None:
+            cur = torch.cuda.current_stream(g.device if g is not None else None)
+            cur.wait_event(h.event)
+            if g is not None:
+                g.record_stream(cur)  # allocated on the branch stream, read here
+            h.event = h.keep = None
+        return g, None
+
+
+def take_saved_output(t: torch.Tensor) -> bool:
+    """True if ``t`` is (the start and size of) the output the last sparse-MLA forward saved; clears the record."""
+    rec, _PENDING_OUT[0] = _PENDING_OUT[0], None
+    return rec is not None and rec == (t.data_ptr(), t.numel())
+
+
+def _launch_dsink_param(sink, needs_grad: bool):
+    """PRIMUS_LAUNCH_DSINK=1: the bf16 sink Parameter whose ``main_grad`` the backward writes in one
+    launch (Turbo gfx1250 dsink kernel, no reduce / cast / DDP copy), flagged like Turbo's fused-wgrad linears; else
+    None (the regular path)."""
+    if sink is None or not needs_grad or os.environ.get("PRIMUS_LAUNCH_DSINK", "0") not in ("1", "2"):
+
+        return None
+    mg = getattr(sink, "main_grad", None)
+    if not (
+        isinstance(sink, torch.nn.Parameter)
+        and sink.is_cuda
+        and sink.dtype == torch.bfloat16
+        and hasattr(sink, "grad_added_to_main_grad")
+        and isinstance(mg, torch.Tensor)
+        and mg.dtype == torch.bfloat16
+        and mg.is_contiguous()
+        and mg.numel() == sink.numel()
+        and sink.dim() == 1
+        and sink.numel() % 16 == 0
+        and not getattr(sink, "shared", False)
+    ):
+        return None
+    sink._primus_fwd_claim = True  # grad_added_to_main_grad is flagged already in forward
+    sink.grad_added_to_main_grad = True
+    return sink
+
+
+def _sink_arg(sink):
+    """fp32 contiguous sink for the kernels; PRIMUS_LAUNCH_SINK_CAST: a row of the per-step joint cast."""
+    if sink is None:
+        return None
+    if os.environ.get("PRIMUS_LAUNCH_SINK_CAST", "0") == "1":
+        from ._triton_common.launch_sink_cast import sink_f32
+
+        r = sink_f32(sink)
+        if r is not None:
+            return r
+    return sink.float().contiguous()
+
+
+def _launch_dsink_begin(ctx):
+
+    p = getattr(ctx, "sink_param", None)
+    if p is None:
+        return None
+    ctx.sink_param = None
+    from primus_turbo.pytorch.ops.utils import main_grad_first_write
+
+    acc = not main_grad_first_write(p)
+    slot = [(p.main_grad, acc)]
+    return p, acc, slot, _DSINK_MG.set(slot)
+
+
+def _launch_dsink_end(st, dsink):
+    """The sink's autograd gradient (a dummy: main_grad already holds it). Falls back to a torch write when the
+    backend did not consume the target (non-gfx1250 backward)."""
+    from primus_turbo.pytorch.ops.utils import _get_dummy_wgrad
+
+    p, acc, slot, tok = st
+    _DSINK_MG.reset(tok)
+    if slot[0] is not None:
+        g = dsink.to(p.dtype)
+        if acc:
+            p.main_grad.add_(g)
+        else:
+            p.main_grad.copy_(g)
+    return _get_dummy_wgrad(list(p.shape), p.dtype)
+
+
+def _fused_glue_on(t: torch.Tensor) -> bool:
+    """Fused Triton glue (one kernel for the CSA top-k map / the rope-padded kv) on GPU tensors."""
+    return t.is_cuda and os.environ.get("PRIMUS_V4_FUSED_GLUE", "1") == "1"
+
+
+def _glue():
+    from ._triton_common import sparse_mla_glue
+
+    return sparse_mla_glue
+
+
+def band_hint():
+    """True inside a fwd / bwd call whose top-k map is a canonical band (see above)."""
+    return _BAND_HINT.get()
+
+
+@contextlib.contextmanager
+def _band(on: bool):
+    tok = _BAND_HINT.set(on if isinstance(on, tuple) else bool(on))
+    try:
+        yield
+    finally:
+        _BAND_HINT.reset(tok)
+
+
+def _hca_mask_is_closed_form(mask: torch.Tensor, S: int, P: int) -> bool:
+    """``mask`` ([S, P] additive) == the causal pool mask with ratio S // P. Checked once per
+    mask tensor (one device sync; the model caches its mask, so once per run and layer)."""
+    ent = _mask_ok_cache.get(id(mask))
+    if ent is not None and ent[0]() is mask and ent[1] == mask._version:
+        return ent[2]
+    cr = S // P
+    t = torch.arange(S, device=mask.device).view(S, 1)
+    vis = (torch.arange(P, device=mask.device).view(1, P) + 1) * cr - 1 <= t
+    ok = bool(torch.equal(mask.reshape(S, P) == 0, vis))
+    if len(_mask_ok_cache) > 64:
+        _mask_ok_cache.clear()
+    _mask_ok_cache[id(mask)] = (weakref.ref(mask), mask._version, ok)
+    return ok
+
+
+def _csa_band_pool(B, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts):
+    """``(W, Skv, P)`` when a CSA map is "window + pool" in its simplest form: B == 1, no CP,
+    no packing, so slot s < W of token t is raw row t - W + 1 + s (or -1) and the rest are
+    pool rows Skv + p (indexer top-k: each at most once per token) or -1. The backward may
+    then reduce dKV without a CSR inverse (Turbo ``band_pool``). Else ``False``."""
+    if os.environ.get("PRIMUS_V4_BAND_KERNELS", "1") != "1":
+        return False
+    if B != 1 or W <= 0 or int(cp_dwindow) != 0 or int(cp_global_start) != 0 or seq_starts is not None:
+        return False
+    if Skv != S or P <= 0:
+        return False
+    return (int(W), int(Skv), int(P))
+
+
+def _canonical_band(B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, hca_local_seqlen, mask) -> bool:
+    if os.environ.get("PRIMUS_V4_BAND_KERNELS", "1") != "1":
+        return False
+    if (
+        B != 1
+        or W != _SWA_BAND_W
+        or int(cp_dwindow) != 0
+        or int(cp_global_start) != 0
+        or seq_starts is not None
+    ):
+        return False
+    if hca_local_seqlen > 0 and mask is not None:
+        P = Skv - int(hca_local_seqlen)
+        if int(hca_local_seqlen) != S or P <= 0 or S % P or mask.numel() != S * P:
+            return False
+        return _hca_mask_is_closed_form(mask, S, P)
+    return Skv == S
+
 
 _ROPE_PAD = 64  # dummy separate-rope block (zeros); the kernels need D_ROPE > 0
 
@@ -47,8 +273,23 @@ def _rope_pad_q(q_bh: torch.Tensor) -> torch.Tensor:
     put the run over a 192 GiB card -- it OOM'd here with 176.11 GiB already live.
     """
     B, H, S, D = q_bh.shape
-    out = q_bh.new_zeros(B, S, H, D + _ROPE_PAD)
+    Dp = D + _ROPE_PAD
+    # The fused query norm+RoPE (``q_norm_rope.QNormRopePadFn``) already writes the query
+    # into a zero-padded [B, S, H, D + _ROPE_PAD] buffer and hands out its [..., :D] view:
+    # use that buffer as-is instead of copying the query into a fresh one.
+    base = q_bh._base
+    if (
+        base is not None
+        and getattr(base, "_v4_rope_pad", 0) == _ROPE_PAD
+        and tuple(base.shape) == (B, S, H, Dp)
+        and base.is_contiguous()
+        and q_bh.data_ptr() == base.data_ptr()
+        and q_bh.stride() == (S * H * Dp, Dp, H * Dp, 1)
+    ):
+        return base.view(B * S, H, Dp)
+    out = q_bh.new_empty(B, S, H, Dp)
     out[..., :D] = q_bh.permute(0, 2, 1, 3)  # strided copy, no contiguous temp
+    out[..., D:].zero_()  # zero only the pad block, not the whole buffer first
     return out.reshape(B * S, H, D + _ROPE_PAD)  # contiguous -> free view
 
 
@@ -62,17 +303,22 @@ def _bshd_slice_to_bhsd(dq_g: torch.Tensor, B: int, S: int, H: int, D: int) -> t
     with CP=8 that is 8.00 GiB each, in the backward pass, which is where the run died.
     Allocating the destination and doing one strided copy through a permuted view of it
     leaves a single 8.00 GiB allocation.
+
+    Returning a permuted VIEW of the padded buffer costs no copy at all: the only consumer
+    is ``q_bh = q.transpose(1, 2)``, whose backward turns this straight back into a
+    row-strided BSHD view, and the fused RoPE backward reads rows through their strides.
+    Materialising BHSD here only made the RoPE backward materialise BSHD again (two
+    transposing copies of the full query gradient that cancel out).
     """
-    out = dq_g.new_empty(B, H, S, D)
-    out.permute(0, 2, 1, 3).copy_(dq_g[:, :, :D].unflatten(0, (B, S)))
-    return out
+    return dq_g[:, :, :D].unflatten(0, (B, S)).permute(0, 2, 1, 3)
 
 
 def _rope_pad_kv(kv512: torch.Tensor) -> torch.Tensor:
     """``[N, 1, D]`` -> ``[N, 1, D + _ROPE_PAD]``, pad block zeroed. See :func:`_rope_pad_q`."""
     N, G, D = kv512.shape
-    out = kv512.new_zeros(N, G, D + _ROPE_PAD)
+    out = kv512.new_empty(N, G, D + _ROPE_PAD)
     out[..., :D] = kv512
+    out[..., D:].zero_()
     return out
 
 
@@ -147,7 +393,9 @@ def _build_csa_topk(
     # int32 throughout -- see the note in _V4SparseMLAAttnFn.forward. The result is cast
     # to int32 regardless, so int64 intermediates only double the transient peak.
     idx_dtype = torch.int32
-    neg1 = torch.tensor(-1, device=device, dtype=idx_dtype)
+    neg1 = (
+        -1
+    )  # Python scalar: torch.tensor(-1, device=cuda) was a pageable H2D copy (host sync, not graph-capturable)
     base = (torch.arange(B, device=device, dtype=idx_dtype) * (Skv + P)).view(B, 1, 1)
 
     win_idx = _window_indices(S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device)
@@ -196,20 +444,37 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         latent = k_local_bh[:, :, 0, :] if k_is_latent else k_local_bh[:, 0, :, :]  # [B, Skv, D]
 
         q_g = _rope_pad_q(q_bh)
-        kv_g = _rope_pad_kv(torch.cat([latent, pool], dim=1).reshape(B * (Skv + P), 1, D))
+        if (
+            _fused_glue_on(q_bh)
+            and latent.stride(-1) == 1
+            and pool.stride(-1) == 1
+            and pool.dtype == latent.dtype
+        ):
+            kv_g = _glue().rope_pad_kv(latent, pool, _ROPE_PAD)
+        else:
+            kv_g = _rope_pad_kv(torch.cat([latent, pool], dim=1).reshape(B * (Skv + P), 1, D))
+        ctx.sink_param = _launch_dsink_param(sink, ctx.needs_input_grad[5])
 
-        topk_g = _pad_topk_64(
-            _build_csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start), seq_starts)
-        )
+        if seq_starts is None and _fused_glue_on(q_bh) and topk_idxs.stride(-1) == 1:
+            topk_g = _glue().csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start))
+        else:
+            topk_g = _pad_topk_64(
+                _build_csa_topk(topk_idxs, S, Skv, P, W, int(cp_dwindow), int(cp_global_start), seq_starts)
+            )
 
-        sink_arg = sink.float().contiguous() if sink is not None else None
+        sink_arg = _sink_arg(sink)
         o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
+        _PENDING_OUT[0] = (o_g.data_ptr(), o_g.numel())
         ctx.shapes = (B, H, S, Skv, D, P, W)
+        ctx.band = _csa_band_pool(B, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts)
         ctx.scale = float(scale)
         ctx.sink_was_none = sink is None
         ctx.bwd_fn = bwd_fn
+        ctx.dkv_holder, _CSA_DKV_SLOT[0] = _CSA_DKV_SLOT[0], None  # PRIMUS_OVERLAP (CSA_BWD)
+        if not (ctx.k_is_latent and kv_g.dtype == q_bh.dtype and isinstance(ctx.band, tuple)):
+            ctx.dkv_holder = None
         # Return a VIEW, not a copy. The kernel's `o_g` is contiguous [B*S, H, D], i.e.
         # already BSHD; every caller immediately does `out_bh.transpose(1, 2).contiguous()`
         # to get back to BSHD, so a `.contiguous()` here would materialise BHSD only for
@@ -226,14 +491,38 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         sink_arg = None if ctx.sink_was_none else sink_saved
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
-        dq_g, dkv_g, dsink = ctx.bwd_fn(
-            q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-        )
+        lst = _launch_dsink_begin(ctx)
+        holder, ctx.dkv_holder = ctx.dkv_holder, None
+        keep, dpl = [], []  # dpl: the contiguous dpool Turbo writes next to dkv (single-chunk band path)
+        tok = _DKV_SIDE.set((holder.stream, keep, dpl)) if holder is not None else None
+        try:
+            with _band(ctx.band):
+                dq_g, dkv_g, dsink = ctx.bwd_fn(
+                    q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+                )
+        finally:
+            if tok is not None:
+                _DKV_SIDE.reset(tok)
+        dsink_mg = _launch_dsink_end(lst, dsink) if lst is not None else None
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv512 = dkv_g[:, 0, :D].reshape(B, Skv + P, D)
         dlatent = dkv512[:, :Skv, :]
-        dpool = dkv512[:, Skv:, :].contiguous()
+        if keep:
+            # PRIMUS_OVERLAP (CSA_BWD): dkv is being produced on the branch stream; the pool part is split off there
+            # (its consumer, the compressor backward, runs on that stream) and the latent part's consumer waits
+            # in CSADkvJoin, after the dQ chain has been issued.
+            with torch.cuda.stream(holder.stream):
+                if dpl and B == 1 and tuple(dpl[0].shape) == (P, D):
+                    dpool = dpl[0].view(B, P, D)
+                else:
+                    dpool = dkv512[:, Skv:, :].contiguous()
+                ev = torch.cuda.Event()
+                ev.record(holder.stream)
+            keep.append(dkv_g)
+            holder.event, holder.keep = ev, keep
+        else:
+            dpool = dkv512[:, Skv:, :].contiguous()
 
         if ctx.k_is_latent:
             # Gradient has the latent's own [B, Skv, 1, D] shape -- 128 MiB at 1M/CP=8
@@ -253,7 +542,9 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         dv_local = None
 
         dsink_out = None
-        if not ctx.sink_was_none and dsink is not None:
+        if dsink_mg is not None:
+            dsink_out = dsink_mg
+        elif not ctx.sink_was_none and dsink is not None:
             dsink_out = dsink.to(sink_saved.dtype)
 
         # forward args: (q, k_local, v_local, pool, topk_idxs, sink, swa_window, scale,
@@ -310,44 +601,66 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         assert q_bh.dtype == torch.bfloat16, "sparse-MLA adapter requires bf16"
         assert W > 0, "sparse-MLA adapter requires swa_window > 0"
 
-        device = q_bh.device
-        # int32 throughout: this index matrix is cast to int32 by _pad_topk_64 anyway, and
-        # the largest value is B*(Skv+P) -- 139264 at 1M with CP=8, nowhere near the int32
-        # range. Building it in torch's default int64 doubled every intermediate below,
-        # which at 1M is ~8.6 GiB apiece.
-        idx_dtype = torch.int32
-        neg1 = torch.tensor(-1, device=device, dtype=idx_dtype)
-        base = (torch.arange(B, device=device, dtype=idx_dtype) * Skv).view(B, 1, 1)
-        # Context parallel: this rank owns global rows [cp_global_start, +S), and its KV
-        # buffer is [boundary ++ local] with `cp_dwindow` boundary rows received from the
-        # left neighbour. So the window is validated against GLOBAL positions (a token must
-        # not attend before the sequence start) but indexed in LOCAL buffer coordinates.
-        # With cp_dwindow == cp_global_start == 0 this is byte-identical to the non-CP form.
-        win_idx = _window_indices(
-            S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device
+        band = _canonical_band(
+            B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, int(hca_local_seqlen), additive_mask
         )
+        # A certified band map depends only on (S, Skv, W, pool) -- the same tensor for every layer
+        # and step: build it once. (Kernels only read it.)
+        band_key = (B, S, Skv, W, int(hca_local_seqlen), str(q_bh.device)) if band else None
+        topk_g = _BAND_TOPK_CACHE.get(band_key) if band else None
+        if topk_g is None:
+            device = q_bh.device
+            # int32 throughout: this index matrix is cast to int32 by _pad_topk_64 anyway, and
+            # the largest value is B*(Skv+P) -- 139264 at 1M with CP=8, nowhere near the int32
+            # range. Building it in torch's default int64 doubled every intermediate below,
+            # which at 1M is ~8.6 GiB apiece.
+            idx_dtype = torch.int32
+            neg1 = (
+                -1
+            )  # Python scalar: torch.tensor(-1, device=cuda) was a pageable H2D copy (host sync, not graph-capturable)
+            base = (torch.arange(B, device=device, dtype=idx_dtype) * Skv).view(B, 1, 1)
+            # Context parallel: this rank owns global rows [cp_global_start, +S), and its KV
+            # buffer is [boundary ++ local] with `cp_dwindow` boundary rows received from the
+            # left neighbour. So the window is validated against GLOBAL positions (a token must
+            # not attend before the sequence start) but indexed in LOCAL buffer coordinates.
+            # With cp_dwindow == cp_global_start == 0 this is byte-identical to the non-CP form.
+            win_idx = _window_indices(
+                S, W, base, cp_dwindow, cp_global_start, seq_starts, idx_dtype, neg1, device
+            )
 
-        if hca_local_seqlen > 0 and additive_mask is not None:
-            P = Skv - int(hca_local_seqlen)
-            vis = (additive_mask == 0).view(1, S, P)
-            ps = torch.arange(P, device=device, dtype=idx_dtype).view(1, 1, P)
-            # `neg1` is a 0-dim tensor, not torch.full((B, S, P), -1): the full form
-            # materialised an entire [B, S, P] constant just to be the `where` else-branch
-            # -- 8.6 GiB at 1M, thrown away immediately.
-            pool_idx = torch.where(vis, base + hca_local_seqlen + ps, neg1)
-            topk = torch.cat([win_idx, pool_idx], dim=2)
-        else:
-            topk = win_idx
-        topk_g = _pad_topk_64(topk.reshape(B * S, -1))
+            if hca_local_seqlen > 0 and additive_mask is not None:
+                P = Skv - int(hca_local_seqlen)
+                vis = (additive_mask == 0).view(1, S, P)
+                ps = torch.arange(P, device=device, dtype=idx_dtype).view(1, 1, P)
+                # `neg1` is a 0-dim tensor, not torch.full((B, S, P), -1): the full form
+                # materialised an entire [B, S, P] constant just to be the `where` else-branch
+                # -- 8.6 GiB at 1M, thrown away immediately.
+                pool_idx = torch.where(vis, base + hca_local_seqlen + ps, neg1)
+                topk = torch.cat([win_idx, pool_idx], dim=2)
+            else:
+                topk = win_idx
+            topk_g = _pad_topk_64(topk.reshape(B * S, -1))
+            if band:
+                if len(_BAND_TOPK_CACHE) > 16:
+                    _BAND_TOPK_CACHE.clear()
+                _BAND_TOPK_CACHE[band_key] = topk_g
 
         q_g = _rope_pad_q(q_bh)
         latent = k_bh[:, :, 0, :] if k_is_latent else k_bh[:, 0, :, :]  # [B, Skv, D]
-        kv_g = _rope_pad_kv(latent.reshape(B * Skv, 1, D))
+        if _fused_glue_on(q_bh) and latent.stride(-1) == 1:
+            kv_g = _glue().rope_pad_kv(latent, None, _ROPE_PAD)
+        else:
+            kv_g = _rope_pad_kv(latent.reshape(B * Skv, 1, D))
+        ctx.sink_param = _launch_dsink_param(sink, ctx.needs_input_grad[3])
 
-        sink_arg = sink.float().contiguous() if sink is not None else None
-        o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
+        sink_arg = _sink_arg(sink)
+
+        ctx.band = band
+        with _band(band):
+            o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
+        _PENDING_OUT[0] = (o_g.data_ptr(), o_g.numel())
         ctx.shapes = (B, H, S, D, Skv)
         ctx.scale = float(scale)
         ctx.sink_was_none = sink is None
@@ -368,9 +681,12 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         sink_arg = None if ctx.sink_was_none else sink_saved
 
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
-        dq_g, dkv_g, dsink = ctx.bwd_fn(
-            q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-        )
+        lst = _launch_dsink_begin(ctx)
+        with _band(ctx.band):
+            dq_g, dkv_g, dsink = ctx.bwd_fn(
+                q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+            )
+        dsink_mg = _launch_dsink_end(lst, dsink) if lst is not None else None
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)
         dkv = dkv_g[:, 0, :D].reshape(B, Skv, D)
@@ -387,10 +703,13 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         dv_bh = None
 
         dsink_out = None
-        if not ctx.sink_was_none and dsink is not None:
+        if dsink_mg is not None:
+            dsink_out = dsink_mg
+        elif not ctx.sink_was_none and dsink is not None:
             dsink_out = dsink.to(sink_saved.dtype)
 
         # forward args: (q, k, v, sink, swa_window, additive_mask, scale, hca_local_seqlen,
+
         #                cp_dwindow, cp_global_start, k_is_latent, seq_starts, fwd_fn, bwd_fn)
         return (
             dq_bh,

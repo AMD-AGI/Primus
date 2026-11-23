@@ -76,6 +76,10 @@ def _is_rank0() -> bool:
     return True
 
 
+from primus.backends.megatron.core.fusions.bf16grp import (
+    idx_enabled as _bf16grp_idx_enabled,
+)
+from primus.backends.megatron.core.fusions.bf16tune import enabled as _bf16tune_enabled
 from primus.backends.megatron.core.transformer.compressor import Compressor
 from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
@@ -118,6 +122,15 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score import (
     is_triton_path_enabled as _indexer_triton_full_enabled,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_gluon import (
+    indexer_score_gluon,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_gluon import (
+    is_gluon_kernel_supported as _indexer_gluon_supported,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_gluon import (
+    is_gluon_path_enabled as _indexer_gluon_enabled,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_score_post import (
     indexer_score_post_triton,
@@ -480,7 +493,14 @@ class Indexer(nn.Module):
             return k_icomp
 
         P = k_icomp.shape[1]
-        cos, sin = rope.forward_arange(P, k_icomp.device, stride=self.compress_ratio)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl():  # memoised contiguous cast table (same bytes, no per-call copies)
+            cos, sin = rope.forward_arange_cast(
+                P, k_icomp.device, k_icomp.dtype, self.rotary_dim // 2, stride=self.compress_ratio
+            )
+        else:
+            cos, sin = rope.forward_arange(P, k_icomp.device, stride=self.compress_ratio)
         # ``apply_interleaved_partial_rope`` inserts a singleton head axis into
         # cos / sin, so give it a ``[B, P, 1, Hd]`` view to broadcast against.
         rotated = apply_interleaved_partial_rope(
@@ -500,7 +520,13 @@ class Indexer(nn.Module):
         B, S = q_i.shape[0], q_i.shape[1]
         if position_ids is None:
             position_ids = torch.arange(S, device=q_i.device)
-        cos, sin = rope(position_ids)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl() and hasattr(rope, "forward_pos_cast"):
+            # one table per step for all CSA layers (memoised on the position_ids tensor), pre-cast
+            cos, sin = rope.forward_pos_cast(position_ids, q_i.dtype)
+        else:
+            cos, sin = rope(position_ids)
         if tuple(cos.shape[:-1]) != (B, S):
             cos = cos.expand(B, S, -1)
             sin = sin.expand(B, S, -1)
@@ -553,6 +579,15 @@ class Indexer(nn.Module):
         )
 
         cp_group = get_cp_group()
+        _grp = None
+        if cu_seqlens is None and cp_group is None and _bf16grp_idx_enabled():
+            # bf16grp: the compressor's wkv_gate and w_dq_w (same input, frozen) as ONE grouped split-K
+            # GEMM launch + one reduce, bit-identical to the two hipBLASLt GSU calls (fusions/bf16grp.py)
+            from primus.backends.megatron.core.fusions.bf16grp import indexer_pair
+
+            _grp = indexer_pair(self, hidden)
+            if _grp is not None:
+                self.indexer_compressor.__dict__["_bf16grp_proj"] = _grp[0]
         if cu_seqlens is not None:
             # Per-sequence key pool, matching the attention-side pool exactly -- the
             # top-K indices produced here address THAT pool, so the two must be laid out
@@ -591,6 +626,8 @@ class Indexer(nn.Module):
                 k_icomp = build_global_pool(k_local, cp_group)
         elif cp_group is None:
             k_icomp = self.indexer_compressor(hidden)  # [B, P, Hd]
+            if _grp is not None:  # consumed by the compressor (never left behind for a later call)
+                self.indexer_compressor.__dict__.pop("_bf16grp_proj", None)
         else:
             from primus.backends.megatron.core.transformer.deepseek_v4_cp import (
                 build_global_pool,
@@ -618,7 +655,14 @@ class Indexer(nn.Module):
         # so arange(P) is the right position set. Rotating the LOCAL pool first would give
         # every rank positions 0..P_local-1: correct on rank 0, silently the wrong phase
         # everywhere else, with no error and no shape mismatch to catch it.
-        k_icomp = self._rotate_keys(k_icomp)  # [B, P, Hd]
+        k_rot = None
+        if os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1":  # bf16g2: RoPE + Hadamard + scale in one kernel
+            from primus.backends.megatron.core.fusions.idx_q_fused import (
+                indexer_keys_bf16g2,
+            )
+
+            k_rot = indexer_keys_bf16g2(self, k_icomp)
+        k_icomp = self._rotate_keys(k_icomp) if k_rot is None else k_rot  # [B, P, Hd]
         P = k_icomp.shape[1]
         k_icomp = k_icomp.unsqueeze(2)  # [B, P, 1, Hd]
 
@@ -627,18 +671,36 @@ class Indexer(nn.Module):
         # PRIMUS_V4_FP8_INDEXER_PROJ knob routes these through MXFP8. No TP
         # gather/scatter (duplicated linears).
         proj = _fp8_linear if _indexer_fp8_proj_enabled() else (lambda lin, x: lin(x))
+        if not _indexer_fp8_proj_enabled() and _bf16tune_enabled():
+            from primus.backends.megatron.core.fusions.bf16tune import bt_linear
+
+            def proj(lin, x):  # bf16tune: planned shapes (frozen projections only) on Gluon bf16g2
+                y = bt_linear(x, lin.weight, lin.bias)
+                return lin(x) if y is None else y
+
         if self._fuse_qw_proj:
-            dqw = proj(self.w_dq_w, hidden)  # [B, S, dq_rank + local H] in one GEMM
+            dqw = (
+                proj(self.w_dq_w, hidden) if _grp is None else _grp[1]
+            )  # [B, S, dq_rank + local H] in one GEMM
             q_q = dqw[..., : self.dq_rank]  # [B, S, dq_rank]
             w_i = dqw[..., self.dq_rank :]  # [B, S, H]
         else:
             q_q = proj(self.w_dq, hidden)  # [B, S, dq_rank]
             w_i = proj(self.w_w, hidden)  # [B, S, H]
-        q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd)  # [B, S, H, Hd]
+        q_g2 = None
+        if os.environ.get("PRIMUS_BF16G2_IDXQ", "0") == "1" and not _indexer_fp8_proj_enabled():
+            from primus.backends.megatron.core.fusions.idx_q_fused import (
+                indexer_queries_bf16g2,
+            )
+
+            q_g2 = indexer_queries_bf16g2(
+                self, q_q, position_ids, B, S, H, Hd
+            )  # bf16g2: w_iuq + rotation fused
+        q_i = proj(self.w_iuq, q_q).view(B, S, H, Hd) if q_g2 is None else None  # [B, S, H, Hd]
         # Queries are rotated at their own token positions, then Hadamard-rotated
         # like the keys, so the ReLU'd dot product sees both operands in the same
         # basis the reference scores in.
-        q_i = self._rotate_queries(q_i, position_ids)
+        q_i = self._rotate_queries(q_i, position_ids) if q_g2 is None else q_g2
 
         # Score temperature (see ``self.score_scale``). Applied on ``w_i``
         # because every scoring branch below multiplies by it before summing
@@ -650,6 +712,8 @@ class Indexer(nn.Module):
         # 4) Causal mask + (effective topk capped at P).
         #
         # Dispatch precedence (P41 re-routing):
+        #   Gluon gate open               → fused Gluon fwd score on gfx1250
+        #                                    (no einsum; the bwd recomputes the dot).
         #   PRIMUS_INDEXER_TRITON=1       → post-einsum tail fused
         #                                    (einsum stays eager / cuBLAS).
         #   PRIMUS_INDEXER_TRITON_FULL=1  → legacy P38 full-fuse path
@@ -681,6 +745,10 @@ class Indexer(nn.Module):
                 dot_c = _fp4_qk_gemm(q_i, k2d)
                 sc = (F.relu(dot_c) * w_i.unsqueeze(-1)).sum(dim=2)
                 return sc + self._causal_mask(S, Pc, sc.device, sc.dtype, q_offset=q_off).unsqueeze(0)
+            if _indexer_gluon_enabled() and _indexer_gluon_supported(q_i, k2d, w_i):
+                return indexer_score_gluon(
+                    q_i, k2d, w_i, compress_ratio=self.compress_ratio, out_dtype=hidden.dtype, q_offset=q_off
+                )
             if _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k2d, w_i):
                 return indexer_score_triton(
                     q_i,
@@ -711,7 +779,11 @@ class Indexer(nn.Module):
         # be a model quietly conditioning on other samples. The packed branch below does
         # its own streaming with the per-sequence mask.
         if cu_seqlens is None and chunk > 0 and P > chunk:
-            if _indexer_tail_triton_enabled() and not _indexer_triton_full_enabled():
+            if (
+                _indexer_tail_triton_enabled()
+                and not _indexer_triton_full_enabled()
+                and not (_indexer_gluon_enabled() and _indexer_gluon_supported(q_i, k_icomp_2d, w_i))
+            ):
                 raise NotImplementedError(
                     "Streaming indexer top-K does not support the tail-fused path "
                     "(PRIMUS_INDEXER_TRITON): indexer_score_post applies the causal mask "
@@ -801,6 +873,17 @@ class Indexer(nn.Module):
             scores = (relu * w_i.unsqueeze(-1)).sum(dim=2)  # [B, S, P]
             mask = self._causal_mask(S, P, scores.device, scores.dtype)  # [S, P]
             scores = scores + mask.unsqueeze(0)  # [B, S, P]
+        elif _indexer_gluon_enabled() and _indexer_gluon_supported(q_i, k_icomp_2d, w_i):
+            # Fused Gluon forward (gfx1250): q.k WMMA -> bf16 round -> w*relu -> sum_h -> causal -inf, never
+            # materialising [B, S, H, P]; causally dead tiles skip the GEMM.
+            scores = indexer_score_gluon(
+                q_i,
+                k_icomp_2d,
+                w_i,
+                compress_ratio=self.compress_ratio,
+                out_dtype=hidden.dtype,
+                q_offset=self._cp_query_offset(S),
+            )
         elif _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
             scores = indexer_score_triton(
                 q_i,
@@ -835,6 +918,15 @@ class Indexer(nn.Module):
             _dist.all_reduce(scores, group=self.tp_group)
 
         topk_eff = min(K, P)
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.indexer_topk import (
+            indexer_topk,
+            indexer_topk_supported,
+        )
+
+        if topk_eff == K and indexer_topk_supported(scores, topk_eff):
+            # PRIMUS_V4_INDEXER_TOPK_TRITON=1: torch.topk (sorted) + the -inf -> -1 sentinel in one Triton launch,
+            # same values / indices bit for bit (see indexer_topk.py).
+            return indexer_topk(scores, topk_eff)
         topk_scores, topk_idxs = scores.topk(topk_eff, dim=-1)  # [B, S, topk_eff]
         return self._finalize_topk(topk_idxs, topk_scores, topk_eff, K, B, S)
 

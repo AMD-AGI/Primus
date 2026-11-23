@@ -47,7 +47,27 @@ GLUON_MIN_TRITON: Tuple[int, int] = (3, 9)
 
 # --- model tier: read only by DeepSeek-V4 code -------------------------------------------------
 _MODEL_DEFAULTS: Dict[str, str] = {
+    # attention glue
+    "PRIMUS_DSA_GFX1250_TURBO": "1",
+    "PRIMUS_V4_QKV_A_CONCAT": "1",
+    "PRIMUS_V4_QKV_POST_FUSED": "1",
+    "PRIMUS_V4_ROPE_BWD_INPLACE": "1",
+    "PRIMUS_V4_OROPE_INPLACE": "1",
+    "PRIMUS_V4_OA_MAIN_GRAD": "1",
+    "PRIMUS_V4_OA_DGRAD_TN": "1",
+    "PRIMUS_V4_INDEXER_TOPK_TRITON": "1",
+    "PRIMUS_GLUE_RMSNORM": "1",
+    "PRIMUS_GLUE_ROPE_NOCAST": "1",
+    "PRIMUS_GLUE_COMPRESS_POOL": "1",
+    "PRIMUS_MB_ROPE_TBL": "1",
+    "PRIMUS_LAUNCH_ROPE_TBL": "1",
+    "PRIMUS_LAUNCH_SINK_CAST": "1",
+    "PRIMUS_LAUNCH_DSINK": "2",
+    "PRIMUS_FUSE2_WPOOL_DAPE": "1",
+    "PRIMUS_FUSE2_COMP_MG": "1",
+    "PRIMUS_FUSE2_ATT_GADD": "1",
     "PRIMUS_GLUE_SMALLS": "1",
+    "PRIMUS_MB_SMALLS": "1",
     # MoE routing
     "PRIMUS_V4_ROUTER_FUSED": "1",
     "PRIMUS_V4_ROUTER_DENSE_OUT": "1",
@@ -55,6 +75,9 @@ _MODEL_DEFAULTS: Dict[str, str] = {
     "PRIMUS_FUSE_MOE_ADD": "1",
     "PRIMUS_PERSIST_ROUTER_BWD": "1",
     "PRIMUS_MB_ROUTER_FWD": "128,4",
+    # BF16 GEMM routing (Gluon-gated inside the fusions)
+    "PRIMUS_BF16G2_OA_DGRAD": "1",
+    "PRIMUS_BF16G2_IDXQ": "1",
 }
 
 # --- recipe tier: patches that apply to any model, enabled together with the block-FP8 recipe ---
@@ -88,7 +111,10 @@ _KILL_GROUPS: Dict[str, Tuple[str, ...]] = {
 _BITWISE_OFF: Dict[str, str] = {
     "PRIMUS_MB_GNORM": "0",
     "PRIMUS_TURBO_MOE_WGRAD_SUMSQ": "0",
+    "PRIMUS_V4_QKV_A_CONCAT": "0",
+    "PRIMUS_FUSE2_WPOOL_DAPE": "0",
     "PRIMUS_FUSE_ROUTE": "0",
+    "PRIMUS_GLUE_RMSNORM": "0",
 }
 
 
