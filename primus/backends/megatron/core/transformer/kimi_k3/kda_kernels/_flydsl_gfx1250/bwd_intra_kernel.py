@@ -147,8 +147,8 @@ def _build():
         g_dk = _bv(DK, nb_x4, F32, 4)
         g_dg = _bv(DG, nb_x4, F32, 4)
         g_db = _bv(DB, nb_r, F32, 1)
-        g_dq2 = _bv(DQ2, nb_x4, F32, 4)
-        g_dk2 = _bv(DK2, nb_x4, F32, 4)
+        g_dq2 = _bv(DQ2, nb_x, BF, 8)  # dq2 / dk2 leave in bf16 (the chunk's gradient dtype), dg2 in fp32
+        g_dk2 = _bv(DK2, nb_x, BF, 8)
         g_dg2 = _bv(DG2, nb_x4, F32, 4)
         g_dbo = _bv(DBO, nb_r, F32, 1)
         rs = HV * I32(16)
@@ -296,6 +296,7 @@ def _build():
             gnz = _ld8(lg + rz * I32(_QK_PITCH) + col4)
             gnm = _ld8(lg + rm * I32(_QK_PITCH) + col4)
             gi = bx4 + c * rs4 + kt * I32(4) + h * I32(2)
+            gib = bx + c * rs + kt * I32(2) + h  # the same 8 columns as one bf16 vector
             pre = [F32(x) for x in pre]
             dqi, dki, dgi = pre[0:8], pre[8:16], pre[16:24]
             vq, vk, vt = fx.Vector(acc_q), fx.Vector(acc_k), fx.Vector(acc_t)
@@ -312,10 +313,8 @@ def _build():
                 o_q.append(dq2 + dqi[e])
                 o_g.append(qc[e] * dq2 + (dk2b - dkt) * kc[e] + dgi[e])
                 o_k.append(dk2b + dki[e] + dkt)
-            _stv(o_q[:4], g_dq2, gi, F32)
-            _stv(o_q[4:], g_dq2, gi + I32(1), F32)
-            _stv(o_k[:4], g_dk2, gi, F32)
-            _stv(o_k[4:], g_dk2, gi + I32(1), F32)
+            _stv([x.to(BF) for x in o_q], g_dq2, gib, BF)
+            _stv([x.to(BF) for x in o_k], g_dk2, gib, BF)
             _stv(o_g[:4], g_dg2, gi, F32)
             _stv(o_g[4:], g_dg2, gi + I32(1), F32)
             return db_acc
@@ -421,9 +420,12 @@ def kda_bwd_intra(
     db: Tensor,
     dg: Tensor,
 ):
-    """``(dq2, dk2, db, dg2)`` as fla's ``chunk_kda_bwd_intra`` returns them (db with the input db added)."""
+    """``(dq2, dk2, db, dg2)`` as fla's ``chunk_kda_bwd_intra`` returns them (db with the input db added), with
+    ``dq2`` / ``dk2`` rounded to ``q``'s dtype in the kernel: the chunk's backward returns them in it, so the fp32
+    copies and their cast are never made."""
     B, T, HV, K = g.shape
-    dq2, dk2, dg2 = torch.empty_like(dq), torch.empty_like(dk), torch.empty_like(dg)
+    dq2, dk2 = torch.empty_like(dq, dtype=q.dtype), torch.empty_like(dk, dtype=k.dtype)
+    dg2 = torch.empty_like(dg)
     dbo = torch.empty_like(db)
     args = (
         q,
