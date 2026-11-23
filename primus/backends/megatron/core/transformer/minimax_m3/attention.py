@@ -247,6 +247,51 @@ class MinimaxSparseAttention(SelfAttention):
         )
         return normed.to(x.dtype)
 
+    def msa_core(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        block_indices: torch.Tensor,
+        block_scores: torch.Tensor,
+        block_plan: Optional[object],
+        want_loss: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """flydsl backend: attention over the selected blocks and, with ``want_loss``, the sparse
+        indexer loss.
+
+        Takes ``[sq, b, heads, hn]`` query / key / value and the indexer's outputs; returns
+        ``(core_attn_out [sq, b, np, hn], indexer_loss or None)``.
+        """
+        outs = self.msa_attention(
+            query,
+            key,
+            value,
+            block_indices,
+            self.softmax_scale,
+            self.block_size,
+            return_slot_lse=want_loss,
+            plan=block_plan,
+            shared_tiles=getattr(self.config, "msa_shared_tile_staging", False),
+        )
+        if not want_loss:
+            return outs[0], None
+        slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
+        if self.config.msa_fused_indexer_loss:
+            # bitwise, in a few Triton launches
+            from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
+                sparse_indexer_loss as loss_fn,
+            )
+        else:
+            loss_fn = compute_sparse_indexer_loss
+        if self.config.msa_fused_indexer_loss and self.config.msa_fused_indexer_loss_scatter:
+            indexer_loss = loss_fn(
+                slot_mass, block_scores, block_indices, self.indexer_loss_coeff, fold_scatter=True
+            )
+        else:
+            indexer_loss = loss_fn(slot_mass, block_scores, block_indices, self.indexer_loss_coeff)
+        return outs[0], indexer_loss
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -330,33 +375,9 @@ class MinimaxSparseAttention(SelfAttention):
                     f"{key.shape[2]}; msa_backend='flydsl' needs one selection per local KV head."
                 )
             # [sq, b, heads, hn] in and out: o needs no permute before linear_proj.
-            outs = self.msa_attention(
-                query,
-                key,
-                value,
-                block_indices,
-                self.softmax_scale,
-                self.block_size,
-                return_slot_lse=want_loss,
-                plan=block_plan,
-                shared_tiles=getattr(self.config, "msa_shared_tile_staging", False),
+            core_attn_out, indexer_loss = self.msa_core(
+                query, key, value, block_indices, block_scores, block_plan, want_loss
             )
-            core_attn_out = outs[0]
-            if want_loss:
-                slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
-                if self.config.msa_fused_indexer_loss:
-                    # bitwise, in a few Triton launches
-                    from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
-                        sparse_indexer_loss as loss_fn,
-                    )
-                else:
-                    loss_fn = compute_sparse_indexer_loss
-                if self.config.msa_fused_indexer_loss and self.config.msa_fused_indexer_loss_scatter:
-                    indexer_loss = loss_fn(
-                        slot_mass, block_scores, block_indices, self.indexer_loss_coeff, fold_scatter=True
-                    )
-                else:
-                    indexer_loss = loss_fn(slot_mass, block_scores, block_indices, self.indexer_loss_coeff)
         else:
             # sbhd -> bhsd for the eager kernel, matching the reference's layout.
             block_keep = build_block_keep(block_indices, key.shape[0], self.block_size)

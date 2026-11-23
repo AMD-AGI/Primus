@@ -196,6 +196,11 @@ class MSATransformerConfig(TransformerConfig):
     one-token-per-workgroup kernels and keeps those on a mismatch. Needs S and the block size to be
     multiples of 4 / 2, else unchanged."""
 
+    msa_exact_numerics: bool = False
+    """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
+    kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for
+    regression checks). Each such option checks this flag; the bit-identical ones above ignore it."""
+
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not
     differentiable, so this loss is the only gradient its projections ever receive."""

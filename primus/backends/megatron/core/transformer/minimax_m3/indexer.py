@@ -187,6 +187,13 @@ class MinimaxM3Indexer(MegatronModule):
                 index_q = rope.apply(index_q, interleaved)
                 index_k = rope.apply(index_k, interleaved)
 
+        return self.select(index_q, index_k)
+
+    def select(
+        self, index_q: torch.Tensor, index_k: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[object]]:
+        """Normed, roped ``[sq, b, n_index, d]`` index q and ``[sq, b, 1, d]`` index k ->
+        ``(block_indices, block_scores, plan)``, as :meth:`forward` returns them."""
         if self.fused_select is not None:
             # [sq, b, n, d] straight in: the kernel never forms the [b, n, sq, sk] scores.
             return self.fused_select(index_q, index_k, self.select_from_block_scores, self.block_size)
