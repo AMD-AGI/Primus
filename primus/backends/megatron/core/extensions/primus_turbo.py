@@ -133,6 +133,7 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.backends.megatron.core.utils import is_allgather_cp
 from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import warning_rank_0
 
@@ -1191,8 +1192,19 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                     pg_collection, "hcp"
                 ), "TEDotProductAttention pg_collection must have hierarchical cp pg"
 
+        # cp_comm_type all_gather: Turbo's all-gather-KV attention on Megatron's zigzag CP split (the
+        # batch and RoPE stay on the stock CP path, see data_loader_store).
+        self.agkv_mode = None
+        if self.config.context_parallel_size > 1 and is_allgather_cp(cp_comm_type):
+            assert not args.enable_turbo_attention_float8, "turbo allgather CP runs bf16 attention only"
+            assert not _use_sink_attention, "turbo allgather CP takes no sink attention"
+            assert config.window_size is None, "turbo allgather CP takes no sliding window"
+            self.agkv_mode = args.turbo_agkv_mode
+            self.agkv_group = pg_collection.cp
+            self.attn = primus_turbo_torch.ops.flash_attn_agkv_func
+
         self.attn_kwargs = {}
-        if self.config.context_parallel_size > 1:
+        if self.config.context_parallel_size > 1 and self.agkv_mode is None:
             self.attn_kwargs["ulysses_group"] = pg_collection.cp
             # TODO (limou)
             # enable ring attention
@@ -1318,6 +1330,19 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         query = query.contiguous()
         key = key.contiguous()
         value = value.contiguous()
+
+        if self.agkv_mode is not None:
+            assert causal and qkv_format == "sbhd", "turbo allgather CP takes causal sbhd attention only"
+            o = self.attn(
+                query,
+                key,
+                value,
+                self.agkv_group,
+                softmax_scale=self.softmax_scale,
+                mode=self.agkv_mode,
+                deterministic=self.deterministic_mode,
+            )
+            return o.view(o.shape[0], o.shape[1], -1)
 
         if qkv_format == "sbhd":
             query = query.permute(1, 0, 2, 3)

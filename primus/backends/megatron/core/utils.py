@@ -70,6 +70,11 @@ def process_mtp_loss_compat(*, runtime_gather_output=None, tp_group=None, **kwar
     return process_mtp_loss(**kwargs)
 
 
+def is_allgather_cp(cp_comm_type) -> bool:
+    """Whether ``cp_comm_type`` is the all-gather-KV CP (Megatron spells it ``all_gather``)."""
+    return isinstance(cp_comm_type, str) and cp_comm_type.replace("_", "").lower() == "allgather"
+
+
 @lru_cache
 def produce_attention_sharder(cp_comm_type: str):
     # Import only when needed to avoid import errors if primus_turbo is not available

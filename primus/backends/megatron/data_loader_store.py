@@ -128,7 +128,15 @@ def get_batch_func(data_iterator, vp_stage=None):
             else:
                 batch[k] = v[:, start_idx:end_idx].contiguous()
 
-    if args.context_parallel_size > 1 and args.enable_primus_turbo and args.use_turbo_attention:
+    from primus.backends.megatron.core.utils import is_allgather_cp
+
+    # Turbo's all_gather CP attention takes Megatron's own zigzag split (the stock branch below).
+    if (
+        args.context_parallel_size > 1
+        and args.enable_primus_turbo
+        and args.use_turbo_attention
+        and not is_allgather_cp(args.cp_comm_type)
+    ):
         try:
             from primus.backends.megatron.core.utils import (
                 produce_attention_sharder,
