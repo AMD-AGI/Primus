@@ -12,7 +12,8 @@ export NODE_RANK=0
 export MASTER_ADDR=localhost
 export MASTER_PORT=29502
 
-# MLPerf timed runs set SEED=$RANDOM per trial; default here for single-shot primus-cli.
+# A host SEED is used for every trial. Unset means a new $RANDOM per trial,
+# including a single-shot primus-cli that does not pass SEED.
 export SEED="${SEED:-$RANDOM}"
 
 export PRIMUS_PATH="${PRIMUS_PATH:-/workspace/Primus}"
@@ -74,9 +75,11 @@ export HEALING_PREFETCH_GB="${HEALING_PREFETCH_GB:-0}"
 export HEALING_PREFETCH_STEPS="${HEALING_PREFETCH_STEPS:-4}"
 export WARMUP_KEEP_CACHE="${WARMUP_KEEP_CACHE:-1}"
 
-# RCCL disables cuMem when uname reports a kernel older than 6.8. Lux reports
-# RHEL 5.14 even though amdgpu supports cuMem, so the container preloads
-# libfakeuname.so (LUX_FAKE_KERNEL=6.8.0-lux) and RCCL then enables cuMem.
+# RCCL disables cuMem when uname reports a kernel older than 6.8. Some hosts
+# report an older kernel than amdgpu supports (a RHEL 5.14 uname is one
+# example), so run_and_time.sh preloads libfakeuname.so with
+# FAKE_UNAME_RELEASE=6.8.0 and RCCL then enables cuMem. A reported kernel of
+# 6.8 or newer is left unchanged. LUX_FAKE_KERNEL is still accepted.
 # With cuMem, the parameter all-gather and the gradient reduce-scatter use
 # the GPU copy engines, matching the submission config.
 export MEGATRON_PARAM_GATHER_BACKEND="${MEGATRON_PARAM_GATHER_BACKEND:-rccl_sdma}"

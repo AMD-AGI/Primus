@@ -60,6 +60,7 @@ TOP_KEYS = {
     "step_timeout",
     "download_timeout",
     "keep_container",
+    "privileged",
     "diffusion",
     "dlrm",
 }
@@ -190,6 +191,12 @@ def parse_args(argv):
     p.add_argument("--output-dir", help="Override output_dir")
     p.add_argument("--timeout", type=int, help="Override step_timeout (seconds, 0 = none)")
     p.add_argument("--keep-container", action="store_true", help="Keep the container after the run")
+    p.add_argument(
+        "--privileged",
+        action="store_true",
+        help="Start the benchmark containers with docker's --privileged (off by default; some "
+        "clusters refuse it)",
+    )
     p.add_argument(
         "--label",
         action="append",
@@ -356,6 +363,7 @@ def resolve(args):
         "step_timeout": step_timeout,
         "download_timeout": int(cfg.get("download_timeout", 0)),
         "keep_container": bool(args.keep_container or cfg.get("keep_container", False)),
+        "privileged": bool(args.privileged or cfg.get("privileged", False)),
         "dry_run": bool(args.dry_run),
         "diffusion_models": list(dict.fromkeys(r["model"] for r in runs)),
         "diffusion_runs": runs,
@@ -389,6 +397,7 @@ def emit_shell(plan, args):
         f"STEP_TIMEOUT={q(plan['step_timeout'])}",
         f"DOWNLOAD_TIMEOUT={q(plan['download_timeout'])}",
         f"KEEP_CONTAINER={q(plan['keep_container'])}",
+        f"PRIVILEGED={q(plan['privileged'])}",
         f"DRY_RUN={q(plan['dry_run'])}",
         f"DIFF_MODELS={arr(plan['diffusion_models'])}",
         # one element per run: model<TAB>batch_size<TAB>override...

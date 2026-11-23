@@ -3,6 +3,19 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-pretrain}
 workspace: ./output
 
+# Qwen3-30B-A3B, dropless MoE (no token is dropped): sparse expert matmuls on the Primus-Turbo hipBLASLt grouped GEMM, FSDP 8.
+# Needs Primus-Turbo built for JAX and MaxText with the Turbo grouped GEMM (release/v26.10 or later).
+# 8x MI300X (per-device batch 8, smaller than on MI325X for 192 GB HBM): 9484 tokens/s/device; the previous
+# token-dropping recipe, kept as qwen3_30B_A3B-bf16-token_dropping-pretrain.yaml: 5656 tokens/s/device.
+env:
+  # Tuned and measured at XLA GEMM autotune level 1 (Primus's default is 3). Set here, this and XLA_FLAGS_APPEND
+  # below take precedence over values exported in the shell or passed with primus-cli --env.
+  XLA_GPU_AUTOTUNE_LEVEL: "1"
+  # Collective combine thresholds of 256 MiB instead of Primus's 8 GB, so FSDP all-gathers and reduce-scatters
+  # are split into smaller groups that XLA can overlap with compute.
+  # The first collective can start >40 s late on one GPU (per-device first-call setup); XLA's default 40 s limit for it then aborts the run.
+  XLA_FLAGS_APPEND: "--xla_gpu_all_gather_combine_threshold_bytes=268435456 --xla_gpu_reduce_scatter_combine_threshold_bytes=268435456 --xla_gpu_first_collective_call_terminate_timeout_seconds=900"
+
 modules:
   pre_trainer:
     framework: maxtext
@@ -28,15 +41,19 @@ modules:
       dcn_data_parallelism: -1
       dcn_fsdp_parallelism: 1
 
-      # intra-node parallelism strategy
-      ici_fsdp_parallelism: 1
+      # intra-node parallelism strategy: all 128 experts on every GPU (one grouped GEMM over 128 groups) and
+      # no ragged all-to-all, which dominates the dropless path under expert parallelism on ROCm.
+      ici_fsdp_parallelism: 8
       ici_data_parallelism: 1
-      ici_expert_parallelism: -1
+      ici_expert_parallelism: 1
 
-      # training
-      max_target_length: 4096
-      per_device_batch_size: 4
-      remat_policy: "minimal"
-      sparse_matmul: false
+      # dropless MoE through the Primus-Turbo grouped GEMM
+      sparse_matmul: true
       megablox: false
-      capacity_factor: 1
+      capacity_factor: -1
+      use_turbo_grouped_gemm: true
+      turbo_grouped_gemm_backend: "hipblaslt"
+
+      max_target_length: 4096
+      per_device_batch_size: 8
+      remat_policy: "minimal"

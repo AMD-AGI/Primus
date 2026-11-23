@@ -88,7 +88,7 @@ modules:
       no_save_optim: null
       no_save_rng: null
       disable_last_saving: false
-      ckpt_format: torch
+      ckpt_format: torch_dist
 
       # Precision (BF16 mixed precision)
       bf16: true

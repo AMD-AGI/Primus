@@ -1,0 +1,3907 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#!/usr/bin/env python3
+
+# pyre-unsafe
+
+import os
+from typing import List, Optional, Tuple
+
+import torch
+
+# @manual=//triton:triton
+import triton
+
+# @manual=//triton:triton
+import triton.language as tl
+from generative_recommenders.ops.utils import (
+    copy_if_different_ptr,
+    maybe_register_custom_op,
+)
+
+try:
+    # @manual=//triton:triton
+    import triton.language.extra.tlx as tlx  # type: ignore
+
+    HAS_TLX = True
+except ImportError:
+    # suppress type checking errors
+    tlx = None
+
+    HAS_TLX = False
+
+from generative_recommenders.common import (
+    autotune_max_seq_len,
+    prev_power_of_2,
+    switch_to_contiguous_if_needed,
+    triton_autotune,
+)
+from generative_recommenders.ops.triton._autotune_pinning import pinned_or_full
+from triton.language.extra.libdevice import (  # @manual=//triton:triton
+    fast_dividef,
+    fast_expf,
+)
+
+try:
+    # @manual=//triton:triton
+    from triton.tools.tensor_descriptor import TensorDescriptor
+
+    tensor_descriptor_tma = True
+except ImportError:
+    tensor_descriptor_tma = False
+
+try:
+    from generative_recommenders.ops.triton.fb.triton_attention_utils import acc_dq
+except ImportError:
+    from generative_recommenders.ops.triton.triton_attention_utils import acc_dq
+
+
+def _fast_interior() -> bool:
+    """Whether to split the key loop into unmasked-interior and boundary spans.
+
+    Read per call rather than latched at import, matching $HSTU_ATTN_BWD in
+    ops/hstu_attention.py: it costs one dict lookup against a kernel launch, and
+    it is what lets a test flip the specialization in-process. It reaches the
+    kernel as a tl.constexpr, so each value still gets its own compiled variant.
+    """
+    return os.environ.get("TRITON_HSTU_FAST_INTERIOR", "0") == "1"
+
+
+def _host_descriptor_pre_hook(nargs):
+    if not tensor_descriptor_tma:
+        return
+
+    if not isinstance(nargs["Q"], TensorDescriptor):
+        return
+    BLOCK_M = nargs["BLOCK_M"]
+    BLOCK_N = nargs["BLOCK_N"]
+    BLOCK_D_Q = nargs["BLOCK_D_Q"]
+    BLOCK_D_V = nargs["BLOCK_D_V"]
+    if "USE_TLX" in nargs and nargs["USE_TLX"]:
+        BLOCK_M = BLOCK_M // nargs["NUM_MMA_GROUPS"]
+    nargs["Q"].block_shape = [BLOCK_M, BLOCK_D_Q]
+    nargs["V"].block_shape = [BLOCK_N, BLOCK_D_V]
+    nargs["K"].block_shape = [BLOCK_N, BLOCK_D_Q]
+
+
+# pyre-ignore[2]
+def _early_config_prune(
+    configs: List[triton.Config],
+    named_args,
+    **kwargs,
+) -> List[triton.Config]:
+    """Filter autotune configs that are incompatible with the current call.
+
+    The TLX (warp-specialized) variant of ``_hstu_attn_fwd`` calls
+    ``tlx.async_descriptor_load(Q, ...)`` which requires Q/K/V to be real TMA
+    tensor descriptors (``tl.tensor_descriptor_base``). They are only
+    constructed by the host wrapper when ``ENABLE_TMA=True`` AND the host
+    ``TensorDescriptor`` API is importable. If the kernel is invoked without
+    those preconditions, raw tensors flow into the TLX path and the
+    ``isinstance(desc, tl.tensor_descriptor_base)`` assert in
+    ``triton/language/extra/tlx/mem_ops.py`` fires at compile time.
+
+    We make autotuning robust to that mismatch by dropping any config with
+    ``USE_TLX=True`` whenever ENABLE_TMA is not set or TMA host descriptors
+    are unavailable. This is purely defensive: if the caller threads
+    ``enable_tma=True`` (see ``_should_enable_tma`` below) the TLX configs
+    remain eligible.
+    """
+    enable_tma = kwargs.get("ENABLE_TMA", None)
+    if enable_tma is None:
+        enable_tma = named_args.get("ENABLE_TMA", False)
+    if enable_tma and tensor_descriptor_tma:
+        return configs
+    pruned = [c for c in configs if not c.kwargs.get("USE_TLX", False)]
+    # Safety: never return an empty config list.
+    return pruned if pruned else configs
+
+
+def _should_enable_tma() -> bool:
+    """Return True iff the TMA / TLX fast path can be safely enabled.
+
+    Conditions:
+      * The host ``triton.tools.tensor_descriptor.TensorDescriptor`` API is
+        importable (``tensor_descriptor_tma``).
+      * CUDA is available and the device is Hopper (compute capability 9),
+        which is the only architecture for which TLX configs are emitted in
+        ``_get_fw_configs``.
+    """
+    if not tensor_descriptor_tma:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    # NVIDIA-only gate: TMA (Tensor Memory Accelerator) is Hopper-specific
+    # hardware. On ROCm/HIP, `torch.cuda.get_device_capability()` mirrors the
+    # gfx name into a major.minor tuple — gfx950 (MI350X) returns (9, 5), which
+    # would otherwise pass the `device_capability == 9` check below and trick
+    # the kernel into taking the TMA path. The TMA path uses
+    # `triton.tools.tensor_descriptor.TensorDescriptor` and `TensorDescriptor.load`
+    # which lower to PTX `cp.async.bulk.tensor.*`; on AMD this either fails to
+    # compile or produces a kernel with mismatched reduction-dim shapes for
+    # `tl.dot(silu, v)` in `_hstu_attn_fwd_one_block` (see WARNING in
+    # `_hstu_attn_fwd` for the cascade). Bail out early on HIP so the
+    # non-TMA path is selected and AMD gets a working kernel.
+    if torch.version.hip:
+        return False
+    try:
+        device_capability = torch.cuda.get_device_capability()[0]
+    except (RuntimeError, AssertionError):
+        return False
+    return device_capability == 9
+
+
+def _get_fw_configs() -> List[triton.Config]:  # noqa: C901
+    configs = []
+    if torch.version.hip:
+        for BLOCK_M in [32, 64, 128]:
+            for BLOCK_N in [32, 64]:
+                for num_stages in [1, 2]:
+                    for num_warps in [4, 8]:
+                        for matrix_instr_nonkdim in [16, 32]:
+                            configs.append(
+                                triton.Config(
+                                    {
+                                        "BLOCK_M": BLOCK_M,
+                                        "BLOCK_N": BLOCK_N,
+                                        "matrix_instr_nonkdim": matrix_instr_nonkdim,
+                                        "waves_per_eu": 0,
+                                        "kpack": 2,
+                                    },
+                                    num_stages=num_stages,
+                                    num_warps=num_warps,
+                                )
+                            )
+    else:
+        configs = [
+            triton.Config(
+                {"BLOCK_M": 16, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=2,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=2,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 32},
+                num_stages=4,
+                num_warps=2,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 32},
+                num_stages=4,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64},
+                num_stages=4,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64},
+                num_stages=4,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 128},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 128},
+                num_stages=2,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 32},
+                num_stages=4,
+                num_warps=2,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 32},
+                num_stages=4,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64},
+                num_stages=2,
+                num_warps=2,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64},
+                num_stages=4,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 64, "BLOCK_N": 64},
+                num_stages=4,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=2,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 32},
+                num_stages=4,
+                num_warps=2,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 32},
+                num_stages=4,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 32},
+                num_stages=2,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 32},
+                num_stages=4,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 64},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 64},
+                num_stages=2,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 64},
+                num_stages=4,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 128},
+                num_stages=4,
+                num_warps=4,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 128, "BLOCK_N": 128},
+                num_stages=2,
+                num_warps=8,
+                pre_hook=_host_descriptor_pre_hook,
+            ),
+        ]
+
+    # The `_hstu_attn_fwd` kernel signature unconditionally declares the four
+    # constexprs `USE_TLX`, `NUM_BUFFERS`, `NUM_MMA_WARPS_PER_GROUP`,
+    # `NUM_MMA_GROUPS` (introduced for the Hopper TLX warp-specialized variant).
+    # Triton requires every constexpr be bound at autotune time; missing any one
+    # of them triggers `TypeError: dynamic_func() missing N required positional
+    # arguments` during kernel dispatch. This loop populates the non-TLX defaults
+    # so the kernel call site doesn't have to know about TLX at all.
+    #
+    # IMPORTANT: this loop must apply to BOTH the HIP branch and the CUDA branch
+    # above. It used to live inside the CUDA `else:` block which meant HIP
+    # configs reached `_hstu_attn_fwd[grid](...)` without these defaults and
+    # crashed at dispatch. Keep this hoisted (outside the if/else) when
+    # editing — see commit message for the symptom.
+    for config in configs:
+        if not config.kwargs.get("USE_TLX", False):
+            config.kwargs["USE_TLX"] = False
+            config.kwargs["NUM_BUFFERS"] = 1
+            config.kwargs["NUM_MMA_WARPS_PER_GROUP"] = 1
+            config.kwargs["NUM_MMA_GROUPS"] = 1
+
+    # TLX (Triton Language Extension) warp-specialized configs are Hopper-only.
+    # Guard with `not torch.version.hip` so AMD never sees them — the TLX code
+    # path inside `_hstu_attn_fwd` calls `tlx.async_descriptor_load(...)` which
+    # requires real TMA tensor descriptors and only compiles on CUDA.
+    if not torch.version.hip:
+        if HAS_TLX:
+            try:
+                device_capability = torch.cuda.get_device_capability()[0]
+            except (RuntimeError, AssertionError):
+                # No CUDA device available
+                device_capability = None
+
+            if device_capability == 9:
+                # H100 configs
+                configs.append(
+                    triton.Config(
+                        {
+                            "BLOCK_M": 128,
+                            "BLOCK_N": 64,
+                            "USE_TLX": True,
+                            "NUM_BUFFERS": 2,
+                            "NUM_MMA_WARPS_PER_GROUP": 4,
+                            "NUM_MMA_GROUPS": 2,
+                        },
+                        num_stages=0,
+                        num_warps=4,
+                        pre_hook=_host_descriptor_pre_hook,
+                    ),
+                )
+
+    return configs
+
+
+@triton.jit
+def _hstu_attn_fwd_one_block(  # noqa: C901
+    start_n,
+    seq_len,
+    offs_m,
+    offs_n,
+    q,
+    K,
+    V,
+    K_block_ptr,
+    V_block_ptr,
+    stride_kn,
+    stride_vn,
+    offset_kh,
+    offset_vh,
+    seq_start,
+    n_targets,
+    alpha,
+    QK_SCALE,
+    V_SCALE,
+    MAX_SEQ_LEN,
+    contextual_seq_len,
+    max_attn_len,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    FP8_INPUT: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+):
+    start_n = tl.multiple_of(start_n, BLOCK_N)
+    # Triton 3.9 (ROCm 10.2 image) removed block pointers (tl.make_block_ptr /
+    # tl.advance and load(boundary_check=, padding_option=)). Without TMA,
+    # K_block_ptr / V_block_ptr are the plain (sequence, head) base pointers
+    # set up by _hstu_attn_fwd_compute, and the tiles are addressed from the
+    # key rows start_n + [0, BLOCK_N): the old block-pointer offset was start_n
+    # at every call. Rows outside [0, seq_len) load as 0, as boundary_check +
+    # padding_option="zero" did. Rows are >= 0 for valid inputs; the unsigned
+    # compare keeps the lower bound anyway (a negative row wraps above
+    # seq_len) at no extra cost: it replaces the signed compare one for one.
+    offs_kv = start_n + tl.arange(0, BLOCK_N)
+    kv_in = offs_kv.to(tl.uint32) < seq_len.to(tl.uint32)
+    # -- compute qk ----
+    k = None
+    qk = None
+    if ENABLE_TMA:
+        k = K.load(
+            [(seq_start + start_n).to(tl.int32), offset_kh.to(tl.int32)],
+        )
+        # tma can only be loaded in one order, use trans afterwards
+        qk = (
+            tl.dot(q, tl.trans(k).to(q.dtype), allow_tf32=ALLOW_TF32)
+            * alpha
+            * QK_SCALE
+        )
+    else:
+        # K^T tile [BLOCK_D_Q, BLOCK_N] (was a block pointer with order (0, 1)).
+        k = tl.load(
+            K_block_ptr
+            + offs_kv[None, :] * stride_kn
+            + tl.arange(0, BLOCK_D_Q)[:, None],
+            mask=kv_in[None, :],
+            other=0.0,
+        )
+        qk = (
+            tl.dot(q, k.to(q.dtype), allow_tf32=ALLOW_TF32)
+            * alpha
+            * QK_SCALE
+        )
+    invalid_mask = offs_m[:, None] == offs_n[None, :]
+    max_ids = seq_len
+    if HAS_CONTEXTUAL_SEQ_LEN:
+        offs_m = offs_m - contextual_seq_len + 1
+        offs_m = tl.where(
+            offs_m > 0,
+            offs_m,
+            0,
+        )
+        offs_n = offs_n - contextual_seq_len + 1
+        offs_n = tl.where(
+            offs_n > 0,
+            offs_n,
+            0,
+        )
+        max_ids = max_ids - contextual_seq_len + 1
+    if HAS_MULTIPLE_TARGETS:
+        max_ids = max_ids - n_targets
+        offs_m = tl.where(
+            offs_m < max_ids,
+            offs_m,
+            max_ids,
+        )
+        offs_n = tl.where(
+            offs_n < max_ids,
+            offs_n,
+            max_ids,
+        )
+    offs_m_minus_n = offs_m[:, None] - offs_n[None, :]
+    invalid_mask = invalid_mask or (offs_m_minus_n > 0)
+    if HAS_MAX_ATTN_LEN:
+        invalid_mask = invalid_mask and offs_m_minus_n <= max_attn_len
+    if HAS_CONTEXTUAL_SEQ_LEN:
+        invalid_mask = invalid_mask or (
+            offs_m[:, None] == 0 and offs_n[None, :] < max_ids
+        )
+    scale = tl.where(invalid_mask, (1.0 / MAX_SEQ_LEN), 0.0)
+    silu = fast_dividef(qk, 1.0 + fast_expf(-qk)) * scale
+    v = None
+    if ENABLE_TMA:
+        v = V.load(
+            [(seq_start + start_n).to(tl.int32), offset_vh.to(tl.int32)],
+        )
+    else:
+        # V tile [BLOCK_N, BLOCK_D_V], rows offs_kv (offs_n was rewritten above).
+        v = tl.load(
+            V_block_ptr
+            + offs_kv[:, None] * stride_vn
+            + tl.arange(0, BLOCK_D_V)[None, :],
+            mask=kv_in[:, None],
+            other=0.0,
+        )
+    if FP8_INPUT:
+        # Q/K remain FP8 for the score dot. The gate has no independently
+        # calibrated FP8 scale, so AV dequantizes V in registers and retains
+        # the baseline BF16 gate instead of clipping/casting it implicitly.
+        return tl.dot(
+            silu.to(tl.bfloat16),
+            (v.to(tl.float32) * V_SCALE).to(tl.bfloat16),
+            allow_tf32=ALLOW_TF32,
+        )
+    silu = silu.to(v.dtype)
+    return tl.dot(silu, v, allow_tf32=ALLOW_TF32) * V_SCALE
+
+
+@triton.jit
+def _hstu_attn_fwd_one_block_nomask(
+    start_n,
+    q,
+    K,
+    V,
+    K_block_ptr,
+    V_block_ptr,
+    stride_kn,
+    stride_vn,
+    offset_kh,
+    offset_vh,
+    seq_start,
+    alpha,
+    QK_SCALE,
+    V_SCALE,
+    MAX_SEQ_LEN,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    FP8_INPUT: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+):
+    """Compute a provably all-valid interior KV tile without mask VALU."""
+    start_n = tl.multiple_of(start_n, BLOCK_N)
+    # Triton 3.9 port: plain base pointers, see _hstu_attn_fwd_one_block. No
+    # row mask: the caller runs this only for start_n + BLOCK_N <= n_split, and
+    # n_split <= start_m < seq_len, so every row is in range (the old
+    # boundary_check never fired here).
+    offs_kv = start_n + tl.arange(0, BLOCK_N)
+    if ENABLE_TMA:
+        k = K.load(
+            [(seq_start + start_n).to(tl.int32), offset_kh.to(tl.int32)],
+        )
+        qk = (
+            tl.dot(q, tl.trans(k).to(q.dtype), allow_tf32=ALLOW_TF32)
+            * alpha
+            * QK_SCALE
+        )
+    else:
+        k = tl.load(
+            K_block_ptr
+            + offs_kv[None, :] * stride_kn
+            + tl.arange(0, BLOCK_D_Q)[:, None]
+        )
+        qk = (
+            tl.dot(q, k.to(q.dtype), allow_tf32=ALLOW_TF32)
+            * alpha
+            * QK_SCALE
+        )
+    # Keep the baseline BF16 arithmetic order: gate, scale, cast, AV dot.
+    scale = 1.0 / MAX_SEQ_LEN
+    silu = fast_dividef(qk, 1.0 + fast_expf(-qk)) * scale
+    if ENABLE_TMA:
+        v = V.load(
+            [(seq_start + start_n).to(tl.int32), offset_vh.to(tl.int32)],
+        )
+    else:
+        v = tl.load(
+            V_block_ptr
+            + offs_kv[:, None] * stride_vn
+            + tl.arange(0, BLOCK_D_V)[None, :]
+        )
+    if FP8_INPUT:
+        return tl.dot(
+            silu.to(tl.bfloat16),
+            (v.to(tl.float32) * V_SCALE).to(tl.bfloat16),
+            allow_tf32=ALLOW_TF32,
+        )
+    silu = silu.to(v.dtype)
+    return tl.dot(silu, v, allow_tf32=ALLOW_TF32) * V_SCALE
+
+
+@triton.jit
+def _hstu_attn_fwd_compute(  # noqa C901
+    Q,
+    K,
+    V,
+    H,
+    DimQ,
+    DimV,
+    workspace_ptr,
+    seq_offsets,
+    num_targets,
+    Out,
+    stride_qm,
+    stride_qh,
+    stride_kn,
+    stride_kh,
+    stride_vn,
+    stride_vh,
+    stride_om,
+    stride_oh,
+    alpha,
+    QK_SCALE,
+    V_SCALE,
+    MAX_SEQ_LEN,
+    DeltaSize,
+    contextual_seq_len,
+    max_attn_len,
+    off_z,
+    off_h,
+    pid,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    IS_DELTA_Q: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    FP8_INPUT: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+    TMA_DESC_SIZE: tl.constexpr,
+    FAST_INTERIOR: tl.constexpr = False,
+):
+    seq_start = tl.load(seq_offsets + off_z).to(tl.int64)
+    off_h = off_h.to(tl.int64)
+    off_z = off_z.to(tl.int64)
+    seq_end = tl.load(seq_offsets + off_z + 1)
+    seq_len = (seq_end - seq_start).to(tl.int32)
+
+    if IS_DELTA_Q:
+        start_m_delta = pid * BLOCK_M
+        start_m = (start_m_delta + seq_len - DeltaSize).to(tl.int32)
+    else:
+        start_m_delta = 0
+        start_m = pid * BLOCK_M
+    if start_m < seq_len:
+        if HAS_MULTIPLE_TARGETS:
+            n_targets = tl.load(num_targets + off_z).to(tl.int32)
+        else:
+            n_targets = None
+
+        # initialize offsets
+        offs_m = start_m + tl.arange(0, BLOCK_M)
+        offs_n = tl.arange(0, BLOCK_N)
+        K_block_ptr = None
+        V_block_ptr = None
+        if not ENABLE_TMA:
+            # Triton 3.9 (ROCm 10.2 image) removed block pointers: explicit
+            # pointer + mask. Tensor descriptors would also work but compile
+            # worse on gfx950 (no TDM; lowered back to pointers, with a
+            # tl.trans for K^T). Q rows past the end load as 0, as
+            # boundary_check=(0,) + padding_option="zero" did.
+            if IS_DELTA_Q:
+                q_base = Q + off_h * stride_qh + off_z * DeltaSize * stride_qm
+                q_rows = start_m_delta + tl.arange(0, BLOCK_M)
+                q_mask = q_rows < DeltaSize
+            else:
+                q_base = Q + off_h * stride_qh + seq_start * stride_qm
+                q_rows = start_m + tl.arange(0, BLOCK_M)
+                q_mask = q_rows < seq_len
+            q = tl.load(
+                q_base
+                + q_rows[:, None] * stride_qm
+                + tl.arange(0, BLOCK_D_Q)[None, :],
+                mask=q_mask[:, None],
+                other=0.0,
+            )
+            # Per-(sequence, head) bases; the one_block helpers index rows
+            # from start_n, which replaces the tl.advance bookkeeping.
+            K_block_ptr = K + off_h * stride_kh + seq_start * stride_kn
+            V_block_ptr = V + off_h * stride_vh + seq_start * stride_vn
+        else:
+            if IS_DELTA_Q:
+                q = Q.load(
+                    [
+                        (off_z * DeltaSize + start_m_delta).to(tl.int32),
+                        (off_h * stride_qh).to(tl.int32),
+                    ]
+                )
+            else:
+                q = Q.load(
+                    [
+                        (seq_start + start_m).to(tl.int32),
+                        (off_h * stride_qh).to(tl.int32),
+                    ]
+                )
+
+        acc = tl.zeros([BLOCK_M, BLOCK_D_V], dtype=tl.float32)
+        if HAS_MULTIPLE_TARGETS:
+            uih_end = seq_len - n_targets
+        else:
+            uih_end = seq_len
+        # Preserve the exact history boundary before BLOCK_N rounding below.
+        uih_unrounded = uih_end
+        if HAS_CONTEXTUAL_SEQ_LEN is True and start_m < contextual_seq_len:
+            # uih_end must be larger than start_m
+            low = 0
+            high = seq_len
+        else:
+            low = 0
+            high = start_m + BLOCK_M
+            if HAS_MAX_ATTN_LEN:
+                if start_m > uih_end:
+                    low = uih_end - max_attn_len
+                else:
+                    low = start_m - max_attn_len
+                if HAS_CONTEXTUAL_SEQ_LEN:
+                    low = low if low > contextual_seq_len else 0
+                else:
+                    low = low if low > 0 else 0
+            if HAS_MULTIPLE_TARGETS:
+                uih_end = (uih_end + BLOCK_N - 1) // BLOCK_N * BLOCK_N
+                if uih_end < start_m:
+                    high = seq_len - n_targets
+
+        # Every block in [low, n_split) is strictly below the causal diagonal
+        # and entirely within history. The complete mask is therefore all ones.
+        # Windowed attention keeps the baseline path because its lower bound can
+        # invalidate otherwise-causal elements.
+        n_split = low
+        if FAST_INTERIOR and not HAS_MAX_ATTN_LEN:
+            interior_bound = uih_unrounded
+            if start_m < interior_bound:
+                interior_bound = start_m
+            n_split = (interior_bound // BLOCK_N) * BLOCK_N
+            if n_split < low:
+                n_split = low
+
+        # Triton 3.9 port: the helpers address K/V rows from start_n, which is
+        # where every tl.advance here used to leave the block pointers (low,
+        # then += BLOCK_N per block, then low_delta for the target blocks), so
+        # the advance / end_n / offset bookkeeping is gone.
+        if FAST_INTERIOR and not HAS_MAX_ATTN_LEN:
+            for start_n in range(low, n_split, BLOCK_N):
+                acc += _hstu_attn_fwd_one_block_nomask(
+                    start_n=start_n,
+                    q=q,
+                    K=K,
+                    V=V,
+                    K_block_ptr=K_block_ptr,
+                    V_block_ptr=V_block_ptr,
+                    stride_kn=stride_kn,
+                    stride_vn=stride_vn,
+                    offset_kh=off_h * stride_kh,
+                    offset_vh=off_h * stride_vh,
+                    seq_start=seq_start,
+                    alpha=alpha,
+                    QK_SCALE=QK_SCALE,
+                    V_SCALE=V_SCALE,
+                    MAX_SEQ_LEN=MAX_SEQ_LEN,
+                    ALLOW_TF32=ALLOW_TF32,
+                    BLOCK_D_Q=BLOCK_D_Q,
+                    BLOCK_D_V=BLOCK_D_V,
+                    BLOCK_N=BLOCK_N,
+                    FP8_INPUT=FP8_INPUT,
+                    ENABLE_TMA=ENABLE_TMA,
+                )
+            for start_n in range(n_split, high, BLOCK_N):
+                acc += _hstu_attn_fwd_one_block(
+                    start_n=start_n,
+                    seq_len=seq_len,
+                    offs_m=offs_m,
+                    offs_n=offs_n + start_n,
+                    q=q,
+                    K=K,
+                    V=V,
+                    K_block_ptr=K_block_ptr,
+                    V_block_ptr=V_block_ptr,
+                    stride_kn=stride_kn,
+                    stride_vn=stride_vn,
+                    offset_kh=off_h * stride_kh,
+                    offset_vh=off_h * stride_vh,
+                    seq_start=seq_start,
+                    n_targets=n_targets if HAS_MULTIPLE_TARGETS else None,
+                    alpha=alpha,
+                    QK_SCALE=QK_SCALE,
+                    V_SCALE=V_SCALE,
+                    MAX_SEQ_LEN=MAX_SEQ_LEN,
+                    contextual_seq_len=contextual_seq_len,
+                    max_attn_len=max_attn_len,
+                    HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                    HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                    HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                    ALLOW_TF32=ALLOW_TF32,
+                    BLOCK_D_Q=BLOCK_D_Q,
+                    BLOCK_D_V=BLOCK_D_V,
+                    BLOCK_N=BLOCK_N,
+                    FP8_INPUT=FP8_INPUT,
+                    ENABLE_TMA=ENABLE_TMA,
+                )
+        else:
+            for start_n in range(low, high, BLOCK_N):
+                acc += _hstu_attn_fwd_one_block(
+                    start_n=start_n,
+                    seq_len=seq_len,
+                    offs_m=offs_m,
+                    offs_n=offs_n + start_n,
+                    q=q,
+                    K=K,
+                    V=V,
+                    K_block_ptr=K_block_ptr,
+                    V_block_ptr=V_block_ptr,
+                    stride_kn=stride_kn,
+                    stride_vn=stride_vn,
+                    offset_kh=off_h * stride_kh,
+                    offset_vh=off_h * stride_vh,
+                    seq_start=seq_start,
+                    n_targets=n_targets if HAS_MULTIPLE_TARGETS else None,
+                    alpha=alpha,
+                    QK_SCALE=QK_SCALE,
+                    V_SCALE=V_SCALE,
+                    MAX_SEQ_LEN=MAX_SEQ_LEN,
+                    contextual_seq_len=contextual_seq_len,
+                    max_attn_len=max_attn_len,
+                    HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                    HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                    HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                    ALLOW_TF32=ALLOW_TF32,
+                    BLOCK_D_Q=BLOCK_D_Q,
+                    BLOCK_D_V=BLOCK_D_V,
+                    BLOCK_N=BLOCK_N,
+                    FP8_INPUT=FP8_INPUT,
+                    ENABLE_TMA=ENABLE_TMA,
+                )
+
+        if HAS_MULTIPLE_TARGETS:
+            # pyre-ignore[61]
+            if uih_end < start_m:
+                low_delta = start_m
+                high_delta = start_m + BLOCK_M
+                for start_delta in tl.range(
+                    low_delta, high_delta, BLOCK_N, num_stages=0
+                ):
+                    acc += _hstu_attn_fwd_one_block(
+                        start_n=start_delta,
+                        seq_len=seq_len,
+                        offs_m=offs_m,
+                        offs_n=offs_n + start_delta,
+                        q=q,
+                        K=K,
+                        V=V,
+                        K_block_ptr=K_block_ptr,
+                        V_block_ptr=V_block_ptr,
+                        stride_kn=stride_kn,
+                        stride_vn=stride_vn,
+                        offset_kh=off_h * stride_kh,
+                        offset_vh=off_h * stride_vh,
+                        seq_start=seq_start,
+                        n_targets=n_targets if HAS_MULTIPLE_TARGETS else None,
+                        alpha=alpha,
+                        QK_SCALE=QK_SCALE,
+                        V_SCALE=V_SCALE,
+                        MAX_SEQ_LEN=MAX_SEQ_LEN,
+                        contextual_seq_len=contextual_seq_len,
+                        max_attn_len=max_attn_len,
+                        HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                        HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                        HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                        ALLOW_TF32=ALLOW_TF32,
+                        BLOCK_D_Q=BLOCK_D_Q,
+                        BLOCK_D_V=BLOCK_D_V,
+                        BLOCK_N=BLOCK_N,
+                        FP8_INPUT=FP8_INPUT,
+                        ENABLE_TMA=ENABLE_TMA,
+                    )
+        # Don't use TMA in Jagged case since we don't want to overwrite
+        # the output of another sequence
+        if IS_DELTA_Q:
+            start_m_delta = pid * BLOCK_M
+            offs_m_delta = start_m_delta + tl.arange(0, BLOCK_M)
+            offs_v_d = tl.arange(0, BLOCK_D_V)
+            off_o = Out + off_z * DeltaSize * stride_om + off_h * stride_oh
+            out_ptrs = off_o + offs_m_delta[:, None] * stride_om + offs_v_d[None, :]
+            tl.store(out_ptrs, acc, mask=(offs_m_delta < DeltaSize)[:, None])
+        else:
+            # rematerialize offsets to save registers
+            start_m = pid * BLOCK_M
+            offs_m = start_m + tl.arange(0, BLOCK_M)
+            offs_v_d = tl.arange(0, BLOCK_D_V)
+            off_o = Out + seq_start * stride_om + off_h * stride_oh
+            out_ptrs = off_o + offs_m[:, None] * stride_om + offs_v_d[None, :]
+            tl.store(out_ptrs, acc, mask=(offs_m < seq_len)[:, None])
+
+
+@triton.jit
+def _hstu_attn_fwd_compute_main_loop_tlx(  # noqa C901
+    low,
+    high,
+    seq_len,
+    offs_m,
+    offs_n,
+    acc,
+    q_tiles,
+    k_tiles,
+    v_tiles,
+    q_fulls,
+    k_fulls,
+    v_fulls,
+    k_empties,
+    v_empties,
+    v_dtype,
+    n_targets,
+    alpha,
+    end_n,
+    loop_trip_cnt,
+    max_attn_len,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    cid: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_BUFFERS: tl.constexpr,
+    MAX_SEQ_LEN: tl.constexpr,
+    WAIT_FOR_Q: tl.constexpr,
+):
+    if WAIT_FOR_Q:
+        # wait for the Q buffer to be populated by the producer
+        q_full = tlx.local_view(q_fulls, cid)
+        tlx.barrier_wait(q_full, 0)
+
+    q_tile = tlx.local_view(q_tiles, cid)
+
+    for start in tl.range(low + BLOCK_N, high, BLOCK_N, num_stages=0):
+        buf_id = loop_trip_cnt % NUM_BUFFERS
+        # buffers in a row share the same phase
+        kv_phase = (loop_trip_cnt // NUM_BUFFERS) % 2
+
+        start_n = tl.multiple_of(start, BLOCK_N)
+        offs_n_start = offs_n
+        offs_n = offs_n_start + start_n
+
+        # wait for the K buffer to be populated by the producer
+        k_full = tlx.local_view(k_fulls, buf_id)
+        tlx.barrier_wait(k_full, kv_phase)
+        k_tile = tlx.local_view(k_tiles, buf_id)
+
+        # tma can only be loaded in one order, use trans afterwards
+        k_tile = tlx.local_trans(k_tile)
+        # second
+        qk = tlx.async_dot(q_tile, k_tile)
+        # wait for the MMA using to complete
+        qk = tlx.async_dot_wait(0, qk)
+        # release the K buffer
+        k_empty = tlx.local_view(k_empties, buf_id)
+        tlx.barrier_arrive(k_empty, 1)
+
+        qk = qk * alpha
+
+        invalid_mask = offs_m[:, None] == offs_n[None, :]
+        max_ids = seq_len
+        if HAS_MULTIPLE_TARGETS:
+            max_ids = max_ids - n_targets
+            offs_m = tl.where(
+                offs_m < max_ids,
+                offs_m,
+                max_ids,
+            )
+            offs_n = tl.where(
+                offs_n < max_ids,
+                offs_n,
+                max_ids,
+            )
+        offs_m_minus_n = offs_m[:, None] - offs_n[None, :]
+        invalid_mask = invalid_mask or (offs_m_minus_n > 0)
+        if HAS_MAX_ATTN_LEN:
+            invalid_mask = invalid_mask and offs_m_minus_n <= max_attn_len
+        if HAS_CONTEXTUAL_SEQ_LEN:
+            invalid_mask = invalid_mask or (
+                offs_m[:, None] == 0 and offs_n[None, :] < max_ids
+            )
+        scale = tl.where(invalid_mask, (1.0 / MAX_SEQ_LEN), 0.0)
+        silu = fast_dividef(qk, 1.0 + fast_expf(-qk)) * scale
+        silu = silu.to(v_dtype)
+
+        # wait for the V buffer to be populated by the producer
+        v_full = tlx.local_view(v_fulls, buf_id)
+        tlx.barrier_wait(v_full, kv_phase)
+        v_tile = tlx.local_view(v_tiles, buf_id)
+        acc = tlx.async_dot(silu, v_tile, acc)
+        # wait for the MMA using to complete
+        acc = tlx.async_dot_wait(0, acc)
+        # release the V buffer
+        v_empty = tlx.local_view(v_empties, buf_id)
+        tlx.barrier_arrive(v_empty, 1)
+
+        end_n += BLOCK_N
+
+        # increment loop trip counts
+        loop_trip_cnt += 1
+
+    return acc, end_n, loop_trip_cnt
+
+
+@triton.jit
+def _hstu_attn_fwd_compute_main_loop_tlx_pipelined(  # noqa C901
+    low,
+    high,
+    seq_len,
+    offs_m,
+    offs_n,
+    acc,
+    q_tiles,
+    k_tiles,
+    v_tiles,
+    q_fulls,
+    k_fulls,
+    v_fulls,
+    k_empties,
+    v_empties,
+    v_dtype,
+    n_targets,
+    alpha,
+    end_n,
+    loop_trip_cnt,
+    max_attn_len,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    cid: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_BUFFERS: tl.constexpr,
+    MAX_SEQ_LEN: tl.constexpr,
+    WAIT_FOR_Q: tl.constexpr,
+):
+    if WAIT_FOR_Q:
+        # wait for the Q buffer to be populated by the producer
+        q_full = tlx.local_view(q_fulls, cid)
+        tlx.barrier_wait(q_full, 0)
+    q_tile = tlx.local_view(q_tiles, cid)
+
+    # wait for the K buffer to be populated by the producer
+    k_buf_id = loop_trip_cnt % NUM_BUFFERS
+    # buffers in a row share the same phase
+    k_phase = (loop_trip_cnt // NUM_BUFFERS) % 2
+
+    k_full = tlx.local_view(k_fulls, k_buf_id)
+    tlx.barrier_wait(k_full, k_phase)
+    k_tile = tlx.local_view(k_tiles, k_buf_id)
+
+    # tma can only be loaded in one order, use trans afterwards
+    k_tile = tlx.local_trans(k_tile)
+
+    # Pingpong
+    if cid == 0:
+        # Consumer 0 waits for Consumer 1 to reach synchronization point at barrier 9.
+        tlx.named_barrier_wait(9, 256)
+    else:
+        # Consumer 1 signals its arrival at barrier 9.
+        tlx.named_barrier_arrive(9, 256)
+        # Then waits at barrier 10 until Consumer 0 finishes issuing its async_dot.
+        tlx.named_barrier_wait(10, 256)
+
+    qk = tlx.async_dot(q_tile, k_tile)
+
+    if cid == 0:
+        # After issuing async_dot, Consumer 0 signals barrier 10 to unblock Consumer 1.
+        tlx.named_barrier_arrive(10, 256)
+
+    # wait for the MMA using to complete
+    qk = tlx.async_dot_wait(0, qk)
+    # release the K buffer
+    k_empty = tlx.local_view(k_empties, k_buf_id)
+    tlx.barrier_arrive(k_empty, 1)
+
+    qk = qk * alpha
+
+    start_n = tl.multiple_of(low, BLOCK_N)
+    offs_n_start = offs_n
+    offs_n = offs_n_start + start_n
+
+    invalid_mask = offs_m[:, None] == offs_n[None, :]
+    max_ids = seq_len
+    if HAS_MULTIPLE_TARGETS:
+        max_ids = max_ids - n_targets
+        offs_m = tl.where(
+            offs_m < max_ids,
+            offs_m,
+            max_ids,
+        )
+        offs_n = tl.where(
+            offs_n < max_ids,
+            offs_n,
+            max_ids,
+        )
+    offs_m_minus_n = offs_m[:, None] - offs_n[None, :]
+    invalid_mask = invalid_mask or (offs_m_minus_n > 0)
+    if HAS_MAX_ATTN_LEN:
+        invalid_mask = invalid_mask and offs_m_minus_n <= max_attn_len
+    if HAS_CONTEXTUAL_SEQ_LEN:
+        invalid_mask = invalid_mask or (
+            offs_m[:, None] == 0 and offs_n[None, :] < max_ids
+        )
+    scale = tl.where(invalid_mask, (1.0 / MAX_SEQ_LEN), 0.0)
+    silu = fast_dividef(qk, 1.0 + fast_expf(-qk)) * scale
+    silu = silu.to(v_dtype)
+
+    loop_trip_cnt += 1
+
+    for start in tl.range(low + BLOCK_N, high, BLOCK_N, num_stages=0):
+        start_n = tl.multiple_of(start, BLOCK_N)
+        offs_n = offs_n_start + start_n
+
+        k_buf_id = loop_trip_cnt % NUM_BUFFERS
+        # buffers in a row share the same phase
+        k_phase = k_phase ^ (k_buf_id == 0)
+
+        # wait for the K buffer to be populated by the producer
+        k_full = tlx.local_view(k_fulls, k_buf_id)
+        tlx.barrier_wait(k_full, k_phase)
+        k_tile = tlx.local_view(k_tiles, k_buf_id)
+
+        # tma can only be loaded in one order, use trans afterwards
+        k_tile = tlx.local_trans(k_tile)
+
+        qk = tlx.async_dot(q_tile, k_tile)
+        # wait for the MMA using to complete
+        prev_silu = silu
+
+        v_buf_id = (loop_trip_cnt - 1) % NUM_BUFFERS
+        # v_phase = v_phase ^ (v_buf_id == 0)
+        v_phase = ((loop_trip_cnt - 1) // NUM_BUFFERS) % 2
+        v_full = tlx.local_view(v_fulls, v_buf_id)
+        tlx.barrier_wait(v_full, v_phase)
+        v_tile = tlx.local_view(v_tiles, v_buf_id)
+        acc = tlx.async_dot(prev_silu, v_tile, acc)
+        qk = tlx.async_dot_wait(1, qk)
+
+        # release the K buffer
+        k_empty = tlx.local_view(k_empties, k_buf_id)
+        tlx.barrier_arrive(k_empty, 1)
+
+        qk = qk * alpha
+        invalid_mask = offs_m[:, None] == offs_n[None, :]
+        max_ids = seq_len
+        if HAS_MULTIPLE_TARGETS:
+            max_ids = max_ids - n_targets
+            offs_m = tl.where(
+                offs_m < max_ids,
+                offs_m,
+                max_ids,
+            )
+            offs_n = tl.where(
+                offs_n < max_ids,
+                offs_n,
+                max_ids,
+            )
+        offs_m_minus_n = offs_m[:, None] - offs_n[None, :]
+        invalid_mask = invalid_mask or (offs_m_minus_n > 0)
+        if HAS_MAX_ATTN_LEN:
+            invalid_mask = invalid_mask and offs_m_minus_n <= max_attn_len
+        if HAS_CONTEXTUAL_SEQ_LEN:
+            invalid_mask = invalid_mask or (
+                offs_m[:, None] == 0 and offs_n[None, :] < max_ids
+            )
+        scale = tl.where(invalid_mask, (1.0 / MAX_SEQ_LEN), 0.0)
+        silu = fast_dividef(qk, 1.0 + fast_expf(-qk)) * scale
+        silu = silu.to(v_dtype)
+
+        acc = tlx.async_dot_wait(0, acc)
+        # release the V buffer
+        v_empty = tlx.local_view(v_empties, v_buf_id)
+        tlx.barrier_arrive(v_empty, 1)
+
+        end_n += BLOCK_N
+
+        # increment loop trip counts
+        loop_trip_cnt += 1
+        # v_buf_id = loop_trip_cnt % NUM_BUFFERS
+        # v_phase = (loop_trip_cnt // NUM_BUFFERS) % 2
+
+    # wait for the V buffer to be populated by the producer
+    v_buf_id = (loop_trip_cnt - 1) % NUM_BUFFERS
+    v_phase = ((loop_trip_cnt - 1) // NUM_BUFFERS) % 2
+    v_full = tlx.local_view(v_fulls, v_buf_id)
+    # tlx.barrier_wait(v_full, v_buf_id)
+    v_tile = tlx.local_view(v_tiles, v_buf_id)
+    tlx.barrier_wait(v_full, v_phase)
+    acc = tlx.async_dot(silu, v_tile, acc)
+    acc = tlx.async_dot_wait(0, acc)
+    # release the V buffer
+    v_empty = tlx.local_view(v_empties, v_buf_id)
+    tlx.barrier_arrive(v_empty, 1)
+
+    return acc, end_n, loop_trip_cnt
+
+
+@triton.jit
+def _hstu_attn_fwd_load_K_or_V(
+    K,
+    k_tiles,
+    k_empties,
+    k_fulls,
+    buf_id,
+    k_phase,
+    start_n,
+    seq_start,
+    offset_kh,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    # wait for the K buffer to be released by the consumer
+    k_empty = tlx.local_view(k_empties, buf_id)
+    tlx.barrier_wait(k_empty, k_phase)
+    # load K
+    k_full = tlx.local_view(k_fulls, buf_id)
+    k_tile = tlx.local_view(k_tiles, buf_id)
+    tlx.barrier_expect_bytes(k_full, 2 * BLOCK_N * BLOCK_D_Q)  # float16
+    tlx.async_descriptor_load(
+        K,
+        k_tile,
+        [(seq_start + start_n).to(tl.int32), offset_kh.to(tl.int32)],
+        k_full,
+    )
+
+
+@triton.jit
+def _hstu_attn_fwd_load_Q(
+    Q,
+    q_tiles,
+    q_fulls,
+    cid,
+    off_z,
+    off_h,
+    stride_qh,
+    start_m,
+    seq_start,
+    DeltaSize,
+    IS_DELTA_Q: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    q_full = tlx.local_view(q_fulls, cid)
+    tlx.barrier_expect_bytes(q_full, 2 * BLOCK_M * BLOCK_D_Q)  # float16
+    q_tile = tlx.local_view(q_tiles, cid)
+    seq_offset = start_m + cid * BLOCK_M
+    if IS_DELTA_Q:
+        tlx.async_descriptor_load(
+            Q,
+            q_tile,
+            [
+                (off_z * DeltaSize + start_m).to(tl.int32),
+                (off_h * stride_qh).to(tl.int32),
+            ],
+            q_full,
+        )
+    else:
+        tlx.async_descriptor_load(
+            Q,
+            q_tile,
+            [
+                (seq_start + seq_offset).to(tl.int32),
+                (off_h * stride_qh).to(tl.int32),
+            ],
+            q_full,
+        )
+
+
+@triton.jit
+def _hstu_attn_fwd_caculate_range(
+    seq_len,
+    start_m,
+    n_targets,
+    contextual_seq_len,
+    max_attn_len,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    if HAS_MULTIPLE_TARGETS:
+        uih_end = seq_len - n_targets
+    else:
+        uih_end = seq_len
+
+    if HAS_CONTEXTUAL_SEQ_LEN is True and start_m < contextual_seq_len:
+        # uih_end must be larger than start_m
+        low = 0
+        high = seq_len
+    else:
+        low = 0
+        high = start_m + BLOCK_M
+        if HAS_MAX_ATTN_LEN:
+            if start_m > uih_end:
+                low = uih_end - max_attn_len
+            else:
+                low = start_m - max_attn_len
+            if HAS_CONTEXTUAL_SEQ_LEN:
+                low = low if low > contextual_seq_len else 0
+            else:
+                low = low if low > 0 else 0
+        if HAS_MULTIPLE_TARGETS:
+            uih_end = (uih_end + BLOCK_N - 1) // BLOCK_N * BLOCK_N
+            if uih_end < start_m:
+                high = seq_len - n_targets
+
+    return low, high, uih_end
+
+
+@triton.jit
+def _hstu_attn_fwd_load_Q_K_V(
+    Q,
+    K,
+    V,
+    q_tiles,
+    k_tiles,
+    v_tiles,
+    q_fulls,
+    k_fulls,
+    v_fulls,
+    k_empties,
+    v_empties,
+    stride_qh,
+    stride_kh,
+    stride_vh,
+    contextual_seq_len,
+    max_attn_len,
+    DeltaSize,
+    off_z,
+    off_h,
+    start_m,
+    seq_start,
+    seq_len,
+    n_targets,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    IS_DELTA_Q: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_BUFFERS: tl.constexpr,
+    NUM_MMA_GROUPS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+):
+    # load q: it will stay in SRAM throughout
+    BLOCK_M_SPLIT: tl.constexpr = BLOCK_M // NUM_MMA_GROUPS
+
+    _hstu_attn_fwd_load_Q(
+        Q=Q,
+        q_tiles=q_tiles,
+        q_fulls=q_fulls,
+        cid=0,
+        off_z=off_z,
+        off_h=off_h,
+        stride_qh=stride_qh,
+        start_m=start_m,
+        seq_start=seq_start,
+        DeltaSize=DeltaSize,
+        IS_DELTA_Q=IS_DELTA_Q,
+        BLOCK_D_Q=BLOCK_D_Q,
+        BLOCK_M=BLOCK_M_SPLIT,
+    )
+
+    off_h = off_h.to(tl.int64)
+    off_z = off_z.to(tl.int64)
+    offset_kh = off_h * stride_kh
+    offset_vh = off_h * stride_vh
+
+    low, high, uih_end = _hstu_attn_fwd_caculate_range(
+        seq_len,
+        start_m,
+        n_targets,
+        contextual_seq_len,
+        max_attn_len,
+        HAS_MULTIPLE_TARGETS,
+        HAS_CONTEXTUAL_SEQ_LEN,
+        HAS_MAX_ATTN_LEN,
+        BLOCK_M,
+        BLOCK_N,
+    )
+
+    kv_phase = 0
+    loop_trip_cnt = 0
+
+    # pyre-ignore[58]
+    buf_id = loop_trip_cnt % NUM_BUFFERS
+    # buffers in a row share the same phase
+    kv_phase = kv_phase ^ (buf_id == 0)
+
+    start_n = tl.multiple_of(low, BLOCK_N)
+
+    _hstu_attn_fwd_load_K_or_V(
+        K,
+        k_tiles,
+        k_empties,
+        k_fulls,
+        buf_id,
+        kv_phase,
+        start_n,
+        seq_start,
+        offset_kh,
+        BLOCK_D_Q,
+        BLOCK_N,
+    )
+
+    for cid in tl.range(1, NUM_MMA_GROUPS, loop_unroll_factor=NUM_MMA_GROUPS - 1):
+        _hstu_attn_fwd_load_Q(
+            Q,
+            q_tiles,
+            q_fulls,
+            cid,
+            off_z,
+            off_h,
+            stride_qh,
+            start_m,
+            seq_start,
+            DeltaSize,
+            IS_DELTA_Q,
+            BLOCK_D_Q,
+            BLOCK_M_SPLIT,
+        )
+
+    _hstu_attn_fwd_load_K_or_V(
+        V,
+        v_tiles,
+        v_empties,
+        v_fulls,
+        buf_id,
+        kv_phase,
+        start_n,
+        seq_start,
+        offset_vh,
+        BLOCK_D_V,
+        BLOCK_N,
+    )
+
+    loop_trip_cnt += 1
+
+    for start in range(low + BLOCK_N, high, BLOCK_N):
+        # pyre-ignore[58]
+        buf_id = loop_trip_cnt % NUM_BUFFERS
+        # buffers in a row share the same phase
+        kv_phase = kv_phase ^ (buf_id == 0)
+
+        start_n = tl.multiple_of(start, BLOCK_N)
+
+        _hstu_attn_fwd_load_K_or_V(
+            K,
+            k_tiles,
+            k_empties,
+            k_fulls,
+            buf_id,
+            kv_phase,
+            start_n,
+            seq_start,
+            offset_kh,
+            BLOCK_D_Q,
+            BLOCK_N,
+        )
+
+        _hstu_attn_fwd_load_K_or_V(
+            V,
+            v_tiles,
+            v_empties,
+            v_fulls,
+            buf_id,
+            kv_phase,
+            start_n,
+            seq_start,
+            offset_vh,
+            BLOCK_D_V,
+            BLOCK_N,
+        )
+
+        # increment loop trip counts
+        loop_trip_cnt += 1
+
+    # pyre-ignore[61]
+    if uih_end < start_m:
+        low_delta = start_m
+        high_delta = start_m + BLOCK_M
+        for start_delta in tl.range(low_delta, high_delta, BLOCK_N, num_stages=0):
+            # pyre-ignore[58]
+            buf_id = loop_trip_cnt % NUM_BUFFERS
+            # buffers in a row share the same phase
+            kv_phase = kv_phase ^ (buf_id == 0)
+
+            start_n = tl.multiple_of(start_delta, BLOCK_N)
+
+            _hstu_attn_fwd_load_K_or_V(
+                K,
+                k_tiles,
+                k_empties,
+                k_fulls,
+                buf_id,
+                kv_phase,
+                start_n,
+                seq_start,
+                offset_kh,
+                BLOCK_D_Q,
+                BLOCK_N,
+            )
+
+            _hstu_attn_fwd_load_K_or_V(
+                V,
+                v_tiles,
+                v_empties,
+                v_fulls,
+                buf_id,
+                kv_phase,
+                start_n,
+                seq_start,
+                offset_vh,
+                BLOCK_D_V,
+                BLOCK_N,
+            )
+
+            # increment loop trip counts
+            loop_trip_cnt += 1
+
+
+@triton.jit
+def _hstu_attn_fwd_compute_tlx(  # noqa C901
+    Q,
+    K,
+    V,
+    H,
+    DimQ,
+    DimV,
+    seq_offsets,
+    num_targets,
+    Out,
+    stride_qh,
+    stride_kh,
+    stride_vh,
+    stride_om,
+    stride_oh,
+    alpha,
+    MAX_SEQ_LEN,
+    DeltaSize,
+    contextual_seq_len,
+    max_attn_len,
+    off_z,
+    off_h,
+    pid,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    IS_DELTA_Q: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    NUM_BUFFERS: tl.constexpr,  #
+    NUM_MMA_WARPS_PER_GROUP: tl.constexpr,  #
+    NUM_MMA_GROUPS: tl.constexpr,  #
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+):
+    seq_start = tl.load(seq_offsets + off_z).to(tl.int64)
+    seq_end = tl.load(seq_offsets + off_z + 1)
+    seq_len = (seq_end - seq_start).to(tl.int32)
+
+    if IS_DELTA_Q:
+        start_m = pid * BLOCK_M
+        start_m = (start_m + seq_len - DeltaSize).to(tl.int32)
+    else:
+        start_m = pid * BLOCK_M
+
+    if start_m >= seq_len:
+        return
+
+    if HAS_MULTIPLE_TARGETS:
+        n_targets = tl.load(num_targets + off_z).to(tl.int32)
+    else:
+        n_targets = None
+
+    BLOCK_M_SPLIT: tl.constexpr = BLOCK_M // NUM_MMA_GROUPS
+    # allocate buffers
+    q_tiles = tlx.local_alloc(
+        (BLOCK_M_SPLIT, BLOCK_D_Q), tlx.dtype_of(Q), NUM_MMA_GROUPS
+    )
+    k_tiles = tlx.local_alloc((BLOCK_N, BLOCK_D_Q), tlx.dtype_of(K), NUM_BUFFERS)
+    v_tiles = tlx.local_alloc((BLOCK_N, BLOCK_D_V), tlx.dtype_of(V), NUM_BUFFERS)
+
+    # allocate barriers
+    q_fulls = tlx.alloc_barriers(num_barriers=NUM_MMA_GROUPS, arrive_count=1)
+    k_empties = tlx.alloc_barriers(
+        num_barriers=NUM_BUFFERS, arrive_count=NUM_MMA_GROUPS
+    )
+    k_fulls = tlx.alloc_barriers(num_barriers=NUM_BUFFERS, arrive_count=1)
+    v_empties = tlx.alloc_barriers(
+        num_barriers=NUM_BUFFERS, arrive_count=NUM_MMA_GROUPS
+    )
+    v_fulls = tlx.alloc_barriers(num_barriers=NUM_BUFFERS, arrive_count=1)
+
+    with tlx.async_tasks():
+        # producer group
+        with tlx.async_task("default"):
+            _hstu_attn_fwd_load_Q_K_V(
+                Q=Q,
+                K=K,
+                V=V,
+                q_tiles=q_tiles,
+                k_tiles=k_tiles,
+                v_tiles=v_tiles,
+                q_fulls=q_fulls,
+                k_fulls=k_fulls,
+                v_fulls=v_fulls,
+                k_empties=k_empties,
+                v_empties=v_empties,
+                stride_qh=stride_qh,
+                stride_kh=stride_kh,
+                stride_vh=stride_vh,
+                contextual_seq_len=contextual_seq_len,
+                max_attn_len=max_attn_len,
+                DeltaSize=DeltaSize,
+                off_z=off_z,
+                off_h=off_h,
+                start_m=start_m,
+                seq_start=seq_start,
+                seq_len=seq_len,
+                n_targets=n_targets,
+                HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                IS_DELTA_Q=IS_DELTA_Q,
+                BLOCK_D_Q=BLOCK_D_Q,
+                BLOCK_D_V=BLOCK_D_V,
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_N,
+                NUM_BUFFERS=NUM_BUFFERS,
+                NUM_MMA_GROUPS=NUM_MMA_GROUPS,
+                HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+            )
+
+        # consumer groups
+        with tlx.async_task(
+            num_warps=NUM_MMA_WARPS_PER_GROUP, registers=232, replicate=NUM_MMA_GROUPS
+        ):
+            cid = tlx.async_task_replica_id()
+            acc = tl.zeros([BLOCK_M_SPLIT, BLOCK_D_V], dtype=tl.float32)
+            # initialize offsets
+            offs_m = start_m + tl.arange(0, BLOCK_M_SPLIT) + cid * BLOCK_M_SPLIT
+            offs_n = tl.arange(0, BLOCK_N)
+
+            low, high, uih_end = _hstu_attn_fwd_caculate_range(
+                seq_len,
+                start_m,
+                n_targets,
+                contextual_seq_len,
+                max_attn_len,
+                HAS_MULTIPLE_TARGETS,
+                HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN,
+                BLOCK_M,
+                BLOCK_N,
+            )
+
+            end_n = low
+            loop_trip_cnt = 0
+
+            acc, end_n, loop_trip_cnt = _hstu_attn_fwd_compute_main_loop_tlx_pipelined(
+                low=low,
+                high=high,
+                seq_len=seq_len,
+                offs_m=offs_m,
+                offs_n=offs_n,
+                acc=acc,
+                q_tiles=q_tiles,
+                k_tiles=k_tiles,
+                v_tiles=v_tiles,
+                q_fulls=q_fulls,
+                k_fulls=k_fulls,
+                v_fulls=v_fulls,
+                k_empties=k_empties,
+                v_empties=v_empties,
+                v_dtype=tlx.dtype_of(V),
+                n_targets=n_targets,
+                alpha=alpha,
+                end_n=end_n,
+                loop_trip_cnt=loop_trip_cnt,
+                max_attn_len=max_attn_len,
+                HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                cid=cid,
+                BLOCK_N=BLOCK_N,
+                NUM_BUFFERS=NUM_BUFFERS,
+                MAX_SEQ_LEN=MAX_SEQ_LEN,
+                WAIT_FOR_Q=1,
+            )
+
+            # pyre-ignore[61]
+            if uih_end < start_m:
+                low_delta = start_m
+                high_delta = start_m + BLOCK_M
+                acc, end_n, loop_trip_cnt = _hstu_attn_fwd_compute_main_loop_tlx(
+                    low=low_delta,
+                    high=high_delta,
+                    seq_len=seq_len,
+                    offs_m=offs_m,
+                    offs_n=offs_n,
+                    acc=acc,
+                    q_tiles=q_tiles,
+                    k_tiles=k_tiles,
+                    v_tiles=v_tiles,
+                    q_fulls=q_fulls,
+                    k_fulls=k_fulls,
+                    v_fulls=v_fulls,
+                    k_empties=k_empties,
+                    v_empties=v_empties,
+                    v_dtype=tlx.dtype_of(V),
+                    n_targets=n_targets,
+                    alpha=alpha,
+                    end_n=end_n,
+                    loop_trip_cnt=loop_trip_cnt,
+                    max_attn_len=max_attn_len,
+                    HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                    HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                    HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                    cid=cid,
+                    BLOCK_N=BLOCK_N,
+                    NUM_BUFFERS=NUM_BUFFERS,
+                    MAX_SEQ_LEN=MAX_SEQ_LEN,
+                    WAIT_FOR_Q=0,
+                )
+
+            # Don't use TMA in Jagged case since we don't want to overwrite
+            # the output of another sequence
+            if IS_DELTA_Q:
+                start_m_delta = pid * BLOCK_M + cid * BLOCK_M_SPLIT
+                offs_m_delta = start_m_delta + tl.arange(0, BLOCK_M_SPLIT)
+                offs_v_d = tl.arange(0, BLOCK_D_V)
+                off_o = Out + off_z * DeltaSize * stride_om + off_h * stride_oh
+                out_ptrs = off_o + offs_m_delta[:, None] * stride_om + offs_v_d[None, :]
+                tl.store(out_ptrs, acc, mask=(offs_m_delta < DeltaSize)[:, None])
+            else:
+                # rematerialize offsets to save registers
+                start_m = pid * BLOCK_M + cid * BLOCK_M_SPLIT
+                offs_m = start_m + tl.arange(0, BLOCK_M_SPLIT)
+                offs_v_d = tl.arange(0, BLOCK_D_V)
+                off_o = Out + seq_start * stride_om + off_h * stride_oh
+                out_ptrs = off_o + offs_m[:, None] * stride_om + offs_v_d[None, :]
+                tl.store(out_ptrs, acc, mask=(offs_m < seq_len)[:, None])
+
+
+def _get_fw_pinned_configs() -> List[triton.Config]:
+    # Pinned forward-attention configs for MI350X gfx950. The full search is a
+    # coin flip between matrix_instr_nonkdim 16 (fast) and 32 (slow); pinning the
+    # known winners makes cold starts deterministic. See _autotune_pinning.
+    #
+    # This is a LIST, one entry per training shape we've tuned (currently just
+    # bs=1024). With >1 entry the autotuner still runs a tiny benchmark over only
+    # these candidates and caches the winner per `key` (AUTOTUNE_Z / H /
+    # AUTOTUNE_MAX_SEQ_LEN / DimQ / DimV / ...), so each batch size automatically
+    # picks its own config — same pattern as the layer-norm pins.
+    #
+    # TO ADD A NEW BATCH SIZE / SHAPE:
+    #   1. Run once with TRITON_FULL_AUTOTUNE=1 TRITON_PRINT_AUTOTUNING=1.
+    #   2. Grep the log for "best config selected:" under "_hstu_attn_fwd".
+    #   3. Append that config below (copy BLOCK_M/BLOCK_N/matrix_instr_nonkdim/
+    #      waves_per_eu/kpack/num_stages/num_warps verbatim).
+    # The four USE_TLX/NUM_* defaults below are required by the kernel signature
+    # (see the USE_TLX-default loop in _get_fw_configs); the pinned path bypasses
+    # that loop, so every pinned entry must set them explicitly.
+    if torch.version.hip:
+        return [
+            # --- yambda bs=1024, L=2048 winner (from capture log) ---
+            triton.Config(
+                {
+                    "BLOCK_M": 128,
+                    "BLOCK_N": 32,
+                    "matrix_instr_nonkdim": 16,
+                    "waves_per_eu": 0,
+                    "kpack": 2,
+                    "USE_TLX": False,
+                    "NUM_BUFFERS": 1,
+                    "NUM_MMA_WARPS_PER_GROUP": 1,
+                    "NUM_MMA_GROUPS": 1,
+                },
+                num_stages=2,
+                num_warps=8,
+            ),
+            # --- add more (bs, L) winners here; see "TO ADD A NEW BATCH SIZE" ---
+        ]
+    return _get_fw_configs()
+
+
+@triton_autotune(
+    configs=pinned_or_full(
+        _get_fw_pinned_configs(),
+        _get_fw_configs,
+    ),
+    key=[
+        "AUTOTUNE_Z",
+        "H",
+        "AUTOTUNE_MAX_SEQ_LEN",
+        "DimQ",
+        "DimV",
+        "DeltaSize",
+        "IS_DELTA_Q",
+        "FP8_INPUT",
+    ],
+    prune_configs_by={"early_config_prune": _early_config_prune},
+)
+@triton.jit
+def _hstu_attn_fwd(  # noqa C901
+    Q,
+    K,
+    V,
+    workspace_ptr,
+    sort_by_length_indices,
+    seq_offsets,
+    num_targets,
+    Out,
+    stride_qm,
+    stride_qh,
+    stride_kn,
+    stride_kh,
+    stride_vn,
+    stride_vh,
+    stride_om,
+    stride_oh,
+    alpha,
+    QK_SCALE,
+    V_SCALE,
+    Z,
+    AUTOTUNE_Z,
+    H,
+    MAX_SEQ_LEN,
+    AUTOTUNE_MAX_SEQ_LEN,  # Quantized MAX_SEQ_LEN used as an autotuning key
+    DimQ,
+    DimV,
+    DeltaSize,
+    contextual_seq_len,
+    max_attn_len,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    IS_DELTA_Q: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    USE_TLX: tl.constexpr,
+    NUM_BUFFERS: tl.constexpr,  #
+    NUM_MMA_WARPS_PER_GROUP: tl.constexpr,  #
+    NUM_MMA_GROUPS: tl.constexpr,  #
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    HAS_SORT_BY_LENGTH_INDICES: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+    TMA_DESC_SIZE: tl.constexpr,
+    FAST_INTERIOR: tl.constexpr,
+    FP8_INPUT: tl.constexpr,
+):
+    off_hz = tl.program_id(1)
+    off_z = off_hz // H
+    if HAS_SORT_BY_LENGTH_INDICES:
+        off_z = tl.load(sort_by_length_indices + off_z)
+    off_h = off_hz % H
+    pid = tl.program_id(0)
+    if USE_TLX and not FP8_INPUT:
+        _hstu_attn_fwd_compute_tlx(
+            Q=Q,
+            K=K,
+            V=V,
+            H=H,
+            DimQ=DimQ,
+            DimV=DimV,
+            seq_offsets=seq_offsets,
+            num_targets=num_targets,
+            Out=Out,
+            stride_qh=stride_qh,
+            stride_kh=stride_kh,
+            stride_vh=stride_vh,
+            stride_om=stride_om,
+            stride_oh=stride_oh,
+            alpha=alpha,
+            MAX_SEQ_LEN=MAX_SEQ_LEN,
+            DeltaSize=DeltaSize,
+            contextual_seq_len=contextual_seq_len,
+            max_attn_len=max_attn_len,
+            off_z=off_z,
+            off_h=off_h,
+            pid=pid,
+            HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+            IS_DELTA_Q=IS_DELTA_Q,
+            ALLOW_TF32=ALLOW_TF32,
+            BLOCK_D_Q=BLOCK_D_Q,
+            BLOCK_D_V=BLOCK_D_V,
+            HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+            HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            NUM_BUFFERS=NUM_BUFFERS,
+            NUM_MMA_WARPS_PER_GROUP=NUM_MMA_WARPS_PER_GROUP,
+            NUM_MMA_GROUPS=NUM_MMA_GROUPS,
+        )
+    else:
+        _hstu_attn_fwd_compute(
+            Q=Q,
+            K=K,
+            V=V,
+            H=H,
+            DimQ=DimQ,
+            DimV=DimV,
+            workspace_ptr=workspace_ptr,
+            seq_offsets=seq_offsets,
+            num_targets=num_targets,
+            Out=Out,
+            stride_qm=stride_qm,
+            stride_qh=stride_qh,
+            stride_kn=stride_kn,
+            stride_kh=stride_kh,
+            stride_vn=stride_vn,
+            stride_vh=stride_vh,
+            stride_om=stride_om,
+            stride_oh=stride_oh,
+            alpha=alpha,
+            QK_SCALE=QK_SCALE,
+            V_SCALE=V_SCALE,
+            MAX_SEQ_LEN=MAX_SEQ_LEN,
+            DeltaSize=DeltaSize,
+            contextual_seq_len=contextual_seq_len,
+            max_attn_len=max_attn_len,
+            off_z=off_z,
+            off_h=off_h,
+            pid=pid,
+            HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+            IS_DELTA_Q=IS_DELTA_Q,
+            ALLOW_TF32=ALLOW_TF32,
+            BLOCK_D_Q=BLOCK_D_Q,
+            BLOCK_D_V=BLOCK_D_V,
+            HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+            HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+            FP8_INPUT=FP8_INPUT,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            ENABLE_TMA=ENABLE_TMA,
+            TMA_DESC_SIZE=TMA_DESC_SIZE,
+            FAST_INTERIOR=FAST_INTERIOR,
+        )
+
+
+@triton_autotune(
+    configs=pinned_or_full(
+        _get_fw_pinned_configs(),
+        _get_fw_configs,
+    ),
+    key=[
+        "AUTOTUNE_Z",
+        "H",
+        "AUTOTUNE_MAX_SEQ_LEN",
+        "DimQ",
+        "DimV",
+        "DeltaSize",
+        "IS_DELTA_Q",
+    ],
+    prune_configs_by={"early_config_prune": _early_config_prune},
+)
+@triton.jit
+def _hstu_attn_fwd_persistent(  # noqa C901
+    Q,
+    K,
+    V,
+    workspace_ptr,
+    sort_by_length_indices,
+    seq_offsets,
+    num_targets,
+    Out,
+    stride_qm,
+    stride_qh,
+    stride_kn,
+    stride_kh,
+    stride_vn,
+    stride_vh,
+    stride_om,
+    stride_oh,
+    alpha,
+    QK_SCALE,
+    V_SCALE,
+    Z,
+    AUTOTUNE_Z,
+    H,
+    MAX_SEQ_LEN,
+    AUTOTUNE_MAX_SEQ_LEN,  # Quantized MAX_SEQ_LEN used as an autotuning key
+    DimQ,
+    DimV,
+    DeltaSize,
+    contextual_seq_len,
+    max_attn_len,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    IS_DELTA_Q: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    USE_TLX: tl.constexpr,
+    NUM_BUFFERS: tl.constexpr,  #
+    NUM_MMA_WARPS_PER_GROUP: tl.constexpr,  #
+    NUM_MMA_GROUPS: tl.constexpr,  #
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    HAS_SORT_BY_LENGTH_INDICES: tl.constexpr,
+    FP8_INPUT: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+    TMA_DESC_SIZE: tl.constexpr,
+):
+    n_tile_num = tl.cdiv(MAX_SEQ_LEN, BLOCK_M)
+    prog_id = tl.program_id(0)
+    num_progs = tl.num_programs(0)
+
+    total_tiles = n_tile_num * Z * H
+
+    tiles_per_sm = total_tiles // num_progs
+    if prog_id < total_tiles % num_progs:
+        tiles_per_sm += 1
+
+    tile_idx = prog_id
+    for _ in range(0, tiles_per_sm):
+        pid = (total_tiles - tile_idx - 1) // (Z * H)
+        off_hz = (total_tiles - tile_idx - 1) % (Z * H)
+        off_z = off_hz // H
+        off_h = off_hz % H
+        _hstu_attn_fwd_compute(
+            Q=Q,
+            K=K,
+            V=V,
+            H=H,
+            DimQ=DimQ,
+            DimV=DimV,
+            workspace_ptr=workspace_ptr,
+            seq_offsets=seq_offsets,
+            num_targets=num_targets,
+            Out=Out,
+            stride_qm=stride_qm,
+            stride_qh=stride_qh,
+            stride_kn=stride_kn,
+            stride_kh=stride_kh,
+            stride_vn=stride_vn,
+            stride_vh=stride_vh,
+            stride_om=stride_om,
+            stride_oh=stride_oh,
+            alpha=alpha,
+            QK_SCALE=QK_SCALE,
+            V_SCALE=V_SCALE,
+            MAX_SEQ_LEN=MAX_SEQ_LEN,
+            DeltaSize=DeltaSize,
+            contextual_seq_len=contextual_seq_len,
+            max_attn_len=max_attn_len,
+            off_z=off_z,
+            off_h=off_h,
+            pid=pid,
+            HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+            IS_DELTA_Q=IS_DELTA_Q,
+            ALLOW_TF32=ALLOW_TF32,
+            BLOCK_D_Q=BLOCK_D_Q,
+            BLOCK_D_V=BLOCK_D_V,
+            HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+            HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+            FP8_INPUT=FP8_INPUT,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            ENABLE_TMA=ENABLE_TMA,
+            TMA_DESC_SIZE=TMA_DESC_SIZE,
+        )
+        tile_idx += num_progs
+
+
+@triton.jit
+def _hstu_attn_bwd_one_block(  # noqa C901
+    start_m,
+    offs_n,
+    offs_m,
+    q_ptrs_trans,
+    dq_ptrs_trans,
+    do_ptrs,
+    device_desc_q,
+    device_desc_do,
+    dk,
+    dv,
+    k,
+    v,
+    pos_offs_n,
+    seq_len,
+    max_ids,
+    contextual_seq_len,
+    max_attn_len,
+    LOCK,
+    off_h,
+    stride_qh,
+    stride_doh,
+    stride_qm,
+    stride_dom,
+    stride_dqm,
+    alpha,
+    MAX_SEQ_LEN,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    ATOMIC_ADD: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    APPLY_MASK: tl.constexpr = True,
+):
+    pos_offs_m = offs_m + start_m
+    mask_m = pos_offs_m < seq_len
+    # recompute qk and silu
+    if APPLY_MASK:
+        invalid_mask_trans = pos_offs_m[None, :] == offs_n[:, None]
+        if HAS_CONTEXTUAL_SEQ_LEN:
+            pos_offs_m = pos_offs_m - contextual_seq_len + 1
+            pos_offs_m = tl.where(
+                pos_offs_m > 0,
+                pos_offs_m,
+                0,
+            )
+        if HAS_MULTIPLE_TARGETS:
+            pos_offs_m = tl.where(
+                pos_offs_m < max_ids,
+                pos_offs_m,
+                max_ids,
+            )
+    if ENABLE_TMA:
+        q = device_desc_q.load(
+            [start_m, (off_h * stride_qh).to(tl.int32)],
+        )
+        q_trans = tl.trans(q)
+    else:
+        q_trans = tl.load(
+            q_ptrs_trans + start_m * stride_qm,
+            mask=mask_m[None, :],
+            other=0.0,
+        )
+    qk_trans = tl.dot(k, q_trans, allow_tf32=ALLOW_TF32) * alpha
+    sig_trans = fast_dividef(1.0, 1.0 + tl.exp(-qk_trans))
+    silu_trans = qk_trans * sig_trans * (1.0 / MAX_SEQ_LEN)
+    if APPLY_MASK:
+        pos_offs_m_minus_n = pos_offs_m[None, :] - pos_offs_n[:, None]
+        invalid_mask_trans = invalid_mask_trans or (pos_offs_m_minus_n > 0)
+        if HAS_MAX_ATTN_LEN:
+            invalid_mask_trans = (
+                invalid_mask_trans and pos_offs_m_minus_n <= max_attn_len
+            )
+        if HAS_CONTEXTUAL_SEQ_LEN:
+            invalid_mask_trans = invalid_mask_trans or (
+                pos_offs_m[None, :] == 0 and pos_offs_n[:, None] < max_ids
+            )
+        silu_trans = tl.where(invalid_mask_trans, silu_trans, 0)
+    silu_trans = silu_trans.to(k.dtype)
+    # compute dv
+    if ENABLE_TMA:
+        do = device_desc_do.load(
+            [start_m, (off_h * stride_doh).to(tl.int32)],
+        )
+    else:
+        do = tl.load(
+            do_ptrs + start_m * stride_dom,
+            mask=mask_m[:, None],
+            other=0.0,
+        )
+    dv += tl.dot(silu_trans, do, allow_tf32=ALLOW_TF32)
+
+    # compute dk and dq
+    dqk_trans = tl.dot(v, tl.trans(do), allow_tf32=ALLOW_TF32)
+    dqk_trans = (
+        dqk_trans * sig_trans * (1 + qk_trans * (1 - sig_trans)) * (1.0 / MAX_SEQ_LEN)
+    )
+    if APPLY_MASK:
+        dqk_trans = tl.where(invalid_mask_trans, dqk_trans, 0)
+    dqk_trans = dqk_trans.to(k.dtype)
+
+    # Note: the factor `alpha` is delayed until the end of the function to reduce the cost
+    dk += tl.dot(dqk_trans, tl.trans(q_trans), allow_tf32=ALLOW_TF32)
+    acc_dq(
+        dq_ptrs_trans=dq_ptrs_trans,
+        start_m=start_m,
+        stride_dqm=stride_dqm,
+        k=k,
+        dqk_trans=dqk_trans,
+        alpha=alpha,
+        mask_m=mask_m,
+        MAX_SEQ_LEN=MAX_SEQ_LEN,
+        LOCK=LOCK,
+        BLOCK_M=BLOCK_M,
+        ATOMIC_ADD=ATOMIC_ADD,
+        ALLOW_TF32=ALLOW_TF32,
+    )
+    return dk, dv
+
+
+@triton.jit
+def _hstu_attn_bwd_one_col_block(  # noqa C901
+    start_n,
+    seq_len,
+    n_targets,
+    contextual_seq_len,
+    max_attn_len,
+    Q,
+    K,
+    V,
+    DOut,
+    DQ,
+    DK,
+    DV,
+    device_desc_q,
+    device_desc_k,
+    device_desc_v,
+    device_desc_do,
+    device_desc_dk,
+    device_desc_dv,
+    LOCK,
+    off_h,
+    stride_qh,
+    stride_kh,
+    stride_vh,
+    stride_doh,
+    stride_dkh,
+    stride_dvh,
+    stride_qm,
+    stride_kn,
+    stride_vn,
+    stride_dom,
+    stride_dqm,
+    stride_dkn,
+    stride_dvn,
+    alpha,
+    MAX_SEQ_LEN,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    UNROLL: tl.constexpr,
+    ATOMIC_ADD: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+    FAST_INTERIOR: tl.constexpr = False,
+):
+    if HAS_MULTIPLE_TARGETS:
+        low = start_n
+        if HAS_MAX_ATTN_LEN:
+            high = start_n + max_attn_len + BLOCK_N
+            high = high if high + n_targets < seq_len else seq_len
+        else:
+            high = seq_len
+    else:
+        low = start_n
+        if HAS_MAX_ATTN_LEN:
+            high = start_n + max_attn_len + BLOCK_N
+            high = high if high < seq_len else seq_len
+        else:
+            high = seq_len
+    if HAS_CONTEXTUAL_SEQ_LEN:
+        contextual_block_end = tl.cdiv(contextual_seq_len, BLOCK_M) * BLOCK_M
+        if low < contextual_block_end:
+            low = contextual_block_end
+
+    offs_m = tl.arange(0, BLOCK_M)
+    offs_qk_d = tl.arange(0, BLOCK_D_Q)
+    offs_v_d = tl.arange(0, BLOCK_D_V)
+    offs_n = start_n + tl.arange(0, BLOCK_N)
+
+    dq_ptrs_trans = DQ + (offs_m[None, :] * stride_dqm + offs_qk_d[:, None])
+    dv = tl.zeros([BLOCK_N, BLOCK_D_V], dtype=tl.float32)
+    dk = tl.zeros([BLOCK_N, BLOCK_D_Q], dtype=tl.float32)
+    if ENABLE_TMA:
+        q_ptrs_trans = None
+        do_ptrs = None
+        k = device_desc_k.load(
+            [start_n, (off_h * stride_kh).to(tl.int32)],
+        )
+        v = device_desc_v.load(
+            [start_n, (off_h * stride_vh).to(tl.int32)],
+        )
+    else:
+        mask_n = offs_n < seq_len
+        q_ptrs_trans = Q + (offs_m[None, :] * stride_qm + offs_qk_d[:, None])
+        do_ptrs = DOut + (offs_m[:, None] * stride_dom + offs_v_d[None, :])
+        k_ptrs = K + (offs_n[:, None] * stride_kn + offs_qk_d[None, :])
+        v_ptrs = V + (offs_n[:, None] * stride_vn + offs_v_d[None, :])
+        k = tl.load(k_ptrs, mask=mask_n[:, None], other=0.0)
+        v = tl.load(v_ptrs, mask=mask_n[:, None], other=0.0)
+    history_end = seq_len
+    if HAS_MULTIPLE_TARGETS:
+        history_end = history_end - n_targets
+    max_ids = seq_len
+    if HAS_CONTEXTUAL_SEQ_LEN:
+        pos_offs_n = offs_n - contextual_seq_len + 1
+        pos_offs_n = tl.where(
+            pos_offs_n > 0,
+            pos_offs_n,
+            0,
+        )
+        max_ids = max_ids - contextual_seq_len + 1
+    else:
+        pos_offs_n = offs_n
+    if HAS_MULTIPLE_TARGETS:
+        max_ids = max_ids - n_targets
+        pos_offs_n = tl.where(
+            pos_offs_n < max_ids,
+            pos_offs_n,
+            max_ids,
+        )
+    # loop over rows
+    if HAS_CONTEXTUAL_SEQ_LEN:
+        for start_m in range(0, contextual_seq_len, BLOCK_M):
+            start_m = tl.multiple_of(start_m, BLOCK_M)
+            dk, dv = _hstu_attn_bwd_one_block(
+                start_m=start_m,
+                offs_n=offs_n,
+                offs_m=offs_m,
+                q_ptrs_trans=q_ptrs_trans,
+                dq_ptrs_trans=dq_ptrs_trans,
+                do_ptrs=do_ptrs,
+                device_desc_q=device_desc_q,
+                device_desc_do=device_desc_do,
+                dk=dk,
+                dv=dv,
+                k=k,
+                v=v,
+                pos_offs_n=pos_offs_n,
+                seq_len=seq_len,
+                max_ids=max_ids,
+                contextual_seq_len=contextual_seq_len,
+                max_attn_len=max_attn_len,
+                LOCK=LOCK,
+                off_h=off_h,
+                stride_qh=stride_qh,
+                stride_doh=stride_doh,
+                stride_qm=stride_qm,
+                stride_dom=stride_dom,
+                stride_dqm=stride_dqm,
+                alpha=alpha,
+                MAX_SEQ_LEN=MAX_SEQ_LEN,
+                HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                ALLOW_TF32=ALLOW_TF32,
+                BLOCK_M=BLOCK_M,
+                ATOMIC_ADD=ATOMIC_ADD,
+                ENABLE_TMA=ENABLE_TMA,
+                BLOCK_D_Q=BLOCK_D_Q,
+                BLOCK_D_V=BLOCK_D_V,
+            )
+    if FAST_INTERIOR and not HAS_CONTEXTUAL_SEQ_LEN and not HAS_MAX_ATTN_LEN:
+        # Full history-key blocks are all-valid once query rows are strictly below them.
+        interior_start = high
+        if start_n + BLOCK_N <= history_end:
+            interior_start = start_n + BLOCK_N
+        if interior_start < low:
+            interior_start = low
+        for start_m in tl.range(low, interior_start, BLOCK_M, loop_unroll_factor=UNROLL):
+            start_m = tl.multiple_of(start_m, BLOCK_M)
+            dk, dv = _hstu_attn_bwd_one_block(
+                start_m=start_m,
+                offs_n=offs_n,
+                offs_m=offs_m,
+                q_ptrs_trans=q_ptrs_trans,
+                dq_ptrs_trans=dq_ptrs_trans,
+                do_ptrs=do_ptrs,
+                device_desc_q=device_desc_q,
+                device_desc_do=device_desc_do,
+                dk=dk,
+                dv=dv,
+                k=k,
+                v=v,
+                pos_offs_n=pos_offs_n,
+                seq_len=seq_len,
+                max_ids=max_ids,
+                contextual_seq_len=contextual_seq_len,
+                max_attn_len=max_attn_len,
+                LOCK=LOCK,
+                off_h=off_h,
+                stride_qh=stride_qh,
+                stride_doh=stride_doh,
+                stride_qm=stride_qm,
+                stride_dom=stride_dom,
+                stride_dqm=stride_dqm,
+                alpha=alpha,
+                MAX_SEQ_LEN=MAX_SEQ_LEN,
+                HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                ALLOW_TF32=ALLOW_TF32,
+                BLOCK_M=BLOCK_M,
+                ATOMIC_ADD=ATOMIC_ADD,
+                ENABLE_TMA=ENABLE_TMA,
+                BLOCK_D_Q=BLOCK_D_Q,
+                BLOCK_D_V=BLOCK_D_V,
+                APPLY_MASK=True,
+            )
+        for start_m in tl.range(interior_start, high, BLOCK_M, loop_unroll_factor=UNROLL):
+            start_m = tl.multiple_of(start_m, BLOCK_M)
+            dk, dv = _hstu_attn_bwd_one_block(
+                start_m=start_m,
+                offs_n=offs_n,
+                offs_m=offs_m,
+                q_ptrs_trans=q_ptrs_trans,
+                dq_ptrs_trans=dq_ptrs_trans,
+                do_ptrs=do_ptrs,
+                device_desc_q=device_desc_q,
+                device_desc_do=device_desc_do,
+                dk=dk,
+                dv=dv,
+                k=k,
+                v=v,
+                pos_offs_n=pos_offs_n,
+                seq_len=seq_len,
+                max_ids=max_ids,
+                contextual_seq_len=contextual_seq_len,
+                max_attn_len=max_attn_len,
+                LOCK=LOCK,
+                off_h=off_h,
+                stride_qh=stride_qh,
+                stride_doh=stride_doh,
+                stride_qm=stride_qm,
+                stride_dom=stride_dom,
+                stride_dqm=stride_dqm,
+                alpha=alpha,
+                MAX_SEQ_LEN=MAX_SEQ_LEN,
+                HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                ALLOW_TF32=ALLOW_TF32,
+                BLOCK_M=BLOCK_M,
+                ATOMIC_ADD=ATOMIC_ADD,
+                ENABLE_TMA=ENABLE_TMA,
+                BLOCK_D_Q=BLOCK_D_Q,
+                BLOCK_D_V=BLOCK_D_V,
+                APPLY_MASK=False,
+            )
+    else:
+        for start_m in tl.range(low, high, BLOCK_M, loop_unroll_factor=UNROLL):
+            start_m = tl.multiple_of(start_m, BLOCK_M)
+            dk, dv = _hstu_attn_bwd_one_block(
+                start_m=start_m,
+                offs_n=offs_n,
+                offs_m=offs_m,
+                q_ptrs_trans=q_ptrs_trans,
+                dq_ptrs_trans=dq_ptrs_trans,
+                do_ptrs=do_ptrs,
+                device_desc_q=device_desc_q,
+                device_desc_do=device_desc_do,
+                dk=dk,
+                dv=dv,
+                k=k,
+                v=v,
+                pos_offs_n=pos_offs_n,
+                seq_len=seq_len,
+                max_ids=max_ids,
+                contextual_seq_len=contextual_seq_len,
+                max_attn_len=max_attn_len,
+                LOCK=LOCK,
+                off_h=off_h,
+                stride_qh=stride_qh,
+                stride_doh=stride_doh,
+                stride_qm=stride_qm,
+                stride_dom=stride_dom,
+                stride_dqm=stride_dqm,
+                alpha=alpha,
+                MAX_SEQ_LEN=MAX_SEQ_LEN,
+                HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                ALLOW_TF32=ALLOW_TF32,
+                BLOCK_M=BLOCK_M,
+                ATOMIC_ADD=ATOMIC_ADD,
+                ENABLE_TMA=ENABLE_TMA,
+                BLOCK_D_Q=BLOCK_D_Q,
+                BLOCK_D_V=BLOCK_D_V,
+                APPLY_MASK=True,
+            )
+    # write-back
+    dk = dk * alpha
+    if ENABLE_TMA:
+        device_desc_dv.store(
+            [start_n, (off_h * stride_dvh).to(tl.int32)],
+            dv.to(k.dtype),
+        )
+        device_desc_dk.store(
+            [start_n, (off_h * stride_dkh).to(tl.int32)],
+            dk.to(k.dtype),
+        )
+    else:
+        dv_ptrs = DV + (offs_n[:, None] * stride_dvn + offs_v_d[None, :])
+        dk_ptrs = DK + (offs_n[:, None] * stride_dkn + offs_qk_d[None, :])
+        tl.store(dv_ptrs, dv.to(k.dtype), mask=mask_n[:, None])  # pyre-ignore[61]
+        tl.store(dk_ptrs, dk.to(k.dtype), mask=mask_n[:, None])  # pyre-ignore[61]
+
+
+def _bwd_pre_hook(nargs):
+    nargs["DQ"].zero_()
+    if nargs["SEQUENCE_PARALLEL"] is True:
+        nargs["LOCK"].zero_()
+
+
+def _get_bw_configs() -> List[triton.Config]:
+    if torch.version.hip:
+        configs = []
+        for BLOCK_M in [32, 64]:
+            for BLOCK_N in [32, 64, 128]:
+                for num_stages in [1, 2]:
+                    for num_warps in [4, 8]:
+                        for matrix_instr_nonkdim in [16, 32]:
+                            for waves_per_eu in [0, 2, 4]:
+                                for sp in [True, False]:
+                                    configs.append(
+                                        triton.Config(
+                                            {
+                                                "BLOCK_M": BLOCK_M,
+                                                "BLOCK_N": BLOCK_N,
+                                                "matrix_instr_nonkdim": matrix_instr_nonkdim,
+                                                "waves_per_eu": waves_per_eu,
+                                                "SEQUENCE_PARALLEL": sp,
+                                                "UNROLL": 1,
+                                            },
+                                            num_stages=num_stages,
+                                            num_warps=num_warps,
+                                            pre_hook=_bwd_pre_hook,
+                                        )
+                                    )
+        return configs
+
+    configs = [
+        triton.Config(
+            {"BLOCK_M": 16, "BLOCK_N": 32, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=2,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 16, "BLOCK_N": 16, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=2,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 16, "BLOCK_N": 32, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 16, "BLOCK_N": 32, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=1,
+            num_warps=8,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 32, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=1,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 32, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=8,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=1,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=1,
+            num_warps=8,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=8,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 128, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=2,
+            num_warps=8,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 128, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+            num_stages=3,
+            num_warps=8,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 128, "SEQUENCE_PARALLEL": False, "UNROLL": 4},
+            num_stages=2,
+            num_warps=8,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 16, "BLOCK_N": 32, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+            num_stages=2,
+            num_warps=2,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 32, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+            num_stages=1,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 32, "BLOCK_N": 32, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+            num_stages=1,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+        triton.Config(
+            {"BLOCK_M": 64, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+            num_stages=2,
+            num_warps=4,
+            pre_hook=_bwd_pre_hook,
+        ),
+    ]
+    if torch.cuda.is_available() and torch.version.cuda < "12.8":
+        configs += [
+            triton.Config(
+                {"BLOCK_M": 16, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+                num_stages=1,
+                num_warps=4,
+                pre_hook=_bwd_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+                num_stages=1,
+                num_warps=4,
+                pre_hook=_bwd_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64, "SEQUENCE_PARALLEL": False, "UNROLL": 1},
+                num_stages=1,
+                num_warps=8,
+                pre_hook=_bwd_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+                num_stages=1,
+                num_warps=8,
+                pre_hook=_bwd_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 128, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+                num_stages=3,
+                num_warps=8,
+                pre_hook=_bwd_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+                num_stages=1,
+                num_warps=4,
+                pre_hook=_bwd_pre_hook,
+            ),
+            triton.Config(
+                {"BLOCK_M": 32, "BLOCK_N": 64, "SEQUENCE_PARALLEL": True, "UNROLL": 1},
+                num_stages=2,
+                num_warps=4,
+                pre_hook=_bwd_pre_hook,
+            ),
+            triton.Config(
+                {
+                    "BLOCK_M": 32,
+                    "BLOCK_N": 128,
+                    "SEQUENCE_PARALLEL": False,
+                    "UNROLL": 2,
+                },
+                num_stages=2,
+                num_warps=8,
+                pre_hook=_bwd_pre_hook,
+            ),
+        ]
+    else:
+        print("WARNING: temporarily disabled some autotune configs for CUDA 12.8+")
+    return configs
+
+
+def _get_bw_pinned_configs() -> List[triton.Config]:
+    # Pinned backward-attention configs for MI350X gfx950. Pins the fast
+    # matrix_instr_nonkdim=16 winner(s) to avoid the 16-vs-32 autotune lottery.
+    #
+    # LIST, one entry per tuned shape (currently just bs=1024). With >1 entry the
+    # autotuner benchmarks only these candidates and caches the winner per `key`
+    # (AUTOTUNE_Z / H / AUTOTUNE_MAX_SEQ_LEN / DimQ / DimV), so each batch size
+    # picks its own config automatically — same pattern as the layer-norm pins.
+    #
+    # TO ADD A NEW BATCH SIZE / SHAPE:
+    #   1. Run once with TRITON_FULL_AUTOTUNE=1 TRITON_PRINT_AUTOTUNING=1.
+    #   2. Grep the log for "best config selected:" under "_hstu_attn_bwd".
+    #   3. Append that config below (verbatim BLOCK_M/BLOCK_N/matrix_instr_nonkdim/
+    #      waves_per_eu/SEQUENCE_PARALLEL/UNROLL/num_stages/num_warps).
+    # Keep pre_hook=_bwd_pre_hook on every entry (the bwd configs require it).
+    if torch.version.hip:
+        return [
+            # --- yambda bs=1024, L=2048 winner (from capture log) ---
+            triton.Config(
+                {
+                    "BLOCK_M": 32,
+                    "BLOCK_N": 128,
+                    "matrix_instr_nonkdim": 16,
+                    "waves_per_eu": 0,
+                    "SEQUENCE_PARALLEL": False,
+                    "UNROLL": 1,
+                },
+                num_stages=1,
+                num_warps=4,
+                pre_hook=_bwd_pre_hook,
+            ),
+            # --- add more (bs, L) winners here; see "TO ADD A NEW BATCH SIZE" ---
+        ]
+    return _get_bw_configs()
+
+
+@triton_autotune(
+    configs=pinned_or_full(
+        _get_bw_pinned_configs(),
+        _get_bw_configs,
+    ),
+    key=[
+        "AUTOTUNE_Z",
+        "H",
+        "AUTOTUNE_MAX_SEQ_LEN",
+        "DimQ",
+        "DimV",
+    ],
+)
+@triton.jit
+def _hstu_attn_bwd(  # noqa C901
+    Q,
+    K,
+    V,
+    tma_workspace_ptr,
+    sort_by_length_indices,
+    seq_offsets,
+    num_targets,
+    DOut,
+    DQ,
+    DK,
+    DV,
+    LOCK,
+    stride_qm,
+    stride_qh,
+    stride_kn,
+    stride_kh,
+    stride_vn,
+    stride_vh,
+    stride_dom,
+    stride_doh,
+    stride_dqm,
+    stride_dqh,
+    stride_dkn,
+    stride_dkh,
+    stride_dvn,
+    stride_dvh,
+    alpha,
+    contextual_seq_len,
+    max_attn_len,
+    Z,
+    AUTOTUNE_Z,
+    H,
+    MAX_SEQ_LEN,
+    AUTOTUNE_MAX_SEQ_LEN,  # Quantized MAX_SEQ_LEN used as an autotuning key
+    DimQ,
+    DimV,
+    HAS_MULTIPLE_TARGETS: tl.constexpr,
+    HAS_CONTEXTUAL_SEQ_LEN: tl.constexpr,
+    HAS_MAX_ATTN_LEN: tl.constexpr,
+    ALLOW_TF32: tl.constexpr,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    SEQUENCE_PARALLEL: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    UNROLL: tl.constexpr,
+    HAS_SORT_BY_LENGTH_INDICES: tl.constexpr,
+    ENABLE_TMA: tl.constexpr,
+    TMA_DESC_SIZE: tl.constexpr,
+    ENABLE_BUFFER_OPS_ASSUMES: tl.constexpr,
+    FAST_INTERIOR: tl.constexpr,
+):
+    off_hz = tl.program_id(0)
+    off_z = off_hz // H
+    if HAS_SORT_BY_LENGTH_INDICES:
+        off_z = tl.load(sort_by_length_indices + off_z)
+    off_h = off_hz % H
+    off_h = off_h.to(tl.int64)
+    seq_start = tl.load(seq_offsets + off_z).to(tl.int64)
+    seq_end = tl.load(seq_offsets + off_z + 1)
+    seq_len = (seq_end - seq_start).to(tl.int32)
+    if HAS_MULTIPLE_TARGETS:
+        n_targets = tl.load(num_targets + off_z).to(tl.int32)
+    else:
+        n_targets = None
+    if ENABLE_BUFFER_OPS_ASSUMES:
+        tl.assume(off_hz >= 0)
+        tl.assume(off_z >= 0)
+        tl.assume(off_h >= 0)
+        tl.assume(seq_start >= 0)
+        tl.assume(stride_qm >= 0)
+        tl.assume(stride_qh >= 0)
+        tl.assume(stride_kn >= 0)
+        tl.assume(stride_kh >= 0)
+        tl.assume(stride_vn >= 0)
+        tl.assume(stride_vh >= 0)
+        tl.assume(stride_dom >= 0)
+        tl.assume(stride_doh >= 0)
+        tl.assume(stride_dqm >= 0)
+        tl.assume(stride_dqh >= 0)
+        tl.assume(stride_dkn >= 0)
+        tl.assume(stride_dkh >= 0)
+        tl.assume(stride_dvn >= 0)
+        tl.assume(stride_dvh >= 0)
+
+    # offset pointers for batch/head
+    Q = Q + seq_start * stride_qm
+    K = K + seq_start * stride_kn
+    V = V + seq_start * stride_vn
+    DOut = DOut + seq_start * stride_dom
+    DQ = DQ + seq_start * stride_dqm + off_h * stride_dqh
+    DK = DK + seq_start * stride_dkn
+    DV = DV + seq_start * stride_dvn
+    device_desc_q = None
+    device_desc_k = None
+    device_desc_v = None
+    device_desc_do = None
+    device_desc_dk = None
+    device_desc_dv = None
+    if ENABLE_TMA:
+        device_desc_q = tl.make_tensor_descriptor(
+            Q,
+            shape=[seq_len, H * DimQ],
+            strides=[H * DimQ, 1],
+            block_shape=[BLOCK_M, BLOCK_D_Q],
+        )
+        device_desc_do = tl.make_tensor_descriptor(
+            DOut,
+            shape=[seq_len, H * DimV],
+            strides=[H * DimV, 1],
+            block_shape=[BLOCK_M, BLOCK_D_V],
+        )
+        device_desc_k = tl.make_tensor_descriptor(
+            K,
+            shape=[seq_len, H * DimQ],
+            strides=[H * DimQ, 1],
+            block_shape=[BLOCK_N, BLOCK_D_Q],
+        )
+        device_desc_dk = tl.make_tensor_descriptor(
+            DK,
+            shape=[seq_len, H * DimQ],
+            strides=[H * DimQ, 1],
+            block_shape=[BLOCK_N, BLOCK_D_Q],
+        )
+        device_desc_v = tl.make_tensor_descriptor(
+            V,
+            shape=[seq_len, H * DimV],
+            strides=[H * DimV, 1],
+            block_shape=[BLOCK_N, BLOCK_D_V],
+        )
+        device_desc_dv = tl.make_tensor_descriptor(
+            DV,
+            shape=[seq_len, H * DimV],
+            strides=[H * DimV, 1],
+            block_shape=[BLOCK_N, BLOCK_D_V],
+        )
+    else:
+        Q += off_h * stride_qh
+        K += off_h * stride_kh
+        V += off_h * stride_vh
+        DOut += off_h * stride_doh
+        DK += off_h * stride_dkh
+        DV += off_h * stride_dvh
+    if SEQUENCE_PARALLEL:
+        start_n = tl.program_id(1) * BLOCK_N
+        if start_n >= seq_len:
+            return
+        _hstu_attn_bwd_one_col_block(
+            start_n=start_n,
+            seq_len=seq_len,
+            n_targets=n_targets,
+            contextual_seq_len=contextual_seq_len,
+            max_attn_len=max_attn_len,
+            Q=Q,
+            K=K,
+            V=V,
+            DOut=DOut,
+            DQ=DQ,
+            DK=DK,
+            DV=DV,
+            device_desc_q=device_desc_q,
+            device_desc_k=device_desc_k,
+            device_desc_v=device_desc_v,
+            device_desc_do=device_desc_do,
+            device_desc_dk=device_desc_dk,
+            device_desc_dv=device_desc_dv,
+            LOCK=LOCK,
+            off_h=off_h,
+            stride_qh=stride_qh,
+            stride_kh=stride_kh,
+            stride_vh=stride_vh,
+            stride_doh=stride_doh,
+            stride_dkh=stride_dkh,
+            stride_dvh=stride_dvh,
+            stride_qm=stride_qm,
+            stride_kn=stride_kn,
+            stride_vn=stride_vn,
+            stride_dom=stride_dom,
+            stride_dqm=stride_dqm,
+            stride_dkn=stride_dkn,
+            stride_dvn=stride_dvn,
+            alpha=alpha,
+            MAX_SEQ_LEN=MAX_SEQ_LEN,
+            HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+            HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+            HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+            ALLOW_TF32=ALLOW_TF32,
+            BLOCK_D_Q=BLOCK_D_Q,
+            BLOCK_D_V=BLOCK_D_V,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            UNROLL=UNROLL,
+            ATOMIC_ADD=True,
+            ENABLE_TMA=ENABLE_TMA,
+            FAST_INTERIOR=FAST_INTERIOR,
+        )
+    else:
+        for start_n in range(0, seq_len, BLOCK_N):
+            _hstu_attn_bwd_one_col_block(
+                start_n=start_n,
+                seq_len=seq_len,
+                n_targets=n_targets,
+                contextual_seq_len=contextual_seq_len,
+                max_attn_len=max_attn_len,
+                Q=Q,
+                K=K,
+                V=V,
+                DOut=DOut,
+                DQ=DQ,
+                DK=DK,
+                DV=DV,
+                device_desc_q=device_desc_q,
+                device_desc_k=device_desc_k,
+                device_desc_v=device_desc_v,
+                device_desc_do=device_desc_do,
+                device_desc_dk=device_desc_dk,
+                device_desc_dv=device_desc_dv,
+                LOCK=LOCK,
+                off_h=off_h,
+                stride_qh=stride_qh,
+                stride_kh=stride_kh,
+                stride_vh=stride_vh,
+                stride_doh=stride_doh,
+                stride_dkh=stride_dkh,
+                stride_dvh=stride_dvh,
+                stride_qm=stride_qm,
+                stride_kn=stride_kn,
+                stride_vn=stride_vn,
+                stride_dom=stride_dom,
+                stride_dqm=stride_dqm,
+                stride_dkn=stride_dkn,
+                stride_dvn=stride_dvn,
+                alpha=alpha,
+                MAX_SEQ_LEN=MAX_SEQ_LEN,
+                HAS_MULTIPLE_TARGETS=HAS_MULTIPLE_TARGETS,
+                HAS_CONTEXTUAL_SEQ_LEN=HAS_CONTEXTUAL_SEQ_LEN,
+                HAS_MAX_ATTN_LEN=HAS_MAX_ATTN_LEN,
+                ALLOW_TF32=ALLOW_TF32,
+                BLOCK_D_Q=BLOCK_D_Q,
+                BLOCK_D_V=BLOCK_D_V,
+                BLOCK_M=BLOCK_M,
+                BLOCK_N=BLOCK_N,
+                UNROLL=UNROLL,
+                ATOMIC_ADD=False,
+                ENABLE_TMA=ENABLE_TMA,
+                FAST_INTERIOR=FAST_INTERIOR,
+            )
+
+
+@triton.jit
+def _hstu_attn_delta_bwd(
+    Q,
+    K,
+    V,
+    seq_offsets,
+    DOut,
+    DQ,
+    DK,
+    DV,
+    stride_qm,
+    stride_qh,
+    stride_kn,
+    stride_kh,
+    stride_vn,
+    stride_vh,
+    stride_dom,
+    stride_doh,
+    stride_dqm,
+    stride_dqh,
+    stride_dkn,
+    stride_dkh,
+    stride_dvn,
+    stride_dvh,
+    alpha,
+    K_SCALE,
+    V_SCALE,
+    H,
+    MAX_SEQ_LEN,
+    BLOCK_D_Q: tl.constexpr,
+    BLOCK_D_V: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Backward for one compact suffix query per jagged sequence.
+
+    The Plan 05 specialization is intentionally narrower than the cached
+    inference path: every sequence has exactly one target, contextual/window
+    modes are disabled, and target-aware masking makes that target attend all
+    history rows plus itself. Each program owns one sequence/head, so dK/dV
+    stores are disjoint and dQ can stay in registers across the key loop.
+
+    MAX_SEQ_LEN is a runtime scalar, not a tl.constexpr, and must stay that way.
+    Production derives it per batch as max_uih_len + num_candidates, so making it
+    constexpr keys the JIT cache on a value that changes nearly every step: a
+    cold process then pays a fresh ~110 ms compile per batch, and that compile
+    blocks the launch queue, so it shows up as GPU idle rather than as host time.
+    It is only ever used as the 1/MAX_SEQ_LEN scale below -- the same expression
+    _hstu_attn_bwd already evaluates from a runtime value -- so nothing here
+    benefits from constant folding. _hstu_attn_fwd/_hstu_attn_bwd handle this by
+    passing a separately quantized AUTOTUNE_MAX_SEQ_LEN as the autotuning key;
+    this kernel has a fixed config and needs no such key.
+    """
+    off_hz = tl.program_id(0)
+    off_z = off_hz // H
+    off_h = (off_hz % H).to(tl.int64)
+    seq_start = tl.load(seq_offsets + off_z).to(tl.int64)
+    seq_end = tl.load(seq_offsets + off_z + 1)
+    seq_len = (seq_end - seq_start).to(tl.int32)
+
+    offs_q = tl.arange(0, BLOCK_D_Q)
+    offs_v = tl.arange(0, BLOCK_D_V)
+    q = tl.load(
+        Q + off_z * stride_qm + off_h * stride_qh + offs_q,
+        mask=offs_q < BLOCK_D_Q,
+        other=0.0,
+    ).to(tl.float32)
+    dout = tl.load(
+        DOut + off_z * stride_dom + off_h * stride_doh + offs_v,
+        mask=offs_v < BLOCK_D_V,
+        other=0.0,
+    ).to(tl.float32)
+    dq = tl.zeros([BLOCK_D_Q], dtype=tl.float32)
+
+    for start_n in tl.range(0, seq_len, BLOCK_N, num_stages=1):
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        mask_n = offs_n < seq_len
+        k_ptrs = (
+            K
+            + (seq_start + offs_n[:, None]) * stride_kn
+            + off_h * stride_kh
+            + offs_q[None, :]
+        )
+        v_ptrs = (
+            V
+            + (seq_start + offs_n[:, None]) * stride_vn
+            + off_h * stride_vh
+            + offs_v[None, :]
+        )
+        k = tl.load(k_ptrs, mask=mask_n[:, None], other=0.0)
+        v = tl.load(v_ptrs, mask=mask_n[:, None], other=0.0)
+        # Match the former standalone dequantization boundary exactly: scale in
+        # fp32, round to BF16, then consume the rounded value in the backward.
+        k_real = (
+            (k.to(tl.float32) * K_SCALE).to(DK.dtype.element_ty).to(tl.float32)
+        )
+        v_real = (
+            (v.to(tl.float32) * V_SCALE).to(DV.dtype.element_ty).to(tl.float32)
+        )
+
+        qk = tl.sum(k_real * q[None, :], axis=1) * alpha
+        sig = fast_dividef(1.0, 1.0 + tl.exp(-qk))
+        silu = fast_dividef(qk, 1.0 + fast_expf(-qk)) * (1.0 / MAX_SEQ_LEN)
+        silu = tl.where(mask_n, silu, 0.0).to(DOut.dtype.element_ty)
+
+        dv = silu[:, None].to(tl.float32) * dout[None, :]
+        dqk = tl.sum(v_real * dout[None, :], axis=1)
+        dqk *= sig * (1.0 + qk * (1.0 - sig)) * (1.0 / MAX_SEQ_LEN)
+        dqk = tl.where(mask_n, dqk, 0.0).to(DK.dtype.element_ty)
+        dk = dqk[:, None].to(tl.float32) * q[None, :] * alpha
+        dq += tl.sum(dqk[:, None].to(tl.float32) * k_real, axis=0)
+
+        dk_ptrs = (
+            DK
+            + (seq_start + offs_n[:, None]) * stride_dkn
+            + off_h * stride_dkh
+            + offs_q[None, :]
+        )
+        dv_ptrs = (
+            DV
+            + (seq_start + offs_n[:, None]) * stride_dvn
+            + off_h * stride_dvh
+            + offs_v[None, :]
+        )
+        tl.store(dk_ptrs, dk.to(DK.dtype.element_ty), mask=mask_n[:, None])
+        tl.store(dv_ptrs, dv.to(DV.dtype.element_ty), mask=mask_n[:, None])
+
+    tl.store(
+        DQ + off_z * stride_dqm + off_h * stride_dqh + offs_q,
+        (dq * alpha).to(DQ.dtype.element_ty),
+        mask=offs_q < BLOCK_D_Q,
+    )
+
+
+@maybe_register_custom_op(
+    "generative_recommenders::triton_hstu_attention_fwd", mutates_args=()
+)
+def triton_hstu_attention_fwd(
+    N: int,
+    alpha: float,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    num_targets: Optional[torch.Tensor],
+    max_attn_len: int,
+    contextual_seq_len: int,
+    sort_by_length_indices: Optional[torch.Tensor],
+    enable_tma: bool,
+    num_softmax_heads: int,
+    q_scale: float = 1.0,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+) -> torch.Tensor:
+    Z = seq_offsets.numel() - 1
+    AUTOTUNE_Z = prev_power_of_2(Z)
+    L, H, DimQ = q.shape
+    _, _, DimV = v.shape
+    # Plan 08 Phi2 consumes scaled E4M3 Q/K/V but keeps the attention output
+    # in BF16 for the existing output-LN and backward paths.
+    output_dtype = (
+        torch.bfloat16
+        if v.dtype
+        in (
+            getattr(torch, "float8_e4m3fn", None),
+            getattr(torch, "float8_e4m3fnuz", None),
+        )
+        else v.dtype
+    )
+    fp8_input = v.dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+    )
+    out = torch.empty((L, H, DimV), dtype=output_dtype, device=v.device)
+    has_multiple_targets = num_targets is not None
+    has_contextual_seq_len = contextual_seq_len > 0
+    has_max_attn_len = max_attn_len > 0
+    has_sort_by_length_indices = sort_by_length_indices is not None
+    if L == 0:
+        return out
+
+    TMA_DESC_SIZE = 128
+    workspace = None
+    desc_q = q
+    desc_k = k
+    desc_v = v
+    enable_tma = enable_tma and q_scale == k_scale == v_scale == 1.0
+
+    if enable_tma and tensor_descriptor_tma:
+        dummy_block = [1, 1]
+        desc_q = TensorDescriptor(
+            q,
+            shape=[L, H * DimQ],
+            strides=[H * DimQ, 1],
+            block_shape=dummy_block,
+        )
+        desc_v = TensorDescriptor(
+            v,
+            shape=[L, H * DimV],
+            strides=[H * DimV, 1],
+            block_shape=dummy_block,
+        )
+        desc_k = TensorDescriptor(
+            k,
+            shape=[L, H * DimQ],
+            strides=[H * DimQ, 1],
+            block_shape=dummy_block,
+        )
+
+    def alloc_fn(size: int, align: int, stream: Optional[int]):
+        assert align == TMA_DESC_SIZE
+        return torch.empty(size, dtype=torch.int8, device="cuda")
+
+    # pyre-ignore [6]
+    triton.set_allocator(alloc_fn)
+    grid = lambda meta: (  # noqa E731
+        triton.cdiv(N, meta["BLOCK_M"]),
+        Z * H,
+    )
+
+    _hstu_attn_fwd[grid](
+        Q=desc_q,
+        K=desc_k,
+        V=desc_v,
+        workspace_ptr=workspace,
+        sort_by_length_indices=sort_by_length_indices,
+        seq_offsets=seq_offsets,
+        num_targets=num_targets,
+        Out=out,
+        stride_qm=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_kn=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_vn=v.stride(0),
+        stride_vh=v.stride(1),
+        stride_om=out.stride(0),
+        stride_oh=out.stride(1),
+        alpha=alpha,
+        QK_SCALE=q_scale * k_scale,
+        V_SCALE=v_scale,
+        Z=Z,
+        AUTOTUNE_Z=AUTOTUNE_Z,
+        H=H,
+        MAX_SEQ_LEN=N,
+        AUTOTUNE_MAX_SEQ_LEN=autotune_max_seq_len(N),
+        DimQ=DimQ,
+        DimV=DimV,
+        DeltaSize=0,
+        contextual_seq_len=contextual_seq_len,
+        max_attn_len=max_attn_len,
+        HAS_MULTIPLE_TARGETS=has_multiple_targets,
+        IS_DELTA_Q=False,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        BLOCK_D_Q=DimQ,
+        BLOCK_D_V=DimV,
+        HAS_CONTEXTUAL_SEQ_LEN=has_contextual_seq_len,
+        HAS_MAX_ATTN_LEN=has_max_attn_len,
+        HAS_SORT_BY_LENGTH_INDICES=has_sort_by_length_indices,
+        ENABLE_TMA=enable_tma,
+        TMA_DESC_SIZE=TMA_DESC_SIZE,
+        FAST_INTERIOR=_fast_interior(),
+        FP8_INPUT=fp8_input,
+    )
+    return out
+
+
+@maybe_register_custom_op(
+    "generative_recommenders::triton_hstu_attention_bwd",
+    mutates_args=("dq", "dk", "dv"),
+)
+def triton_hstu_attention_bwd(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    num_targets: Optional[torch.Tensor],
+    N: int,
+    alpha: float,
+    max_attn_len: int,
+    contextual_seq_len: int,
+    sort_by_length_indices: Optional[torch.Tensor],
+    enable_tma: bool,
+    num_softmax_heads: int,
+) -> None:
+    orig_dq, orig_dk, orig_dv = dq, dk, dv
+    dout = switch_to_contiguous_if_needed(dout)
+    dq = switch_to_contiguous_if_needed(dq)
+    dk = switch_to_contiguous_if_needed(dk)
+    dv = switch_to_contiguous_if_needed(dv)
+    if dout.shape[0] == 0:
+        orig_dq.zero_()
+        orig_dk.zero_()
+        orig_dv.zero_()
+        return
+    Z = seq_offsets.numel() - 1
+    _, H, DimQ = q.shape
+    _, _, DimV = v.shape
+    grid = lambda meta: (  # noqa E731
+        Z * H,
+        (triton.cdiv(N, meta["BLOCK_N"]) if meta["SEQUENCE_PARALLEL"] else 1),
+    )
+    # The minimum size of BLOCK_M used in `_get_bw_configs`.
+    # TODO (linjianma): avoid hardcoding the value.
+    MIN_BLOCK_M = 16
+    lock = torch.empty(
+        (Z * H, triton.cdiv(N, MIN_BLOCK_M)),
+        dtype=torch.int32,
+        device=q.device,
+    )
+    AUTOTUNE_Z = prev_power_of_2(Z)
+    TMA_DESC_SIZE = 128
+    tma_workspace = None
+
+    def alloc_fn(size: int, align: int, stream: Optional[int]):
+        assert align == TMA_DESC_SIZE
+        return torch.empty(size, dtype=torch.int8, device="cuda")
+
+    # pyre-ignore [6]
+    triton.set_allocator(alloc_fn)
+
+    # Enable BufferOps on AMD
+    ENABLE_BUFFER_OPS_ASSUMES = torch.version.hip is not None
+    _hstu_attn_bwd[grid](
+        Q=q,
+        K=k,
+        V=v,
+        tma_workspace_ptr=tma_workspace,
+        sort_by_length_indices=sort_by_length_indices,
+        seq_offsets=seq_offsets,
+        num_targets=num_targets,
+        DOut=dout,
+        DQ=dq,
+        DK=dk,
+        DV=dv,
+        LOCK=lock,
+        stride_qm=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_kn=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_vn=v.stride(0),
+        stride_vh=v.stride(1),
+        stride_dom=dout.stride(0),
+        stride_doh=dout.stride(1),
+        stride_dqm=dq.stride(0),
+        stride_dqh=dq.stride(1),
+        stride_dkn=dk.stride(0),
+        stride_dkh=dk.stride(1),
+        stride_dvn=dv.stride(0),
+        stride_dvh=dv.stride(1),
+        alpha=alpha,
+        contextual_seq_len=contextual_seq_len,
+        max_attn_len=max_attn_len,
+        Z=Z,
+        AUTOTUNE_Z=AUTOTUNE_Z,
+        H=H,
+        MAX_SEQ_LEN=N,
+        AUTOTUNE_MAX_SEQ_LEN=autotune_max_seq_len(N),
+        DimQ=DimQ,
+        DimV=DimV,
+        HAS_MULTIPLE_TARGETS=num_targets is not None,
+        HAS_CONTEXTUAL_SEQ_LEN=contextual_seq_len > 0,
+        HAS_MAX_ATTN_LEN=max_attn_len > 0,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        BLOCK_D_Q=DimQ,
+        BLOCK_D_V=DimV,
+        HAS_SORT_BY_LENGTH_INDICES=sort_by_length_indices is not None,
+        ENABLE_TMA=enable_tma,
+        TMA_DESC_SIZE=TMA_DESC_SIZE,
+        ENABLE_BUFFER_OPS_ASSUMES=ENABLE_BUFFER_OPS_ASSUMES,
+        FAST_INTERIOR=_fast_interior(),
+    )
+
+    copy_if_different_ptr(orig_dq, dq)
+    copy_if_different_ptr(orig_dk, dk)
+    copy_if_different_ptr(orig_dv, dv)
+
+
+@maybe_register_custom_op(
+    "generative_recommenders::triton_hstu_attention_delta_bwd",
+    mutates_args=("dq", "dk", "dv"),
+)
+def triton_hstu_attention_delta_bwd(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    N: int,
+    alpha: float,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+) -> None:
+    """Differentiate one compact suffix query per sequence against full K/V."""
+    orig_dq, orig_dk, orig_dv = dq, dk, dv
+    dout = switch_to_contiguous_if_needed(dout)
+    q = switch_to_contiguous_if_needed(q)
+    k = switch_to_contiguous_if_needed(k)
+    v = switch_to_contiguous_if_needed(v)
+    dq = switch_to_contiguous_if_needed(dq)
+    dk = switch_to_contiguous_if_needed(dk)
+    dv = switch_to_contiguous_if_needed(dv)
+    if dout.shape[0] == 0:
+        orig_dq.zero_()
+        orig_dk.zero_()
+        orig_dv.zero_()
+        return
+
+    Z = seq_offsets.numel() - 1
+    _, H, DimQ = q.shape
+    _, _, DimV = v.shape
+    if q.shape[0] != Z or dout.shape[0] != Z:
+        raise ValueError("delta attention training requires one query per sequence")
+
+    _hstu_attn_delta_bwd[(Z * H,)](
+        Q=q,
+        K=k,
+        V=v,
+        seq_offsets=seq_offsets,
+        DOut=dout,
+        DQ=dq,
+        DK=dk,
+        DV=dv,
+        stride_qm=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_kn=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_vn=v.stride(0),
+        stride_vh=v.stride(1),
+        stride_dom=dout.stride(0),
+        stride_doh=dout.stride(1),
+        stride_dqm=dq.stride(0),
+        stride_dqh=dq.stride(1),
+        stride_dkn=dk.stride(0),
+        stride_dkh=dk.stride(1),
+        stride_dvn=dv.stride(0),
+        stride_dvh=dv.stride(1),
+        alpha=alpha,
+        K_SCALE=k_scale,
+        V_SCALE=v_scale,
+        H=H,
+        MAX_SEQ_LEN=N,
+        BLOCK_D_Q=DimQ,
+        BLOCK_D_V=DimV,
+        BLOCK_N=32,
+        num_warps=4,
+    )
+    copy_if_different_ptr(orig_dq, dq)
+    copy_if_different_ptr(orig_dk, dk)
+    copy_if_different_ptr(orig_dv, dv)
+
+
+@triton_hstu_attention_delta_bwd.register_fake
+def _triton_hstu_attention_delta_bwd_fake(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    N: int,
+    alpha: float,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+) -> None:
+    return None
+
+
+@triton_hstu_attention_fwd.register_fake
+def _triton_hstu_attention_fwd_fake(
+    N: int,
+    alpha: float,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    num_targets: Optional[torch.Tensor],
+    max_attn_len: int,
+    contextual_seq_len: int,
+    sort_by_length_indices: Optional[torch.Tensor],
+    enable_tma: bool,
+    num_softmax_heads: int,
+    q_scale: float = 1.0,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+) -> torch.Tensor:
+    L, H, _ = q.shape
+    _, _, DimV = v.shape
+    output_dtype = (
+        torch.bfloat16
+        if v.dtype
+        in (
+            getattr(torch, "float8_e4m3fn", None),
+            getattr(torch, "float8_e4m3fnuz", None),
+        )
+        else v.dtype
+    )
+    out = torch.empty((L, H, DimV), dtype=output_dtype, device=v.device)
+    return out
+
+
+@triton_hstu_attention_bwd.register_fake
+def _triton_hstu_attention_bwd_fake(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    num_targets: Optional[torch.Tensor],
+    N: int,
+    alpha: float,
+    max_attn_len: int,
+    contextual_seq_len: int,
+    sort_by_length_indices: Optional[torch.Tensor],
+    enable_tma: bool,
+    num_softmax_heads: int,
+) -> None:
+    return None
+
+
+class _AttentionFunction(torch.autograd.Function):
+    @staticmethod
+    # pyre-ignore[14]
+    def forward(
+        ctx,
+        N: int,
+        alpha: float,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        seq_offsets: torch.Tensor,
+        num_targets: Optional[torch.Tensor],
+        max_attn_len: int,
+        contextual_seq_len: int,
+        sort_by_length: bool,
+        enable_tma: bool,
+    ) -> torch.Tensor:
+        sort_by_length_indices = None
+        if sort_by_length:
+            seq_lengths = seq_offsets[1:] - seq_offsets[:-1]
+            _, sort_by_length_indices = torch.sort(
+                seq_lengths, descending=True, stable=False
+            )
+        saved_tensors = [q, k, v, seq_offsets]
+        if num_targets is not None:
+            saved_tensors.append(num_targets)
+        if sort_by_length_indices is not None:
+            saved_tensors.append(sort_by_length_indices)
+        ctx.save_for_backward(*saved_tensors)
+        ctx.alpha = alpha
+        ctx.has_multiple_targets = num_targets is not None
+        ctx.max_attn_len = max_attn_len
+        ctx.N = N
+        ctx.contextual_seq_len = contextual_seq_len
+        ctx.sort_by_length = sort_by_length
+        ctx.enable_tma = enable_tma
+        return triton_hstu_attention_fwd(
+            N=N,
+            alpha=alpha,
+            q=q,
+            k=k,
+            v=v,
+            seq_offsets=seq_offsets,
+            num_targets=num_targets,
+            max_attn_len=max_attn_len,
+            contextual_seq_len=contextual_seq_len,
+            sort_by_length_indices=sort_by_length_indices,
+            enable_tma=enable_tma,
+            num_softmax_heads=0,
+        )
+
+    @staticmethod
+    # pyre-ignore[14]
+    def backward(
+        ctx, dout: torch.Tensor
+    ) -> Tuple[
+        None,
+        None,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]:
+        with torch.inference_mode():
+            q, k, v, seq_offsets = ctx.saved_tensors[:4]
+            idx = 4
+            if ctx.has_multiple_targets:
+                num_targets = ctx.saved_tensors[idx]
+                idx += 1
+            else:
+                num_targets = None
+            if ctx.sort_by_length:
+                sort_by_length_indices = ctx.saved_tensors[idx]
+            else:
+                sort_by_length_indices = None
+
+            dq = torch.empty_like(q)
+            dk = torch.empty_like(k)
+            dv = torch.empty_like(v)
+            triton_hstu_attention_bwd(
+                dout=dout,
+                q=q,
+                k=k,
+                v=v,
+                dq=dq,
+                dk=dk,
+                dv=dv,
+                seq_offsets=seq_offsets,
+                num_targets=num_targets,
+                N=ctx.N,
+                alpha=ctx.alpha,
+                max_attn_len=ctx.max_attn_len,
+                contextual_seq_len=ctx.contextual_seq_len,
+                sort_by_length_indices=sort_by_length_indices,
+                enable_tma=ctx.enable_tma,
+                num_softmax_heads=0,
+            )
+            return (
+                None,
+                None,
+                dq,
+                dk,
+                dv,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+
+@torch.jit.unused
+@torch.fx.wrap
+def triton_hstu_mha(
+    N: int,
+    alpha: float,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    num_targets: Optional[torch.Tensor] = None,
+    max_attn_len: int = 0,
+    contextual_seq_len: int = 0,
+    sort_by_length: bool = False,
+    enable_tma: bool = False,
+) -> torch.Tensor:
+    return _AttentionFunction.apply(
+        N,
+        alpha,
+        q,
+        k,
+        v,
+        seq_offsets,
+        num_targets,
+        max_attn_len,
+        contextual_seq_len,
+        sort_by_length,
+        enable_tma,
+    )
+
+
+@torch.jit.unused
+@torch.fx.wrap
+def triton_cached_hstu_mha(
+    N: int,
+    alpha: float,
+    delta_q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seq_offsets: torch.Tensor,
+    num_targets: Optional[torch.Tensor] = None,
+    max_attn_len: int = 0,
+    contextual_seq_len: int = 0,
+    enable_tma: bool = False,
+    q_scale: float = 1.0,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+) -> torch.Tensor:
+    Z = seq_offsets.size(0) - 1
+    AUTOTUNE_Z = prev_power_of_2(Z)
+    DELTA_L, H, DimQ = delta_q.shape
+    DeltaSize = DELTA_L // Z
+    L, _, DimV = v.shape
+    output_dtype = (
+        torch.bfloat16
+        if delta_q.dtype
+        in (
+            getattr(torch, "float8_e4m3fn", None),
+            getattr(torch, "float8_e4m3fnuz", None),
+        )
+        else delta_q.dtype
+    )
+    fp8_input = v.dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+    )
+    out = torch.empty(
+        (DELTA_L, H, DimV),
+        dtype=output_dtype,
+        device=delta_q.device,
+    )
+
+    TMA_DESC_SIZE = 128
+    desc_q = delta_q
+    desc_k = k
+    desc_v = v
+    enable_tma = enable_tma and q_scale == k_scale == v_scale == 1.0
+
+    if enable_tma and tensor_descriptor_tma:
+        dummy_block = [1, 1]
+        desc_q = TensorDescriptor(
+            delta_q,
+            shape=[DELTA_L, H * DimQ],
+            strides=[H * DimQ, 1],
+            block_shape=dummy_block,
+        )
+        desc_v = TensorDescriptor(
+            v,
+            shape=[L, H * DimV],
+            strides=[H * DimV, 1],
+            block_shape=dummy_block,
+        )
+        desc_k = TensorDescriptor(
+            k,
+            shape=[L, H * DimQ],
+            strides=[H * DimQ, 1],
+            block_shape=dummy_block,
+        )
+
+    def alloc_fn(size: int, align: int, stream: Optional[int]):
+        assert align == TMA_DESC_SIZE
+        return torch.empty(size, dtype=torch.int8, device="cuda")
+
+    # pyre-ignore [6]
+    triton.set_allocator(alloc_fn)
+    grid = lambda meta: (  # noqa E731
+        triton.cdiv(DeltaSize, meta["BLOCK_M"]),
+        Z * H,
+    )
+
+    has_contextual_seq_len = contextual_seq_len > 0
+    has_max_attn_len = max_attn_len > 0
+    # DLRM_HSTU_FP8_DELTA_FWD_BM16 (X4C19; read per call; code default OFF,
+    # gin item (26)(c) binds it on): the pinned forward config (BLOCK_M=128, tuned for the full forward)
+    # leaves 127 of 128 query rows masked when each sequence has one delta
+    # query. A 16-row query block (BLOCK_N=32, 2 warps) computes the same
+    # per-row values -- bitwise identical output -- with 8x fewer MFMA rows.
+    # Applies to DeltaSize <= 16 without TMA on ROCm only, bypassing the
+    # autotuner there; DLRM_HSTU_FP8_DELTA_FWD_BM16=0 restores the pinned
+    # config. The kernel is still `_hstu_attn_fwd`.
+    # PROVENANCE: selected by in-model A/B of the benchmark run (bitwise,
+    # speed-only choice): ship11 ladder rung R2->R3 = gin item (26), together
+    # with FWD_PIPE (late traced pair: this kernel -1.03 ms/rank-step), and the
+    # Arbor x4c19 iter-37 2n A/B (_hstu_attn_fwd 1.52 -> 0.51 ms/rank-step,
+    # faster in 80/80 rank-step pairs per pairing). The iter-36 lab sweep on
+    # benchmark-run length pools (since removed) is historical.
+    launch = _hstu_attn_fwd
+    extra_cfg = {}
+    if (
+        DeltaSize <= 16
+        and not enable_tma
+        and torch.version.hip is not None
+        and os.environ.get("TRITON_FULL_AUTOTUNE", "0") != "1"
+        and _delta_fwd_bm16_enabled()
+    ):
+        launch = _hstu_attn_fwd.fn
+        extra_cfg = dict(
+            BLOCK_M=16,
+            BLOCK_N=32,
+            matrix_instr_nonkdim=16,
+            waves_per_eu=0,
+            kpack=2,
+            USE_TLX=False,
+            NUM_BUFFERS=1,
+            NUM_MMA_WARPS_PER_GROUP=1,
+            NUM_MMA_GROUPS=1,
+            num_stages=2,
+            num_warps=2,
+        )
+    launch[grid](
+        Q=desc_q,
+        K=desc_k,
+        V=desc_v,
+        workspace_ptr=None,
+        sort_by_length_indices=None,
+        seq_offsets=seq_offsets,
+        num_targets=num_targets,
+        Out=out,
+        stride_qm=delta_q.stride(0),
+        stride_qh=delta_q.stride(1),
+        stride_kn=k.stride(0),
+        stride_kh=k.stride(1),
+        stride_vn=v.stride(0),
+        stride_vh=v.stride(1),
+        stride_om=out.stride(0),
+        stride_oh=out.stride(1),
+        alpha=alpha,
+        QK_SCALE=q_scale * k_scale,
+        V_SCALE=v_scale,
+        contextual_seq_len=contextual_seq_len,
+        max_attn_len=max_attn_len,
+        Z=Z,
+        AUTOTUNE_Z=AUTOTUNE_Z,
+        H=H,
+        MAX_SEQ_LEN=N,
+        AUTOTUNE_MAX_SEQ_LEN=autotune_max_seq_len(N),
+        DimQ=DimQ,
+        DimV=DimV,
+        DeltaSize=DeltaSize,
+        HAS_MULTIPLE_TARGETS=num_targets is not None,
+        IS_DELTA_Q=True,
+        ALLOW_TF32=torch.backends.cuda.matmul.allow_tf32,
+        BLOCK_D_Q=DimQ,
+        BLOCK_D_V=DimV,
+        HAS_CONTEXTUAL_SEQ_LEN=has_contextual_seq_len,
+        HAS_MAX_ATTN_LEN=has_max_attn_len,
+        HAS_SORT_BY_LENGTH_INDICES=False,
+        ENABLE_TMA=enable_tma,
+        TMA_DESC_SIZE=TMA_DESC_SIZE,
+        FAST_INTERIOR=_fast_interior(),
+        FP8_INPUT=fp8_input,
+        **extra_cfg,
+    )
+    return out
+
+
+_DELTA_FWD_BM16_LOGGED = [False]
+
+
+def _delta_fwd_bm16_enabled() -> bool:
+    on = os.environ.get("DLRM_HSTU_FP8_DELTA_FWD_BM16", "0") == "1"
+    if on and not _DELTA_FWD_BM16_LOGGED[0]:
+        _DELTA_FWD_BM16_LOGGED[0] = True
+        print(
+            "[hstu_delta_fwd] DLRM_HSTU_FP8_DELTA_FWD_BM16=1 armed: delta-query "
+            "forward uses BLOCK_M=16 BLOCK_N=32 num_warps=2 num_stages=2 "
+            "(bypasses the pinned BLOCK_M=128 config; bitwise identical)",
+            flush=True,
+        )
+    return on

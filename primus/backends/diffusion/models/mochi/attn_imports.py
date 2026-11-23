@@ -61,6 +61,10 @@ def flash_varlen_attn(
     if get_attention_backend() == "flash_attn_aiter":
         if not AITER_FLASH_ATTN_AVAILABLE or not q.is_cuda or cu_seqlens_q is None:
             raise RuntimeError("Mochi flash attention requires AITER and packed CUDA sequences.")
+        # fmha_v3_varlen_fwd rejects anything but int32. cumsum promotes
+        # integer lengths to int64 unless the caller pins the dtype.
+        cu_seqlens_q = cu_seqlens_q.to(dtype=torch.int32)
+        cu_seqlens_k = cu_seqlens_k.to(dtype=torch.int32)
         out = aiter.flash_attn_varlen_func(
             q,
             k,

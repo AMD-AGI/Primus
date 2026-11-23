@@ -11,50 +11,16 @@ are untouched. The optimizer patch is process-wide, so it is also gated on the
 run training Ideogram-4: the setting in another model's config changes nothing.
 """
 
-import ast
-from typing import Any
-
 from primus.backends.automodel import options
-from primus.backends.automodel.patches._conditions import transformer_is
-from primus.core.patches import PatchContext, get_param, register_patch
+from primus.backends.automodel.patches._conditions import (
+    checkpoint_enabled,
+    transformer_is,
+)
+from primus.core.patches import PatchContext, register_patch
 
 options.declare("primus_ideogram4", "zero1")
 
 _is_ideogram4 = transformer_is("Ideogram4Transformer2DModel")
-
-# The spellings AutoModel's config loader turns into constants before falling back
-# to literal evaluation (its translate_value).
-_AUTOMODEL_CONSTANTS = {
-    "none": None,
-    "None": None,
-    "true": True,
-    "True": True,
-    "false": False,
-    "False": False,
-}
-
-
-def as_automodel_reads_it(value: Any) -> Any:
-    """``value`` as AutoModel's config loader will hand it to the recipe."""
-    if not isinstance(value, str):
-        return value
-    if value in _AUTOMODEL_CONSTANTS:
-        return _AUTOMODEL_CONSTANTS[value]
-    try:
-        return ast.literal_eval(value)
-    except (ValueError, SyntaxError):
-        return value
-
-
-def checkpoint_enabled(ctx: PatchContext) -> bool:
-    """Whether AutoModel will save checkpoints, which defaults to yes.
-
-    Read the way AutoModel reads it, not with Primus's own true/false spellings:
-    "false" and "0" turn saving off, but "off" or "no" stay non-empty strings,
-    which AutoModel treats as on -- so they must count as on here too, or ZeRO-1
-    would be let through to fail at the first save.
-    """
-    return bool(as_automodel_reads_it(get_param(ctx, "checkpoint.enabled", True)))
 
 
 def _enabled(ctx: PatchContext) -> bool:
