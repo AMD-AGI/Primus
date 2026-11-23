@@ -83,3 +83,50 @@ def test_fused_grouped_mlp_runs_linear_pre_hooks_before_preparing_weights():
         "fc2.prepare_weights(grouped_mlp, fc2)",
     ]
     assert out == (x, "fc1.weight", "fc2.weight", "pattern")
+
+
+class _ProbsFusingActivation:
+    """An activation that reports whether it folds the router probability in, and records which entry ran."""
+
+    def __init__(self, fuses_probs):
+        self.fuses_probs = fuses_probs
+        self.calls = []
+
+    def __call__(self, x):
+        self.calls.append("plain")
+        return 2 * x
+
+    def forward_with_probs(self, x, probs):
+        self.calls.append("with_probs")
+        return 3 * x * probs
+
+
+def _bias_act_state(activation):
+    return SimpleNamespace(config=SimpleNamespace(use_te_activation_func=True), activation_func=activation)
+
+
+def test_bias_act_func_hands_the_probs_to_an_activation_that_fuses_them():
+    act = _ProbsFusingActivation(fuses_probs=True)
+    x, probs = torch.ones(4, 8), torch.full((4, 1), 0.5)
+
+    out = PrimusGroupedMLP.bias_act_func(_bias_act_state(act), x, None, probs)
+
+    assert act.calls == ["with_probs"]
+    torch.testing.assert_close(out, 3 * x * probs)
+
+
+@pytest.mark.parametrize(
+    "fuses_probs, with_bias, with_probs",
+    [(False, False, True), (True, True, True), (True, False, False)],
+)
+def test_bias_act_func_keeps_the_unfused_path(fuses_probs, with_bias, with_probs):
+    act = _ProbsFusingActivation(fuses_probs=fuses_probs)
+    x = torch.ones(4, 8)
+    bias = torch.ones(8) if with_bias else None
+    probs = torch.full((4, 1), 0.5) if with_probs else None
+
+    out = PrimusGroupedMLP.bias_act_func(_bias_act_state(act), x, bias, probs)
+
+    assert act.calls == ["plain"]
+    expected = 2 * (x + bias if with_bias else x)
+    torch.testing.assert_close(out, expected * probs if with_probs else expected)

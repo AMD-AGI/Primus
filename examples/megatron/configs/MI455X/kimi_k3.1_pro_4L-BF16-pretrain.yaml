@@ -28,7 +28,9 @@ env:
 #   - Turbo FlyDSL MLA attention (create_attention_mask_in_dataloader: false),
 #     DeepEP on at 64 CUs, and a hipBLASLt tuning table (env block above);
 #   - the attention-residual mixer on FlyDSL (attn_res_backend: flydsl, MI355X:
-#     the model default eager; PRIMUS_ATTN_RES_BACKEND overrides it).
+#     the model default eager; PRIMUS_ATTN_RES_BACKEND overrides it);
+#   - the situ activation on FlyDSL (situ_backend: flydsl, MI355X: eager;
+#     PRIMUS_SITU_BACKEND overrides it) and moe_router_fusion on (MI355X: off).
 # At world 4 / EP 4 the expert-DP size is 1, so the memory recipe below
 # (distributed + precision-aware optimizer, bf16 grads/moments) is required.
 # Synthetic data (mock_data: true).
@@ -122,6 +124,9 @@ modules:
       use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:fla}
       # Attention-residual mixer: eager | eager_bcast | flydsl (FlyDSL kernels: gfx950 / gfx1250).
       attn_res_backend: ${PRIMUS_ATTN_RES_BACKEND:flydsl}
+      # situ activation: eager | flydsl (FlyDSL kernels: gfx1250; the routed experts fold the router
+      # probability into them).
+      situ_backend: ${PRIMUS_SITU_BACKEND:flydsl}
       moe_router_dtype: fp32
       moe_router_bwd_bf16: true
       optimizer: adam
@@ -141,6 +146,11 @@ modules:
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: true
       moe_permute_fusion: true
+      # the router's score function and top-k as fused kernels (Megatron's moe_router_fusion)
+      moe_router_fusion: true
+      # situ_backend: flydsl and moe_router_fusion checked on 4 x MI455X (EP 4, BF16, seq 4096, MBS 2, GBS 64,
+      # 12 iterations, dev/mi455x_v4): loss within 7.6e-5 (relative) of situ_backend: eager with the fusion off
+      # over iterations 1-7, no NaN.
       # Attention uses the FlyDSL MLA backend (PRIMUS_TURBO_ATTN_BACKEND).
       # DeepEP uses Primus-Turbo's FlyDSL flydsl_v2 backend for gfx1250
       # (Primus-Turbo#602, in amdprimus/amdprimus:tas-20261109's Primus-Turbo)
