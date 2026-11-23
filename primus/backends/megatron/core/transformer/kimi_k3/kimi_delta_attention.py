@@ -864,14 +864,21 @@ class KimiDeltaAttention(MegatronModule):
 
         seq_len, batch, _ = hidden_states.shape
         seq_len = seq_len * self.sp_size
+        # Without sequence or context parallelism the projections run on one [b, s, h] copy of the input, so their
+        # outputs are already in the [b, s, ...] layout the kernels take: two hidden-wide transposes (input and
+        # output) instead of one per projection output. With either, the projections see the [s, b, h] shard.
+        bshd = self.sp_size == 1 and cp_context is None
+        x_in = hidden_states.transpose(0, 1).contiguous() if bshd else hidden_states
+
+        def to_bs(t: Tensor) -> Tensor:
+            return t if bshd else t.transpose(0, 1)
 
         # --- projections, then three separate causal convs --------------
         nvtx_range_push(suffix="kda_in_proj")
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
-        # s b d -> b s d
-        q, k, v = (x.transpose(0, 1) for x in (q, k, v))
+        q, _ = self.q_proj(x_in)
+        k, _ = self.k_proj(x_in)
+        v, _ = self.v_proj(x_in)
+        q, k, v = (to_bs(x) for x in (q, k, v))
         nvtx_range_pop(suffix="kda_in_proj")
 
         nvtx_range_push(suffix="kda_conv1d")
@@ -888,12 +895,12 @@ class KimiDeltaAttention(MegatronModule):
 
         # --- gate and write strength ------------------------------------
         nvtx_range_push(suffix="kda_gate")
-        z, _ = self.f_a_proj(hidden_states)
+        z, _ = self.f_a_proj(x_in)
         z, _ = self.f_b_proj(z)
-        z = z.transpose(0, 1).reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
+        z = to_bs(z).reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
         g = self.gate_fn(z, self.A_log, self.dt_bias, self.gate_lower_bound)
-        beta, _ = self.b_proj(hidden_states)
-        beta = torch.sigmoid(beta.transpose(0, 1).float())
+        beta, _ = self.b_proj(x_in)
+        beta = torch.sigmoid(to_bs(beta).float())
         nvtx_range_pop(suffix="kda_gate")
 
         # --- the delta-rule recurrence ----------------------------------
@@ -921,19 +928,22 @@ class KimiDeltaAttention(MegatronModule):
         # --- sigmoid-gated head-wise RMSNorm, then o_proj ---------------
         nvtx_range_push(suffix="kda_out_norm")
         if self.use_full_rank_gate:
-            gate, _ = self.g_proj(hidden_states)
+            gate, _ = self.g_proj(x_in)
         else:
-            gate, _ = self.g_a_proj(hidden_states)
+            gate, _ = self.g_a_proj(x_in)
             gate, _ = self.g_b_proj(gate)
-        gate = gate.transpose(0, 1).reshape(batch, seq_len, self.num_heads_local_tp, self.value_head_dim)
+        gate = to_bs(gate).reshape(batch, seq_len, self.num_heads_local_tp, self.value_head_dim)
         out = self.out_norm(core_out, gate)
         nvtx_range_pop(suffix="kda_out_norm")
 
-        # b s h d -> s b (h d)
-        out = out.reshape(batch, seq_len, self.v_dim_local_tp).transpose(0, 1).contiguous()
+        out = out.reshape(batch, seq_len, self.v_dim_local_tp)
+        if not bshd:
+            out = out.transpose(0, 1).contiguous()  # b s (h d) -> s b (h d), the row-parallel o_proj's layout
         nvtx_range_push(suffix="kda_o_proj")
         out, out_bias = self.o_proj(out)
         nvtx_range_pop(suffix="kda_o_proj")
+        if bshd:
+            out = out.transpose(0, 1).contiguous()
         return out, out_bias
 
     # ------------------------------------------------------------------
