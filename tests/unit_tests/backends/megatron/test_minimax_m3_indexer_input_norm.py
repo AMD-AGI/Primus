@@ -86,7 +86,16 @@ def test_switch_defaults_to_off():
 @needs_gpu
 @pytest.mark.parametrize(
     "shape",
-    [(4096, 1, 6144), (4096, 2, 6144), (8192, 1, 6144), (16384, 1, 6144), (512, 3, 7168), (512, 1, 8192), (512, 1, 1028), (64, 1, 520)],
+    [
+        (4096, 1, 6144),
+        (4096, 2, 6144),
+        (8192, 1, 6144),
+        (16384, 1, 6144),
+        (512, 3, 7168),
+        (512, 1, 8192),
+        (512, 1, 1028),
+        (64, 1, 520),
+    ],
 )
 @pytest.mark.parametrize("zero_centered", [True, False])
 @pytest.mark.parametrize("eps", [1e-6, 1e-5])
@@ -222,7 +231,9 @@ def test_patched_indexer_input_matches_the_original(mod, require_bitwise, switch
     got = cls._indexer_input(_fake(1e-6, zero_centered, switch, weight), hidden)
     if switch:
         require_bitwise(
-            mod.self_check(hidden.detach(), weight.detach(), 1e-6, zero_centered, _original(1e-6, zero_centered)),
+            mod.self_check(
+                hidden.detach(), weight.detach(), 1e-6, zero_centered, _original(1e-6, zero_centered)
+            ),
             "msa_indexer_input_norm",
         )
     assert not got.requires_grad and got.dtype == want.dtype

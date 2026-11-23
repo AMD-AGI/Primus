@@ -87,7 +87,9 @@ def _log_fusions_once(config) -> None:
     log_rank_0(f"MinimaxSparseAttention ({config.msa_backend}): Triton fusions {', '.join(on) or 'off'}")
     if config.msa_backend == "flydsl":
         shared = "on" if getattr(config, "msa_shared_tile_staging", False) else "off"
-        log_rank_0(f"MinimaxSparseAttention (flydsl): msa_shared_tile_staging {shared} (gfx1250 kernels only)")
+        log_rank_0(
+            f"MinimaxSparseAttention (flydsl): msa_shared_tile_staging {shared} (gfx1250 kernels only)"
+        )
 
 
 def _require_gfx1250_flydsl() -> None:

@@ -766,7 +766,15 @@ _CACHE: dict = {}
 
 
 def msa_token_fwd(
-    q, k, v, block_table, softmax_scale=None, block_size=128, return_slot_lse=False, shared_tiles=False, **config
+    q,
+    k,
+    v,
+    block_table,
+    softmax_scale=None,
+    block_size=128,
+    return_slot_lse=False,
+    shared_tiles=False,
+    **config,
 ):
     """MSA forward.
 
@@ -795,7 +803,15 @@ def msa_token_fwd(
         )
 
         return msa_token_fwd_wave32(
-            q, k, v, block_table, softmax_scale, block_size, return_slot_lse, shared_tiles=shared_tiles, **config
+            q,
+            k,
+            v,
+            block_table,
+            softmax_scale,
+            block_size,
+            return_slot_lse,
+            shared_tiles=shared_tiles,
+            **config,
         )
     S, B, Hq, Dq = q.shape
     Hkv = k.shape[2]

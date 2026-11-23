@@ -56,9 +56,7 @@ def eligible(tensor_lists, coeff) -> bool:
     """Whether a ``multi_tensor_scale_tensor`` call is the in-place BF16 scale this module covers."""
     if len(tensor_lists) != 2 or len(tensor_lists[0]) != len(tensor_lists[1]) or not tensor_lists[0]:
         return False
-    if not (
-        torch.is_tensor(coeff) and coeff.is_cuda and coeff.dtype == torch.float32 and coeff.numel() == 1
-    ):
+    if not (torch.is_tensor(coeff) and coeff.is_cuda and coeff.dtype == torch.float32 and coeff.numel() == 1):
         return False
     for src, dst in zip(*tensor_lists):
         # in place only: same storage, offset and layout (Megatron passes [grads, grads])
@@ -87,7 +85,12 @@ def scale_tensors(tensors: Sequence[torch.Tensor], coeff: torch.Tensor) -> None:
 def _probe_tensors(device) -> list:
     """Every BF16 bit pattern, in lengths that end inside, at and one past a kernel block."""
     bits = torch.arange(65536, dtype=torch.int32, device=device).to(torch.int16).view(torch.bfloat16)
-    return [bits.clone(), bits[: 3 * _BLOCK + 1].clone(), bits[32000 : 32000 + _BLOCK - 1].clone(), bits[-7:].clone()]
+    return [
+        bits.clone(),
+        bits[: 3 * _BLOCK + 1].clone(),
+        bits[32000 : 32000 + _BLOCK - 1].clone(),
+        bits[-7:].clone(),
+    ]
 
 
 def _probe(scale, coeff: torch.Tensor) -> list:

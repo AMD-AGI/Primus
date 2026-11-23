@@ -18,7 +18,9 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton an
 def _te_scale(tensors, coeff):
     """Megatron's call: TE's applier around TE's kernel, in place."""
     noop = torch.zeros(1, dtype=torch.int, device="cuda")
-    te_optimizers.multi_tensor_applier(te_optimizers.multi_tensor_scale_tensor, noop, [tensors, tensors], coeff)
+    te_optimizers.multi_tensor_applier(
+        te_optimizers.multi_tensor_scale_tensor, noop, [tensors, tensors], coeff
+    )
 
 
 def _coeff(value):
@@ -104,7 +106,9 @@ def test_large_tensors_take_several_launches(require_bitwise, monkeypatch, limit
     c = _coeff(0.0437)
     clip_scale.scale_tensors(got, c)
     _te_scale(want, c)
-    require_bitwise(all(_same_bits(a, b) for a, b in zip(got, want)), f"bitwise_clip_scale in slices of {limit}")
+    require_bitwise(
+        all(_same_bits(a, b) for a, b in zip(got, want)), f"bitwise_clip_scale in slices of {limit}"
+    )
     assert len(launches) == sum(-(-g.numel() // limit) for g in grads)
 
 
@@ -142,7 +146,9 @@ def test_eligibility():
 
 
 def _patched(calls):
-    from primus.backends.megatron.patches.te_patches.bitwise_clip_scale_patches import make_bitwise_scale
+    from primus.backends.megatron.patches.te_patches.bitwise_clip_scale_patches import (
+        make_bitwise_scale,
+    )
 
     def original(chunk_size, noop_flag, tensor_lists, coeff):
         calls.append(len(tensor_lists[0]))

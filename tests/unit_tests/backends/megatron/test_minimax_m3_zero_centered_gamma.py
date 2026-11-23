@@ -124,7 +124,9 @@ def test_qk_kernels_with_in_kernel_gamma_match_upstream(seq, batch, kind, fresh_
     attn = _attn(_norm(True, kind), _norm(True, kind), True, ng, hpg)
     rope = _rope(seq)
     params = [attn.q_layernorm.weight, attn.k_layernorm.weight]
-    if not (qk_norm_rope._multi_row(D, seq * batch * ng * hpg) and qk_norm_rope._multi_row(D, seq * batch * ng)):
+    if not (
+        qk_norm_rope._multi_row(D, seq * batch * ng * hpg) and qk_norm_rope._multi_row(D, seq * batch * ng)
+    ):
         pytest.skip("Turbo launches one of these row counts single-row; the fused path does not apply")
     ok = qk_norm_rope._qk_self_check(attn, seq, batch, rope, True)
     assert all(p.grad is None for p in params)
@@ -147,7 +149,9 @@ def test_qk_kernels_with_in_kernel_gamma_match_upstream(seq, batch, kind, fresh_
 
     def kernels(m):
         cos_, sin_ = rope.cos_sin(m.dtype)
-        return qk_norm_rope._QKNormRope.apply(m, params[0], params[1], cos_, sin_, hpg, attn.q_layernorm.eps, True)
+        return qk_norm_rope._QKNormRope.apply(
+            m, params[0], params[1], cos_, sin_, hpg, attn.q_layernorm.eps, True
+        )
 
     ref = _run(upstream, mixed, dys, params)
     _assert_bitwise(_run(kernels, mixed, dys, params), ref)
@@ -158,7 +162,9 @@ def test_qk_kernels_with_in_kernel_gamma_match_upstream(seq, batch, kind, fresh_
 @needs_gpu
 @pytest.mark.parametrize("seq, heads, batch", [(4096, 4, 1), (4096, 1, 1), (4096, 4, 2), (8192, 4, 1)])
 @pytest.mark.parametrize("kind", ["randn", "edges"])
-def test_norm_rope_kernels_with_in_kernel_gamma_match_upstream(seq, heads, batch, kind, fresh_checks, require_bitwise):
+def test_norm_rope_kernels_with_in_kernel_gamma_match_upstream(
+    seq, heads, batch, kind, fresh_checks, require_bitwise
+):
     from primus.backends.megatron.core.transformer.minimax_m3 import qk_norm_rope
 
     torch.manual_seed(0)
@@ -179,7 +185,9 @@ def test_norm_rope_kernels_with_in_kernel_gamma_match_upstream(seq, heads, batch
 
     ref = _run(lambda t: (rope.apply(norm(t)),), x, [dy], [norm.weight])
     _assert_bitwise(_run(kernels, x, [dy], [norm.weight]), ref)
-    _assert_bitwise(_run(lambda t: (qk_norm_rope.norm_rope(t, norm, rope, True),), x, [dy], [norm.weight]), ref)
+    _assert_bitwise(
+        _run(lambda t: (qk_norm_rope.norm_rope(t, norm, rope, True),), x, [dy], [norm.weight]), ref
+    )
 
 
 @needs_gpu
@@ -207,7 +215,9 @@ def test_not_zero_centered_or_fp32_weight_is_unaffected_by_the_switch(fresh_chec
     assert list(fresh_checks._results) == [("msa_fused_norm_rope", (4096, 1, 4, D))]
     dy = torch.randn_like(x)
     ref = _run(lambda t: (rope.apply(norm(t)),), x, [dy], [norm.weight])
-    _assert_bitwise(_run(lambda t: (qk_norm_rope.norm_rope(t, norm, rope, True),), x, [dy], [norm.weight]), ref)
+    _assert_bitwise(
+        _run(lambda t: (qk_norm_rope.norm_rope(t, norm, rope, True),), x, [dy], [norm.weight]), ref
+    )
 
 
 @needs_gpu

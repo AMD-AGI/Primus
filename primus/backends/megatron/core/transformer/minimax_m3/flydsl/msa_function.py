@@ -18,11 +18,20 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
 
 class _MSAAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan, shared_tiles=False):
+    def forward(
+        ctx, q, k, v, block_table, softmax_scale, block_size, return_slot_lse, plan, shared_tiles=False
+    ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
         outs = msa_token_fwd(
-            q, k, v, block_table, softmax_scale, block_size, return_slot_lse=return_slot_lse, shared_tiles=shared_tiles
+            q,
+            k,
+            v,
+            block_table,
+            softmax_scale,
+            block_size,
+            return_slot_lse=return_slot_lse,
+            shared_tiles=shared_tiles,
         )
         o, lse = outs[0], outs[1]
         ctx.save_for_backward(q, k, v, o, lse, block_table)

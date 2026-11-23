@@ -43,9 +43,16 @@ _MAX_WIDTH = 8192
 
 @triton.jit
 def _indexer_input_norm_kernel(
-    X_ptr, W_ptr, Y_ptr, eps,
-    N: tl.constexpr, NV: tl.constexpr, TRIPS: tl.constexpr, BLOCKS: tl.constexpr,
-    RB: tl.constexpr, ZC: tl.constexpr,
+    X_ptr,
+    W_ptr,
+    Y_ptr,
+    eps,
+    N: tl.constexpr,
+    NV: tl.constexpr,
+    TRIPS: tl.constexpr,
+    BLOCKS: tl.constexpr,
+    RB: tl.constexpr,
+    ZC: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     x_row = X_ptr + row * N
@@ -85,9 +92,16 @@ def _launch(x: torch.Tensor, w: torch.Tensor, eps: float, zero_centered: bool) -
     y = torch.empty_like(x)
     nv = N // 4
     _indexer_input_norm_kernel[(rows,)](
-        x, w, y, eps,
-        N=N, NV=nv, TRIPS=triton.cdiv(nv, _THREADS), BLOCKS=triton.cdiv(N, _ROW_BLOCK),
-        RB=_ROW_BLOCK, ZC=bool(zero_centered),
+        x,
+        w,
+        y,
+        eps,
+        N=N,
+        NV=nv,
+        TRIPS=triton.cdiv(nv, _THREADS),
+        BLOCKS=triton.cdiv(N, _ROW_BLOCK),
+        RB=_ROW_BLOCK,
+        ZC=bool(zero_centered),
         num_warps=8,
     )
     return y

@@ -67,7 +67,8 @@ def _bits(t):
 
 def _same(got, want):
     return len(got) == len(want) and all(
-        a.shape == b.shape and a.dtype == b.dtype and torch.equal(_bits(a), _bits(b)) for a, b in zip(got, want)
+        a.shape == b.shape and a.dtype == b.dtype and torch.equal(_bits(a), _bits(b))
+        for a, b in zip(got, want)
     )
 
 
@@ -112,7 +113,9 @@ def test_forward_kernel_bitwise(require_bitwise, force_shared, S, B, Hkv, topk, 
 
 @pytest.mark.parametrize("S, B, Hkv, topk, kind", CASES)
 def test_backward_kernel_bitwise(require_bitwise, force_shared, S, B, Hkv, topk, kind):
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        msa_token_bwd,
+    )
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
         dq_tokens_per_wg,
     )
@@ -151,7 +154,9 @@ def _hostile_table(B, Hkv, S, topk, seed=3):
 
 def _run_both(q, k, v, dout, table, slot_lse=False, repeats=20):
     """(ok, forward outputs): the shared-staging entries against the one-token kernels, bit for bit."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        msa_token_bwd,
+    )
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
         msa_token_fwd_wave32,
     )
@@ -184,8 +189,13 @@ def test_hostile_tables_bitwise(require_bitwise, force_shared, S, B, Hkv, topk, 
 )
 @pytest.mark.parametrize("kind", ["local", "random"])
 def test_sequence_the_group_does_not_divide(require_bitwise, force_shared, S, fwd_tpw, dq_tpw, kind):
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd as bwd
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd_w32, msa_token_fwd_w32
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd as bwd,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd_w32,
+        msa_token_fwd_w32,
+    )
 
     assert msa_token_fwd_w32.fwd_tokens_per_wg(S, BLOCK, "lpt") == fwd_tpw
     assert msa_token_bwd_w32.dq_tokens_per_wg(S, BLOCK) == dq_tpw
@@ -211,8 +221,13 @@ def test_lockstep_kernels_refuse_a_sequence_they_do_not_divide():
     """The barrier count is workgroup-uniform only when the group divides S: nothing may launch
     the lockstep layout otherwise. The guard sits at the launch, behind the eligibility helpers."""
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd as bwd
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd_w32, msa_token_fwd_w32
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd as bwd,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd_w32,
+        msa_token_fwd_w32,
+    )
 
     q, k, v, dout, table = _inputs(642, 1, 2, 4, "local", seed=6)
     out, lse = msa_token_fwd_w32.msa_token_fwd_wave32(q, k, v, table, None, BLOCK, False)
@@ -249,7 +264,9 @@ def test_block_tables_of_a_training_step_bitwise(require_bitwise, force_shared):
         q, k, v, dout, _ = _inputs(S, B, Hkv, topk, "random", seed=7 + i)
         for slot_lse in (False, True):
             ok = _run_both(q, k, v, dout, table, slot_lse)
-            require_bitwise(ok, f"msa_shared_tile_staging training-step table {i} {tuple(table.shape)} {slot_lse}")
+            require_bitwise(
+                ok, f"msa_shared_tile_staging training-step table {i} {tuple(table.shape)} {slot_lse}"
+            )
 
 
 def test_odd_sequence_keeps_one_token_per_workgroup():
@@ -267,8 +284,12 @@ def test_odd_sequence_keeps_one_token_per_workgroup():
 
 def test_dispatchers_check_once_per_shape_and_fall_back(monkeypatch):
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_fwd_w32
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_fwd_w32,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        msa_token_bwd,
+    )
 
     saved = dict(bitwise_check._results)
     bitwise_check._results.clear()
@@ -277,7 +298,9 @@ def test_dispatchers_check_once_per_shape_and_fall_back(monkeypatch):
         want = msa_token_fwd_w32.msa_token_fwd_wave32(q, k, v, table, None, BLOCK, False)
         assert bitwise_check._results == {}  # the switch is off: nothing checked
         for _ in range(2):
-            got = msa_token_fwd_w32.msa_token_fwd_wave32(q, k, v, table, None, BLOCK, False, shared_tiles=True)
+            got = msa_token_fwd_w32.msa_token_fwd_wave32(
+                q, k, v, table, None, BLOCK, False, shared_tiles=True
+            )
             assert _same(got, want)
         want_g = msa_token_bwd(dout, q, k, v, want[0], want[1], table, None, BLOCK)
         got_g = msa_token_bwd(dout, q, k, v, want[0], want[1], table, None, BLOCK, shared_tiles=True)

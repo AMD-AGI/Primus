@@ -492,7 +492,11 @@ def eligible(attn, hidden_states, rope) -> bool:
         return False
     hpg = attn.num_attention_heads_per_partition // attn.num_query_groups_per_partition
     nk = S * Bt * attn.num_query_groups_per_partition
-    return _multi_row(D, nk * hpg) and _multi_row(D, nk) and _qk_self_check(attn, S, Bt, rope, _in_kernel_gamma(cfg))
+    return (
+        _multi_row(D, nk * hpg)
+        and _multi_row(D, nk)
+        and _qk_self_check(attn, S, Bt, rope, _in_kernel_gamma(cfg))
+    )
 
 
 def qk_norm_rope(attn, mixed_qkv, rope):
@@ -551,7 +555,8 @@ def _norm_rope_self_check(shape, norm, rope, in_kernel: bool = False) -> bool:
         lambda: bitwise_check.outputs_and_grads(fused, *inputs()),
         lambda: bitwise_check.outputs_and_grads(eager, *inputs()),
         # Turbo picks its launch configs by row count; the in-kernel gamma is another kernel variant
-        key=tuple(shape) + (("in-kernel gamma",) if in_kernel and _gamma(norm, norm.weight.detach(), True)[1] else ()),
+        key=tuple(shape)
+        + (("in-kernel gamma",) if in_kernel and _gamma(norm, norm.weight.detach(), True)[1] else ()),
     )
 
 

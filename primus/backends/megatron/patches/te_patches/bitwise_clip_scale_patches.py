@@ -75,9 +75,13 @@ def patch_bitwise_clip_scale(ctx: PatchContext) -> None:
         return
     original = getattr(clip_grads, "multi_tensor_scale_tensor_impl", None)
     if original is None:
-        log_rank_0(f"[Patch:{_PATCH_KEY}] no multi_tensor_scale_tensor (TE not installed); nothing to replace")
+        log_rank_0(
+            f"[Patch:{_PATCH_KEY}] no multi_tensor_scale_tensor (TE not installed); nothing to replace"
+        )
         return
     wrapped = make_bitwise_scale(original, clip_grads.multi_tensor_applier)
     rebound = rebind_everywhere(clip_grads, "multi_tensor_scale_tensor_impl", wrapped)
     mark_patched(clip_grads, _PATCH_KEY)
-    log_rank_0(f"[Patch:{_PATCH_KEY}] wrapped multi_tensor_scale_tensor_impl in {', '.join(sorted(set(rebound)))}")
+    log_rank_0(
+        f"[Patch:{_PATCH_KEY}] wrapped multi_tensor_scale_tensor_impl in {', '.join(sorted(set(rebound)))}"
+    )

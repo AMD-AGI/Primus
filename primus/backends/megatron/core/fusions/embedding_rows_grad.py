@@ -81,7 +81,9 @@ def add_embedding_grad_(main_grad_2d: torch.Tensor, grad_output: torch.Tensor, i
     inverse, unique, count = compact_ids(ids)
     n, hidden = unique.numel(), main_grad_2d.shape[1]
     compact = torch.ops.aten.embedding_dense_backward(grad_output, inverse, n, -1, False).contiguous()
-    _add_rows[(n, triton.cdiv(hidden, _BLOCK))](main_grad_2d, unique, compact, count, hidden, BLOCK=_BLOCK, num_warps=4)
+    _add_rows[(n, triton.cdiv(hidden, _BLOCK))](
+        main_grad_2d, unique, compact, count, hidden, BLOCK=_BLOCK, num_warps=4
+    )
 
 
 class _RowsGradEmbedding(torch.autograd.Function):
@@ -108,7 +110,9 @@ class _RowsGradEmbedding(torch.autograd.Function):
         if getattr(weight, "_primus_held_grads", None):
             # grad_accum_group holds dense gradients of earlier micro-batches (a step that
             # changed route): they come first
-            from primus.backends.megatron.core.fusions.grouped_grad_accum import flush_held
+            from primus.backends.megatron.core.fusions.grouped_grad_accum import (
+                flush_held,
+            )
 
             flush_held(weight)
         add_embedding_grad_(weight.main_grad.view(weight.shape), grad_output.contiguous(), ids)

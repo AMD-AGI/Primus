@@ -35,7 +35,9 @@ def _bits(t):
 
 
 def _dense_reference(main, grad_output, ids, vocab):
-    weight = torch.zeros(vocab, grad_output.shape[-1], dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    weight = torch.zeros(
+        vocab, grad_output.shape[-1], dtype=torch.bfloat16, device="cuda", requires_grad=True
+    )
     out = F.embedding(ids, weight)
     (dense,) = torch.autograd.grad(out, weight, grad_output)
     main.add_(dense)
@@ -43,11 +45,15 @@ def _dense_reference(main, grad_output, ids, vocab):
 
 
 @pytest.mark.parametrize("kind", ["uniform", "zipf1.1", "zipf1.5", "constant"])
-@pytest.mark.parametrize("n, vocab, hidden", [(4096, 20011, 384), (8192, 3000, 96), (100, 517, 1030), (3072, 9000, 64)])
+@pytest.mark.parametrize(
+    "n, vocab, hidden", [(4096, 20011, 384), (8192, 3000, 96), (100, 517, 1030), (3072, 9000, 64)]
+)
 @pytest.mark.parametrize("main_dtype", [torch.bfloat16, torch.float32])
 def test_rows_add_bitwise(require_bitwise, kind, n, vocab, hidden, main_dtype):
     # the kernel path itself; the patched forward would run Megatron's after a failed check
-    from primus.backends.megatron.core.fusions.embedding_rows_grad import add_embedding_grad_
+    from primus.backends.megatron.core.fusions.embedding_rows_grad import (
+        add_embedding_grad_,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(n + vocab)
     ids = _ids(kind, n, vocab, gen).view(1, n)
@@ -65,7 +71,9 @@ def test_rows_add_bitwise(require_bitwise, kind, n, vocab, hidden, main_dtype):
 
 
 def test_rows_add_is_stable_over_repeats(require_bitwise):
-    from primus.backends.megatron.core.fusions.embedding_rows_grad import add_embedding_grad_
+    from primus.backends.megatron.core.fusions.embedding_rows_grad import (
+        add_embedding_grad_,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(13)
     n, vocab, hidden = 4096, 30000, 1536
@@ -95,7 +103,8 @@ def test_compact_ids_is_an_order_preserving_renumbering():
 
 
 def test_self_check_passes(require_bitwise):
-    from primus.backends.megatron.core.fusions import bitwise_check, embedding_rows_grad as erg
+    from primus.backends.megatron.core.fusions import bitwise_check
+    from primus.backends.megatron.core.fusions import embedding_rows_grad as erg
 
     saved = dict(bitwise_check._results)
     bitwise_check._results.clear()
@@ -148,7 +157,10 @@ def _step(module, forward, ids, grad_outputs):
 @pytest.mark.parametrize("main_dtype", [torch.bfloat16, torch.float32])
 def test_patched_forward_matches_megatron(require_bitwise, main_dtype):
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.patches.embedding_rows_grad_patches import _UNTIED, make_forward
+    from primus.backends.megatron.patches.embedding_rows_grad_patches import (
+        _UNTIED,
+        make_forward,
+    )
 
     saved = dict(bitwise_check._results)
     bitwise_check._results.clear()
@@ -180,7 +192,10 @@ def test_route_may_change_within_a_step(require_bitwise, order):
     """Megatron resets grad_added_to_main_grad once per step: a micro-batch that falls back to
     the dense forward after a row-wise one must still get its gradient added."""
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.patches.embedding_rows_grad_patches import _UNTIED, make_forward
+    from primus.backends.megatron.patches.embedding_rows_grad_patches import (
+        _UNTIED,
+        make_forward,
+    )
 
     saved = dict(bitwise_check._results)
     bitwise_check._results.clear()
@@ -209,7 +224,9 @@ def test_route_may_change_within_a_step(require_bitwise, order):
 
 
 def test_backward_refuses_a_gradient_it_was_not_checked_for():
-    from primus.backends.megatron.core.fusions.embedding_rows_grad import _RowsGradEmbedding
+    from primus.backends.megatron.core.fusions.embedding_rows_grad import (
+        _RowsGradEmbedding,
+    )
 
     weight = torch.nn.Parameter(torch.zeros(50, 16, device="cuda", dtype=torch.bfloat16))
     weight.main_grad = torch.zeros(50, 16, device="cuda", dtype=torch.bfloat16)
@@ -224,7 +241,10 @@ def test_backward_refuses_a_gradient_it_was_not_checked_for():
 
 
 def test_patched_forward_keeps_megatron_where_it_must():
-    from primus.backends.megatron.patches.embedding_rows_grad_patches import _UNTIED, make_forward
+    from primus.backends.megatron.patches.embedding_rows_grad_patches import (
+        _UNTIED,
+        make_forward,
+    )
 
     patched = make_forward(_FakeEmbedding.megatron_forward)
     ids = torch.arange(64, device="cuda").view(1, 64)
@@ -240,7 +260,11 @@ def test_patched_forward_keeps_megatron_where_it_must():
     tp = _FakeEmbedding(100, 32, tp=2)
     setattr(tp, _UNTIED, True)
     assert uses_original(tp)
-    for attr, value in (("deterministic_mode", True), ("reduce_scatter_embeddings", True), ("gtp_remat_size", 2)):
+    for attr, value in (
+        ("deterministic_mode", True),
+        ("reduce_scatter_embeddings", True),
+        ("gtp_remat_size", 2),
+    ):
         m = _FakeEmbedding(100, 32)
         setattr(m, _UNTIED, True)
         setattr(m, attr, value)
@@ -262,7 +286,10 @@ def test_patched_forward_keeps_megatron_where_it_must():
 
 def test_patched_forward_keeps_megatron_when_the_self_check_fails(monkeypatch):
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.patches.embedding_rows_grad_patches import _UNTIED, make_forward
+    from primus.backends.megatron.patches.embedding_rows_grad_patches import (
+        _UNTIED,
+        make_forward,
+    )
 
     saved = dict(bitwise_check._results)
     bitwise_check._results.clear()
@@ -283,13 +310,19 @@ def test_patched_forward_keeps_megatron_when_the_self_check_fails(monkeypatch):
 
 
 def test_only_untied_gpt_embeddings_are_marked():
-    from primus.backends.megatron.patches.embedding_rows_grad_patches import _UNTIED, mark_untied
+    from primus.backends.megatron.patches.embedding_rows_grad_patches import (
+        _UNTIED,
+        mark_untied,
+    )
 
     def model(shared):
         word = SimpleNamespace()
-        return SimpleNamespace(
-            embedding=SimpleNamespace(word_embeddings=word), share_embeddings_and_output_weights=shared
-        ), word
+        return (
+            SimpleNamespace(
+                embedding=SimpleNamespace(word_embeddings=word), share_embeddings_and_output_weights=shared
+            ),
+            word,
+        )
 
     m, word = model(False)
     mark_untied(m)

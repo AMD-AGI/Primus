@@ -51,7 +51,6 @@ from flydsl.expr.utils.arith import _to_raw as _raw
 from primus_turbo.flydsl.utils import buffer_ops
 
 from primus.backends.megatron.core.fusions import bitwise_check
-
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
     HPW,
     MAX_TOPK,
@@ -225,9 +224,9 @@ def build_fwd_wave32(
             # query block (S and block_size are multiples of WPG), so this is each token's own count.
             tok_wg = fx.Int32(Sn - fx.Index(1) - (raw // bgn) * fx.Index(WPG))
             n_vis_wg = tok_wg // fx.Int32(block_size) + fx.Int32(1)
-            n_steps = fx.Index(sel_i32(ArithValue(n_vis_wg < fx.Int32(topk)), n_vis_wg, fx.Int32(topk))) * fx.Index(
-                SPB
-            )
+            n_steps = fx.Index(
+                sel_i32(ArithValue(n_vis_wg < fx.Int32(topk)), n_vis_wg, fx.Int32(topk))
+            ) * fx.Index(SPB)
         else:
             n_steps = fx.Index(n_valid) * fx.Index(SPB)
         tbl_row = ((b * fx.Index(Hkv) + g) * Sn + tok) * fx.Index(topk)

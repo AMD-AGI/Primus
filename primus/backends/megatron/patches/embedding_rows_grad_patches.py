@@ -80,7 +80,9 @@ def make_forward(original_forward):
             return _dense_forward(original_forward, self, input_)
         if not logged:
             logged.append(True)
-            log_rank_0(f"[Patch:{_PATCH_KEY}] word-embedding gradient added into main_grad for the touched rows")
+            log_rank_0(
+                f"[Patch:{_PATCH_KEY}] word-embedding gradient added into main_grad for the touched rows"
+            )
         return erg.embedding(input_, self.weight)
 
     forward._primus_embedding_rows_grad = True

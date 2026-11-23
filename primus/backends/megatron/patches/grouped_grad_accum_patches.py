@@ -131,7 +131,9 @@ def make_hook_factory(original_factory, group: int, is_graph_capturing):
             # Under overlap_grad_reduce the bucket's reduction may start inside Megatron's hook
             # in the last micro-batch (register_grad_ready), so nothing may stay held past it.
             # Without it the reduction starts in start_grad_sync / finish_grad_sync, which flush.
-            last = self.ddp_config.overlap_grad_reduce and self.param_to_bucket_group[param].is_last_microbatch
+            last = (
+                self.ddp_config.overlap_grad_reduce and self.param_to_bucket_group[param].is_last_microbatch
+            )
             if len(held) >= group or last:
                 accumulate_(param.main_grad, held)
                 held.clear()
@@ -166,7 +168,9 @@ def _flush_first(original):
     condition=lambda ctx: group_size(get_args(ctx)) >= 2,
 )
 def patch_grouped_grad_accum(ctx: PatchContext) -> None:
-    from megatron.core.distributed.distributed_data_parallel import DistributedDataParallel as DDP
+    from megatron.core.distributed.distributed_data_parallel import (
+        DistributedDataParallel as DDP,
+    )
     from megatron.core.transformer.cuda_graphs import is_graph_capturing
 
     from primus.backends.megatron.core.fusions.grouped_grad_accum import MAX_GRADS

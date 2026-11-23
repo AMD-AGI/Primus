@@ -35,7 +35,11 @@ def clean_checks():
 @pytest.mark.parametrize("main_dtype", [torch.bfloat16, torch.float32])
 def test_kernel_bitwise(require_bitwise, k, main_dtype):
     # the kernel itself; accumulate_ would run the add_ loop after a failed self-check
-    from primus.backends.megatron.core.fusions.grouped_grad_accum import _add_loop, _kernel, _probe
+    from primus.backends.megatron.core.fusions.grouped_grad_accum import (
+        _add_loop,
+        _kernel,
+        _probe,
+    )
 
     main, grads = _probe(k, main_dtype, "cuda")
     got, want = main.clone(), main.clone()
@@ -49,7 +53,10 @@ def test_kernel_bitwise(require_bitwise, k, main_dtype):
 @pytest.mark.parametrize("scale", [1.0, 1.0e-3, 1.0e-38, 1.0e38])
 @pytest.mark.parametrize("shape", [(6144, 512), (7,), (3, 5, 4099)])
 def test_kernel_bitwise_on_gradient_like_values(require_bitwise, scale, shape):
-    from primus.backends.megatron.core.fusions.grouped_grad_accum import _add_loop, _kernel
+    from primus.backends.megatron.core.fusions.grouped_grad_accum import (
+        _add_loop,
+        _kernel,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(17)
     ok = True
@@ -65,7 +72,10 @@ def test_kernel_bitwise_on_gradient_like_values(require_bitwise, scale, shape):
 
 
 def test_kernel_is_stable_over_repeats(require_bitwise):
-    from primus.backends.megatron.core.fusions.grouped_grad_accum import _add_loop, _kernel
+    from primus.backends.megatron.core.fusions.grouped_grad_accum import (
+        _add_loop,
+        _kernel,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(23)
     grads = [torch.randn(2_000_003, device="cuda", generator=gen).bfloat16() for _ in range(4)]
@@ -131,7 +141,10 @@ def test_large_tensors_take_several_launches(require_bitwise, monkeypatch, limit
 
 
 def test_accumulate_keeps_add_for_other_layouts(clean_checks):
-    from primus.backends.megatron.core.fusions.grouped_grad_accum import accumulate_, can_fuse
+    from primus.backends.megatron.core.fusions.grouped_grad_accum import (
+        accumulate_,
+        can_fuse,
+    )
 
     main = torch.zeros(64, 8, device="cuda", dtype=torch.bfloat16)
     g = torch.randn(64, 8, device="cuda").bfloat16()
@@ -246,7 +259,10 @@ def test_patched_hook_matches_megatron(group, microbatches, main_dtype, overlap)
 
 
 def test_patched_hook_holds_at_most_group_minus_one():
-    from primus.backends.megatron.patches.grouped_grad_accum_patches import _PENDING, make_hook_factory
+    from primus.backends.megatron.patches.grouped_grad_accum_patches import (
+        _PENDING,
+        make_hook_factory,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(41)
     p = _param(100, gen)
@@ -261,7 +277,10 @@ def test_patched_hook_holds_at_most_group_minus_one():
 
 
 def test_patched_hook_leaves_other_cases_to_megatron():
-    from primus.backends.megatron.patches.grouped_grad_accum_patches import _PENDING, make_hook_factory
+    from primus.backends.megatron.patches.grouped_grad_accum_patches import (
+        _PENDING,
+        make_hook_factory,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(43)
 
@@ -329,7 +348,9 @@ def test_flush_and_zero(clean_checks):
 
 
 def test_hook_refuses_a_reused_gradient_buffer():
-    from primus.backends.megatron.patches.grouped_grad_accum_patches import make_hook_factory
+    from primus.backends.megatron.patches.grouped_grad_accum_patches import (
+        make_hook_factory,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(53)
     p = _param(64, gen)
@@ -349,7 +370,10 @@ def test_rows_grad_embedding_adds_after_the_held_dense_gradients(require_bitwise
     import torch.nn.functional as F
 
     from primus.backends.megatron.core.fusions import embedding_rows_grad as erg
-    from primus.backends.megatron.patches.grouped_grad_accum_patches import flush_pending, make_hook_factory
+    from primus.backends.megatron.patches.grouped_grad_accum_patches import (
+        flush_pending,
+        make_hook_factory,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(59)
     vocab, hidden, n = 700, 48, 512
