@@ -118,6 +118,10 @@ moe_router_grad_merge: false
 # Triton forward/backward GEMMs for an FP32 router with BF16 input/weight; the backward keeps FP32
 # accuracy. Not installed together with moe_router_bwd_bf16.
 moe_router_triton_gemm: false
+# gfx1250 FlyDSL forward GEMM for an FP32 router with BF16 input/weight (token count, expert count and hidden
+# size multiples of 128); the backward is Megatron's (or moe_router_bwd_bf16's). Not installed together with
+# moe_router_triton_gemm.
+moe_router_fwd_flydsl: false
 moe_router_score_function: softmax # softmax, sigmoid
 moe_router_topk: 2
 moe_router_pre_softmax: false

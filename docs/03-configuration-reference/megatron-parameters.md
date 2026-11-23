@@ -599,6 +599,7 @@ models:
 | `use_deprecated_20241209_moe_layer` | `false` | *Primus:* legacy MoE layer implementation. |
 | `moe_router_force_load_balancing_type` | `even` | *Primus:* Control the force load balancing type for the MoE router. Choices: even, uniform. |
 | `moe_router_triton_gemm` | `false` | *Primus:* run an FP32 router's gating GEMM and its backward on Triton kernels, as accurate as Megatron's FP32 GEMMs (BF16 input and weight, no bias, 16-256 experts, hidden a multiple of 256; other calls keep Megatron's path). Not together with `moe_router_bwd_bf16`. |
+| `moe_router_fwd_flydsl` | `false` | *Primus:* on gfx1250, compute an FP32 router's logits on a FlyDSL WMMA GEMM (BF16 input and weight, no bias, token count, expert count and hidden size multiples of 128; other calls keep Megatron's forward). hipBLASLt's BF16 x BF16 -> FP32 kernels are slow at router shapes on gfx1250: on one MI455X, 8,192 tokens x 896 experts x hidden 7,168 take 142 us here and 410 us through hipBLASLt. With 256 or fewer experts `moe_router_triton_gemm` is faster (8,192 x 256 x 7,168: 62 us, this kernel 101 us). The backward stays Megatron's, so `moe_router_bwd_bf16` still applies. Not together with `moe_router_triton_gemm`; not installed off gfx1250 or without FlyDSL. |
 
 
 ### 10.7 Logit softcapping (Primus / Grok-style)
