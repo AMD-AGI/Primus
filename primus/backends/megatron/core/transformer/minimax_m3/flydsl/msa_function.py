@@ -31,6 +31,8 @@ class _MSAAttention(torch.autograd.Function):
         plan,
         shared_tiles=False,
         step_mask_skip=False,
+        dq_from_ds=False,
+        walk_slots=None,
     ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
@@ -52,6 +54,8 @@ class _MSAAttention(torch.autograd.Function):
         ctx.plan = plan
         ctx.shared_tiles = shared_tiles
         ctx.step_mask_skip = step_mask_skip
+        ctx.dq_from_ds = dq_from_ds
+        ctx.walk_slots = walk_slots
         ctx.mark_non_differentiable(*outs[1:])
         return outs
 
@@ -71,8 +75,10 @@ class _MSAAttention(torch.autograd.Function):
             plan=ctx.plan,
             shared_tiles=ctx.shared_tiles,
             step_mask_skip=ctx.step_mask_skip,
+            dq_from_ds=ctx.dq_from_ds,
+            walk_slots=ctx.walk_slots,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None
 
 
 def msa_attention(
@@ -87,6 +93,8 @@ def msa_attention(
     shared_tiles=False,
     walk_table=None,
     step_mask_skip=False,
+    dq_from_ds=False,
+    walk_slots=None,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
@@ -100,6 +108,10 @@ def msa_attention(
     row permuted, int32: the forward and dQ kernels walk a token's blocks in that order, and
     ``slot_lse`` then comes back in that order too. ``plan`` stays the plan of ``block_table``
     (dK/dV walks blocks, not rows).
+
+    ``dq_from_ds`` (``msa_dq_from_ds``, relaxed numerics; ``msa_token_bwd``): the backward takes dQ
+    from the dK/dV kernel's dS. With a ``walk_table`` it needs ``walk_slots``, the int32 slot of
+    each walk position in ``block_table``; without them the backward keeps the reference dQ kernel.
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
@@ -110,6 +122,8 @@ def msa_attention(
             # the plan belongs to the indexer's table: its entries are that table's slots
             plan = build_block_plan(block_table.to(torch.int32).contiguous(), block_size)
         block_table = walk_table.contiguous()
+        if dq_from_ds and walk_slots is None:
+            dq_from_ds = False
     elif table is not None and table.shape == block_table.shape:
         block_table = table  # select_plan's int32 copy of the same table
     else:
@@ -125,4 +139,6 @@ def msa_attention(
         plan,
         bool(shared_tiles),
         bool(step_mask_skip),
+        bool(dq_from_ds),
+        walk_slots if dq_from_ds else None,
     )

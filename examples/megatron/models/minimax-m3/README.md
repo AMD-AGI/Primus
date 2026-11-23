@@ -168,18 +168,25 @@ parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs wh
 the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
-off; apart from `msa_shared_tile_staging`, `msa_lean_masks` and `msa_aligned_block_walk` the
-FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
+off; apart from `msa_shared_tile_staging`, `msa_lean_masks`, `msa_aligned_block_walk` and
+`msa_dq_from_ds` the FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
-**Relaxed-numerics MSA options.** `msa_aligned_block_walk` is not bit-identical to the reference
-FlyDSL kernels: the forward and dQ kernels walk each token's selected blocks in an order aligned
+**Relaxed-numerics MSA options.** Two options are not bit-identical to the reference FlyDSL
+kernels. With `msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
 with the token's neighbours (groups of four consecutive tokens; a block that an earlier token of
 the group selected is visited at that token's step), so the tokens of a workgroup meet a common
 block at the same step and `msa_shared_tile_staging` copies its K/V tiles once. The block selection
 and the terms of every sum are unchanged; the order of the sums over a token's blocks is not, so
 `o`, the attention mass per slot and `dq` differ in their last bits (same error against an FP32
-reference; deterministic). `--msa_exact_numerics True` turns it, and any other option of this kind,
-off and reproduces the reference kernels' losses bit for bit.
+reference; deterministic). `msa_dq_from_ds` takes dQ from the dK/dV kernel: that kernel
+already forms `dS = P * (dO V^T - delta)` for every token and selected block as a BF16 operand, so
+it also writes it to a transient buffer (4 KB per token and block: 1.1 GB per layer call at 4k,
+8.6 GB at 32k; shapes above 16 GiB keep the reference kernels) and a slim dQ kernel forms
+`dQ = scale * dS K` from it, without staging V or computing `S` and `dS` a second time. The terms
+are the same; `dS` is the dK/dV kernel's instead of the dQ kernel's own and `delta` is summed in
+another order, so `dq`, `dk` and `dv` differ in their last bits (deterministic; the first call for
+a shape compares the two paths). `--msa_exact_numerics True` turns these options, and any other
+option of this kind, off and reproduces the reference kernels' losses bit for bit.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a

@@ -216,6 +216,17 @@ class MSATransformerConfig(TransformerConfig):
     numerics: o, lse, the slot mass and dq change in the last bits; deterministic).
     msa_exact_numerics turns it off."""
 
+    msa_dq_from_ds: bool = False
+    """flydsl backend on gfx1250: the MSA backward takes dQ from the dK/dV kernel's dS. That kernel
+    already forms dS = P * (dO V^T - delta) for every (token, selected block) as a bf16 WMMA
+    operand; it also writes it out (4 KB per pair, a transient buffer), and a slim dQ kernel forms
+    dQ = scale * dS K from it: no V staging and no second S / dS computation in the dQ kernel
+    (flydsl/msa_token_bwd_w32.py, build_dq_ds_w32). delta = rowsum(dO * O) comes from one Triton
+    launch. Relaxed numerics: the same terms, with the dK/dV kernel's dS instead of the dQ kernel's
+    own (last-bit differences) and delta summed in another order; deterministic. The first call for
+    a shape compares dq / dk / dv with the reference kernels (tolerance 1e-3) and keeps those
+    otherwise; dS buffers above 16 GiB keep them too. msa_exact_numerics turns it off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for

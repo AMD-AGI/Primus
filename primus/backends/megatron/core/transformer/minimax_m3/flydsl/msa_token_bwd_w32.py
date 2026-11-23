@@ -492,8 +492,13 @@ def build_dkdv_w32(
     topk: int,
     tokens_per_step: int = 4,
     step_mask_skip: bool = False,
+    emit_ds: bool = False,
 ):
     """dK/dV with the Q / dO rows of each step staged by the Tensor Data Mover.
+
+    ``emit_ds`` (``msa_dq_from_ds``): the bf16 dS operand of every live (token, block) entry is
+    also written to ``DS`` (see ``build_dq_ds_w32``), each lane its 16 heads of one key; each
+    record is written by exactly one workgroup, so the buffer is deterministic.
 
     ``step_mask_skip`` (``msa_lean_masks``): a step whose tokens are all live entries at or
     after the wave's last key skips the causal / tail select of ``P`` (it would keep ``P``): a
@@ -523,6 +528,7 @@ def build_dkdv_w32(
     KV_OFF = LSE_OFF + 2 * threads * 4
     KV_W = 2 * TK * STRIDE * 2  # per wave: K tile then V tile, 16 keys x STRIDE bf16
     LDS_BYTES = KV_OFF + waves * KV_W
+    DS_BYTES = block_size * HPW * 2  # one (token, slot) record of the dS buffer
 
     @flyc.kernel(known_block_size=[threads, 1, 1])
     def k_fn(
@@ -535,6 +541,7 @@ def build_dkdv_w32(
         CHUNKS: fx.Tensor,
         ENT: fx.Tensor,
         WS: fx.Tensor,
+        DS: fx.Tensor,
         S: fx.Int32,
         B: fx.Int32,
         NB: fx.Int32,
@@ -803,6 +810,32 @@ def build_dkdv_w32(
                 dss1 = [p * d for p, d in zip(probs1, dpd1)]
                 pB = pack_pair_bf16(probs0, probs1)
                 dsB = pack_pair_bf16(dss0, dss1)
+                if const_expr(emit_ds):
+                    # lane group 0 holds token 2*pr's dS[head 0..15, key lo], group 1 token 2*pr+1's:
+                    # 32 bytes at [entry, key, head] of the entry's record. Dead tail entries of
+                    # the chunk (clamped duplicates) are not stored.
+                    for jj in range_constexpr(2):
+                        rj = r0 + fx.Int32(2 * pr + jj)
+                        rj_c = fx.Int32(ArithValue(rj < t_end).select(_raw(rj), _raw(t_end - fx.Int32(1))))
+                        ent_j = sload(ent_rsrc, fx.Index(rj_c))
+                        ds_rsrc = buffer_ops.create_buffer_resource(
+                            DS,
+                            max_size=False,
+                            num_records_bytes=DS_BYTES,
+                            base_byte_offset=fx.Index(ent_j) * fx.Index(DS_BYTES),
+                        )
+                        mine = _andb(ArithValue(half == fx.Index(jj)), valid[2 * pr + jj])
+                        for part in range_constexpr(2):
+                            piece = Vec.from_elements(
+                                [Vec(dsB)[part * 8 + i] for i in range_constexpr(8)], elem
+                            )
+                            buffer_ops.buffer_store(
+                                _raw(piece),
+                                ds_rsrc,
+                                (wave * fx.Index(TK) + lo) * fx.Index(HPW * 2) + fx.Index(part * 16),
+                                mask=_raw(mine),
+                                offset_is_bytes=True,
+                            )
                 new_dk, new_dv = [], []
                 for dt in range_constexpr(DT):
                     o_ = fx.Int32((2 * pr * HPW * STRIDE + dt * 16) * 2)
@@ -824,8 +857,8 @@ def build_dkdv_w32(
             _store_f32x8(ws_rsrc, off + fx.Index(block_size * D), results[DT + dt])
 
     @flyc.jit
-    def launch(Q, K, V, DO, LSE, DELTA, CHUNKS, ENT, WS, S, B, NB, NENT, NCH, stream):
-        k_fn(Q, K, V, DO, LSE, DELTA, CHUNKS, ENT, WS, S, B, NB, NENT, NCH).launch(
+    def launch(Q, K, V, DO, LSE, DELTA, CHUNKS, ENT, WS, DS, S, B, NB, NENT, NCH, stream):
+        k_fn(Q, K, V, DO, LSE, DELTA, CHUNKS, ENT, WS, DS, S, B, NB, NENT, NCH).launch(
             grid=(fx.Index(NCH), 1, 1), block=(threads, 1, 1), stream=stream
         )
 
@@ -836,4 +869,304 @@ def build_dkdv_w32(
             return flyc.compile(launch, *a)
 
     launch.compile = _compile
+    return launch
+
+
+DQ_DS_TOKENS_PER_WG = 4
+
+
+def dq_ds_tokens_per_wg(S: int, block_size: int) -> int:
+    t = DQ_DS_TOKENS_PER_WG
+    return t if S % t == 0 and block_size % t == 0 else 1
+
+
+DS_ROW = 16  # LDS row stride (elements) of a staged dS tile: its 16 heads, unpadded
+
+
+def ds_entry_bytes(block_size: int) -> int:
+    """Bytes of one (token, slot) record of the dS buffer: ``[block_size keys, 16 heads]`` bf16."""
+    return block_size * HPW * 2
+
+
+def build_dq_ds_w32(
+    num_kv_heads: int,
+    topk: int,
+    block_size: int,
+    scale: float,
+    tokens_per_wg: int = 1,
+    with_slots: bool = False,
+):
+    """dQ from the dK/dV kernel's dS (``msa_dq_from_ds``): ``dQ = scale * dS K`` only.
+
+    The dK/dV kernel already forms ``dS = P * (dO V^T - delta)`` for every (token, selected block)
+    and packs it in bf16 as its own WMMA operand; with ``emit_ds`` it also writes that operand to
+    ``DS``, ``[B * Hkv * S * topk, block_size keys, 16 heads]`` bf16 (one 4 KB record per table
+    entry). This kernel walks a token's blocks like ``build_dq_w32`` but stages only the K tile
+    (shared between the workgroup's tokens as there) and the step's ``[32 keys, 16 heads]`` dS
+    tile, and runs the dQ WMMAs alone: no V tile, no S / dP WMMAs, no exp.
+
+    ``TBL`` is the table the kernel walks. ``DS`` records are indexed by the indexer's table
+    entry (token, slot); when ``TBL`` is a permuted walk (``msa_aligned_block_walk``),
+    ``with_slots`` adds ``SLOT`` (int32, the indexer's slot of each walk position) and the record
+    is looked up through it.
+
+    Why the lockstep layout (``tokens_per_wg > 1``) cannot deadlock or hang the GPU: it is
+    ``build_dq_w32``'s. One ``gpu.barrier()`` per loop iteration, no spin-wait, flag, counter or
+    atomic; every wave of a workgroup runs ``n_steps`` iterations with no early exit, and
+    ``n_steps = min(tok_wg // block_size + 1, topk) * steps_per_block`` comes from the workgroup's
+    grid position, ``S`` and build constants only (never from ``TBL``, ``SLOT`` or ``DS``; a
+    ``-1`` entry stages zero dS rows, it does not shorten the loop); ``tensor_wait`` waits only
+    for copies the wave itself issued (its own dS tile every step, the K tile when it owns it);
+    the dispatcher builds this layout only when ``S`` and ``block_size`` are multiples of
+    ``tokens_per_wg`` and refuses other shapes before any launch.
+    """
+    NBUF = 2
+    WPG = tokens_per_wg
+    assert block_size % WPG == 0
+    elem = fx.BFloat16
+    Hkv = num_kv_heads
+    Hq = Hkv * HPW
+    KPS = 2 * TK
+    assert block_size % KPS == 0
+    SPB = block_size // KPS
+    ROWE = STRIDE
+    T_BYTES = KPS * ROWE * 2  # K tile, shared per workgroup
+    D_BYTES = KPS * DS_ROW * 2  # dS tile, one per wave
+    STAGE = T_BYTES + D_BYTES
+    LDS_BYTES = NBUF * STAGE
+    ENTRY = ds_entry_bytes(block_size) // 2  # elements per record
+
+    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1])
+    def k_fn(
+        K: fx.Tensor,
+        DS: fx.Tensor,
+        TBL: fx.Tensor,
+        SLOT: fx.Tensor,
+        DQ: fx.Tensor,
+        S: fx.Int32,
+        B: fx.Int32,
+    ):
+        v8_ty = ir.VectorType.get([8], elem.ir_type)
+        smem = fx.SharedAllocator().allocate(LDS_BYTES * WPG)
+        lds_wg = fx.Int32(fx.ptrtoint(smem.peek().ptr))
+        if const_expr(WPG > 1):
+            tid = fx.Index(gpu.thread_idx.x)
+            wave_u = fx.Index(
+                fx.Int32(rocdl.readfirstlane(fx.Int32.ir_type, _raw(fx.Int32(tid // fx.Index(WAVE)))))
+            )
+            lane = tid % fx.Index(WAVE)
+        else:
+            lane = fx.Index(gpu.thread_idx.x)
+            wave_u = fx.Index(0)
+
+        lo = lane % fx.Index(16)
+        half = lane // fx.Index(16)
+        Sn = fx.Index(S)
+        Bn = fx.Index(B)
+        raw = fx.Index(gpu.block_idx.x)
+        bgn = Bn * fx.Index(Hkv)
+        if const_expr(WPG > 1):
+            tok = Sn - fx.Index(1) - ((raw // bgn) * fx.Index(WPG) + wave_u)
+        else:
+            tok = Sn - fx.Index(1) - raw // bgn
+        bg = raw % bgn
+        b = bg // fx.Index(Hkv)
+        g = bg % fx.Index(Hkv)
+
+        dq_rsrc = buffer_ops.create_buffer_resource(
+            DQ, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(Hq * D * 2))
+        )
+        t_rsrc = buffer_ops.create_buffer_resource(
+            TBL, max_size=False, num_records_bytes=_raw(Bn * fx.Index(Hkv) * Sn * fx.Index(topk * 4))
+        )
+        if const_expr(with_slots):
+            s_rsrc = buffer_ops.create_buffer_resource(
+                SLOT, max_size=False, num_records_bytes=_raw(Bn * fx.Index(Hkv) * Sn * fx.Index(topk * 4))
+            )
+
+        head = g * fx.Index(HPW) + lo
+        row = (tok * Bn + b) * fx.Index(Hq) + head
+
+        tok_i32 = fx.Int32(tok)
+        n_vis = tok_i32 // fx.Int32(block_size) + fx.Int32(1)
+        n_valid = fx.Int32(ArithValue(n_vis < fx.Int32(topk)).select(_raw(n_vis), _raw(fx.Int32(topk))))
+        if const_expr(WPG > 1):
+            tok_wg = fx.Int32(Sn - fx.Index(1) - (raw // bgn) * fx.Index(WPG))
+            n_vis_wg = tok_wg // fx.Int32(block_size) + fx.Int32(1)
+            n_steps = fx.Index(
+                fx.Int32(ArithValue(n_vis_wg < fx.Int32(topk)).select(_raw(n_vis_wg), _raw(fx.Int32(topk))))
+            ) * fx.Index(SPB)
+        else:
+            n_steps = fx.Index(n_valid) * fx.Index(SPB)
+        tbl_row = ((b * fx.Index(Hkv) + g) * Sn + tok) * fx.Index(topk)
+        if const_expr(WPG > 1):
+            tbl_row0 = ((b * fx.Index(Hkv) + g) * Sn + (tok + wave_u - fx.Index(WPG - 1))) * fx.Index(topk)
+
+        ptr3 = ir.Type.parse("!llvm.ptr<3>")
+
+        def lds_ptr(addr):
+            return llvm.inttoptr(ptr3, _raw(fx.Int32(addr)))
+
+        def lds_tr16(addr):
+            r = _rocdl.ds_load_tr16_b128(v8_ty, lds_ptr(addr))
+            return Vec(r if isinstance(r, ir.Value) else r.result)
+
+        lds_ty = fx.PointerType.get(elem_ty=elem.ir_type, address_space=fx.AddressSpace.Shared, alignment=16)
+        row_stride = Bn * fx.Index(Hkv) * fx.Index(D)
+        head_off = (b * fx.Index(Hkv) + g) * fx.Index(D)
+
+        def tdm_k(kv0, lds_addr):
+            off = fx.Int64(fx.Int32(kv0)) * fx.Int64(fx.Int32(row_stride)) + fx.Int64(fx.Int32(head_off))
+            gbase = fx.add_offset(fx.get_iter(K), off)
+            g_view = fx.Tensor(fx.make_view(gbase, fx.make_layout((KPS, D), (D, 1))))
+            rows = fx.Int32(S) - fx.Int32(kv0)
+            rows = fx.Int32(ArithValue(rows < fx.Int32(KPS)).select(_raw(rows), _raw(fx.Int32(KPS))))
+            rows = fx.Int32(ArithValue(rows > fx.Int32(0)).select(_raw(rows), _raw(fx.Int32(0))))
+            atom = fx.rocdl.make_tdm_atom(
+                g_view,
+                [rows, None],
+                strides=[fx.Int32(row_stride), None],
+                num_warps=1,
+                pad_interval=D,
+                pad_amount=ROWE - D,
+            )
+            l_view = fx.Tensor(
+                fx.make_view(fx.inttoptr(lds_ty, lds_addr), fx.make_layout((KPS, D), (ROWE, 1)))
+            )
+            fx.copy_atom_call(atom, g_view, l_view)
+
+        def tdm_ds(jj, blk, lds_addr):
+            # the step's [KPS keys, 16 heads] tile of this token's record; an empty slot stages zeros
+            pos = jj // fx.Index(SPB)
+            if const_expr(with_slots):
+                # the walk position's slot in the indexer's table (0 .. topk-1 by construction;
+                # clamped, so a corrupt entry cannot address past the token's records)
+                slot = fx.Int32(buffer_ops.buffer_load(s_rsrc, tbl_row + pos, vec_width=1, is_scalar=True))
+                slot = fx.Int32(ArithValue(slot < fx.Int32(0)).select(_raw(fx.Int32(0)), _raw(slot)))
+                slot = fx.Int32(
+                    ArithValue(slot < fx.Int32(topk)).select(_raw(slot), _raw(fx.Int32(topk - 1)))
+                )
+                ent = tbl_row + fx.Index(slot)
+            else:
+                ent = tbl_row + pos
+            off = fx.Int64(fx.Int32(ent)) * fx.Int64(ENTRY) + fx.Int64(
+                fx.Int32(jj % fx.Index(SPB))
+            ) * fx.Int64(KPS * HPW)
+            gbase = fx.add_offset(fx.get_iter(DS), off)
+            g_view = fx.Tensor(fx.make_view(gbase, fx.make_layout((KPS, HPW), (HPW, 1))))
+            rows = fx.Int32(ArithValue(blk >= fx.Int32(0)).select(_raw(fx.Int32(KPS)), _raw(fx.Int32(0))))
+            atom = fx.rocdl.make_tdm_atom(
+                g_view,
+                [rows, None],
+                strides=[fx.Int32(HPW), None],
+                num_warps=1,
+            )
+            l_view = fx.Tensor(
+                fx.make_view(fx.inttoptr(lds_ty, lds_addr), fx.make_layout((KPS, HPW), (DS_ROW, 1)))
+            )
+            fx.copy_atom_call(atom, g_view, l_view)
+
+        # LDS: NBUF stages; in a stage, WPG K slots then WPG dS slots
+        def stage_base(jj):
+            return lds_wg + fx.Int32(jj % fx.Index(NBUF)) * fx.Int32(STAGE * WPG)
+
+        def step_blk(jj):
+            return fx.Int32(
+                buffer_ops.buffer_load(t_rsrc, tbl_row + jj // fx.Index(SPB), vec_width=1, is_scalar=True)
+            )
+
+        def step_kv0(blk, jj):
+            safe = fx.Int32(ArithValue(blk >= fx.Int32(0)).select(_raw(blk), _raw(fx.Int32(0))))
+            return safe * fx.Int32(block_size) + fx.Int32(jj % fx.Index(SPB)) * fx.Int32(KPS)
+
+        def owner_of(jj):
+            my_blk = step_blk(jj)
+            mine = step_kv0(my_blk, jj)
+            own = fx.Int32(WPG - 1)
+            for w2i in range_constexpr(WPG):
+                w2 = WPG - 1 - w2i
+                row2 = tbl_row0 + fx.Index((WPG - 1 - w2) * topk)
+                b2 = fx.Int32(
+                    buffer_ops.buffer_load(t_rsrc, row2 + jj // fx.Index(SPB), vec_width=1, is_scalar=True)
+                )
+                own = fx.Int32(ArithValue(step_kv0(b2, jj) == mine).select(_raw(fx.Int32(w2)), _raw(own)))
+            return own, mine, my_blk
+
+        def ds_slot(js):
+            return stage_base(js) + fx.Int32(WPG * T_BYTES) + fx.Int32(wave_u) * fx.Int32(D_BYTES)
+
+        def issue(js, jj):
+            if const_expr(WPG > 1):
+                own, kv0, blk = owner_of(jj)
+                if own == fx.Int32(wave_u):
+                    tdm_k(kv0, stage_base(js) + fx.Int32(wave_u) * fx.Int32(T_BYTES))
+            else:
+                blk = step_blk(jj)
+                tdm_k(step_kv0(blk, jj), stage_base(js))
+            tdm_ds(jj, blk, ds_slot(js))
+
+        # K^T / dS^T by ds_load_tr16_b128: lane row half*16 + lane%8, column ((lane//8)%2)*8
+        t_lane = (fx.Int32(half) * fx.Int32(16) + fx.Int32(lane % fx.Index(8))) * fx.Int32(
+            ROWE * 2
+        ) + fx.Int32((lane // fx.Index(8)) % fx.Index(2)) * fx.Int32(16)
+        d_lane = (fx.Int32(half) * fx.Int32(16) + fx.Int32(lane % fx.Index(8))) * fx.Int32(
+            DS_ROW * 2
+        ) + fx.Int32((lane // fx.Index(8)) % fx.Index(2)) * fx.Int32(16)
+
+        def sel_idx(c, a_, b_):
+            return fx.Index(fx.Int32(ArithValue(c).select(_raw(fx.Int32(a_)), _raw(fx.Int32(b_)))))
+
+        for pj in range_constexpr(NBUF - 1):
+            jj = sel_idx(fx.Index(pj) < n_steps, fx.Index(pj), fx.Index(0))
+            issue(fx.Index(pj), jj)
+
+        c_zero_v8 = Vec.filled(8, 0.0, fx.Float32)
+        init = [c_zero_v8 for _ in range_constexpr(DT)]
+        results = init
+        for j, it in range(fx.Index(0), n_steps, fx.Index(1), init=init):
+            dq_acc = [it[dt] for dt in range_constexpr(DT)]
+            tdm_ops.tensor_wait(0)
+            if const_expr(WPG > 1):
+                gpu.barrier()
+            j_f = j + fx.Index(NBUF - 1)
+            j_c = sel_idx(j_f < n_steps, j_f, j)
+            issue(j_f, j_c)
+            if const_expr(WPG > 1):
+                own_j, _, _ = owner_of(j)
+                kslot = stage_base(j) + own_j * fx.Int32(T_BYTES)
+            else:
+                kslot = stage_base(j)
+            ktb = kslot + t_lane
+            dsb = ds_slot(j) + d_lane
+            # B: column = head lo, K = the step's 32 keys (dS^T read like K^T)
+            dsB = cat_bf16_16(lds_tr16(dsb), lds_tr16(dsb + fx.Int32(8 * DS_ROW * 2)))
+            new_dq = []
+            for dt in range_constexpr(DT):
+                ta = ktb + fx.Int32(dt * 16 * 2)
+                a_kt = cat_bf16_16(lds_tr16(ta), lds_tr16(ta + fx.Int32(8 * ROWE * 2)))
+                new_dq.append(wmma_f32_16x16x32_bf16(a_kt, dsB, dq_acc[dt]))
+            results = yield new_dq
+        tdm_ops.tensor_wait(0)
+
+        for dt in range_constexpr(DT):
+            _store_bf16x8(
+                dq_rsrc,
+                row * fx.Index(D) + fx.Index(dt * 16) + half * fx.Index(8),
+                results[dt],
+                fx.Float32(scale),
+            )
+
+    @flyc.jit
+    def launch(K, DS, TBL, SLOT, DQ, S, B, stream):
+        k_fn(K, DS, TBL, SLOT, DQ, S, B).launch(
+            grid=(
+                (fx.Index(S) if WPG == 1 else fx.Index(S) // fx.Index(WPG)) * fx.Index(B) * fx.Index(Hkv),
+                1,
+                1,
+            ),
+            block=(WAVE * WPG, 1, 1),
+            stream=stream,
+        )
+
+    launch.compile = lambda *a: flyc.compile(launch, *a)
     return launch

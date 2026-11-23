@@ -77,7 +77,7 @@ _MSA_FUSIONS = (
 )
 # Options whose arithmetic is not bit-identical to the reference flydsl kernels (reordered sums);
 # msa_exact_numerics turns every one of them off.
-_MSA_RELAXED = ("msa_aligned_block_walk",)
+_MSA_RELAXED = ("msa_aligned_block_walk", "msa_dq_from_ds")
 _FUSIONS_LOGGED = False
 
 
@@ -288,6 +288,22 @@ class MinimaxSparseAttention(SelfAttention):
             table = block_indices.to(torch.int32)
         return block_walk.aligned_block_walk(table, self.block_size)
 
+    def _dq_from_ds(self, walk) -> dict:
+        """``msa_dq_from_ds``: the keyword arguments that turn it on for the MSA backward, or none
+        when the switch is off, ``msa_exact_numerics`` is set or the kernels are not the gfx1250
+        ones. Relaxed numerics (dQ from the dK/dV kernel's dS), so ``msa_exact_numerics`` turns it
+        off. With an aligned walk the backward also needs the walk's slots as int32."""
+        config = self.config
+        if (
+            not getattr(config, "msa_dq_from_ds", False)
+            or getattr(config, "msa_exact_numerics", False)
+            or not self._gfx1250
+        ):
+            return {}
+        if walk is None:
+            return {"dq_from_ds": True}
+        return {"dq_from_ds": True, "walk_slots": walk[1].to(torch.int32)}
+
     def msa_core(
         self,
         query: torch.Tensor,
@@ -317,6 +333,7 @@ class MinimaxSparseAttention(SelfAttention):
             shared_tiles=getattr(self.config, "msa_shared_tile_staging", False),
             step_mask_skip=getattr(self.config, "msa_lean_masks", False),
             **({} if walk is None else {"walk_table": walk[0]}),
+            **self._dq_from_ds(walk),
         )
         if not want_loss:
             return outs[0], None
