@@ -168,9 +168,10 @@ modules:
       fused_probs_mul: true
       bitwise_clip_scale: true
       embedding_rows_grad: true
-      # main_grad += the gradients of 4 micro-batches in one pass; holds up to 3 extra BF16
-      # gradients per parameter (about +49 GB on the 4-layer proxy). 0 turns it off.
-      grad_accum_group: 4
+      # 4: main_grad += the gradients of 4 micro-batches in one pass (-15 ms per step on the
+      # 4-layer proxy), holding up to 3 extra BF16 gradients per parameter (about +49 GB there);
+      # no gain with gradient_accumulation_fusion on.
+      grad_accum_group: 0
 
       # training control. A full gc.collect() takes about 280 ms here, longer than
       # the 1-GPU step, and collects nothing, so not every iteration.
