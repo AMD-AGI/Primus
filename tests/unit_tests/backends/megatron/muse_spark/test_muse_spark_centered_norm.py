@@ -6,6 +6,8 @@
 
 """The fused centered RMSNorm (``norm(x) * (1 + w)``) against the eager fp32 formula."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -56,7 +58,9 @@ def test_the_kernel_matches_eager_forward_and_backward(h, dtype):
     g = torch.randn_like(x)
     xa, xb = x.clone().requires_grad_(), x.clone().requires_grad_()
     wa, wb = w.detach().clone().requires_grad_(), w.detach().clone().requires_grad_()
-    out_f = centered_norm.centered_rms_norm(xa, wa, 1e-5)  # the shared Triton RMSNorm
+    out_f = centered_norm.centered_rms_norm(
+        xa, wa, 1e-5
+    )  # Primus-Turbo's rmsnorm, else the shared Triton one
     out_e = centered_norm.centered_rms_norm_reference(xb, wb, 1e-5)
     out_f.backward(g)
     out_e.backward(g)
@@ -65,3 +69,64 @@ def test_the_kernel_matches_eager_forward_and_backward(h, dtype):
     assert (out_f.float() - out_e.float()).abs().max() <= tol
     assert (xa.grad.float() - xb.grad.float()).abs().max() <= tol * 4
     assert torch.allclose(wa.grad, wb.grad, rtol=1e-3, atol=1e-2)
+
+
+def _fake_turbo(calls):
+    def rmsnorm(x, gamma, eps=1e-6, zero_centered=False):
+        calls.append((gamma, eps, zero_centered))
+        return x
+
+    return rmsnorm
+
+
+def test_turbo_rmsnorm_takes_gpu_calls_unless_switched_off(monkeypatch):
+    gpu, cpu = SimpleNamespace(is_cuda=True), SimpleNamespace(is_cuda=False)
+    fake = _fake_turbo([])
+    monkeypatch.setattr(centered_norm, "_turbo_rmsnorm", lambda: fake)
+    monkeypatch.delenv("PRIMUS_RMSNORM_TURBO", raising=False)
+    assert centered_norm._turbo_rmsnorm_for(gpu, gpu) is fake
+    assert centered_norm._turbo_rmsnorm_for(cpu, cpu) is None
+    monkeypatch.setenv("PRIMUS_RMSNORM_TURBO", "0")
+    assert centered_norm._turbo_rmsnorm_for(gpu, gpu) is None
+    monkeypatch.delenv("PRIMUS_RMSNORM_TURBO")
+    monkeypatch.setattr(centered_norm, "_turbo_rmsnorm", lambda: None)  # not installed / too old
+    assert centered_norm._turbo_rmsnorm_for(gpu, gpu) is None
+
+
+def test_centered_norm_hands_turbo_the_raw_weight_zero_centered(monkeypatch):
+    calls = []
+    monkeypatch.setattr(centered_norm, "_turbo_rmsnorm_for", lambda x, w: _fake_turbo(calls))
+    x, w = torch.randn(4, 8), torch.randn(8)
+    centered_norm.centered_rms_norm(x, w, 1e-5)
+    centered_norm.weighted_rms_norm(x, w.float(), 1e-6)
+    assert calls[0][0] is w and calls[0][1:] == (1e-5, True)
+    assert calls[1][1:] == (1e-6, False)
+    centered_norm.centered_rms_norm(x, w, 1e-5, fused=False)  # the eager formula: no kernel
+    assert len(calls) == 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.skipif(centered_norm._turbo_rmsnorm() is None, reason="needs Primus-Turbo's rmsnorm")
+def test_turbo_path_matches_the_shared_kernel_and_is_reproducible(monkeypatch):
+    torch.manual_seed(0)
+    x = (torch.randn(512, 1, 8192, device="cuda") * 3).to(torch.bfloat16)
+    w = (torch.randn(8192, device="cuda") * 0.05).to(torch.bfloat16)
+    g = torch.randn_like(x)
+
+    def run():
+        xa, wa = x.clone().requires_grad_(), w.clone().requires_grad_()
+        out = centered_norm.centered_rms_norm(xa, wa, 1e-5)
+        out.backward(g)
+        return out, xa.grad, wa.grad
+
+    turbo = run()
+    assert all(torch.equal(a, b) for a, b in zip(turbo, run()))  # deterministic weight gradient
+    monkeypatch.setenv("PRIMUS_RMSNORM_TURBO", "0")
+    shared = run()
+    eager_x, eager_w = x.clone().requires_grad_(), w.clone().requires_grad_()
+    eager = centered_norm.centered_rms_norm_reference(eager_x, eager_w, 1e-5)
+    eager.backward(g)
+    for out, dx, dw in (turbo, shared):
+        assert (out.float() - eager.float()).abs().max() <= 2e-2
+        assert (dx.float() - eager_x.grad.float()).abs().max() <= 8e-2
+        assert torch.allclose(dw.float(), eager_w.grad.float(), rtol=2e-2, atol=5e-1)
