@@ -3,6 +3,14 @@
 > [!NOTE]
 > This in-tree recipe (`rocm/primus:v26.9`) is still being validated; its results and defaults may change and will differ from the published AMD MLPerf Training v6.1 submission. To reproduce the v6.1 submission results, follow the [AMD MLPerf Training v6.1 reproduction blog](https://rocm.blogs.amd.com/artificial-intelligence/mlperf-training6.1-repro/README.html), which uses its own images and code.
 
+> [!IMPORTANT]
+> To reproduce the FLUX.1 performance numbers, check out Primus commit [`ad2fd2b6150b61afdce6deed5fb799ca8f35a23f`](https://github.com/AMD-AGI/Primus/commit/ad2fd2b6150b61afdce6deed5fb799ca8f35a23f) (`fix(sdma): attach FSDP2 copy-engine all-gather reliably in TorchTitan and Flux, etc (#1511)`) or a later commit on `main`. That commit includes the SDMA all-gather fix and the FLUX launcher changes in `config_common.sh`, `run_with_docker.sh`, and `run_with_docker_slurm.sh`. Earlier commits do not include these changes.
+
+```bash
+git clone https://github.com/AMD-AGI/Primus.git && cd Primus
+git checkout ad2fd2b6150b61afdce6deed5fb799ca8f35a23f   # or a later commit on main
+```
+
 MLPerf Training Flux.1-Schnell on **MI355X** via the in-tree diffusion backend and `primus-cli`.
 
 Precision defaults are in `config_common.sh`: MXFP4 `dgrad,wgrad` with A6W4 forward, fused norm/RoPE, FlyDSL attention, local AdamW, and the SDMA all-gather. The 6.1 disclosure defaults are mxfp4 linear, bfloat16 attention, and mxfp4 communication. Target validation loss is `0.586`. An evaluation runs every 262,144 training samples.
