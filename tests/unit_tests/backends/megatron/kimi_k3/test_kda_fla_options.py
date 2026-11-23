@@ -29,9 +29,15 @@ pytest.importorskip(
     reason="megatron.core is not importable in this environment",
 )
 
-from primus.backends.megatron.core.models.kimi_k3.kimi_k3_transformer_config import (  # noqa: E402
-    KimiK3TransformerConfig,
-)
+try:
+    from primus.backends.megatron.core.models.kimi_k3.kimi_k3_transformer_config import (
+        KimiK3TransformerConfig,
+    )
+except RuntimeError as error:
+    # models.kimi_k3 imports megatron.training, whose import chain needs a GPU (as in test_model_registry.py)
+    if torch.cuda.is_available():
+        raise
+    pytest.skip(f"importing models.kimi_k3 needs a GPU: {error}", allow_module_level=True)
 from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels import (  # noqa: E402
     kda_gate,
     kda_l2norm,
