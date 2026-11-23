@@ -1,7 +1,7 @@
 # FLUX.1-Schnell MLPerf on MI355X (Primus)
 
 > [!IMPORTANT]
-> To reproduce the FLUX.1 performance numbers, use the `rocm/primus:v26.9` image and check out Primus commit [`ad2fd2b6150b61afdce6deed5fb799ca8f35a23f`](https://github.com/AMD-AGI/Primus/commit/ad2fd2b6150b61afdce6deed5fb799ca8f35a23f) (`fix(sdma): attach FSDP2 copy-engine all-gather reliably in TorchTitan and Flux, etc (#1511)`) or a later commit on `main`. That commit includes the SDMA all-gather fix and the FLUX launcher changes in `config_common.sh`, `run_with_docker.sh`, and `run_with_docker_slurm.sh`. Earlier commits do not include these changes.
+> To reproduce the MLPerf Training v6.1 submission numbers for FLUX.1, use the `rocm/primus:v26.9` image and check out Primus commit [`ad2fd2b6150b61afdce6deed5fb799ca8f35a23f`](https://github.com/AMD-AGI/Primus/commit/ad2fd2b6150b61afdce6deed5fb799ca8f35a23f) (`fix(sdma): attach FSDP2 copy-engine all-gather reliably in TorchTitan and Flux, etc (#1511)`) or a later commit on `main`. That commit includes the SDMA all-gather fix and the FLUX launcher changes in `config_common.sh`, `run_with_docker.sh`, and `run_with_docker_slurm.sh`. Earlier commits do not include these changes.
 
 MLPerf Training Flux.1-Schnell on **MI355X** via the in-tree diffusion backend and `primus-cli`.
 
