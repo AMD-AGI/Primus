@@ -181,9 +181,10 @@ export TARGET_ACCURACY=${TARGET_ACCURACY:-0.586}
 export VAL_CHECK_INTERVAL=${VAL_CHECK_INTERVAL:-262144}
 # 1-node MLPerf recipe evaluates at the train microbatch, not batch 1.
 export EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-${LOCAL_BATCH_SIZE:-32}}
-# copy runs the parameter all-gather on the GPU copy engines. symm is the 6.1
-# symmetric-memory path; torch 2.16 cannot find its NCCL host communicator.
-export FSDP_ALL_GATHER_IMPL=${FSDP_ALL_GATHER_IMPL:-copy}
+# Copy-engine parameter all-gather for FSDP_SDMA_MODULES: symm = RCCL's copy-engine
+# all-gather on a zero-CTA twin of the FSDP group, hierarchical across nodes;
+# copy = HIP IPC copies, which cannot reach GPUs on other nodes.
+export FSDP_ALL_GATHER_IMPL=${FSDP_ALL_GATHER_IMPL:-symm}
 export SEED=${SEED:-10007}
 export ENABLE_WANDB_LOGGER=false
 export LOG_FREQ=${LOG_FREQ:-999999}

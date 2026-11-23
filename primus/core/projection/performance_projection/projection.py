@@ -24,6 +24,8 @@ from primus.core.projection.config_validation import (
     recompute_is_enabled,
 )
 from primus.core.projection.frameworks import framework_of, normalize_primus_config
+from primus.core.projection.hardware_calibration import SKIP_ENV as _HW_CALIB_SKIP_ENV
+from primus.core.projection.hardware_calibration import TAG as _HW_TAG
 from primus.core.projection.memory_capture import MemoryBenchmarkRecorder, format_bytes
 from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.module_profilers.collective_args import get_default_args
@@ -35,6 +37,12 @@ from primus.core.projection.module_profilers.language_model import (
 from primus.core.projection.module_profilers.optimizer import OptimizerProfiler
 from primus.core.projection.performance_projection.simulator import (
     SchedulerSimulationRunner,
+)
+from primus.core.projection.simulation_backends.base import (
+    HBM_BANDWIDTH_ENV,
+    set_calibrated_hbm_bandwidth,
+    set_hbm_bandwidth_override,
+    user_hbm_bandwidth_gbps,
 )
 from primus.core.projection.simulation_backends.factory import (
     get_gemm_simulation_backend,
@@ -287,7 +295,13 @@ def _merge_hybrid_profiling(
     for layer_idx, current_data in current_results.items():
         if not isinstance(current_data, dict):
             continue
-        if layer_idx in ("embedding", "output", "_tp_allreduce_benchmark", "_memory_benchmark"):
+        if layer_idx in (
+            "embedding",
+            "output",
+            "_tp_allreduce_benchmark",
+            "_memory_benchmark",
+            "_hardware_calibration",
+        ):
             continue
 
         # Find matching baseline layer (by index, or use the representative
@@ -2735,6 +2749,95 @@ def _build_runtime_primus_config(legacy_primus_config, args, module_name="pre_tr
     return runtime_cfg
 
 
+def _run_hardware_calibration(training_config, framework, rank, args):
+    """Measure this rank's effective compute clock and STREAM bandwidth.
+
+    Returns ``None`` when calibration is skipped -- decided identically on
+    every rank, since the payload is later gathered collectively -- and an
+    ``{"error": ...}`` payload when it fails, so a failing rank still joins
+    the gather.
+    """
+    from primus.core.projection.hardware_calibration import (
+        calibration_skip_reason,
+        run_hardware_calibration,
+    )
+
+    reason = calibration_skip_reason(args)
+    if reason is None and get_bench_runner(framework) is not None:
+        # JAX backends own the device through XLA; torch must not touch it.
+        reason = f"{framework} is not benchmarked through torch"
+    if reason is not None:
+        if rank == 0:
+            print(f"{_HW_TAG} Skipping compute-clock / memory-bandwidth calibration ({reason})")
+        return None
+
+    if rank == 0:
+        print(f"{_HW_TAG} Measuring effective compute clock (workload GEMMs) and STREAM bandwidth...")
+    try:
+        return run_hardware_calibration(training_config)
+    except Exception as exc:
+        print(f"{_HW_TAG} WARNING: rank {rank} calibration failed: {type(exc).__name__}: {exc}")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _apply_calibrated_hbm_bandwidth(hw_calibration, rank):
+    """Price the projection's memory-bound terms at the bench GPUs' measured bandwidth.
+
+    Uses the derated STREAM result (see ``hardware_calibration.stream_bandwidth``)
+    unless ``--hbm-bandwidth-gbps`` / ``PRIMUS_HBM_BANDWIDTH_GBPS`` already set
+    one.  Every rank holds the same gathered per-rank list, so all ranks pick
+    the same value.
+    """
+    from primus.core.projection.hardware_calibration import (
+        calibrated_model_hbm_bandwidth_gbps,
+    )
+
+    try:
+        gbps = calibrated_model_hbm_bandwidth_gbps(hw_calibration)
+    except ValueError as exc:
+        if rank == 0:
+            print(f"{_HW_TAG} WARNING: not using the calibrated HBM bandwidth: {exc}")
+        return
+    if gbps is None:
+        return
+    existing = user_hbm_bandwidth_gbps()
+    if existing is not None:
+        if rank == 0:
+            print(
+                f"{_HW_TAG} Keeping HBM bandwidth override {existing:.0f} GB/s "
+                f"(--hbm-bandwidth-gbps / {HBM_BANDWIDTH_ENV}); calibrated value was {gbps:.0f} GB/s"
+            )
+        return
+    set_calibrated_hbm_bandwidth(gbps)
+    if rank == 0:
+        print(
+            f"{_HW_TAG} Memory-bound terms use the calibrated HBM bandwidth "
+            f"{gbps:.0f} GB/s (peak-equivalent, slowest bench GPU)"
+        )
+
+
+def _apply_loaded_calibration(saved_calibration, args, is_rank_0):
+    """``--load-benchmark``: report the artifact's calibration and reuse its bandwidth.
+
+    The bandwidth is re-derived with the current derate; ``--skip-hw-calibration``
+    or ``PRIMUS_BENCH_SKIP_HW_CALIB=1`` keep the arch-profile bandwidth instead.
+    """
+    if not saved_calibration:
+        return
+    if is_rank_0:
+        from primus.core.projection.hardware_calibration import (
+            format_calibration_report,
+        )
+
+        print(f"{_HW_TAG} Calibration recorded with the loaded bench:")
+        print(format_calibration_report(saved_calibration))
+    if os.environ.get(_HW_CALIB_SKIP_ENV, "0") == "1" or getattr(args, "skip_hw_calibration", False):
+        if is_rank_0:
+            print(f"{_HW_TAG} Not reusing the recorded HBM bandwidth (calibration skipped)")
+        return
+    _apply_calibrated_hbm_bandwidth(saved_calibration, 0 if is_rank_0 else 1)
+
+
 def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
     """Measure a real ``optimizer.step()`` on silicon (benchmark mode).
 
@@ -2849,6 +2952,11 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
 
+    # Runs before the first memory snapshot: the GPU is idle, has memory to
+    # spare, and the calibration's buffers are freed (and peak stats reset)
+    # before the recorder starts tracking the high-water mark.
+    hw_calibration = _run_hardware_calibration(training_config, framework_of(module_config), rank, args)
+
     # Memory benchmark recorder: snapshots per-rank GPU memory at key phases
     # so the memory-projection extrapolator can predict target-cluster peak.
     # Snapshots are rank-0-only (see MemoryBenchmarkRecorder).
@@ -2926,6 +3034,18 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
     # at the bench config.  This is the "static" memory anchor — what every
     # rank pays before any forward pass.
     mem_recorder.snapshot("post_setup")
+
+    from primus.core.projection.hardware_calibration import (
+        format_calibration_report,
+        gather_rank_summaries,
+    )
+
+    # Collective: every rank joins, even one that skipped calibration.
+    gather_rank_summaries(hw_calibration)
+    if hw_calibration is not None:
+        if rank == 0:
+            print(format_calibration_report(hw_calibration))
+        _apply_calibrated_hbm_bandwidth(hw_calibration, rank)
 
     print("[Primus:Performance Projection] Building model profiler...")
     model_profiler_spec = get_language_model_profiler_spec(training_config)
@@ -3042,6 +3162,8 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
         optimizer_bench = _benchmark_optimizer_step(trainer, rank)
     if optimizer_bench:
         profiling_results["_optimizer_benchmark"] = optimizer_bench
+    if hw_calibration is not None:
+        profiling_results["_hardware_calibration"] = hw_calibration
 
     # Attach the memory benchmark payload to the profiling results dict so
     # _save_profiling_results / _load_profiling_results can persist it
@@ -4083,6 +4205,9 @@ def launch_projection_from_cli(args, overrides):
     if not cfg_path.exists():
         raise FileNotFoundError(f"[Primus:Performance Projection] Config file '{cfg_path}' not found.")
 
+    set_hbm_bandwidth_override(getattr(args, "hbm_bandwidth_gbps", None))
+    set_calibrated_hbm_bandwidth(None)
+
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
     # Translate the backend's own config spelling into the projection's before
@@ -4323,6 +4448,8 @@ def launch_projection_from_cli(args, overrides):
         # profiling_results that downstream code expects.
         from_load_results, _ = _load_profiling_results(load_benchmark_path)
         profiling_results = from_load_results
+        saved_calibration = profiling_results.get("_hardware_calibration")
+        _apply_loaded_calibration(saved_calibration, args, is_rank_0)
         if is_rank_0:
             n_layers = sum(1 for k in profiling_results if isinstance(k, int))
             print(
