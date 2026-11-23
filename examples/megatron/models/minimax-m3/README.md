@@ -168,8 +168,18 @@ parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs wh
 the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
-off; apart from `msa_shared_tile_staging` and `msa_lean_masks` the FlyDSL MSA kernels have no
-switch other than `PRIMUS_MSA_BACKEND=eager`.
+off; apart from `msa_shared_tile_staging`, `msa_lean_masks` and `msa_aligned_block_walk` the
+FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
+
+**Relaxed-numerics MSA options.** `msa_aligned_block_walk` is not bit-identical to the reference
+FlyDSL kernels: the forward and dQ kernels walk each token's selected blocks in an order aligned
+with the token's neighbours (groups of four consecutive tokens; a block that an earlier token of
+the group selected is visited at that token's step), so the tokens of a workgroup meet a common
+block at the same step and `msa_shared_tile_staging` copies its K/V tiles once. The block selection
+and the terms of every sum are unchanged; the order of the sums over a token's blocks is not, so
+`o`, the attention mass per slot and `dq` differ in their last bits (same error against an FP32
+reference; deterministic). `--msa_exact_numerics True` turns it, and any other option of this kind,
+off and reproduces the reference kernels' losses bit for bit.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a

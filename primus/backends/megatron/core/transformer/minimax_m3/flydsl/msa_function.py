@@ -9,6 +9,7 @@
 import torch
 
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+    build_block_plan,
     msa_token_bwd,
 )
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
@@ -84,6 +85,7 @@ def msa_attention(
     return_slot_lse=False,
     plan=None,
     shared_tiles=False,
+    walk_table=None,
     step_mask_skip=False,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
@@ -93,10 +95,22 @@ def msa_attention(
     builds it otherwise. Returns ``(o, lse)``, or ``(o, lse, slot_lse)``; only
     ``o`` carries a gradient. ``shared_tiles`` is ``msa_shared_tile_staging`` and ``step_mask_skip``
     ``msa_lean_masks`` (gfx1250 kernels, both bit-identical).
+
+    ``walk_table`` (``msa_aligned_block_walk``, see ``block_walk.py``) is ``block_table`` with each
+    row permuted, int32: the forward and dQ kernels walk a token's blocks in that order, and
+    ``slot_lse`` then comes back in that order too. ``plan`` stays the plan of ``block_table``
+    (dK/dV walks blocks, not rows).
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
-    if table is not None and table.shape == block_table.shape:
+    if walk_table is not None:
+        if walk_table.shape != block_table.shape or walk_table.dtype != torch.int32:
+            raise ValueError("walk_table must be an int32 row permutation of block_table")
+        if plan is None:
+            # the plan belongs to the indexer's table: its entries are that table's slots
+            plan = build_block_plan(block_table.to(torch.int32).contiguous(), block_size)
+        block_table = walk_table.contiguous()
+    elif table is not None and table.shape == block_table.shape:
         block_table = table  # select_plan's int32 copy of the same table
     else:
         block_table = block_table.to(torch.int32).contiguous()

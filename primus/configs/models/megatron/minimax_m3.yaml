@@ -103,6 +103,10 @@ msa_shared_tile_staging: false
 # change the result (fully visible steps skip the causal compare); bit-identical, checked on
 # first use (MSATransformerConfig).
 msa_lean_masks: false
+# gfx1250 flydsl kernels with msa_shared_tile_staging: walk each token's selected blocks in an
+# order aligned with its neighbours', so shared blocks are staged once per workgroup. Relaxed
+# numerics (the sums run in another order); msa_exact_numerics turns it off.
+msa_aligned_block_walk: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 

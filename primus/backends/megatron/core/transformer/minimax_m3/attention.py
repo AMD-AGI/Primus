@@ -75,6 +75,9 @@ _MSA_FUSIONS = (
     "msa_fused_zero_centered_gamma",
     "msa_fused_indexer_input_norm",
 )
+# Options whose arithmetic is not bit-identical to the reference flydsl kernels (reordered sums);
+# msa_exact_numerics turns every one of them off.
+_MSA_RELAXED = ("msa_aligned_block_walk",)
 _FUSIONS_LOGGED = False
 
 
@@ -91,6 +94,16 @@ def _log_fusions_once(config) -> None:
         log_rank_0(
             f"MinimaxSparseAttention (flydsl): msa_shared_tile_staging {shared}, msa_lean_masks "
             f"{lean} (gfx1250 kernels only)"
+        )
+        relaxed = [
+            name
+            for name in _MSA_RELAXED
+            if getattr(config, name, False) and not getattr(config, "msa_exact_numerics", False)
+        ]
+        log_rank_0(
+            "MinimaxSparseAttention (flydsl): relaxed-numerics options "
+            f"{', '.join(relaxed) or 'off'} (msa_exact_numerics "
+            f"{bool(getattr(config, 'msa_exact_numerics', False))})"
         )
 
 
@@ -181,6 +194,7 @@ class MinimaxSparseAttention(SelfAttention):
             )
 
         self.msa_attention = None
+        self._gfx1250 = False
         if config.msa_backend == "flydsl":
             # Imported here, not at module level: flydsl is not in every build.
             from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_function import (
@@ -189,6 +203,7 @@ class MinimaxSparseAttention(SelfAttention):
             from primus.core.utils.gpu_arch import is_gfx1250
 
             if is_gfx1250():
+                self._gfx1250 = True
                 _require_gfx1250_flydsl()
                 if self.block_size != 128:
                     raise NotImplementedError(
@@ -249,6 +264,30 @@ class MinimaxSparseAttention(SelfAttention):
         )
         return normed.to(x.dtype)
 
+    def _aligned_walk(self, block_indices: torch.Tensor, block_plan: Optional[object]):
+        """``msa_aligned_block_walk``: ``(walk_table, slots)`` of flydsl/block_walk.py, or None when
+        the switch is off, ``msa_exact_numerics`` is set, the kernels are not the gfx1250 ones with
+        ``msa_shared_tile_staging`` (nothing would share a tile), or the shape is not eligible.
+        Decided before any work; relaxed numerics (the blocks of a token are added in another
+        order), so ``msa_exact_numerics`` turns it off."""
+        config = self.config
+        if (
+            not getattr(config, "msa_aligned_block_walk", False)
+            or getattr(config, "msa_exact_numerics", False)
+            or not getattr(config, "msa_shared_tile_staging", False)
+            or not self._gfx1250
+        ):
+            return None
+        # imported only when switched on: the eager backend needs no Triton
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+            block_walk,
+        )
+
+        table = getattr(block_plan, "table", None) if block_plan is not None else None
+        if table is None or table.shape != block_indices.shape:
+            table = block_indices.to(torch.int32)
+        return block_walk.aligned_block_walk(table, self.block_size)
+
     def msa_core(
         self,
         query: torch.Tensor,
@@ -265,6 +304,7 @@ class MinimaxSparseAttention(SelfAttention):
         Takes ``[sq, b, heads, hn]`` query / key / value and the indexer's outputs; returns
         ``(core_attn_out [sq, b, np, hn], indexer_loss or None)``.
         """
+        walk = self._aligned_walk(block_indices, block_plan)
         outs = self.msa_attention(
             query,
             key,
@@ -276,10 +316,15 @@ class MinimaxSparseAttention(SelfAttention):
             plan=block_plan,
             shared_tiles=getattr(self.config, "msa_shared_tile_staging", False),
             step_mask_skip=getattr(self.config, "msa_lean_masks", False),
+            **({} if walk is None else {"walk_table": walk[0]}),
         )
         if not want_loss:
             return outs[0], None
         slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
+        if walk is not None:
+            # the kernel's slot_lse is in walk order: position p of a row is the indexer's slot
+            # walk[1][p]. One scatter on the [b, n_index, sq, topk] mass puts it back.
+            slot_mass = torch.empty_like(slot_mass).scatter_(-1, walk[1], slot_mass)
         if self.config.msa_fused_indexer_loss:
             # bitwise, in a few Triton launches
             from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (

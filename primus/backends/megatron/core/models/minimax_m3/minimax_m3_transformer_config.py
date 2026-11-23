@@ -208,6 +208,14 @@ class MSATransformerConfig(TransformerConfig):
     for a shape compares every output bit of each kernel with the kernel without it and keeps
     that one on a mismatch."""
 
+    msa_aligned_block_walk: bool = False
+    """flydsl backend on gfx1250, with msa_shared_tile_staging: the forward and dQ kernels walk each
+    token's selected blocks in an order aligned with its neighbours' (flydsl/block_walk.py), so
+    the tokens of a workgroup meet a common block at the same step and stage its K/V tiles once.
+    The selection and the terms summed are unchanged; the order of the sums is not (relaxed
+    numerics: o, lse, the slot mass and dq change in the last bits; deterministic).
+    msa_exact_numerics turns it off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for
