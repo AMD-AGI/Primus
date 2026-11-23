@@ -15,6 +15,17 @@ The eager loss is ~25 tiny kernels in the forward and ~35 in the backward of eve
 * everything else is elementwise (gather, fills, compare/select, ``min``, ``log``, IEEE divides)
   or an exact row max/count, and is fused into Triton kernels; the logs use ATen's log kernel
   (one in-place launch), whose bits Triton's ``log`` does not reproduce.
+
+``fold_scatter`` (config switch ``msa_fused_indexer_loss_scatter``) also writes the gradient of
+``block_scores`` row by row from the last backward kernel instead of
+``zeros(...).scatter_add_(-1, idx.clamp_min(0), g)``: three launches fewer per call. Exact because
+the valid block indices of a row are distinct and every invalid slot adds +0 to block 0, so each
+element is ``0 + (its one g, or nothing)`` in any order. The premise is structural, not a property
+of the data: ``block_indices`` is the output of ``block_scores.topk`` (``indexer.py``, invalid
+slots set to -1) or of ``msa_fused_select_plan``, itself checked bit-identical to it, and
+``scatter_add_`` on a GPU is order-free only under the same premise. The first-call check runs on
+the call's own inputs. Rows wider than ``_SCATTER_MAX_BLOCKS`` = 64 blocks (sequence 8192 at
+``sparse_block_size`` 128) and scores whose leading shape is not the indices' keep ``scatter_add_``.
 """
 
 from __future__ import annotations
@@ -203,6 +214,9 @@ def _bwd_scores_kernel(
     K: tl.constexpr,
     KP: tl.constexpr,
     BR: tl.constexpr,
+    SCATTER: tl.constexpr = False,
+    NB: tl.constexpr = 1,
+    NBP: tl.constexpr = 1,
 ):
     pid = tl.program_id(0)
     rows = pid * BR + tl.arange(0, BR)
@@ -223,15 +237,40 @@ def _bwd_scores_kernel(
     g = gsf + ga
     idx = tl.load(idx_ptr + off, mask=m, other=-1)
     g = tl.where(idx < 0, 0.0, g)  # MaskedFillBackward (invalid)
-    tl.store(gs_ptr + off, g, mask=m)
+    if SCATTER:
+        # zeros(NB).scatter_add_(-1, idx.clamp_min(0), g) written as whole rows: a row's valid
+        # blocks are distinct and every other contribution (an invalid slot -> block 0, g = +0)
+        # is +0, so each block is 0 + (its one g, or nothing) in any order, which is what the
+        # scatter's atomic adds produce; "+ 0.0" turns a -0 into +0 as 0 + (-0) does.
+        nb = tl.arange(0, NBP)
+        hit = (idx[:, :, None] == nb[None, None, :]) & m[:, :, None]
+        contrib = tl.where(hit, g[:, :, None], 0.0)
+        out = tl.sum(contrib, axis=1) + 0.0
+        om = rmask[:, None] & (nb[None, :] < NB)
+        tl.store(gs_ptr + rows[:, None] * NB + nb[None, :], out, mask=om)
+    else:
+        tl.store(gs_ptr + off, g, mask=m)
 
 
 _BR = 64
+# fold_scatter: rows per program and the widest block_scores row the folded kernel takes
+_SCATTER_BR = 16
+_SCATTER_MAX_BLOCKS = 64
+
+
+def _can_fold(block_scores, block_indices) -> bool:
+    """Whether the folded kernel may write the gradient of ``block_scores``: it writes one row of
+    blocks per row of indices into an uninitialised tensor, so the two must have the same rows."""
+    return (
+        block_scores.dtype == torch.float32
+        and block_scores.shape[-1] <= _SCATTER_MAX_BLOCKS
+        and block_scores.shape[:-1] == block_indices.shape[:-1]
+    )
 
 
 class _SparseIndexerKL(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, block_scores, block_indices, slot_mass):
+    def forward(ctx, block_scores, block_indices, slot_mass, fold_scatter=False):
         shape = block_indices.shape
         K = shape[-1]
         NB = block_scores.shape[-1]
@@ -257,13 +296,15 @@ class _SparseIndexerKL(torch.autograd.Function):
         kl = torch.empty(shape, device=dev, dtype=torch.float32)
         _fwd_kl_kernel[grid](t, q, idx, rowinfo, kl, N, R, K, KP, _BR)
         ctx.save_for_backward(idx, scores, rowinfo, p, t)
-        ctx.meta = (block_scores.shape, block_scores.dtype, R, K, KP)
+        # Eligibility of the folded scatter, decided here before any backward work.
+        fold = bool(fold_scatter) and _can_fold(block_scores, block_indices)
+        ctx.meta = (block_scores.shape, block_scores.dtype, R, K, KP, fold)
         return kl
 
     @staticmethod
     def backward(ctx, grad_kl):
         idx, scores, rowinfo, p, t = ctx.saved_tensors
-        bs_shape, bs_dtype, R, K, KP = ctx.meta
+        bs_shape, bs_dtype, R, K, KP, fold = ctx.meta
         grid = (triton.cdiv(R, _BR),)
         g2 = grad_kl.reshape(R, K)
         gp = torch.empty_like(p)
@@ -273,34 +314,54 @@ class _SparseIndexerKL(torch.autograd.Function):
         goth = torch.empty_like(gl)
         _bwd_min_kernel[grid](gl, scores, rowinfo, gself, goth, R, K, KP, _BR)
         gothsum = goth.sum(dim=-1, keepdim=True)
+        if fold:
+            # the scatter folded into the kernel: no zero fill, clamp or scatter_add_ launches
+            NB = bs_shape[-1]
+            grad_bs = torch.empty(bs_shape, device=gl.device, dtype=bs_dtype)
+            _bwd_scores_kernel[(triton.cdiv(R, _SCATTER_BR),)](
+                gself, gothsum, scores, idx, rowinfo, grad_bs, R, K, KP, _SCATTER_BR,
+                SCATTER=True, NB=NB, NBP=triton.next_power_of_2(NB),
+            )  # fmt: skip
+            return grad_bs, None, None, None
         gs = torch.empty_like(gl)
         _bwd_scores_kernel[grid](gself, gothsum, scores, idx, rowinfo, gs, R, K, KP, _BR)
         grad_bs = torch.zeros(bs_shape, device=gs.device, dtype=bs_dtype).scatter_add_(
             -1, idx.clamp_min(0), gs
         )
-        return grad_bs, None, None
+        return grad_bs, None, None, None
 
 
-def fused_sparse_indexer_loss(slot_mass, block_scores, block_indices, loss_coeff):
+def fused_sparse_indexer_loss(slot_mass, block_scores, block_indices, loss_coeff, fold_scatter=False):
     """Same value and gradients as ``compute_sparse_indexer_loss`` (bit for bit)."""
-    kl = _SparseIndexerKL.apply(block_scores, block_indices, slot_mass)
+    kl = _SparseIndexerKL.apply(block_scores, block_indices, slot_mass, fold_scatter)
     return kl.sum(dim=-1).mean() * loss_coeff
 
 
-def sparse_indexer_loss(slot_mass, block_scores, block_indices, loss_coeff):
-    """:func:`fused_sparse_indexer_loss` if the first call with these shapes finds it
-    bit-identical to ``compute_sparse_indexer_loss`` on its inputs, else the eager loss for
-    every call with these shapes."""
+def _checked(name, slot_mass, block_scores, block_indices, loss_coeff, fold_scatter) -> bool:
     inputs = (slot_mass, block_scores, block_indices)
-    if bitwise_check.passed(
-        "msa_fused_indexer_loss",
+    return bitwise_check.passed(
+        name,
         lambda: bitwise_check.outputs_and_grads(
-            lambda m, s, i: fused_sparse_indexer_loss(m, s, i, loss_coeff), *inputs
+            lambda m, s, i: fused_sparse_indexer_loss(m, s, i, loss_coeff, fold_scatter), *inputs
         ),
         lambda: bitwise_check.outputs_and_grads(
             lambda m, s, i: compute_sparse_indexer_loss(m, s, i, loss_coeff), *inputs
         ),
         key=tuple(tuple(t.shape) for t in inputs),
-    ):
-        return fused_sparse_indexer_loss(slot_mass, block_scores, block_indices, loss_coeff)
-    return compute_sparse_indexer_loss(slot_mass, block_scores, block_indices, loss_coeff)
+    )
+
+
+def sparse_indexer_loss(slot_mass, block_scores, block_indices, loss_coeff, fold_scatter=False):
+    """:func:`fused_sparse_indexer_loss` if the first call with these shapes finds it
+    bit-identical to ``compute_sparse_indexer_loss`` on its inputs, else the eager loss for
+    every call with these shapes. ``fold_scatter`` (see the module docstring) is checked the same
+    way under its own name and falls back to the fused loss with ``scatter_add_``."""
+    args = (slot_mass, block_scores, block_indices, loss_coeff)
+    if not _checked("msa_fused_indexer_loss", *args, False):
+        return compute_sparse_indexer_loss(*args)
+    fold = (
+        bool(fold_scatter)
+        and _can_fold(block_scores, block_indices)
+        and _checked("msa_fused_indexer_loss_scatter", *args, True)
+    )
+    return fused_sparse_indexer_loss(*args, fold_scatter=fold)

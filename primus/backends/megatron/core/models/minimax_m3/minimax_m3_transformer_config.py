@@ -160,6 +160,11 @@ class MSATransformerConfig(TransformerConfig):
     """The sparse indexer loss in a few Triton launches (indexer_loss_fused.py). Bit-identical to
     compute_sparse_indexer_loss, checked on first use."""
 
+    msa_fused_indexer_loss_scatter: bool = False
+    """With msa_fused_indexer_loss: the loss backward writes the gradient of block_scores row by
+    row from its last kernel instead of zeros + clamp + scatter_add_ (three launches fewer per
+    call). Bit-identical, checked on first use; rows wider than 64 blocks keep scatter_add_."""
+
     msa_fused_select_plan: bool = False
     """flydsl backend: the indexer's block selection and the backward's BlockPlan in a few Triton
     launches (flydsl/select_plan.py) instead of the eager ops and build_block_plan. Integer

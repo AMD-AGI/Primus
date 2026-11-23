@@ -66,7 +66,12 @@ from primus.core.utils.module_utils import log_rank_0
 # Backends that compute the block-sparse attention itself.
 MSA_BACKENDS = ("eager", "flydsl")
 
-_MSA_FUSIONS = ("msa_fused_qk_norm_rope", "msa_fused_indexer_loss", "msa_fused_select_plan")
+_MSA_FUSIONS = (
+    "msa_fused_qk_norm_rope",
+    "msa_fused_indexer_loss",
+    "msa_fused_indexer_loss_scatter",
+    "msa_fused_select_plan",
+)
 _FUSIONS_LOGGED = False
 
 
@@ -320,7 +325,12 @@ class MinimaxSparseAttention(SelfAttention):
                     )
                 else:
                     loss_fn = compute_sparse_indexer_loss
-                indexer_loss = loss_fn(slot_mass, block_scores, block_indices, self.indexer_loss_coeff)
+                if self.config.msa_fused_indexer_loss and self.config.msa_fused_indexer_loss_scatter:
+                    indexer_loss = loss_fn(
+                        slot_mass, block_scores, block_indices, self.indexer_loss_coeff, fold_scatter=True
+                    )
+                else:
+                    indexer_loss = loss_fn(slot_mass, block_scores, block_indices, self.indexer_loss_coeff)
         else:
             # sbhd -> bhsd for the eager kernel, matching the reference's layout.
             block_keep = build_block_keep(block_indices, key.shape[0], self.block_size)

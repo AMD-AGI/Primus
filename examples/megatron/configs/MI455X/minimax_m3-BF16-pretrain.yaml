@@ -68,6 +68,8 @@ modules:
       # Triton fusions around the attention, bit-identical to the eager ops (minimax_m3.yaml)
       msa_fused_qk_norm_rope: true
       msa_fused_indexer_loss: true
+      # launch cut: block_scores gradient written by the loss kernel
+      msa_fused_indexer_loss_scatter: true
       msa_fused_select_plan: true
       # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens
       msa_shared_tile_staging: true
