@@ -47,6 +47,7 @@ def _ctx(params):
 @pytest.fixture
 def eligible_env(monkeypatch):
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    monkeypatch.delenv("GPU_MAX_HW_QUEUES", raising=False)
     monkeypatch.setattr(mega_ulysses_patches, "is_primus_turbo_can_patch", lambda _ctx: True)
     monkeypatch.setattr(mega_ulysses_patches, "_missing_ops", lambda _args: None)
 
@@ -196,6 +197,27 @@ def test_mla_attn_enabled_when_eligible(eligible_env, heads, seq_chunk):
 )
 def test_mla_attn_unsupported_settings_keep_stock_path(eligible_env, overrides):
     assert _is_turbo_mega_ulysses_can_patch(_ctx(_mla_attn_params(**overrides))) is False
+
+
+@pytest.mark.parametrize(
+    "hw_queues, expected", [("4", True), ("8", True), ("2", False), ("1", False), ("", False)]
+)
+@pytest.mark.parametrize("mla", [False, True])
+def test_attn_needs_four_hw_queues(eligible_env, monkeypatch, mla, hw_queues, expected):
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", hw_queues)
+    params = (
+        _mla_attn_params()
+        if mla
+        else _params(turbo_mega_ulysses_impl="attn", micro_batch_size=1, seq_length=32768)
+    )
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is expected
+
+
+@pytest.mark.parametrize("mla", [False, True])
+def test_fused_runs_on_two_hw_queues(eligible_env, monkeypatch, mla):
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", "2")
+    params = _params(multi_latent_attention=mla, q_lora_rank=1536 if mla else None)
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is True
 
 
 @pytest.mark.parametrize("missing, expected", [(set(), True), ({_ATTN_OPS}, False), ({_MLA_OPS}, True)])

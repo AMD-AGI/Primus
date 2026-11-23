@@ -116,7 +116,8 @@ turbo_mega_moe_wgrad_accum_fusion: null
 use_turbo_mega_ulysses: false
 # fused | serial (the same attention path with the GEMMs and RCCL collectives in series) |
 # per_head (MLA only: Megatron's per-head q/k/v all-to-all) |
-# attn (GQA only: local projections, the all-to-alls fused into the attention, micro-batch size 1).
+# attn (local projections, the all-to-alls fused into the attention; micro-batch size 1 and
+# GPU_MAX_HW_QUEUES >= 4, which base_env.sh sets to 2 unless exported).
 # Only read when use_turbo_mega_ulysses is on.
 turbo_mega_ulysses_impl: fused
 # attn only: striped CP split, chunk c of this many tokens on CP rank c % cp (0: contiguous)

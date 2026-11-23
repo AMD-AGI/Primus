@@ -44,7 +44,8 @@ attention (q / k 192, v 128) at the module's (YaRN) softmax scale.
 ``ulysses_mega_attn`` is one kernel each way (pull q / k / v, attention on the local heads, push O;
 pull dO, the backward, push dq / dk / dv). Its sequence split is striped: chunk ``c`` of
 ``turbo_mega_ulysses_seq_chunk`` tokens lives on rank ``c % cp`` (0: contiguous), which lets the
-attention start before the exchange ends; the CP batch split follows it. Micro-batch size 1 only.
+attention start before the exchange ends; the CP batch split follows it. Micro-batch size 1 only,
+and ``GPU_MAX_HW_QUEUES`` >= 4 (unset is HIP's 4; ``base_env.sh`` exports 2 unless it is set).
 
 The split and the RoPE slicing are global, so no layer can fall back to the stock attention once
 the patch is in: every unsupported setting known from the arguments keeps the whole run on the stock
@@ -88,6 +89,10 @@ def _mega_attn_heads_ok(hq, hkv, cp) -> bool:
 _MLA_ATTN_DIMS = (192, 128)
 # the MLA forward's q block: a sequence chunk holds whole q blocks
 _MLA_ATTN_BLOCK = 256
+# ulysses_mega_attn's kernels wait on the peer ranks' kernels; with 2 hardware queues (base_env.sh's
+# default) they share one with the overlapped grad-reduce / param-gather RCCL kernels and the ranks
+# deadlock (the kernels' spin-wait watchdog traps). HIP's default is 4.
+_ATTN_MIN_HW_QUEUES = 4
 
 
 def _mla_attn_dims(args):
@@ -147,6 +152,12 @@ def _unsupported(args):
         block = _MLA_ATTN_BLOCK if mla else 128
         if mbs != 1:
             return f"turbo_mega_ulysses_impl=attn needs micro_batch_size=1 (got {mbs})"
+        hw_queues = os.environ.get("GPU_MAX_HW_QUEUES")
+        if hw_queues is not None and (not hw_queues.isdigit() or int(hw_queues) < _ATTN_MIN_HW_QUEUES):
+            return (
+                f"turbo_mega_ulysses_impl=attn needs GPU_MAX_HW_QUEUES>={_ATTN_MIN_HW_QUEUES} (got "
+                f"{hw_queues}): with fewer hardware queues its kernels deadlock against overlapped RCCL"
+            )
         if mla:
             dims = _mla_attn_dims(args)
             if dims is not None and dims != _MLA_ATTN_DIMS:
