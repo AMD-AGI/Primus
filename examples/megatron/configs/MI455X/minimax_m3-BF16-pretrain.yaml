@@ -71,6 +71,9 @@ modules:
       # launch cuts: block_scores gradient written by the loss kernel; RoPE tables kept per freqs tensor
       msa_fused_indexer_loss_scatter: true
       msa_shared_rope_tables: true
+      # launch cuts: zero-centered gamma formed in the norm + RoPE kernels; indexer input norm in one launch
+      msa_fused_zero_centered_gamma: true
+      msa_fused_indexer_input_norm: true
       msa_fused_select_plan: true
       # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens
       msa_shared_tile_staging: true

@@ -72,6 +72,8 @@ _MSA_FUSIONS = (
     "msa_fused_indexer_loss_scatter",
     "msa_fused_select_plan",
     "msa_shared_rope_tables",
+    "msa_fused_zero_centered_gamma",
+    "msa_fused_indexer_input_norm",
 )
 _FUSIONS_LOGGED = False
 
@@ -215,7 +217,27 @@ class MinimaxSparseAttention(SelfAttention):
         norm_weight = self._fused_input_norm_weight()
         if norm_weight is None:
             return x
-        weight = norm_weight.detach().float()
+        if getattr(self.config, "msa_fused_indexer_input_norm", False):
+            # the same ops in one bitwise Triton launch where its self-check passed (None
+            # otherwise); imported only when switched on: the eager backend needs no Triton
+            from primus.backends.megatron.core.transformer.minimax_m3 import (
+                indexer_input_norm,
+            )
+
+            normed = indexer_input_norm.indexer_input_norm(
+                x,
+                norm_weight.detach(),
+                self.config.layernorm_epsilon,
+                bool(self.config.layernorm_zero_centered_gamma),
+                self._indexer_input_eager,
+            )
+            if normed is not None:
+                return normed
+        return self._indexer_input_eager(x, norm_weight.detach())
+
+    def _indexer_input_eager(self, x: torch.Tensor, norm_weight: torch.Tensor) -> torch.Tensor:
+        """The FP32 RMSNorm of ``x`` with the (detached) fused norm weight, cast back."""
+        weight = norm_weight.float()
         if self.config.layernorm_zero_centered_gamma:
             weight = weight + 1.0
         normed = torch.nn.functional.rms_norm(

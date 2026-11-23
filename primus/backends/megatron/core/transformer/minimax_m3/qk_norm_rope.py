@@ -74,6 +74,7 @@ def _norm_rope_fwd_rows(
     ROWS_PER_BLOCK: tl.constexpr,
     D: tl.constexpr,
     ROT: tl.constexpr,
+    ZC: tl.constexpr,
 ):
     # rmsnorm_fwd_kernel_multi_row with x row r at x_off + (r // HPG) * stride_grp + (r % HPG) * D,
     # then RoPE on the normed BF16 rows
@@ -93,6 +94,9 @@ def _norm_rope_fwd_rows(
     full_mask = row_mask[:, None] & h_mask[None, :]
     x = tl.load(x_ptrs, mask=full_mask, other=0.0).to(tl.float32)
     g = tl.load(g_ptrs, mask=h_mask, other=0.0).to(tl.float32)
+    if ZC:
+        # zero-centered gamma: the BF16 (1 + w) of the eager ``weight + 1``, formed in-register
+        g = (g + 1.0).to(tl.bfloat16).to(tl.float32)
 
     var = tl.sum(x * x, axis=1) / H
     rstd = tl.rsqrt(var + eps)
@@ -106,6 +110,9 @@ def _norm_rope_fwd_rows(
     partner = tl.where(in_rot, partner, d)
     xp = tl.load(X_ptr + x_rows[:, None] + partner[None, :], mask=full_mask, other=0.0).to(tl.float32)
     gp = tl.load(G_ptr + partner, mask=h_mask, other=0.0).to(tl.float32)
+    if ZC:
+        # zero-centered gamma: the BF16 (1 + w) of the eager ``weight + 1``, formed in-register
+        gp = (gp + 1.0).to(tl.bfloat16).to(tl.float32)
     yp = (xp * rstd[:, None] * gp[None, :]).to(tl.bfloat16).to(tl.float32)
     s = (row_offs // ROWS_PER_S).to(tl.int64)
     c = tl.load(COS + s[:, None] * ROT + d[None, :], mask=row_mask[:, None] & in_rot[None, :], other=0.0).to(
@@ -143,6 +150,7 @@ def _rope_norm_bwd_rows(
     ROWS_PER_BLOCK: tl.constexpr,
     D: tl.constexpr,
     ROT: tl.constexpr,
+    ZC: tl.constexpr,
 ):
     # RoPE backward on the incoming gradient rows, then rmsnorm_bwd_kernel_multi_row with x and
     # dx rows addressed as in the forward
@@ -181,6 +189,9 @@ def _rope_norm_bwd_rows(
     x = tl.load(x_ptrs, mask=full_mask, other=0.0).to(tl.float32)
     dy = dyb.to(tl.float32)
     g = tl.load(g_ptrs, mask=h_mask, other=0.0).to(tl.float32)
+    if ZC:
+        # zero-centered gamma: the BF16 (1 + w) of the eager ``weight + 1``, formed in-register
+        g = (g + 1.0).to(tl.bfloat16).to(tl.float32)
     rstd = tl.load(RSTD_ptr + row_offs, mask=row_mask, other=0.0).to(tl.float32)
 
     x_hat = x * rstd[:, None]
@@ -219,7 +230,7 @@ def _turbo_cfg():
     return R
 
 
-def _norm_rope_fwd(mixed, x_off, hpg, stride_grp, n_rows, rows_per_s, gamma, eps, cos_, sin_):
+def _norm_rope_fwd(mixed, x_off, hpg, stride_grp, n_rows, rows_per_s, gamma, eps, cos_, sin_, zc=False):
     """Normed + roped rows ``[n_rows, D]`` and rstd, in one pass."""
     R = _turbo_cfg()
     D = gamma.shape[0]
@@ -245,13 +256,16 @@ def _norm_rope_fwd(mixed, x_off, hpg, stride_grp, n_rows, rows_per_s, gamma, eps
         ROWS_PER_BLOCK=ROWS,
         D=D,
         ROT=cos_.shape[-1],
+        ZC=bool(zc),
         num_warps=num_warps,
         num_stages=num_stages,
     )
     return out, rstd
 
 
-def _rope_norm_bwd(dq, mixed, dmixed, x_off, hpg, stride_grp, n_rows, rows_per_s, gamma, rstd, cos_, sin_):
+def _rope_norm_bwd(
+    dq, mixed, dmixed, x_off, hpg, stride_grp, n_rows, rows_per_s, gamma, rstd, cos_, sin_, zc=False
+):
     R = _turbo_cfg()
     D = gamma.shape[0]
     mode, BLOCK_H, ROWS, num_warps, num_stages = R._pick_bwd_config(D, n_rows)
@@ -278,6 +292,7 @@ def _rope_norm_bwd(dq, mixed, dmixed, x_off, hpg, stride_grp, n_rows, rows_per_s
         ROWS_PER_BLOCK=ROWS,
         D=D,
         ROT=cos_.shape[-1],
+        ZC=bool(zc),
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -348,24 +363,25 @@ def _multi_row(head_dim: int, n_rows: int) -> bool:
 
 class _QKNormRope(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, mixed, gq, gk, cos_, sin_, hpg, eps):
+    def forward(ctx, mixed, gq, gk, cos_, sin_, hpg, eps, zc=False):
         S, Bt, NG, W = mixed.shape
         D = gq.shape[0]
         assert mixed.dtype == torch.bfloat16 and mixed.is_contiguous()
         assert W == (hpg + 2) * D and cos_.shape[0] == S
         nq, nk = S * Bt * NG * hpg, S * Bt * NG
-        q, rq = _norm_rope_fwd(mixed, 0, hpg, W, nq, Bt * NG * hpg, gq, eps, cos_, sin_)
-        k, rk = _norm_rope_fwd(mixed, hpg * D, 1, W, nk, Bt * NG, gk, eps, cos_, sin_)
+        q, rq = _norm_rope_fwd(mixed, 0, hpg, W, nq, Bt * NG * hpg, gq, eps, cos_, sin_, zc)
+        k, rk = _norm_rope_fwd(mixed, hpg * D, 1, W, nk, Bt * NG, gk, eps, cos_, sin_, zc)
         v = torch.empty((S, Bt, NG, D), dtype=mixed.dtype, device=mixed.device)
         _copy_rows[(triton.cdiv(nk, _COPY_ROWS),)](mixed, v, (hpg + 1) * D, W, D, 0, nk, D=D, BR=_COPY_ROWS)
         ctx.save_for_backward(mixed, gq, gk, rq, rk, cos_, sin_)
         ctx.hpg = hpg
+        ctx.zc = zc
         return q.view(S, Bt, NG * hpg, D), k.view(S, Bt, NG, D), v
 
     @staticmethod
     def backward(ctx, dq, dk, dv):
         mixed, gq, gk, rq, rk, cos_, sin_ = ctx.saved_tensors
-        hpg = ctx.hpg
+        hpg, zc = ctx.hpg, ctx.zc
         S, Bt, NG, W = mixed.shape
         D = gq.shape[0]
         nq, nk = S * Bt * NG * hpg, S * Bt * NG
@@ -374,15 +390,19 @@ class _QKNormRope(torch.autograd.Function):
             dq = torch.zeros((S, Bt, NG * hpg, D), dtype=mixed.dtype, device=mixed.device)
         if dk is None:
             dk = torch.zeros((S, Bt, NG, D), dtype=mixed.dtype, device=mixed.device)
-        dgq = _rope_norm_bwd(dq.contiguous(), mixed, dmixed, 0, hpg, W, nq, Bt * NG * hpg, gq, rq, cos_, sin_)
-        dgk = _rope_norm_bwd(dk.contiguous(), mixed, dmixed, hpg * D, 1, W, nk, Bt * NG, gk, rk, cos_, sin_)
+        dgq = _rope_norm_bwd(
+            dq.contiguous(), mixed, dmixed, 0, hpg, W, nq, Bt * NG * hpg, gq, rq, cos_, sin_, zc
+        )
+        dgk = _rope_norm_bwd(
+            dk.contiguous(), mixed, dmixed, hpg * D, 1, W, nk, Bt * NG, gk, rk, cos_, sin_, zc
+        )
         if dv is None:
             dmixed.view(S, Bt, NG, W)[..., (hpg + 1) * D :].zero_()
         else:
             _copy_rows[(triton.cdiv(nk, _COPY_ROWS),)](
                 dv.contiguous(), dmixed, 0, D, W, (hpg + 1) * D, nk, D=D, BR=_COPY_ROWS
             )
-        return dmixed, dgq, dgk, None, None, None, None
+        return dmixed, dgq, dgk, None, None, None, None, None
 
 
 @functools.lru_cache(maxsize=None)
@@ -390,8 +410,21 @@ def _takes_split_qkv(attn_cls) -> bool:
     return "split_qkv" in inspect.signature(attn_cls.get_query_key_value_tensors).parameters
 
 
-def _gamma(norm, weight):
-    return weight + 1 if norm.zero_centered_gamma else weight
+def _gamma(norm, weight, in_kernel: bool = False):
+    """``(gamma, zc)`` for the kernels: the norm's gamma as the eager path forms it (``weight + 1``,
+    one BF16 launch, for a zero-centered norm), or, with ``in_kernel`` (config switch
+    ``msa_fused_zero_centered_gamma``), the raw BF16 weight and ``zc=True``: the kernels then form
+    the same BF16 ``1 + w`` in-register and the launch goes. The gradient is unchanged (the add's
+    backward passes dgamma through)."""
+    if not norm.zero_centered_gamma:
+        return weight, False
+    if in_kernel and weight.dtype == torch.bfloat16:
+        return weight, True
+    return weight + 1, False
+
+
+def _in_kernel_gamma(config) -> bool:
+    return bool(getattr(config, "msa_fused_zero_centered_gamma", False))
 
 
 def _probe_weight(weight, seed: int):
@@ -400,7 +433,7 @@ def _probe_weight(weight, seed: int):
     return (weight.detach().float() + 0.1 * noise).to(weight.dtype)
 
 
-def _qk_self_check(attn, S: int, Bt: int, rope) -> bool:
+def _qk_self_check(attn, S: int, Bt: int, rope, in_kernel: bool = False) -> bool:
     """The kernels against upstream's split, q/k norms and ``rope.apply``, on random rows of the
     training shape, with the gammas moved off their init values."""
     qn, kn = attn.q_layernorm, attn.k_layernorm
@@ -408,13 +441,16 @@ def _qk_self_check(attn, S: int, Bt: int, rope) -> bool:
     NG = attn.num_query_groups_per_partition
     hpg = attn.num_attention_heads_per_partition // NG
 
+    zc_key = _gamma(qn, qn.weight.detach(), in_kernel)[1] if in_kernel else False
+
     def inputs():
         mixed = bitwise_check.randn((S, Bt, NG, (hpg + 2) * D), qn.weight.device).to(torch.bfloat16)
         return mixed, _probe_weight(qn.weight, 100), _probe_weight(kn.weight, 101)
 
     def fused(m, wq, wk):
         cos_, sin_ = rope.cos_sin(m.dtype)
-        return _QKNormRope.apply(m, _gamma(qn, wq), _gamma(kn, wk), cos_, sin_, hpg, qn.eps)
+        (gq, zc), (gk, _) = _gamma(qn, wq, in_kernel), _gamma(kn, wk, in_kernel)
+        return _QKNormRope.apply(m, gq, gk, cos_, sin_, hpg, qn.eps, zc)
 
     def eager(m, wq, wk):
         q, k, v = torch.split(m, [hpg * D, D, D], dim=3)
@@ -426,8 +462,8 @@ def _qk_self_check(attn, S: int, Bt: int, rope) -> bool:
         "msa_fused_qk_norm_rope",
         lambda: bitwise_check.outputs_and_grads(fused, *inputs()),
         lambda: bitwise_check.outputs_and_grads(eager, *inputs()),
-        # Turbo picks its launch configs by row count
-        key=(S, Bt, NG, hpg),
+        # Turbo picks its launch configs by row count; the in-kernel gamma is another kernel variant
+        key=(S, Bt, NG, hpg) + (("in-kernel gamma",) if zc_key else ()),
     )
 
 
@@ -447,6 +483,7 @@ def eligible(attn, hidden_states, rope) -> bool:
         or not (_turbo_norm_ok(qn, D) and _turbo_norm_ok(kn, D))
         or qn.eps != kn.eps
         or qn.zero_centered_gamma != kn.zero_centered_gamma
+        or qn.weight.dtype != kn.weight.dtype
     ):
         return False
     tables = _rope_tables(rope, D)
@@ -455,7 +492,7 @@ def eligible(attn, hidden_states, rope) -> bool:
         return False
     hpg = attn.num_attention_heads_per_partition // attn.num_query_groups_per_partition
     nk = S * Bt * attn.num_query_groups_per_partition
-    return _multi_row(D, nk * hpg) and _multi_row(D, nk) and _qk_self_check(attn, S, Bt, rope)
+    return _multi_row(D, nk * hpg) and _multi_row(D, nk) and _qk_self_check(attn, S, Bt, rope, _in_kernel_gamma(cfg))
 
 
 def qk_norm_rope(attn, mixed_qkv, rope):
@@ -464,9 +501,9 @@ def qk_norm_rope(attn, mixed_qkv, rope):
     qn, kn = attn.q_layernorm, attn.k_layernorm
     cos_, sin_ = rope.cos_sin(mixed_qkv.dtype)
     hpg = attn.num_attention_heads_per_partition // attn.num_query_groups_per_partition
-    return _QKNormRope.apply(
-        mixed_qkv.contiguous(), _gamma(qn, qn.weight), _gamma(kn, kn.weight), cos_, sin_, hpg, qn.eps
-    )
+    in_kernel = _in_kernel_gamma(getattr(attn, "config", None))
+    (gq, zc), (gk, _) = _gamma(qn, qn.weight, in_kernel), _gamma(kn, kn.weight, in_kernel)
+    return _QKNormRope.apply(mixed_qkv.contiguous(), gq, gk, cos_, sin_, hpg, qn.eps, zc)
 
 
 class _NormRope(torch.autograd.Function):
@@ -474,11 +511,12 @@ class _NormRope(torch.autograd.Function):
     each way (the indexer's q/k)."""
 
     @staticmethod
-    def forward(ctx, x, gamma, cos_, sin_, eps):
+    def forward(ctx, x, gamma, cos_, sin_, eps, zc=False):
         S, Bt, N, D = x.shape
         n = S * Bt * N
-        out, rstd = _norm_rope_fwd(x, 0, 1, D, n, Bt * N, gamma, eps, cos_, sin_)
+        out, rstd = _norm_rope_fwd(x, 0, 1, D, n, Bt * N, gamma, eps, cos_, sin_, zc)
         ctx.save_for_backward(x, gamma, rstd, cos_, sin_)
+        ctx.zc = zc
         return out.view(S, Bt, N, D)
 
     @staticmethod
@@ -486,11 +524,13 @@ class _NormRope(torch.autograd.Function):
         x, gamma, rstd, cos_, sin_ = ctx.saved_tensors
         S, Bt, N, D = x.shape
         dx = torch.empty_like(x)
-        dg = _rope_norm_bwd(dout.contiguous(), x, dx, 0, 1, D, S * Bt * N, Bt * N, gamma, rstd, cos_, sin_)
-        return dx, dg, None, None, None
+        dg = _rope_norm_bwd(
+            dout.contiguous(), x, dx, 0, 1, D, S * Bt * N, Bt * N, gamma, rstd, cos_, sin_, ctx.zc
+        )
+        return dx, dg, None, None, None, None
 
 
-def _norm_rope_self_check(shape, norm, rope) -> bool:
+def _norm_rope_self_check(shape, norm, rope, in_kernel: bool = False) -> bool:
     """The kernels against ``rope.apply(norm(x))`` on random rows of the training shape, with
     gamma moved off its init value."""
 
@@ -500,7 +540,8 @@ def _norm_rope_self_check(shape, norm, rope) -> bool:
 
     def fused(x, w):
         cos_, sin_ = rope.cos_sin(x.dtype)
-        return _NormRope.apply(x, _gamma(norm, w), cos_, sin_, norm.eps)
+        gamma, zc = _gamma(norm, w, in_kernel)
+        return _NormRope.apply(x, gamma, cos_, sin_, norm.eps, zc)
 
     def eager(x, w):
         return rope.apply(torch.func.functional_call(norm, {"weight": w}, (x,)), False)
@@ -509,13 +550,14 @@ def _norm_rope_self_check(shape, norm, rope) -> bool:
         "msa_fused_norm_rope",
         lambda: bitwise_check.outputs_and_grads(fused, *inputs()),
         lambda: bitwise_check.outputs_and_grads(eager, *inputs()),
-        # Turbo picks its launch configs by row count
-        key=tuple(shape),
+        # Turbo picks its launch configs by row count; the in-kernel gamma is another kernel variant
+        key=tuple(shape) + (("in-kernel gamma",) if in_kernel and _gamma(norm, norm.weight.detach(), True)[1] else ()),
     )
 
 
-def norm_rope_ok(x, norm, rope, rotary_interleaved) -> bool:
-    """Whether :func:`norm_rope` can stand in for ``rope.apply(norm(x))``."""
+def norm_rope_ok(x, norm, rope, rotary_interleaved, in_kernel_gamma: bool = False) -> bool:
+    """Whether :func:`norm_rope` (called with the same ``in_kernel_gamma``) can stand in for
+    ``rope.apply(norm(x))``."""
     if rotary_interleaved or rope is None:
         return False
     D = x.shape[-1]
@@ -528,11 +570,12 @@ def norm_rope_ok(x, norm, rope, rotary_interleaved) -> bool:
         tables is not None
         and tables[0].shape[0] == x.shape[0]
         and _multi_row(D, x.numel() // D)
-        and _norm_rope_self_check(x.shape, norm, rope)
+        and _norm_rope_self_check(x.shape, norm, rope, in_kernel_gamma)
     )
 
 
-def norm_rope(x, norm, rope):
+def norm_rope(x, norm, rope, in_kernel_gamma: bool = False):
     """``rope.apply(norm(x))`` bitwise, for :func:`norm_rope_ok` inputs."""
     cos_, sin_ = rope.cos_sin(x.dtype)
-    return _NormRope.apply(x, _gamma(norm, norm.weight), cos_, sin_, norm.eps)
+    gamma, zc = _gamma(norm, norm.weight, in_kernel_gamma)
+    return _NormRope.apply(x, gamma, cos_, sin_, norm.eps, zc)

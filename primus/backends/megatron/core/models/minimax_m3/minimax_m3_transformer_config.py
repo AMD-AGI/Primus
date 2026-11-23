@@ -165,6 +165,18 @@ class MSATransformerConfig(TransformerConfig):
     row from its last kernel instead of zeros + clamp + scatter_add_ (three launches fewer per
     call). Bit-identical, checked on first use; rows wider than 64 blocks keep scatter_add_."""
 
+    msa_fused_zero_centered_gamma: bool = False
+    """With msa_fused_qk_norm_rope: the q / k and indexer norm + RoPE kernels form a zero-centered
+    norm's BF16 ``1 + weight`` in-register instead of reading the result of a separate
+    ``weight + 1`` launch (four launches fewer per MSA layer call). Bit-identical, checked on
+    first use; norms that are not zero-centered or whose weight is not BF16 are unaffected."""
+
+    msa_fused_indexer_input_norm: bool = False
+    """The MSA indexer's input norm (``rms_norm`` of the FP32 copy of the residual stream, cast
+    back) as one Triton launch that follows ATen's reduction order (indexer_input_norm.py)
+    instead of five launches. Bit-identical, checked on first use per row width; other shapes
+    keep the eager ops."""
+
     msa_shared_rope_tables: bool = False
     """The cos / sin RoPE tables of the MSA layers are kept per rotary ``freqs`` tensor (Megatron
     caches that tensor) instead of being recomputed in every layer call (rope.py). Same ops, so

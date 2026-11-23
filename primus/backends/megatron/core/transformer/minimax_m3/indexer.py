@@ -167,13 +167,15 @@ class MinimaxM3Indexer(MegatronModule):
                 qk_norm_rope,
             )
 
+            # msa_fused_zero_centered_gamma: the kernels form a zero-centered norm's 1 + w themselves
+            zc = bool(getattr(self.config, "msa_fused_zero_centered_gamma", False))
             fused = qk_norm_rope.norm_rope_ok(
-                index_q, self.index_q_layernorm, rope, interleaved
-            ) and qk_norm_rope.norm_rope_ok(index_k, self.index_k_layernorm, rope, interleaved)
+                index_q, self.index_q_layernorm, rope, interleaved, zc
+            ) and qk_norm_rope.norm_rope_ok(index_k, self.index_k_layernorm, rope, interleaved, zc)
         if fused:
             # norm + rope in one pass each way, bitwise (qk_norm_rope.py)
-            index_q = qk_norm_rope.norm_rope(index_q, self.index_q_layernorm, rope)
-            index_k = qk_norm_rope.norm_rope(index_k, self.index_k_layernorm, rope)
+            index_q = qk_norm_rope.norm_rope(index_q, self.index_q_layernorm, rope, zc)
+            index_k = qk_norm_rope.norm_rope(index_k, self.index_k_layernorm, rope, zc)
         else:
             index_q = self.index_q_layernorm(index_q)
             index_k = self.index_k_layernorm(index_k)

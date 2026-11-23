@@ -143,7 +143,11 @@ workgroup and stage a K/V tile they share once), and two launch cuts, `msa_share
 cos / sin RoPE tables are kept per rotary `freqs` tensor, not recomputed in every layer call) and
 `msa_fused_indexer_loss_scatter` (the indexer-loss backward writes the block-score gradient from
 its last kernel, without the zero fill, clamp and `scatter_add_`; rows of up to 64 blocks, i.e.
-sequences up to 8192). Each one compares
+sequences up to 8192), and two more launch cuts, `msa_fused_zero_centered_gamma` (the q / k and
+indexer norm + RoPE kernels form a zero-centered norm's BF16 `1 + weight` themselves, without the
+separate `weight + 1` launches) and `msa_fused_indexer_input_norm` (the indexer's input norm, an
+FP32 `rms_norm` of the residual stream cast back to BF16, as one Triton launch in ATen's reduction
+order instead of five launches). Each one compares
 itself with the path it replaces on its first call and keeps that path, with a warning in the log,
 if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).
 `grad_accum_group` is off in the yaml (0). Set to 4, the gradient buffer takes the gradients of four
