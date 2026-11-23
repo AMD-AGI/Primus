@@ -75,6 +75,11 @@ def _impl(args) -> str:
     return impl
 
 
+def _mega_attn_heads_ok(hq, hkv, cp) -> bool:
+    group = hq // hkv if hkv and hq % hkv == 0 else 0
+    return hq % cp == 0 and hkv % cp == 0 and group >= 2 and group & (group - 1) == 0
+
+
 def _seq_chunk(args) -> int:
     """The ``attn`` implementation's striped-split chunk (0: contiguous)."""
     cs = getattr(args, "turbo_mega_ulysses_seq_chunk", None)
@@ -121,8 +126,15 @@ def _unsupported(args):
         mbs = int(getattr(args, "micro_batch_size", 1) or 1)
         cs = _seq_chunk(args)
         seq = int(getattr(args, "seq_length", 0) or 0)
+        hq = getattr(args, "num_attention_heads", None)
+        hkv = getattr(args, "num_query_groups", None) if getattr(args, "group_query_attention", False) else hq
         if mbs != 1:
             return f"turbo_mega_ulysses_impl=attn needs micro_batch_size=1 (got {mbs})"
+        if hq is not None and hkv is not None and not _mega_attn_heads_ok(hq, hkv, cp):
+            return (
+                f"turbo_mega_ulysses_impl=attn needs the heads to split over CP={cp} and a power-of-two "
+                f"GQA group >= 2 (the FlyDSL backward's), got {hq} q / {hkv} kv heads"
+            )
         if cs < 0 or cs % 128 or (seq and cs and seq % (cs * cp)):
             return (
                 f"turbo_mega_ulysses_seq_chunk={cs} must be 0 or a multiple of 128 whose CP stripe "
@@ -417,7 +429,7 @@ def _make_mega_attn_forward(args):
                 f"attn_mask_type={self.attn_mask_type.name}": self.attn_mask_type != AttnMaskType.causal,
                 f"micro-batch size {b}": b != 1,
                 f"softmax_scale={cfg.softmax_scale}": cfg.softmax_scale not in (None, d**-0.5),
-                f"{hq} q / {hkv} kv heads on {n} ranks": hq % n or hkv % n or (hq // hkv) % 2,
+                f"{hq} q / {hkv} kv heads on {n} ranks": not _mega_attn_heads_ok(hq, hkv, n),
             },
             " with turbo_mega_ulysses_impl=attn",
         )
