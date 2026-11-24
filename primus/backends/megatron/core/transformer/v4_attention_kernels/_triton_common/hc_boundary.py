@@ -16,6 +16,8 @@ PRIMUS_HC_GRAD_DIRECT=1  backward tail in ONE launch (``_hc_tail_kernel``): the 
 PRIMUS_HC_XRMS=1  expand(L) also produces HC(L+1)'s rms-linear split-K partials (``_hc_expand_rms_kernel``): the
     next HCPreFn skips ``_hc_wt_split`` + ``_hc_fwd_wmma3`` (one fewer 134 MB read of x per boundary). Needs bf16
     fn.weight (then the wmma3 "mid"/"lo" parts are exact zeros) and the wmma3 chunking (CHUNK | D, BK = 128).
+    Under the Gluon gate the same bits come from the TDM-fed Gluon kernel (``hc_xrms_gluon``) whenever its
+    shape / layout preconditions hold; the Triton kernel runs otherwise.
 
 Tried and dropped: folding _hc_pre_fwd's row math into the
 folded-norm collapse kernel, and _hc_pre_bwd's into the folded-norm backward.
@@ -34,6 +36,13 @@ from primus.backends.megatron.core.distributed.main_grad_direct import (  # noqa
     claim_main_grad,
     direct_main_grad,
 )
+from primus.backends.megatron.core.dsv4_features import fast_enabled, gluon_ok
+
+# Gluon expand + rms partials (Triton >= 3.9 on gfx1250); import errors under an open gate must surface.
+_HAVE_GLUON = gluon_ok() and fast_enabled()
+
+if _HAVE_GLUON:
+    from .hc_xrms_gluon import expand_rms_gluon, xrms_gluon_supported
 
 
 def _flag(name: str) -> bool:
@@ -374,6 +383,9 @@ def expand_rms(x3, out_c, post_c, combt_c, next_w):
     """-> new [M, 4, D], p_raw [KD/CHUNK, M, BN] fp32, p_ss [KD/CHUNK, M] fp32 (the wmma3 partials of next_w)."""
     M, K, D = x3.shape
     c = XRMS_CFG
+    if _HAVE_GLUON and xrms_gluon_supported(x3, out_c, post_c, combt_c, next_w):
+        new, p_raw, p_ss = expand_rms_gluon(x3, out_c, post_c, combt_c, next_w)
+        return new, p_raw, p_ss, K * D // c["chunk"]
     N = next_w.shape[0]
     BN = max(16, triton.next_power_of_2(N))
     n_split = (K * D) // c["chunk"]

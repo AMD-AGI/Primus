@@ -32,9 +32,10 @@ import triton
 import triton.language as tl
 
 # Launch config; defaults tuned on gfx1250 (MI455X). T_SPLIT > 1 splits the backward over rows
-# and reduces the dW partials afterwards (deterministic).
+# and reduces the dW partials afterwards (deterministic). The forward row tile and the backward
+# warps / stages leave every summation order unchanged (out / dx / dW bit-identical across them).
 HC_CFG = dict(
-    fwd_bt=32,
+    fwd_bt=64,
     fwd_bk=64,
     fwd_chunk=1024,
     fwd_warps=4,
@@ -43,8 +44,8 @@ HC_CFG = dict(
     bwd_bt=64,
     bwd_bk=64,
     bwd_tsplit=4,
-    bwd_warps=8,
-    bwd_stages=2,
+    bwd_warps=4,
+    bwd_stages=1,
     bwd_prec="ieee",
 )
 
