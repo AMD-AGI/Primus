@@ -14,7 +14,7 @@ The following aligns with the backend overview and the configs present in this t
 | ------- | ---------------------------------------------- |
 | **Megatron-LM** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3 / LLaMA4 (sizes from small to 405B+), DeepSeek-V2 (including lite), DeepSeek-V3, and DeepSeek-V4 (flash / pro—from v26.7 also on `gfx942` with context parallelism at 128k, and packed-sequence THD SFT; see [`examples/megatron/models/deepseek-v4`](https://github.com/AMD-AGI/Primus/tree/main/examples/megatron/models/deepseek-v4)), Mixtral MoE and large MoE recipe YAML, Qwen2.5 and Qwen3 (dense and MoE), Grok, GPT-OSS (20B / 120B), GLM (including GLM-5.3-Flash, from v26.9), Kimi K2, LFM2, MiniMax (M2.5 and the M3 text tower), ZAYA1-8B (from v26.8), Zebra LLaMA (including GDN and KDA linear-attention variants), Mamba, and generic `language_model.yaml` bases. |
 | **TorchTitan** | LLaMA3 family (including 3.1), LLaMA4 examples, DeepSeek-V3 examples, and Qwen3 examples including 0.6B, 1.7B, 4B, 8B, 14B, and 32B variants where present. Additional presets exist under `primus/configs/models/torchtitan/` without being exhaustively listed here. |
-| **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.3, DeepSeek-V2 16B, Mixtral-8x7B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
+| **MaxText (JAX)** | LLaMA2 / LLaMA3 / LLaMA3.1 / LLaMA3.3, DeepSeek-V2 16B, Gemma4 26B / 31B, Mixtral-8x7B / 8x22B, Grok1, Qwen3 14B / 30B-A3B (per presets and examples; dropless MoE recipes on the Primus-Turbo grouped GEMM for DeepSeek-V2 16B, Gemma4 26B and Qwen3 30B-A3B, from v26.10). Broader coverage may exist in upstream MaxText; see [MaxText](https://github.com/AI-Hypercomputer/maxtext). |
 | **Megatron Bridge** | Qwen3 pretraining and post-training examples, plus post-training examples for Zebra LLaMA and Mamba where present. LLaMA 3.1 70B Bridge examples appear under MI355X. |
 | **Diffusion** | Flux.1 (`schnell` / `dev`) text-to-image and Wan 2.1 / 2.2 text- and image-to-video presets under `primus/configs/models/diffusion/`, with examples under `examples/diffusion/configs/` and `examples/megatron/configs/*/diffusion/`. See [Diffusion models](../04-technical-guides/diffusion-models/README.md). |
 | **Recommendation** | DLRMv4: the HSTU ranker on yambda-5b, MLPerf Training `dlrmv4` (`model_family: dlrm_v4`, preset `primus/configs/models/recommendation/dlrm_v4_hstu_yambda_5b.yaml`). The trainer (`generative_recommenders`, FP8 with Triton / FlyDSL / HIP kernels, gfx950) is in-tree under `primus/backends/recommendation/dlrm_v4/src/`; MI355X recipe in [`examples/mlperf/dlrm_v4`](../../examples/mlperf/dlrm_v4/README.md). See [Recommendation models](../04-technical-guides/recommendation/README.md). |
@@ -177,23 +177,28 @@ Presets: `primus/configs/models/torchtitan/`. Examples: `examples/torchtitan/con
 
 ## MaxText model configs
 
-Presets: `primus/configs/models/maxtext/`. Examples: `examples/maxtext/configs/MI300X/` and `examples/maxtext/configs/MI355X/`.
+Presets: `primus/configs/models/maxtext/`. Examples: `examples/maxtext/configs/MI300X/`, `MI325X/` and `MI355X/`.
 
 | Model name (file) | Preset path | Example experiment dirs |
 | ----------------- | ----------- | ------------------------ |
-| `deepseek_v2_16B.yaml` | `primus/configs/models/maxtext/deepseek_v2_16B.yaml` | MI300X, MI355X |
-| `grok1.yaml` | `primus/configs/models/maxtext/grok1.yaml` | MI300X |
-| `llama2_7B.yaml` | `primus/configs/models/maxtext/llama2_7B.yaml` | MI300X, MI355X |
-| `llama2_70B.yaml` | `primus/configs/models/maxtext/llama2_70B.yaml` | MI300X, MI355X |
-| `llama3_8B.yaml` | `primus/configs/models/maxtext/llama3_8B.yaml` | MI300X, MI355X |
-| `llama3_70B.yaml` | `primus/configs/models/maxtext/llama3_70B.yaml` | MI300X, MI355X |
+| `deepseek_v2_16B.yaml` | `primus/configs/models/maxtext/deepseek_v2_16B.yaml` | MI300X, MI325X, MI355X (dropless default; token-dropping variant, from v26.10) |
+| `gemma4_26B.yaml` | `primus/configs/models/maxtext/gemma4_26B.yaml` | MI300X, MI325X, MI355X (dropless default; token-dropping variant, from v26.10) |
+| `gemma4_31B.yaml` | `primus/configs/models/maxtext/gemma4_31B.yaml` | MI300X, MI325X, MI355X |
+| `grok1.yaml` | `primus/configs/models/maxtext/grok1.yaml` | MI300X, MI325X |
+| `llama2_7B.yaml` | `primus/configs/models/maxtext/llama2_7B.yaml` | MI300X, MI325X, MI355X |
+| `llama2_70B.yaml` | `primus/configs/models/maxtext/llama2_70B.yaml` | MI300X, MI325X, MI355X |
+| `llama3_8B.yaml` | `primus/configs/models/maxtext/llama3_8B.yaml` | MI300X, MI325X, MI355X |
+| `llama3_70B.yaml` | `primus/configs/models/maxtext/llama3_70B.yaml` | MI300X, MI325X, MI355X |
 | `llama3.1_405B.yaml` | `primus/configs/models/maxtext/llama3.1_405B.yaml` | MI355X |
 | `llama3.2_1B.yaml` | `primus/configs/models/maxtext/llama3.2_1B.yaml` | Convergence test only (`tools/convergence_test/configs/maxtext/`) |
-| `llama3.3_70B.yaml` | `primus/configs/models/maxtext/llama3.3_70B.yaml` | MI300X, MI355X |
-| `mixtral_8x7B.yaml` | `primus/configs/models/maxtext/mixtral_8x7B.yaml` | MI300X, MI355X |
-| `qwen3_14B.yaml` | `primus/configs/models/maxtext/qwen3_14B.yaml` | MI300X, MI355X |
-| `qwen3_30B_A3B.yaml` | `primus/configs/models/maxtext/qwen3_30B_A3B.yaml` | MI300X, MI355X |
+| `llama3.3_70B.yaml` | `primus/configs/models/maxtext/llama3.3_70B.yaml` | MI300X, MI325X, MI355X |
+| `mixtral_8x7B.yaml` | `primus/configs/models/maxtext/mixtral_8x7B.yaml` | MI300X, MI325X, MI355X |
+| `mixtral_8x22B.yaml` | `primus/configs/models/maxtext/mixtral_8x22B.yaml` | MI300X, MI325X, MI355X |
+| `qwen3_14B.yaml` | `primus/configs/models/maxtext/qwen3_14B.yaml` | MI300X, MI325X, MI355X |
+| `qwen3_30B_A3B.yaml` | `primus/configs/models/maxtext/qwen3_30B_A3B.yaml` | MI300X, MI325X, MI355X (dropless default; token-dropping variant, from v26.10) |
 | `model_base.yaml` | `primus/configs/models/maxtext/model_base.yaml` | Extended by other presets (not a standalone run) |
+
+For `deepseek_v2_16B`, `gemma4_26B` and `qwen3_30B_A3B`, the `bf16` examples (and the `fp8` examples on MI355X) are dropless MoE recipes on the Primus-Turbo grouped GEMM; the previous recipes ship next to them as `<model>-<precision>-token_dropping-pretrain.yaml`. See [JAX MaxText training → Dropless MoE recipes](../02-user-guide/jax-maxtext-training.md#dropless-moe-recipes-primus-turbo-grouped-gemm).
 
 **Parallelism:** JAX / MaxText sharding is configured in experiment overrides (for example `ici_fsdp_parallelism`, `ici_data_parallelism`, `dcn_*` in sample experiments). See [MaxText parameters](../03-configuration-reference/maxtext-parameters.md).
 
@@ -226,7 +231,7 @@ Curated example layouts under `examples/` use GPU SKU subdirectories. As of this
 | **MI325X** | Yes | Yes | Yes | No |
 | **gfx1250** | Yes (LoRA-SFT proxies) | No | No | No |
 
-Megatron, TorchTitan and MaxText ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI355X-only entries such as `llama3.1_405B-pretrain.yaml`. Megatron's gfx1250 examples are single-GPU LoRA-SFT proxies for bring-up. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
+Megatron, TorchTitan and MaxText ship MI325X example directories in addition to MI300X and MI355X examples. MaxText includes MI355X-only entries such as `llama3.1_405B-bf16-pretrain.yaml` and `llama3.1_405B-fp8-pretrain.yaml`. Megatron's gfx1250 examples are single-GPU LoRA-SFT proxies for bring-up. Megatron Bridge MI300X examples include Qwen3 8B and 32B pretraining plus Qwen3 32B, Zebra LLaMA, and Mamba post-training examples; LLaMA 3.1 70B Bridge examples appear under MI355X.
 
 Absence of a SKU directory for a given backend does **not** imply the backend cannot run there; it means this tree does not currently provide a checked-in example path to copy from.
 

@@ -1,3 +1,9 @@
+# Single-node training (8 GPUs):
+#   GPUS_PER_NODE=8 ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI325X/zaya1_8B-BF16-pretrain.yaml
+# Same ZAYA1 compute paths as the MI355X recipe. No --numa: it gained under 0.1% for BF16
+# on MI355X. The FP8 recipe uses it.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-pretrain}
@@ -20,11 +26,11 @@ modules:
       log_avg_skip_iterations: 1
       log_avg_reset_interval: 10
 
-      # 30-step mock-data run for one 8-GPU node (DP=8). micro_batch_size 216
-      # is the largest multiple of 8 that completes on MI325X with
-      # rocm/primus:v26.8: it peaks at 249 of 256 GB per GPU, and 224 runs out
-      # of memory. Each sample costs about 0.8 GB, mostly fp32 logits over the
-      # 262k vocabulary. On fewer GPUs, lower micro_batch_size or num_layers
+      # 30-step mock-data run for one 8-GPU node (DP=8). micro_batch_size 184
+      # is the size the earlier MI325X recipe used. With the compute paths
+      # below it peaks at about 166 of 256 GB per GPU, so larger micro
+      # batches fit; this recipe keeps 184 so its numbers compare with the
+      # earlier one. On fewer GPUs, lower micro_batch_size or num_layers
       # (keep it even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
       micro_batch_size: 184
@@ -56,6 +62,31 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
+      # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
+      # elementwise chains, CCA's convolutions as GEMMs, and one data-parallel
+      # all-reduce per micro batch for every router's balancing-bias update,
+      # instead of one per MoE layer.
+      zaya_attn_flash: true
+      zaya_fuse_norm: true
+      zaya_fuse_cca: true
+      zaya_conv_gemm: true
+      zaya_fuse_moe: true
+      zaya_router_defer_ar: true
+
+      # Transformer Engine's fused cross-entropy on the output logits, in
+      # place of Megatron's path, which first copies the logits to fp32. Needs
+      # TE 2.20 or later. The ZAYA1 chunked cross-entropy (zaya_chunked_ce)
+      # stays off: it rounds each chunk's output-layer weight gradient to bf16
+      # before summing.
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te
+
+      # Average gradients inside the reduce-scatter, so Megatron skips its
+      # separate pass that first scales the gradient buffer by 1/DP. At DP=8
+      # the scale is a power of two, so the gradients come out the same.
+      ddp_average_in_collective: true
+
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.
       mock_data: true
@@ -77,6 +108,8 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      enable_primus_turbo: false
+      # The 16 experts run as two Primus Turbo grouped GEMMs whose group sizes
+      # stay on the GPU, so no MoE layer waits on the host.
+      enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true

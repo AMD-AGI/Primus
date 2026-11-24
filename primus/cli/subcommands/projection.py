@@ -287,6 +287,21 @@ def _add_perf_compute_baseline_arg(parser):
     )
 
 
+def _add_hw_calibration_arg(parser):
+    parser.add_argument(
+        "--skip-hw-calibration",
+        action="store_true",
+        default=False,
+        help=(
+            "Benchmark mode measures each bench GPU's effective compute clock "
+            "(back-calculated from the workload's largest GEMMs) and its STREAM "
+            "memory bandwidth before the layer benchmark, and stores both in the "
+            "bench artifact. This flag skips that step (a few seconds per GPU). "
+            "Equivalent to PRIMUS_BENCH_SKIP_HW_CALIB=1."
+        ),
+    )
+
+
 def _add_topology_args(parser):
     """``--target-nodes`` / ``--benchmark-gpus`` — shared between memory and perf."""
     parser.add_argument(
@@ -382,6 +397,20 @@ def _add_performance_args(parser):
             "given --gpu-arch (e.g. 2100 MHz for MI300X/MI325X).\n"
             "Can also be set via the PRIMUS_GPU_CLOCK_MHZ env var.\n"
             "Example: --gpu-clock-mhz 1500\n"
+        ),
+    )
+    parser.add_argument(
+        "--hbm-bandwidth-gbps",
+        type=float,
+        required=False,
+        default=None,
+        help=(
+            "Override the HBM bandwidth (GB/s) the memory-bound terms are priced at.\n"
+            "Peak-referenced: the profilers still apply their own sustained fractions.\n"
+            "Benchmark mode otherwise uses the bench GPUs' STREAM result, derated\n"
+            "(PRIMUS_HBM_STREAM_DERATE, default 0.72); simulation mode uses the\n"
+            "--gpu-arch profile peak. Can also be set via PRIMUS_HBM_BANDWIDTH_GBPS.\n"
+            "The benchmark-mode report prints the value to reuse here.\n"
         ),
     )
     _add_pipeline_schedule_algorithm_arg(parser)
@@ -491,6 +520,7 @@ def register_subcommand(subparsers):
     add_pretrain_parser(memory)
     _add_memory_args(memory)
     _add_topology_args(memory)
+    _add_hw_calibration_arg(memory)
     _add_save_benchmark_arg(memory)
     _add_load_benchmark_arg(memory, include_compute_baseline_alias=True)
 
@@ -501,6 +531,7 @@ def register_subcommand(subparsers):
     add_pretrain_parser(performance)
     _add_topology_args(performance)
     _add_performance_args(performance)
+    _add_hw_calibration_arg(performance)
     _add_save_benchmark_arg(performance)
     # ``--load-benchmark`` skips the bench entirely and runs the perf
     # projection from a saved artifact (timing + reduction info come from
@@ -521,6 +552,7 @@ def register_subcommand(subparsers):
     add_pretrain_parser(both)
     _add_topology_args(both)
     _add_performance_args(both)
+    _add_hw_calibration_arg(both)
     # `both` always runs perf-bench + benchmark-anchored memory projection;
     # --memory-mode is meaningless here, so we only expose the safety
     # margin from the memory side.
