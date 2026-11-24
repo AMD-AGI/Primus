@@ -289,8 +289,9 @@ scripts:
   `stable.repo.amd.com` releases v26.8 used. If a pin stops resolving,
   update the pin block at the top of `setup.sh` as a set — `torch`,
   `amd-torch-device-*`, `rocm-sdk-*`, `torchaudio`, `torchvision`,
-  `amd-torchvision-device-*` must all target the same ROCm version. `apex` is the
-  exception: it stays on the later ROCm 10.3 build the v26.10 image resolved (see
+  `amd-torchvision-device-*` must all target the same ROCm nightly
+  (`10.3.0a20261111`). `apex` is the exception: it stays on the later
+  `10.3.0a20261123` nightly build the v26.10 image resolved (see
   [above](#apex-is-pinned-to-what-the-image-resolved)).
 - **GPU arch is auto-detected** (`env.sh` reads `rocminfo`, else the kernel KFD
   sysfs `gfx_target_version`), and `stage_torch` installs the matching device

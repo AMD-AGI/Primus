@@ -73,7 +73,7 @@ Every version below was read out of the published image itself. From v26.4 on, t
 
 ## v26.10 (current)
 
-Both v26.10 images are now released. `rocm/jax-training:maxtext-v26.10` came first and `rocm/primus:v26.10` follows it; they were built from different commits on `release/v26.10`—see [Primus source for v26.10](#primus-source-for-v2610).
+Both v26.10 images are now released. `rocm/jax-training:maxtext-v26.10` came first and `rocm/primus:v26.10` followed; they were built from different commits on `release/v26.10`—see [Primus source for v26.10](#primus-source-for-v2610).
 
 ### `rocm/primus:v26.10`
 

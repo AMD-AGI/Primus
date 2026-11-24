@@ -463,7 +463,7 @@ EXT=$(python -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))
 make -C third_party/Megatron-LM/megatron/core/datasets LIBEXT="$EXT"
 ```
 
-If you already have a local Primus checkout, run `pip install -r requirements.txt` from its root and skip the clone — but still build `helpers_cpp` in *that* checkout, since it is the one you will launch training from.
+If you already have a local Primus checkout, run the same `pip install -r requirements.txt nvidia-modelopt==0.48.0` and `pip install --no-deps filelock==4.2.1` from its root and skip the clone — but still build `helpers_cpp` in *that* checkout, since it is the one you will launch training from.
 
 ### 4.9 Optional: torchrec + FBGEMM (DLRM / recommendation workloads)
 
@@ -672,7 +672,7 @@ If you only need **single-node Megatron/TorchTitan LLM pretraining**, you can sk
 | causal-conv1d, mamba                                    | Hybrid / Mamba-family models         |
 | torchtune, torchao                                      | Post-training (SFT/LoRA), fp8        |
 | torchrec, FBGEMM, DLRM                                  | Recommendation (DLRM) workloads only |
-| Flux / AMDiffusionBenchmark                             | Diffusion benchmark only             |
+| decord                                                  | Diffusion video models (Wan, Mochi, HunyuanVideo) |
 | UCX, OpenMPI, AINIC                                     | Multi-node distributed training      |
 
 Install the core rows first, validate with [Section 7](#7-verify-the-installation), then add the optional components as your workload requires.
