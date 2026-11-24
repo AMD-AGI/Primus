@@ -155,7 +155,7 @@ For each gap the projection agent runs op bring-up (`projection_agent/bringup.py
    - the op-model API and the existing op models and profilers closest to the gap.
 2. **Create.** A coder writes one op model:
    - `--op-coder-cmd` runs an external coding agent;
-   - otherwise an LLM writes it: `--op-llm-model` / `$LLM_MODEL`, or, under the tuning agent, the search's own LLM.
+   - otherwise an LLM writes it: `--op-llm-model` / `$PRIMUS_OP_LLM_MODEL` (read first) / `$LLM_MODEL`, or, under the tuning agent, the search's own LLM.
 
    Attention-like ops are priced on the FAv3 or 1-CU tile simulator; everything else analytically.
 3. **Validate.** The validator (`primus.core.projection.op_models.validate`) checks:

@@ -121,8 +121,8 @@ If `--target-nodes` is omitted, the tool defaults to the **minimum** number of n
 
 The default projection is the *expected* bound: what today's software stack achieves. `--bound ceiling` projects the same deployment with the software levers at their physical best, while GEMM and attention kernels stay Origami's and the SDPA simulator's:
 
-- **overlap**: TP all-reduce, MoE all-to-all, gradient reduce, FSDP and pipeline point-to-point traffic are hidden behind compute, limited only by the compute available to hide them.
-- **fusion**: element-wise passes (norm and residual, MoE permute and unpermute, activation, expert quantize and dequantize) are fused into neighbouring kernels.
+- **overlap**: TP all-reduce, MoE all-to-all, gradient reduce and FSDP traffic are hidden behind compute, limited only by the compute available to hide them. Pipeline point-to-point sends cost nothing.
+- **fusion**: element-wise passes (norm and residual, MoE permute and unpermute, activation, expert quantize and dequantize, a hybrid mixer's gates and norms) are fused into neighbouring kernels.
 - **launch**: zero kernel-launch latency and a bubble-free pipeline (the busiest stage's compute over all microbatches).
 
 A measured throughput above the ceiling means the model is missing something. `--headroom` prints both bounds, each lever's gain on its own, and a waterfall that stacks the levers biggest first. `--headroom-measured` adds a measured tokens/s/GPU to that report.

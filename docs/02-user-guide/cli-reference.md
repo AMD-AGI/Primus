@@ -177,7 +177,13 @@ or `--op-llm-model` says who writes the model; without either, the agent only
 writes a context pack per op (`op_bringup/<op_id>/context.md`). With
 `--op-pr pr` each op it adds is also committed on its own branch, pushed, and
 opened as a draft pull request. See the
-tuning agent's README, "Op bring-up (new ops)", for the flags.
+[tuning agent's README, "Op bring-up (new ops)"](https://github.com/AMD-AGI/Primus/blob/main/primus/agents/tuning_agent/README.md#op-bring-up-new-ops)
+for the flags.
+
+`--op-coder-cmd` is run through the shell, and every op model the agent
+registers under `primus/core/projection/op_models/generated/` is Python that
+the projection imports on its next run. Only point it at a coding agent you
+trust, and review generated op models before committing them.
 
 ### Benchmark suites
 

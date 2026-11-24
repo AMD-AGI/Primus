@@ -48,8 +48,16 @@ def unregister_op_model(name: str) -> None:
     _REGISTRY.pop(name, None)
 
 
+def env_flag(name: str, default: bool = True) -> bool:
+    """A boolean env switch: ``0``/``false``/``no``/``off`` (any case) turn it off, ``1``/``true``/``yes``/``on`` on."""
+    val = os.getenv(name)
+    if val is None or not val.strip():
+        return default
+    return val.strip().lower() not in ("0", "false", "no", "off")
+
+
 def op_models_enabled() -> bool:
-    return os.getenv("PRIMUS_OP_MODELS", "1").strip().lower() not in ("0", "false", "no", "off")
+    return env_flag("PRIMUS_OP_MODELS")
 
 
 def load_op_model_file(path) -> List[Type[OpModel]]:

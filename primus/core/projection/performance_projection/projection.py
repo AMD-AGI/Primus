@@ -1147,11 +1147,12 @@ def _limit_hybrid_layers_for_projection(module_config) -> bool:
     full = hybrid_layer_types(module_config)
     if full is None:
         return False
+    if not full:
+        raise ValueError("hybrid model has no decoder layers: check hybrid_layer_pattern / num_layers")
     kinds = set(full)
-    if os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is not None:
-        cap = int(os.environ["PRIMUS_PROJ_MAX_LAYERS"])
-    else:
-        cap = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
+    shortest = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
+    # A smaller explicit cap would drop layer kinds the projection must price.
+    cap = max(shortest, int(os.environ.get("PRIMUS_PROJ_MAX_LAYERS") or 0))
     pattern = hybrid_layer_pattern(module_config)
     if pattern is not None:
         trimmed = pattern[:cap]
@@ -1162,7 +1163,11 @@ def _limit_hybrid_layers_for_projection(module_config) -> bool:
     else:
         ratio = getattr(module_config, "hybrid_attention_ratio", 0.0) or 0.0
         layers = next(
-            (n for n in range(2, len(full) + 1, 2) if set(allocate_hybrid_layers(n, ratio)) == kinds and n >= cap),
+            (
+                n
+                for n in range(2, len(full) + 1, 2)
+                if set(allocate_hybrid_layers(n, ratio)) == kinds and n >= cap
+            ),
             len(full),
         )
         module_config.num_layers = layers
@@ -4172,19 +4177,23 @@ def launch_projection_from_cli(args, overrides):
     if bound == "ceiling" or want_headroom:
         check_simulate_only(args)
 
+    shown = levers if bound == "ceiling" else ()
+    pristine = (copy.deepcopy(args), list(overrides or [])) if want_headroom else None
+    with ceiling_levers(shown):
+        if bound == "ceiling" and int(os.getenv("RANK", "0")) == 0:
+            print(f"[Primus:Performance Projection] Bound: ceiling ({', '.join(active_levers())})")
+        result = _launch_projection(args, overrides)
+
     report = None
     if want_headroom:
 
         def _project(active):
             with ceiling_levers(active), contextlib.redirect_stdout(io.StringIO()):
-                return _launch_projection(copy.deepcopy(args), list(overrides or []))
+                return _launch_projection(copy.deepcopy(pristine[0]), list(pristine[1]))
 
-        report = headroom(_project, levers, getattr(args, "headroom_measured", None))
-
-    with ceiling_levers(levers if bound == "ceiling" else ()):
-        if bound == "ceiling" and int(os.getenv("RANK", "0")) == 0:
-            print(f"[Primus:Performance Projection] Bound: ceiling ({', '.join(active_levers())})")
-        result = _launch_projection(args, overrides)
+        report = headroom(
+            _project, levers, getattr(args, "headroom_measured", None), known={tuple(shown): result}
+        )
 
     if report is not None:
         if int(os.getenv("RANK", "0")) == 0:
@@ -4526,7 +4535,7 @@ def _launch_projection(args, overrides):
     if getattr(args, "profile_only", False):
         if is_rank_0:
             print("[Primus:Performance Projection] --profile-only: exiting after profiling.")
-        return
+        return None
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)

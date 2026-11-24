@@ -6,6 +6,7 @@
 """Expected vs. ceiling bound and the per-lever headroom report."""
 
 import argparse
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,6 +33,15 @@ def test_parse_levers_defaults_dedupes_and_validates():
     assert parse_levers(["launch"]) == ("launch",)
     with pytest.raises(ValueError, match="unknown ceiling lever"):
         parse_levers("overlap,kernel")
+    with pytest.raises(ValueError, match="no ceiling lever"):
+        parse_levers(",")
+
+
+def test_ceiling_levers_accepts_a_comma_separated_string():
+    with ceiling_levers("overlap"):
+        assert ceiling.active_levers() == ("overlap",)
+    with ceiling_levers("fusion,launch"):
+        assert at_ceiling("fusion") and at_ceiling("launch") and not at_ceiling("overlap")
 
 
 def test_ceiling_levers_scope_nests_and_restores():
@@ -80,7 +90,43 @@ def test_headroom_sorts_levers_and_waterfall_ends_at_ceiling():
     assert report["measured"]["of_expected"] == pytest.approx(1.2)
     assert not report["measured"]["above_ceiling"]
     assert calls[0] == ()
+    # Each lever set once: expected, three alone, two more stacked steps.
+    assert len(calls) == len(set(map(frozenset, calls))) == 6
     assert "Waterfall" in format_headroom(report) and "within ceiling" in format_headroom(report)
+
+
+def test_headroom_reuses_known_projections():
+    calls = []
+
+    def project(active):
+        calls.append(tuple(active))
+        return {"iteration_time_ms": 100.0 - 10.0 * len(active), "tokens_per_sec_per_gpu": 1.0 + len(active)}
+
+    known = {("launch", "overlap"): {"iteration_time_ms": 80.0, "tokens_per_sec_per_gpu": 3.0}}
+    headroom(project, ("overlap", "launch"), known=known)
+    assert frozenset(("overlap", "launch")) not in map(frozenset, calls)
+
+
+def test_headroom_warns_when_a_lever_slows_the_projection():
+    def project(active):
+        it = 100.0 + 5.0 * len(active)
+        return {"iteration_time_ms": it, "tokens_per_sec_per_gpu": 1e4 / it}
+
+    text = format_headroom(headroom(project, ("fusion",)))
+    assert "WARNING: the ceiling is below the expected bound" in text
+    assert re.search(r"fusion\s+-4\.8%", text) and "(-4.8%)" in text
+
+
+def test_measurement_within_tolerance_of_ceiling_is_not_above_it():
+    def project(active):
+        return {"iteration_time_ms": 100.0, "tokens_per_sec_per_gpu": 50.0}
+
+    report = headroom(
+        project,
+        ("overlap",),
+        measured_tokens_per_sec_per_gpu=50.0 * (1 + ceiling.ABOVE_CEILING_TOLERANCE / 2),
+    )
+    assert not report["measured"]["above_ceiling"]
 
 
 def test_headroom_flags_measurement_above_ceiling():
@@ -164,6 +210,24 @@ def test_cli_registers_ceiling_flags():
     assert args.ceiling_levers == "fusion"
     assert args.headroom and args.headroom_measured is None
     assert _cli_args("--config", "x.yaml").projection_bound == "expected"
+
+
+@pytest.mark.parametrize("extra", [("--bound", "ceiling"), ("--headroom",)])
+def test_both_suite_rejects_ceiling_flags_before_any_work(extra):
+    from primus.cli.subcommands.projection import register_subcommand, run
+
+    parser = argparse.ArgumentParser()
+    register_subcommand(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["projection", "both", "--config", "x.yaml", *extra])
+    with pytest.raises(ValueError, match="projection performance --profiling-mode simulate"):
+        run(args, [])
+
+
+def test_performance_suite_rejects_empty_ceiling_levers_up_front():
+    from primus.cli.subcommands.projection import run
+
+    with pytest.raises(ValueError, match="no ceiling lever"):
+        run(_cli_args("--config", "x.yaml", "--ceiling-levers", ","), [])
 
 
 def test_end_to_end_ceiling_never_below_expected(monkeypatch, capsys):

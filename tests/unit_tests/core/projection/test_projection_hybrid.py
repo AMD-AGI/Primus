@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from primus.core.projection.module_profilers import hybrid_mixer, transformer_layer
+from primus.core.projection.module_profilers import hybrid_mixer, language_model
 from primus.core.projection.module_profilers.hybrid_mixer import (
     mixer_activation_bytes,
     mixer_kind,
@@ -91,9 +91,11 @@ def _mi325x_backend():
             get_gemm_simulation_backend,
         )
 
-        return get_gemm_simulation_backend(gpu_arch="mi325x")
+        backend = get_gemm_simulation_backend(gpu_arch="mi325x")
     except Exception as exc:  # pragma: no cover - origami not installed
+        backend = None
         pytest.skip(f"MI325X GEMM backend unavailable: {exc}")
+    return backend
 
 
 # Per-layer MI325X benchmark times (fwd, bwd ms) of the ``M`` layers, which
@@ -159,10 +161,10 @@ class _Layer:
 
 
 def _hybrid_profiler(monkeypatch, recompute=None):
-    monkeypatch.setattr(transformer_layer, "_layer_ln_res_ms", lambda *a: (2.0, 4.0))
-    monkeypatch.setattr(transformer_layer, "_estimate_tp_allreduce_time_ms", lambda *a: 0.0)
-    monkeypatch.setattr(hybrid_mixer, "mixer_time_ms", lambda mc, tokens, be, tp=1: (3.0, 9.0))
-    monkeypatch.setattr(hybrid_mixer, "mixer_activation_bytes", lambda mc, tokens, tp=1: 100)
+    monkeypatch.setattr(language_model, "_layer_ln_res_ms", lambda *a: (2.0, 4.0))
+    monkeypatch.setattr(language_model, "_estimate_tp_allreduce_time_ms", lambda *a: 0.0)
+    monkeypatch.setattr(language_model, "mixer_time_ms", lambda mc, tokens, be, tp=1: (3.0, 9.0))
+    monkeypatch.setattr(language_model, "mixer_activation_bytes", lambda mc, tokens, tp=1: 100)
     prof = LanguageModelProfiler.__new__(LanguageModelProfiler)
     prof.config = SimpleNamespace(
         model_config=SimpleNamespace(hybrid_mixer="gdn", hidden_size=2048),
@@ -222,3 +224,64 @@ def test_fla_fused_ce_prices_one_forward_pass_and_no_backward():
     assert off._loss_time_ms(2, SEQ) == (f_dense, b_dense)
     assert fused.estimated_activation_memory(2, SEQ) == 0
     assert off.estimated_activation_memory(2, SEQ) > 0
+
+
+def test_mixer_kind_honours_and_validates_an_explicit_mixer():
+    assert mixer_kind("gdn_hybrid_stack_spec", "KDA") == "kda"
+    with pytest.raises(ValueError, match="hybrid_mixer must be one of"):
+        mixer_kind(None, "rwkv")
+    with pytest.warns(UserWarning, match="names no known mixer"):
+        assert mixer_kind("my_custom_stack_spec") == "mamba"
+
+
+@pytest.mark.parametrize(
+    "mc",
+    [
+        _gdn(),
+        SimpleNamespace(hybrid_mixer="mamba", hidden_size=2048, mamba_state_dim=64, mamba_head_dim=64),
+    ],
+)
+def test_mixer_keeps_one_head_per_rank_when_tp_exceeds_heads(mc):
+    # GDN has 8 key heads and Mamba 64 heads: TP 128 leaves each rank one head.
+    at_heads = mixer_time_ms(mc, 4096, None, tp=64)
+    beyond = mixer_time_ms(mc, 4096, None, tp=128)
+    assert all(t > 0 for t in (*at_heads, *beyond))
+    assert mixer_activation_bytes(mc, 4096, tp=128) > 0
+
+
+def test_mixer_elementwise_passes_drop_at_the_fusion_ceiling():
+    from primus.core.projection.ceiling import ceiling_levers
+
+    expected = mixer_time_ms(_gdn(), 8192, None)
+    with ceiling_levers(("fusion",)):
+        fused = mixer_time_ms(_gdn(), 8192, None)
+    assert fused[0] < expected[0] and fused[1] < expected[1]
+
+
+def _hybrid_module(pattern):
+    return SimpleNamespace(hybrid_layer_pattern=pattern, num_layers=len(pattern), moe_layer_freq=1)
+
+
+def test_max_layers_cap_never_drops_a_layer_kind(monkeypatch):
+    from primus.core.projection.performance_projection.projection import (
+        _limit_hybrid_layers_for_projection,
+    )
+
+    monkeypatch.setenv("PRIMUS_PROJ_MAX_LAYERS", "1")
+    mc = _hybrid_module("M-M-*-M-")
+    assert _limit_hybrid_layers_for_projection(mc)
+    assert mc.hybrid_layer_pattern == "M-M-*" and mc.num_layers == 5
+    monkeypatch.setenv("PRIMUS_PROJ_MAX_LAYERS", "7")
+    mc = _hybrid_module("M-M-*-M-")
+    _limit_hybrid_layers_for_projection(mc)
+    assert mc.num_layers == 7
+
+
+def test_hybrid_stack_without_layers_is_a_clear_error():
+    from primus.core.projection.performance_projection.projection import (
+        _limit_hybrid_layers_for_projection,
+    )
+
+    mc = SimpleNamespace(is_hybrid_model=True, num_layers=1, hybrid_attention_ratio=0.0)
+    with pytest.raises(ValueError, match="no decoder layers"):
+        _limit_hybrid_layers_for_projection(mc)

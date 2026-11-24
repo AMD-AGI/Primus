@@ -97,7 +97,8 @@ def github_repo(url: str) -> Optional[str]:
 
 def _default_base(root: Path, remote: str) -> str:
     ref = _git(root, "symbolic-ref", "--quiet", f"refs/remotes/{remote}/HEAD", check=False)
-    return ref.rsplit("/", 1)[-1] if ref else "main"
+    prefix = f"refs/remotes/{remote}/"
+    return ref[len(prefix) :] if ref.startswith(prefix) and len(ref) > len(prefix) else "main"
 
 
 def _module_meta(path: Path) -> Tuple[str, Tuple[str, ...]]:
@@ -228,8 +229,10 @@ def publish_op(
         f"{cfg.branch_prefix}/{re.sub(r'[^A-Za-z0-9_.-]+', '-', res.op_id)}-{time.strftime('%Y%m%d%H%M%S')}"
     )
     tmp = Path(tempfile.mkdtemp(prefix="op-pr-"))
+    created = False
     try:
         _git(root, "worktree", "add", "-q", "-b", out.branch, str(tmp), "HEAD")
+        created = True
         if res.status == "registered":
             rel = [str(p.resolve().relative_to(root)) for p in files]
             for r in rel:
@@ -286,5 +289,7 @@ def publish_op(
         _git(root, "worktree", "remove", "--force", str(tmp), check=False)
         shutil.rmtree(tmp, ignore_errors=True)
         if out.branch and out.commit is None:
-            _git(root, "branch", "-q", "-D", out.branch, check=False)
+            # Never delete a same-named branch this call did not create.
+            if created:
+                _git(root, "branch", "-q", "-D", out.branch, check=False)
             out.branch = None

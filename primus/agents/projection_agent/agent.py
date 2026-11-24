@@ -147,15 +147,10 @@ class ProjectionAgent:
         ]
         return any(r.changed_projection for r in self._bring_up(parsed, workload, arch))
 
-    def _bring_up(self, gaps: Sequence, workload: Path, arch=None) -> List[BringupResult]:
-        new = [g for g in gaps if g.op_id not in self.gaps_seen]
-        if self.policy == "off" or not new:
-            return []
-        for g in new:
-            self.gaps_seen[g.op_id] = asdict(g)
+    def _bring_up_gaps(self, gaps: Sequence, workload: Path, arch=None) -> List[BringupResult]:
         a = self._arch(workload, arch)
-        res = bring_up_gaps(
-            new,
+        return bring_up_gaps(
+            gaps,
             workload=Path(workload).resolve(),
             primus_root=self.primus_root,
             out_dir=self.out_dir,
@@ -170,6 +165,19 @@ class ProjectionAgent:
             env=self.env,
             log=lambda s: self.log(f"[projection-agent] {s}"),
         )
+
+    def _bring_up(self, gaps: Sequence, workload: Path, arch=None) -> List[BringupResult]:
+        new = [g for g in gaps if g.op_id not in self.gaps_seen]
+        if self.policy == "off" or not new:
+            return []
+        for g in new:
+            self.gaps_seen[g.op_id] = asdict(g)
+        try:
+            res = self._bring_up_gaps(new, workload, arch)
+        except Exception as exc:
+            # Bring-up is best effort: the projection still runs, pricing the op as before.
+            self.log(f"[projection-agent] op bring-up failed for {[g.op_id for g in new]}: {exc}")
+            return []
         if any(r.status == "registered" for r in res):
             from primus.core.projection.op_models.registry import discover_op_models
 

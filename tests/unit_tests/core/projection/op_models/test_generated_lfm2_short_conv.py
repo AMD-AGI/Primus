@@ -1,3 +1,8 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 """Regression test for the generated op model ``lfm2_short_conv`` (written by op bring-up)."""
 
 from pathlib import Path

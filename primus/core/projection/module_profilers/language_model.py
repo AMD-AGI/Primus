@@ -6,20 +6,30 @@
 
 import os
 import re
+from collections import Counter
 from typing import List, Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.bench_harness import LAYER
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
 from .embedding import EmbeddingProfiler
+from .hybrid_mixer import mixer_activation_bytes, mixer_time_ms
 from .layer_norm import LayerNormProfiler
 from .loss import LossProfiler
 from .output_layer import OutputLayerProfiler
 from .transformer_layer import (
+    _deepep_exposed_a2a_ms,
+    _deepep_overlap_efficiency,
+    _estimate_moe_a2a_time_ms,
+    _estimate_tp_allreduce_time_ms,
+    _layer_comm_ms,
+    _layer_ln_res_ms,
     get_dense_transformer_layer_profiler_spec,
     get_moe_transformer_layer_profiler_spec,
 )
+from .utils import benchmark_layer
 
 
 def _parse_compress_ratios(model_config):
@@ -613,12 +623,6 @@ class LanguageModelProfiler(BaseModuleProfiler):
         a whole layer. Every full-model layer index is given the per-layer
         average, which the extrapolation multiplies back up to the full count.
         """
-        from collections import Counter
-
-        from primus.core.projection.bench_harness import LAYER
-
-        from .utils import benchmark_layer
-
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         profiler = self.sub_profilers["dense_transformer_layer"]
         per_kind = {}
@@ -631,40 +635,18 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})..."
                 )
             shapes, kwargs = profiler.require_bench_inputs(LAYER, module, batch_size, seq_len)
-            with kernel_report.scope(kernel_report.layer_scope("dense", None)):
-                fwd, bwd, mem = benchmark_layer(
-                    module, shapes, transformer_config=getattr(module, "config", None), forward_kwargs=kwargs
-                )
+            fwd, bwd, mem = benchmark_layer(
+                module, shapes, transformer_config=getattr(module, "config", None), forward_kwargs=kwargs
+            )
             per_kind[kind] = (fwd, bwd, mem)
             if is_rank_0:
                 print(f"  Forward time:  {fwd:.2f} ms (measured)")
                 print(f"  Backward time: {bwd:.2f} ms (measured)")
 
-        counts = Counter(str(k) for k in full_types)
-        missing = set(counts) - set(per_kind)
+        missing = {str(k) for k in full_types} - set(per_kind)
         if missing:
             raise RuntimeError(f"Hybrid benchmark model has no layer of kind(s) {sorted(missing)}")
-        total = len(full_types)
-        avg = [sum(counts[k] * per_kind[k][i] for k in counts) / total for i in range(3)]
-        if is_rank_0:
-            mix = ", ".join(f"{counts[k]}x'{k}'" for k in sorted(counts))
-            print(f"  Hybrid mix ({mix}): {avg[0]:.2f} ms fwd, {avg[1]:.2f} ms bwd per layer on average")
-
-        zero = {"forward_time_ms": 0.0, "backward_time_ms": 0.0, "activation_memory_bytes": 0}
-        layer_stats = {
-            "type": "dense",
-            "compress_ratio": None,
-            "forward_time_ms": avg[0],
-            "backward_time_ms": avg[1],
-            "activation_memory_bytes": int(avg[2]),
-            "attention": dict(zero, window_variants=None),
-            "mlp": dict(zero, a2a_forward_time_ms=0.0, a2a_backward_time_ms=0.0),
-            "hybrid_kinds": {
-                k: {"forward_time_ms": f, "backward_time_ms": b, "count": counts.get(k, 0)}
-                for k, (f, b, _m) in per_kind.items()
-            },
-        }
-        return {layer_idx: dict(layer_stats) for layer_idx in self.layers}
+        return self._hybrid_layer_results(per_kind, full_types, is_rank_0)
 
     def _run_hybrid_layer_simulation(self, full_types, batch_size, seq_len) -> dict:
         """Simulate one layer of each kind in a hybrid stack, weighted by the full model's mix.
@@ -674,18 +656,6 @@ class LanguageModelProfiler(BaseModuleProfiler):
         MLP and ``M`` a sequence mixer (GDN / KDA / Mamba2), each with one pre-norm
         and one residual add.
         """
-        from collections import Counter
-
-        from .hybrid_mixer import mixer_activation_bytes, mixer_time_ms
-        from .transformer_layer import (
-            _deepep_exposed_a2a_ms,
-            _deepep_overlap_efficiency,
-            _estimate_moe_a2a_time_ms,
-            _estimate_tp_allreduce_time_ms,
-            _layer_comm_ms,
-            _layer_ln_res_ms,
-        )
-
         cfg = self.config
         mp = cfg.model_parallel_config
         tp = mp.tensor_model_parallel_size
@@ -739,6 +709,16 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 print(f"  Forward time:  {per_kind[kind][0]:.2f} ms (simulated)")
                 print(f"  Backward time: {per_kind[kind][1]:.2f} ms (simulated)")
 
+        return self._hybrid_layer_results(per_kind, full_types, is_rank_0)
+
+    def _hybrid_layer_results(self, per_kind: dict, full_types, is_rank_0: bool) -> dict:
+        """Per-layer stats of a hybrid stack: every layer gets the full model's per-layer average.
+
+        Layer kinds are weighted by their count in the whole model, so the total
+        is right, but under PP every stage gets the same average however the
+        kinds are placed, and an ``E`` layer's all-to-all is folded into the
+        layer time instead of being reported as a MoE layer's a2a.
+        """
         counts = Counter(str(k) for k in full_types)
         total = len(full_types)
         avg = [sum(counts[k] * per_kind[k][i] for k in counts) / total for i in range(3)]
@@ -753,7 +733,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             "forward_time_ms": avg[0],
             "backward_time_ms": avg[1],
             "activation_memory_bytes": int(avg[2]),
-            "attention": dict(zero),
+            "attention": dict(zero, window_variants=None),
             "mlp": dict(zero, a2a_forward_time_ms=0.0, a2a_backward_time_ms=0.0),
             "hybrid_kinds": {
                 k: {"forward_time_ms": f, "backward_time_ms": b, "count": counts.get(k, 0)}

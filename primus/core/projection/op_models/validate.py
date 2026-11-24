@@ -147,7 +147,7 @@ def load_workload(
     )
 
     if gpu_arch:
-        os.environ.setdefault("PRIMUS_GPU_ARCH", gpu_arch)
+        os.environ["PRIMUS_GPU_ARCH"] = gpu_arch
     primus_config, _ = load_primus_config(SimpleNamespace(config=str(config_path)), list(overrides))
     normalize_primus_config(primus_config)
     module_config = primus_config.get_module_config("pre_trainer")
@@ -187,6 +187,9 @@ def load_op_class(path: str) -> Type[OpModel]:
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
+
+
+_COST_FIELDS = ("fwd_ms", "bwd_ms", "fwd_flops", "bwd_flops", "fwd_bytes", "bwd_bytes")
 
 
 def _finite_pos(x: Any) -> bool:
@@ -269,36 +272,25 @@ def validate_op_model(
         costs.append((label, b, s, c, ctx))
 
     for label, b, s, c, ctx in costs:
-        bad = [
-            n
-            for n in ("fwd_ms", "bwd_ms", "fwd_flops", "bwd_flops", "fwd_bytes", "bwd_bytes")
-            if not _finite_pos(getattr(c, n))
-        ]
+        bad = [n for n in _COST_FIELDS if not _finite_pos(getattr(c, n))]
         rep.add(
             f"finite_positive[{label}]",
             FAIL if bad else PASS,
             f"{bad} must be finite and > 0" if bad else "",
         )
+        case = {"label": label, "batch_size": b, "seq_len": s}
+        case.update({n: getattr(c, n) if n in bad else float(getattr(c, n)) for n in _COST_FIELDS})
+        if bad:
+            rep.cases.append(case)
+            continue
         roof_f = ctx.roofline_ms(c.fwd_flops, c.fwd_bytes)
         roof_b = ctx.roofline_ms(c.bwd_flops, c.bwd_bytes)
-        rep.cases.append(
-            {
-                "label": label,
-                "batch_size": b,
-                "seq_len": s,
-                "fwd_ms": float(c.fwd_ms),
-                "bwd_ms": float(c.bwd_ms),
-                "fwd_flops": float(c.fwd_flops),
-                "bwd_flops": float(c.bwd_flops),
-                "fwd_bytes": float(c.fwd_bytes),
-                "bwd_bytes": float(c.bwd_bytes),
-                "roofline_fwd_ms": roof_f,
-                "roofline_bwd_ms": roof_b,
-                "breakdown": {k: list(v) for k, v in c.breakdown.items()},
-            }
+        case.update(
+            roofline_fwd_ms=roof_f,
+            roofline_bwd_ms=roof_b,
+            breakdown={k: list(v) for k, v in (c.breakdown or {}).items()},
         )
-        if bad:
-            continue
+        rep.cases.append(case)
         msgs, status = [], PASS
         for tag, t, roof in (("fwd", c.fwd_ms, roof_f), ("bwd", c.bwd_ms, roof_b)):
             if t < ROOFLINE_SLACK * roof:

@@ -9,12 +9,12 @@ The *expected* bound is what today's stack achieves (the default projection).
 The *ceiling* bound projects the same deployment with the software levers at
 their physical best, while kernels stay Origami's / the SDPA simulator's:
 
-* ``overlap`` -- TP all-reduce, MoE all-to-all, gradient reduce, FSDP and PP
-  point-to-point traffic are hidden behind compute, limited only by the
-  compute available to hide them.
+* ``overlap`` -- TP all-reduce, MoE all-to-all, gradient reduce and FSDP
+  traffic are hidden behind compute, limited only by the compute available to
+  hide them; PP point-to-point sends cost nothing.
 * ``fusion``  -- element-wise passes (norm / residual, MoE permute + unpermute,
-  activation, expert quant / dequant) are fused into neighbouring kernels and
-  cost no extra HBM traffic.
+  activation, expert quant / dequant, a hybrid mixer's gates and norms) are
+  fused into neighbouring kernels and cost no extra HBM traffic.
 * ``launch``  -- kernel launch latency and pipeline bubbles are zero
   (persistent kernels / graph capture, bubble-free schedule).
 
@@ -29,6 +29,8 @@ from typing import Callable, Dict, Iterable, Iterator, Optional, Sequence
 
 LEVERS = ("overlap", "fusion", "launch")
 BOUNDS = ("expected", "ceiling")
+# A measurement this far above the ceiling is still noise, not a modelling gap.
+ABOVE_CEILING_TOLERANCE = 0.01
 
 _active: frozenset = frozenset()
 
@@ -38,7 +40,9 @@ def parse_levers(text) -> tuple:
     if text is None or text == "":
         return LEVERS
     items = text.split(",") if isinstance(text, str) else list(text)
-    levers = tuple(dict.fromkeys(i.strip() for i in items if i.strip()))
+    levers = tuple(dict.fromkeys(str(i).strip() for i in items if str(i).strip()))
+    if not levers:
+        raise ValueError(f"no ceiling lever in {text!r}; choose from {list(LEVERS)}")
     unknown = [lv for lv in levers if lv not in LEVERS]
     if unknown:
         raise ValueError(f"unknown ceiling lever(s) {unknown}; choose from {list(LEVERS)}")
@@ -58,7 +62,7 @@ def ceiling_levers(levers: Iterable[str]) -> Iterator[None]:
     """Project with ``levers`` at their physical best for the enclosed block."""
     global _active
     previous = _active
-    _active = frozenset(parse_levers(tuple(levers)) if levers else ())
+    _active = frozenset(parse_levers(levers) if levers else ())
     try:
         yield
     finally:
@@ -92,26 +96,37 @@ def headroom(
     project: Callable[[Sequence[str]], Optional[dict]],
     levers: Sequence[str] = LEVERS,
     measured_tokens_per_sec_per_gpu: Optional[float] = None,
+    known: Optional[Dict[tuple, Optional[dict]]] = None,
 ) -> dict:
     """Expected, ceiling, each lever alone, and a biggest-first waterfall.
 
     ``project(levers)`` runs one projection with ``levers`` at ceiling and
-    returns the multinode result dict.  Levers interact (hiding comm behind
-    compute is worth less once fusion shrinks the compute), so the waterfall
-    stacks them and its last step equals the full ceiling.
+    returns the multinode result dict; ``known`` maps lever sets already
+    projected to their results, so they are not run again.  Each lever set is
+    projected once.  Levers interact (hiding comm behind compute is worth less
+    once fusion shrinks the compute), so the waterfall stacks them and its last
+    step equals the full ceiling.
     """
-    levers = parse_levers(tuple(levers))
-    expected = _metrics(project(()))
+    levers = parse_levers(levers)
+    cache = {frozenset(k): _metrics(v) for k, v in (known or {}).items() if v}
+
+    def run(active) -> Dict[str, float]:
+        key = frozenset(active)
+        if key not in cache:
+            cache[key] = _metrics(project(tuple(active)))
+        return cache[key]
+
+    expected = run(())
     alone = []
     for lever in levers:
-        m = _metrics(project((lever,)))
+        m = run((lever,))
         alone.append({"lever": lever, "gain_pct": _gain(expected, m), **m})
     alone.sort(key=lambda r: r["gain_pct"], reverse=True)
 
     waterfall, enabled = [], []
     for row in alone:
         enabled.append(row["lever"])
-        m = _metrics(project(tuple(enabled)))
+        m = run(enabled)
         waterfall.append({"levers": list(enabled), "gain_pct": _gain(expected, m), **m})
     ceiling = {k: waterfall[-1][k] for k in expected} if waterfall else dict(expected)
 
@@ -129,7 +144,7 @@ def headroom(
             "tokens_per_sec_per_gpu": meas,
             "of_expected": meas / expected["tokens_per_sec_per_gpu"],
             "of_ceiling": meas / ceiling["tokens_per_sec_per_gpu"],
-            "above_ceiling": meas > ceiling["tokens_per_sec_per_gpu"],
+            "above_ceiling": meas > ceiling["tokens_per_sec_per_gpu"] * (1.0 + ABOVE_CEILING_TOLERANCE),
         }
     return report
 
@@ -143,16 +158,18 @@ def format_headroom(report: dict) -> str:
         f"  Expected : {exp['tokens_per_sec_per_gpu']:>12,.0f} tokens/s/GPU   "
         f"iteration {exp['iteration_time_ms']:,.1f} ms",
         f"  Ceiling  : {ceil['tokens_per_sec_per_gpu']:>12,.0f} tokens/s/GPU   "
-        f"iteration {ceil['iteration_time_ms']:,.1f} ms   (+{report['headroom_pct']:.1f}%)",
-        "  Each lever alone:",
+        f"iteration {ceil['iteration_time_ms']:,.1f} ms   ({report['headroom_pct']:+.1f}%)",
     ]
+    if report["headroom_pct"] < 0:
+        lines.append("  WARNING: the ceiling is below the expected bound; a lever made the projection slower")
+    lines.append("  Each lever alone:")
     for row in report["lever_gains"]:
-        lines.append(f"    {row['lever']:<8} +{row['gain_pct']:5.1f}%")
+        lines.append(f"    {row['lever']:<8} {row['gain_pct']:+6.1f}%")
     lines.append("  Waterfall (stacked, biggest first):")
     for row in report["waterfall"]:
         lines.append(
             f"    + {'+'.join(row['levers']):<24} {row['tokens_per_sec_per_gpu']:>12,.0f} tokens/s/GPU "
-            f"(+{row['gain_pct']:.1f}%)"
+            f"({row['gain_pct']:+.1f}%)"
         )
     meas = report.get("measured")
     if meas:

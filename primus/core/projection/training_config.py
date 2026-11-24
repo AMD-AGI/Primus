@@ -422,7 +422,7 @@ def megatron_derive_default_args(args):
     if args.hybrid_layer_types is not None:
         from primus.core.projection.module_profilers.hybrid_mixer import mixer_kind
 
-        args.hybrid_mixer = mixer_kind(getattr(args, "spec", None))
+        args.hybrid_mixer = mixer_kind(getattr(args, "spec", None), getattr(args, "hybrid_mixer", None))
 
     if args.num_experts is None:
         args.moe_pattern = [0] * args.num_layers

@@ -25,12 +25,15 @@ the tuning agent reads, or the args namespace the projection is built from.
 from __future__ import annotations
 
 import json
+import os
 import re
 import warnings
 from dataclasses import asdict, dataclass, field, fields
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import yaml
 
 from .base import (
     SLOT_ATTENTION,
@@ -39,7 +42,7 @@ from .base import (
     SLOT_MLP,
     is_active,
 )
-from .registry import op_models_enabled, registered_op_models
+from .registry import env_flag, op_models_enabled, registered_op_models
 
 GAP_MARKER = "PRIMUS_OP_GAP"
 
@@ -243,20 +246,39 @@ def _switches_on(key: str, val: Any) -> bool:
     return False
 
 
-def _load_chain(path: Path, seen=None) -> Dict[str, Any]:
-    import yaml
+def yaml_chain(
+    path: Path, *, strict: bool = True, seen: Optional[set] = None
+) -> List[Tuple[Path, str, dict]]:
+    """``(path, text, data)`` of a YAML and every file it ``extends`` / ``bases``, parents first.
 
-    seen = seen or set()
-    path = path.resolve()
+    Each file comes after all its parents, so updating a dict in list order
+    merges the chain.  A file already visited (a cycle) or missing is skipped;
+    with ``strict=False`` an unparsable file contributes its text and no data.
+    """
+    seen = seen if seen is not None else set()
+    path = Path(path).resolve()
     if path in seen or not path.is_file():
-        return {}
+        return []
     seen.add(path)
-    doc = yaml.safe_load(path.read_text()) or {}
-    merged: Dict[str, Any] = {}
-    parents = doc.get("extends") or doc.get("bases") or []
+    text = path.read_text()
+    try:
+        data = yaml.safe_load(text) or {}
+    except Exception:
+        if strict:
+            raise
+        data = {}
+    parents = data.get("extends") or data.get("bases") or []
+    out: List[Tuple[Path, str, dict]] = []
     for parent in [parents] if isinstance(parents, str) else parents:
-        merged.update(_load_chain(path.parent / parent, seen))
-    merged.update({k: v for k, v in doc.items() if k not in ("extends", "bases")})
+        out.extend(yaml_chain(path.parent / str(parent), strict=strict, seen=seen))
+    out.append((path, text, data))
+    return out
+
+
+def _load_chain(path: Path) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for _p, _text, doc in yaml_chain(path):
+        merged.update({k: v for k, v in doc.items() if k not in ("extends", "bases")})
     return merged
 
 
@@ -275,8 +297,6 @@ def _acknowledged() -> Dict[str, str]:
     path = Path(__file__).resolve().parent / "generated" / "acknowledged.yaml"
     if path.is_file():
         try:
-            import yaml
-
             for k, v in (yaml.safe_load(path.read_text()) or {}).items():
                 out[str(k)] = str(v)
         except Exception as exc:
@@ -318,10 +338,8 @@ def detect_op_gaps(
 
     view = _View(flat)
     claimed: Dict[str, set] = {}
-    consumed = (
-        set(_model_config_fields()) | set(_projection_tokens()) | set(extra_consumed) | set(_acknowledged())
-    )
     owned = set(extra_consumed) | set(_acknowledged())
+    consumed = set(_model_config_fields()) | set(_projection_tokens()) | owned
     for cls in ops:
         try:
             present = cls.matches(view)
@@ -485,10 +503,13 @@ _REPORTED: set = set()
 def report_op_coverage(
     cfg: Dict[str, Any], *, prefix: str = "[Primus:OpCoverage]"
 ) -> Optional[CoverageReport]:
-    """Print the coverage once per process; gaps also as machine-readable markers."""
-    import os
+    """Print the coverage once per process; gaps also as machine-readable markers.
 
-    if int(os.getenv("RANK", "0")) != 0 or os.getenv("PRIMUS_OP_COVERAGE", "1") == "0":
+    Runs for every projection (performance, memory, the op validator) since
+    the gap markers are what op bring-up acts on; ``PRIMUS_OP_COVERAGE=0``
+    turns it off.
+    """
+    if int(os.getenv("RANK", "0")) != 0 or not env_flag("PRIMUS_OP_COVERAGE"):
         return None
     report = detect_op_gaps(cfg)
     key = json.dumps(report.as_dict(), sort_keys=True, default=str)

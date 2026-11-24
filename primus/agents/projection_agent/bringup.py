@@ -1,3 +1,8 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 """Op bring-up: turn one op the projection does not model into a validated op model.
 
 New models keep shipping ops the projection's built-in profilers do not know
@@ -42,6 +47,8 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence
+
+import yaml
 
 # Section caps keep the context inside a coder's window.
 _MAX_SECTION = 40_000
@@ -189,27 +196,11 @@ def _clip(text: str, cap: int = _MAX_SECTION) -> str:
     return text[:cap] + f"\n... [{len(text) - cap} more characters omitted]\n"
 
 
-def _yaml_chain_text(model_path: Path, seen: Optional[set] = None) -> List[tuple]:
-    """The model YAML and every file it ``extends`` / ``bases``, comments kept."""
-    seen = seen if seen is not None else set()
-    model_path = model_path.resolve()
-    if model_path in seen or not model_path.is_file():
-        return []
-    seen.add(model_path)
-    text = model_path.read_text()
-    out = [(model_path, text)]
-    try:
-        import yaml
+def _yaml_chain_text(model_path: Path) -> List[tuple]:
+    """The model YAML and every file it ``extends`` / ``bases``, comments kept, model first."""
+    from primus.core.projection.op_models.coverage import yaml_chain
 
-        data = yaml.safe_load(text) or {}
-    except Exception:
-        data = {}
-    parents = data.get("extends") or data.get("bases") or []
-    if isinstance(parents, str):
-        parents = [parents]
-    for p in parents:
-        out.extend(_yaml_chain_text(model_path.parent / str(p), seen))
-    return out
+    return [(p, text) for p, text, _data in reversed(yaml_chain(model_path, strict=False))]
 
 
 def fetch_hf_config(
@@ -310,8 +301,20 @@ def build_context(
     raw_model: Optional[dict] = None,
     hf_config: Optional[str] = None,
     papers: Sequence[str] = (),
+    memo: Optional[dict] = None,
 ) -> str:
-    """The context pack for one gap, as markdown."""
+    """The context pack for one gap, as markdown.
+
+    ``memo`` carries the gap-independent parts (HF config, papers) across the
+    gaps of one workload, so each is fetched once.
+    """
+    memo = {} if memo is None else memo
+
+    def once(key, fn):
+        if key not in memo:
+            memo[key] = fn()
+        return memo[key]
+
     sec: List[str] = [f"# Op bring-up: `{gap.op_id}`\n", _GUIDE]
     sec.append(
         "## The gap\n\n"
@@ -329,7 +332,7 @@ def build_context(
             + "\n```\n"
         )
     tok = (raw_model or {}).get("tokenizer_model")
-    hf = fetch_hf_config(hf_config, tok)
+    hf = once(("hf", hf_config, tok), lambda: fetch_hf_config(hf_config, tok))
     if hf:
         sec.append(f"## HF config.json ({hf_config or tok})\n\n```json\n{_clip(hf, 20_000)}\n```\n")
     else:
@@ -337,7 +340,7 @@ def build_context(
     for i, spec in enumerate(papers, 1):
         sec.append(
             f"## Paper {i}: {spec if len(spec) < 200 else spec[:200] + '...'}\n\n"
-            + _clip(_read_paper(spec), _MAX_PAPER)
+            + _clip(once(("paper", spec), lambda: _read_paper(spec)), _MAX_PAPER)
         )
 
     od = _op_models_dir(primus_root)
@@ -398,7 +401,9 @@ def dspy_coder(model: Optional[str] = None, *, timeout: int = 600, max_tokens: i
     if lm is None:
         model = model or llm_model_from_env()
         if not model:
-            raise RuntimeError("no LLM configured: pass --op-llm-model or set LLM_MODEL")
+            raise RuntimeError(
+                "no LLM configured: pass --op-llm-model or set PRIMUS_OP_LLM_MODEL / LLM_MODEL"
+            )
         kw: dict = {"cache": False, "timeout": timeout, "max_tokens": max_tokens}
         if os.getenv("LLM_API_KEY"):
             kw["api_key"] = os.environ["LLM_API_KEY"]
@@ -437,6 +442,9 @@ def command_coder(cmd_template: str, timeout: int = 1800) -> Coder:
         )
         if target.is_file() and target.stat().st_size > 0:
             return "```python\n" + target.read_text() + "\n```"
+        if proc.returncode != 0:
+            tail = "\n".join((proc.stdout or "").strip().splitlines()[-20:])
+            raise RuntimeError(f"coder command exited with status {proc.returncode}: {tail}")
         return proc.stdout or ""
 
     return _code
@@ -542,6 +550,11 @@ def validation_feedback(report: dict) -> str:
 
 
 _TEST_TEMPLATE = '''\
+###############################################################################
+# Copyright (c) {year}, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 """Regression test for the generated op model ``{name}`` (written by op bring-up)."""
 
 from pathlib import Path
@@ -585,7 +598,11 @@ def _write_test(primus_root: Path, name: str, workload: Path, gap_keys: Sequence
     path = tdir / f"test_generated_{name}.py"
     path.write_text(
         _TEST_TEMPLATE.format(
-            name=name, workload=json.dumps(rel), gap_keys=json.dumps(list(gap_keys)), depth=depth
+            name=name,
+            workload=json.dumps(rel),
+            gap_keys=json.dumps(list(gap_keys)),
+            depth=depth,
+            year=time.strftime("%Y"),
         )
     )
     return path
@@ -593,8 +610,13 @@ def _write_test(primus_root: Path, name: str, workload: Path, gap_keys: Sequence
 
 def acknowledge_keys(primus_root: Path, entries: dict) -> Path:
     path = _op_models_dir(primus_root) / "generated" / "acknowledged.yaml"
-    lines = [] if not path.exists() else [path.read_text().rstrip("\n"), ""]
-    for k, why in entries.items():
+    text = path.read_text() if path.exists() else ""
+    existing = yaml.safe_load(text) or {}
+    new = {k: why for k, why in entries.items() if k not in existing}
+    if not new:
+        return path
+    lines = [text.rstrip("\n"), ""] if text else []
+    for k, why in new.items():
         why = " ".join(str(why).split())
         lines.append(f"{k}: >-\n" + textwrap.indent(textwrap.fill(why, 86), "  "))
     path.write_text("\n".join(lines) + "\n")
@@ -622,6 +644,7 @@ def bring_up_op(
     register: bool = True,
     env: Optional[dict] = None,
     log: Callable[[str], None] = print,
+    context_memo: Optional[dict] = None,
 ) -> BringupResult:
     """Context -> Create -> Validate -> Register for one gap."""
     work = Path(out_dir) / "op_bringup" / gap.op_id
@@ -633,6 +656,7 @@ def bring_up_op(
         raw_model=raw_model,
         hf_config=hf_config,
         papers=papers,
+        memo=context_memo,
     )
     ctx_path = work / "context.md"
     ctx_path.write_text(context)
@@ -731,6 +755,7 @@ def _finish(res: BringupResult, work: Path) -> BringupResult:
 def bring_up_gaps(gaps: Sequence, **kwargs) -> List[BringupResult]:
     """Bring up every blocking gap, de-duplicated by op id."""
     out, seen = [], set()
+    kwargs.setdefault("context_memo", {})
     for g in gaps:
         if g.severity != "gap" or g.op_id in seen:
             continue

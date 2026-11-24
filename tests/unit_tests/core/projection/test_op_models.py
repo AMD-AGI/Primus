@@ -294,3 +294,78 @@ def test_shipped_ops_validate_on_qwen35(name, monkeypatch):
     wl = load_workload(str(_QWEN35), simulate_backends=False)
     rep = validate_op_model(ops[name], wl)
     assert rep.ok, rep.feedback()
+
+
+def test_validator_names_a_missing_cost_field_instead_of_crashing():
+    class Hollow(_Toy):
+        def cost(self, ctx):
+            c = super().cost(ctx)
+            c.bwd_flops = None
+            return c
+
+    rep = validate_op_model(Hollow, _wl(toy_variant="toy"))
+    failed = {c.name: c.detail for c in rep.failures()}
+    assert "['bwd_flops'] must be finite" in failed["finite_positive[workload]"]
+    assert "load" not in failed and "roofline[workload]" not in failed
+    assert rep.cases and rep.cases[0]["bwd_flops"] is None
+
+
+@pytest.mark.parametrize(
+    "value, on", [("0", False), (" Off ", False), ("false", False), ("1", True), ("", True)]
+)
+def test_env_flags_share_one_parser(monkeypatch, value, on):
+    monkeypatch.setenv("PRIMUS_OP_MODELS", value)
+    monkeypatch.setenv("PRIMUS_OP_COVERAGE", value)
+    assert registry.op_models_enabled() is on
+    assert (coverage.report_op_coverage({}) is not None) is on
+
+
+def test_yaml_chain_merges_parents_first_and_skips_cycles(tmp_path):
+    (tmp_path / "base.yaml").write_text("extends: child.yaml\na: 1\nb: 1\n")
+    (tmp_path / "mid.yaml").write_text("extends: base.yaml\nb: 2\n")
+    (tmp_path / "child.yaml").write_text("extends: [mid.yaml]\nc: 3  # comment\n")
+    chain = coverage.yaml_chain(tmp_path / "child.yaml")
+    assert [p.name for p, _t, _d in chain] == ["base.yaml", "mid.yaml", "child.yaml"]
+    assert coverage._load_chain(tmp_path / "child.yaml") == {"a": 1, "b": 2, "c": 3}
+    from primus.agents.projection_agent.bringup import _yaml_chain_text
+
+    texts = _yaml_chain_text(tmp_path / "child.yaml")
+    assert [p.name for p, _t in texts] == ["child.yaml", "mid.yaml", "base.yaml"]
+    assert "# comment" in texts[0][1]
+
+
+class _OneCU:
+    def __init__(self):
+        self.calls = []
+
+    def simulate_gemm(self, m, n, k, dtype):
+        self.calls.append((m, n, k, dtype))
+        return SimpleNamespace(forward_time_ms=1e-3 + 2.0 * m * n * k / 1e12)
+
+
+def test_fused_tiles_fold_waves_into_m():
+    from primus.core.projection.simulation_backends.sdpa_simulator import SDPASimulator
+
+    sim = SDPASimulator.__new__(SDPASimulator)
+    sim._tile_gemm, sim._tile_units, sim._hw = _OneCU(), 4, SimpleNamespace(n_cu=4)
+    one_wave = sim.simulate_fused_tiles([(64, 64, 128), (64, 128, 64)], 4)
+    three_waves = sim.simulate_fused_tiles([(64, 64, 128), (64, 128, 64)], 9)
+    assert sim._tile_gemm.calls[2:] == [(192, 64, 128, "bf16"), (192, 128, 64, "bf16")]
+    # The fixed per-GEMM cost is paid once, not once per wave.
+    assert three_waves < 3 * one_wave
+    assert three_waves == pytest.approx(2e-3 + 3 * (one_wave - 2e-3))
+
+
+def test_fused_tiles_on_the_real_backend_grow_with_waves():
+    from primus.core.projection.simulation_backends.sdpa_simulator import SDPASimulator
+
+    try:
+        sim = SDPASimulator(gpu_arch="mi355x")
+    except Exception as exc:  # pragma: no cover - origami not installed
+        pytest.skip(f"SDPA simulator unavailable: {exc}")
+    if getattr(sim, "_tile_gemm", None) is None:
+        pytest.skip("no 1-CU GEMM backend")
+    n_cu = getattr(sim, "_tile_units", None) or sim._hw.n_cu
+    tiles = [(64, 128, 128), (64, 128, 64)]
+    one, four = sim.simulate_fused_tiles(tiles, n_cu), sim.simulate_fused_tiles(tiles, 4 * n_cu)
+    assert 0 < one < four < 4 * one

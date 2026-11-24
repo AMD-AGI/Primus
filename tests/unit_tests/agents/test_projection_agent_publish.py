@@ -231,3 +231,21 @@ def test_op_pr_flags_build_the_publish_config():
     assert pa_cli.publish_from_args(p.parse_args([])) is None
     cfg = pa_cli.publish_from_args(p.parse_args(["--op-pr", "pr", "--op-pr-base", "dev", "--op-pr-ready"]))
     assert (cfg.mode, cfg.base, cfg.draft, cfg.remote) == ("pr", "dev", False, "origin")
+
+
+def test_failed_publish_keeps_a_same_named_branch_it_did_not_create(repo, monkeypatch):
+    root, _ = repo
+    monkeypatch.setattr(pub.time, "strftime", lambda fmt, *a: "20260101000000")
+    _git(root, "branch", "projection-agent/foo-20260101000000")
+    before = _git(root, "rev-parse", "projection-agent/foo-20260101000000")
+    out = _publish(root, _registered(root), "commit")
+    assert out.commit is None and out.branch is None and "publish failed" in out.message
+    assert _git(root, "rev-parse", "projection-agent/foo-20260101000000") == before
+
+
+def test_default_base_keeps_slashes_in_the_branch_name(repo):
+    root, _ = repo
+    _git(root, "push", "-q", "origin", "main:release/v1")
+    _git(root, "fetch", "-q", "origin")
+    _git(root, "remote", "set-head", "origin", "release/v1")
+    assert pub._default_base(root, "origin") == "release/v1"

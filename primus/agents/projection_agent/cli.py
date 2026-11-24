@@ -130,12 +130,16 @@ def _llm_available(args) -> bool:
 
 
 def coder_from_args(args, *, log=print):
+    """The coder ``--op-coder`` asks for; ``auto`` falls back to context packs, an explicit kind raises."""
     kind = args.op_coder
-    if kind == "auto":
+    explicit = kind != "auto"
+    if not explicit:
         kind = "command" if args.op_coder_cmd else ("dspy" if _llm_available(args) else "none")
     try:
         return make_coder(kind, cmd=args.op_coder_cmd, model=args.op_llm_model)
     except Exception as e:
+        if explicit:
+            raise ValueError(f"--op-coder {kind}: {e}") from e
         log(f"[projection-agent] op coder '{kind}' unavailable ({e}); writing context packs only")
         return None
 
@@ -173,6 +177,9 @@ def _parse(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    from primus.agents.tuning_agent.config import load_env
+
+    load_env()
     args = _parse(argv)
     agent = agent_from_args(
         args, gpu_arch=args.gpu_arch, max_attempts=args.max_attempts, register=not args.no_register

@@ -61,6 +61,19 @@ def run(args, overrides):
     """
     framework = _experiment_framework(args)
 
+    if args.suite == "both" and (
+        (getattr(args, "projection_bound", None) or "expected") == "ceiling"
+        or getattr(args, "headroom", False)
+    ):
+        # The both suite benchmarks, and the ceiling only splits simulated layer times.
+        raise ValueError(
+            "--bound ceiling / --headroom need `projection performance --profiling-mode simulate`"
+        )
+    if args.suite == "performance":
+        from primus.core.projection.ceiling import parse_levers
+
+        parse_levers(getattr(args, "ceiling_levers", None))
+
     if getattr(args, "op_bringup", "off") != "off":
         # The projection agent adds models for the ops this workload needs and
         # the projection does not price yet; the run below then picks them up.
@@ -477,8 +490,8 @@ def _add_ceiling_args(parser):
         default=None,
         help=(
             "Comma-separated levers the ceiling removes (default: all):\n"
-            "  overlap - TP/A2A/grad-reduce/FSDP/PP comm hidden behind compute\n"
-            "  fusion  - norm/residual, MoE permute/activation/quant passes fused\n"
+            "  overlap - TP/A2A/grad-reduce/FSDP comm hidden behind compute, PP sends free\n"
+            "  fusion  - norm/residual, MoE permute/activation/quant, mixer gate passes fused\n"
             "  launch  - zero kernel-launch latency and pipeline bubbles\n"
         ),
     )

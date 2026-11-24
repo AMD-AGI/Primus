@@ -13,6 +13,7 @@ import argparse
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytest.importorskip("yaml")
 
@@ -215,3 +216,74 @@ def test_primus_projection_brings_ops_up_before_projecting(monkeypatch):
     args, extra = parser.parse_known_args(argv)  # default: off
     proj_cli.run(args, extra)
     assert order == [("project",)]
+
+
+def test_command_coder_surfaces_a_failing_command(tmp_path):
+    coder = ob.command_coder("echo 'auth failed' && exit 3")
+    with pytest.raises(RuntimeError, match="exited with status 3: auth failed"):
+        coder("prompt", tmp_path / "op.py")
+    # A command that writes the module is fine whatever its exit status.
+    ok = ob.command_coder("echo 'class X(OpModel): pass' > {target_file}; exit 1")
+    assert "class X" in ok("prompt", tmp_path / "op2.py")
+
+
+@pytest.mark.parametrize("argv", [["--op-coder", "command"], ["--op-coder", "dspy"]])
+def test_explicit_coder_misconfiguration_is_an_error(monkeypatch, argv):
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("PRIMUS_OP_LLM_MODEL", raising=False)
+    try:
+        import dspy
+
+        monkeypatch.setattr(dspy.settings, "lm", None, raising=False)
+    except ImportError:
+        pass  # without dspy the dspy coder is just as unavailable
+    p = argparse.ArgumentParser()
+    pa_cli.add_op_bringup_args(p)
+    with pytest.raises(ValueError, match=f"--op-coder {argv[1]}"):
+        pa_cli.coder_from_args(p.parse_args(argv))
+
+
+def test_acknowledging_a_key_twice_keeps_one_entry(tmp_path):
+    gen = tmp_path / "primus/core/projection/op_models/generated"
+    gen.mkdir(parents=True)
+    (gen / "acknowledged.yaml").write_text("old_key: >-\n  negligible\n")
+    ob.acknowledge_keys(tmp_path, {"old_key": "again", "new_key": "tiny"})
+    ob.acknowledge_keys(tmp_path, {"new_key": "tiny again"})
+    text = (gen / "acknowledged.yaml").read_text()
+    assert text.count("old_key:") == 1 and text.count("new_key:") == 1
+    assert yaml.safe_load(text) == {"old_key": "negligible", "new_key": "tiny"}
+
+
+def test_context_is_fetched_once_for_all_gaps(tmp_path, monkeypatch):
+    fetched = []
+    monkeypatch.setattr(ob, "fetch_hf_config", lambda *a, **k: fetched.append(a) or None)
+    gaps = [
+        OpGap(op_id=f"op{i}", severity="gap", slot="mlp", reason="r", keys={f"k{i}": True}) for i in range(3)
+    ]
+    ob.bring_up_gaps(
+        gaps, workload=_WORKLOAD, primus_root=_ROOT, out_dir=tmp_path, coder=None, log=lambda s: None
+    )
+    assert len(fetched) == 1
+
+
+def test_unexpected_bring_up_errors_do_not_abort_the_projection(tmp_path, monkeypatch):
+    from primus.agents.projection_agent import agent as agent_mod
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(agent_mod, "bring_up_gaps", boom)
+    logs = []
+    agent = ProjectionAgent(primus_root=_ROOT, out_dir=tmp_path, policy="report", log=logs.append)
+    gap = {"op_id": "fancy", "severity": "gap", "slot": "mlp", "reason": "r", "keys": {"fancy_gate": True}}
+    assert agent.handle_gaps([gap], _WORKLOAD) is False
+    assert any("op bring-up failed" in s and "disk full" in s for s in logs)
+
+
+def test_standalone_cli_loads_the_env_file(monkeypatch):
+    import primus.agents.tuning_agent.config as ta_config
+
+    loaded = []
+    monkeypatch.setattr(ta_config, "load_env", lambda *a, **k: loaded.append(True))
+    assert pa_cli.main(["--workload", str(_WORKLOAD), "--op-bringup", "off"]) == 0
+    assert loaded == [True]
