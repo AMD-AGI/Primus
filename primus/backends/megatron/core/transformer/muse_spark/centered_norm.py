@@ -21,8 +21,7 @@ On GPU, when the installed Primus-Turbo has it, both norms run on Primus-Turbo's
 math, rounded once to ``x.dtype``. Its backward reduces the weight gradient in two stages
 in a fixed order; the shared kernel's backward adds every row's weight gradient into the
 same ``D`` floats with ``tl.atomic_add``, which serialises it (two orders of magnitude
-slower at ``[4096, 8192]``) and changes the sum from run to run. ``PRIMUS_RMSNORM_TURBO=0``
-keeps the shared kernel.
+slower at ``[4096, 8192]``) and changes the sum from run to run.
 
 Deterministic mode, on the shared kernel: under ``torch.use_deterministic_algorithms``
 (Megatron's ``--deterministic-mode``) :func:`weighted_rms_norm` runs it without a weight
@@ -34,7 +33,6 @@ from __future__ import annotations
 
 import functools
 import inspect
-import os
 
 import torch
 
@@ -56,8 +54,8 @@ def _turbo_rmsnorm():
 
 
 def _turbo_rmsnorm_for(x, weight):
-    """The Turbo ``rmsnorm`` when it takes this call (GPU tensors, ``PRIMUS_RMSNORM_TURBO`` not 0), else None."""
-    if os.environ.get("PRIMUS_RMSNORM_TURBO", "1") == "0" or not (x.is_cuda and weight.is_cuda):
+    """The Turbo ``rmsnorm`` when it takes this call (GPU tensors), else None."""
+    if not (x.is_cuda and weight.is_cuda):
         return None
     return _turbo_rmsnorm()
 

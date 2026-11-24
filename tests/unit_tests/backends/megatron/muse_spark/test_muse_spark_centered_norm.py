@@ -79,16 +79,12 @@ def _fake_turbo(calls):
     return rmsnorm
 
 
-def test_turbo_rmsnorm_takes_gpu_calls_unless_switched_off(monkeypatch):
+def test_turbo_rmsnorm_takes_gpu_calls_when_installed(monkeypatch):
     gpu, cpu = SimpleNamespace(is_cuda=True), SimpleNamespace(is_cuda=False)
     fake = _fake_turbo([])
     monkeypatch.setattr(centered_norm, "_turbo_rmsnorm", lambda: fake)
-    monkeypatch.delenv("PRIMUS_RMSNORM_TURBO", raising=False)
     assert centered_norm._turbo_rmsnorm_for(gpu, gpu) is fake
     assert centered_norm._turbo_rmsnorm_for(cpu, cpu) is None
-    monkeypatch.setenv("PRIMUS_RMSNORM_TURBO", "0")
-    assert centered_norm._turbo_rmsnorm_for(gpu, gpu) is None
-    monkeypatch.delenv("PRIMUS_RMSNORM_TURBO")
     monkeypatch.setattr(centered_norm, "_turbo_rmsnorm", lambda: None)  # not installed / too old
     assert centered_norm._turbo_rmsnorm_for(gpu, gpu) is None
 
@@ -121,7 +117,7 @@ def test_turbo_path_matches_the_shared_kernel_and_is_reproducible(monkeypatch):
 
     turbo = run()
     assert all(torch.equal(a, b) for a, b in zip(turbo, run()))  # deterministic weight gradient
-    monkeypatch.setenv("PRIMUS_RMSNORM_TURBO", "0")
+    monkeypatch.setattr(centered_norm, "_turbo_rmsnorm", lambda: None)
     shared = run()
     eager_x, eager_w = x.clone().requires_grad_(), w.clone().requires_grad_()
     eager = centered_norm.centered_rms_norm_reference(eager_x, eager_w, 1e-5)
