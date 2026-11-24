@@ -643,7 +643,7 @@ cd "$WORKSPACE_DIR/Primus"   # or your Primus checkout
 
 A healthy run reports a decreasing `lm loss`, `number of nan iterations: 0`, and a steady `throughput per GPU (TFLOP/s/GPU)` after the first couple of iterations. The first iterations are slower because Transformer Engine JIT-compiles its CK attention kernels on first use (`[CK-JIT] JIT-compiling blob: ...` in the log); they are cached for later runs.
 
-> **Validated for v26.8:** the scripts' default flow ran end-to-end on **MI325X (`gfx942`) / Ubuntu 22.04 (glibc 2.35) / Python 3.12**, followed by the MI325X Llama 3.1 8B BF16 recipe for 10 iterations on 8 GPUs, with a loss curve matching `rocm/primus:v26.8` on the same node. The v26.10 pins have not been through a bare-metal run yet. The MI325X recipes are tuned to use nearly all of the GPU's memory; if anything else holds GPU memory on the node, lower `--micro_batch_size` to fit.
+> **Validated for v26.10:** the scripts' default flow ran end-to-end on **MI325X (`gfx942`) / Python 3.12**, followed by four MI325X recipes for 10 iterations each on 8 GPUs (Megatron-LM Llama 3.1 8B BF16 and FP8, Mixtral 8x7B BF16, and TorchTitan Llama 3.1 8B BF16), all with a finite loss and throughput in line with `rocm/primus:v26.10` on the same cluster. The MI325X recipes are tuned to use nearly all of the GPU's memory; if anything else holds GPU memory on the node, lower `--micro_batch_size` to fit.
 
 Use `primus-cli direct` (not `container`) since you are running on bare metal with everything installed in your environment.
 

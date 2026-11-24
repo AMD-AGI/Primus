@@ -271,15 +271,15 @@ scripts:
 
 ## Caveats
 
-- **Runtime-validated for v26.8.** A clean run of the default stages completed on
-  **MI325X (gfx942) / Ubuntu 22.04 (glibc 2.35, GCC 11) / Python 3.12**, followed by
-  `examples/megatron/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml` for 10
-  iterations on 8 GPUs (with `--micro_batch_size 2`, because the node was shared).
-  It ran with no NaN iterations, and its loss matched the same command in
-  `rocm/primus:v26.8` at every iteration to five significant digits.
+- **Runtime-validated for v26.10.** A clean run of the default stages completed on
+  **MI325X (gfx942) / Python 3.12**, followed by four MI325X recipes for 10
+  iterations each on 8 GPUs: Megatron-LM `llama3.1_8B-BF16`, `llama3.1_8B-FP8` and
+  `mixtral_8x7B_v0.1-BF16`, and TorchTitan `llama3.1_8B-BF16` (`-pretrain.yaml`).
+  All ran with a finite loss, and their throughput was in line with
+  `rocm/primus:v26.10` on the same cluster.
   The installed package set matched the image's except for the optional stages
-  skipped here and four minor transitive versions. The v26.10 pins have not been
-  through a bare-metal run yet.
+  skipped here (the gfx950 device wheels and the torchrec / FBGEMM stack) and six
+  minor transitive versions.
 - **Persistence**: the venv, the provisioned interpreter and the kept checkouts
   live under `$PRIMUS_BASE` (persistent). Transient build sources go to local
   `/tmp` for speed and are deleted after each build.
