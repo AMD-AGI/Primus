@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from primus.backends.megatron.core.fusions.bf16tune import enabled as _bf16tune_enabled
 from primus.backends.megatron.core.transformer.keep_in_fp32 import (
     KeepInFp32Mixin,
     mark_keep_in_fp32,
@@ -590,7 +591,37 @@ class Compressor(KeepInFp32Mixin, nn.Module):
         ``row_idx`` is just ``arange`` -- and factoring the rest out is what keeps them
         numerically interchangeable rather than three drifting copies.
         """
-        if self._fuse_proj:
+        if self._fuse_proj and row_idx is None and is_first is None:
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.compressor_pool import (
+                fused_window_pool,
+                glue_window_pool_ok,
+            )
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_main_grad import (
+                fuse2_linear_mg_ok,
+                linear_main_grad,
+            )
+
+            wkg = self.wkv_gate
+            if getattr(wkg, "bias", None) is None and fuse2_linear_mg_ok(hidden, wkg.weight):
+                # PRIMUS_FUSE2_COMP_MG=1: same GEMMs, the wgrad written straight into main_grad
+                slot, self._fuse2_dx_slot = getattr(self, "_fuse2_dx_slot", None), None
+                proj = linear_main_grad(hidden, wkg.weight, slot)
+            else:
+                # bf16grp: the indexer computed this projection in its grouped launch (bit-identical)
+                proj = self.__dict__.pop("_bf16grp_proj", None)
+                if proj is None and _bf16tune_enabled():  # frozen indexer compressor
+                    from primus.backends.megatron.core.fusions.bf16tune import bt_linear
+
+                    proj = bt_linear(hidden, wkg.weight, getattr(wkg, "bias", None))
+                if proj is None:
+                    proj = self.wkv_gate(hidden)
+            if glue_window_pool_ok(proj, self.ape, self.ratio, self.head_dim, self.overlap):
+                # PRIMUS_GLUE_COMPRESS_POOL=1: window split + overlap stitch folded into the pool kernels
+                return self.kv_norm(
+                    fused_window_pool(proj, self.ape, self.ratio, self.head_dim, self.overlap)
+                )
+            kv_proj, score_proj = proj.split(self._proj_out, dim=-1)
+        elif self._fuse_proj:
             kv_proj, score_proj = self.wkv_gate(hidden).split(self._proj_out, dim=-1)
         else:
             kv_proj = self.wkv(hidden)  # [B, S, coff*head_dim]

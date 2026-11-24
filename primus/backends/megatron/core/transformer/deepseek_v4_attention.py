@@ -68,6 +68,8 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 
+from primus.backends.megatron.core.dsv4_features import fast_enabled, gluon_ok
+from primus.backends.megatron.core.fusions.bf16tune import enabled as _bf16tune_enabled
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
@@ -77,6 +79,12 @@ from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
 from primus.backends.megatron.core.transformer.indexer import Indexer
+from primus.core.utils.module_utils import log_rank_0
+
+try:  # PRIMUS_OVERLAP (INDEXER) (side-stream CSA indexer); absent in older Primus-Turbo builds
+    from primus_turbo.pytorch.core import overlap as _overlap
+except ImportError:  # pragma: no cover
+    _overlap = None
 from primus.backends.megatron.core.transformer.indexer_distill_loss import (
     V4IndexerLossAutoScaler,
     compute_indexer_distill_loss,
@@ -111,11 +119,20 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     v4_csa_attention_v1,
     v4_csa_attention_v2,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.q_norm_rope import (
+    q_norm_rope_pad,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.qkv_post import (
+    qkv_post,
+    qkv_post_supported,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
     fused_rms_norm,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rope_interleaved_partial import (
     apply_rope_from_positions,
+    orope_inplace_supported,
+    out_inv_rope_inplace,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -342,6 +359,58 @@ def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+# ---------------------------------------------------------------------------
+# wq_a || wkv concat (PRIMUS_V4_QKV_A_CONCAT=1)
+# ---------------------------------------------------------------------------
+# linear_q_down_proj (wq_a, D -> q_lora_rank) and linear_kv (wkv, D -> head_dim) read the same hidden. On the
+# block-FP8 dsv4up path they run as ONE joint GEMM (Turbo gemm_fp8_block_concat_n): one x quant, one launch per
+# pass, a joint FP8 weight written by the optimizer and the wgrad fused into main_grad. Otherwise the two
+# separate linears run.
+def _qkv_a_concat_enabled() -> bool:
+    return os.environ.get("PRIMUS_V4_QKV_A_CONCAT", "0") == "1"
+
+
+def _no_bias(m: nn.Module) -> bool:
+    """No bias: TE-style linears keep ``bias`` as an EMPTY tensor when bias=False (not None)."""
+    if getattr(m, "use_bias", False):
+        return False
+    b = getattr(m, "bias", None)
+    return b is None or (isinstance(b, torch.Tensor) and b.numel() == 0)
+
+
+def _qkv_a_fp8blk(x2: torch.Tensor, ws, config):
+    """PRIMUS_V4_QKV_A_CONCAT on the Turbo block-FP8 dsv4up path: one x quant + one launch per pass against the
+    joint FP8 weight the optimizer writes (Turbo gemm_fp8_block_concat_n; fused main_grad wgrad, no bf16 weight
+    cat, no .grad round trip). Returns one contiguous [M, N_i] output per weight of ``ws``, or None when that
+    path does not apply."""
+    try:
+        from primus_turbo.pytorch.ops.gemm_fp8_concat import (
+            gemm_fp8_block_concat_n,
+            gemm_fp8_block_concat_n_supported,
+        )
+
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboLowPrecisionGlobalStateManager as _M,
+        )
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            _dense_precision_context,
+            _fuse_wgrad_accum_pattern,
+        )
+    except Exception:  # CPU unit tests / a Turbo without the op
+        return None
+    with _dense_precision_context(x2, ws[0]):
+        if not _M.is_turbo_fp8_enabled():
+            return None
+        qc = _M.get_turbo_quant_config()
+        if qc is None or not qc.block_scaling():
+            return None
+        cfg = qc.data()
+        if not gemm_fp8_block_concat_n_supported(x2, ws, cfg):
+            return None
+        pats = [_fuse_wgrad_accum_pattern(config, w) for w in ws]
+        return gemm_fp8_block_concat_n(x2, list(ws), cfg, pats)
+
+
 def _v4_o_a_fp8_enabled(config) -> bool:
     """Whether to run the grouped-O ``o_a`` down-projection in MXFP8.
 
@@ -389,6 +458,169 @@ def _fp8_grouped_o_a(attn_g: torch.Tensor, wo_a_w: torch.Tensor) -> torch.Tensor
     group_lens = torch.full((G,), B * S, dtype=torch.int64, device=a.device)
     out = pt.ops.grouped_gemm_fp8(a, b, group_lens, trans_b=False, config=cfg)  # [G*BS, r]
     return out.reshape(G, B, S, r).permute(1, 2, 0, 3)  # [B, S, G, r]
+
+
+_OA_DGRAD_TN = os.environ.get("PRIMUS_V4_OA_DGRAD_TN", "0") == "1"
+# bf16g2: o_a dgrad as an NN Gluon GEMM on w itself (no [G, d, r] transpose of w); bit-identical to the hipBLASLt
+# TN / NN solutions (same per-output K order). Needs Triton main (Gluon cdna5); falls back to the paths below.
+_BF16G2_OA_DGRAD = os.environ.get("PRIMUS_BF16G2_OA_DGRAD", "0") == "1"
+_BF16G2_STATE = {}
+
+
+def _bf16g2_mm_or_none():
+    """primus_turbo bf16g2_mm if importable (Gluon cdna5 / gfx1250), else None (logged once)."""
+    if "mm" not in _BF16G2_STATE:
+        try:
+            if not (fast_enabled() and gluon_ok()):
+                raise RuntimeError("Gluon gate closed (Triton < 3.9, not gfx1250, or PRIMUS_GLUON=0)")
+            from primus_turbo.gluon.gemm.gemm_bf16_kernel import bf16g2_mm
+
+            _BF16G2_STATE["mm"] = bf16g2_mm
+        except Exception as e:  # noqa: BLE001
+            _BF16G2_STATE["mm"] = None
+            logging.getLogger(__name__).warning(
+                f"bf16g2 unavailable ({type(e).__name__}: {e}); using hipBLASLt"
+            )
+    return _BF16G2_STATE["mm"]
+
+
+def _bt_mm_oa(a, b, out):
+    from primus.backends.megatron.core.fusions.bf16tune import bt_mm
+
+    return bt_mm(a, b, out=out)
+
+
+class _GroupedOAProjFn(torch.autograd.Function):
+    """Grouped-O ``o_a`` down-projection ``[B,S,G,d] x [G,r,d] -> [B,S,G*r]`` without layout copies.
+
+    ``torch.einsum("bsgd,grd->bsgr")`` runs a bmm over ``g`` on permuted views and pays
+    for it in layout copies: the ``[G,BS,r]`` result is materialised as ``[BS,G,r]`` for
+    the ``flatten`` (fwd), the input gradient comes back as ``[G,BS,d]`` and is copied to
+    ``[BS,G,d]`` by ``ViewBackward`` of the ``reshape``, and the weight gradient comes back
+    as ``[G,d,r]`` and is copied to ``[G,r,d]`` by ``ViewBackward`` of ``weight.view`` --
+    three full transposing copies per layer.
+
+    Here every bmm reads and writes through strided batch views (hipBLASLt takes any
+    batch stride with a unit-stride inner dim), so the outputs land directly in the
+    layout the neighbours want: same GEMMs, no copies.
+    """
+
+    @staticmethod
+    def forward(ctx, x, w, wview=None):  # type: ignore[override]
+        # x: [B, S, G, d] (rows unit-stride), w: [G, r, d]
+        # wview = (G, r, d): ``w`` is the 2-D weight Parameter itself and its dW goes straight into ``main_grad``
+        # (PRIMUS_V4_OA_MAIN_GRAD=1, see _oa_main_grad_ok) instead of param.grad + the DDP hook's copy / add.
+        ctx.wparam, ctx.wview = None, wview
+        if wview is not None:
+            ctx.wparam = w
+            w.grad_added_to_main_grad = True  # set in forward, like Turbo's fused-wgrad linears
+        wv = w.view(wview) if wview is not None else w
+        B, S, G, d = x.shape
+        r = wv.shape[1]
+        x2 = x.reshape(B * S, G, d)
+        out = x.new_empty(B * S, G, r)
+        torch.bmm(x2.transpose(0, 1), wv.transpose(1, 2), out=out.transpose(0, 1))
+        ctx.save_for_backward(x2, w)
+        ctx.x_shape = x.shape
+        return out.view(B, S, G * r)
+
+    @staticmethod
+    def backward(ctx, dout):  # type: ignore[override]
+        x2, w = ctx.saved_tensors
+        wshape = w.shape
+        if ctx.wview is not None:
+            w = w.view(ctx.wview)
+        BS, G, d = x2.shape
+        r = w.shape[1]
+        do = dout.reshape(BS, G, r).transpose(0, 1)  # [G, BS, r] strided view
+        dx = None
+        if ctx.needs_input_grad[0]:
+            dx = x2.new_empty(BS, G, d)
+            g2 = _bf16g2_mm_or_none() if _BF16G2_OA_DGRAD else None
+            if (
+                g2 is not None
+                and w.stride(-1) == 1
+                and do.stride(-1) == 1
+                and w.dtype == torch.bfloat16
+                and do.dtype == torch.bfloat16
+                and r % 128 == 0
+                and r >= 384
+            ):
+                # NN: B = w [G, r(K), d(N)], N contiguous; 256x256 tiles, 16-element row pad for the MN-major tile
+                g2(do, w, dx.transpose(0, 1), tile="256x256", tpad=16)
+                if not _BF16G2_STATE.get("logged"):
+                    _BF16G2_STATE["logged"] = True
+                    log_rank_0(f"[bf16g2] o_a dgrad NN Gluon (G={G}, T={BS}, r={r}, d={d})")
+            elif _OA_DGRAD_TN and w.stride(-1) == 1:
+                # TN: K (= r) contiguous for both operands. With the TunableOp entry for
+                # tn_4096_4096_1024_B_8_ld_1024_8192_32768 (tunableop_dsv4_gfx1250_bf16{bit,all}_0.csv) hipBLASLt
+                # runs ~20% faster than the tuned NN form and bit-identical to it; without the entry the default
+                # TN kernel is SLOWER. The [G, d, r] copy of w costs ~13 us (Triton, LDS-tiled).
+                from primus.backends.megatron.core.fusions.bf16_transpose import (
+                    transpose_last2,
+                )
+
+                torch.bmm(do, transpose_last2(w).transpose(1, 2), out=dx.transpose(0, 1))
+            else:
+                torch.bmm(do, w, out=dx.transpose(0, 1))
+            dx = dx.view(ctx.x_shape)
+        dw = None
+        if ctx.needs_input_grad[1]:
+            if ctx.wparam is not None:
+                from primus_turbo.pytorch.ops.utils import (
+                    _get_dummy_wgrad,
+                    main_grad_first_write,
+                )
+
+                mg = ctx.wparam.main_grad.view(G, r, d)
+                first = main_grad_first_write(
+                    ctx.wparam
+                )  # decided at issue time (host), like the serial path
+
+                bt = _bf16tune_enabled()  # the planned o_a wgrad kernel (bf16rot, bit-identical)
+
+                def _wgrad(mg=mg, do=do, x2=x2, first=first, bt=bt):
+                    if first:  # beta 0: the GEMM writes main_grad (= param.grad's bits)
+                        if not bt or _bt_mm_oa(do.transpose(1, 2), x2.transpose(0, 1), mg) is None:
+                            torch.bmm(do.transpose(1, 2), x2.transpose(0, 1), out=mg)
+                    else:  # the DDP hook's add, done here
+                        t = _bt_mm_oa(do.transpose(1, 2), x2.transpose(0, 1), None) if bt else None
+                        mg.add_(torch.bmm(do.transpose(1, 2), x2.transpose(0, 1)) if t is None else t)
+
+                _wgrad()
+                dw = _get_dummy_wgrad(list(wshape), w.dtype)
+                ctx.wparam = None
+            else:
+                dw = torch.bmm(do.transpose(1, 2), x2.transpose(0, 1))  # [G, r, d], contiguous
+        return dx, dw, None
+
+
+def _ovl_csa_bwd() -> bool:
+    """With the compressor overlap on (``PRIMUS_OVERLAP``), CSA layers fork the compressor and the sparse-MLA
+    backward leaves its dKV gathers on that branch stream, so
+    the dQ chain (q norm/rope bwd, quant, wq_b dgrad) runs next to dKV gather + compressor backward."""
+    return _overlap is not None and _overlap.enabled("COMPRESSOR")
+
+
+def _oa_main_grad_ok(weight: torch.Tensor) -> bool:
+    """PRIMUS_V4_OA_MAIN_GRAD=1 (default off): the grouped o_a bmm writes its dW into ``weight.main_grad``."""
+    if os.environ.get("PRIMUS_V4_OA_MAIN_GRAD", "0") != "1":
+        return False
+    mg = getattr(weight, "main_grad", None)
+    return (
+        isinstance(weight, torch.nn.Parameter)
+        and hasattr(weight, "grad_added_to_main_grad")
+        and isinstance(mg, torch.Tensor)
+        and mg.shape == weight.shape
+        and mg.dtype == weight.dtype
+        and mg.is_contiguous()
+        and weight.is_contiguous()
+        and not getattr(weight, "shared", False)
+    )
+
+
+def _grouped_o_a_bmm_enabled() -> bool:
+    return os.environ.get("PRIMUS_V4_GROUPED_OA_BMM", "1") != "0"
 
 
 def _coerce_optional_bool_flag(value: object, *, field_name: str) -> bool:
@@ -1132,9 +1364,79 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         """
         return 1.0 / math.sqrt(self.head_dim)
 
-    def _apply_q(self, hidden: torch.Tensor) -> torch.Tensor:
+    def _qkv_a_concat_ok(self, hidden: torch.Tensor) -> bool:
+        if not _qkv_a_concat_enabled():
+            return False
+        wq = getattr(self.linear_q_down_proj, "weight", None)
+        wkv = getattr(self.linear_kv, "weight", None)
+        if wq is None or wkv is None or wq.dim() != 2 or wkv.dim() != 2 or wq.shape[1] != wkv.shape[1]:
+            return False
+        if not (_no_bias(self.linear_q_down_proj) and _no_bias(self.linear_kv)):
+            return False
+        return getattr(self.config, "tensor_model_parallel_size", 1) == 1 and hidden.shape[-1] == wq.shape[1]
+
+    def _fuse2_att_gadd_slot(self, hidden: torch.Tensor, seq_starts):
+        """PRIMUS_FUSE2_ATT_GADD=1 (fuse2, default off): a gradient slot when this compressed layer's input feeds only
+        the concat GEMM and the compressor's main_grad-writing wkv_gate (the indexer reads ``hidden.detach()``).
+        """
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_main_grad import (
+            AttGradSlot,
+            att_gadd_enabled,
+            fuse2_linear_mg_ok,
+        )
+
+        if not att_gadd_enabled() or self.compress_ratio not in (4, 128) or seq_starts is not None:
+            return None
+        if (
+            getattr(self, "_ovl_pool", None) is not None
+        ):  # the compressor overlap already issued it (ForkGrad sums)
+            return None
+        comp = getattr(self, "compressor", None)
+        wkg = getattr(comp, "wkv_gate", None) if comp is not None else None
+        if wkg is None or getattr(wkg, "bias", None) is not None or not getattr(comp, "_fuse_proj", False):
+            return None
+        if not (
+            torch.is_grad_enabled()
+            and hidden.requires_grad
+            and hidden.dtype == torch.bfloat16
+            and hidden.is_contiguous()
+            and _v4_get_cp_group() is None
+            and fuse2_linear_mg_ok(hidden, wkg.weight)
+        ):
+            return None
+        return AttGradSlot()
+
+    def _qkv_a_concat(self, hidden: torch.Tensor):
+        """One GEMM for wq_a and wkv -> (q_compressed [B,S,nq], kv_proj [B,S,nkv]) (row-strided views)."""
+        wq = self.linear_q_down_proj.weight
+        wkv = self.linear_kv.weight
+        nq, nkv, D = wq.shape[0], wkv.shape[0], wq.shape[1]
+        lead = hidden.shape[:-1]
+        # Block-FP8 dsv4up path (the DSv4 recipe): joint FP8 weight, fused main_grad. The weight order follows the
+        # main_grad layout (DDP lays wkv right before wq_a), so the wgrad is one GEMM into both main_grads; it is
+        # fixed at the first call (the optimizer's joint FP8 cache is built in that order).
+        order = getattr(self, "_qkv_a_fp8_order", None)
+        if order is None:
+            mq, mk = getattr(wq, "main_grad", None), getattr(wkv, "main_grad", None)
+            kv_first = (
+                isinstance(mq, torch.Tensor)
+                and isinstance(mk, torch.Tensor)
+                and mk.data_ptr() + mk.numel() * mk.element_size() == mq.data_ptr()
+            )
+            order = "kv_q" if kv_first else "q_kv"
+            self._qkv_a_fp8_order = order
+        ws = (wkv, wq) if order == "kv_q" else (wq, wkv)
+        x2 = hidden.reshape(-1, D)
+        outs = _qkv_a_fp8blk(x2, ws, self.config)
+        if outs is not None:  # one contiguous output per weight, in ``ws`` order
+            o_q, o_kv = (outs[1], outs[0]) if order == "kv_q" else (outs[0], outs[1])
+            return o_q.view(*lead, nq), o_kv.view(*lead, nkv)
+        return None, None  # not on the block-FP8 path: the caller keeps the separate linears
+
+    def _apply_q(self, hidden: torch.Tensor, q_compressed: Optional[torch.Tensor] = None) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, H, head_dim]`` (Q after q_norm + q_rms)."""
-        q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
+        if q_compressed is None:
+            q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
         q_compressed = self.q_layernorm(q_compressed)
         q = _projection_forward(self.linear_q_up_proj, q_compressed)
         B, S, _ = q.shape
@@ -1143,9 +1445,48 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         q = _per_head_rms_norm(q, eps=self.norm_eps)
         return q
 
-    def _apply_kv(self, hidden: torch.Tensor) -> torch.Tensor:
+    def _fused_q_norm_rope_ok(self, hidden: torch.Tensor) -> bool:
+        if os.environ.get("PRIMUS_V4_Q_NORM_ROPE_FUSED", "1") == "0":
+            return False
+        if not (hidden.is_cuda and self.rotary_dim > 0):
+            return False
+        if (
+            os.environ.get("PRIMUS_ROPE_TRITON", "1") == "0"
+            or os.environ.get("PRIMUS_RMSNORM_TRITON", "1") == "0"
+        ):
+            return False
+        hd = int(self.head_dim)
+        return hd >= 2 and (hd & (hd - 1)) == 0 and hidden.dtype in (torch.bfloat16, torch.float16)
+
+    def _apply_q_norm_rope(
+        self,
+        hidden: torch.Tensor,
+        position_ids: torch.Tensor,
+        q_compressed: Optional[torch.Tensor] = None,
+        q_normed: bool = False,
+    ) -> torch.Tensor:
+        """``_apply_q`` + Q RoPE in one fused kernel (same math, see ``q_norm_rope``). ``q_normed``: ``q_compressed``
+        already went through ``q_layernorm`` (PRIMUS_V4_QKV_POST_FUSED)."""
+        if q_compressed is None:
+            q_compressed = _projection_forward(self.linear_q_down_proj, hidden)
+        if not q_normed:
+            q_compressed = self.q_layernorm(q_compressed)
+        q = _projection_forward(self.linear_q_up_proj, q_compressed)
+        B, S, _ = q.shape
+        q = q.view(B, S, self.num_heads, self.head_dim)
+        rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+        pos_flat = position_ids.broadcast_to((B, S)).reshape(-1)
+        # The triton_v2 sparse-MLA adapter wants the query zero-padded by 64 columns.
+        be = self._csa_backend if self.compress_ratio == 4 else self._attn_backend
+        pad = 64 if (be == "triton_v2" and not (self.compress_ratio == 0 and self._use_core_attention)) else 0
+        return q_norm_rope_pad(
+            q, pos_flat, rope.inv_freq, rotary_dim=self.rotary_dim, eps=self.norm_eps, pad=pad
+        )
+
+    def _apply_kv(self, hidden: torch.Tensor, kv: Optional[torch.Tensor] = None) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, 1, head_dim]`` (single-latent K = V)."""
-        kv = _projection_forward(self.linear_kv, hidden)
+        if kv is None:
+            kv = _projection_forward(self.linear_kv, hidden)
         kv = self.kv_layernorm(kv)
         B, S, _ = kv.shape
         return kv.view(B, S, 1, self.head_dim)
@@ -1395,10 +1736,15 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         else:
             wo_a_w = weight.view(G, self.o_lora_rank, (H * Dh) // G)  # G is local
             if _v4_o_a_fp8_enabled(self.config):
-                o = _fp8_grouped_o_a(attn_g, wo_a_w)  # per-group MXFP8
+                o = _fp8_grouped_o_a(attn_g, wo_a_w).flatten(2)  # per-group MXFP8
+            elif _grouped_o_a_bmm_enabled() and attn_g.stride(-1) == 1 and attn_g.is_cuda:
+                if _oa_main_grad_ok(weight):
+                    weight._primus_fwd_claim = True  # grad_added_to_main_grad is flagged already in forward
+                    o = _GroupedOAProjFn.apply(attn_g, weight, tuple(wo_a_w.shape))
+                else:
+                    o = _GroupedOAProjFn.apply(attn_g, wo_a_w)  # [B, S, G*r], no layout copies
             else:
-                o = torch.einsum("bsgd,grd->bsgr", attn_g, wo_a_w)
-            o = o.flatten(2)
+                o = torch.einsum("bsgd,grd->bsgr", attn_g, wo_a_w).flatten(2)
         return _projection_forward(self.linear_o_b, o)
 
     def _flat_o_projection(self, attn: torch.Tensor) -> torch.Tensor:
@@ -1434,6 +1780,15 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         if self.rotary_dim == 0:
             return attn
         rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+        if orope_inplace_supported(attn, self.rotary_dim) and torch.is_grad_enabled() and attn.requires_grad:
+            # PRIMUS_V4_OROPE_INPLACE=1: ``attn`` is the sparse-MLA output its backward saved; de-rotate its tail in
+            # place and restore it in the backward (same bytes as below; see OutInvRopeInplaceFn).
+            from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                take_saved_output,
+            )
+
+            if take_saved_output(attn):
+                return out_inv_rope_inplace(attn, position_ids, rope.inv_freq, rotary_dim=self.rotary_dim)
         return apply_rope_from_positions(
             attn,
             position_ids,
@@ -1571,7 +1926,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # for prefill and indexes ``start_pos + 1 - ratio`` for decode -- both
         # land on the window's first token. Positions stay deterministic, so the
         # cached table is still reused every forward.
-        cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl():  # memoised contiguous cast table (same bytes, no per-call copies)
+            cos, sin = self.rope.compress_rope.forward_arange_cast(
+                P, device, pooled.dtype, self.rotary_dim // 2, stride=self.compress_ratio
+            )
+        else:
+            cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
         cos = cos[..., : self.rotary_dim // 2]
         sin = sin[..., : self.rotary_dim // 2]
         cos = cos.unsqueeze(0).expand(B, -1, -1)
@@ -1579,6 +1941,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         pool_kv = pooled.unsqueeze(2)  # [B, P, 1, head_dim]
         pool_kv = apply_interleaved_partial_rope(pool_kv, cos, sin, rotary_dim=self.rotary_dim)
         return pool_kv.squeeze(2)  # [B, P, head_dim]
+
+    def _pool_or_overlap(self, hidden: torch.Tensor, cu_seqlens=None) -> torch.Tensor:
+        """The compressed pool: the one forward() issued on a side stream (PRIMUS_OVERLAP), or built now."""
+        ovl, self._ovl_pool = getattr(self, "_ovl_pool", None), None
+        if ovl is not None:
+            br, pool = ovl
+            return br.done(pool)
+        return self._build_compressed_pool(hidden, cu_seqlens)
 
     def _hca_extra_kv(
         self,
@@ -1601,7 +1971,7 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         """
         B, S, _ = hidden.shape
         device, dtype = hidden.device, hidden.dtype
-        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
+        pool = self._pool_or_overlap(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # Broadcast pool across all H query-heads: [B, P, head_dim] -> [B, P, H, head_dim].
@@ -1754,9 +2124,15 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             k_local_bh, v_local_bh, kv_latent, cp_dwindow, cp_global_start = self._cp_prepend_boundary(
                 kv, B, S
             )
+        elif kv is not None and self._csa_backend == "triton_v2":
+            # Without CP too, hand the triton_v2 adapter the un-broadcast [B, S, 1, D]
+            # latent: its gradient then lands on `kv` directly instead of going through a
+            # zeroed [B, H, S, D] buffer (268 MB memset at S=4096) and the H-fold
+            # ExpandBackward sum (exactly dlatent + 63 zeros, so bit-identical).
+            kv_latent = kv
 
         # 1) Compressed pool with compress-base RoPE.
-        pool = self._build_compressed_pool(hidden, cu_seqlens)  # [B, P, head_dim]
+        pool = self._pool_or_overlap(hidden, cu_seqlens)  # [B, P, head_dim]
         P = pool.shape[1]
 
         # 2) Indexer top-K per query. The indexer is fed a *detached* hidden
@@ -1765,9 +2141,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # from leaking into the layers below (the open-source reference detaches
         # the same way), and when the indexer is frozen it also stops autograd
         # from building a subgraph whose output is discarded.
-        topk_idxs, topk_scores = self.indexer(
-            hidden.detach(), position_ids, cu_seqlens=cu_seqlens
-        )  # [B, S, K]
+        ovl_idx, self._ovl_indexer = getattr(self, "_ovl_indexer", None), None
+        if ovl_idx is not None:  # PRIMUS_OVERLAP (INDEXER): issued on a side stream at the top of forward()
+            br, out = ovl_idx
+            topk_idxs, topk_scores = br.done(*out)
+        else:
+            topk_idxs, topk_scores = self.indexer(
+                hidden.detach(), position_ids, cu_seqlens=cu_seqlens
+            )  # [B, S, K]
 
         # 2b) Indexer distillation. argTopK is not differentiable and the
         # scores are otherwise discarded, so this loss is the indexer's only
@@ -1855,22 +2236,34 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             # Hand the kernel the un-broadcast latent when CP gave us one: it reads a
             # single key row per position anyway, and the broadcast view's gradient would
             # be an 8 GiB [B, H, Skv, D] buffer that is zero except at head 0.
-            return v4_csa_attention_v2(
-                q_bh,
-                k_local_bh if kv_latent is None else kv_latent,
-                v_local_bh if kv_latent is None else None,
-                pool,
-                topk_idxs=topk_idxs,
-                sink=self.attn_sink,
-                swa_window=int(self.attn_sliding_window),
-                attn_dropout=self.attn_dropout,
-                training=self.training,
-                scale=self._attention_scale(),
-                cp_dwindow=cp_dwindow,
-                cp_global_start=cp_global_start,
-                k_is_latent=kv_latent is not None,
-                seq_starts=seq_starts,
-            )
+            dkv_holder, self._ovl_csa_dkv = getattr(self, "_ovl_csa_dkv", None), None
+            if dkv_holder is not None:  # PRIMUS_OVERLAP (CSA_BWD): picked up by this adapter call's forward
+                from primus.backends.megatron.core.transformer.v4_attention_kernels import (
+                    v4_sparse_mla_adapter as _smla,
+                )
+
+                if kv_latent is not None and seq_starts is None and cp_dwindow == 0:
+                    _smla._CSA_DKV_SLOT[0] = dkv_holder
+            try:
+                return v4_csa_attention_v2(
+                    q_bh,
+                    k_local_bh if kv_latent is None else kv_latent,
+                    v_local_bh if kv_latent is None else None,
+                    pool,
+                    topk_idxs=topk_idxs,
+                    sink=self.attn_sink,
+                    swa_window=int(self.attn_sliding_window),
+                    attn_dropout=self.attn_dropout,
+                    training=self.training,
+                    scale=self._attention_scale(),
+                    cp_dwindow=cp_dwindow,
+                    cp_global_start=cp_global_start,
+                    k_is_latent=kv_latent is not None,
+                    seq_starts=seq_starts,
+                )
+            finally:
+                if dkv_holder is not None:
+                    _smla._CSA_DKV_SLOT[0] = None
         if be == "flydsl_v1":
             return self._v4_csa_attention_flydsl(
                 q_bh,
@@ -2224,12 +2617,150 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
             )
         device, dtype = hidden.device, hidden.dtype
 
-        q = self._apply_q(hidden)  # [B, S, H, head_dim]
-        kv = self._apply_kv(hidden)  # [B, S, 1, head_dim]
+        # PRIMUS_OVERLAP (INDEXER): the CSA indexer (forward only: detached input, frozen params, integer top-k out)
+        # depends on nothing but `hidden`, so it is issued on a side stream here and runs next to the q / kv
+        # projections and the compressor; _csa_forward waits for it. Same kernels and inputs -> same top-k.
+        self._ovl_indexer = None
+        if (
+            self.compress_ratio == 4
+            and self.indexer is not None
+            and _overlap is not None
+            and _overlap.enabled("INDEXER")
+            and cu_seqlens is None
+            and _v4_get_cp_group() is None
+            and not (self.indexer_distill_enabled and self.training and torch.is_grad_enabled())
+            and not any(p.requires_grad for p in self.indexer.parameters())
+        ):
+            with _overlap.branch("indexer") as br:
+                out = self.indexer(hidden.detach(), position_ids, cu_seqlens=None)
+            self._ovl_indexer = (br, out)
 
-        # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
-        # (V4's single-latent design: K and V share the rope-applied kv).
-        q, kv = self._apply_rope_q_k(q, kv, position_ids)
+        # PRIMUS_OVERLAP, HCA / CSA: the compressor (pool) depends only on `hidden`, so it is issued on a side
+        # stream next to the q / kv path (its backward follows it there). ForkGrad sums the two input gradients in the
+        # serial engine's order -- compressor first, then the qkv_a projection (the only other consumer on the concat
+        # path) -- so every bit stays the same. HCA layers always; CSA layers only with PRIMUS_OVERLAP (CSA_BWD).
+        self._ovl_pool = None
+        self._ovl_csa_dkv = None
+        csa_bwd = self.compress_ratio == 4 and _ovl_csa_bwd()
+        fork_ok = (
+            self.compressor is not None
+            and _overlap is not None
+            and _overlap.enabled("COMPRESSOR")
+            and cu_seqlens is None
+            and _v4_get_cp_group() is None
+            and hidden.requires_grad
+            and torch.is_grad_enabled()
+            and self._qkv_a_concat_ok(hidden)
+            and not (self.indexer_distill_enabled and self.training)
+        )
+        # CSA_BWD overlap with FUSE2_ATT_GADD: the CSA compressor is forked AFTER the qkv_a concat (below), so
+        # autograd issues the compressor backward before the concat backward and the concat's dX GEMM can still add
+        # into the compressor's dX in its epilogue (the slot waits for the branch); ForkGrad's separate add goes away.
+        csa_late = (
+            fork_ok
+            and csa_bwd
+            and self._csa_backend == "triton_v2"
+            and self._fuse2_att_gadd_slot(hidden, seq_starts) is not None
+        )
+        if (
+            fork_ok
+            and not csa_late
+            and (self.compress_ratio == 128 or (self.compress_ratio == 4 and csa_bwd))
+        ):
+            h_q, h_c = _overlap.ForkGrad.apply(hidden, 2, (1, 0))
+            with _overlap.branch("compressor") as brc:
+                pool_ovl = self._build_compressed_pool(h_c, None)
+            self._ovl_pool = (brc, pool_ovl)
+            hidden = h_q
+            if csa_bwd and self._csa_backend == "triton_v2":
+                # PRIMUS_OVERLAP (CSA_BWD): the CSA sparse-MLA backward leaves its dKV gathers on this branch stream
+                from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                    CSADkvHolder,
+                )
+
+                self._ovl_csa_dkv = CSADkvHolder(brc.side)
+
+        # PRIMUS_V4_QKV_A_CONCAT=1: wq_a and wkv as one joint block-FP8 GEMM (see _qkv_a_fp8blk); else two linears.
+        q_a, kv_a = None, None
+        csa_dkv_joined = False
+        if self._qkv_a_concat_ok(hidden):
+            slot = self._fuse2_att_gadd_slot(hidden, seq_starts)
+            if slot is not None:
+                # PRIMUS_FUSE2_ATT_GADD: the concat and the compressor get their own aliases of the input; the
+                # concat's dX GEMM adds into the compressor's dX (autograd's bf16 add, in the GEMM epilogue)
+                from primus_turbo.pytorch.ops.gemm_fp8_concat import request_dx_accum
+
+                from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.fuse2_main_grad import (
+                    AttFanOut,
+                )
+
+                slot.branch = csa_late
+                h_cat, hidden = AttFanOut.apply(hidden, slot)
+                request_dx_accum(slot)
+                try:
+                    q_a, kv_a = self._qkv_a_concat(h_cat)
+                finally:
+                    request_dx_accum(None)
+                self.compressor._fuse2_dx_slot = slot
+                if (
+                    csa_late
+                ):  # PRIMUS_OVERLAP (CSA_BWD): compressor on the branch, after the concat (see above)
+                    from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                        CSADkvHolder,
+                    )
+
+                    with _overlap.branch("compressor") as brc:
+                        pool_ovl = self._build_compressed_pool(hidden, None)
+                    self._ovl_pool = (brc, pool_ovl)
+                    self._ovl_csa_dkv = CSADkvHolder(brc.side)
+            else:
+                q_a, kv_a = self._qkv_a_concat(hidden)
+        if (
+            q_a is not None
+            and self._fused_q_norm_rope_ok(hidden)
+            and qkv_post_supported(q_a, kv_a, self.q_layernorm, self.kv_layernorm, self.rotary_dim)
+        ):
+            # PRIMUS_V4_QKV_POST_FUSED=1: q_layernorm, kv_layernorm and the kv RoPE as one op (fwd 3 -> 1 launch,
+            # bwd 5 -> 2), bit-identical (see qkv_post.py).
+            rope = self.rope.get_rope(compress_ratio=self.compress_ratio)
+            q_c, kv_r = qkv_post(
+                q_a,
+                kv_a,
+                self.q_layernorm.weight,
+                self.kv_layernorm.weight,
+                position_ids.broadcast_to((B, S)).reshape(-1),
+                rope.inv_freq,
+                eps_q=self.q_layernorm.eps,
+                eps_kv=self.kv_layernorm.eps,
+                rotary_dim=self.rotary_dim,
+                q_first=getattr(self, "_qkv_a_fp8_order", "q_kv") == "q_kv",
+            )
+            if self._ovl_csa_dkv is not None:
+                # PRIMUS_OVERLAP (CSA_BWD): created before the q path's ops, so its backward (the wait for the dKV
+                # gathers) runs after the dQ chain has been issued
+                from primus.backends.megatron.core.transformer.v4_attention_kernels.v4_sparse_mla_adapter import (
+                    CSADkvJoin,
+                )
+
+                kv_r = CSADkvJoin.apply(kv_r, self._ovl_csa_dkv)
+                csa_dkv_joined = True
+            q = self._apply_q_norm_rope(hidden, position_ids, q_compressed=q_c, q_normed=True)
+            kv = kv_r.view(B, S, 1, self.head_dim)
+        elif self._fused_q_norm_rope_ok(hidden):
+            # One pass for per-head RMSNorm + RoPE on Q, written straight into the
+            # zero-padded buffer the sparse-MLA adapter consumes (no pad copy).
+            q = self._apply_q_norm_rope(hidden, position_ids, q_compressed=q_a)  # [B, S, H, head_dim] view
+            kv = self._apply_kv(hidden, kv=kv_a)  # [B, S, 1, head_dim]
+            kv = self.rope.apply_rope(kv, position_ids=position_ids, compress_ratio=self.compress_ratio)
+        else:
+            q = self._apply_q(hidden, q_compressed=q_a)  # [B, S, H, head_dim]
+            kv = self._apply_kv(hidden, kv=kv_a)  # [B, S, 1, head_dim]
+
+            # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
+            # (V4's single-latent design: K and V share the rope-applied kv).
+            q, kv = self._apply_rope_q_k(q, kv, position_ids)
+        if not csa_dkv_joined:
+            self._ovl_csa_dkv = None  # PRIMUS_OVERLAP (CSA_BWD) needs the join on the fused qkv_post path
 
         if self.compress_ratio == 0 and self._use_core_attention:
             # Plan-3 P22: dense layer, Turbo / TE flash path.  Causal + SWA
