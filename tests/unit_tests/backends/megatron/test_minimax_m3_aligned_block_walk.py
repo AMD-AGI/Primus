@@ -165,7 +165,6 @@ def _fp32_reference(q, k, v, dout, table):
     S, B, Hq, _ = q.shape
     Hkv = k.shape[2]
     R = Hq // Hkv
-    topk = table.shape[-1]
     n_blocks = -(-S // BLOCK)
     pos = torch.arange(S, device="cuda")
     keep = torch.zeros(B, Hkv, S, n_blocks + 1, dtype=torch.bool, device="cuda")

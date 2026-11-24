@@ -74,7 +74,6 @@ def _fp32_reference(q, k, v, dout, table):
     S, B, Hq, _ = q.shape
     Hkv = k.shape[2]
     R = Hq // Hkv
-    topk = table.shape[-1]
     n_blocks = -(-S // BLOCK)
     pos = torch.arange(S, device="cuda")
     keep = torch.zeros(B, Hkv, S, n_blocks + 1, dtype=torch.bool, device="cuda")
@@ -172,7 +171,9 @@ def test_backward_matches_fp32_and_the_reference_kernels(S, B, Hkv, topk, kind, 
 
 
 def test_row_dot_matches_torch():
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.row_dot import row_dot
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.row_dot import (
+        row_dot,
+    )
 
     gen = torch.Generator(device="cuda").manual_seed(3)
     for shape in [(513, 1, 64, D), (64, 3, 16, D), (1, 1, 16, D)]:
@@ -186,7 +187,9 @@ def test_row_dot_matches_torch():
 
 
 def test_dispatcher_decides_once_per_shape_and_falls_back(monkeypatch):
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd as bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd as bwd,
+    )
 
     q, k, v, dout, table = _inputs(512, 1, 2, 4, "local")
     saved = dict(bwd._DS_OK)
@@ -222,7 +225,9 @@ def test_dispatcher_decides_once_per_shape_and_falls_back(monkeypatch):
 
 def test_lockstep_kernel_refuses_a_sequence_it_does_not_divide(monkeypatch):
     """The barrier count is workgroup-uniform only when the group divides S."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd_w32
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd_w32,
+    )
 
     assert msa_token_bwd_w32.dq_ds_tokens_per_wg(642, BLOCK) == 1
     assert msa_token_bwd_w32.dq_ds_tokens_per_wg(644, BLOCK) == 4
@@ -242,7 +247,9 @@ def test_switches_turn_it_off():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
-    from primus.backends.megatron.core.transformer.minimax_m3.attention import MinimaxSparseAttention
+    from primus.backends.megatron.core.transformer.minimax_m3.attention import (
+        MinimaxSparseAttention,
+    )
 
     assert MSATransformerConfig.__dataclass_fields__["msa_dq_from_ds"].default is False
     assert MinimaxSparseAttention._dq_from_ds(_fake_attention(), None) == {

@@ -101,7 +101,9 @@ def test_ds_chunk_store_does_not_read_or_leave_stale_records():
 def test_ds_chunk_store_keeps_per_record_stores_for_large_slices(monkeypatch):
     """A (batch, KV head) slice above the 32-bit limit builds the per-record kernel: decided from
     S, topk and the block size before any launch."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd,
+    )
 
     q, k, v, dout, table = H._inputs(1024, 1, 2, 4, "local")
     want = H._backward(q, k, v, dout, table, None, dq_from_ds="force")
@@ -127,7 +129,9 @@ def test_switch_defaults_off_and_exact_numerics_turns_it_off():
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
-    from primus.backends.megatron.core.transformer.minimax_m3.attention import MinimaxSparseAttention
+    from primus.backends.megatron.core.transformer.minimax_m3.attention import (
+        MinimaxSparseAttention,
+    )
 
     assert MSATransformerConfig.__dataclass_fields__["msa_ds_chunk_store"].default is False
     assert "msa_ds_chunk_store" in attention._MSA_RELAXED

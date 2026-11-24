@@ -99,7 +99,9 @@ def test_forward_owner_carry(force_checks, S, B, Hkv, topk, kind, aligned, slot_
 def test_owner_carry_dispatcher_checks_once_and_falls_back(monkeypatch):
     """The dispatcher takes the carry only after a bit-identical first call, per shape."""
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_fwd_w32
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_fwd_w32,
+    )
 
     q, k, v, _, table = H._inputs(1024, 1, 2, 4, "local")
     calls = []
@@ -136,7 +138,9 @@ def test_switch_defaults_off_and_exact_numerics_turns_it_off():
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
-    from primus.backends.megatron.core.transformer.minimax_m3.attention import MinimaxSparseAttention
+    from primus.backends.megatron.core.transformer.minimax_m3.attention import (
+        MinimaxSparseAttention,
+    )
 
     assert MSATransformerConfig.__dataclass_fields__["msa_owner_carry"].default is False
     assert "msa_owner_carry" in attention._MSA_RELAXED
