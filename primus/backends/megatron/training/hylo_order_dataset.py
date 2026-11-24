@@ -33,6 +33,7 @@ class HyLoOrderDataset(Dataset):
     def __init__(self, dump_dir: str, seq_length: int, micro_batch_size: int, data_parallel_size: int):
         with open(os.path.join(dump_dir, "meta.json")) as f:
             meta = json.load(f)
+        # The recorded HyLo runs are pure data parallel, so their world size is the data-parallel size.
         self.mbs, self.seq, self.dp = int(meta["micro_batch"]), int(meta["seq_len"]), int(meta["world_size"])
         if (self.mbs, self.seq, self.dp) != (micro_batch_size, seq_length, data_parallel_size):
             raise ValueError(
