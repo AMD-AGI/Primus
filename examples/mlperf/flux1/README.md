@@ -83,6 +83,7 @@ Each node launches one process, which creates eight workers with `torchrun`.
 | `FLUX_CONFIG` | Nodes | MBS | GA | GBS | Path |
 |---|---:|---:|---:|---:|---|
 | `config_1n_gbs256_a6w4.sh` (default) | 1 | 32 | 1 | 256 | AMD single-node A6W4 schedule |
+| `config_1n_gbs192_a6w4_util6.sh` | 1 | 32 | 1 | 192 | Six-GPU utilization profile; leaves GPUs 6-7 free |
 | `config_1n_gbs256_a6w4_v26_9.sh` | 1 | 32 | 1 | 256 | v26.9 communication settings |
 | `config_1n_gbs1024_a6w4_v26_9.sh` | 1 | 32 | 4 | 1024 | v26.9, no precision switch |
 | `config_2n_gbs512_a6w4.sh` | 2 | 32 | 1 | 512 | Same kernels scaled to DP16 |

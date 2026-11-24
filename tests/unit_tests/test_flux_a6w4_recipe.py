@@ -79,6 +79,23 @@ def test_single_node_matches_amd_schedule_without_four_node_extensions():
     assert {name: env[name] for name in expected} == expected
 
 
+def test_six_gpu_utilization_profile_leaves_two_devices_free():
+    env = _profile_env(profile="config_1n_gbs192_a6w4_util6.sh")
+    expected = {
+        "NNODES": "1",
+        "GPUS_PER_NODE": "6",
+        "LOCAL_BATCH_SIZE": "32",
+        "GRADIENT_ACCUMULATION_STEPS": "1",
+        "GLOBAL_BATCH_SIZE": "192",
+        "EVAL_BATCH_SIZE": "32",
+        "HIP_VISIBLE_DEVICES": "0,1,2,3,4,5",
+        "ROCR_VISIBLE_DEVICES": "0,1,2,3,4,5",
+        "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5",
+        "MLLOG_CONFIG_FILENAME": "config_1n_gbs192_a6w4_util6.sh",
+    }
+    assert {name: env[name] for name in expected} == expected
+
+
 def test_v269_single_node_profile_preserves_schedule_and_tunes_communication():
     env = _profile_env(profile="config_1n_gbs256_a6w4_v26_9.sh")
     baseline = _profile_env(profile="config_1n_gbs256_a6w4.sh")
