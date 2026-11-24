@@ -207,6 +207,11 @@ fourteen small launches forward and six backward; the loss is the same block-lev
 row sums, `exp` and `log` taken by Triton and, under `msa_aligned_block_walk`, in walk order
 (relaxed numerics, deterministic; the first call for a shape compares it with the bit-exact path:
 loss within 5e-7, gradient within 2e-5, two runs identical).
+`msa_index_dk_scatter` (relaxed numerics) replaces the indexer backward's dK chunk kernel, a
+one-hot masked WMMA product over all 128 keys of a block, by a scatter: each plan entry's
+`g * q` row is added in fp32 to its one winning key row, in plan order, one wave per chunk; the
+same fixed-order reduce follows. `d index k` differs in its last bits (deterministic; the first
+call for a shape compares the two kernels' partials and two runs of the new one).
 `--msa_exact_numerics True` turns these options, and any other
 option of this kind, off and reproduces the reference kernels' losses bit for bit.
 

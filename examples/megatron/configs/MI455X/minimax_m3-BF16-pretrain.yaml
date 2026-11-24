@@ -82,6 +82,8 @@ modules:
       # relaxed numerics (off under msa_exact_numerics): neighbouring tokens walk their common
       # blocks at the same step, so the shared staging above finds them
       msa_aligned_block_walk: true
+      # relaxed numerics: the indexer backward's dK as a per-entry scatter into the winning key row
+      msa_index_dk_scatter: true
       # relaxed numerics: dQ from the dK/dV kernel's dS (4 KB of transient buffer per token and block)
       msa_dq_from_ds: true
       # MSA operator kernels, same bits, fewer scalar loads / descriptors per step (off under

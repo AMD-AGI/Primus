@@ -40,6 +40,16 @@ from primus.core.utils.module_utils import warning_rank_0
 _UNSUPPORTED_WARNED = False
 
 
+def index_dk_scatter_enabled(config) -> bool:
+    """``msa_index_dk_scatter`` as the indexer's backward uses it: the switch, unless
+    ``msa_exact_numerics`` is set (relaxed numerics: the chunk partials of ``index_dk`` are
+    summed in another order and from the full fp32 ``g``). Decided before any work; whether
+    the kernel serves the shape and passes its first-call comparison is ``index_dk``'s part."""
+    return bool(getattr(config, "msa_index_dk_scatter", False)) and not bool(
+        getattr(config, "msa_exact_numerics", False)
+    )
+
+
 def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_plan):
     """:func:`select_plan`'s five-launch form of ``select_from_block_scores`` plus the
     ``_FusedSelect`` bookkeeping and the :class:`BlockPlan`; None if it does not apply."""
@@ -85,6 +95,7 @@ class _FusedSelect(torch.autograd.Function):
         # msa_lean_masks: bit-identical scoring and dK kernels, each checked on its first call
         lean = bool(getattr(getattr(indexer, "config", None), "msa_lean_masks", False))
         ctx.lean = lean
+        ctx.dk_scatter = index_dk_scatter_enabled(getattr(indexer, "config", None))
         raw, argmax = index_block_max(q, k, block_size, mask_skip=lean)
         ctx.set_materialize_grads(False)
         ctx.block_size = block_size
@@ -131,7 +142,7 @@ class _FusedSelect(torch.autograd.Function):
             keys_c = keys.clamp_min(0)
         dq = index_dq(g, keys_c, k.reshape(S, B, D), H)
         plan = ctx.plan_slot[0] if ctx.plan_slot else build_block_plan(block_indices, ctx.block_size)
-        dk = index_dk(plan, g, keys, q, ctx.block_size, lean=ctx.lean)
+        dk = index_dk(plan, g, keys, q, ctx.block_size, lean=ctx.lean, scatter=ctx.dk_scatter)
         return dq, dk.reshape(k.shape), None, None, None
 
 

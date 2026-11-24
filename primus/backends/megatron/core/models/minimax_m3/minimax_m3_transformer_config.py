@@ -236,6 +236,19 @@ class MSATransformerConfig(TransformerConfig):
     without it and keeps that one on a mismatch. It changes an MSA operator kernel, so it is
     grouped with the relaxed-numerics options: msa_exact_numerics turns it off."""
 
+    msa_index_dk_scatter: bool = False
+    """flydsl backend on gfx1250, relaxed numerics: the indexer backward's dK chunk kernel adds
+    each plan entry's ``g * q_row`` (fp32) into the one winning key row of an fp32 LDS
+    accumulator, entry by entry in plan order, instead of a one-hot masked WMMA product over
+    all the block's keys (flydsl/index_block_max.py, _build_index_dk_scatter_w32; one wave per
+    chunk, no barrier). The chunk partials go through the same fixed-order reduce. The terms
+    are the same; g enters in full fp32 instead of 16 mantissa bits and a key row's terms are
+    added in entry order, so d index k differs in its last bits (deterministic). The first
+    call for a shape runs the kernel twice and the reference kernel once on that call's
+    inputs: identical bits between the two runs and partials within 1e-4 of the reference's
+    largest partial, else the reference kernel stays. Needs sparse_index_dim a multiple of 32
+    (2, 4 or 8 elements per lane). msa_exact_numerics turns it off."""
+
     msa_ds_chunk_store: bool = False
     """flydsl backend on gfx1250, with msa_dq_from_ds: the dK/dV kernel writes its dS records
     through one buffer descriptor per workgroup (the (batch, KV head) slice of the dS buffer, with

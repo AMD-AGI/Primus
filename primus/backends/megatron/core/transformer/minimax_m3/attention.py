@@ -83,6 +83,7 @@ _MSA_RELAXED = (
     "msa_dq_from_ds",
     "msa_owner_carry",
     "msa_ds_chunk_store",
+    "msa_index_dk_scatter",
     "msa_dq_early_issue",
     "msa_two_tile_slots",
     "msa_walk_one_wave",

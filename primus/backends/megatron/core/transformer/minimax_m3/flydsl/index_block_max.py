@@ -655,6 +655,209 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
     return launch
 
 
+SCATTER_UNROLL = 8  # plan entries per loop step: their loads are in flight together
+SCATTER_AHEAD = False  # load the next step's entry ids one step ahead (timing variant, same bits)
+
+
+def index_dk_scatter_supported(index_dim: int, block_size: int) -> bool:
+    """Shapes ``_build_index_dk_scatter_w32`` serves: one wave32 covers a key row with 4 elements
+    per lane (index dim 128, the only width that was compiled and tested on the device; 2 or 8 per
+    lane would lower too but have never run), and the fp32 accumulator of a block fits in LDS."""
+    return index_dim == 128 and 0 < block_size * index_dim * 4 <= 160 * 1024
+
+
+def _build_index_dk_scatter_w32(
+    num_heads: int,
+    index_dim: int,
+    topk: int,
+    block_size: int,
+    ahead: bool = False,
+    unroll: int = SCATTER_UNROLL,
+):
+    """``msa_index_dk_scatter`` (gfx1250, relaxed numerics): pass 1 of ``index_dk`` as a scatter.
+
+    Same interface, plan and workspace as :func:`build_index_dk`: one workgroup per plan chunk
+    writes that chunk's fp32 ``[block_size, D]`` partial, :func:`build_index_dk_reduce` sums the
+    partials in its fixed order. The partial itself is formed differently. ``build_index_dk``
+    multiplies a one-hot ``[entries, block keys]`` matrix of gradients with the entries' Q rows
+    on the WMMAs: every entry is multiplied into all ``block_size`` key rows although it has one
+    winning key. Here the workgroup is ONE wave (32 lanes = the D columns, ``D / 32`` per lane)
+    with an fp32 ``[block_size, D]`` accumulator in LDS, and each entry does
+
+        acc[key - block * block_size, :] += g * q[token, b, h, :]          (fp32)
+
+    in plan order, ``unroll`` entries per loop step (their entry, gradient, key and Q-row loads are
+    issued together, the LDS updates follow in entry order; ``ahead`` loads the next step's entry
+    ids before the step's updates -- same arithmetic and order, a build variant for timing). An entry that carries no
+    gradient into this block (past the chunk's end, or a key outside the block: the dead slots'
+    ``-1``) leaves the accumulator untouched (a select, not ``+ 0 * q``: a non-finite Q row of a
+    dead entry cannot reach the result).
+
+    Numerics (relaxed class): the same terms as the reference kernel, but ``g`` enters in full fp32
+    (the reference feeds it to the bf16 WMMA as a high and a low half, 16 mantissa bits) and the
+    terms of a key row are added one by one in entry order instead of in the WMMA's order.
+    Deterministic: one wave owns a chunk and adds in program order; no other wave reads or writes
+    its LDS or its workspace rows; no atomics.
+
+    Cannot deadlock: there is no barrier, no wait on another wave and no flag or counter shared
+    between waves anywhere in the kernel (the workgroup is a single wave, so nothing needs one).
+    The only loop walks the chunk's own entries, ``ceil((end - begin) / unroll)`` trips
+    from the read-only chunk table; a wave with more entries simply finishes later. The LDS row
+    index is clamped to the block by the same select that masks the entry, and every buffer
+    access goes through a bounds-checked descriptor (an out-of-range load reads 0).
+    """
+    elem = fx.BFloat16
+    H, DI = num_heads, index_dim
+    assert index_dk_scatter_supported(DI, block_size)
+    EPT = DI // 32  # fp32 elements of a key row per lane
+    U = unroll
+    NACC = block_size * DI
+
+    allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_index_dk_scatter_smem")
+    acc_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = allocator._align(acc_off + NACC * 4, 16)
+
+    @flyc.kernel(known_block_size=[32, 1, 1])
+    def k_fn(
+        ENT: fx.Tensor,
+        CHUNKS: fx.Tensor,
+        GS: fx.Tensor,
+        KEYS: fx.Tensor,
+        Q: fx.Tensor,
+        WS: fx.Tensor,
+        S: fx.Int32,
+        B: fx.Int32,
+        NB: fx.Int32,
+        NCH: fx.Int32,
+    ):
+        vf = Vec.make_type(EPT, fx.Float32)
+        lds_acc = SmemPtr(allocator.get_base(), acc_off, fx.Float32.ir_type, shape=(NACC,)).get()
+        lane = fx.Index(gpu.thread_idx.x)
+        col = lane * fx.Index(EPT)
+        Sn = fx.Index(S)
+        Bn = fx.Index(B)
+        NBn = fx.Index(NB)
+        chunk = fx.Index(gpu.block_idx.x)
+
+        n_entries = Bn * fx.Index(H) * Sn * fx.Index(topk)
+        entry_bytes = _raw(n_entries * fx.Index(4))
+        ent_rsrc = buffer_ops.create_buffer_resource(ENT, max_size=False, num_records_bytes=entry_bytes)
+        gs_rsrc = buffer_ops.create_buffer_resource(GS, max_size=False, num_records_bytes=entry_bytes)
+        key_rsrc = buffer_ops.create_buffer_resource(KEYS, max_size=False, num_records_bytes=entry_bytes)
+        q_rsrc = buffer_ops.create_buffer_resource(
+            Q, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(H * DI * 2))
+        )
+        ch_rsrc = buffer_ops.create_buffer_resource(
+            CHUNKS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(3 * 4))
+        )
+        ws_rsrc = buffer_ops.create_buffer_resource(
+            WS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(block_size * DI * 4))
+        )
+
+        def load_i32(rsrc, idx):
+            return fx.Int32(buffer_ops.buffer_load(rsrc, idx, vec_width=1, dtype=fx.Int32))
+
+        row = fx.Index(load_i32(ch_rsrc, chunk * fx.Index(3)))
+        e_begin = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(1))
+        e_end = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(2))
+        bh = row // NBn
+        blk = row % NBn
+        b = bh // fx.Index(H)
+        h = bh % fx.Index(H)
+        key0 = fx.Int32(blk * fx.Index(block_size))  # first key of the block
+        bh_s = fx.Int32(bh * Sn)
+        b_i32 = fx.Int32(b)
+        h_i32 = fx.Int32(h)
+        key_lo = key0 - fx.Int32(1)
+        key_hi = key0 + fx.Int32(block_size)
+
+        # the accumulator starts at zero: each lane clears its columns of every key row
+        zeros = Vec.filled(EPT, 0.0, fx.Float32)
+        for r in range_constexpr(block_size):
+            zeros.store(lds_acc, [fx.Index(r * DI) + col])
+
+        def load_entries(r0_i32):
+            """Entry ids of the step starting at plan position ``r0_i32`` (clamped into the chunk)."""
+            out = []
+            for i in range_constexpr(U):
+                r = r0_i32 + fx.Int32(i)
+                rc = ArithValue(r < e_end).select(_raw(r), _raw(e_end - fx.Int32(1)))
+                out.append(load_i32(ent_rsrc, fx.Index(fx.Int32(rc))))
+            return out
+
+        if const_expr(ahead):
+            # loop state: the step's U entry ids (loaded one step ahead) and a trip counter
+            init = load_entries(e_begin) + [fx.Int32(0)]
+        else:
+            # a loop carrying one value hands it back unwrapped, so it carries two counters
+            init = [fx.Int32(0), fx.Int32(0)]
+        results = init
+        for r0, it in range(fx.Index(e_begin), fx.Index(e_end), fx.Index(U), init=init):
+            r0_i32 = fx.Int32(r0)
+            if const_expr(ahead):
+                ents = [fx.Index(fx.Int32(it[i])) for i in range_constexpr(U)]
+            else:
+                # the step's U entry ids first, then every load that depends on them, so that each
+                # group is in flight together (two load latencies per step, not two per entry)
+                ents = [fx.Index(x) for x in load_entries(r0_i32)]
+            lives = [ArithValue(r0_i32 + fx.Int32(i) < e_end) for i in range_constexpr(U)]
+            hits, rows, gvs, qfs = [], [], [], []
+            # every load that depends on the entry ids, in flight together
+            for i in range_constexpr(U):
+                e = ents[i]
+                gv = fx.Float32(buffer_ops.buffer_load(gs_rsrc, e, vec_width=1, dtype=fx.Float32))
+                kv = load_i32(key_rsrc, e)
+                # the entry's Q row. e = ((b * H + h) * S + t) * topk + slot and (b, h) is the chunk's,
+                # so t needs no division by S; 32-bit arithmetic (the entry ids are int32).
+                t = fx.Int32(e) // fx.Int32(topk) - bh_s
+                q_at = ((t * B + b_i32) * fx.Int32(H) + h_i32) * fx.Int32(DI)
+                qv = buffer_ops.buffer_load(q_rsrc, fx.Index(q_at) + col, vec_width=EPT, dtype=elem)
+                in_block = arith.AndIOp(_raw(ArithValue(key_lo < kv)), _raw(ArithValue(kv < key_hi))).result
+                hit = ArithValue(arith.AndIOp(_raw(lives[i]), in_block).result)
+                hits.append(hit)
+                rows.append(fx.Int32(hit.select(_raw(kv - key0), _raw(fx.Int32(0)))))
+                gvs.append(gv)
+                qfs.append(Vec(arith.ExtFOp(vf, _raw(qv)).result))
+            if const_expr(ahead):
+                # the next step's entry ids, issued before this step's updates
+                state = load_entries(r0_i32 + fx.Int32(U)) + [fx.Int32(it[U]) + fx.Int32(1)]
+            else:
+                state = [fx.Int32(it[0]) + fx.Int32(1), fx.Int32(it[1])]
+            # the updates, strictly in entry order (two entries of a step may win the same key)
+            for i in range_constexpr(U):
+                at = fx.Index(rows[i]) * fx.Index(DI) + col
+                cur = Vec(Vec.load(vf, lds_acc, [at]))
+                new = []
+                for j in range_constexpr(EPT):
+                    c_j = fx.Float32(_raw(cur[j]))
+                    s_j = c_j + gvs[i] * fx.Float32(_raw(qfs[i][j]))
+                    new.append(fx.Float32(hits[i].select(_raw(s_j), _raw(c_j))))
+                Vec.from_elements(new, fx.Float32).store(lds_acc, [at])
+            results = yield state
+
+        # the chunk's fp32 partial, [chunk][key in block][d], as build_index_dk writes it
+        for r in range_constexpr(block_size):
+            vals = Vec.load(vf, lds_acc, [fx.Index(r * DI) + col])
+            buffer_ops.buffer_store(
+                _raw(vals),
+                ws_rsrc,
+                ((chunk * fx.Index(block_size) + fx.Index(r)) * fx.Index(DI) + col) * fx.Index(4),
+                offset_is_bytes=True,
+            )
+
+    @flyc.jit
+    def launch(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH, stream):
+        allocator.finalized = False
+        with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
+            allocator.finalize()
+        k_fn(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH).launch(
+            grid=(fx.Index(NCH), 1, 1), block=(32, 1, 1), stream=stream
+        )
+
+    launch.compile = lambda *a: flyc.compile(launch, *a)
+    return launch
+
+
 def build_index_dk(num_heads: int, index_dim: int, topk: int, block_size: int):
     """dK for the fused selection, pass 1: one work-group per chunk of the block plan.
 
@@ -1041,13 +1244,64 @@ def index_dq(g, keys, k, num_heads):
     return dq
 
 
-def index_dk(plan, g, keys, q, block_size=128, lean=False):
+_DK_SCATTER_OK: dict = {}
+# first-call comparison of msa_index_dk_scatter: largest partial difference allowed, as a fraction
+# of the reference kernel's largest partial (the reference rounds g to 16 mantissa bits: 8e-6)
+_DK_SCATTER_TOL = 1e-4
+
+
+def _dk_scatter_checked(key, run_scatter, run_reference, ws) -> bool:
+    """Whether the scatter chunk kernel may replace the reference one for this shape: decided on
+    the first call that has something to compare, on that call's inputs. Two runs must give the
+    same bits (determinism) and every partial must be within ``_DK_SCATTER_TOL`` of the reference
+    kernel's largest partial. Nothing is decided (False, not cached) under inference mode or
+    while the reference partials are all zero or not finite (a non-finite Q row spreads through
+    the reference's masked products but not through the scatter, so they cannot be compared). A
+    GPU fault is raised; any other error keeps the reference kernel."""
+    if key in _DK_SCATTER_OK:
+        return _DK_SCATTER_OK[key]
+    if torch.is_inference_mode_enabled():
+        return False
+    from primus.backends.megatron.core.fusions import bitwise_check
+    from primus.core.utils.module_utils import log_rank_0, warning_rank_all
+
+    try:
+        (want,) = run_reference(torch.empty_like(ws))
+        top = want.abs().max()
+        if not bool(torch.isfinite(top)) or float(top) == 0.0:
+            return False
+        (got,) = run_scatter(torch.empty_like(ws))
+        (again,) = run_scatter(torch.empty_like(ws))
+        same = bitwise_check.same_bits(got, again)
+        err = float((got - want).abs().max() / top)
+        ok = bool(same) and err <= _DK_SCATTER_TOL  # a NaN err compares False
+        reason = (
+            f"two runs identical: {bool(same)}; largest partial difference {err:.3e} of the largest partial"
+        )
+    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault keeps the reference kernel
+        if bitwise_check._device_error(e):
+            raise
+        ok, reason = False, f"{type(e).__name__}: {e}"
+    _DK_SCATTER_OK[key] = ok
+    if ok:
+        log_rank_0(f"[msa_index_dk_scatter {key}] relaxed numerics, deterministic ({reason}); in use")
+    else:
+        warning_rank_all(f"[msa_index_dk_scatter {key}] keeping the reference kernel ({reason})")
+    return ok
+
+
+def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
     """Deterministic dK of the index keys; see :func:`build_index_dk`.
 
     ``lean`` (gfx1250, ``msa_lean_masks``): the chunk kernel takes the zeros of the WMMA's unused
     K half from an LDS pad instead of selecting them per element (``_build_index_dk_w32``). The
     first call for a shape compares every bit of the chunk partials with the kernel without it
     and keeps that kernel on a mismatch.
+
+    ``scatter`` (gfx1250, ``msa_index_dk_scatter``, relaxed numerics): the chunk partials come
+    from :func:`_build_index_dk_scatter_w32` (each entry added to its winning key row) when the
+    shape is supported and the first call's comparison with the kernel above passes
+    (:func:`_dk_scatter_checked`); the reduce is unchanged.
 
     Args:
         plan: the selection's :class:`BlockPlan` (``msa_token_bwd``'s, shared).
@@ -1061,6 +1315,15 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False):
     """
     S, B, H, DI = q.shape
     topk = g.shape[-1]
+    # eligibility of the scatter kernel, before any work
+    want_scatter = (
+        bool(scatter)
+        and "gfx1250" in get_hip_arch()
+        and index_dk_scatter_supported(DI, block_size)
+        # the kernel divides entry ids by topk; only power-of-two topk (a shift) was compiled and tested
+        and topk > 0
+        and topk & (topk - 1) == 0
+    )
     dk = torch.empty((S, B, DI), dtype=torch.bfloat16, device=q.device)
     ws = torch.empty((plan.n_chunks, block_size, DI), dtype=torch.float32, device=q.device)
     stream = torch.cuda.current_stream()
@@ -1093,6 +1356,16 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False):
         fn(*args)
         return (ws_out,)
 
+    def run_scatter(ws_out):
+        args = dk_args[:5] + (ws_out,) + dk_args[6:]
+        key = (H, DI, topk, block_size, "scatter")
+        fn = _DK_CACHE.get(key)
+        if fn is None:
+            fn = _build_index_dk_scatter_w32(H, DI, topk, block_size, ahead=SCATTER_AHEAD).compile(*args)
+            _DK_CACHE[key] = fn
+        fn(*args)
+        return (ws_out,)
+
     use_lean = False
     if lean and "gfx1250" in get_hip_arch():
         from primus.backends.megatron.core.fusions import bitwise_check
@@ -1103,7 +1376,12 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False):
             lambda: run_chunks(False, torch.empty_like(ws)),
             key=(S, B, H, DI, topk, block_size, nch),
         )
-    run_chunks(use_lean, ws)
+    if want_scatter and _dk_scatter_checked(
+        (S, B, H, DI, topk, block_size, nch), run_scatter, lambda out: run_chunks(use_lean, out), ws
+    ):
+        run_scatter(ws)
+    else:
+        run_chunks(use_lean, ws)
     red_key = (H, DI, block_size, "reduce")
     red = _DK_CACHE.get(red_key)
     if red is None:
