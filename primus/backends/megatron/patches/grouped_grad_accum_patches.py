@@ -160,12 +160,19 @@ def _flush_first(original):
     return method
 
 
+# A named function, not a lambda: test_defer_embedding_wgrad_patch_wiring reads the
+# register_patch call of every patch module that touches start_grad_sync from its source,
+# where the keyword values have to be literals or module-level names.
+def _is_enabled(ctx: PatchContext) -> bool:
+    return group_size(get_args(ctx)) >= 2
+
+
 @register_patch(
     _PATCH_KEY,
     backend="megatron",
     phase="before_train",
     description="Accumulate K micro-batch gradients into main_grad in one pass (grad_accum_group)",
-    condition=lambda ctx: group_size(get_args(ctx)) >= 2,
+    condition=_is_enabled,
 )
 def patch_grouped_grad_accum(ctx: PatchContext) -> None:
     from megatron.core.distributed.distributed_data_parallel import (
