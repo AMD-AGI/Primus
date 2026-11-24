@@ -111,8 +111,14 @@ _RECIPE_DEFAULTS: Dict[str, str] = {
     "PRIMUS_EMB_MAIN_GRAD": "1",
     "PRIMUS_GLUE_EMB_TOUCHED": "1",
     "PRIMUS_LAUNCH_EMB_SORT": "1",
+    # step boundary
+    "PRIMUS_BUBBLE_LAG_LOG": "1",
+    "PRIMUS_BUBBLE_SKIP_DP1_AG": "1",
+    "PRIMUS_FUSE2_PREFETCH": "2",
     "PRIMUS_FUSE2_LOSS": "1",
     "PRIMUS_STATIC_BF16_LOSS_SCALE_CPU": "1",
+    # overlap of side branches inside the captured step (master switch, read by Primus and Primus-Turbo)
+    "PRIMUS_OVERLAP": "1",
 }
 
 # Component kill switches: ``X=0`` turns every name in the group off (unless that name is set explicitly).
