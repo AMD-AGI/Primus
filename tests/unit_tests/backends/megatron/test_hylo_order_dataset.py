@@ -44,10 +44,11 @@ def test_megatron_sampler_gives_each_rank_its_recorded_batch(tmp_path):
         pytest.skip(f"Megatron is not importable here: {e}")
     batches = _record(tmp_path)
     ds = HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
-    for rank in range(DP):
-        sampler = MegatronPretrainingSampler(len(ds), 0, MBS, rank, DP)
-        served = [np.stack([ds[i]["tokens"].numpy() for i in indices]) for indices in sampler]
-        np.testing.assert_array_equal(np.stack(served), batches[rank])
+    for consumed_steps in (0, 2):
+        for rank in range(DP):
+            sampler = MegatronPretrainingSampler(len(ds), consumed_steps * MBS * DP, MBS, rank, DP)
+            served = [np.stack([ds[i]["tokens"].numpy() for i in indices]) for indices in sampler]
+            np.testing.assert_array_equal(np.stack(served), batches[rank, consumed_steps:])
 
 
 def test_every_position_is_supervised(tmp_path):
@@ -70,6 +71,8 @@ def test_rejects_a_mismatched_layout(tmp_path):
     _record(tmp_path)
     with pytest.raises(ValueError, match="micro_batch_size"):
         HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS + 1, data_parallel_size=DP)
+    with pytest.raises(ValueError, match="seq_length"):
+        HyLoOrderDataset(str(tmp_path), seq_length=SEQ * 2, micro_batch_size=MBS, data_parallel_size=DP)
     with pytest.raises(ValueError, match="data-parallel"):
         HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP * 2)
 

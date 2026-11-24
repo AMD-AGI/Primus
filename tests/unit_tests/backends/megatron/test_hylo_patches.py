@@ -31,7 +31,7 @@ def _args(**overrides):
         micro_batch_size=12,
         global_batch_size=96,
         dataloader_type="cyclic",
-        hylo_order_data_dir="/dump",
+        hylo_order_data_dir=None,
     )
     for name, value in overrides.items():
         setattr(args, name, value)
@@ -86,8 +86,7 @@ def test_each_build_gets_the_mamba_student_and_a_new_teacher(monkeypatch):
 
 
 def test_replay_accepts_one_micro_batch_per_rank_per_step():
-    hylo_distillation._check_replay_args(_args())
-    hylo_distillation._check_replay_args(_args(tensor_model_parallel_size=2, global_batch_size=48))
+    hylo_distillation.validate_hylo_args(_args(hylo_order_data_dir="/dump"))
 
 
 @pytest.mark.parametrize(
@@ -95,13 +94,13 @@ def test_replay_accepts_one_micro_batch_per_rank_per_step():
     [
         ({"global_batch_size": 192}, "global_batch_size=192"),
         ({"world_size": 4}, r"12 x 4"),
-        ({"tensor_model_parallel_size": 2}, r"12 x 4"),
-        ({"context_parallel_size": 2}, "context_parallel_size"),
+        ({"rampup_batch_size": [24, 24, 1000]}, "rampup_batch_size"),
+        ({"stage": "sft"}, "SFT trainer"),
     ],
 )
 def test_replay_rejects_runs_that_cannot_follow_the_recording(overrides, match):
     with pytest.raises(ValueError, match=match):
-        hylo_distillation._check_replay_args(_args(**overrides))
+        hylo_distillation.validate_hylo_args(_args(hylo_order_data_dir="/dump", **overrides))
 
 
 @pytest.fixture
@@ -117,7 +116,7 @@ def run_patch(monkeypatch):
 
 
 def test_patch_switches_replay_to_the_sequential_sampler(run_patch):
-    args = _args()
+    args = _args(hylo_order_data_dir="/dump")
     original = sft_forward_step.create_sft_forward_step
     run_patch(args)
     assert args.dataloader_type == "single"
@@ -125,7 +124,7 @@ def test_patch_switches_replay_to_the_sequential_sampler(run_patch):
 
 
 def test_patch_gives_the_sft_trainer_the_hylo_forward_step(run_patch):
-    args = _args(stage="sft", hylo_order_data_dir=None)
+    args = _args(stage="sft")
     run_patch(args)
     assert sft_forward_step.create_sft_forward_step is hylo_distillation.create_sft_forward_step
     assert args.dataloader_type == "cyclic"
@@ -134,7 +133,7 @@ def test_patch_gives_the_sft_trainer_the_hylo_forward_step(run_patch):
 @pytest.mark.parametrize(
     "overrides, match",
     [
-        ({"global_batch_size": 24}, "global_batch_size"),
+        ({"hylo_order_data_dir": "/dump"}, "SFT trainer"),
         ({"hylo_distill_stage": "kd"}, "hylo_distill_stage"),
         ({"lora": SimpleNamespace(enabled=True)}, "LoRA"),
         ({"hylo_ce_weight": 0.5}, "hylo_ce_weight"),

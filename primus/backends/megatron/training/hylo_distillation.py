@@ -463,16 +463,16 @@ def validate_hylo_args(args: Any) -> None:
 
 def _check_replay_args(args: Any) -> None:
     """Replay serves one recorded micro-batch per data-parallel rank per optimizer step."""
-    if int(getattr(args, "context_parallel_size", 1) or 1) != 1:
-        raise ValueError("hylo_order_data_dir does not support context_parallel_size > 1")
-    tp = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
-    pp = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
-    data_parallel = int(args.world_size) // (tp * pp)
-    if args.global_batch_size != args.micro_batch_size * data_parallel:
+    if getattr(args, "stage", None) == "sft":
+        raise ValueError("hylo_order_data_dir replays pretraining batches; the SFT trainer would not read it")
+    if not unset(getattr(args, "rampup_batch_size", None)):
+        raise ValueError("hylo_order_data_dir does not support rampup_batch_size")
+    # TP=PP=CP=1, so every rank is a data-parallel rank.
+    if args.global_batch_size != args.micro_batch_size * args.world_size:
         raise ValueError(
             "hylo_order_data_dir replays one recorded micro-batch per rank per step; "
             f"global_batch_size={args.global_batch_size} must be micro_batch_size x data-parallel size "
-            f"({args.micro_batch_size} x {data_parallel})"
+            f"({args.micro_batch_size} x {args.world_size})"
         )
 
 

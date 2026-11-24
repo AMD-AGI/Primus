@@ -66,6 +66,11 @@ def test_packed_recipe_is_the_sft_recipe_on_the_reference_schedule(kind, monkeyp
     sft_name, seq_length, steps, warmup, data = RECIPES[kind]
     packed = load_primus_config(CONFIGS / f"{sft_name}-packed.yaml", None).modules[0].params
     sft = load_primus_config(CONFIGS / f"{sft_name}.yaml", None).modules[0].params
+    assert packed.hylo_order_data_dir is None
+    monkeypatch.setenv("HYLO_ORDER_DATA_DIR", "/dump")
+    replay = load_primus_config(CONFIGS / f"{sft_name}-packed.yaml", None).modules[0].params
+    assert replay.hylo_order_data_dir == "/dump"
+    monkeypatch.delenv("HYLO_ORDER_DATA_DIR")
 
     for name in SHARED:
         assert getattr(packed, name, None) == getattr(sft, name, None), name
