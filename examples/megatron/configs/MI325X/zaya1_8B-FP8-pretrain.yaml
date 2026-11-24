@@ -34,17 +34,20 @@ modules:
 
       # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
       # weights and adds cached FP8 weight copies, so it fits fewer samples
-      # than BF16. micro_batch_size 184 is the size the earlier MI325X recipe
-      # used. With the compute paths below it peaks at about 202 of 256 GB per
-      # GPU, so larger micro batches may fit; this recipe keeps 184 so its
-      # numbers compare with the earlier one. On fewer GPUs, lower
-      # micro_batch_size or num_layers (keep it even). Do not edit the model
-      # yaml to shrink the architecture.
+      # than BF16. micro_batch_size 264 is the largest multiple of 8 that
+      # completes the run, including the end-of-training evaluation, on MI325X
+      # (8 x 256 GB) with the compute paths below. Measured on
+      # unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_b06d0c1_20261116 it
+      # peaks at about 239 GiB allocated and 245 GiB reserved by PyTorch
+      # (253 of 256 GB at the device); 272 runs out of memory. Earlier
+      # versions of this recipe used 184, which peaks at about 202 GB. On
+      # fewer GPUs, lower micro_batch_size or num_layers (keep it even). Do not
+      # edit the model yaml to shrink the architecture.
       train_iters: 30
-      micro_batch_size: 184
+      micro_batch_size: 264
       # One micro batch per GPU per step at DP=8.
       # Must be divisible by micro_batch_size * data_parallel_size.
-      global_batch_size: 1472
+      global_batch_size: 2112
       seq_length: 128
       max_position_embeddings: 4096
 
