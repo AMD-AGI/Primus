@@ -5,7 +5,7 @@ Enhanced-ILD, without the reference TRL trainer. It trains an all-MLA student
 and an all-Mamba-2 student from `meta-llama/Llama-3.2-1B-Instruct` at 4K
 context. The public reference config uses 2K; these recipes start at 4K.
 
-The runtime currently supports TP=1 and PP=1. It is intended for eight-way data
+The runtime currently supports TP=PP=CP=1 without activation recompute. It is intended for eight-way data
 parallel training on MI300X with `rocm/primus:v26.9`.
 
 The distillation recipes set `model_type: hylo`. That model family builds the

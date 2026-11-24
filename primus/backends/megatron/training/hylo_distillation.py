@@ -9,9 +9,8 @@
 ``forward_step`` and ``train_valid_test_datasets_provider``; ``patches/hylo_patches.py`` checks the
 run's settings and gives the SFT trainer ``create_sft_forward_step``.
 
-The first implementation intentionally supports TP=PP=1. Data parallel ranks
-each own a frozen teacher, which keeps the layer mapping identical to the
-reference Hugging Face implementation and avoids sharding ambiguities.
+Native HyLo supports TP=PP=CP=1 without activation recompute. Each data-parallel rank owns a frozen
+teacher, which keeps the layer mapping identical to the reference Hugging Face implementation.
 """
 
 from __future__ import annotations
@@ -68,11 +67,9 @@ def hybrid_batch_getter():
 
 
 def _unwrap(model: Any) -> Any:
-    seen = set()
-    while hasattr(model, "module") and id(model) not in seen:
-        seen.add(id(model))
-        model = model.module
-    return model
+    from primus.backends.megatron.sft.forward_step import _unwrap_to_base
+
+    return _unwrap_to_base(model)
 
 
 def _tensor(output: Any) -> torch.Tensor:
@@ -226,20 +223,19 @@ class HyLoRuntime:
                 mixer_slots.append((idx, layer, value))
             elif value == "-":
                 mlp_slots.append((idx, layer))
-        if len(mixer_slots) != len(mlp_slots):
+        if len(mixer_slots) != len(mlp_slots) or any(
+            mlp_idx != mixer_idx + 1 for (mixer_idx, _, _), (mlp_idx, _) in zip(mixer_slots, mlp_slots)
+        ):
             raise RuntimeError(
-                f"HyLo requires paired mixer/MLP slots, got {len(mixer_slots)} and {len(mlp_slots)}"
+                "HyLo requires each mixer slot to be followed by its MLP slot, got pattern "
+                f"{''.join(getattr(s, 'value', str(s)) for s in stack.layer_type_list)}"
             )
         for dense_idx, (_idx, layer, value) in enumerate(mixer_slots):
             self._handles.append(
                 layer.register_forward_pre_hook(self._student_teacher_force_hook(dense_idx), with_kwargs=True)
             )
-            mixer_module = layer.self_attention if value == "*" else getattr(layer, "mixer", layer)
-            self._handles.append(
-                mixer_module.register_forward_hook(
-                    lambda _m, _args, out, cap=self.student_capture: cap.mixer.append(_tensor(out))
-                )
-            )
+            mixer_module = layer.self_attention if value == "*" else layer.mixer
+            self._handles.append(mixer_module.register_forward_hook(self._capture_student_mixer))
         for _idx, layer in mlp_slots:
             self._handles.append(
                 layer.register_forward_hook(
@@ -247,10 +243,16 @@ class HyLoRuntime:
                 )
             )
 
+    def _capture_student_mixer(self, module: torch.nn.Module, _args, out) -> None:
+        # As for the teacher: without grad or in eval mode, bias-dropout-add adds the residual in place.
+        out = _tensor(out)
+        if module.training and torch.is_grad_enabled():
+            self.student_capture.mixer.append(out)
+        else:
+            self.student_capture.mixer.append(out.clone())
+
     def _student_teacher_force_hook(self, dense_idx: int):
         def hook(_module, args, kwargs):
-            if self.stage != "ild":
-                return args, kwargs
             if dense_idx >= len(self.teacher_capture.layer_inputs):
                 raise RuntimeError(f"missing teacher layer input {dense_idx}")
             forced = self.teacher_capture.layer_inputs[dense_idx].detach()
@@ -436,16 +438,21 @@ def validate_hylo_args(args: Any) -> None:
         raise ValueError("native HyLo currently requires tensor_model_parallel_size=1")
     if int(getattr(args, "pipeline_model_parallel_size", 1)) != 1:
         raise ValueError("native HyLo currently requires pipeline_model_parallel_size=1")
+    if int(getattr(args, "context_parallel_size", 1)) != 1:
+        raise ValueError("native HyLo currently requires context_parallel_size=1")
+    if not unset(getattr(args, "recompute_granularity", None)):
+        raise ValueError("native HyLo does not support activation recompute; unset recompute_granularity")
     stage = str(getattr(args, "hylo_distill_stage", "")).lower()
     if stage != "ild":
         raise ValueError("hylo_distill_stage must be 'ild'")
-    if not getattr(args, "hylo_teacher_checkpoint", None):
+    if unset(getattr(args, "hylo_teacher_checkpoint", None)):
         raise ValueError("hylo_teacher_checkpoint is required")
     if not unset(getattr(args, "hylo_teacher_yarn_factor", None)) and unset(
         getattr(args, "hylo_teacher_yarn_original_max_position_embeddings", None)
     ):
         raise ValueError("hylo_teacher_yarn_factor needs hylo_teacher_yarn_original_max_position_embeddings")
-    if float(getattr(args, "hylo_ce_weight", 0.0) or 0.0) != 0.0:
+    ce_weight = getattr(args, "hylo_ce_weight", None)
+    if not unset(ce_weight) and float(ce_weight) != 0.0:
         raise ValueError("HyLo distillation has no cross-entropy term; hylo_ce_weight must be 0")
     if getattr(getattr(args, "lora", None), "enabled", False):
         raise ValueError("native HyLo does not support LoRA")
