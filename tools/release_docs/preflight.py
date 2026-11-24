@@ -128,7 +128,7 @@ def resolve_family(version, family, previous, override=None):
     image = (snapshot or {}).get("image") or C.image_for(family, version)
     ships_primus = snapshot is None or "Primus" in snapshot.get("workspace_repos", {})
 
-    pin_arg = "PRIMUS_COMMIT" if "PRIMUS_COMMIT" in args else "PRIMUS_BRANCH"   # renamed in v26.10
+    pin_arg = "PRIMUS_COMMIT" if "PRIMUS_COMMIT" in args else "PRIMUS_BRANCH"  # renamed in v26.10
     pinned = args.get(pin_arg, "")
     if override:
         resolved = git("rev-parse", "--verify", "--quiet", f"{override}^{{commit}}").stdout.strip()
