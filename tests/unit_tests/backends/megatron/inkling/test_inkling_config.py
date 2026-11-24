@@ -8,8 +8,13 @@
 
 from __future__ import annotations
 
-import pytest
+from types import SimpleNamespace
 
+import pytest
+from megatron.core.extensions import transformer_engine_spec_provider
+from megatron.core.transformer.moe.experts import TEGroupedMLP
+
+from primus.backends.megatron.core.models.inkling import inkling_layer_specs
 from primus.backends.megatron.core.models.inkling.inkling_builders import (
     inkling_config_from_model_yaml,
 )
@@ -17,6 +22,7 @@ from primus.backends.megatron.core.models.inkling.inkling_transformer_config imp
     InklingTransformerConfig,
     default_local_layer_ids,
 )
+from primus.backends.megatron.core.transformer.inkling.moe import InklingGroupedMLP
 from tests.unit_tests.backends.megatron.inkling.inkling_test_utils import (
     load_converter,
     preset,
@@ -93,8 +99,48 @@ def test_default_local_layer_ids():
         ({"swa_num_query_groups": 3}, "not divisible"),
         ({"inkling_attention_backend": "sdpa"}, "inkling_attention_backend"),
         ({"moe_num_shared_experts": 0, "moe_shared_expert_intermediate_size": None}, "shared expert"),
+        ({"tensor_model_parallel_size": 2}, "tensor_model_parallel_size=1"),
     ],
 )
 def test_invalid_configs(overrides, message):
     with pytest.raises(ValueError, match=message):
         inkling_config_from_model_yaml(preset("inkling_small_tiny"), **overrides)
+
+
+def _tuple_backend(expert_module, expert_submodules):
+    """A spec provider whose ``grouped_mlp_modules`` returns the pre-0.19 ``(module, submodules)`` tuple."""
+    return SimpleNamespace(
+        grouped_mlp_modules=lambda grouped_gemm: (expert_module, expert_submodules),
+        column_parallel_linear=lambda: "column",
+        row_parallel_linear=lambda: "row",
+    )
+
+
+class _OtherExperts:
+    pass
+
+
+@pytest.mark.parametrize(
+    "module, expected", [(TEGroupedMLP, InklingGroupedMLP), (_OtherExperts, _OtherExperts)]
+)
+def test_moe_spec_accepts_tuple_experts(module, expected):
+    submodules = object()
+    config = SimpleNamespace(moe_grouped_gemm=True, inkling_fp32_activations=False)
+    experts = inkling_layer_specs._moe_spec(config, _tuple_backend(module, submodules)).submodules.experts
+    assert experts.module is expected and experts.submodules is submodules
+
+
+def test_moe_spec_tuple_experts_reject_fp32_activations():
+    config = SimpleNamespace(moe_grouped_gemm=True, inkling_fp32_activations=True)
+    with pytest.raises(NotImplementedError, match="needs TE grouped experts"):
+        inkling_layer_specs._moe_spec(config, _tuple_backend(_OtherExperts, None))
+
+
+def test_spec_provider_follows_later_patches(monkeypatch):
+    """The Primus-Turbo patch replaces ``TESpecProvider`` after Inkling's specs are imported."""
+
+    class Patched:
+        pass
+
+    monkeypatch.setattr(transformer_engine_spec_provider, "TESpecProvider", Patched)
+    assert isinstance(inkling_layer_specs._spec_provider(), Patched)

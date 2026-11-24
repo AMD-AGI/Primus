@@ -1,0 +1,34 @@
+# Transformer Engine per-module precision recipe for the Muse Spark MI455X proxies.
+# Loaded via Megatron --te-precision-config-file / yaml te_precision_config_file.
+# Empty training_recipe disables FP8 autocast for the matched modules (BF16): the dense linears,
+# i.e. the attention QKV / output projections and the MoE latent projections. The grouped expert
+# GEMMs are not matched, so they keep the experiment's FP8 recipe.
+#
+# This file is not a Primus experiment recipe.
+
+configs:
+  bf16:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe: {}
+
+matchers:
+  self_attn_qkv_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.linear_qkv"
+    enabled: true
+  self_attn_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.linear_proj"
+    enabled: true
+  moe_fc1_latent_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.mlp.fc1_latent_proj"
+    enabled: true
+  moe_fc2_latent_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.mlp.fc2_latent_proj"
+    enabled: true

@@ -63,7 +63,8 @@
     "jax": {
       "torch": "installed by the MaxDiffusion stage, which the bare-metal script skips",
       "torchvision": "same MaxDiffusion stage",
-      "transformers": "pinned by the jax_training stage; bare metal takes it from Primus' requirements-jax.txt"
+      "transformers": "pinned by the jax_training stage; bare metal takes it from Primus' requirements-jax.txt",
+      "datasets": "pinned (5.0.1, next to transformers 4.57.3 for huggingface-hub<1.0) by the MaxDiffusion stage, which the bare-metal script skips; bare metal takes it from MaxText's requirements"
     }
   },
   "inline_pins": {

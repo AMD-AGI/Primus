@@ -54,6 +54,7 @@ from typing import Dict, Optional
 from primus.core.projection.simulation_backends.base import (
     SDPASimulationBackend,
     SimulationResult,
+    hbm_bandwidth_override_gbps,
 )
 
 # =========================================================================
@@ -360,7 +361,8 @@ class SDPASimulator(SDPASimulationBackend):
     # ------------------------------------------------------------------
     @property
     def hbm_bandwidth_gbps(self) -> float:
-        return self._hw.hbm_bandwidth_gbps
+        override = hbm_bandwidth_override_gbps()
+        return override if override is not None else self._hw.hbm_bandwidth_gbps
 
     @property
     def peak_tflops_bf16(self) -> float:

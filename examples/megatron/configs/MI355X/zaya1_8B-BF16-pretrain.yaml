@@ -1,3 +1,8 @@
+# Single-node training (8 GPUs):
+#   GPUS_PER_NODE=8 ./primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI355X/zaya1_8B-BF16-pretrain.yaml
+# No --numa: it gained under 0.1% for BF16. The FP8 recipe uses it.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-pretrain}
@@ -18,11 +23,12 @@ modules:
       log_avg_reset_interval: 10
 
       # 30-step mock-data run for one 8-GPU node (DP=8). micro_batch_size 248
-      # is the largest multiple of 8 that completes on MI355X with
-      # rocm/primus:v26.8: it peaks at 282 of 288 GB per GPU, and 256 runs out
-      # of memory. Each sample costs about 0.8 GB, mostly fp32 logits over the
-      # 262k vocabulary. On fewer GPUs, lower micro_batch_size or num_layers
-      # (keep it even). Do not edit the model yaml to shrink the architecture.
+      # was sized before the ZAYA1 kernel changes and the settings in this
+      # file, as the largest multiple of 8 that completed on MI355X with
+      # rocm/primus:v26.8 (282 of 288 GB per GPU; 256 ran out of memory). It
+      # peaks lower now; larger micro batches were not tried. On fewer GPUs,
+      # lower micro_batch_size or num_layers (keep it even). Do not edit the
+      # model yaml to shrink the architecture.
       train_iters: 30
       micro_batch_size: 248
       # One micro batch per GPU per step at DP=8.
@@ -53,6 +59,36 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
+      # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
+      # elementwise chains, CCA's convolutions as GEMMs, the split experts'
+      # sort-based dispatch (unused while the experts run as grouped GEMMs,
+      # below), and one data-parallel all-reduce per micro batch for every
+      # router's balancing-bias update, instead of one per MoE layer.
+      zaya_attn_flash: true
+      zaya_fuse_norm: true
+      zaya_fuse_cca: true
+      zaya_conv_gemm: true
+      zaya_fuse_moe: true
+      zaya_sort_dispatch: true
+      zaya_router_defer_ar: true
+
+      # Transformer Engine's fused cross-entropy on the output logits, in
+      # place of Megatron's path, which first copies the logits to fp32. From
+      # TE 2.20 (rocm/primus:v26.9) it rounds the logits gradient to bf16 once,
+      # as Megatron's path does; TE 2.17.1 (rocm/primus:v26.8) rounds it twice,
+      # so leave it off there. Primus's warning that TE lacks the FP32-gradient
+      # fix (TE PR #3193) misreads TE 2.20. The chunked linear cross-entropy
+      # (fused_ce_mode: 3) stays off: it rounds each chunk's output-layer weight
+      # gradient to bf16 before summing.
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te
+
+      # Average gradients inside the reduce-scatter, so Megatron skips its
+      # separate pass that first scales the gradient buffer by 1/DP. At DP=8
+      # the scale is a power of two, so the gradients come out the same.
+      ddp_average_in_collective: true
+
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.
       mock_data: true
@@ -74,6 +110,15 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      enable_primus_turbo: false
+      # The 16 experts run as two Primus Turbo grouped GEMMs whose group sizes
+      # stay on the GPU, with Turbo's moe_permute and moe_unpermute moving the
+      # tokens, so no MoE layer waits on the host. The router's gate multiplies
+      # inside Turbo's swiglu_with_probs, in fp32 before the activation's one
+      # bf16 rounding, instead of scaling the unpermuted output: one bf16
+      # rounding fewer per expert row than main's expert(x) * p.
+      # The distributed-optimizer state does not carry across a switch between
+      # split and grouped experts; load with --no-load-optim when switching.
+      enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: true
+      use_turbo_fused_act_with_probs: true

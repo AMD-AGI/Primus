@@ -123,6 +123,8 @@ Settings come from three layers, each overriding the one before it:
 | `warm_cache_after_run_start` | | `false` (`true` in the recipe) | Stream each node's dataset copy back into the page cache once that node's ranks pass `run_start` |
 | `mlperf_log_path` | `MLPERF_LOG_PATH` | `<output_dir>/mlperf_dlrm_v4.log` | MLPerf log (`/results/mlperf_<date>_<n>.log` with `run_with_docker.sh`) |
 | `output_dir` | | `<workspace>/<work_group>/<user_name>/<exp_name>/dlrm_v4` | Generated gin file and default MLPerf log |
+| `synthetic_data` | | `false` | Train on a generated synthetic dataset instead of `data_path`'s (see [Throughput runs on synthetic data](#throughput-runs-on-synthetic-data)) |
+| `synthetic_data_dir` | | `$DATA_PATH/dlrm_v4_synthetic`, else `<output_dir>/dlrm_v4_synthetic` | Where synthetic datasets are generated and kept |
 
 In the MLPerf experiment, `clear_caches`, `warm_cache_after_run_start` and
 `output_dir` are filled from `CLEAR_CACHES`, `WARM_CACHE_AFTER_RUN_START` and
@@ -165,6 +167,80 @@ path in the gin file. The trainer refuses an FP8 backward with a bf16 forward:
 setting only `DLRM_HSTU_FP8_FWD=0` stops at startup, and the error lists the
 other switches to set. They are `DLRM_HSTU_FP8_BWD=0`,
 `DLRM_HSTU_FP8_BWD_UVQK=0` and `DLRM_HSTU_FP8_PREPROC_L2=0`.
+
+### Throughput runs on synthetic data
+
+With `synthetic_data: true`, the backend generates a small dataset in the
+layout of the staged cache and trains on it, so a throughput run needs no
+download. The data loader, model, kernels and gin file are the ones the MLPerf
+run uses. The generator,
+[`synthetic_data.py`](../../../../primus/backends/recommendation/dlrm_v4/synthetic_data.py),
+draws its users from the statistics of a steady-state day of the real data:
+sequence lengths, anchors per user (the trainer batches a window user-major),
+the share of each event type, and items replayed from per-user artist
+libraries. Tokens per batch, users per batch and unique items, artists and
+albums per batch come within a few percent of the real day's, and so does the
+throughput: on one MI355X node with `rocm/primus:v26.9`, two 200-step runs gave
+8397 samples/s per GPU (launched with `primus-cli direct`) and 8379 (through
+tools/perf), against 8454 on the real day 200 (harmonic means over steps
+31-200; TFLOP/s 1013 and 1011 against 1017).
+
+The dataset has two daily windows, one to train on and one for the final eval,
+sized from `num_train_batches` (required), `batch_size` and the world size. The
+backend sets `start_ts` 0, `num_train_ts` 1 and the eval window itself.
+Generating it takes about 20 s for 200 steps of one node (11 GB); later runs of
+the same size reuse it, and a run of another size generates its own. It is for
+a single node: `synthetic_data` refuses `NNODES` above 1, as every node would
+generate the dataset into the same directory.
+
+[`examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml`](../../../../examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml)
+is such a run, and the DLRMv4 entry of the Primus perf benchmarks
+([tools/perf](../../../../tools/perf/README.md#recommendation-recommendation)):
+
+```bash
+DATA_PATH=/mnt/nvme/primus-data ./primus-cli direct -- train pretrain \
+    --config examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml
+```
+
+It trains 200 steps and logs the throughput every 10 (`train - Step N perf:`
+lines, with `global_sps` and `tflops_real/gpu`); the first steps hold the
+kernel builds and FP8 calibration.
+
+Throughput depends on the data: the real windows' sequences grow over the
+dataset (tokens per rank-batch rise from about 2.2 M around window 20 to 2.8 M
+from window 200), so the MLPerf recipe's short check on the first windows
+(`NUM_TRAIN_TS=31`, median `global_sps` over steps 20–200) runs faster than a
+steady-state window. Compare synthetic runs with each other, or with a real
+window of the same day range.
+
+### MI300X and MI325X (bf16)
+
+The recipe's FlyDSL attention and FP8 / MXFP6 HSTU paths are gfx950-only, and
+they stop a run on gfx942 instead of falling back, so MI300X and MI325X run
+the model in bf16. `examples/recommendation/configs/<GPU>/dlrm_v4-BF16-pretrain.yaml`
+sets, in its `env:` block:
+
+- `HSTU_ATTN_FWD=triton`, `HSTU_ATTN_BWD=triton`;
+- `DLRM_HSTU_FP8_FWD`, `DLRM_HSTU_FP8_BWD`, `DLRM_HSTU_FP8_BWD_UVQK`,
+  `DLRM_HSTU_FP8_PREPROC_L2`, `DLRM_HSTU_FP8_FWD_MXFP6` and
+  `DLRM_HSTU_FP8_BWD_OUTPROJ_MXFP6` to 0 (the gin file arms each one
+  separately, and refuses an FP8 backward without the FP8 forward);
+- `TRITON_HSTU_LAST_LAYER_TARGETS_ONLY=0`: the targets-only last layer needs
+  the separated-RNG LayerNorm dropout kernel, which the trainer selects on
+  gfx950 only; without it the first step stops with `indexed output dropout
+  requires separated RNG masks`.
+
+They also lower `hbm_cap_gb` (the embedding placement cap, 260 GB in the gin
+file) to 230 on MI325X and 170 on MI300X, and MI300X runs 512 samples per GPU:
+at 1024 it runs out of its 192 GB. The other gfx950-only kernels turn
+themselves off with a log line. `dlrm_v4-BF16-pretrain.yaml` for MI355X runs
+the same settings, to compare the three GPUs on the same work.
+
+On `rocm/primus:v26.9`, 200 steps on synthetic data: MI325X 1207 samples/s and
+203 TFLOP/s per GPU, MI300X 1052 and 178 (batch 512), MI355X 2025 and 340 with
+these settings (8379 and 1011 with the recipe's FP8 kernels). The trainer's pinned
+Triton configurations are tuned on MI350X; `TRITON_FULL_AUTOTUNE=1` gave MI325X
+8.5% more throughput but took about 45 minutes of autotuning.
 
 ### Checkpointing
 
