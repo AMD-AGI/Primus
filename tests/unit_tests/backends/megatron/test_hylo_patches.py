@@ -4,9 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -14,6 +16,7 @@ from primus.backends.megatron.core.models.registry import get_model_family
 from primus.backends.megatron.patches import hylo_patches
 from primus.backends.megatron.sft import forward_step as sft_forward_step
 from primus.backends.megatron.training import hylo_distillation
+from primus.backends.megatron.training.hylo_order_dataset import HyLoOrderDataset
 
 
 def _args(**overrides):
@@ -21,8 +24,14 @@ def _args(**overrides):
         model_type="hylo",
         hylo_distill_stage="ild",
         hylo_teacher_checkpoint="/teacher",
+        context_parallel_size=1,
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
+        world_size=8,
+        micro_batch_size=12,
+        global_batch_size=96,
+        dataloader_type="cyclic",
+        hylo_order_data_dir="/dump",
     )
     for name, value in overrides.items():
         setattr(args, name, value)
@@ -76,6 +85,25 @@ def test_each_build_gets_the_mamba_student_and_a_new_teacher(monkeypatch):
     assert first.stage == "ild" and hylo_distillation._RUNTIME is not first and removed == [first]
 
 
+def test_replay_accepts_one_micro_batch_per_rank_per_step():
+    hylo_distillation._check_replay_args(_args())
+    hylo_distillation._check_replay_args(_args(tensor_model_parallel_size=2, global_batch_size=48))
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"global_batch_size": 192}, "global_batch_size=192"),
+        ({"world_size": 4}, r"12 x 4"),
+        ({"tensor_model_parallel_size": 2}, r"12 x 4"),
+        ({"context_parallel_size": 2}, "context_parallel_size"),
+    ],
+)
+def test_replay_rejects_runs_that_cannot_follow_the_recording(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        hylo_distillation._check_replay_args(_args(**overrides))
+
+
 @pytest.fixture
 def run_patch(monkeypatch):
     # The SFT trainer imports create_sft_forward_step from this module when it trains.
@@ -88,15 +116,25 @@ def run_patch(monkeypatch):
     return run
 
 
+def test_patch_switches_replay_to_the_sequential_sampler(run_patch):
+    args = _args()
+    original = sft_forward_step.create_sft_forward_step
+    run_patch(args)
+    assert args.dataloader_type == "single"
+    assert sft_forward_step.create_sft_forward_step is original
+
+
 def test_patch_gives_the_sft_trainer_the_hylo_forward_step(run_patch):
-    args = _args(stage="sft")
+    args = _args(stage="sft", hylo_order_data_dir=None)
     run_patch(args)
     assert sft_forward_step.create_sft_forward_step is hylo_distillation.create_sft_forward_step
+    assert args.dataloader_type == "cyclic"
 
 
 @pytest.mark.parametrize(
     "overrides, match",
     [
+        ({"global_batch_size": 24}, "global_batch_size"),
         ({"hylo_distill_stage": "kd"}, "hylo_distill_stage"),
         ({"lora": SimpleNamespace(enabled=True)}, "LoRA"),
         ({"hylo_ce_weight": 0.5}, "hylo_ce_weight"),
@@ -108,10 +146,24 @@ def test_patch_stops_the_run_on_settings_hylo_does_not_support(run_patch, overri
     with pytest.raises(SystemExit, match=match):
         run_patch(args)
     assert sft_forward_step.create_sft_forward_step is original
+    assert args.dataloader_type == "cyclic"
 
 
-def test_provider_serves_the_hybrid_scripts_datasets(monkeypatch):
-    # Megatron-core 0.19: pretrain_mamba is a shim and the provider lives in pretrain_hybrid.
+@pytest.fixture
+def megatron_0_19(monkeypatch, tmp_path):
+    """Megatron-core 0.19: ``pretrain_mamba`` is a shim and the provider lives in ``pretrain_hybrid``."""
+    steps, mbs, seq, dp = 3, 2, 4, 1
+    np.arange(steps * mbs * seq, dtype=np.int32).tofile(tmp_path / "batches_rank0.bin")
+    (tmp_path / "meta.json").write_text(
+        json.dumps({"micro_batch": mbs, "seq_len": seq, "world_size": dp, "steps": steps})
+    )
+    args = SimpleNamespace(
+        hylo_order_data_dir=str(tmp_path),
+        seq_length=seq,
+        micro_batch_size=mbs,
+        global_batch_size=mbs,
+        train_iters=3,
+    )
     original = []
     hybrid = _module(
         "pretrain_hybrid",
@@ -119,5 +171,29 @@ def test_provider_serves_the_hybrid_scripts_datasets(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "pretrain_mamba", _module("pretrain_mamba"))
     monkeypatch.setitem(sys.modules, "pretrain_hybrid", hybrid)
+    parallel_state = _module("megatron.core.parallel_state", get_data_parallel_world_size=lambda: dp)
+    monkeypatch.setitem(sys.modules, "megatron", _module("megatron"))
+    monkeypatch.setitem(sys.modules, "megatron.core", _module("megatron.core", parallel_state=parallel_state))
+    monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", parallel_state)
+    monkeypatch.setitem(
+        sys.modules,
+        "megatron.training",
+        _module("megatron.training", get_args=lambda: args, print_rank_0=lambda *a: None),
+    )
+    return SimpleNamespace(args=args, original=original)
+
+
+def test_provider_serves_the_recording_or_the_hybrid_scripts_datasets(megatron_0_19):
+    train, valid, test = hylo_distillation.train_valid_test_datasets_provider([6, 0, 0])
+    assert isinstance(train, HyLoOrderDataset) and train.steps == 3
+    assert (valid, test) == (None, None)
+
+    megatron_0_19.args.hylo_order_data_dir = None
     hylo_distillation.train_valid_test_datasets_provider([6, 0, 0], vp_stage=1)
-    assert original == [(([6, 0, 0],), {"vp_stage": 1})]
+    assert megatron_0_19.original == [(([6, 0, 0],), {"vp_stage": 1})]
+
+
+def test_provider_rejects_a_recording_shorter_than_the_run(megatron_0_19):
+    megatron_0_19.args.train_iters = 4
+    with pytest.raises(ValueError, match="fewer than train_iters=4"):
+        hylo_distillation.train_valid_test_datasets_provider([8, 0, 0])

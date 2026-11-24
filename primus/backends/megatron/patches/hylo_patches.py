@@ -12,6 +12,10 @@ HyLo Distillation Patch
 builds both and gives the pretrain trainer HyLo's forward step and dataset provider
 (``training/hylo_distillation.py``). This patch checks the run's HyLo settings before training and
 gives the SFT trainer HyLo's SFT forward step in place of its own.
+
+With ``hylo_order_data_dir`` set, the dataset provider serves ``HyLoOrderDataset``: the batches a
+reference HyLo (TRL) run recorded, in its order. Megatron's random sampler would reorder them, so
+the patch also sets ``dataloader_type`` to ``single``.
 """
 
 from primus.core.patches import PatchContext, get_args, get_param, register_patch
@@ -33,6 +37,14 @@ def patch_hylo(ctx: PatchContext) -> None:
 
         args = get_args(ctx)
         hylo_distillation.validate_hylo_args(args)
+        if not hylo_distillation.unset(getattr(args, "hylo_order_data_dir", None)):
+            if args.dataloader_type != "single":
+                log_rank_0(
+                    f"[Patch:{_PATCH_KEY}] dataloader_type {args.dataloader_type} -> single, "
+                    "to keep the recorded order"
+                )
+                args.dataloader_type = "single"
+            log_rank_0(f"[Patch:{_PATCH_KEY}] training reads {args.hylo_order_data_dir}")
         if getattr(args, "stage", None) == "sft":
             from primus.backends.megatron.sft import forward_step as sft_forward_step
 

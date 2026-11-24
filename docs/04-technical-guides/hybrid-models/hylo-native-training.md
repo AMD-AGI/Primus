@@ -237,3 +237,50 @@ match the reference checkpoints.
      --reference /path/to/reference-m2/model.safetensors \
      --dense /path/to/Llama-3.2-1B-Instruct/model.safetensors
    ```
+
+### Train in lockstep with a HyLo run
+
+The packed recipes follow the reference's schedule, but Megatron's packing orders and cuts the
+windows differently from TRL's `ConstantLengthDataset`. To train on exactly the batches a HyLo
+`train_distill.py` run used, record them, along with its init, while it trains.
+`tools/hybrid/hylo_train_dump.py` runs `train_distill.py` unchanged and writes each rank's
+per-step `input_ids` as int32 `(steps, micro_batch, seq_len)` to `batches_rank<r>.bin`,
+`meta.json` with `micro_batch`, `seq_len`, `world_size`, and `steps`, and the student's init to
+`init/model.safetensors`. Launch it from the HyLo checkout in place of `train_distill.py`:
+
+```bash
+cd /path/to/AMD-Hybrid-Models/HyLo
+HYLO_DUMP_DIR=/data/dump/gdn accelerate launch --config_file configs/fsdp_GDN.yaml \
+  /path/to/Primus/tools/hybrid/hylo_train_dump.py <HyLo recipe.yaml>
+```
+
+The numbers below were recorded against AMD-Hybrid-Models `feat/HyLo` at `84871cc` with
+`tools/hybrid/hylo_primus_parity.patch` applied (`git am`). The patch adds the
+`teacher_rope_from_student` option, which the recordings set to false so the teacher keeps its own
+RoPE scaling as in Primus, and fixes padded-batch Enhanced-ILD.
+
+Point `HYLO_ORDER_DATA_DIR` at the dump and `HyLoOrderDataset` replays the batches. The startup patch
+switches the sampler to `dataloader_type: single`, so every rank receives, at every step, the
+batch the HyLo rank with its index used. The run must use the HyLo run's micro-batch, sequence
+length, and data-parallel size, CP=1, and `global_batch_size` equal to micro-batch times
+data-parallel size: one recorded micro-batch per rank per step. Startup fails if `meta.json` and
+the rank files disagree on the step count or record fewer steps than `train_iters`. Replay builds
+no validation or test set, so in-training evaluation is off; score checkpoints afterwards with
+`run_hylo_ild_eval.sh`. Convert the recorded init with `convert_hylo_reference_to_megatron.py` and
+load it as the upcycled checkpoint.
+
+The teacher keeps Llama-3's rope scaling. HyLo's `train_distill.py` gives the teacher the
+student's YaRN by default (`teacher_rope_from_student`); to match that, set
+`HYLO_TEACHER_YARN_FACTOR` and `HYLO_TEACHER_YARN_ORIGINAL_MAX` to the student's `factor` and
+`original_max_position_embeddings` (32 and 8192 for all-MLA, 1 and 2048 for all-Mamba-2).
+
+For 1000 steps from the same init on the same batches, Primus and HyLo give the same per-step
+loss to within 0.3% over the first 25 steps. They drift apart only as bf16 runs do, ending within
+0.3%. The final students score within 0.12% of each other on the test split.
+
+On Megatron-core 0.19 in `rocm/primus:v26.9` the replays end within 0.42% to 0.59% (three all-MLA
+runs) and 0.30% and 0.75% (two all-Mamba-2 runs) of HyLo over the last 250 steps. The two
+all-Mamba-2 runs, with the same inputs, are themselves 0.45% apart there, so bf16 nondeterminism
+sets that spread. On the test split they score all-MLA 34.263 and 34.217 and all-Mamba-2 48.847
+and 48.640, against HyLo's 34.186 and 48.657. The same all-MLA replay in `rocm/primus:v26.8`
+scores 34.189, so the small all-MLA shift comes with the newer image's kernels.

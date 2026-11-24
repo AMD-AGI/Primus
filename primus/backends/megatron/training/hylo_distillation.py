@@ -449,7 +449,24 @@ def validate_hylo_args(args: Any) -> None:
         raise ValueError("HyLo distillation has no cross-entropy term; hylo_ce_weight must be 0")
     if getattr(getattr(args, "lora", None), "enabled", False):
         raise ValueError("native HyLo does not support LoRA")
+    if not unset(getattr(args, "hylo_order_data_dir", None)):
+        _check_replay_args(args)
     _derive_warmup(args)
+
+
+def _check_replay_args(args: Any) -> None:
+    """Replay serves one recorded micro-batch per data-parallel rank per optimizer step."""
+    if int(getattr(args, "context_parallel_size", 1) or 1) != 1:
+        raise ValueError("hylo_order_data_dir does not support context_parallel_size > 1")
+    tp = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
+    pp = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
+    data_parallel = int(args.world_size) // (tp * pp)
+    if args.global_batch_size != args.micro_batch_size * data_parallel:
+        raise ValueError(
+            "hylo_order_data_dir replays one recorded micro-batch per rank per step; "
+            f"global_batch_size={args.global_batch_size} must be micro_batch_size x data-parallel size "
+            f"({args.micro_batch_size} x {data_parallel})"
+        )
 
 
 def _derive_warmup(args: Any) -> None:
@@ -472,10 +489,31 @@ def _derive_warmup(args: Any) -> None:
 
 
 def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None):
-    """The hybrid script's datasets."""
-    return hybrid_pretrain_module().train_valid_test_datasets_provider(
-        train_val_test_num_samples, vp_stage=vp_stage
+    """The hybrid script's datasets, or with ``hylo_order_data_dir`` set, a reference HyLo run's
+    recorded batches (``HyLoOrderDataset``) in its order. Replay builds no validation or test set."""
+    from megatron.core import parallel_state
+    from megatron.training import get_args, print_rank_0
+
+    from primus.backends.megatron.training.hylo_order_dataset import HyLoOrderDataset
+
+    args = get_args()
+    if unset(getattr(args, "hylo_order_data_dir", None)):
+        return hybrid_pretrain_module().train_valid_test_datasets_provider(
+            train_val_test_num_samples, vp_stage=vp_stage
+        )
+    train_ds = HyLoOrderDataset(
+        args.hylo_order_data_dir,
+        seq_length=args.seq_length,
+        micro_batch_size=args.micro_batch_size,
+        data_parallel_size=parallel_state.get_data_parallel_world_size(),
     )
+    if len(train_ds) < args.train_iters * args.global_batch_size:
+        raise ValueError(
+            f"{args.hylo_order_data_dir} has {train_ds.steps} recorded steps, "
+            f"fewer than train_iters={args.train_iters}"
+        )
+    print_rank_0(f"> HyLo-order dataset: {train_ds.steps} steps from {args.hylo_order_data_dir}")
+    return train_ds, None, None
 
 
 def sft_real_tokens(tokens: torch.Tensor, loss_mask: torch.Tensor, pad_id: int) -> torch.Tensor:
