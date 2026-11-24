@@ -75,7 +75,7 @@ def test_grouped_kv_up_projection_reads_hylo_mla_kv_heads(monkeypatch):
     assert (proj.weight.shape[0], proj.kv_repeats) == (8 * PER_HEAD, 4)
     with pytest.raises(ValueError, match="hylo_mla_kv_heads"):
         GroupedKVUpProjection(KV_RANK, 32 * PER_HEAD, config=config, kv_heads=5)
-    monkeypatch.setattr(megatron.training, "get_args", lambda: SimpleNamespace())
+    monkeypatch.setattr(megatron.training, "get_args", SimpleNamespace)
     with pytest.raises(ValueError, match="got None"):
         GroupedKVUpProjection(KV_RANK, 32 * PER_HEAD, config=config)
 

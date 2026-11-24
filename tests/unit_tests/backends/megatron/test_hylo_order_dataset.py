@@ -63,7 +63,7 @@ def test_rejects_padding_and_indices_past_the_recording(tmp_path, idx):
     _record(tmp_path)
     ds = HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
     with pytest.raises(IndexError, match="recorded samples 0 to 29"):
-        ds[idx]
+        _ = ds[idx]
 
 
 def test_rejects_a_mismatched_layout(tmp_path):
