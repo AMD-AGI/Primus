@@ -246,6 +246,15 @@ class MSATransformerConfig(TransformerConfig):
     keep the per-record stores. Part of the msa_dq_from_ds path: its first-call comparison runs
     with it, and msa_exact_numerics turns it off."""
 
+    msa_dq_early_issue: bool = False
+    """flydsl backend on gfx1250, with msa_dq_from_ds: the slim dQ kernel issues the Tensor Data
+    Mover copies of step j+1 before it waits for those of step j, so two steps' copies are in
+    flight at a time in the same 2-stage LDS ring (flydsl/msa_token_bwd_w32.py, early_issue; two
+    workgroup barriers per step instead of one, a count-based wait). Same tiles, arithmetic and
+    order: dq is bit-identical, and the first call for a shape compares every bit of dq with the
+    kernel without it and keeps that one on a mismatch. Part of the msa_dq_from_ds path, so
+    msa_exact_numerics turns it off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for

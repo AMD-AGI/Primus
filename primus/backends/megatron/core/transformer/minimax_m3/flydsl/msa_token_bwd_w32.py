@@ -942,6 +942,7 @@ def build_dq_ds_w32(
     scale: float,
     tokens_per_wg: int = 1,
     with_slots: bool = False,
+    early_issue: bool = False,
 ):
     """dQ from the dK/dV kernel's dS (``msa_dq_from_ds``): ``dQ = scale * dS K`` only.
 
@@ -966,7 +967,21 @@ def build_dq_ds_w32(
     for copies the wave itself issued (its own dS tile every step, the K tile when it owns it);
     the dispatcher builds this layout only when ``S`` and ``block_size`` are multiples of
     ``tokens_per_wg`` and refuses other shapes before any launch.
+
+    ``early_issue`` (``msa_dq_early_issue``, lockstep layout only): the copies of step ``j+1`` are
+    issued before the wave waits for those of step ``j``, so two steps' copies are in flight at a
+    time in the same 2-stage ring (the wait on step ``j``'s copies no longer delays step ``j+1``'s).
+    Per iteration: ``barrier`` (every wave has left step ``j-1``, whose stage is the one step
+    ``j+1`` is written to), issue step ``j+1``, ``tensor_wait(2)`` (all but the two copies just
+    issued, i.e. this wave's copies of step ``j``; a wave's copies complete in issue order),
+    ``barrier`` (every owner's step-``j`` K tile landed), then the step's reads. So that the wait
+    count is the same for every wave, a wave that does not own the step's K tile issues the copy
+    with zero rows (as an empty slot's dS copy already is). Same tiles, same arithmetic, same
+    order: ``dq`` is bit-identical. The deadlock argument is the one above with two barriers per
+    iteration instead of one: both are outside any branch, the trip count is unchanged, and the
+    owner test now selects a row count instead of guarding the copy.
     """
+    EARLY = bool(early_issue) and tokens_per_wg > 1
     NBUF = 2
     WPG = tokens_per_wg
     assert block_size % WPG == 0
@@ -1062,13 +1077,16 @@ def build_dq_ds_w32(
         row_stride = Bn * fx.Index(Hkv) * fx.Index(D)
         head_off = (b * fx.Index(Hkv) + g) * fx.Index(D)
 
-        def tdm_k(kv0, lds_addr):
+        def tdm_k(kv0, lds_addr, live=None):
             off = fx.Int64(fx.Int32(kv0)) * fx.Int64(fx.Int32(row_stride)) + fx.Int64(fx.Int32(head_off))
             gbase = fx.add_offset(fx.get_iter(K), off)
             g_view = fx.Tensor(fx.make_view(gbase, fx.make_layout((KPS, D), (D, 1))))
             rows = fx.Int32(S) - fx.Int32(kv0)
             rows = fx.Int32(ArithValue(rows < fx.Int32(KPS)).select(_raw(rows), _raw(fx.Int32(KPS))))
             rows = fx.Int32(ArithValue(rows > fx.Int32(0)).select(_raw(rows), _raw(fx.Int32(0))))
+            if live is not None:
+                # early_issue: every wave issues the copy; only the owner's has rows
+                rows = fx.Int32(ArithValue(live).select(_raw(rows), _raw(fx.Int32(0))))
             atom = fx.rocdl.make_tdm_atom(
                 g_view,
                 [rows, None],
@@ -1145,7 +1163,13 @@ def build_dq_ds_w32(
         def issue(js, jj):
             if const_expr(WPG > 1):
                 own, kv0, blk = owner_of(jj)
-                if own == fx.Int32(wave_u):
+                if const_expr(EARLY):
+                    tdm_k(
+                        kv0,
+                        stage_base(js) + fx.Int32(wave_u) * fx.Int32(T_BYTES),
+                        ArithValue(own == fx.Int32(wave_u)),
+                    )
+                elif own == fx.Int32(wave_u):
                     tdm_k(kv0, stage_base(js) + fx.Int32(wave_u) * fx.Int32(T_BYTES))
             else:
                 blk = step_blk(jj)
@@ -1172,12 +1196,18 @@ def build_dq_ds_w32(
         results = init
         for j, it in range(fx.Index(0), n_steps, fx.Index(1), init=init):
             dq_acc = [it[dt] for dt in range_constexpr(DT)]
-            tdm_ops.tensor_wait(0)
-            if const_expr(WPG > 1):
-                gpu.barrier()
             j_f = j + fx.Index(NBUF - 1)
             j_c = sel_idx(j_f < n_steps, j_f, j)
-            issue(j_f, j_c)
+            if const_expr(EARLY):
+                gpu.barrier()  # every wave has left step j-1: its stage takes step j+1's tiles
+                issue(j_f, j_c)
+                tdm_ops.tensor_wait(2)  # this wave's step-j copies; the two just issued may still fly
+                gpu.barrier()  # every owner's step-j K tile landed
+            else:
+                tdm_ops.tensor_wait(0)
+                if const_expr(WPG > 1):
+                    gpu.barrier()
+                issue(j_f, j_c)
             if const_expr(WPG > 1):
                 own_j, _, _ = owner_of(j)
                 kslot = stage_base(j) + own_j * fx.Int32(T_BYTES)

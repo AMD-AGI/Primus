@@ -117,6 +117,10 @@ msa_owner_carry: false
 # gfx1250 flydsl kernels with msa_dq_from_ds: the dK/dV kernel stores dS through one buffer
 # descriptor per workgroup instead of one per record (same bytes); msa_exact_numerics turns it off.
 msa_ds_chunk_store: false
+# gfx1250 flydsl kernels with msa_dq_from_ds: the slim dQ kernel issues a step's copies before it
+# waits for the previous step's (two in flight). Bit-identical dq, checked on first use;
+# msa_exact_numerics turns it off.
+msa_dq_early_issue: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 

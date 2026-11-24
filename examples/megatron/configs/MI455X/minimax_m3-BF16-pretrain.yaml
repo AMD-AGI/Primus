@@ -88,6 +88,8 @@ modules:
       # msa_exact_numerics): the forward carries its tile owner; dS stored through one descriptor
       msa_owner_carry: true
       msa_ds_chunk_store: true
+      # same class: the slim dQ kernel keeps two steps' copies in flight
+      msa_dq_early_issue: false
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.

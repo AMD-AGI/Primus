@@ -75,9 +75,16 @@ _MSA_FUSIONS = (
     "msa_fused_zero_centered_gamma",
     "msa_fused_indexer_input_norm",
 )
-# Options whose arithmetic is not bit-identical to the reference flydsl kernels (reordered sums);
-# msa_exact_numerics turns every one of them off.
-_MSA_RELAXED = ("msa_aligned_block_walk", "msa_dq_from_ds", "msa_owner_carry", "msa_ds_chunk_store")
+# Options of the MSA operator kernels that msa_exact_numerics turns off: the ones whose arithmetic
+# is not bit-identical to the reference flydsl kernels (reordered sums: msa_aligned_block_walk,
+# msa_dq_from_ds) and the bit-preserving kernel options that came after them.
+_MSA_RELAXED = (
+    "msa_aligned_block_walk",
+    "msa_dq_from_ds",
+    "msa_owner_carry",
+    "msa_ds_chunk_store",
+    "msa_dq_early_issue",
+)
 _FUSIONS_LOGGED = False
 
 
@@ -302,6 +309,9 @@ class MinimaxSparseAttention(SelfAttention):
             return {}
         # msa_ds_chunk_store rides on this path (the dK/dV kernel's dS stores); same conditions
         lean = {"ds_chunk_store": True} if getattr(config, "msa_ds_chunk_store", False) else {}
+        # msa_dq_early_issue too (the slim dQ kernel's copy issue order)
+        if getattr(config, "msa_dq_early_issue", False):
+            lean["dq_early_issue"] = True
         if walk is None:
             return {"dq_from_ds": True, **lean}
         return {"dq_from_ds": True, "walk_slots": walk[1].to(torch.int32), **lean}

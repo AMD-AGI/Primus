@@ -35,6 +35,7 @@ class _MSAAttention(torch.autograd.Function):
         walk_slots=None,
         owner_carry=False,
         ds_chunk_store=False,
+        dq_early_issue=False,
     ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
@@ -60,6 +61,7 @@ class _MSAAttention(torch.autograd.Function):
         ctx.dq_from_ds = dq_from_ds
         ctx.walk_slots = walk_slots
         ctx.ds_chunk_store = ds_chunk_store
+        ctx.dq_early_issue = dq_early_issue
         ctx.mark_non_differentiable(*outs[1:])
         return outs
 
@@ -82,8 +84,9 @@ class _MSAAttention(torch.autograd.Function):
             dq_from_ds=ctx.dq_from_ds,
             walk_slots=ctx.walk_slots,
             ds_chunk_store=ctx.ds_chunk_store,
+            dq_early_issue=ctx.dq_early_issue,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def msa_attention(
@@ -102,6 +105,7 @@ def msa_attention(
     walk_slots=None,
     owner_carry=False,
     ds_chunk_store=False,
+    dq_early_issue=False,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
@@ -123,6 +127,9 @@ def msa_attention(
     ``owner_carry`` (``msa_owner_carry``) and ``ds_chunk_store`` (``msa_ds_chunk_store``, with
     ``dq_from_ds``): the forward / the dS stores with fewer scalar table loads and buffer
     descriptors per step; same bits as without them (``msa_token_fwd_wave32``, ``msa_token_bwd``).
+
+    ``dq_early_issue`` (``msa_dq_early_issue``, with ``dq_from_ds``): the slim dQ kernel issues a
+    step's copies one wait earlier; same bits (``msa_token_bwd``).
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
@@ -154,4 +161,5 @@ def msa_attention(
         walk_slots if dq_from_ds else None,
         bool(owner_carry),
         bool(ds_chunk_store) and bool(dq_from_ds),
+        bool(dq_early_issue) and bool(dq_from_ds),
     )

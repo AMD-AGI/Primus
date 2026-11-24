@@ -1125,6 +1125,7 @@ def msa_token_bwd(
     dq_from_ds=False,
     walk_slots=None,
     ds_chunk_store=False,
+    dq_early_issue=False,
 ):
     """Gradients of ``msa_token_fwd``.
 
@@ -1161,6 +1162,11 @@ def msa_token_bwd(
             head) slice of the buffer is at most ``_DS_SLICE_MAX_BYTES``; larger shapes keep the
             per-record stores. Bit-identical to ``dq_from_ds`` without it (unit-tested); the
             first-call comparison of ``dq_from_ds`` runs with it.
+        dq_early_issue: with ``dq_from_ds`` (``msa_dq_early_issue``): the slim dQ kernel issues the
+            next step's copies before it waits for the current step's (``build_dq_ds_w32``,
+            ``early_issue``; lockstep layout only). Same tiles and arithmetic: the first call for a
+            shape compares every bit of ``dq`` with the kernel without it, on that call's ``dS``
+            (``bitwise_check``), and keeps that kernel on a mismatch.
         walk_slots: with ``dq_from_ds`` and a permuted ``block_table`` (``msa_aligned_block_walk``),
             the int32 ``[B, Hkv, S, topk]`` slot of each walk position in the table ``plan`` was
             built from.
@@ -1195,6 +1201,8 @@ def msa_token_bwd(
             kwargs = dict(plan=plan, shared_tiles=shared_tiles, step_mask_skip=step_mask_skip)
             if ds_chunk_store:
                 kwargs["ds_chunk_store"] = True  # the comparison runs the variant that will be used
+            if dq_early_issue:
+                kwargs["dq_early_issue"] = True
             key = (
                 S,
                 B,
@@ -1204,6 +1212,7 @@ def msa_token_bwd(
                 float(softmax_scale),
                 walk_slots is not None,
                 bool(ds_chunk_store),
+                bool(dq_early_issue),
             )
             decided = _DS_OK.get(key)
             if decided is None:
@@ -1367,22 +1376,41 @@ def msa_token_bwd(
         if tpw2 > 1 and (S % tpw2 or block_size % tpw2):
             # the lockstep layout's barrier count is workgroup-uniform only for these shapes
             raise ValueError(f"msa_dq_from_ds dQ: S={S} block_size={block_size}")
-        dq = torch.empty_like(q)
         slots = walk_slots if walk_slots is not None else block_table  # unused without slots
-        ds_args = (k, ds, block_table, slots, dq, int(S), int(B), stream)
-        ds_key = ("dq_from_ds", walk_slots is not None, Hkv, topk, block_size, float(softmax_scale), tpw2)
-        fn = _DQ_CACHE.get(ds_key)
-        if fn is None:
-            fn = _w32.build_dq_ds_w32(
-                Hkv,
-                topk,
-                block_size,
-                float(softmax_scale),
-                tokens_per_wg=tpw2,
-                with_slots=walk_slots is not None,
-            ).compile(*ds_args)
-            _DQ_CACHE[ds_key] = fn
-        fn(*ds_args)
+
+        def run_dq_ds(early):
+            dq_out = torch.empty_like(q)
+            ds_args = (k, ds, block_table, slots, dq_out, int(S), int(B), stream)
+            ds_key = ("dq_from_ds", walk_slots is not None, Hkv, topk, block_size, float(softmax_scale), tpw2)
+            if early:
+                ds_key = ("early_issue",) + ds_key  # tokens_per_wg stays the last element
+            fn = _DQ_CACHE.get(ds_key)
+            if fn is None:
+                fn = _w32.build_dq_ds_w32(
+                    Hkv,
+                    topk,
+                    block_size,
+                    float(softmax_scale),
+                    tokens_per_wg=tpw2,
+                    with_slots=walk_slots is not None,
+                    **({"early_issue": True} if early else {}),
+                ).compile(*ds_args)
+                _DQ_CACHE[ds_key] = fn
+            fn(*ds_args)
+            return (dq_out,)
+
+        early = False
+        if dq_early_issue and tpw2 > 1:
+            from primus.backends.megatron.core.fusions import bitwise_check
+
+            # msa_dq_early_issue: decided once per shape, on this call's dS, against the kernel without it
+            early = bitwise_check.passed(
+                "msa_dq_early_issue dQ",
+                lambda: run_dq_ds(True),
+                lambda: run_dq_ds(False),
+                key=(S, B, Hkv, topk, block_size, float(softmax_scale), walk_slots is not None, tpw2),
+            )
+        (dq,) = run_dq_ds(early)
 
     red_args = (ws, plan.chunk_ptr, dk, dv, int(S), int(B), int(n_blocks), int(n_chunks), stream)
     red_key = (Hkv, block_size)
