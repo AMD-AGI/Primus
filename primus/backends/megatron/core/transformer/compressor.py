@@ -422,8 +422,14 @@ class Compressor(KeepInFp32Mixin, nn.Module):
         cu_seqlens: torch.Tensor = None,
         global_start: int = 0,
         boundary_hidden: torch.Tensor = None,
+        rope=None,
     ) -> torch.Tensor:
         """Pool ``hidden[B, S, D]`` to ``[B, P, head_dim]``.
+
+        ``rope``: ``(cos, sin, rotary_dim)`` of the caller's compress-base RoPE, cos / sin as
+        ``[B * P, rotary_dim // 2]`` tables in the activation dtype (contiguous layout only). The
+        result is then ``(pool, rope_applied)``: when the fused pool + kv_norm + RoPE op applies
+        (``comp_fused``), the pool comes back rotated, otherwise unrotated for the caller to rotate.
 
         ``cu_seqlens`` switches to packed (THD) pooling: windows are laid out per sequence
         instead of over the whole row axis, and the result has the fixed capacity
@@ -440,6 +446,8 @@ class Compressor(KeepInFp32Mixin, nn.Module):
         needs the predecessor window. Too short and this raises rather than quietly
         pooling a truncated window.
         """
+        if rope is not None and cu_seqlens is not None:
+            raise ValueError("rope is only supported on the contiguous (cu_seqlens=None) path")
         row_idx = is_first = None
         if cu_seqlens is not None:
             # Fixed-capacity compact layout: this rank's windows in slots [0, n_mine) and
@@ -580,10 +588,37 @@ class Compressor(KeepInFp32Mixin, nn.Module):
             # column numbering that addresses it goes wrong.
             return pooled[:, 1:] if shadow else pooled
 
-        return self._pool_windows(hidden, row_idx, is_first)
+        return self._pool_windows(hidden, row_idx, is_first, rope=rope)
 
-    def _pool_windows(self, hidden, row_idx, is_first):
-        """Project, cut into windows, and softmax-pool -> ``[B, N, head_dim]``.
+    def _pool_norm_rope(self, proj, rope):
+        """Window pool + kv_norm + the caller's RoPE as one op (comp_fused), or None where it does not apply."""
+        if type(self.kv_norm) is not LocalRMSNorm:
+            return None
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.comp_fused import (
+            comp_fused_ok,
+            comp_pool_norm_rope,
+        )
+
+        cos, sin, rd = rope
+        wn = self.kv_norm.weight
+        if not comp_fused_ok(proj, self.ape, wn, self.ratio, self.head_dim, self.overlap, rd):
+            return None
+        return comp_pool_norm_rope(
+            proj,
+            self.ape,
+            wn,
+            cos,
+            sin,
+            ratio=self.ratio,
+            hd=self.head_dim,
+            overlap=self.overlap,
+            eps=self.kv_norm.eps,
+            rotary_dim=rd,
+        )
+
+    def _pool_windows(self, hidden, row_idx, is_first, rope=None):
+        """Project, cut into windows, and softmax-pool -> ``[B, N, head_dim]``
+        (``(pool, rope_applied)`` when ``rope`` is given, see :meth:`forward`).
 
         Shared by the contiguous path, the PyTorch packed path and the fused packed path.
         The three differ only in how ``hidden`` and ``row_idx`` were produced -- the fused
@@ -616,10 +651,15 @@ class Compressor(KeepInFp32Mixin, nn.Module):
                 if proj is None:
                     proj = self.wkv_gate(hidden)
             if glue_window_pool_ok(proj, self.ape, self.ratio, self.head_dim, self.overlap):
+                if rope is not None:
+                    pooled = self._pool_norm_rope(proj, rope)
+                    if pooled is not None:
+                        return pooled, True
                 # PRIMUS_GLUE_COMPRESS_POOL=1: window split + overlap stitch folded into the pool kernels
-                return self.kv_norm(
+                pooled = self.kv_norm(
                     fused_window_pool(proj, self.ape, self.ratio, self.head_dim, self.overlap)
                 )
+                return pooled if rope is None else (pooled, False)
             kv_proj, score_proj = proj.split(self._proj_out, dim=-1)
         elif self._fuse_proj:
             kv_proj, score_proj = self.wkv_gate(hidden).split(self._proj_out, dim=-1)
@@ -662,7 +702,7 @@ class Compressor(KeepInFp32Mixin, nn.Module):
             pooled = (kv * weights).sum(dim=2)  # [B, N, head_dim]
 
         pooled = self.kv_norm(pooled)
-        return pooled
+        return pooled if rope is None else (pooled, False)
 
 
 __all__ = ["Compressor"]

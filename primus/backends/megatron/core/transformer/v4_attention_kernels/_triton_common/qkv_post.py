@@ -12,7 +12,10 @@ Here:
   fwd  ``_qkv_post_fwd_kernel``: both RMSNorms and the kv RoPE (+ the cos / sin table of the RoPE adjoint)  1 launch
   bwd  ``_qkv_post_bwd_kernel``: both RMSNorm backwards per row partition (programs [0, P) q, [P, 2P) kv) with the
        kv RoPE adjoint applied on the fly; ``_dg_reduce2_kernel``: both dgamma reductions                   2 launches
-The concat op's [dq_a | dkv] quant is unchanged.
+When q_a / kv_a are the two outputs of the Turbo concat-N op, its forward leaves a ``DyPrequantSlot``: the backward
+then quantizes the concat's dY ([dq_a | dkv] plus the W^T column cat) and runs both dgamma reductions in one Turbo
+launch (``dy_prequant_fill``), and the concat backward takes that result instead of quantizing again. Same kernel
+bodies, same bytes; a Turbo without the slot API keeps ``_dg_reduce2_kernel`` and the concat's own quant.
 
 Bit-identical to the unfused chain (rmsnorm_g90 fwd / bwd incl. PRIMUS_GLUE_RMSNORM's main_grad writes, and
 RoPEFromPositionsFn with the row kernel): every reduction runs on the original kernel's tile shape and warp count
@@ -230,6 +233,16 @@ def _dg_reduce2_kernel(
         tl.store(DGKV + cols, tl.sum(acc, axis=0).to(DGKV.dtype.element_ty))
 
 
+def _take_dy_prequant(q_a, kv_a):
+    """``(slot, swapped)`` of the concat-N forward whose outputs are (q_a, kv_a), or ``(None, False)`` (no such
+    forward, or a Turbo without ``take_dy_prequant``)."""
+    try:
+        from primus_turbo.pytorch.ops.gemm_fp8_concat import take_dy_prequant
+    except ImportError:
+        return None, False
+    return take_dy_prequant(q_a, kv_a)
+
+
 def _pow2(n):
     return n > 0 and (n & (n - 1)) == 0
 
@@ -315,6 +328,7 @@ class QKVPostFn(torch.autograd.Function):
             num_warps=4,
         )
         ctx.save_for_backward(xq, xkv, gqc, gkvc, rq, rkv, csb)
+        ctx.preq = _take_dy_prequant(q_a, kv_a)
         ctx.meta = (q_a.shape, kv_a.shape, HQ, HKV, rotary_dim, bool(q_first))
         # PRIMUS_GLUE_RMSNORM: dgamma straight into main_grad, claimed in forward like RMSNormG90Fn
         ctx.wparams = []
@@ -429,9 +443,21 @@ class QKVPostFn(torch.autograd.Function):
                 posts.append(None)
                 grads.append(t)
         ctx.wparams = None
-        _dg_reduce2_kernel[(HQ // 64 + HKV // 64,)](
-            dgpq, outs[0], dgpkv, outs[1], P, HQ=HQ, HKV=HKV, BH=64, BP=64, num_warps=4
-        )
+        (slot, swapped), ctx.preq = ctx.preq, None
+        done = False
+        if slot is not None:
+            # dx_q / dx_kv are the concat's dY: quantize them for its backward, with both dgamma reduces in the
+            # same launch (parts in the concat's output order)
+            from primus_turbo.pytorch.ops.gemm_fp8_concat import dy_prequant_fill
+
+            pq, pkv = dxq.view(N, HQ), dxkv.view(N, HKV)
+            done = dy_prequant_fill(
+                slot, [pkv, pq] if swapped else [pq, pkv], (dgpq, outs[0], dgpkv, outs[1], P)
+            )
+        if not done:
+            _dg_reduce2_kernel[(HQ // 64 + HKV // 64,)](
+                dgpq, outs[0], dgpkv, outs[1], P, HQ=HQ, HKV=HKV, BH=64, BP=64, num_warps=4
+            )
         for o, pst in zip(outs, posts):
             if pst is not None:
                 mg, first = pst
