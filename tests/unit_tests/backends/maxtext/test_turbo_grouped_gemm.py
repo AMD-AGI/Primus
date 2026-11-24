@@ -25,6 +25,21 @@ except ImportError:
     HAS_PRIMUS_TURBO = False
 
 
+def _gcn_arch() -> str:
+    try:
+        return str(getattr(jax.devices()[0], "compute_capability", ""))
+    except RuntimeError:
+        return ""
+
+
+# FlyDSL kernels are gfx950-only; on other GPUs they abort the process instead of raising.
+requires_gfx950 = pytest.mark.skipif("gfx950" not in _gcn_arch(), reason="FlyDSL grouped GEMM targets gfx950")
+
+
+def _backend_params(backends):
+    return [pytest.param(b, marks=requires_gfx950) if b == "flydsl" else b for b in backends]
+
+
 def _reference(lhs, rhs, group_sizes):
     out = jax.lax.ragged_dot(lhs.astype(jnp.float32), rhs.astype(jnp.float32), group_sizes)
     rows = jnp.arange(lhs.shape[0])[:, None]
@@ -90,18 +105,19 @@ class TestTurboGroupedGemm:
         assert float(jnp.max(jnp.abs(out[valid:].astype(jnp.float32)), initial=0.0)) == 0.0
         assert float(jnp.max(jnp.abs(d_lhs[valid:].astype(jnp.float32)), initial=0.0)) == 0.0
 
-    @pytest.mark.parametrize("backend", ["ck", "hipblaslt", "flydsl"])
+    @pytest.mark.parametrize("backend", _backend_params(["ck", "hipblaslt", "flydsl"]))
     def test_balanced(self, backend):
         self._check(backend, [256] * 8, m=2048, k=256, n=512)
 
-    @pytest.mark.parametrize("backend", ["ck", "hipblaslt", "flydsl"])
+    @pytest.mark.parametrize("backend", _backend_params(["ck", "hipblaslt", "flydsl"]))
     def test_empty_groups_and_padding(self, backend):
         self._check(backend, [0, 300, 17, 0, 512, 1, 200, 0], m=1536, k=256, n=384)
 
-    @pytest.mark.parametrize("backend", ["hipblaslt", "flydsl"])
+    @pytest.mark.parametrize("backend", _backend_params(["hipblaslt", "flydsl"]))
     def test_single_group(self, backend):
         self._check(backend, [1000], m=1024, k=512, n=256)
 
+    @requires_gfx950
     def test_flydsl_skewed_many_groups(self):
         sizes = [0] * 31 + [3000] + [1] * 32
         self._check("flydsl", sizes, m=3200, k=192, n=640)
