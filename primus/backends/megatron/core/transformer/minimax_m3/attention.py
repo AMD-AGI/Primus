@@ -85,6 +85,7 @@ _MSA_RELAXED = (
     "msa_ds_chunk_store",
     "msa_dq_early_issue",
     "msa_two_tile_slots",
+    "msa_walk_one_wave",
 )
 _FUSIONS_LOGGED = False
 
@@ -294,7 +295,9 @@ class MinimaxSparseAttention(SelfAttention):
         table = getattr(block_plan, "table", None) if block_plan is not None else None
         if table is None or table.shape != block_indices.shape:
             table = block_indices.to(torch.int32)
-        return block_walk.aligned_block_walk(table, self.block_size)
+        return block_walk.aligned_block_walk(
+            table, self.block_size, one_wave=bool(getattr(config, "msa_walk_one_wave", False))
+        )
 
     def _dq_from_ds(self, walk) -> dict:
         """``msa_dq_from_ds``: the keyword arguments that turn it on for the MSA backward, or none

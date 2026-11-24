@@ -50,6 +50,11 @@ from primus.backends.megatron.core.fusions import bitwise_check
 
 # tokens aligned with each other: the forward kernel's workgroup (msa_token_fwd_w32.FWD_TOKENS_PER_WG)
 GROUP = 4
+# msa_walk_one_wave: groups per program when the kernel is launched with one wave per program.
+# With four waves and 16 groups per program the compiled kernel (gfx1250, topk 16) exchanges its
+# K x K compare / rank reductions between the waves through LDS and 207 workgroup barrier pairs;
+# with one wave it has none. A constant of the kernel, not of S or B.
+_ONE_WAVE_ROWS = 2
 
 
 @triton.jit
@@ -164,14 +169,15 @@ def _reference(table: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return walk.reshape(B, H, S, K).to(torch.int32), slots.reshape(B, H, S, K)
 
 
-def _kernel(table: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def _kernel(table: torch.Tensor, rows: int = 16, warps: int = 4) -> Tuple[torch.Tensor, torch.Tensor]:
+    """One launch of ``_align_kernel``: ``rows`` groups per program, ``warps`` waves per program
+    (the same integer result for every pair)."""
     B, H, S, K = table.shape
     walk = torch.empty_like(table)
     slots = torch.empty(table.shape, dtype=torch.int64, device=table.device)
     n_groups = B * H * S // GROUP
-    BR = 16
-    _align_kernel[(triton.cdiv(n_groups, BR),)](
-        table, walk, slots, n_groups, K=K, KP=triton.next_power_of_2(K), BR=BR, num_warps=4
+    _align_kernel[(triton.cdiv(n_groups, rows),)](
+        table, walk, slots, n_groups, K=K, KP=triton.next_power_of_2(K), BR=rows, num_warps=warps
     )
     return walk, slots
 
@@ -199,17 +205,21 @@ def _is_permutation(table, walk, slots) -> bool:
     )
 
 
-def aligned_block_walk(table: torch.Tensor, block_size: int) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+def aligned_block_walk(
+    table: torch.Tensor, block_size: int, one_wave: bool = False
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
     """``(walk, slots)`` for an int32 ``[B, H, S, K]`` block table: ``walk`` is ``table`` with
     every row permuted as the module docstring describes and ``slots`` (int64) the permutation,
     ``walk == table.gather(-1, slots)``. None when the shape is not :func:`eligible` or the
-    kernel's first result for this shape was not the reference's (the caller keeps ``table``)."""
+    kernel's first result for this shape was not the reference's (the caller keeps ``table``).
+    ``one_wave`` (``msa_walk_one_wave``) launches the kernel with one wave per program; that launch
+    is checked against the reference on its own first table and falls back to the four-wave one."""
     if not eligible(table, block_size):
         return None
     table = table.contiguous()
 
-    def run():
-        walk, slots = _kernel(table)
+    def run(rows=16, warps=4):
+        walk, slots = _kernel(table, rows, warps)
         # a row of walk must hold exactly the table row's entries, whatever the alignment did
         ok = torch.tensor(_is_permutation(table, walk, slots), device=table.device)
         return walk, slots, ok
@@ -220,4 +230,8 @@ def aligned_block_walk(table: torch.Tensor, block_size: int) -> Optional[Tuple[t
 
     if not bitwise_check.passed("msa_aligned_block_walk", run, reference, key=tuple(table.shape)):
         return None
+    if one_wave and bitwise_check.passed(
+        "msa_walk_one_wave", lambda: run(_ONE_WAVE_ROWS, 1), reference, key=tuple(table.shape)
+    ):
+        return _kernel(table, _ONE_WAVE_ROWS, 1)
     return _kernel(table)

@@ -92,6 +92,8 @@ modules:
       msa_dq_early_issue: false
       # same class: the forward keeps two LDS tile slots per wave (four workgroups per compute unit)
       msa_two_tile_slots: true
+      # same table, the aligned walk's kernel with one wave per program
+      msa_walk_one_wave: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.

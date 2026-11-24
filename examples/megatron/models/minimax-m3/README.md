@@ -198,6 +198,9 @@ the forward keeps one K and one V tile slot per wave instead of two of each: a s
 copied while the step works on K, the next step's K tile while it works on V; a workgroup then
 takes 68 KB instead of 140 KB of LDS and four instead of two fit a compute unit; the first call
 for a shape compares every output bit).
+`msa_walk_one_wave` launches the aligned walk's Triton kernel with one wave per program, which
+removes the workgroup barriers of its cross-wave reductions; the table it writes is the same
+integers (checked against the PyTorch reference on the first table of a shape).
 `--msa_exact_numerics True` turns these options, and any other
 option of this kind, off and reproduces the reference kernels' losses bit for bit.
 

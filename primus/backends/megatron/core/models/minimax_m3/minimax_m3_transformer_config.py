@@ -266,6 +266,15 @@ class MSATransformerConfig(TransformerConfig):
     bit with the kernel without it and keeps that one on a mismatch. An MSA operator kernel
     option: msa_exact_numerics turns it off."""
 
+    msa_walk_one_wave: bool = False
+    """flydsl backend on gfx1250, with msa_aligned_block_walk: the walk's Triton kernel is launched
+    with one wave per program (2 token groups each) instead of four waves (16 groups), so its
+    K x K compares and ranks are not exchanged between waves through LDS and workgroup barriers
+    (flydsl/block_walk.py). The same integer kernel: the walk table and slots are identical (the
+    first table of a shape is compared with the PyTorch reference; a mismatch keeps the four-wave
+    launch), so every output keeps its bits. An option of the aligned walk, which
+    msa_exact_numerics turns off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for

@@ -125,6 +125,9 @@ msa_dq_early_issue: false
 # four workgroups instead of two fit a compute unit. Bit-identical outputs, checked on first use;
 # msa_exact_numerics turns it off.
 msa_two_tile_slots: false
+# with msa_aligned_block_walk: the walk kernel runs one wave per program (no workgroup barriers);
+# the same integer table. Off with the walk under msa_exact_numerics.
+msa_walk_one_wave: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 
