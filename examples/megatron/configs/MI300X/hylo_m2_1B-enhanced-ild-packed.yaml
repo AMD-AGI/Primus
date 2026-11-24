@@ -24,6 +24,7 @@ modules:
       # student's factor and original window to train against that teacher.
       hylo_teacher_yarn_factor: ${HYLO_TEACHER_YARN_FACTOR:null}
       hylo_teacher_yarn_original_max_position_embeddings: ${HYLO_TEACHER_YARN_ORIGINAL_MAX:null}
+      hylo_kl_weight: 1.0
 
       tokenizer_model: ${HYLO_TOKENIZER_MODEL:meta-llama/Llama-3.2-1B-Instruct}
       mock_data: false

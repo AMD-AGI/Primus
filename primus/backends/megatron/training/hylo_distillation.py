@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Native Megatron runtime for HyLo Enhanced-ILD (``model_type: hylo``).
+"""Native Megatron runtime for HyLo Enhanced-ILD and pure-KL SFT (``model_type: hylo``).
 
 ``registry.py`` builds the student with ``hylo_builder`` and trains it with this module's
 ``forward_step`` and ``train_valid_test_datasets_provider``; ``patches/hylo_patches.py`` checks the
@@ -25,9 +25,11 @@ from typing import Any, Iterable, Optional
 
 import torch
 import torch.nn.functional as F
+from torch.autograd.function import once_differentiable
 
 from primus.core.utils.module_utils import log_rank_0
 
+_KL_CHUNK = 4096
 _RUNTIME: Optional["HyLoRuntime"] = None
 
 
@@ -126,6 +128,158 @@ def enhanced_ild_loss(
     }
 
 
+def masked_chunked_kl(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+    *,
+    chunk_size: int = _KL_CHUNK,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute summed KL(teacher || student) without materializing softmaxes globally."""
+    student = student_logits.reshape(-1, student_logits.shape[-1])
+    teacher = teacher_logits.reshape(-1, teacher_logits.shape[-1])
+    if student.shape != teacher.shape:
+        raise ValueError(f"student logits {tuple(student.shape)} != teacher {tuple(teacher.shape)}")
+    if loss_mask is None:
+        mask = torch.ones(student.shape[0], device=student.device, dtype=torch.float32)
+    else:
+        mask = loss_mask.reshape(-1).to(device=student.device, dtype=torch.float32)
+    total = torch.zeros((), device=student.device, dtype=torch.float32)
+    for start in range(0, student.shape[0], chunk_size):
+        stop = min(start + chunk_size, student.shape[0])
+        s = student[start:stop].float()
+        t = teacher[start:stop].float()
+        per_token = F.kl_div(
+            F.log_softmax(s, dim=-1),
+            F.softmax(t, dim=-1),
+            reduction="none",
+        ).sum(dim=-1)
+        total = total + (per_token * mask[start:stop]).sum()
+    return total, mask.sum().detach().to(torch.int)
+
+
+@functools.lru_cache(maxsize=None)
+def _fla_kl_kernel():
+    try:
+        import triton
+        from fla.modules.fused_kl_div import MAX_FUSED_SIZE, STATIC_WARPS, kl_div_kernel
+    except ImportError:
+        return None
+    return triton, kl_div_kernel, MAX_FUSED_SIZE, STATIC_WARPS
+
+
+class _FusedMaskedKL(torch.autograd.Function):
+    """Summed masked KL(teacher || student) in FLA's single-pass Triton kernel (HyLo's ``fused_kl``).
+
+    The kernel writes dKL/d(student logits) while computing the loss, so no softmax is kept for backward.
+    """
+
+    @staticmethod
+    def forward(ctx, student, teacher, mask):
+        triton, kernel, max_fused, warps = _fla_kl_kernel()
+        n, v = student.shape
+        grad = student.detach().contiguous().clone()
+        teacher = teacher.detach().contiguous()
+        if teacher.dtype != grad.dtype:
+            teacher = teacher.to(grad.dtype)
+        loss = torch.empty(n, dtype=torch.float32, device=student.device)
+        kernel[(n,)](
+            logits=grad,
+            target_logits=teacher,
+            loss=loss,
+            s_logits=grad.stride(0),
+            s_loss=loss.stride(0),
+            reduction="none",
+            N=n,
+            V=v,
+            BV=min(max_fused, triton.next_power_of_2(v)),
+            num_warps=warps,
+        )
+        if mask is not None:
+            loss = loss * mask
+        ctx.save_for_backward(grad, mask)
+        return loss.sum()
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output):
+        grad, mask = ctx.saved_tensors
+        scale = grad_output if mask is None else mask.unsqueeze(-1) * grad_output
+        # In place: another full-vocabulary copy would double the backward's peak memory.
+        return grad.mul_(scale), None, None
+
+
+def masked_fused_kl(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``masked_chunked_kl`` through FLA's fused KL kernel; off GPU, the chunked loop itself."""
+    if not student_logits.is_cuda:
+        return masked_chunked_kl(student_logits, teacher_logits, loss_mask)
+    if _fla_kl_kernel() is None:
+        raise RuntimeError(
+            "hylo_kl_impl: fused needs flash-linear-attention's fla.modules.fused_kl_div.kl_div_kernel, "
+            "which failed to import; install FLA or set hylo_kl_impl: chunked"
+        )
+    student = student_logits.reshape(-1, student_logits.shape[-1])
+    teacher = teacher_logits.reshape(-1, teacher_logits.shape[-1])
+    if student.shape != teacher.shape:
+        raise ValueError(f"student logits {tuple(student.shape)} != teacher {tuple(teacher.shape)}")
+    if loss_mask is None:
+        mask, count = None, torch.tensor(student.shape[0], device=student.device, dtype=torch.int)
+    else:
+        mask = loss_mask.reshape(-1).to(device=student.device, dtype=torch.float32)
+        count = mask.sum().detach().to(torch.int)
+    return _FusedMaskedKL.apply(student, teacher, mask), count
+
+
+_KL_IMPLS = ("fused", "chunked")
+
+
+@functools.lru_cache(maxsize=None)
+def _log_kl_impl(impl: str, dtype: torch.dtype) -> None:
+    how = "FLA's fused kl_div_kernel" if impl == "fused" else "the chunked PyTorch loop"
+    log_rank_0(f"[HyLo] KL(teacher || student) with {how}, on {dtype} logits")
+
+
+def teacher_kl(
+    student_logits: torch.Tensor, teacher_logits: torch.Tensor, loss_mask: Optional[torch.Tensor]
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """KL(teacher || student) summed over ``loss_mask`` with the configured ``hylo_kl_impl``."""
+    from megatron.training import get_args
+
+    args = get_args()
+    impl = getattr(args, "hylo_kl_impl", "fused")
+    if impl not in _KL_IMPLS:
+        raise ValueError(f"hylo_kl_impl must be 'fused' or 'chunked', got {impl!r}")
+    _log_kl_impl(impl if student_logits.is_cuda else "chunked", student_logits.dtype)
+    if impl == "fused":
+        return masked_fused_kl(student_logits, teacher_logits, loss_mask)
+    return masked_chunked_kl(
+        student_logits,
+        teacher_logits,
+        loss_mask,
+        chunk_size=int(getattr(args, "hylo_kl_chunk_size", _KL_CHUNK)),
+    )
+
+
+def _logits_kwargs() -> dict:
+    """Keeps Float16Module's bf16/fp16 logits for the fused KL, which upcasts them in-kernel.
+
+    Its loss is the one on fp32 copies of those logits, and the gradient reaches the output layer in
+    model precision either way, so this only skips two full-vocabulary fp32 copies.
+    """
+    from megatron.training import get_args
+
+    args = get_args()
+    fused = getattr(args, "hylo_kl_impl", "fused") == "fused"
+    half = getattr(args, "fp16", False) or getattr(args, "bf16", False)
+    if fused and half and torch.cuda.is_available():
+        return {"fp32_output": False}
+    return {}
+
+
 @dataclass
 class _Capture:
     layer_inputs: list[torch.Tensor] = field(default_factory=list)
@@ -147,7 +301,10 @@ class _Capture:
 
 
 class HyLoRuntime:
-    """Own the frozen teacher and hook state for one Megatron process."""
+    """Own the frozen teacher and hook state for one Megatron process.
+
+    Only Enhanced-ILD (stage ``ild``) reads the captures, so the pure-KL stage installs no hooks.
+    """
 
     def __init__(self, teacher: torch.nn.Module, stage: str):
         self.teacher = teacher
@@ -437,8 +594,8 @@ def validate_hylo_args(args: Any) -> None:
     if int(getattr(args, "pipeline_model_parallel_size", 1)) != 1:
         raise ValueError("native HyLo currently requires pipeline_model_parallel_size=1")
     stage = str(getattr(args, "hylo_distill_stage", "")).lower()
-    if stage != "ild":
-        raise ValueError("hylo_distill_stage must be 'ild'")
+    if stage not in ("ild", "sft"):
+        raise ValueError("hylo_distill_stage must be 'ild' or 'sft'")
     if not getattr(args, "hylo_teacher_checkpoint", None):
         raise ValueError("hylo_teacher_checkpoint is required")
     if not unset(getattr(args, "hylo_teacher_yarn_factor", None)) and unset(
@@ -556,25 +713,32 @@ def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, to
 
 def forward_step(data_iterator, model, return_schedule_plan=False):
     """Megatron forward step on a hybrid-script batch: the frozen teacher, then the student."""
+    from megatron.training import get_args
+
     if return_schedule_plan:
         raise NotImplementedError("HyLo distillation does not support schedule plans")
     assert _RUNTIME is not None
     tokens, labels, loss_mask, attention_mask, position_ids = hybrid_batch_getter()(data_iterator)
     _RUNTIME.install_student_hooks(model)
     _RUNTIME.clear()
+    logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
     with torch.no_grad():
-        _RUNTIME.teacher(tokens, position_ids, attention_mask, labels=None)
-    student_logits = model(tokens, position_ids, attention_mask, labels=None)
+        teacher_logits = _RUNTIME.teacher(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
+    student_logits = model(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
 
     def loss_func(_output):
-        loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
-        return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
+        if _RUNTIME.stage == "ild":
+            loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
+            return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
+        loss, tokens_count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
+        weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
+        return _loss_result(weighted_loss, tokens_count, {"hylo kl": loss.detach()})
 
     return student_logits, loss_func
 
 
 def create_sft_forward_step():
-    """SFT forward step for Enhanced-ILD on padded batches, in place of the SFT trainer's."""
+    """SFT forward step for the exact HyLo objectives, in place of the SFT trainer's."""
     from primus.backends.megatron.sft.forward_step import _empty_loss_result
 
     def forward_step(data_iterator, model, return_schedule_plan=False):
@@ -596,15 +760,22 @@ def create_sft_forward_step():
         position_ids = torch.arange(tokens.shape[1], device=device).unsqueeze(0).expand_as(tokens)
         _RUNTIME.install_student_hooks(model)
         _RUNTIME.clear()
+        logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
         with torch.no_grad():
-            _RUNTIME.teacher(tokens, position_ids, None, labels=None)
-        student_logits = model(tokens, position_ids, None, labels=None)
+            teacher_logits = _RUNTIME.teacher(tokens, position_ids, None, labels=None, **logits_kwargs)
+        student_logits = model(tokens, position_ids, None, labels=None, **logits_kwargs)
 
         def loss_func(_output):
-            loss, parts = enhanced_ild_loss(
-                *_RUNTIME.ild_captures(), token_mask=sft_real_tokens(tokens, loss_mask, _sft_pad_id())
-            )
-            return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
+            if _RUNTIME.stage == "ild":
+                loss, parts = enhanced_ild_loss(
+                    *_RUNTIME.ild_captures(), token_mask=sft_real_tokens(tokens, loss_mask, _sft_pad_id())
+                )
+                return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
+            from megatron.training import get_args
+
+            loss, count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
+            weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
+            return _loss_result(weighted_loss, count, {"hylo kl": loss.detach()})
 
         return student_logits, loss_func
 

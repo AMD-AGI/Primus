@@ -21,6 +21,7 @@ modules:
       # Zebra-Llama's train_distill.py builds the teacher from its own config, so the
       # teacher keeps Llama-3's rope scaling.
       hylo_teacher_use_rope_scaling: true
+      hylo_kl_weight: 1.0
 
       load: ${HYLO_M2_UPCYCLED_CKPT:./data/checkpoints/hylo-m2-1b-upcycled}
       save: ${HYLO_M2_ILD_OUTPUT:./output/hylo-m2-1b-ild}

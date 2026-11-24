@@ -12,12 +12,14 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from primus.backends.megatron.training import hylo_distillation
 from primus.backends.megatron.training.hylo_distillation import (
     HyLoRuntime,
     create_sft_forward_step,
     enhanced_ild_loss,
+    masked_chunked_kl,
     set_teacher_yarn,
     sft_real_tokens,
     validate_hylo_args,
@@ -131,11 +133,121 @@ def test_sft_real_tokens_are_the_tokenized_sample_without_its_padding(formatter,
     assert torch.equal(real, torch.arange(64) < length)
 
 
+def test_masked_chunked_kl_matches_dense_reference_and_has_grad():
+    generator = torch.Generator().manual_seed(7)
+    student = torch.randn(2, 5, 11, generator=generator, requires_grad=True)
+    teacher = torch.randn(2, 5, 11, generator=generator)
+    mask = torch.tensor([[1, 1, 0, 1, 0], [0, 1, 1, 1, 1]], dtype=torch.float32)
+    actual, count = masked_chunked_kl(student, teacher, mask, chunk_size=3)
+    per_token = F.kl_div(
+        F.log_softmax(student.float(), dim=-1),
+        F.softmax(teacher.float(), dim=-1),
+        reduction="none",
+    ).sum(dim=-1)
+    expected = (per_token * mask).sum()
+    torch.testing.assert_close(actual, expected)
+    assert count.item() == int(mask.sum())
+    actual.backward()
+    assert student.grad is not None
+    assert torch.count_nonzero(student.grad[mask == 0]) == 0
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or hylo_distillation._fla_kl_kernel() is None,
+    reason="the fused KL needs a GPU and flash-linear-attention",
+)
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_masked_fused_kl_matches_the_chunked_reference(masked, dtype):
+    generator = torch.Generator().manual_seed(3)
+    student = (4 * torch.randn(2, 7, 1000, generator=generator)).to("cuda", dtype).requires_grad_()
+    teacher = (4 * torch.randn(2, 7, 1000, generator=generator)).to("cuda", dtype)
+    mask = (torch.rand(2, 7, generator=generator) > 0.3).float().cuda() if masked else torch.ones(2, 7).cuda()
+    # The reference upcasts like Float16Module and returns the gradient in the logits' dtype.
+    expected, expected_count = masked_chunked_kl(student, teacher, mask, chunk_size=4)
+    (expected_grad,) = torch.autograd.grad(3 * expected, student)
+    actual, count = hylo_distillation.masked_fused_kl(student, teacher, mask)
+    (3 * actual).backward()
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    grad_tol = dict(rtol=1e-5, atol=1e-6) if dtype == torch.float32 else dict(rtol=1.6e-2, atol=1e-5)
+    torch.testing.assert_close(student.grad, expected_grad, **grad_tol)
+    assert student.grad.dtype == dtype
+    assert count.item() == expected_count.item()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or hylo_distillation._fla_kl_kernel() is None,
+    reason="the fused KL needs a GPU and flash-linear-attention",
+)
+def test_masked_fused_kl_backward_runs_once():
+    # The backward scales its saved gradient in place, so nothing may differentiate through it again.
+    student = torch.randn(1, 3, 64, device="cuda", requires_grad=True)
+    loss, _count = hylo_distillation.masked_fused_kl(student, torch.randn(1, 3, 64, device="cuda"))
+    # Only an incoming gradient that itself requires grad makes a graph through the backward.
+    weight = torch.ones((), device="cuda", requires_grad=True)
+    (grad,) = torch.autograd.grad(loss, student, grad_outputs=weight, create_graph=True)
+    with pytest.raises(RuntimeError, match="once_differentiable"):
+        grad.sum().backward()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="off GPU the fused KL is the chunked loop")
+def test_masked_fused_kl_without_fla_says_how_to_fall_back(monkeypatch):
+    monkeypatch.setattr(hylo_distillation, "_fla_kl_kernel", lambda: None)
+    logits = torch.zeros(1, 2, 8, device="cuda")
+    with pytest.raises(RuntimeError, match="hylo_kl_impl: chunked"):
+        hylo_distillation.masked_fused_kl(logits, logits)
+
+
+def _megatron_args(monkeypatch, **values):
+    # A stub, not the real module: off GPU, importing megatron.training can raise (mamba_ssm queries
+    # the device at import).
+    args = Namespace(**values)
+    megatron_training = ModuleType("megatron.training")
+    megatron_training.get_args = lambda: args
+    monkeypatch.setitem(sys.modules, "megatron.training", megatron_training)
+    return args
+
+
+def _kl_inputs():
+    generator = torch.Generator().manual_seed(5)
+    student = torch.randn(2, 3, 11, generator=generator)
+    teacher = torch.randn(2, 3, 11, generator=generator)
+    return student, teacher, torch.tensor([[1.0, 0.0, 1.0], [1.0, 1.0, 0.0]])
+
+
+def test_teacher_kl_fused_is_the_chunked_loop_off_gpu(monkeypatch):
+    _megatron_args(monkeypatch, hylo_kl_impl="fused")
+    student, teacher, mask = _kl_inputs()
+    loss, count = hylo_distillation.teacher_kl(student, teacher, mask)
+    expected, expected_count = masked_chunked_kl(student, teacher, mask)
+    torch.testing.assert_close(loss, expected)
+    assert count.item() == expected_count.item() == 4
+
+
+def test_teacher_kl_chunked_uses_the_configured_chunk(monkeypatch):
+    _megatron_args(monkeypatch, hylo_kl_impl="chunked", hylo_kl_chunk_size=2)
+    seen = []
+
+    def chunked(student, teacher, mask, chunk_size):
+        seen.append(chunk_size)
+        return masked_chunked_kl(student, teacher, mask, chunk_size=chunk_size)
+
+    monkeypatch.setattr(hylo_distillation, "masked_chunked_kl", chunked)
+    hylo_distillation.teacher_kl(*_kl_inputs())
+    assert seen == [2]
+
+
+def test_teacher_kl_rejects_an_unknown_impl(monkeypatch):
+    _megatron_args(monkeypatch, hylo_kl_impl="triton")
+    with pytest.raises(ValueError, match="hylo_kl_impl"):
+        hylo_distillation.teacher_kl(*_kl_inputs())
+
+
 def test_validate_hylo_args_rejects_unsupported_parallelism():
     base = dict(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
-        hylo_distill_stage="ild",
+        hylo_distill_stage="sft",
         hylo_teacher_checkpoint="/tmp/teacher",
         hylo_ce_weight=0.0,
     )
@@ -144,8 +256,9 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "tensor_model_parallel_size": 2}))
     with pytest.raises(ValueError, match="pipeline_model_parallel_size=1"):
         validate_hylo_args(Namespace(**{**base, "pipeline_model_parallel_size": 2}))
-    with pytest.raises(ValueError, match="hylo_ce_weight must be 0"):
-        validate_hylo_args(Namespace(**{**base, "hylo_ce_weight": 1.0}))
+    for stage in ("sft", "ild"):
+        with pytest.raises(ValueError, match="hylo_ce_weight must be 0"):
+            validate_hylo_args(Namespace(**{**base, "hylo_distill_stage": stage, "hylo_ce_weight": 1.0}))
     with pytest.raises(ValueError, match="LoRA"):
         validate_hylo_args(Namespace(**{**base, "lora": SimpleNamespace(enabled=True)}))
     with pytest.raises(ValueError, match="hylo_distill_stage"):
@@ -187,7 +300,7 @@ def test_validate_hylo_args_derives_the_trainer_warmup():
     args = Namespace(
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
-        hylo_distill_stage="ild",
+        hylo_distill_stage="sft",
         hylo_teacher_checkpoint="/tmp/teacher",
         hylo_ce_weight=0.0,
         hylo_warmup_ratio=0.01,
@@ -204,6 +317,13 @@ def test_enhanced_ild_rejects_mismatched_captures():
     hidden = [torch.zeros(1, 2)]
     with pytest.raises(RuntimeError, match="capture mismatch"):
         enhanced_ild_loss(hidden, [], hidden, hidden)
+
+
+def test_masked_chunked_kl_rejects_shape_mismatch():
+    student = torch.zeros(2, 3)
+    teacher = torch.zeros(2, 4)
+    with pytest.raises(ValueError, match="student logits"):
+        masked_chunked_kl(student, teacher)
 
 
 class _Symbol:
@@ -268,6 +388,10 @@ def test_teacher_forcing_replaces_only_ild_mixer_inputs():
 
     student.decoder.layers[0](hidden_states=original)
     assert torch.equal(student.decoder.mixer.seen, forced)
+
+    runtime.stage = "sft"
+    student.decoder.layers[0](hidden_states=original)
+    assert torch.equal(student.decoder.mixer.seen, original)
 
 
 class _Scale(nn.Module):
@@ -357,6 +481,18 @@ def test_sft_ild_step_ignores_padding(monkeypatch):
     torch.testing.assert_close(loss.cpu(), 40 * width)
 
 
+def test_pure_kl_installs_no_capture_hooks():
+    teacher, student = _TeacherGPT(), _StudentHybrid()
+    runtime = HyLoRuntime(teacher, "sft")
+    runtime.install_student_hooks(student)
+    tokens = torch.tensor([[1, 2]])
+    with torch.no_grad():
+        teacher(tokens, None, None)
+        student(tokens, None, None)
+    for capture in (runtime.teacher_capture, runtime.student_capture):
+        assert capture.layer_inputs == capture.hidden == capture.mixer == capture.final == []
+
+
 def test_removed_hooks_capture_nothing():
     teacher, student = _TeacherGPT(), _StudentHybrid()
     runtime = HyLoRuntime(teacher, "ild")
@@ -373,7 +509,7 @@ def test_removed_hooks_capture_nothing():
 def test_sft_step_on_an_exhausted_iterator_has_the_sft_trainers_empty_loss(monkeypatch):
     from primus.backends.megatron.sft.forward_step import _empty_loss_result
 
-    monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "ild"))
+    monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "sft"))
     for data_iterator in (None, iter([])):
         output, loss_func = create_sft_forward_step()(data_iterator, _StudentHybrid())
         loss, count, report = loss_func(output)
@@ -455,14 +591,17 @@ def test_teacher_yarn_matches_hugging_face_llama_yarn():
 def test_hylo_recipes_match_stage_contract(monkeypatch):
     monkeypatch.setattr(file_utils, "create_path_if_not_exists", lambda *args, **kwargs: None)
     recipes = {
+        "examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml": ("ild", 4096, 0.0),
         "examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml": ("ild", 4096, 1.0),
         "examples/megatron/configs/MI300X/hylo_m2_1B-enhanced-ild.yaml": ("ild", 4096, 0.0),
+        "examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml": ("sft", 8192, 0.25),
     }
     for relative, (stage, seq_length, attention_ratio) in recipes.items():
         module = load_primus_config(ROOT / relative, None).modules[0]
         params = module.params
         assert params.model_type == "hylo"
         assert params.hylo_distill_stage == stage
+        assert params.hylo_kl_weight == 1.0
         assert params.seq_length == seq_length
         assert params.tensor_model_parallel_size == 1
         assert params.pipeline_model_parallel_size == 1

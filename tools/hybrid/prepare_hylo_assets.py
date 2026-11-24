@@ -7,7 +7,7 @@
 """Download and convert the public assets used by native HyLo training.
 
 Authentication is read only from ``HF_TOKEN``. The token is never written by
-this tool. The Llama checkpoint is converted to TP=PP=1 legacy Megatron
+this tool. Both Llama checkpoints are converted to TP=PP=1 legacy Megatron
 format, which is the topology supported by the native distillation runtime.
 """
 
@@ -93,6 +93,7 @@ def main() -> None:
     megatron_root = args.root / "megatron"
     repos = {
         "llama32-1b": "meta-llama/Llama-3.2-1B-Instruct",
+        "llama31-8b": "meta-llama/Llama-3.1-8B-Instruct",
     }
     for name, repo in repos.items():
         hf_dir = hf_root / name
