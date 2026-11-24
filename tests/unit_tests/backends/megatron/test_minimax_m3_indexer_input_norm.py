@@ -19,6 +19,22 @@ pytest.importorskip("triton")
 needs_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
 
+def _warp_size():
+    if not torch.cuda.is_available():
+        return None
+    return getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "warp_size", None)
+
+
+# The kernel transcribes the 32 x 8 block ATen picks on a GPU with 32-lane waves (gfx1250). On
+# any other GPU (the MI300X of the GPU CI among them) ``supported`` is False for every input
+# and the eager ops stay, which the fallback tests below cover on every GPU.
+needs_32x8_block = pytest.mark.skipif(
+    _warp_size() != 32,
+    reason="the kernel follows ATen's 32 x 8 layer-norm block (32-lane waves); "
+    "on this GPU it does not apply and the eager ops stay",
+)
+
+
 @pytest.fixture
 def mod(monkeypatch):
     from primus.backends.megatron.core.fusions import bitwise_check
@@ -84,6 +100,7 @@ def test_switch_defaults_to_off():
 
 
 @needs_gpu
+@needs_32x8_block
 @pytest.mark.parametrize(
     "shape",
     [
@@ -116,6 +133,7 @@ def test_kernel_matches_aten_bitwise(mod, require_bitwise, shape, zero_centered,
 
 
 @needs_gpu
+@needs_32x8_block
 def test_kernel_is_repeatable(mod, require_bitwise):
     x, w = _rows((4096, 1, 6144), "residual"), _weight(6144, True)
     original = _original(1e-6, True)
@@ -125,6 +143,7 @@ def test_kernel_is_repeatable(mod, require_bitwise):
 
 
 @needs_gpu
+@needs_32x8_block
 def test_each_width_eps_and_gamma_kind_is_checked(mod, require_bitwise):
     for n, eps, zc in [(6144, 1e-6, True), (6144, 1e-5, True), (6144, 1e-6, False), (2048, 1e-6, True)]:
         mod.indexer_input_norm(_rows((64, 1, n), "randn"), _weight(n, zc), eps, zc, _original(eps, zc))
@@ -177,6 +196,7 @@ def test_width_bound_is_the_largest_tested_width(mod):
 
 
 @needs_gpu
+@needs_32x8_block
 def test_failed_self_check_keeps_the_eager_ops(mod, monkeypatch):
     """A kernel that is one BF16 ulp off in one element loses its check; eager from then on."""
     from primus.backends.megatron.core.fusions import bitwise_check
@@ -197,6 +217,7 @@ def test_failed_self_check_keeps_the_eager_ops(mod, monkeypatch):
 
 
 @needs_gpu
+@needs_32x8_block
 def test_decided_check_builds_no_probe(mod, monkeypatch, require_bitwise):
     x, w = _rows((64, 1, 6144), "randn"), _weight(6144, True)
     original = _original(1e-6, True)
@@ -229,7 +250,8 @@ def test_patched_indexer_input_matches_the_original(mod, require_bitwise, switch
     hidden = _rows((4096, 2, 6144), "residual").requires_grad_()
     want = cls._indexer_input(_fake(1e-6, zero_centered, False, weight), hidden)
     got = cls._indexer_input(_fake(1e-6, zero_centered, switch, weight), hidden)
-    if switch:
+    # where the kernel does not apply the switch runs the eager ops: nothing to self-check
+    if switch and mod.supported(hidden.detach(), weight.detach()):
         require_bitwise(
             mod.self_check(
                 hidden.detach(), weight.detach(), 1e-6, zero_centered, _original(1e-6, zero_centered)
