@@ -562,7 +562,6 @@ def calculate_collective_communication_time(
 
     # Count MoE layers
     num_moe_layers = sum(1 for p in moe_pattern if p == 1)
-    num_dense_layers = num_layers - num_moe_layers
 
     # Parameters on the most loaded stage, split by the data-parallel group that replicates them.
     local = param_counts.local_params(training_config)
