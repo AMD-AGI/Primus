@@ -90,8 +90,8 @@ def patch_device_info(ctx: PatchContext) -> None:
     max_logging = max_utils.max_logging
 
     @functools.wraps(orig_print)
-    def print_system_information():
-        orig_print()
+    def print_system_information(*args, **kwargs):
+        orig_print(*args, **kwargs)
         devices = jax.devices()
         max_logging.log(f"System Information: Number of devices: {len(devices)}, jax path {jax.__file__}")
         for i, device in enumerate(devices):
@@ -179,8 +179,8 @@ def patch_sync_each_step(ctx: PatchContext) -> None:
     orig = train.training_loop_iteration
 
     @functools.wraps(orig)
-    def training_loop_iteration(jax_device_state, python_vars, immutable_data):
-        metrics = orig(jax_device_state, python_vars, immutable_data)
+    def training_loop_iteration(jax_device_state, *args, **kwargs):
+        metrics = orig(jax_device_state, *args, **kwargs)
         jax.block_until_ready(jax_device_state["state"])
         return metrics
 

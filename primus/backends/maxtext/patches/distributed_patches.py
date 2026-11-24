@@ -49,12 +49,12 @@ def patch_heartbeat_timeout(ctx: PatchContext) -> None:
     orig = max_utils.maybe_initialize_jax_distributed_system
 
     @functools.wraps(orig)
-    def maybe_initialize_jax_distributed_system(raw_keys):
+    def maybe_initialize_jax_distributed_system(raw_keys, *args, **kwargs):
         timeout = raw_keys.get(_KEY, _DEFAULT_TIMEOUT)
         orig_initialize = jax.distributed.initialize
         jax.distributed.initialize = functools.partial(orig_initialize, heartbeat_timeout_seconds=timeout)
         try:
-            return orig(raw_keys)
+            return orig(raw_keys, *args, **kwargs)
         finally:
             jax.distributed.initialize = orig_initialize
 
