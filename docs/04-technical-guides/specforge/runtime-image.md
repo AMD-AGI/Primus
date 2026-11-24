@@ -138,8 +138,9 @@ requires a Linux Docker runner with BuildKit enabled. No GPU is needed to build.
 
 Build frequency:
 
-- Non-draft PRs build only for changes under `examples/specforge/docker/`, the
-  image-build workflow, or its `.github/scripts/specforge_image_changes.py` helper.
+- Non-draft PRs build only for changes under `examples/specforge/` (including
+  Docker files and training recipes), `primus/backends/specforge/`, the image-build
+  workflow, or its `.github/scripts/specforge_image_changes.py` helper.
   Draft PRs wait until marked ready for review.
 - Main is checked nightly at **06:23 UTC**. Both variants build only when tracked
   image inputs differ from the last successful main publication of both variants.
