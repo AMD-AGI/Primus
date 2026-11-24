@@ -39,7 +39,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Known issues
 
-The v26.10 QA runs found no TorchTitan issues. They covered MI355X (DeepSeek-V3-16B BF16, and Llama 3.1 8B and 70B in BF16 and FP8); the MI300X and MI325X recipes were not re-run on this image.
+The v26.10 QA runs found no TorchTitan issues.
 
 **Fixed in v26.10:**
 

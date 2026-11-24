@@ -986,7 +986,7 @@
   ],
   "rocm_path": "/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel",
   "schema_version": 1,
-  "size": null,
+  "size": "61 GB",
   "source": "image",
   "version": "v26.10",
   "workspace_repos": {

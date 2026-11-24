@@ -95,7 +95,7 @@ Expandable segments hang on the same hosts, which is why the preceding launch ho
 
 ### Known issues
 
-The v26.10 QA runs found no Megatron-LM issues. They covered MI355X; the MI300X and MI325X recipes were not re-run on this image.
+The v26.10 QA runs found no Megatron-LM issues.
 
 **Fixed in v26.10:**
 

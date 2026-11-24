@@ -83,7 +83,7 @@ Megatron-LM, TorchTitan, and Megatron Bridge backends.
 | --- | --- |
 | Image ID | `3a39815f485e` |
 | Built | 2026-11-23 |
-| Size | None |
+| Size | 61 GB |
 | Manifest | `a1bf6505efa1eab3b7b6ab3334bd12d31b0c44e6` |
 | Dockerfile | [`Dockerfile.primus-v26.10`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.10) |
 
@@ -209,7 +209,7 @@ The pins are the same at both build commits. Since v26.9, MaxText moved to `rele
 | Primus-Turbo | 0.6.1.dev4 | 0.6.1.dev27 |
 | FBGEMM | 2026.10.30 | 2026.11.23 |
 | NumPy | 2.5.4 | 2.5.5 |
-| Image size | 60.5 GB | None |
+| Image size | 60.5 GB | 61 GB |
 
 `rocm/jax-training:maxtext`:
 
