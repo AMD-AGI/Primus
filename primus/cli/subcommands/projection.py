@@ -392,9 +392,10 @@ def _add_performance_args(parser):
         required=False,
         default=None,
         help=(
-            "Override the GPU compute clock frequency in MHz for simulation.\n"
-            "If not specified, uses the default from the hardware profile for the\n"
-            "given --gpu-arch (e.g. 2100 MHz for MI300X/MI325X).\n"
+            "Override the GPU compute clock frequency in MHz for simulation, for\n"
+            "every datatype.  If not specified, each datatype runs at the clock\n"
+            "where the --gpu-arch profile reaches its matrix peak\n"
+            "(e.g. MI325X: BF16 1328, FP8 1309 MHz).\n"
             "Can also be set via the PRIMUS_GPU_CLOCK_MHZ env var.\n"
             "Example: --gpu-clock-mhz 1500\n"
         ),

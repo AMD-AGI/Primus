@@ -129,6 +129,46 @@ _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
     "mi300a": _HardwareProfile("gfx942", 228, 65536, 4_194_304, 2_100_000, 4000.0),
 }
 
+# Dense matrix peaks (TFLOP/s) per datatype.  A GEMM runs at the clock where
+# the profile's CUs reach its datatype's peak; a datatype missing here runs as
+# its ``_DTYPE_FALLBACK``.  Architectures without an entry keep the profile's
+# ``compute_clock_khz`` for every datatype.
+_PEAK_TFLOPS: Dict[str, Dict[str, float]] = {
+    "mi300x": {"bf16": 579, "fp16": 579, "fp8": 1253, "fp4": 1253, "fp32": 110},
+    "mi325x": {"bf16": 827, "fp16": 827, "fp8": 1630},
+    "mi350x": {"bf16": 1445, "fp16": 1345, "fp8": 3028, "fp6": 3630, "mxfp4": 4630, "fp32": 130},
+    "mi355x": {
+        "bf16": 1725,
+        "fp8": 3500,
+        "mxfp8": 2920,
+        "fp6": 4085,
+        "mxfp6": 4570,
+        "fp4": 5155,
+        "mxfp4": 5660,
+        "fp32": 137,
+    },
+}
+_PEAK_TFLOPS["gfx942"] = _PEAK_TFLOPS["mi300x"]
+_PEAK_TFLOPS["gfx950"] = _PEAK_TFLOPS["mi355x"]
+
+# Dense matrix FLOPs per CU per clock, by Origami arch.
+_FLOPS_PER_CU_CLOCK: Dict[str, Dict[str, int]] = {
+    "gfx942": {"bf16": 2048, "fp16": 2048, "fp8": 4096, "fp32": 256},
+    "gfx950": {"bf16": 4096, "fp16": 4096, "fp8": 8192, "fp32": 256},
+}
+
+# Primus dtype names → ``_PEAK_TFLOPS`` keys, and what a datatype runs as where
+# the arch has no peak for it (sub-byte types upcast to BF16 on gfx942).
+_PEAK_KEY: Dict[str, str] = {"mx8": "mxfp8", "mx6": "mxfp6", "mx4": "mxfp4"}
+_DTYPE_FALLBACK: Dict[str, str] = {
+    "fp16": "bf16",
+    "mxfp8": "fp8",
+    "mxfp6": "fp6",
+    "fp6": "bf16",
+    "fp4": "bf16",
+    "mxfp4": "bf16",
+}
+
 # ---------------------------------------------------------------------------
 # Dtype mapping:  Primus string  →  origami datatype string
 # (origami.string_to_datatype accepts these short-hand names)
@@ -137,15 +177,97 @@ _DTYPE_MAP: Dict[str, str] = {
     "bf16": "bf16",
     "fp16": "f16",
     "fp32": "f32",
-    "fp8": "bf8_fnuz",
-    # Origami has no microscaled / sub-8-bit path; model them as fp8-class
-    # (bf8_fnuz) rather than silently falling back to bf16.
-    "mx8": "bf8_fnuz",
-    "mx6": "bf8_fnuz",
-    "mx4": "bf8_fnuz",
-    "fp6": "bf8_fnuz",
-    "fp4": "bf8_fnuz",
 }
+# Origami has no microscaled / sub-8-bit path; these run on the FP8 matrix
+# instruction (see ``_resolve_fp8_mi``) at the clock that reaches their peak.
+_FP8_CLASS = ("fp8", "mx8", "mx6", "mx4", "fp6", "fp4")
+
+_MAX_STATIC_TILE_K = 64
+
+
+def _profile_arch(gpu_arch: Optional[str]) -> str:
+    return (gpu_arch or os.getenv("PRIMUS_GPU_ARCH", "mi300x")).lower().strip()
+
+
+def resolve_clock_mhz(gpu_clock_mhz: Optional[int] = None) -> Optional[int]:
+    """Explicit compute clock: ``gpu_clock_mhz``, else ``PRIMUS_GPU_CLOCK_MHZ``, else None."""
+    if gpu_clock_mhz:
+        return int(gpu_clock_mhz)
+    env = os.getenv("PRIMUS_GPU_CLOCK_MHZ")
+    return int(env) if env else None
+
+
+def _peak_dtype(arch: str, dtype: str) -> str:
+    """The ``_PEAK_TFLOPS`` entry a ``dtype`` matrix kernel runs as on ``arch``."""
+    peaks = _PEAK_TFLOPS[arch]
+    key = str(dtype or "bf16").lower().strip()
+    key = _PEAK_KEY.get(key, key)
+    while key not in peaks and key in _DTYPE_FALLBACK:
+        key = _DTYPE_FALLBACK[key]
+    return key if key in peaks else "bf16"
+
+
+def _mi_dtype(dtype: str) -> str:
+    """The matrix instruction Origami models a ``dtype`` GEMM with."""
+    return "fp8" if dtype in _FP8_CLASS else (dtype if dtype in _DTYPE_MAP else "bf16")
+
+
+def dtype_peak_tflops(
+    gpu_arch: Optional[str] = None, dtype: str = "bf16", gpu_clock_mhz: Optional[int] = None
+) -> Optional[float]:
+    """Dense matrix peak TFLOP/s of a ``dtype`` kernel on ``gpu_arch``, or None without a table.
+
+    The arch's ``_PEAK_TFLOPS`` entry, or at an explicit clock CUs x FLOPs/CU/clock x clock.
+    """
+    arch = _profile_arch(gpu_arch)
+    if arch not in _PEAK_TFLOPS:
+        return None
+    key = _peak_dtype(arch, dtype)
+    clock = resolve_clock_mhz(gpu_clock_mhz)
+    if clock is None:
+        return float(_PEAK_TFLOPS[arch][key])
+    profile = _KNOWN_PROFILES[arch]
+    per_cu = _FLOPS_PER_CU_CLOCK[profile.arch_enum_name].get(key)
+    if per_cu is None:
+        per_cu = _FLOPS_PER_CU_CLOCK[profile.arch_enum_name]["fp8"]
+    return profile.n_cu * per_cu * clock / 1e6
+
+
+def dtype_clock_mhz(
+    gpu_arch: Optional[str] = None,
+    dtype: str = "bf16",
+    gpu_clock_mhz: Optional[int] = None,
+    mi_dtype: Optional[str] = None,
+) -> Optional[float]:
+    """The compute clock a ``dtype`` GEMM is simulated at on ``gpu_arch``.
+
+    An explicit clock applies to every datatype.  Otherwise it is the one at which
+    the profile's CUs, issuing the matrix instruction Origami models the dtype
+    with, reach the dtype's peak.  None for an arch without a peak table.
+    """
+    clock = resolve_clock_mhz(gpu_clock_mhz)
+    if clock is not None:
+        return float(clock)
+    arch = _profile_arch(gpu_arch)
+    if arch not in _PEAK_TFLOPS:
+        return None
+    profile = _KNOWN_PROFILES[arch]
+    per_cu = _FLOPS_PER_CU_CLOCK[profile.arch_enum_name][mi_dtype or _mi_dtype(dtype)]
+    return _PEAK_TFLOPS[arch][_peak_dtype(arch, dtype)] * 1e6 / (profile.n_cu * per_cu)
+
+
+def _candidate_tile_sizes(mi_k: int) -> List[Tuple[int, int, int]]:
+    """Macro-tile candidates, widened so at least one tile can feed the MI.
+
+    Origami only ranks the tiles it is given; if every ``block_K`` is below the
+    instruction's K (FP8 on gfx950 is 16x16x128) the instruction is under-fed
+    and FP8 shows no gain over BF16.
+    """
+    if not mi_k or mi_k <= _MAX_STATIC_TILE_K:
+        return list(_DEFAULT_TILE_SIZES)
+    mn_shapes = sorted({(m, n) for (m, n, _) in _DEFAULT_TILE_SIZES})
+    return list(_DEFAULT_TILE_SIZES) + [(m, n, k) for (m, n) in mn_shapes for k in (mi_k, mi_k * 2)]
+
 
 # ---------------------------------------------------------------------------
 # Default candidate tile configurations (macro-tile M×N×K + occupancy).
@@ -218,11 +340,13 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
 
         # Lazily initialised origami objects – see ``_ensure_initialized``.
         self._hardware = None  # origami.hardware_t
+        self._hardware_by_khz: Dict[int, object] = {}  # profile hardware per compute clock
         self._configs = None  # list[origami.config_t]
         self._clock_ghz: Optional[float] = None
         self._initialized = False
         self._init_dtype: Optional[str] = None  # tracks dtype used for config init
-        self._fp8_mi_unavailable = False  # set True if FP8 MI is 0x0x0
+        self._fp8_mi_unavailable = False  # set True if no FP8 / INT8 MI exists
+        self._fp8_origami_str: Optional[str] = None  # resolved FP8 MI datatype
 
     # ------------------------------------------------------------------
     # GEMMSimulationBackend interface
@@ -269,6 +393,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         )
         return float(profile.n_cu) * float(clock_khz) * 1e3 * float(profile.fp32_vector_flops_per_cu_clk)
 
+    def peak_flops(self, dtype: str = "bf16") -> Optional[float]:
+        """Dense matrix peak FLOP/s of a ``dtype`` kernel on the target, or None without a table."""
+        tflops = dtype_peak_tflops(self._gpu_arch, dtype, self._clock_override_mhz)
+        return tflops * 1e12 if tflops else None
+
     def simulate_gemm(
         self,
         m: int,
@@ -286,37 +415,22 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 "#subdirectory=shared/origami/python"
             )
 
-        # FP8 fallback strategy
-        # ~~~~~~~~~~~~~~~~~~~~~~
-        # Origami v0.1.0 maps the Primus "fp8" dtype to "bf8_fnuz" (the FNUZ
-        # variant used by gfx942 / MI300X), but this datatype string is not
-        # yet recognised by Origami's ``string_to_datatype``.  As a result,
-        # ``_ensure_initialized("fp8")`` sets ``_fp8_mi_unavailable = True``
-        # on *all* current architectures.
-        #
-        # When the FP8 MI is unavailable we simulate in BF16 and halve the
-        # time (``÷ 2.0`` below).  This is a first-order approximation:
-        # FP8 doubles the matrix-instruction throughput relative to BF16 on
-        # both gfx942 and gfx950.
-        #
-        # Origami does expose *native* ``bf8`` / ``f8`` MI for gfx950
-        # (MI=16×16×128 vs BF16 MI=16×16×32), but its tile-level performance
-        # model currently does not translate the higher MI throughput into
-        # proportional time savings — native FP8 predictions are only ~1.03×
-        # faster than BF16 instead of the expected ~2×.  Until Origami's FP8
-        # performance model is updated, the BF16 ÷ 2 heuristic is more
-        # accurate for all supported architectures.
+        # FP8-class dtypes run on a native FP8 matrix instruction: gfx950 has
+        # f8 (16x16x128, fed by the K>=128 tiles of ``_candidate_tile_sizes``);
+        # gfx942's FP8 shares the INT8 MFMA unit (16x16x32, 2x BF16), which
+        # this Origami build only exposes as i8.  Without either, they run on
+        # the BF16 instruction at the clock that reaches their peak.
         fp8_fallback = False
-        sim_dtype = dtype
-        if dtype == "fp8":
+        sim_dtype = "fp8" if dtype in _FP8_CLASS else dtype
+        if sim_dtype == "fp8":
             self._ensure_initialized("fp8")
             if self._fp8_mi_unavailable:
                 sim_dtype = "bf16"
                 fp8_fallback = True
                 self._ensure_initialized("bf16")
-            # else: origami supports FP8 natively, proceed normally
         else:
             self._ensure_initialized(dtype)
+        hardware, clock_ghz = self._hardware_at(dtype, "bf16" if fp8_fallback else None)
 
         # ----- Build origami problem_t -----
         # NOTE: problem.batch models **batched** GEMM (all sub-problems share
@@ -329,7 +443,10 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         problem.a_transpose = _origami.transpose_t.T if trans_a else _origami.transpose_t.N
         problem.b_transpose = _origami.transpose_t.T if trans_b else _origami.transpose_t.N
 
-        origami_dtype = _origami.string_to_datatype(_DTYPE_MAP.get(sim_dtype, "bf16"))
+        if sim_dtype == "fp8":
+            origami_dtype = _origami.string_to_datatype(self._fp8_origami_str)
+        else:
+            origami_dtype = _origami.string_to_datatype(_DTYPE_MAP.get(sim_dtype, "bf16"))
         problem.a_dtype = origami_dtype
         problem.b_dtype = origami_dtype
         problem.c_dtype = origami_dtype
@@ -344,16 +461,16 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         # on availability so the public tree runs against either build.
         try:
             if hasattr(_origami, "model_t"):
-                result = _origami.select_config(problem, self._hardware, self._configs, _origami.model_t.gemm)
+                result = _origami.select_config(problem, hardware, self._configs, _origami.model_t.gemm)
             else:
-                result = _origami.select_config(problem, self._hardware, self._configs)
+                result = _origami.select_config(problem, hardware, self._configs)
         except Exception as e:
             raise RuntimeError(
                 f"Origami select_config failed for " f"(M={m}, N={n}, K={k}, dtype={dtype}): {e}"
             ) from e
 
         latency_cycles = result.latency
-        time_ms = latency_cycles / (self._clock_ghz * 1e6)
+        time_ms = latency_cycles / (clock_ghz * 1e6)
 
         # Compute achieved TFLOPS for metadata
         flops = 2.0 * m * n * k * batch
@@ -368,7 +485,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 "backend": "origami",
                 "gpu_arch": self._gpu_arch,
                 "latency_cycles": latency_cycles,
-                "clock_ghz": self._clock_ghz,
+                "clock_ghz": clock_ghz,
                 "dtype": dtype,
                 "batch": batch,
                 "fp8_fallback": fp8_fallback,
@@ -400,31 +517,28 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         if self._initialized and self._init_dtype == dtype:
             return
 
-        origami_str = _DTYPE_MAP.get(dtype, "bf16")
-        try:
-            origami_dtype = _origami.string_to_datatype(origami_str)
-        except (ValueError, RuntimeError):
-            # Origami doesn't know this dtype string — treat as unavailable
-            if dtype == "fp8":
+        if dtype == "fp8":
+            resolved = self._resolve_fp8_mi()
+            if resolved is None:
                 self._fp8_mi_unavailable = True
-            return
-
-        mi = self._hardware.get_recommended_matrix_instruction(origami_dtype)
-
-        # Detect MI=0x0x0 (datatype not supported by this arch)
-        if mi.m == 0 and mi.n == 0 and mi.k == 0:
-            if dtype == "fp8":
-                self._fp8_mi_unavailable = True
-                is_rank_0 = int(os.getenv("RANK", "0")) == 0
-                if is_rank_0:
+                if int(os.getenv("RANK", "0")) == 0:
                     print(
-                        "[Primus:Origami] FP8 matrix instruction not available "
-                        "for this hardware; will use BF16 with 2x speedup factor"
+                        "[Primus:Origami] No FP8 / INT8 matrix instruction for this hardware; "
+                        "FP8 runs on the BF16 instruction at the FP8 peak's clock"
                     )
-            return
+                return
+            self._fp8_origami_str, mi = resolved
+        else:
+            try:
+                origami_dtype = _origami.string_to_datatype(_DTYPE_MAP.get(dtype, "bf16"))
+            except (ValueError, RuntimeError):
+                return  # Origami doesn't know this dtype string
+            mi = self._hardware.get_recommended_matrix_instruction(origami_dtype)
+            if mi.m == 0 and mi.n == 0 and mi.k == 0:
+                return
 
         configs: list = []
-        for mt_m, mt_n, mt_k in _DEFAULT_TILE_SIZES:
+        for mt_m, mt_n, mt_k in _candidate_tile_sizes(mi.k):
             for occ in _DEFAULT_OCCUPANCIES:
                 cfg = _origami.config_t()
                 cfg.mt = _origami.dim3_t(mt_m, mt_n, mt_k)
@@ -448,6 +562,49 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
 
         self._initialized = True
 
+    def _resolve_fp8_mi(self):
+        """``(origami datatype string, MI)`` of the first FP8-class instruction the arch has, or None.
+
+        Native OCP FP8 (``f8`` / ``bf8``) first; gfx942's FP8 shares the INT8
+        MFMA unit (same shape and rate), so ``i8`` is an exact throughput proxy.
+        """
+        for cand in ("f8", "bf8", "i8"):
+            try:
+                dt = _origami.string_to_datatype(cand)
+            except (ValueError, RuntimeError):
+                continue
+            mi = self._hardware.get_recommended_matrix_instruction(dt)
+            if not (mi.m == 0 and mi.n == 0 and mi.k == 0):
+                return cand, mi
+        return None
+
+    def _hardware_at(self, dtype: str, mi_dtype: Optional[str] = None):
+        """``(hardware, clock GHz)`` for a ``dtype`` GEMM: the profile at that dtype's clock.
+
+        Detected devices and arches without a peak table keep one clock.
+        """
+        if self._gpu_arch not in _KNOWN_PROFILES:
+            return self._hardware, self._clock_ghz
+        mhz = dtype_clock_mhz(self._gpu_arch, dtype, self._clock_override_mhz, mi_dtype)
+        if mhz is None:
+            return self._hardware, self._clock_ghz
+        khz = round(mhz * 1000)
+        if khz not in self._hardware_by_khz:
+            self._hardware_by_khz[khz] = self._profile_hardware(khz)
+        return self._hardware_by_khz[khz], khz / 1e6
+
+    def _profile_hardware(self, clock_khz: int):
+        profile = _KNOWN_PROFILES[self._gpu_arch]
+        n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
+        return _get_hardware_for_arch(
+            getattr(_origami.architecture_t, profile.arch_enum_name),
+            n_cu,
+            profile.lds_capacity,
+            profile.rf_capacity,
+            profile.l2_capacity,
+            clock_khz,
+        )
+
     def _get_hardware(self):
         """
         Obtain an ``origami.hardware_t`` instance.
@@ -466,28 +623,21 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         # 1. If an explicit arch was requested AND we have a profile, use it.
         if self._gpu_arch is not None and self._gpu_arch in _KNOWN_PROFILES:
             profile = _KNOWN_PROFILES[self._gpu_arch]
-            clock_khz = profile.compute_clock_khz
-            if self._clock_override_mhz is not None:
-                clock_khz = self._clock_override_mhz * 1000
+            bf16_mhz = dtype_clock_mhz(self._gpu_arch, "bf16", self._clock_override_mhz)
+            clock_khz = round(bf16_mhz * 1000) if bf16_mhz is not None else profile.compute_clock_khz
             n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
-            arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
-            hw = _get_hardware_for_arch(
-                arch_enum,
-                n_cu,
-                profile.lds_capacity,
-                profile.rf_capacity,
-                profile.l2_capacity,
-                clock_khz,
-            )
+            hw = self._profile_hardware(clock_khz)
             if is_rank_0:
                 override_tag = ""
                 if self._clock_override_mhz is not None:
-                    override_tag = " (overridden via --gpu-clock-mhz)"
+                    override_tag = " (overridden via --gpu-clock-mhz, all dtypes)"
+                elif bf16_mhz is not None:
+                    override_tag = " (BF16; per-dtype defaults)"
                 cu_tag = f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
                 print(
                     f"[Primus:Origami] Using hardware profile for "
                     f"'{self._gpu_arch}': N_CU={n_cu}, "
-                    f"clock={clock_khz / 1e6:.1f} GHz{override_tag}{cu_tag}"
+                    f"clock={clock_khz / 1e6:.3f} GHz{override_tag}{cu_tag}"
                 )
             return hw
 

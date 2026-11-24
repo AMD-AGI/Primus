@@ -172,7 +172,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 | `--profiling-mode` | `benchmark` (default, uses GPU), `simulate` (analytical / Origami GEMM + SDPA models, no GPU), or `both` (side-by-side). |
 | `--gemm-backend` | GEMM simulation backend when profiling is simulated (`origami`). |
 | `--gpu-arch` | Target architecture for simulation (for example `mi300x`, `gfx942`, `mi355x`, `gfx950`); can use `PRIMUS_GPU_ARCH`. |
-| `--gpu-clock-mhz` | Override GPU clock in MHz for simulation; can use `PRIMUS_GPU_CLOCK_MHZ`. |
+| `--gpu-clock-mhz` | Override GPU clock in MHz for simulation, for every datatype; can use `PRIMUS_GPU_CLOCK_MHZ`. By default MI300X, MI325X, MI350X and MI355X run each datatype at the clock where the profile reaches that datatype's dense matrix peak (e.g. MI325X: BF16 1328 MHz, FP8 1309 MHz). |
 | `--hbm-bandwidth-gbps` | Override the peak-equivalent HBM bandwidth (GB/s) for memory-bound terms; takes precedence over the benchmark-mode STREAM calibration and the `--gpu-arch` profile. Can use `PRIMUS_HBM_BANDWIDTH_GBPS`. |
 | `--skip-hw-calibration` | Skip the benchmark-mode compute-clock and STREAM-bandwidth calibration (also `PRIMUS_BENCH_SKIP_HW_CALIB=1`). Accepted by `memory`, `performance`, and `both`. |
 | `--pipeline-schedule-algorithm` | Pipeline simulation scheduler (`auto`, zero-bubble variants, or `all` for comparison). |

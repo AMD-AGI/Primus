@@ -178,6 +178,8 @@ _PROFILE_CLOCK_MHZ: Dict[str, int] = {
     "gfx950": 2100,
     "mi300a": 2100,
 }
+# Arches defined or redefined by an external overlay keep its peaks.
+_EXTERNAL_PROFILES: set = set()
 
 
 def _load_external_hw_profiles() -> None:
@@ -231,12 +233,14 @@ def _load_external_hw_profiles() -> None:
                         n_xcd=int(fields.get("n_xcd", 8)),
                     )
                     _HW_PROFILES[arch_l] = spec
+                    _EXTERNAL_PROFILES.add(arch_l)
                     base_clock = fields.get("base_clock_mhz")
                     if base_clock is not None:
                         _PROFILE_CLOCK_MHZ[arch_l] = int(base_clock)
                     for alias in fields.get("aliases", []) or []:
                         alias_l = str(alias).lower().strip()
                         _HW_PROFILES[alias_l] = spec
+                        _EXTERNAL_PROFILES.add(alias_l)
                         if base_clock is not None:
                             _PROFILE_CLOCK_MHZ[alias_l] = int(base_clock)
             except Exception:
@@ -252,12 +256,28 @@ def _get_hardware_spec(
 ) -> GPUHardwareSpec:
     """Get hardware spec for the given (or detected) GPU architecture.
 
-    If *gpu_clock_mhz* is provided, the profile's TFLOPS values are scaled
+    Arches with a per-datatype peak table use its matrix peaks (at
+    *gpu_clock_mhz* if given, see ``dtype_peak_tflops``).  Otherwise, if
+    *gpu_clock_mhz* is provided, the profile's TFLOPS values are scaled
     proportionally (compute throughput is linear in clock frequency).
     """
+    from primus.core.projection.simulation_backends.origami_backend import (
+        dtype_peak_tflops,
+    )
+
     arch = gpu_arch or os.getenv("PRIMUS_GPU_ARCH", "mi300x")
     arch = arch.lower().strip()
     spec = _HW_PROFILES.get(arch, _HW_PROFILES["mi300x"])
+    if arch not in _EXTERNAL_PROFILES and dtype_peak_tflops(arch) is not None:
+        bf16, fp16, fp8 = (dtype_peak_tflops(arch, d, gpu_clock_mhz) for d in ("bf16", "fp16", "fp8"))
+        return GPUHardwareSpec(
+            peak_tflops_bf16=bf16,
+            peak_tflops_fp16=fp16,
+            peak_tflops_fp8=fp8,
+            hbm_bandwidth_gbps=spec.hbm_bandwidth_gbps,
+            n_cu=spec.n_cu,
+            n_xcd=spec.n_xcd,
+        )
 
     # Apply clock override — scale TFLOPS linearly
     clock_override = gpu_clock_mhz or (int(v) if (v := os.getenv("PRIMUS_GPU_CLOCK_MHZ")) else None)
