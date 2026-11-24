@@ -1,0 +1,52 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# GPT-OSS 120B proxy MXFP8 pretraining on 1 node of 4x MI455X (gfx1250): the precision sibling
+# of gpt_oss_120B-BF16-pretrain.yaml (same 8-layer proxy, EP4, full recompute, batch; see its
+# header). MXFP8 = E4M3 data with one E8M0 scale per 32 elements on the linear GEMMs:
+#   - the dense linears (QKV / O) through Primus-Turbo's MXFP8 GEMM (use_turbo_gemm);
+#   - the expert grouped GEMMs through Primus-Turbo's MXFP8 grouped GEMM (use_turbo_grouped_gemm).
+# Master weights, attention core (sink attention), norms, router, embedding and LM head stay BF16.
+#
+# PRECISION PATH: Primus-Turbo only, no Transformer Engine FP8 (turbo_precision: mxfp8, fp8 unset),
+# so TE never sees an MXFP8 recipe on gfx1250. Every linear is a Primus-Turbo module that quantizes
+# itself: dense GEMMs on Turbo's FlyDSL gfx1250 WMMA-scale MXFP8 GEMM, expert GEMMs on its Triton
+# MX_BLOCKWISE grouped GEMM. TE runs no MXFP8 GEMM and no FP8 at all.
+#
+# REQUIREMENTS (see MXFP8_README.md in this directory):
+#   - a Primus-Turbo with the gfx1250 FlyDSL MXFP8 dense GEMM and hipBLASLt MXFP8 refused on
+#     gfx1250 (AMD-AGI/Primus-Turbo branch fix/gemm/mxfp8-gfx1250-flydsl on dev/mi455x_v6), built for
+#     gfx1250. The Turbo 0.6.1.dev31 of amdprimus/amdprimus:tas-20261109[-fix1] and upstream
+#     dev/mi455x_v6 run MXFP8 through hipBLASLt on gfx1250 and get it wrong (SNR ~5 dB) silently.
+#     mxfp8_preflight.py --gpt-oss must print "MXFP8 PREFLIGHT: PASS".
+#
+# Run (inside a container; TURBO_DIR checkout first on PYTHONPATH):
+#   ./primus-cli direct --env "PYTHONPATH=${TURBO_DIR}:${PWD}:${PWD}/third_party/Megatron-LM" \
+#     -- train pretrain --config examples/megatron/configs/MI455X/gpt_oss_120B-MXFP8-pretrain.yaml
+###############################################################################
+
+extends:
+  - gpt_oss_120B-BF16-pretrain.yaml
+
+exp_name: ${PRIMUS_EXP_NAME:gpt_oss_120B-MXFP8-pretrain}
+
+modules:
+  pre_trainer:
+    overrides:
+      # MXFP8 on the Primus-Turbo linears only; fp8 / fp8_recipe stay unset, so TE does no FP8
+      turbo_precision: mxfp8
+      # dense linears (QKV with its input norm, O) are Turbo modules
+      use_turbo_gemm: true
+      # Expert GEMMs: Turbo grouped linears. Must stay on: with it off the experts are TE grouped
+      # linears, which run BF16 here (TE does no FP8 in this mode). Turbo's MXFP8 grouped GEMM on
+      # gfx1250 is its Triton MX_BLOCKWISE backend (FlyDSL MX grouped and CK are gfx950-only;
+      # hipBLASLt grouped has no MX). Gate: the grouped checks of mxfp8_preflight.py --gpt-oss.
+      use_turbo_grouped_gemm: true
+      # as in muse_spark_816B_A42B-MXFP8: the fp32-accumulating expert wgrad fusion is BF16-only
+      turbo_grouped_gemm_wgrad_accum_fusion: false
+      # as in muse_spark_816B_A42B-MXFP8: feed Turbo the unaligned per-expert token counts directly
+      # (no per-expert quantization padding, no host read of the counts)
+      turbo_grouped_gemm_without_padding: true

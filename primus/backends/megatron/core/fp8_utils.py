@@ -5,6 +5,7 @@
 ###############################################################################
 
 """Utility functions related to FP8 that are used throughout Megatron core"""
+import os
 from contextlib import nullcontext
 
 import torch
@@ -48,6 +49,39 @@ SCALING_BLOCK_SIZE = 128
 MXFP8_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
+_TE_MXFP8_FALLBACK_WARNED = False
+_TE_MXFP8_FALLBACKS = ("bf16", "tensorwise")
+_TE_MXFP8_BF16_REASON = "TE cannot run MXFP8 on this GPU; TE GEMMs run BF16 (PRIMUS_TE_MXFP8_FALLBACK=bf16)"
+
+
+def _te_mxfp8_support():
+    """Transformer Engine's own MXFP8 gate as ``(ok, reason)``; (True, "") if TE has no such check.
+
+    TE 2.19 admits MXFP8 only on gfx950 (``_compute_mxfp8_support``); on gfx1250 (MI455X) it
+    returns False, and handing it an MXFP8BlockScaling recipe asserts at the first forward.
+    """
+    try:
+        from transformer_engine.pytorch.quantization import check_mxfp8_support
+    except ImportError:
+        try:
+            from transformer_engine.pytorch.fp8 import check_mxfp8_support
+        except ImportError:
+            return True, ""
+    return check_mxfp8_support()
+
+
+def _te_mxfp8_fallback() -> str:
+    """What TE GEMMs run when ``fp8_recipe: mxfp8`` but TE cannot do MXFP8 on this GPU.
+
+    ``PRIMUS_TE_MXFP8_FALLBACK=bf16`` (default): TE gets no FP8 recipe, its GEMMs run BF16.
+    ``PRIMUS_TE_MXFP8_FALLBACK=tensorwise``: TE GEMMs run FP8 current scaling (opt-in).
+    """
+    fallback = os.environ.get("PRIMUS_TE_MXFP8_FALLBACK", "bf16").strip().lower()
+    if fallback not in _TE_MXFP8_FALLBACKS:
+        raise ValueError(
+            f"PRIMUS_TE_MXFP8_FALLBACK={fallback!r}: expected one of {', '.join(_TE_MXFP8_FALLBACKS)}"
+        )
+    return fallback
 
 
 if HAVE_TE and HAVE_TURBO:
@@ -111,7 +145,29 @@ if HAVE_TE and HAVE_TURBO:
             elif config.fp8_recipe == Fp8Recipe.blockwise and is_te_min_version("2.3.0.dev0"):
                 fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
             elif config.fp8_recipe == Fp8Recipe.mxfp8:
-                fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+                te_mxfp8_ok, te_mxfp8_reason = _te_mxfp8_support()
+                if te_mxfp8_ok:
+                    fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+                else:
+                    # TE cannot run MXFP8 on this GPU (gfx1250). Never hand it the MXFP8 recipe:
+                    # the Primus-Turbo GEMMs keep MXFP8 through get_fp8_quant_config(), and any
+                    # GEMM still owned by TE runs the fallback (BF16 by default).
+                    fallback = _te_mxfp8_fallback()
+                    if fallback == "tensorwise" and is_te_min_version("2.2.0.dev0"):
+                        fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling(
+                            fp8_format=fp8_format, fp8_dpa=config.fp8_dot_product_attention
+                        )
+                    else:
+                        fp8_recipe_none_reason = _TE_MXFP8_BF16_REASON
+                    global _TE_MXFP8_FALLBACK_WARNED
+                    if not _TE_MXFP8_FALLBACK_WARNED:
+                        warning_rank_0(
+                            f"[fp8] fp8_recipe=mxfp8: Transformer Engine cannot run MXFP8 on this GPU "
+                            f"({te_mxfp8_reason}). Primus-Turbo GEMMs keep MXFP8; GEMMs owned by TE run "
+                            f"{'FP8 tensorwise' if fp8_recipe is not None else 'BF16'} "
+                            f"(PRIMUS_TE_MXFP8_FALLBACK={fallback})."
+                        )
+                        _TE_MXFP8_FALLBACK_WARNED = True
             else:
                 fp8_recipe_none_reason = "Float8CurrentScaling, MXFP8BlockScaling, Float8BlockwiseScaling and DelayedScaling are the only supported FP8 recipes. Please also make sure you are using a compatible TE version."
         else:
@@ -197,7 +253,7 @@ if HAVE_TE and HAVE_TURBO:
 
             global WARN_ONCE
             if WARN_ONCE:
-                if fp8_recipe is None:
+                if fp8_recipe is None and fp8_recipe_none_reason != _TE_MXFP8_BF16_REASON:
                     warning_rank_0(
                         f"TransformerEngine FP8 {config.fp8_recipe} not work since {fp8_recipe_none_reason}"
                     )
@@ -216,6 +272,10 @@ if HAVE_TE and HAVE_TURBO:
                 fp8_group = parallel_state.get_amax_reduction_group(
                     with_context_parallel=True, tp_only_amax_red=config.tp_only_amax_red
                 )
+
+            if is_init and fp8_recipe is None and fp8_recipe_none_reason == _TE_MXFP8_BF16_REASON:
+                # fp8_param with the MXFP8 BF16 fallback: TE keeps BF16 parameters.
+                return nullcontext()
 
             if not is_init:
                 from primus.backends.megatron.core.extensions.primus_turbo import (
@@ -289,6 +349,14 @@ elif HAVE_TE:
             elif config.fp8_recipe == Fp8Recipe.blockwise and is_te_min_version("2.3.0.dev0"):
                 fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
             elif config.fp8_recipe == Fp8Recipe.mxfp8:
+                te_mxfp8_ok, te_mxfp8_reason = _te_mxfp8_support()
+                if not te_mxfp8_ok:
+                    raise RuntimeError(
+                        f"fp8_recipe=mxfp8: Transformer Engine cannot run MXFP8 on this GPU "
+                        f"({te_mxfp8_reason}) and Primus-Turbo is not importable, so no GEMM could "
+                        "run MXFP8. Install a Primus-Turbo with the gfx1250 MXFP8 GEMM "
+                        "(examples/megatron/configs/MI455X/MXFP8_README.md) or pick another fp8_recipe."
+                    )
                 fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
             else:
                 raise ValueError(

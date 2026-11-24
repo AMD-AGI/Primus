@@ -1,0 +1,43 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Llama-3.1-8B MXFP8 pretraining on MI455X (gfx1250), Megatron backend: the precision sibling
+# of llama3.1_8B-BF16-pretrain.yaml (same model, sizes, batch and parallelism; see its header).
+# MXFP8 = E4M3 data with one E8M0 scale per 32 elements, on every transformer-layer linear GEMM
+# (fwd, dgrad, wgrad) through Primus-Turbo (use_turbo_gemm). Master weights, attention core, norms,
+# embedding and the output layer (LM head) stay BF16.
+#
+# PRECISION PATH: Primus-Turbo only, no Transformer Engine FP8 (turbo_precision: mxfp8, fp8 unset),
+# so TE never sees an MXFP8 recipe on gfx1250. Every linear is a Primus-Turbo module that quantizes
+# itself: dense GEMMs on Turbo's FlyDSL gfx1250 WMMA-scale MXFP8 GEMM, expert GEMMs on its Triton
+# MX_BLOCKWISE grouped GEMM. TE runs no MXFP8 GEMM and no FP8 at all.
+#
+# REQUIREMENTS (see MXFP8_README.md in this directory):
+#   - a Primus-Turbo with the gfx1250 FlyDSL MXFP8 dense GEMM and hipBLASLt MXFP8 refused on
+#     gfx1250 (AMD-AGI/Primus-Turbo branch fix/gemm/mxfp8-gfx1250-flydsl on dev/mi455x_v6), built for
+#     gfx1250. The Turbo 0.6.1.dev31 of amdprimus/amdprimus:tas-20261109[-fix1] and upstream
+#     dev/mi455x_v6 run MXFP8 through hipBLASLt on gfx1250 and get it wrong (SNR ~5 dB) silently.
+#     mxfp8_preflight.py must print "MXFP8 PREFLIGHT: PASS".
+#
+# Run (inside a container of the image, TURBO_DIR = the gfx1250-MX Turbo checkout):
+#   EXP=examples/megatron/configs/MI455X/llama3.1_8B-MXFP8-pretrain.yaml TURBO_DIR=/path/to/Primus-Turbo \
+#   PRIMUS_LAUNCHER=direct bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh
+###############################################################################
+
+extends:
+  - llama3.1_8B-BF16-pretrain.yaml
+
+exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-MXFP8-pretrain}
+
+modules:
+  pre_trainer:
+    overrides:
+      # MXFP8 on the Primus-Turbo linears only; fp8 / fp8_recipe stay unset, so TE does no FP8
+      turbo_precision: mxfp8
+      # every dense linear (QKV with its input norm, O, fc1 with its norm, fc2) is a Turbo module
+      use_turbo_gemm: true
+      # dense model: no expert GEMMs
+      use_turbo_grouped_gemm: false
