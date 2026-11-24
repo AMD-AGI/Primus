@@ -273,6 +273,38 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "hylo_teacher_yarn_factor": 32.0}))
 
 
+def test_validate_hylo_args_checks_the_kl_settings_at_startup():
+    base = dict(hylo_distill_stage="sft", hylo_teacher_checkpoint="/tmp/teacher")
+    args = Namespace(**base, hylo_kl_impl="Chunked")
+    validate_hylo_args(args)
+    assert args.hylo_kl_impl == "chunked"
+    for overrides, match in (
+        ({"hylo_kl_impl": "triton"}, "hylo_kl_impl"),
+        ({"hylo_kl_chunk_size": 0}, "hylo_kl_chunk_size"),
+        ({"hylo_kl_weight": 0.0}, "hylo_kl_weight"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            validate_hylo_args(Namespace(**base, **overrides))
+
+
+@pytest.mark.parametrize(
+    "stage, impl, bf16, cuda, expected",
+    [
+        ("sft", "fused", True, True, {"fp32_output": False}),
+        ("sft", "fused", False, True, {}),
+        ("sft", "fused", True, False, {}),
+        ("sft", "chunked", True, True, {}),
+        ("ild", "fused", True, True, {}),
+    ],
+)
+def test_logits_stay_in_model_precision_only_for_the_fused_kl_on_gpu(
+    monkeypatch, stage, impl, bf16, cuda, expected
+):
+    _megatron_args(monkeypatch, hylo_kl_impl=impl, bf16=bf16)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    assert hylo_distillation._logits_kwargs(stage) == expected
+
+
 def test_teacher_args_keep_the_checkpoint_and_fill_newer_megatron_fields():
     run = Namespace(num_layers=16, fp4_param_gather=False, bf16=True, moe_deepep_num_sms=None)
     saved = Namespace(num_layers=32, use_rope_scaling=True, moe_deepep_num_sms=20)
@@ -488,6 +520,27 @@ def test_sft_ild_step_ignores_padding(monkeypatch):
     torch.testing.assert_close(loss.cpu(), 40 * width)
 
 
+def test_sft_kl_step_is_the_weighted_kl_over_the_loss_mask(monkeypatch):
+    _megatron_args(monkeypatch, hylo_kl_impl="chunked", hylo_kl_weight=0.5)
+    teacher = _TeacherGPT()
+    monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(teacher, "sft"))
+    tokens = torch.tensor([[1, 2, 3]])
+    loss_mask = torch.tensor([[1.0, 1.0, 0.0]])
+    student = _StudentHybrid()
+    output, loss_func = create_sft_forward_step()(
+        iter([{"input_ids": tokens, "loss_mask": loss_mask}]), student
+    )
+    loss, count, report = loss_func(output)
+
+    with torch.no_grad():
+        expected, expected_count = masked_chunked_kl(
+            student(tokens, None, None), teacher(tokens, None, None), loss_mask
+        )
+    torch.testing.assert_close(loss, 0.5 * expected)
+    torch.testing.assert_close(report["hylo kl"][0], expected)
+    assert count.item() == expected_count.item() == 2
+
+
 def test_pure_kl_installs_no_capture_hooks():
     teacher, student = _TeacherGPT(), _StudentHybrid()
     runtime = HyLoRuntime(teacher, "sft")
@@ -608,7 +661,7 @@ def test_hylo_recipes_match_stage_contract(monkeypatch):
         params = module.params
         assert params.model_type == "hylo"
         assert params.hylo_distill_stage == stage
-        assert params.hylo_kl_weight == 1.0
+        assert getattr(params, "hylo_kl_weight", None) == (1.0 if stage == "sft" else None)
         assert params.seq_length == seq_length
         assert params.tensor_model_parallel_size == 1
         assert params.pipeline_model_parallel_size == 1

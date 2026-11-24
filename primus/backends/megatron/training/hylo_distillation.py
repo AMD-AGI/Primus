@@ -249,7 +249,7 @@ def teacher_kl(
     args = get_args()
     impl = getattr(args, "hylo_kl_impl", "fused")
     if impl not in _KL_IMPLS:
-        raise ValueError(f"hylo_kl_impl must be 'fused' or 'chunked', got {impl!r}")
+        raise ValueError(f"hylo_kl_impl must be one of {_KL_IMPLS}, got {impl!r}")
     _log_kl_impl(impl if student_logits.is_cuda else "chunked", student_logits.dtype)
     if impl == "fused":
         return masked_fused_kl(student_logits, teacher_logits, loss_mask)
@@ -261,12 +261,24 @@ def teacher_kl(
     )
 
 
-def _logits_kwargs() -> dict:
+def _kl_loss_result(
+    student_logits: torch.Tensor, teacher_logits: torch.Tensor, loss_mask: Optional[torch.Tensor]
+):
+    from megatron.training import get_args
+
+    loss, count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
+    weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
+    return _loss_result(weighted_loss, count, {"hylo kl": loss.detach()})
+
+
+def _logits_kwargs(stage: str) -> dict:
     """Keeps Float16Module's bf16/fp16 logits for the fused KL, which upcasts them in-kernel.
 
     Its loss is the one on fp32 copies of those logits, and the gradient reaches the output layer in
     model precision either way, so this only skips two full-vocabulary fp32 copies.
     """
+    if stage == "ild":
+        return {}
     from megatron.training import get_args
 
     args = get_args()
@@ -613,9 +625,29 @@ def validate_hylo_args(args: Any) -> None:
         raise ValueError("HyLo distillation has no cross-entropy term; hylo_ce_weight must be 0")
     if getattr(getattr(args, "lora", None), "enabled", False):
         raise ValueError("native HyLo does not support LoRA")
+    if stage == "sft":
+        _check_kl_args(args)
     if not unset(getattr(args, "hylo_order_data_dir", None)):
         _check_replay_args(args)
     _derive_warmup(args)
+
+
+def _check_kl_args(args: Any) -> None:
+    impl = getattr(args, "hylo_kl_impl", None)
+    impl = "fused" if unset(impl) else str(impl).lower()
+    if impl not in _KL_IMPLS:
+        raise ValueError(f"hylo_kl_impl must be one of {_KL_IMPLS}, got {args.hylo_kl_impl!r}")
+    args.hylo_kl_impl = impl
+    if impl == "fused" and torch.cuda.is_available() and _fla_kl_kernel() is None:
+        raise ValueError(
+            "hylo_kl_impl: fused needs flash-linear-attention's fused_kl_div; install FLA or set hylo_kl_impl: chunked"
+        )
+    chunk_size = getattr(args, "hylo_kl_chunk_size", None)
+    if not unset(chunk_size) and int(chunk_size) <= 0:
+        raise ValueError(f"hylo_kl_chunk_size must be positive, got {chunk_size}")
+    weight = getattr(args, "hylo_kl_weight", None)
+    if not unset(weight) and float(weight) <= 0:
+        raise ValueError(f"hylo_kl_weight must be positive, got {weight}")
 
 
 def _check_replay_args(args: Any) -> None:
@@ -720,15 +752,13 @@ def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, to
 
 def forward_step(data_iterator, model, return_schedule_plan=False):
     """Megatron forward step on a hybrid-script batch: the frozen teacher, then the student."""
-    from megatron.training import get_args
-
     if return_schedule_plan:
         raise NotImplementedError("HyLo distillation does not support schedule plans")
     assert _RUNTIME is not None
     tokens, labels, loss_mask, attention_mask, position_ids = hybrid_batch_getter()(data_iterator)
     _RUNTIME.install_student_hooks(model)
     _RUNTIME.clear()
-    logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
+    logits_kwargs = _logits_kwargs(_RUNTIME.stage)
     with torch.no_grad():
         teacher_logits = _RUNTIME.teacher(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
     student_logits = model(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
@@ -737,9 +767,7 @@ def forward_step(data_iterator, model, return_schedule_plan=False):
         if _RUNTIME.stage == "ild":
             loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
             return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
-        loss, tokens_count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
-        weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
-        return _loss_result(weighted_loss, tokens_count, {"hylo kl": loss.detach()})
+        return _kl_loss_result(student_logits, teacher_logits, loss_mask)
 
     return student_logits, loss_func
 
@@ -767,7 +795,7 @@ def create_sft_forward_step():
         position_ids = torch.arange(tokens.shape[1], device=device).unsqueeze(0).expand_as(tokens)
         _RUNTIME.install_student_hooks(model)
         _RUNTIME.clear()
-        logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
+        logits_kwargs = _logits_kwargs(_RUNTIME.stage)
         with torch.no_grad():
             teacher_logits = _RUNTIME.teacher(tokens, position_ids, None, labels=None, **logits_kwargs)
         student_logits = model(tokens, position_ids, None, labels=None, **logits_kwargs)
@@ -778,11 +806,8 @@ def create_sft_forward_step():
                     *_RUNTIME.ild_captures(), token_mask=sft_real_tokens(tokens, loss_mask, _sft_pad_id())
                 )
                 return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
-            from megatron.training import get_args
-
-            loss, count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
-            weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
-            return _loss_result(weighted_loss, count, {"hylo kl": loss.detach()})
+            # The SFT loss_mask: KL on the supervised response tokens only.
+            return _kl_loss_result(student_logits, teacher_logits, loss_mask)
 
         return student_logits, loss_func
 

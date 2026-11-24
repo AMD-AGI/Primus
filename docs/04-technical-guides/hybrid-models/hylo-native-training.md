@@ -352,6 +352,20 @@ nondeterminism sets that spread. On the test split they score all-GDN 37.061, al
 all-MLA replay in `rocm/primus:v26.8` scores 34.189, so the small all-MLA shift comes with the
 newer image's kernels.
 
+## Stage 2 settings
+
+Stage 2 is `hylo_distill_stage: sft`: pure KL(teacher || student) on the logits, with no
+Enhanced-ILD hooks. The padded `hylo_4MLA12GDN_1B-8K-sft.yaml` takes the KL over the SFT loss
+mask, the response tokens only; the packed recipe below, like HyLo's trainer, takes it over every
+position.
+
+| Setting | Effect |
+| --- | --- |
+| `hylo_distill_stage` | `ild` for stage 1 (Enhanced-ILD), `sft` for stage 2 (pure KL) |
+| `hylo_kl_weight` | scales the stage-2 KL; the recipes use 1 |
+| `hylo_kl_impl` | `fused` or `chunked`; see [Speed](#speed) |
+| `hylo_kl_chunk_size` | token rows per step of `chunked`, default 4096; `fused` does not use it |
+
 ## Stage 2 on packed 8K windows
 
 `hylo_4MLA12GDN_1B-8K-sft-packed.yaml` trains the assembled 4MLA12GDN student the way HyLo's

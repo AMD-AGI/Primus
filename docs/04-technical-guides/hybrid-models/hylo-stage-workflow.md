@@ -52,8 +52,11 @@ is the stage-2 student initialization.
 
 `hylo_4MLA12GDN_1B-8K-sft.yaml` trains the assembled student against the frozen
 Llama-3.1-8B teacher. Its objective is pure
-`KL(teacher || student)`: KL weight 1 and CE weight 0. The implementation
-computes masked KL in vocabulary chunks to limit memory.
+`KL(teacher || student)`: KL weight 1 and CE weight 0. The recipes'
+`hylo_kl_impl: fused` computes it in one pass with FLA's fused KL kernel;
+`chunked`, the PyTorch reference, takes `hylo_kl_chunk_size` token rows at a
+time over the full vocabulary. This padded recipe takes the KL over the SFT
+loss mask, the response tokens; the packed recipe takes it over every position.
 
 The reference recipe uses 8K context, BF16, learning rate `6e-5`, cosine decay,
 1% warmup, micro-batch 4 per GPU, and YaRN factor 4 over the original 2K
