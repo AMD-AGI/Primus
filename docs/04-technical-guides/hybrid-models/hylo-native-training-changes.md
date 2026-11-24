@@ -6,20 +6,20 @@ is [AMD-Hybrid-Models `feat/HyLo`](https://github.com/AMD-AGI/AMD-Hybrid-Models/
 especially `train_hybrid/train_distill.py` and
 `configs/llama3.2_1B/zebra_4MLA12GDN_8bT_SFT_8k_combined.yaml`.
 
-No Megatron-LM submodule files were edited, and the reference TRL trainer is
-not vendored. Distillation is a Primus forward step behind
-`hylo_distill_stage`.
+No Megatron-LM submodule files or Primus trainers were edited, and the reference
+TRL trainer is not vendored. Distillation is the `hylo` model family
+(`model_type: hylo`): its builder adds the frozen teacher to the Mamba-family
+student, and its forward step computes the HyLo loss.
 
 ## Files
 
 | File | Why it is here |
 | --- | --- |
-| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD (over real tokens only on the padded SFT path), and masked `KL(teacher \|\| student)`, either through FLA's fused `kl_div_kernel` on bf16 logits (`hylo_kl_impl: fused`) or the chunked PyTorch loop. Optional Hugging Face YaRN for the teacher. The teacher is built from its checkpoint's saved args, with fields that Megatron predates (and the dense teacher's `moe_*` defaults) from the run. Derives `lr_warmup_iters` from `hylo_warmup_ratio`. |
-| `primus/backends/megatron/training/hylo_utils.py` | `unset()` for null-like recipe values, and the hybrid pretrain entry point: `pretrain_mamba` before Megatron-core 0.19, `pretrain_hybrid` from it, whose `get_batch` returns its fields in `BATCH_KEYS` order. |
-| `primus/backends/megatron/training/hylo_order_dataset.py`, `primus/backends/megatron/patches/hylo_order_data_patches.py` | Replay of a HyLo run's recorded batches in its order (`hylo_order_data_dir`): the dataset, an all-ones loss mask, and the provider patch with its batch-layout checks. |
-| `primus/backends/megatron/megatron_sft_trainer.py` | Enables that forward step for both training stages. |
-| `primus/backends/megatron/megatron_pretrain_trainer.py` | Same hook, used by the zero-learning-rate constructor. |
-| `primus/backends/megatron/argument_builder.py` | Keeps the `hylo_*` recipe fields (including `hylo_teacher_yarn_*`, `hylo_mla_kv_heads`, `hylo_kl_impl`, `hylo_warmup_ratio`, and `hylo_order_data_dir`), `hybrid_linear_type`, `mamba_expand`, and `mamba_d_xb` through Megatron argument merge, so they reach the saved checkpoint args the upcycler reads. |
+| `primus/backends/megatron/training/hylo_distillation.py` | Frozen dense teacher, Enhanced-ILD (over real tokens only on the padded SFT path), and masked `KL(teacher \|\| student)`, either through FLA's fused `kl_div_kernel` on bf16 logits (`hylo_kl_impl: fused`) or the chunked PyTorch loop. Optional Hugging Face YaRN for the teacher. The teacher is built from its checkpoint's saved args, with fields that Megatron predates (and the dense teacher's `moe_*` defaults), its parallel layout, and its precision from the run. Derives `lr_warmup_iters` from `hylo_warmup_ratio`. The `hylo` family's builder (the Mamba-family student plus the teacher), forward step, and datasets: the hybrid script's, or in replay a HyLo run's recorded batches. The hybrid entry point is `pretrain_mamba` before Megatron-core 0.19 and `pretrain_hybrid` from it, whose `get_batch` returns its fields in `BATCH_KEYS` order. |
+| `primus/backends/megatron/core/models/registry.py` | Registers the `hylo` family: Megatron's `model_provider` with `hylo_builder`, trained by `hylo_distillation`. |
+| `primus/backends/megatron/patches/hylo_patches.py` | Before training with `model_type: hylo`: rejects settings HyLo does not support, sets the warmup, switches replay to the sequential sampler with its batch-layout checks, and gives the SFT trainer HyLo's forward step. |
+| `primus/backends/megatron/patches/mamba_rocm_patches.py` | Applies the Mamba ROCm patches to `model_type: hylo` too. |
+| `primus/backends/megatron/training/hylo_order_dataset.py` | Replay of a HyLo run's recorded batches in its order (`hylo_order_data_dir`), with an all-ones loss mask. |
 | `primus/backends/megatron/checkpoint/hybrid_upcycle.py` | From-teacher MLA, GDN, and Mamba-2 init, plus stage-1 checkpoint assembly. The recurrent mixer's input norm also accepts the TE-fused `linear_qkv.layer_norm_weight` of a converted Llama. Assembly compares layouts on parameters and takes each layer's `_extra_state` from its ILD checkpoint, since `use_fla_fused_gated_norm` replaces the GDN `out_norm` TE norm with one that has none. |
 | `primus/backends/megatron/checkpoint/native_loader_llama.py` | Preserves Llama-3 `rope_scaling` when converting the teachers. |
 | `primus/backends/megatron/core/models/hybrid/hybrid_mamba_mla_layer_specs.py` | `hylo_gdn_hybrid_stack_spec`: RMSNorm, with MLA LoRA latent norms off. `hylo_m2_hybrid_stack_spec`: the same with the grouped Mamba-2 mixer. `hylo_grouped_mla_hybrid_stack_spec`: the same with 8 MLA key/value heads. |
@@ -47,9 +47,9 @@ not vendored. Distillation is a Primus forward step behind
 | `tools/hybrid/run_hylo_ild_eval.sh`, `tools/hybrid/summarize_hylo_ild_eval.py`, `tools/hybrid/summarize_hylo_ild_loss.py` | Test-split Enhanced-ILD of a checkpoint, and summaries of evaluation and training logs. |
 | `tools/hybrid/hylo_train_dump.py` | Runs HyLo's `train_distill.py` unchanged and records its student init and every rank's training batches for replay. |
 | `tools/hybrid/hylo_primus_parity.patch` | The HyLo change the recordings ran with, for `git am` on AMD-Hybrid-Models `84871cc`: the `teacher_rope_from_student` option and padded-batch Enhanced-ILD. |
-| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks; the ILD step's final-norm pair and per-micro-batch count; the real-token mask on the SFT path, checked against a tokenized sample; the teacher attention capture under an in-place residual add; teacher YaRN against Hugging Face (GPU); the fused KL against the chunked loop (GPU) and the KL dispatch. |
+| `tests/unit_tests/backends/megatron/test_hylo_distillation.py` | Loss, mask, and argument checks; the ILD step's final-norm pair and per-micro-batch count; the real-token mask on the SFT path, checked against a tokenized sample; the teacher attention capture under an in-place residual add; teacher YaRN against Hugging Face (GPU); the fused KL against the chunked loop (GPU) and the KL dispatch; the batch unpacking on both Megatron versions. |
 | `tests/unit_tests/backends/megatron/test_hylo_packed_recipes.py` | The four packed recipes keep the SFT recipes' model, teacher, and optimizer on the reference's schedule; the warmup derivation. |
-| `tests/unit_tests/backends/megatron/test_hylo_order_dataset.py`, `test_hylo_order_data_patches.py`, `test_hylo_utils.py` | Replay through Megatron's sampler, its mask and layout checks, the provider patch on both entry points, and the batch unpacking on both Megatron versions. |
+| `tests/unit_tests/backends/megatron/test_hylo_order_dataset.py`, `test_hylo_patches.py` | Replay through Megatron's sampler and its mask; the `hylo` family's provider, builder, and training module; the startup patch and its layout checks; the datasets on Megatron-core 0.19. |
 | `tests/unit_tests/backends/megatron/test_philox_uniform.py` | Philox4x32-10 known answers, the kernel's element order and offsets, and the model against the local GPU's `uniform_` (GPU). |
 | `tests/unit_tests/backends/megatron/test_mamba2_reference_draw.py` | The scan recovers a planted compute-unit count; the writer replaces only the random tensors. |
 | `tests/unit_tests/backends/megatron/test_hylo_reference_compare.py` | Name mapping, the reference-to-Megatron round trip, comparison statistics, and MLA sign alignment. |
@@ -75,7 +75,7 @@ layer input. The teacher's mixer target is a copy of its self-attention output:
 in eval mode without grad, Megatron's bias-dropout-add adds the residual into
 that tensor in place, which would turn the target into the post-attention
 residual stream. Stage 2
-uses pure KL with `hylo_kl_weight: 1.0` and `hylo_ce_weight: 0.0`, summed over the
+uses pure KL with `hylo_kl_weight: 1.0` (a non-zero `hylo_ce_weight` is rejected), summed over the
 loss mask and divided by its count. `hylo_kl_impl: fused` runs FLA's
 `kl_div_kernel`, as HyLo does, on Float16Module's bf16 logits; it computes the
 gradient in the forward pass, and the mask is applied to the loss and to that

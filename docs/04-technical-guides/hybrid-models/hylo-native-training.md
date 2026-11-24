@@ -15,6 +15,11 @@ reference TRL trainer:
 The runtime currently supports TP=1 and PP=1. It is intended for eight-way data
 parallel training on MI300X with `rocm/primus:v26.9`.
 
+The distillation recipes set `model_type: hylo`. That model family builds the
+Mamba-family student through Megatron's model provider, adds the frozen
+teacher, and trains with HyLo's forward step; a startup patch checks the HyLo
+settings. The constructor recipes keep `model_type: mamba`.
+
 ## Prepare public assets
 
 Accept access to both gated Meta Llama repositories, then keep the token in the
@@ -306,7 +311,7 @@ The numbers below were recorded against AMD-Hybrid-Models `feat/HyLo` at `84871c
 `teacher_rope_from_student` option, which the recordings set to false so the teacher keeps its own
 RoPE scaling as in Primus, and fixes padded-batch Enhanced-ILD.
 
-Point `HYLO_ORDER_DATA_DIR` at the dump and `HyLoOrderDataset` replays the batches. The patch
+Point `HYLO_ORDER_DATA_DIR` at the dump and `HyLoOrderDataset` replays the batches. The startup patch
 switches the sampler to `dataloader_type: single`, so every rank receives, at every step, the
 batch the HyLo rank with its index used. The run must use the HyLo run's micro-batch, sequence
 length, and data-parallel size, CP=1, and `global_batch_size` equal to micro-batch times
