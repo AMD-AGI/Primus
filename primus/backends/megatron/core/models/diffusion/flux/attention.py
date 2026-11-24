@@ -390,6 +390,12 @@ class JointSelfAttention(Attention):
             query = apply_rotary_pos_emb(query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q)
             key = apply_rotary_pos_emb(key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv)
 
+        # Q/K RMSNorm (for_qk) can leave Q/K in fp32 while V stays bf16; AITER
+        # FlashAttention requires Q, K, V to share one dtype. Align Q/K to V at the
+        # attention-kernel boundary (covers both RMSNorm and RoPE promotion).
+        query = query.to(value.dtype)
+        key = key.to(value.dtype)
+
         # Core attention computation
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
@@ -565,6 +571,12 @@ class FluxSingleAttention(SelfAttention):
 
             query = apply_rotary_pos_emb(query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q)
             key = apply_rotary_pos_emb(key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv)
+
+        # Q/K RMSNorm (for_qk) can leave Q/K in fp32 while V stays bf16; AITER
+        # FlashAttention requires Q, K, V to share one dtype. Align Q/K to V at the
+        # attention-kernel boundary (covers both RMSNorm and RoPE promotion).
+        query = query.to(value.dtype)
+        key = key.to(value.dtype)
 
         # Core attention computation
         if self.checkpoint_core_attention and self.training:
