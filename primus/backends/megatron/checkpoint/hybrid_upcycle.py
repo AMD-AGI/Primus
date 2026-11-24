@@ -137,6 +137,9 @@ def layout_from_args(dense_args: object, hybrid_args: object) -> Optional[Upcycl
     if heads is None:
         return None
     query_groups = _first_arg(dense_args, hybrid_args, "num_query_groups") or heads
+    if _arg(dense_args, "group_query_attention") is False:
+        # Megatron reads num_query_groups only under group_query_attention.
+        query_groups = heads
     hidden = _first_arg(dense_args, hybrid_args, "hidden_size")
     head_dim = _first_arg(dense_args, hybrid_args, "kv_channels")
     if head_dim is None and hidden is not None:
@@ -466,14 +469,21 @@ def unwrap_model_state(checkpoint: Mapping) -> dict:
     return dict(model)
 
 
-def save_upcycle_checkpoint(checkpoint: dict, output_dir: Path, report: UpcycleReport) -> Path:
-    """Write ``iter_0000000`` plus the iteration tracker and a JSON report."""
+def write_iteration_zero(checkpoint: dict, output_dir: Path) -> Path:
+    """Write ``checkpoint`` as ``iter_0000000`` with the iteration tracker; returns the file."""
+    output_dir = Path(output_dir)
     iter_dir = output_dir / "iter_0000000" / "mp_rank_00"
     iter_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = iter_dir / "model_optim_rng.pt"
     torch.save(checkpoint, ckpt_path)
     (output_dir / "latest_checkpointed_iteration.txt").write_text("0\n")
-    (output_dir / "upcycle_report.json").write_text(json.dumps(report.to_dict(), indent=2) + "\n")
+    return ckpt_path
+
+
+def save_upcycle_checkpoint(checkpoint: dict, output_dir: Path, report: UpcycleReport) -> Path:
+    """Write ``iter_0000000`` plus the iteration tracker and a JSON report."""
+    ckpt_path = write_iteration_zero(checkpoint, output_dir)
+    (Path(output_dir) / "upcycle_report.json").write_text(json.dumps(report.to_dict(), indent=2) + "\n")
     return ckpt_path
 
 

@@ -418,6 +418,7 @@ def write_reference_as_megatron(template: Path, reference: Path, kind: str, outp
     from primus.backends.megatron.checkpoint.hybrid_upcycle import (
         build_upcycle_checkpoint,
         load_checkpoint,
+        write_iteration_zero,
     )
 
     state, envelope = load_checkpoint(Path(template))
@@ -441,11 +442,7 @@ def write_reference_as_megatron(template: Path, reference: Path, kind: str, outp
     if left:
         raise ValueError(f"student tensors without a reference value: {left}")
 
-    output_dir = Path(output_dir)
-    iter_dir = output_dir / "iter_0000000" / "mp_rank_00"
-    iter_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(build_upcycle_checkpoint(envelope, state), iter_dir / "model_optim_rng.pt")
-    (output_dir / "latest_checkpointed_iteration.txt").write_text("0\n")
+    write_iteration_zero(build_upcycle_checkpoint(envelope, state), output_dir)
     return len(written)
 
 

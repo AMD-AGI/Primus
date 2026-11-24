@@ -8,8 +8,8 @@
 On a CUDA or ROCm GPU, PyTorch fills a 32-bit float tensor through
 ``distribution_elementwise_grid_stride_kernel`` with Philox4x32-10 draws. The kernel launches
 256-thread blocks on ``min(ceil(numel / 256), compute_units * threads_per_cu / 256)`` blocks.
-Thread ``t`` draws Philox blocks with counter ``(offset / 4 + k, t)`` under key ``(seed, 0)``,
-and element ``i`` takes component ``(i // S) % 4`` of draw ``i // (4 S)``, where ``S`` is the
+Thread ``t`` draws Philox blocks with counter ``(offset / 4 + k, t)`` under key
+``(seed & 0xFFFFFFFF, seed >> 32)``, the seed's low and high 32-bit words, and element ``i`` takes component ``(i // S) % 4`` of draw ``i // (4 S)``, where ``S`` is the
 number of threads in the grid. The generator offset then advances by
 ``((numel - 1) // (4 S) + 1) * 4``.
 

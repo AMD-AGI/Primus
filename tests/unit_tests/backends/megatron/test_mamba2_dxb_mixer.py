@@ -87,7 +87,8 @@ def _recurrent_forward(mixer, hidden):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="mamba-ssm kernels need a GPU")
-# in_proj widths 52 and 104; causal_conv1d's channel-last kernel only takes widths divisible by 8.
+# conv1d widths d_inner + 2 * d_xb, 32 and 64; causal_conv1d's channel-last kernel only takes
+# widths divisible by 8.
 @pytest.mark.parametrize("groups, d_xb", [(4, 8), (8, 16)])
 def test_mixer_matches_grouped_mamba2_recurrence(monkeypatch, groups, d_xb):
     pytest.importorskip("mamba_ssm")

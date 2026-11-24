@@ -454,3 +454,11 @@ def test_assemble_ild_takes_extra_states_from_the_source_layer():
     }
     with pytest.raises(ValueError, match="layout mismatch"):
         assemble_ild_state_dict(base, missing_weight, mla, pattern)
+
+
+def test_layout_reads_query_groups_only_under_group_query_attention():
+    dense = dict(num_attention_heads=8, num_query_groups=2, hidden_size=32, kv_channels=4)
+    gqa = layout_from_args(Namespace(**dense, group_query_attention=True), None)
+    mha = layout_from_args(Namespace(**dense, group_query_attention=False), None)
+    unrecorded = layout_from_args(Namespace(**dense), None)
+    assert (gqa.num_query_groups, mha.num_query_groups, unrecorded.num_query_groups) == (2, 8, 2)

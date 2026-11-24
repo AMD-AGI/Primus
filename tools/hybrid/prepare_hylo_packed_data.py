@@ -100,7 +100,7 @@ def select_rows(num_rows: int, split: str, ratio: float = 0.2, seed: int = 42) -
 
     ``datasets`` shuffles with ``np.random.default_rng(seed).permutation``. Every split is
     shuffled once; the train split is shuffled again with the same seed and then
-    ``select(range(1, int(ratio * rows)))``, so row ``i`` of the result is ``p[p[i]]``.
+    ``select(range(1, int(ratio * rows)))``, so row ``i`` of the result is ``p[p[i + 1]]``.
     """
     perm = np.random.default_rng(seed).permutation(num_rows)
     if split != "train":

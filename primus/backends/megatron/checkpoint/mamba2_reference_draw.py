@@ -313,6 +313,7 @@ def write(
     from primus.backends.megatron.checkpoint.hybrid_upcycle import (
         build_upcycle_checkpoint,
         load_checkpoint,
+        write_iteration_zero,
     )
 
     widths = reference.widths
@@ -362,14 +363,9 @@ def write(
             }
         )
 
-    checkpoint = build_upcycle_checkpoint(envelope, state)
-    output_dir = Path(output_dir)
-    iter_dir = output_dir / "iter_0000000" / "mp_rank_00"
-    iter_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(checkpoint, iter_dir / "model_optim_rng.pt")
-    (output_dir / "latest_checkpointed_iteration.txt").write_text("0\n")
+    write_iteration_zero(build_upcycle_checkpoint(envelope, state), output_dir)
     report["widths"] = asdict(widths)
-    (output_dir / "reference_draw_report.json").write_text(json.dumps(report, indent=2) + "\n")
+    (Path(output_dir) / "reference_draw_report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
 
