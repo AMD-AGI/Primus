@@ -150,17 +150,28 @@ Build frequency:
 
 The nightly check covers the allowlisted build context (`primus/`, `runner/`,
 `examples/specforge/`, `primus_cli.py`, `pyproject.toml`, `LICENSE`, `README.md`)
-and checkout attributes plus the workflow/change-check helper. It compares Git trees, so unrelated changes
+and `.gitattributes`, plus the workflow/change-check helper. It compares Git trees,
+so unrelated changes
 and fully reverted changes do not rebuild images. PR builds, skipped nights,
 failed runs, and partial/skipped publications cannot advance the reference.
 With no retained successful main publication, the first nightly bootstraps both
-variants. GitHub API or Git comparison failures fail the check rather than
-silently skipping a build. Mutable upstream dependencies changing without a
+variants. An unavailable published commit also triggers a recovery build, so a
+main history rewrite cannot leave every nightly failing on a missing object.
+Other Git comparison or GitHub API failures fail the check rather than silently
+skipping a build. Main publications are serialized; a nightly cannot cancel an
+active manual rebuild. Only PR runs cancel older in-progress runs.
+Mutable upstream dependencies changing without a
 tracked input change require a manual build or a pin update.
 
 The `ci:gpu` label does not gate image builds. The build runs the Dockerfile's
 existing GPU-free checks; the nightly decision runs on a lightweight hosted
 runner before allocating the Docker build runner.
+
+The main CPU CI runs the gate tests even for PRs outside the image path filters.
+Shared core/CLI changes intentionally wait for nightly image coverage unless a
+maintainer requests a manual image build. Reference lookup scans retained successful
+runs, including skipped nights, to find actual publication; this costs one job-list
+request per candidate run rather than maintaining separate writable checkpoint state.
 
 Main and version-tag builds publish the version-bearing tag described above.
 PR builds publish `pr-<number>-<version-bearing-tag>` so they cannot overwrite

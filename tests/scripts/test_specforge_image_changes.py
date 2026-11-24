@@ -109,33 +109,67 @@ class ImageChangesTest(unittest.TestCase):
 
     def test_git_tree_comparison_ignores_docs_and_detects_deletion(self):
         with tempfile.TemporaryDirectory() as directory:
-            previous = Path.cwd()
-            try:
-                os.chdir(directory)
+            root = Path(directory)
+            env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
 
-                def git(*args):
-                    return subprocess.check_output(
-                        ["git", *args], text=True, stderr=subprocess.DEVNULL
-                    ).strip()
+            def git(*args):
+                return subprocess.check_output(
+                    [
+                        "git",
+                        "-c",
+                        "commit.gpgsign=false",
+                        "-c",
+                        "user.name=Test",
+                        "-c",
+                        "user.email=test@example.com",
+                        *args,
+                    ],
+                    text=True,
+                    cwd=root,
+                    env=env,
+                ).strip()
 
-                git("init")
-                Path("README.md").write_text("original\n", encoding="utf-8")
-                git("add", ".")
-                git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
-                base = git("rev-parse", "HEAD")
-                Path("docs").mkdir()
-                Path("docs/guide.md").write_text("unrelated\n", encoding="utf-8")
-                git("add", ".")
-                git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "docs")
-                self.assertEqual(gate.changed_inputs(base), [])
-                git("rm", "README.md")
-                git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "delete")
-                self.assertEqual(gate.changed_inputs(base), ["README.md"])
-                git("checkout", base, "--", "README.md")
-                git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "restore")
-                self.assertEqual(gate.changed_inputs(base), [])
-            finally:
-                os.chdir(previous)
+            git("init", "--quiet")
+            (root / "README.md").write_text("original\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            (root / "docs").mkdir()
+            (root / "docs/guide.md").write_text("unrelated\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "--quiet", "-m", "docs")
+            self.assertEqual(gate.changed_inputs(base, cwd=root, env=env), [])
+            git("rm", "README.md")
+            git("commit", "--quiet", "-m", "delete")
+            self.assertEqual(gate.changed_inputs(base, cwd=root, env=env), ["README.md"])
+            git("checkout", base, "--", "README.md")
+            git("commit", "--quiet", "-m", "restore")
+            self.assertEqual(gate.changed_inputs(base, cwd=root, env=env), [])
+            with self.assertRaises(gate.MissingPublishedRevision):
+                gate.changed_inputs("0" * 40, cwd=root, env=env)
+
+    def test_missing_revision_recovers_but_diff_errors_fail(self):
+        missing = Mock(side_effect=gate.MissingPublishedRevision("gone"))
+        build, reason = gate.decision("schedule", "owner/repo", lambda _: "gone", missing)
+        self.assertTrue(build)
+        self.assertIn("unavailable", reason)
+        with self.assertRaises(subprocess.CalledProcessError):
+            gate.decision(
+                "schedule",
+                "owner/repo",
+                lambda _: "base",
+                Mock(side_effect=subprocess.CalledProcessError(128, "git diff")),
+            )
+
+    def test_publication_contract_matches_workflow(self):
+        import re
+
+        workflow = (ROOT / ".github/workflows/build-specforge-images.yml").read_text()
+        self.assertRegex(workflow, r"(?m)^  build:")
+        self.assertIn("- name: Publish image", workflow)
+        variants = re.search(r"variant: \[(.*?)\]", workflow).group(1)
+        self.assertEqual({item.strip() for item in variants.split(",")}, set(gate.VARIANTS))
 
 
 if __name__ == "__main__":

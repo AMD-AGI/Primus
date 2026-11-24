@@ -19,7 +19,8 @@ permissions:
 
 concurrency:
   group: specforge-images-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Serialize main publications; a quiet nightly must not cancel a manual rebuild.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE_REPOSITORY: docker.io/tasimage/primus-specforge
@@ -38,7 +39,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          fetch-depth: 0
+          fetch-depth: ${{ github.event_name == 'schedule' && '0' || '1' }}
       - name: Check inputs since the last successful main publication
         id: changes
         env:

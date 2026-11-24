@@ -7,6 +7,12 @@ import subprocess
 from pathlib import Path
 
 WORKFLOW = "build-specforge-images.yml"
+PAGE_SIZE = 100
+VARIANTS = tuple(
+    json.loads((Path(__file__).resolve().parents[2] / "examples/specforge/docker/images.json").read_text())[
+        "variants"
+    ]
+)
 # Keep aligned with build.py's allowlisted tar context, plus CI build controls.
 INPUTS = (
     ".gitattributes",
@@ -38,7 +44,7 @@ def published_both(jobs):
             )
             for job in jobs
         )
-        for variant in ("mi30x", "mi35x")
+        for variant in VARIANTS
     )
 
 
@@ -47,7 +53,7 @@ def last_published_revision(repository, api=github_api):
     while True:
         runs = api(
             f"repos/{repository}/actions/workflows/{WORKFLOW}/runs"
-            f"?branch=main&status=success&per_page=100&page={page}"
+            f"?branch=main&status=success&per_page={PAGE_SIZE}&page={page}"
         )["workflow_runs"]
         for run in runs:
             if run["head_branch"] != "main" or run["event"] not in ("push", "schedule", "workflow_dispatch"):
@@ -55,16 +61,29 @@ def last_published_revision(repository, api=github_api):
             jobs = api(f"repos/{repository}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100")["jobs"]
             if published_both(jobs):
                 return run["head_sha"]
-        if len(runs) < 100:
+        if len(runs) < PAGE_SIZE:
             return None
         page += 1
 
 
-def changed_inputs(revision):
+class MissingPublishedRevision(RuntimeError):
+    pass
+
+
+def changed_inputs(revision, cwd=None, env=None):
+    available = subprocess.run(
+        ["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    if available.returncode:
+        raise MissingPublishedRevision(revision)
     # Two-endpoint tree comparison catches additions/deletions/mode changes and
     # avoids rebuilding for changes subsequently reverted before the nightly.
     return subprocess.check_output(
-        ["git", "diff", "--name-only", revision, "HEAD", "--", *INPUTS], text=True
+        ["git", "diff", "--name-only", revision, "HEAD", "--", *INPUTS], text=True, cwd=cwd, env=env
     ).splitlines()
 
 
@@ -74,7 +93,13 @@ def decision(event, repository, find_revision=last_published_revision, diff=chan
     revision = find_revision(repository)
     if revision is None:
         return True, "No successful main publication found; bootstrap both image variants."
-    paths = diff(revision)
+    try:
+        paths = diff(revision)
+    except MissingPublishedRevision:
+        return (
+            True,
+            f"Published commit {revision} is unavailable locally; bootstrap both variants to recover.",
+        )
     return bool(paths), f"Compared tracked image inputs with {revision}: {len(paths)} changed path(s)."
 
 
