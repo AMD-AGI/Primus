@@ -90,7 +90,7 @@ def test_maxtext_patch_modules_import_without_maxtext():
 
     ids = set(PatchRegistry.list_ids())
     for patch_id in (
-        "maxtext.config.v26_10_fields",
+        "maxtext.config.primus_fields",
         "maxtext.distributed.heartbeat_timeout",
         "maxtext.train.device_info",
         "maxtext.train.sync_before_loop",

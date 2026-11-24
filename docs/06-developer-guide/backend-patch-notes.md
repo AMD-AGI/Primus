@@ -159,7 +159,7 @@ Always-on behavior (no flag; leave the patch id out of `PRIMUS_PATCHES` to disab
 
 | Patch id | Change | Patched Files |
 | -------- | ------ | ------------- |
-| `maxtext.config.v26_10_fields` | Adds the keys above to `MaxTextConfig` (subclass bound as `pyconfig`'s default `config_class`). | `maxtext.configs.types.MaxTextConfig`, `maxtext.configs.pyconfig` |
+| `maxtext.config.primus_fields` | Adds the keys above to `MaxTextConfig` (subclass bound as `pyconfig`'s default `config_class`). | `maxtext.configs.types.MaxTextConfig`, `maxtext.configs.pyconfig` |
 | `maxtext.train.sync_before_loop` | `sync_global_devices` barrier right before the training loop. | `maxtext.trainers.pre_train.train.train_loop` |
 | `maxtext.train.sync_each_step` | `jax.block_until_ready` on the train state after every step. | `maxtext.trainers.pre_train.train.training_loop_iteration` |
 | `maxtext.train.device_info` | Logs every device and writes `<base_output_directory>/device_info.json`. | `maxtext.utils.max_utils.print_system_information`, `maxtext.trainers.pre_train.train.initialize` |
@@ -167,5 +167,21 @@ Always-on behavior (no flag; leave the patch id out of `PRIMUS_PATCHES` to disab
 | `maxtext.attention.synthetic_causal_mask` | `dataset_type: synthetic` uses a causal mask instead of building the S x S mask in TE attention. | `maxtext.layers.attention_op.AttentionOp.cudnn_flash_attention` |
 | `maxtext.models.query_pre_attn_scalar` | `query_pre_attn_scalar=head_dim**-0.5` in the Gemma, Gemma2, Llama2, Mistral and Mixtral decoder layers. | `maxtext.models.{gemma,gemma2,llama2,mistral,mixtral}.*DecoderLayer.__init__` |
 | `maxtext.lora.set_mesh_unbox` | Unboxes restored LoRA params under `jax.set_mesh(mesh)` (flax 0.12.2). | `maxtext.utils.lora_utils.setup_initial_lora_state` |
+
+Patch registry. Every MaxText setup patch, the ROCm/maxtext commits it replaces, and when it can go. "Permanent" patches are AMD features or Primus benchmark/ops policy and stay in Primus. "General fix" patches are candidates for upstreaming: once the pinned MaxText contains the change, the patch skips itself (logged at startup), and it is deleted at the next pin bump. Upstream status is as of the pinned `third_party/maxtext` commit; a pin bump that changes it updates this table.
+
+| Patch id | ROCm/maxtext origin | Category | Upstream | Remove when |
+| -------- | ------------------- | -------- | -------- | ----------- |
+| `maxtext.config.primus_fields` | `38d321cff`, `6d3eab29e`, `a1efcbc98`..`2fb48f50e` | Config keys for the patches below | No | Each key goes with the patch that reads it |
+| `maxtext.moe.turbo_grouped_gemm` | `a1efcbc98`, `5f0be4640`, `6ef3e66f5`, `84734f14b`, `11628c4a8`, `2780b6c92`, `e1bd9de00`, `8eec68a4a`, `262f6e873`, `2fb48f50e` | AMD feature | No | Permanent |
+| `maxtext.moe.expert_balance` | `38d321cff` | Benchmark policy | No | Permanent |
+| `maxtext.train.sync_each_step` | `8d1d43c03` | Benchmark policy | No | Permanent |
+| `maxtext.train.device_info` | `1c275c1e2` | Ops policy | No | Permanent |
+| `maxtext.attention.synthetic_causal_mask` | `0aaedc18c` | Benchmark policy | No | Permanent |
+| `maxtext.train.sync_before_loop` | `dd8204b2d` | General fix | No | MaxText has the change |
+| `maxtext.distributed.heartbeat_timeout` | `6d3eab29e` | General fix | No | MaxText has the change |
+| `maxtext.moe.routing_maps_remat` | `b2632e16d` | General fix | No | MaxText has the change |
+| `maxtext.lora.set_mesh_unbox` | `4270c96a1` | General fix | No | MaxText has the change |
+| `maxtext.models.query_pre_attn_scalar` | `ba34cb9e2` | General fix | No | MaxText has the change |
 
 `maxtext.moe.turbo_grouped_gemm` also gives the `jax.lax.ragged_dot` fallback the same ring-of-experts `group_offset` window. The `src/maxtext/examples/shardings.py` part of `4270c96a1` is a standalone example script and is not ported.

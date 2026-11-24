@@ -5,10 +5,10 @@
 ###############################################################################
 
 """
-MaxText config schema patch (ROCm/maxtext release/v26.10).
+MaxText config schema patch: the config keys Primus adds to MaxText.
 
 MaxText's ``pyconfig`` rejects keys that are not fields of ``types.MaxTextConfig``,
-so the config keys introduced by the release/v26.10 commits are added here:
+so every Primus-only MaxText config key is added here. From ROCm/maxtext release/v26.10:
 
 - ``expert_balance`` (38d321cff)
 - ``jax_distributed_heartbeat_timeout_seconds`` (6d3eab29e)
@@ -25,7 +25,8 @@ from typing import Literal
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
-_PREFIX = "[Patch:maxtext.config.v26_10_fields]"
+_PATCH_ID = "maxtext.config.primus_fields"
+_PREFIX = f"[Patch:{_PATCH_ID}]"
 
 _TURBO_BACKEND_MODULES = {
     "ck": "primus_turbo.jax.lax.grouped_gemm",
@@ -106,10 +107,10 @@ def _rebind_default_config_class(pyconfig, old_cls, new_cls) -> None:
 
 
 @register_patch(
-    patch_id="maxtext.config.v26_10_fields",
+    patch_id=_PATCH_ID,
     backend="maxtext",
     phase="setup",
-    description="Add the release/v26.10 config keys (expert_balance, heartbeat timeout, turbo grouped GEMM) to MaxTextConfig",
+    description="Add the Primus MaxText config keys (expert_balance, heartbeat timeout, turbo grouped GEMM) to MaxTextConfig",
     condition=lambda ctx: True,
     priority=10,
 )
@@ -126,11 +127,11 @@ def patch_maxtext_config_fields(ctx: PatchContext) -> None:
     from pydantic.functional_validators import model_validator
 
     base_cls = types.MaxTextConfig
-    if getattr(base_cls, "__primus_v26_10_fields__", False):
+    if getattr(base_cls, "__primus_fields__", False):
         return
     missing = {k: v for k, v in _new_fields(Field).items() if k not in base_cls.model_fields}
     if not missing:
-        log_rank_0(f"{_PREFIX} MaxTextConfig already defines every release/v26.10 key; not patched.")
+        log_rank_0(f"{_PREFIX} MaxTextConfig already defines every Primus key; not patched.")
         return
 
     validators = {}
@@ -147,7 +148,7 @@ def patch_maxtext_config_fields(ctx: PatchContext) -> None:
         **missing,
     )
     new_cls.__qualname__ = base_cls.__qualname__
-    new_cls.__primus_v26_10_fields__ = True
+    new_cls.__primus_fields__ = True
     _rebind_default_config_class(pyconfig, base_cls, new_cls)
     types.MaxTextConfig = new_cls
     log_rank_0(f"{_PREFIX} Added MaxTextConfig fields: {sorted(missing)}")
