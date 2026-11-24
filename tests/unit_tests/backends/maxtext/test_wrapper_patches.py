@@ -88,4 +88,6 @@ def test_heartbeat_timeout_forwards_extra_args(fake_maxtext):
         {"jax_distributed_heartbeat_timeout_seconds": 7}, coordinator="host:1234"
     )
 
-    assert fake_maxtext["initialize"] == [{"coordinator_address": "host:1234", "heartbeat_timeout_seconds": 7}]
+    assert fake_maxtext["initialize"] == [
+        {"coordinator_address": "host:1234", "heartbeat_timeout_seconds": 7}
+    ]
