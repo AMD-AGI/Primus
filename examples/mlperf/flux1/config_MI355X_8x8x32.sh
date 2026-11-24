@@ -12,6 +12,9 @@ export WARMUP_STEPS=${WARMUP_STEPS:-0}
 export DP_REPLICATE=${DP_REPLICATE:-2}
 export FLUX_FP8_AG_PREQUANT=${FLUX_FP8_AG_PREQUANT:-0}
 export FLUX_FPROP_SWITCH_STEP=${FLUX_FPROP_SWITCH_STEP-4150}  # 8.5M samples
+# HIP IPC cannot gather across hosts; use NCCL and keep low-precision gathers.
+export FSDP_ALL_GATHER_BACKEND=${FSDP_ALL_GATHER_BACKEND:-default}
+export FLUX_FP4_ALL_GATHER=${FLUX_FP4_ALL_GATHER:-1}
 if [ "${DP_REPLICATE}" = "1" ]; then
   export FLUX_FP4_ALL_GATHER=0
 fi
