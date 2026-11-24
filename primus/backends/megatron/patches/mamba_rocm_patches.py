@@ -33,8 +33,8 @@ def _is_rocm_mamba_run(ctx: PatchContext) -> bool:
     """
     if getattr(torch.version, "hip", None) is None:
         return False
-    # Megatron: plain Mamba and the hybrids set ``model_type: mamba``, HyLo's hybrid students ``hylo``.
-    if get_param(ctx, "model_type") in ("mamba", "hylo"):
+    # Megatron: plain Mamba and the hybrids both set ``model_type: mamba``.
+    if get_param(ctx, "model_type") == "mamba":
         return True
     recipe = str(get_param(ctx, "recipe", "") or "")
     return any(family in recipe for family in _BRIDGE_MAMBA_RECIPES)

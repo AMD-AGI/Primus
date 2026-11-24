@@ -299,65 +299,6 @@ def upcycle_state_dict(
     return upcycled, report
 
 
-def assemble_ild_state_dict(
-    hybrid_base_state: Mapping[str, torch.Tensor],
-    gdn_ild_state: Mapping[str, torch.Tensor],
-    mla_ild_state: Mapping[str, torch.Tensor],
-    pattern: str,
-) -> dict[str, torch.Tensor]:
-    """Assemble HyLo stage 2 from all-GDN and all-MLA Enhanced-ILD checkpoints.
-
-    Global tensors remain from ``hybrid_base_state`` (the upcycled Llama
-    backbone). Each mixer/MLP pair is copied wholesale from the corresponding
-    stage-1 checkpoint, matching ``HybridModelWrapper.init_distillation``.
-    Layouts are compared on parameters only: a recipe with
-    ``use_fla_fused_gated_norm`` replaces the GDN ``out_norm`` TE norm by one
-    without ``_extra_state``, so a layer takes its source's extra states.
-    """
-    num_sublayers = count_decoder_layers(hybrid_base_state)
-    if num_sublayers % 2:
-        raise ValueError("HyLo ILD assembly requires paired mixer/MLP sublayers")
-    pattern = validate_upcycle_pattern(pattern, num_sublayers // 2)
-    for name, state in (("GDN", gdn_ild_state), ("MLA", mla_ild_state)):
-        if count_decoder_layers(state) != num_sublayers:
-            raise ValueError(
-                f"{name} ILD checkpoint has {count_decoder_layers(state)} sublayers; "
-                f"expected {num_sublayers}"
-            )
-
-    assembled = {key: value for key, value in hybrid_base_state.items()}
-    for block in range(num_sublayers // 2):
-        symbol = pattern[2 * block]
-        source = mla_ild_state if symbol == ATTENTION else gdn_ild_state
-        for layer_index in (2 * block, 2 * block + 1):
-            prefix = f"decoder.layers.{layer_index}."
-            target_keys = {key for key in assembled if key.startswith(prefix)}
-            source_keys = {key for key in source if key.startswith(prefix)}
-            target_params = {key for key in target_keys if not _is_extra_state(key)}
-            source_params = {key for key in source_keys if not _is_extra_state(key)}
-            if target_params != source_params:
-                missing = sorted(target_params - source_params)
-                extra = sorted(source_params - target_params)
-                raise ValueError(
-                    f"ILD layer {layer_index} layout mismatch; " f"missing={missing[:5]}, extra={extra[:5]}"
-                )
-            for key in target_keys - source_keys:
-                del assembled[key]
-            for key in source_keys:
-                if key in target_params and tuple(assembled[key].shape) != tuple(source[key].shape):
-                    raise ValueError(
-                        f"ILD tensor {key}: target {tuple(assembled[key].shape)} "
-                        f"!= source {tuple(source[key].shape)}"
-                    )
-                value = source[key]
-                assembled[key] = value.detach().to(device="cpu").clone() if torch.is_tensor(value) else value
-    return assembled
-
-
-def _is_extra_state(key: str) -> bool:
-    return key.endswith("._extra_state")
-
-
 def build_upcycle_checkpoint(hybrid_checkpoint: dict, upcycled_state: Mapping[str, torch.Tensor]) -> dict:
     """Return a legacy Megatron checkpoint envelope at iteration 0.
 
@@ -789,9 +730,9 @@ def _copy_mamba_hylo(
 
     HyLo writes V into ``x``, K into ``B``, and Q into ``C`` of an ``in_proj``
     whose width is ``2 * d_inner + 2 * d_xb + nheads``, and copies ``o_proj``
-    and the attention input norm. ``Mamba2DxbMixer`` has that width; Megatron's
-    ``MambaMixer`` has it only when ``d_xb == d_inner == n_groups * d_state``.
-    Any other width is left untouched.
+    and the attention input norm. Megatron's ``MambaMixer`` has that width
+    only when ``d_xb == d_inner == n_groups * d_state``. Any other width is
+    left untouched.
     """
     if layout.mamba_d_inner is None or layout.mamba_d_xb is None or layout.mamba_nheads is None:
         return False
