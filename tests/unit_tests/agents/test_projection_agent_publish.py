@@ -61,7 +61,9 @@ def repo(tmp_path, monkeypatch):
 
 
 def _registered(root: Path) -> BringupResult:
-    mod, test = root / _GEN / "foo_op.py", root / _TESTS / "test_generated_foo_op.py"
+    """An op registered the default way: in the run's out directory, outside the checkout."""
+    reg = root.parent / "out" / "op_models"
+    mod, test = reg / "foo_op.py", reg / "tests" / "test_generated_foo_op.py"
     test.parent.mkdir(parents=True, exist_ok=True)
     mod.write_text(_MODULE)
     test.write_text("def test_foo():\n    pass\n")
@@ -71,6 +73,7 @@ def _registered(root: Path) -> BringupResult:
         op_name="foo_op",
         module_path=str(mod),
         test_path=str(test),
+        gap_keys=["foo_type"],
         attempts=2,
         validation={
             "ok": True,
@@ -110,7 +113,11 @@ def test_commit_mode_branches_off_head_without_touching_the_checkout(repo):
     out = _publish(root, res, "commit")
     assert out.commit and not out.pushed, out.message
     files = _git(root, "show", "--name-only", "--format=", out.branch).split()
-    assert sorted(files) == sorted([str(_GEN / "foo_op.py"), str(_TESTS / "test_generated_foo_op.py")])
+    assert sorted(files) == sorted(
+        [str(_GEN / "foo_op.py"), str(_TESTS / "test_generated_foo_op.py"), str(_TESTS / "__init__.py")]
+    )
+    test = _git(root, "show", f"{out.branch}:{_TESTS / 'test_generated_foo_op.py'}")
+    assert '_GAP_KEYS = ["foo_type"]' in test and "registered_op_models()" in test
     msg = _git(root, "log", "-1", "--format=%B", out.branch)
     assert msg.startswith("projection: op model `foo_op` for unmodeled op `foo`")
     assert "Foo et al., 2026" in msg and "| workload | 1 | 4096 |" in msg and "`foo_type`" in msg
@@ -249,3 +256,13 @@ def test_default_base_keeps_slashes_in_the_branch_name(repo):
     _git(root, "fetch", "-q", "origin")
     _git(root, "remote", "set-head", "origin", "release/v1")
     assert pub._default_base(root, "origin") == "release/v1"
+
+
+def test_publish_never_replaces_an_op_model_on_head(repo):
+    root, _ = repo
+    (root / _GEN / "foo_op.py").write_text("# reviewed\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "foo")
+    out = _publish(root, _registered(root), "commit")
+    assert out.commit is None and "already exists on HEAD" in out.message
+    assert (root / _GEN / "foo_op.py").read_text() == "# reviewed\n"

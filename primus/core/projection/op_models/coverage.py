@@ -42,7 +42,7 @@ from .base import (
     SLOT_MLP,
     is_active,
 )
-from .registry import env_flag, op_models_enabled, registered_op_models
+from .registry import env_flag, op_model_dirs, op_models_enabled, registered_op_models
 
 GAP_MARKER = "PRIMUS_OP_GAP"
 
@@ -294,8 +294,10 @@ def default_baseline(framework: str = "megatron") -> Dict[str, Any]:
 
 def _acknowledged() -> Dict[str, str]:
     out = dict(_ACKNOWLEDGED)
-    path = Path(__file__).resolve().parent / "generated" / "acknowledged.yaml"
-    if path.is_file():
+    gen = Path(__file__).resolve().parent / "generated"
+    for path in (gen / "acknowledged.yaml", *(d / "acknowledged.yaml" for d in op_model_dirs())):
+        if not path.is_file():
+            continue
         try:
             for k, v in (yaml.safe_load(path.read_text()) or {}).items():
                 out[str(k)] = str(v)

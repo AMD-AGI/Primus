@@ -85,7 +85,8 @@ Fix the model, not the check.
 
 ## 4. Register and check
 
-- Copy the module to `generated/<name>.py`. The driver does this, and writes `tests/unit_tests/core/projection/op_models/test_generated_<name>.py`.
+- By hand: copy the module to `generated/<name>.py` and add `tests/unit_tests/core/projection/op_models/test_generated_<name>.py`. Never replace an existing module; pick a new `name`.
+- The driver registers into `<out-dir>/op_models/` instead (on `$PRIMUS_OP_MODEL_DIRS`), leaving the checkout alone; `--op-register-in-tree` makes it write `generated/` and `tests/`, and `--op-pr` commits the op on its own branch.
 - Re-run the projection. It prints `[Primus:OpModel] <name> ... on N% of layers`, and the gap is gone.
 - A/B against the stand-in with `PRIMUS_OP_MODELS=0`.
 - Check the size of the change in Tokens/s/GPU against what the op's arithmetic implies.
@@ -96,10 +97,12 @@ The projection agent runs this flow for every gap of a workload. It is invoked b
 
 - `primus projection <suite> --config <yaml> --op-bringup auto`, which then projects with the new models;
 - `python -m primus.agents.projection_agent --workload <yaml>`, which only brings the ops up;
-- the tuning agent (`--op-bringup auto` by default), before seeding and whenever a trial prints a new `PRIMUS_OP_GAP`.
+- the tuning agent with `--op-bringup auto` (its default is `report`), before seeding and whenever a trial prints a new `PRIMUS_OP_GAP`.
+
+`auto` writes Python and runs it: the validator imports every attempt, and every projection that discovers a registered module imports it.
 
 Who writes the model:
 
 - `--op-coder-cmd '<coding agent> ... {prompt_file} ... {target_file}'` uses an external coding agent.
-- Otherwise an LLM: `--op-llm-model` / `$LLM_MODEL`, or the tuning agent's own.
+- Otherwise an LLM: `--op-llm-model` / `$PRIMUS_OP_LLM_MODEL` / `$LLM_MODEL`, or the tuning agent's own.
 - With no LLM, it falls back to `report` (context packs only), and a human or IDE agent finishes the work with this skill.

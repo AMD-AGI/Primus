@@ -8,8 +8,7 @@
 New models keep shipping ops the projection's built-in profilers do not know
 (a linear-attention layer, a new gate, a multi-token-prediction head).  The
 projection reports each one as a ``PRIMUS_OP_GAP`` marker; this module turns a
-gap into a validated op model under
-``primus/core/projection/op_models/generated/`` in four steps:
+gap into a validated op model in four steps:
 
 1. **Context** -- the gap and its config keys, the model YAML chain (comments
    included), the HF ``config.json``, any paper text given, the op-model API,
@@ -22,10 +21,18 @@ gap into a validated op model under
    subprocess, on the workload's shapes: roofline floor, closed-form FLOPs,
    backward ratio, monotonicity, key coverage.  Failures go back to the coder
    as feedback, up to ``max_attempts`` times.
-4. **Register** -- the passing module is copied into ``generated/`` (the
-   projection discovers it on its next run) with a regression test.  A coder
-   may instead judge the op negligible and *acknowledge* its keys, with the
-   estimate, in ``generated/acknowledged.yaml``.
+4. **Register** -- the passing module and a regression test go to the run's
+   ``<out>/op_models/``, which is put on ``PRIMUS_OP_MODEL_DIRS`` so this
+   process and the projections it starts discover it.  A coder may instead
+   judge the op negligible and *acknowledge* its keys, with the estimate, in
+   ``<out>/op_models/acknowledged.yaml``.
+
+Op bring-up writes Python and runs it: the validator imports each attempt, and
+every later projection that discovers a registered module imports it.  It
+does not touch the source tree: only ``in_tree=True`` (``--op-register-in-tree``)
+registers into ``op_models/generated/`` and ``tests/``, and ``--op-pr`` commits
+into a temporary worktree.  An existing module or test is never overwritten:
+the coder is asked for another op name instead.
 
 :class:`~primus.agents.projection_agent.ProjectionAgent` drives this for every
 gap of a workload.
@@ -46,9 +53,11 @@ import time
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
+
+from primus.core.projection.op_models.registry import add_op_model_dir
 
 # Section caps keep the context inside a coder's window.
 _MAX_SECTION = 40_000
@@ -172,6 +181,7 @@ class BringupResult:
     attempts: int = 0
     validation: dict = field(default_factory=dict)
     acknowledged: dict = field(default_factory=dict)
+    gap_keys: List[str] = field(default_factory=list)
 
     @property
     def changed_projection(self) -> bool:
@@ -186,8 +196,20 @@ class BringupResult:
 # ---------------------------------------------------------------------------
 
 
+GENERATED_DIR = Path("primus/core/projection/op_models/generated")
+GENERATED_TESTS_DIR = Path("tests/unit_tests/core/projection/op_models")
+
+
 def _op_models_dir(primus_root: Path) -> Path:
     return primus_root / "primus" / "core" / "projection" / "op_models"
+
+
+def registry_dirs(primus_root: Path, out_dir: Path, in_tree: bool = False) -> Tuple[Path, Path]:
+    """(module dir, test dir) op bring-up registers into."""
+    if in_tree:
+        return primus_root / GENERATED_DIR, primus_root / GENERATED_TESTS_DIR
+    models = Path(out_dir).resolve() / "op_models"
+    return models, models / "tests"
 
 
 def _clip(text: str, cap: int = _MAX_SECTION) -> str:
@@ -563,10 +585,10 @@ import pytest
 
 pytest.importorskip("yaml")
 
-from primus.core.projection.op_models.registry import registered_op_models
+from primus.core.projection.op_models.registry import {lookup_import}
 from primus.core.projection.op_models.validate import load_workload, validate_op_model
 
-_ROOT = Path(__file__).resolve().parents[{depth}]
+_ROOT = {root}
 _WORKLOAD = _ROOT / {workload}
 _GAP_KEYS = {gap_keys}
 
@@ -576,40 +598,71 @@ def test_{name}_validates(monkeypatch):
     monkeypatch.setenv("NNODES", "1")
     monkeypatch.setenv("GPUS_PER_NODE", "8")
     monkeypatch.setenv("PRIMUS_OP_COVERAGE", "0")
-    ops = {{c.name: c for c in registered_op_models()}}
-    assert "{name}" in ops
+{lookup}
     wl = load_workload(str(_WORKLOAD), simulate_backends=False)
-    rep = validate_op_model(ops["{name}"], wl, gap_keys=_GAP_KEYS)
+    rep = validate_op_model(op, wl, gap_keys=_GAP_KEYS)
     assert rep.ok, rep.feedback()
 '''
 
 
-def _write_test(primus_root: Path, name: str, workload: Path, gap_keys: Sequence[str]) -> Path:
-    tdir = primus_root / "tests" / "unit_tests" / "core" / "projection" / "op_models"
-    tdir.mkdir(parents=True, exist_ok=True)
-    init = tdir / "__init__.py"
-    if not init.exists():
-        init.write_text("")
+def write_test(
+    tests_dir: Path,
+    name: str,
+    workload: Path,
+    gap_keys: Sequence[str],
+    *,
+    primus_root: Path,
+    in_tree: bool,
+) -> Path:
+    """The op's regression test in *tests_dir*; raises ``FileExistsError`` rather than overwrite one.
+
+    In the tree the test finds the op through discovery of ``generated/``; out
+    of it, it imports the module next to its ``tests/`` directory.
+    """
+    path = tests_dir / f"test_generated_{name}.py"
+    if path.exists():
+        raise FileExistsError(f"{path} already exists")
+    tests_dir.mkdir(parents=True, exist_ok=True)
     try:
-        rel = str(workload.resolve().relative_to(primus_root.resolve()))
+        rel = str(Path(workload).resolve().relative_to(Path(primus_root).resolve()))
     except ValueError:
-        rel = str(workload.resolve())
-    depth = len(tdir.relative_to(primus_root).parts)
-    path = tdir / f"test_generated_{name}.py"
+        rel = str(Path(workload).resolve())
+    if in_tree:
+        init = tests_dir / "__init__.py"
+        if not init.exists():
+            init.write_text("")
+        root = f"Path(__file__).resolve().parents[{len(GENERATED_TESTS_DIR.parts)}]"
+        lookup_import = "registered_op_models"
+        lookup = (
+            "    ops = {c.name: c for c in registered_op_models()}\n"
+            f'    assert "{name}" in ops\n'
+            f'    op = ops["{name}"]'
+        )
+    else:
+        root = f"Path({json.dumps(str(Path(primus_root).resolve()))})"
+        lookup_import = "load_op_model_file"
+        lookup = (
+            f'    module = Path(__file__).resolve().parents[1] / "{name}.py"\n'
+            f'    (op,) = [c for c in load_op_model_file(module) if c.name == "{name}"]'
+        )
     path.write_text(
         _TEST_TEMPLATE.format(
             name=name,
+            root=root,
             workload=json.dumps(rel),
             gap_keys=json.dumps(list(gap_keys)),
-            depth=depth,
+            lookup_import=lookup_import,
+            lookup=lookup,
             year=time.strftime("%Y"),
         )
     )
     return path
 
 
-def acknowledge_keys(primus_root: Path, entries: dict) -> Path:
-    path = _op_models_dir(primus_root) / "generated" / "acknowledged.yaml"
+def acknowledge_keys(models_dir: Path, entries: dict) -> Path:
+    """Merge *entries* into ``<models_dir>/acknowledged.yaml``; keys already there are kept."""
+    path = Path(models_dir) / "acknowledged.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
     text = path.read_text() if path.exists() else ""
     existing = yaml.safe_load(text) or {}
     new = {k: why for k, why in entries.items() if k not in existing}
@@ -645,8 +698,14 @@ def bring_up_op(
     env: Optional[dict] = None,
     log: Callable[[str], None] = print,
     context_memo: Optional[dict] = None,
+    in_tree: bool = False,
 ) -> BringupResult:
-    """Context -> Create -> Validate -> Register for one gap."""
+    """Context -> Create -> Validate -> Register for one gap.
+
+    Registers into ``<out_dir>/op_models/`` (``in_tree``: the source tree's
+    ``generated/`` and ``tests/``) and never overwrites a module or test.
+    """
+    models_dir, tests_dir = registry_dirs(primus_root, out_dir, in_tree)
     work = Path(out_dir) / "op_bringup" / gap.op_id
     work.mkdir(parents=True, exist_ok=True)
     context = build_context(
@@ -660,7 +719,7 @@ def bring_up_op(
     )
     ctx_path = work / "context.md"
     ctx_path.write_text(context)
-    res = BringupResult(gap.op_id, "context_only", context_path=str(ctx_path))
+    res = BringupResult(gap.op_id, "context_only", context_path=str(ctx_path), gap_keys=list(gap.keys))
     log(f"[op-bringup] {gap.op_id}: context pack {ctx_path} ({len(context) // 1000} kB)")
     if coder is None:
         res.message = "no coder configured; hand context.md to a coding agent, then re-run the projection"
@@ -693,12 +752,12 @@ def bring_up_op(
                 )
                 continue
             res.acknowledged = acks
+            res.status, res.message = "acknowledged", "judged negligible"
             if register:
-                acknowledge_keys(primus_root, acks)
-            res.status, res.message = (
-                "acknowledged",
-                "judged negligible; keys added to generated/acknowledged.yaml",
-            )
+                ack = acknowledge_keys(models_dir, acks)
+                if not in_tree:
+                    add_op_model_dir(models_dir)
+                res.message += f"; keys added to {ack}"
             break
         if source is None:
             feedback = (
@@ -716,14 +775,25 @@ def bring_up_op(
             log(f"[op-bringup] {gap.op_id}: attempt {attempt} failed validation")
             continue
         name = str(report.get("op") or gap.op_id)
+        taken = _name_taken(name, models_dir, tests_dir) if register else None
+        if taken:
+            feedback = (
+                f"An op model named `{name}` already exists ({taken}) and is not replaced. "
+                "Give your class a different `name` (and file stem) and return the whole module again."
+            )
+            log(f"[op-bringup] {gap.op_id}: attempt {attempt}: op name {name!r} is taken ({taken})")
+            continue
         res.op_name = name
         if register:
-            dest = _op_models_dir(primus_root) / "generated" / f"{name}.py"
-            if dest.exists():
-                shutil.copy2(dest, work / f"previous_{name}.py")
+            models_dir.mkdir(parents=True, exist_ok=True)
+            dest = models_dir / f"{name}.py"
             shutil.copy2(target, dest)
             res.module_path = str(dest)
-            res.test_path = str(_write_test(primus_root, name, workload, gap_keys))
+            res.test_path = str(
+                write_test(tests_dir, name, workload, gap_keys, primus_root=primus_root, in_tree=in_tree)
+            )
+            if not in_tree:
+                add_op_model_dir(models_dir)
         else:
             res.module_path = str(target)
         res.status, res.message = "registered", f"validated on attempt {attempt}"
@@ -732,6 +802,18 @@ def bring_up_op(
         res.status, res.message = "failed", f"no valid module after {max_attempts} attempts"
     log(f"[op-bringup] {gap.op_id}: {res.status} -- {res.message}")
     return _finish(res, work)
+
+
+def _name_taken(name: str, models_dir: Path, tests_dir: Path) -> Optional[str]:
+    """Where an op model called *name* already lives, if anywhere."""
+    for path in (models_dir / f"{name}.py", tests_dir / f"test_generated_{name}.py"):
+        if path.exists():
+            return str(path)
+    from primus.core.projection.op_models.registry import discover_op_models
+
+    if name in discover_op_models():
+        return f"the registered op model {name!r}"
+    return None
 
 
 def _finish(res: BringupResult, work: Path) -> BringupResult:

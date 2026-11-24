@@ -87,7 +87,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     from primus.agents.projection_agent.cli import add_op_bringup_args
 
-    add_op_bringup_args(p)
+    # Bringing up ops writes and runs code: the search only reports them unless asked.
+    add_op_bringup_args(p, default="report")
     return p.parse_args(argv)
 
 

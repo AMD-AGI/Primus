@@ -28,7 +28,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
-from .bringup import BringupResult, Coder, bring_up_gaps
+from primus.core.projection.op_models.registry import add_op_model_dir
+
+from .bringup import BringupResult, Coder, bring_up_gaps, registry_dirs
 from .publish import PublishConfig, PublishResult, publish_op
 
 # <root>/primus/agents/projection_agent/agent.py
@@ -46,13 +48,17 @@ class ProjectionAgent:
     agent, however many times it is reported.  With *publish* (``--op-pr``)
     every op it registers or acknowledges also gets its own branch, commit and
     pull request (:mod:`.publish`).
+
+    Op models are registered into ``<out_dir>/op_models/``, which goes on
+    ``PRIMUS_OP_MODEL_DIRS`` (so a later agent with the same *out_dir* reuses
+    them); the source tree changes only with ``in_tree=True``.
     """
 
     def __init__(
         self,
         *,
         primus_root: Optional[Path] = None,
-        out_dir: Path = Path("op_bringup_runs"),
+        out_dir: Path = Path("output/op_bringup"),
         gpu_arch: Optional[str] = None,
         policy: str = "auto",
         coder: Optional[Coder] = None,
@@ -63,6 +69,7 @@ class ProjectionAgent:
         env: Optional[dict] = None,
         publish: Optional[PublishConfig] = None,
         log: Callable[[str], None] = print,
+        in_tree: bool = False,
     ):
         if policy not in POLICIES:
             raise ValueError(f"policy must be one of {POLICIES}, got {policy!r}")
@@ -75,6 +82,10 @@ class ProjectionAgent:
         self.hf_config = hf_config
         self.max_attempts = max_attempts
         self.register = register
+        self.in_tree = in_tree
+        self.registry_dir = registry_dirs(self.primus_root, self.out_dir, in_tree)[0]
+        if self.policy != "off" and not in_tree and self.registry_dir.is_dir():
+            add_op_model_dir(self.registry_dir)
         self.env = env
         self.publish = publish if publish is not None and publish.mode != "off" and register else None
         self.log = log
@@ -164,6 +175,7 @@ class ProjectionAgent:
             register=self.register,
             env=self.env,
             log=lambda s: self.log(f"[projection-agent] {s}"),
+            in_tree=self.in_tree,
         )
 
     def _bring_up(self, gaps: Sequence, workload: Path, arch=None) -> List[BringupResult]:

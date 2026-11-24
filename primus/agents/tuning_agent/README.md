@@ -165,20 +165,29 @@ For each gap the projection agent runs op bring-up (`projection_agent/bringup.py
    - that every gap key is covered.
 
    Failures go back to the coder, up to 3 attempts.
-4. **Register.** The model is copied into `primus/core/projection/op_models/generated/` with a regression test, and the trial is re-run. An op the coder judges negligible is acknowledged in `generated/acknowledged.yaml` instead.
+4. **Register.** The model and a regression test go to `<out-dir>/op_models/`, which is put on `$PRIMUS_OP_MODEL_DIRS` so this run and its trials discover it, and the trial is re-run. An op the coder judges negligible is acknowledged in `<out-dir>/op_models/acknowledged.yaml` instead. An existing module or test is never replaced: the coder is asked for another op name.
+
+**Op bring-up writes code and runs it.** The validator imports every attempt,
+and every projection that discovers a registered module imports it. The
+source tree is left alone: only `--op-register-in-tree` registers into
+`primus/core/projection/op_models/generated/` and `tests/`, and `--op-pr`
+commits in a temporary worktree. To reuse the ops in later runs, pass the same
+`--op-out-dir` or put `<out-dir>/op_models` on `$PRIMUS_OP_MODEL_DIRS`; to keep
+them, review them and publish them with `--op-pr`.
 
 The same `--op-*` flags work on the tuning agent, on `primus projection
 {memory,performance,both}` and on `python -m primus.agents.projection_agent`:
 
 | flag | meaning |
 |---|---|
-| `--op-bringup auto\|report\|off` | `auto` writes models. It falls back to `report` (context packs only) when no coder is available. Default `auto` for the tuning agent and the projection agent, `off` for `primus projection`. |
+| `--op-bringup auto\|report\|off` | `auto` writes models and runs them. It falls back to `report` (context packs only) when no coder is available. Default `report` for the tuning agent, `auto` for the projection agent, `off` for `primus projection`. |
 | `--op-coder auto\|dspy\|command\|none` | Who writes the model. |
 | `--op-coder-cmd '...{prompt_file}...{target_file}...'` | Shell template for an external coding agent. |
 | `--op-llm-model MODEL` | LiteLLM model string for the LLM coder, when it is not the tuning agent's. |
 | `--op-paper FILE\|URL\|TEXT` | Paper text for the new op. Repeatable. |
 | `--hf-config PATH\|URL\|REPO` | HF config, if the YAML has no `tokenizer_model`. |
-| `--op-out-dir DIR` | Where context packs and reports go (the tuning agent uses its `--out-dir`). |
+| `--op-out-dir DIR` | Where context packs, reports and registered op models (`op_models/`) go. Default `output/op_bringup`; the tuning agent uses its `--out-dir`. |
+| `--op-register-in-tree` | Register into `op_models/generated/` and `tests/` of the checkout instead, so every later projection from it imports the module. |
 | `--op-pr off\|commit\|push\|pr` | Publish each registered or acknowledged op on its own branch off HEAD (`projection-agent/<op_id>-<time>`), built in a temporary worktree so the checkout is untouched. `commit` keeps it local, `push` pushes it, `pr` also opens a draft PR. Default `off`. |
 | `--op-pr-remote`, `--op-pr-base`, `--op-pr-repo` | Remote to push to (`origin`); branch the PR targets (the remote's default); `owner/name` to open the PR on when pushing to a fork. |
 | `--op-pr-author 'Name <email>'` | Commit identity when git has none configured (`$PRIMUS_OP_PR_AUTHOR`). |

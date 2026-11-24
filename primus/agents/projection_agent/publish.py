@@ -5,11 +5,12 @@
 ###############################################################################
 """Publish a brought-up op: its own branch, commit and pull request.
 
-Registration leaves the op model in the working tree.  With ``--op-pr`` the
-projection agent also turns each registered (or acknowledged) op into a branch
-off the current HEAD -- built in a temporary git worktree, so the checkout is
-not touched -- with one commit holding the module and its regression test (or
-the ``acknowledged.yaml`` entries), and, depending on the mode:
+Registration keeps the op model in the run's out directory.  With ``--op-pr``
+the projection agent also turns each registered (or acknowledged) op into a
+branch off the current HEAD -- built in a temporary git worktree, so the
+checkout is not touched -- with one commit adding the module to
+``op_models/generated/`` with its regression test (or the ``acknowledged.yaml``
+entries), and, depending on the mode:
 
 * ``commit`` -- leave the branch local;
 * ``push``   -- push it to ``--op-pr-remote``;
@@ -37,7 +38,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
-from .bringup import BringupResult, acknowledge_keys
+from .bringup import (
+    GENERATED_DIR,
+    GENERATED_TESTS_DIR,
+    BringupResult,
+    acknowledge_keys,
+    write_test,
+)
 
 MODES = ("off", "commit", "push", "pr")
 
@@ -220,9 +227,8 @@ def publish_op(
         log(f"[op-pr] {res.op_id}: {out.message}")
         return out
     module = Path(res.module_path) if res.module_path else None
-    files = [p for p in (module, Path(res.test_path) if res.test_path else None) if p is not None]
-    if res.status == "registered" and not all(p.is_file() and root in p.resolve().parents for p in files):
-        out.message = "registered files are not inside the repository (run with registration on)"
+    if res.status == "registered" and not (module and module.is_file()):
+        out.message = "the registered module is missing (run with registration on)"
         return out
 
     out.branch = (
@@ -234,16 +240,22 @@ def publish_op(
         _git(root, "worktree", "add", "-q", "-b", out.branch, str(tmp), "HEAD")
         created = True
         if res.status == "registered":
-            rel = [str(p.resolve().relative_to(root)) for p in files]
-            for r in rel:
-                (tmp / r).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(root / r, tmp / r)
-            init = Path(rel[-1]).parent / "__init__.py"
-            if (root / init).is_file() and not (tmp / init).exists():
-                shutil.copy2(root / init, tmp / init)
-                rel.append(str(init))
+            name = res.op_name or module.stem
+            dest = tmp / GENERATED_DIR / f"{name}.py"
+            if dest.exists():
+                raise FileExistsError(f"{GENERATED_DIR / dest.name} already exists on HEAD; not replacing it")
+            init = tmp / GENERATED_TESTS_DIR / "__init__.py"
+            had_init = init.exists()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(module, dest)
+            test = write_test(
+                tmp / GENERATED_TESTS_DIR, name, workload, res.gap_keys, primus_root=root, in_tree=True
+            )
+            rel = [str(dest.relative_to(tmp)), str(test.relative_to(tmp))]
+            if not had_init:
+                rel.append(str(init.relative_to(tmp)))
         else:
-            ack = acknowledge_keys(tmp, res.acknowledged)
+            ack = acknowledge_keys(tmp / GENERATED_DIR, res.acknowledged)
             rel = [str(ack.relative_to(tmp))]
         _git(tmp, "add", "--", *rel)
         title = pr_title(res)

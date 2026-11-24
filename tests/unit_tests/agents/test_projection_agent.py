@@ -10,6 +10,9 @@ acknowledge path), the agent's preflight / runtime handling, and its callers --
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -247,8 +250,8 @@ def test_acknowledging_a_key_twice_keeps_one_entry(tmp_path):
     gen = tmp_path / "primus/core/projection/op_models/generated"
     gen.mkdir(parents=True)
     (gen / "acknowledged.yaml").write_text("old_key: >-\n  negligible\n")
-    ob.acknowledge_keys(tmp_path, {"old_key": "again", "new_key": "tiny"})
-    ob.acknowledge_keys(tmp_path, {"new_key": "tiny again"})
+    ob.acknowledge_keys(gen, {"old_key": "again", "new_key": "tiny"})
+    ob.acknowledge_keys(gen, {"new_key": "tiny again"})
     text = (gen / "acknowledged.yaml").read_text()
     assert text.count("old_key:") == 1 and text.count("new_key:") == 1
     assert yaml.safe_load(text) == {"old_key": "negligible", "new_key": "tiny"}
@@ -287,3 +290,95 @@ def test_standalone_cli_loads_the_env_file(monkeypatch):
     monkeypatch.setattr(ta_config, "load_env", lambda *a, **k: loaded.append(True))
     assert pa_cli.main(["--workload", str(_WORKLOAD), "--op-bringup", "off"]) == 0
     assert loaded == [True]
+
+
+def _named(name: str) -> str:
+    return _variant(miscount=False).replace('name = "gdn_bringup_test"', f'name = "{name}"')
+
+
+def _tree_status() -> str:
+    gen = "primus/core/projection/op_models/generated"
+    tests = "tests/unit_tests/core/projection/op_models"
+    return subprocess.run(
+        ["git", "-C", str(_ROOT), "status", "--porcelain", "--", gen, tests], capture_output=True, text=True
+    ).stdout
+
+
+def test_registration_stays_out_of_the_source_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(ob, "fetch_hf_config", lambda *a, **k: None)
+    monkeypatch.setenv("PRIMUS_OP_MODEL_DIRS", "")
+    before = _tree_status()
+    res = ob.bring_up_op(
+        _gap(experimental_attention_variant="gated_delta_net", linear_num_value_heads=32),
+        workload=_WORKLOAD,
+        primus_root=_ROOT,
+        out_dir=tmp_path,
+        coder=lambda p, t: _variant(miscount=False),
+        gpu_arch="mi355x",
+        log=lambda s: None,
+    )
+    assert res.status == "registered", res.message
+    reg = tmp_path.resolve() / "op_models"
+    assert res.module_path == str(reg / "gdn_bringup_test.py")
+    assert res.test_path == str(reg / "tests" / "test_generated_gdn_bringup_test.py")
+    assert _tree_status() == before
+    assert str(reg) in os.environ["PRIMUS_OP_MODEL_DIRS"].split(os.pathsep)
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", res.test_path],
+        cwd=str(tmp_path),
+        env={**os.environ, "PYTHONPATH": str(_ROOT)},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert run.returncode == 0, run.stdout[-3000:]
+
+
+def test_an_existing_op_model_is_never_overwritten(tmp_path, monkeypatch):
+    monkeypatch.setattr(ob, "fetch_hf_config", lambda *a, **k: None)
+    monkeypatch.setenv("PRIMUS_OP_MODEL_DIRS", "")
+    reg = tmp_path.resolve() / "op_models"
+    reg.mkdir()
+    (reg / "gdn_mine.py").write_text("# someone else's op\n")
+    replies = iter([_named("gated_delta_net"), _named("gdn_mine"), _named("gdn_fresh")])
+    prompts = []
+
+    def coder(prompt, target):
+        prompts.append(prompt)
+        return next(replies)
+
+    res = ob.bring_up_op(
+        _gap(experimental_attention_variant="gated_delta_net", linear_num_value_heads=32),
+        workload=_WORKLOAD,
+        primus_root=_ROOT,
+        out_dir=tmp_path,
+        coder=coder,
+        gpu_arch="mi355x",
+        log=lambda s: None,
+    )
+    assert res.status == "registered" and res.attempts == 3 and res.op_name == "gdn_fresh", res.message
+    assert "An op model named `gated_delta_net` already exists" in prompts[1]
+    assert "An op model named `gdn_mine` already exists" in prompts[2]
+    assert (reg / "gdn_mine.py").read_text() == "# someone else's op\n"
+
+
+def test_out_of_tree_acknowledgements_reach_coverage(tmp_path, monkeypatch):
+    from primus.core.projection.op_models import coverage
+
+    reg = tmp_path / "op_models"
+    ob.acknowledge_keys(reg, {"fancy_gate": "hidden->1 GEMV"})
+    assert "fancy_gate" not in coverage._acknowledged()
+    monkeypatch.setenv("PRIMUS_OP_MODEL_DIRS", str(reg))
+    assert coverage._acknowledged()["fancy_gate"] == "hidden->1 GEMV"
+
+
+def test_agent_reuses_its_out_dir_registry_and_honours_in_tree(tmp_path, monkeypatch):
+    monkeypatch.setenv("PRIMUS_OP_MODEL_DIRS", "")
+    (tmp_path / "op_models").mkdir()
+    agent = ProjectionAgent(primus_root=_ROOT, out_dir=tmp_path, policy="report", log=lambda s: None)
+    assert agent.registry_dir == tmp_path.resolve() / "op_models"
+    assert os.environ["PRIMUS_OP_MODEL_DIRS"] == str(agent.registry_dir)
+    p = argparse.ArgumentParser()
+    pa_cli.add_op_bringup_args(p)
+    agent = pa_cli.agent_from_args(p.parse_args(["--op-bringup", "report", "--op-register-in-tree"]))
+    assert agent.in_tree and agent.registry_dir == _ROOT / "primus/core/projection/op_models/generated"

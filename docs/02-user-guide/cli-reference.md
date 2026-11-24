@@ -180,10 +180,14 @@ opened as a draft pull request. See the
 [tuning agent's README, "Op bring-up (new ops)"](https://github.com/AMD-AGI/Primus/blob/main/primus/agents/tuning_agent/README.md#op-bring-up-new-ops)
 for the flags.
 
-`--op-coder-cmd` is run through the shell, and every op model the agent
-registers under `primus/core/projection/op_models/generated/` is Python that
-the projection imports on its next run. Only point it at a coding agent you
-trust, and review generated op models before committing them.
+Op bring-up writes code and runs it. `--op-coder-cmd` is run through the
+shell, and every op model the agent registers is Python that the validator and
+later projections import. Registered models go to `<op-out-dir>/op_models/`
+(default `output/op_bringup/op_models/`, put on `PRIMUS_OP_MODEL_DIRS` for the
+run), not into the checkout; `--op-register-in-tree` writes them into
+`primus/core/projection/op_models/generated/` and `tests/` instead. Only point
+the coder at a coding agent you trust, and review generated op models before
+publishing them.
 
 ### Benchmark suites
 

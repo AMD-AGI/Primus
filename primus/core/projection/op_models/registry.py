@@ -5,9 +5,10 @@
 ###############################################################################
 """Registry and discovery of :class:`OpModel` subclasses.
 
-Discovery imports every module under ``op_models/generated`` and every
-``*.py`` in the directories listed on ``PRIMUS_OP_MODEL_DIRS`` (comma or
-``os.pathsep`` separated).  A module that fails to import is skipped and its
+Discovery imports every module under ``op_models/generated`` (reviewed op
+models committed to the repository) and every ``*.py`` in the directories
+listed on ``PRIMUS_OP_MODEL_DIRS`` (comma or ``os.pathsep`` separated) --
+where op bring-up registers what it writes, outside the source tree.  A module that fails to import is skipped and its
 error kept in :func:`discovery_errors`: one broken generated op must not take
 the projection down with it.  ``PRIMUS_OP_MODELS=0`` disables every op model,
 for A/B against the built-in profilers.
@@ -74,10 +75,22 @@ def load_op_model_file(path) -> List[Type[OpModel]]:
     return [cls for name, cls in _REGISTRY.items() if before.get(name) is not cls]
 
 
-def _extra_dirs() -> List[Path]:
+def _dir_entries() -> List[str]:
     raw = os.getenv("PRIMUS_OP_MODEL_DIRS", "")
-    parts = [p.strip() for p in re.split(r"[,%s]" % re.escape(os.pathsep), raw) if p.strip()]
-    return [Path(p) for p in parts if Path(p).is_dir()]
+    return [p.strip() for p in re.split(r"[,%s]" % re.escape(os.pathsep), raw) if p.strip()]
+
+
+def op_model_dirs() -> List[Path]:
+    """The existing directories on ``PRIMUS_OP_MODEL_DIRS``."""
+    return [Path(p) for p in _dir_entries() if Path(p).is_dir()]
+
+
+def add_op_model_dir(path) -> None:
+    """Put *path* on ``PRIMUS_OP_MODEL_DIRS`` for this process and the projections it starts."""
+    path = str(Path(path).resolve())
+    entries = _dir_entries()
+    if path not in entries:
+        os.environ["PRIMUS_OP_MODEL_DIRS"] = os.pathsep.join([path, *entries])
 
 
 def discover_op_models(force: bool = False) -> Dict[str, Type[OpModel]]:
@@ -97,7 +110,7 @@ def discover_op_models(force: bool = False) -> Dict[str, Type[OpModel]]:
                 importlib.import_module(full)
         except Exception as exc:  # keep the projection running
             _ERRORS[full] = f"{type(exc).__name__}: {exc}"
-    for d in _extra_dirs():
+    for d in op_model_dirs():
         for path in sorted(d.glob("*.py")):
             if path.name.startswith("_"):
                 continue
