@@ -147,7 +147,8 @@ The following models are pre-optimized for performance on the AMD Instinct MI300
 - GPT-OSS-120B
 - ZAYA1-8B (BF16 and FP8 mock-data recipes on MI300X, MI325X, and MI355X; FP8 and MI325X added in v26.9)
 - GLM-5.3-Flash (from v26.9; MI355X BF16 bring-up recipe—see the [model support matrix](../06-developer-guide/model-support-matrix.md#megatron-model-configs) for its limits)
-- Inkling (new in v26.10; MI355X BF16 and FP8 recipes for the single-node 6-layer Large proxy, plus multi-node recipes for Inkling-Small and the full-depth Large model—see the [model support matrix](../06-developer-guide/model-support-matrix.md#megatron-model-configs))
+- Inkling (new in v26.10; MI355X BF16 and FP8 recipes for the single-node 6-layer Large proxy, plus multi-node recipes for Inkling-Small and the full-depth Large model, which are not covered by this release's QA—see the [model support matrix](../06-developer-guide/model-support-matrix.md#megatron-model-configs))
+- MiniMax-M3.1-Flash (new in v26.10; MI355X BF16 and FP8 recipes and an 8-layer single-node BF16 proxy, not covered by this release's QA—see the [model support matrix](../06-developer-guide/model-support-matrix.md#megatron-model-configs))
 
 ---
 
