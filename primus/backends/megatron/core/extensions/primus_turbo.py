@@ -1212,6 +1212,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             assert not args.enable_turbo_attention_float8, "turbo allgather CP runs bf16 attention only"
             assert not _use_sink_attention, "turbo allgather CP takes no sink attention"
             assert config.window_size is None, "turbo allgather CP takes no sliding window"
+            assert hasattr(
+                primus_turbo_torch.ops, "flash_attn_agkv_func"
+            ), "turbo allgather CP needs a Primus-Turbo with flash_attn_agkv_func"
             self.agkv_mode = args.turbo_agkv_mode
             self.agkv_group = pg_collection.cp
             self.attn = primus_turbo_torch.ops.flash_attn_agkv_func

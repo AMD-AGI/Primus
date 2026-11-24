@@ -5,8 +5,10 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 # The all-gather-KV kernels wait on the peers' kernels; with the runner's 2 hardware queues the
 # overlapped grad reduce-scatter / param all-gather share the attention's queue and deadlock it.
+# turbo_agkv_mode fused / mega run on the flux FlyDSL attention.
 env:
   GPU_MAX_HW_QUEUES: "8"
+  FLUX_ATTN_FLYDSL: "1"
 
 modules:
   pre_trainer:
