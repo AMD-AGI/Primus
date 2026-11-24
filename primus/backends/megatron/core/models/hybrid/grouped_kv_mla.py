@@ -19,8 +19,8 @@ from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
 
 
 def repeat_kv_heads(kv: torch.Tensor, head_dim: int, repeats: int) -> torch.Tensor:
-    """A new tensor with each ``head_dim`` block of ``kv``'s last dimension repeated ``repeats`` times
-    in a row."""
+    """``kv`` with each ``head_dim`` block of its last dimension repeated ``repeats`` times in a row;
+    ``kv`` itself when ``repeats`` is 1."""
     if repeats == 1:
         return kv
     return kv.unflatten(-1, (-1, head_dim)).repeat_interleave(repeats, dim=-2).flatten(-2)

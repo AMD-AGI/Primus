@@ -12,7 +12,10 @@ This is the recorder behind ``hylo_order_data_dir`` (``HyLoOrderDataset``). With
   ``convert_hylo_reference_to_megatron.py`` turns it into the Megatron checkpoint to start from.
 - ``<dir>/batches_rank<r>.bin``: rank ``r``'s ``input_ids`` of every training step, int32, appended.
 - ``<dir>/meta.json``: ``micro_batch``, ``seq_len``, ``world_size`` and ``steps``, written by rank 0
-  when training ends.
+  only when training finishes. ``world_size`` is the data-parallel size, since the HyLo runs are pure
+  data parallel.
+
+Each training batch is one optimizer step, so the HyLo recipe must use ``gradient_accumulation_steps: 1``.
 
 Batches must be packed (no padding). Run it where HyLo's ``train_distill.py`` would run, from
 HyLo's directory (``HYLO_DIR``, default the current directory), in place of ``train_distill.py``::
@@ -70,6 +73,10 @@ _compute_loss = KDTrainer.compute_loss
 
 def compute_loss(self, model, inputs, *args, **kwargs):
     if model.training:
+        if self.args.gradient_accumulation_steps != 1:
+            raise RuntimeError(
+                "hylo_train_dump records one batch per optimizer step; set gradient_accumulation_steps to 1"
+            )
         mask = inputs.get("attention_mask")
         if mask is not None and not bool(mask.all()):
             raise RuntimeError("hylo_train_dump expects packed batches without padding")
@@ -86,19 +93,18 @@ def compute_loss(self, model, inputs, *args, **kwargs):
 
 KDTrainer.compute_loss = compute_loss
 
-if os.path.exists(BATCHES):
-    os.remove(BATCHES)
+for stale in [BATCHES] + ([os.path.join(DUMP, "meta.json")] if RANK == 0 else []):
+    if os.path.exists(stale):
+        os.remove(stale)
 
 sys.argv = [os.path.join(HYLO, "train_hybrid", "train_distill.py")] + sys.argv[1:]
-try:
-    runpy.run_path(sys.argv[0], run_name="__main__")
-finally:
-    if RANK == 0 and STATE["shape"] is not None:
-        meta = {
-            "micro_batch": STATE["shape"][0],
-            "seq_len": STATE["shape"][1],
-            "world_size": int(os.environ.get("WORLD_SIZE", "1")),
-            "steps": STATE["steps"],
-        }
-        with open(os.path.join(DUMP, "meta.json"), "w") as f:
-            json.dump(meta, f, indent=2)
+runpy.run_path(sys.argv[0], run_name="__main__")
+if RANK == 0 and STATE["shape"] is not None:
+    meta = {
+        "micro_batch": STATE["shape"][0],
+        "seq_len": STATE["shape"][1],
+        "world_size": int(os.environ.get("WORLD_SIZE", "1")),
+        "steps": STATE["steps"],
+    }
+    with open(os.path.join(DUMP, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)

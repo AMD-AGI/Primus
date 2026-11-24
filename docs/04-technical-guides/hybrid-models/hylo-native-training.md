@@ -12,7 +12,7 @@ reference TRL trainer:
    `meta-llama/Llama-3.1-8B-Instruct` with pure
    `KL(teacher || student)` (`KL=1`, `CE=0`) and YaRN factor 4.
 
-The runtime currently supports TP=1 and PP=1. It is intended for eight-way data
+The runtime currently supports TP=PP=CP=1 without activation recompute. It is intended for eight-way data
 parallel training on MI300X with `rocm/primus:v26.9`.
 
 The distillation recipes set `model_type: hylo`. That model family builds the
@@ -301,9 +301,12 @@ per-step `input_ids` as int32 `(steps, micro_batch, seq_len)` to `batches_rank<r
 
 ```bash
 cd /path/to/AMD-Hybrid-Models/HyLo
-HYLO_DUMP_DIR=/data/dump/gdn accelerate launch --config_file configs/fsdp_GDN.yaml \
-  /path/to/Primus/tools/hybrid/hylo_train_dump.py <HyLo recipe.yaml>
+HYLO_DUMP_DIR=/data/dump/mla accelerate launch --config_file <HyLo accelerate config> \
+  /path/to/Primus/tools/hybrid/hylo_train_dump.py <HyLo all-MLA recipe.yaml>
 ```
+
+The HyLo recipe must use `gradient_accumulation_steps: 1`, so that each recorded batch is one
+optimizer step. `meta.json` is written only when the run finishes.
 
 The numbers below were recorded against AMD-Hybrid-Models `feat/HyLo` at `84871cc` with
 `tools/hybrid/hylo_primus_parity.patch` applied (`git am`). The patch adds the
@@ -315,17 +318,27 @@ switches the sampler to `dataloader_type: single`, so every rank receives, at ev
 batch the HyLo rank with its index used. The run must use the HyLo run's micro-batch, sequence
 length, and data-parallel size, CP=1, and `global_batch_size` equal to micro-batch times
 data-parallel size: one recorded micro-batch per rank per step. Startup fails if `meta.json` and
-the rank files disagree on the step count or record fewer steps than `train_iters`. Replay builds
+the rank files disagree on the step count or record fewer steps than `train_iters`. Set
+`HYLO_ILD_TRAIN_ITERS` to the recording's `steps` as well: the cosine schedule is computed from
+`train_iters`, so with more recorded steps than `train_iters` the learning rate no longer follows
+HyLo's. Replay builds
 no validation or test set, so in-training evaluation is off; score checkpoints afterwards with
 `run_hylo_ild_eval.sh`. Convert the recorded init with `convert_hylo_reference_to_megatron.py` and
-load it as the upcycled checkpoint.
+load it as the upcycled checkpoint. Only the packed recipes read `HYLO_ORDER_DATA_DIR`:
+
+```bash
+HYLO_ORDER_DATA_DIR=/data/dump/mla HYLO_ILD_TRAIN_ITERS=<steps in meta.json> \
+HYLO_MLA_UPCYCLED_CKPT=/path/to/converted-init ./primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild-packed.yaml
+```
 
 The teacher keeps Llama-3's rope scaling. HyLo's `train_distill.py` gives the teacher the
 student's YaRN by default (`teacher_rope_from_student`); to match that, set
 `HYLO_TEACHER_YARN_FACTOR` and `HYLO_TEACHER_YARN_ORIGINAL_MAX` to the student's `factor` and
 `original_max_position_embeddings` (32 and 8192 for all-MLA, 1 and 2048 for all-Mamba-2).
 
-For 1000 steps from the same init on the same batches, Primus and HyLo give the same per-step
+On Megatron-LM `d3528a2` in `rocm/primus:v26.8`, for 1000 steps from the same init on the same
+batches, Primus and HyLo give the same per-step
 loss to within 0.3% over the first 25 steps. They drift apart only as bf16 runs do, ending within
 0.3%. The final students score within 0.12% of each other on the test split. The all-GDN
 student, with the FLA kernels below, ends within 0.14% of HyLo over the last 250 steps and scores

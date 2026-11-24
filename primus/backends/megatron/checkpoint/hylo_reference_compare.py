@@ -36,6 +36,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
+from primus.backends.megatron.checkpoint.hybrid_upcycle import _arg
+
 Pairs = List[Tuple[str, str, Optional[Tuple[int, int]]]]
 
 
@@ -65,14 +67,6 @@ def _first(state: Dict[str, torch.Tensor], *keys: str) -> str:
         if key in state:
             return key
     raise KeyError(f"none of {keys}")
-
-
-def _arg(args, name: str):
-    if args is None:
-        return None
-    if isinstance(args, dict):
-        return args.get(name)
-    return getattr(args, name, None)
 
 
 KINDS = ("m2", "mla", "gdn", "hybrid")

@@ -256,6 +256,10 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "tensor_model_parallel_size": 2}))
     with pytest.raises(ValueError, match="pipeline_model_parallel_size=1"):
         validate_hylo_args(Namespace(**{**base, "pipeline_model_parallel_size": 2}))
+    with pytest.raises(ValueError, match="context_parallel_size=1"):
+        validate_hylo_args(Namespace(**{**base, "context_parallel_size": 2}))
+    with pytest.raises(ValueError, match="recompute_granularity"):
+        validate_hylo_args(Namespace(**{**base, "recompute_granularity": "full"}))
     for stage in ("sft", "ild"):
         with pytest.raises(ValueError, match="hylo_ce_weight must be 0"):
             validate_hylo_args(Namespace(**{**base, "hylo_distill_stage": stage, "hylo_ce_weight": 1.0}))
@@ -389,9 +393,12 @@ def test_teacher_forcing_replaces_only_ild_mixer_inputs():
     student.decoder.layers[0](hidden_states=original)
     assert torch.equal(student.decoder.mixer.seen, forced)
 
-    runtime.stage = "sft"
-    student.decoder.layers[0](hidden_states=original)
-    assert torch.equal(student.decoder.mixer.seen, original)
+    sft_runtime = HyLoRuntime(_Teacher(), "sft")
+    sft_runtime.teacher_capture.layer_inputs.append(forced)
+    sft_student = _Student()
+    sft_runtime.install_student_hooks(sft_student)
+    sft_student.decoder.layers[0](hidden_states=original)
+    assert torch.equal(sft_student.decoder.mixer.seen, original)
 
 
 class _Scale(nn.Module):
