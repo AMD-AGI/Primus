@@ -67,6 +67,9 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_expand import (
     is_triton_path_enabled as _hc_expand_enabled,
 )
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_fused import (
+    hc_fused_pre,
+)
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     hc_glue_compute_tail_triton,
 )
@@ -75,6 +78,15 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_comm
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_glue import (
     is_triton_path_enabled as _hc_glue_enabled,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_head import (
+    hc_head_collapse,
+    hc_head_fused_enabled,
+    hc_head_supported,
+)
+from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_rms_linear import (
+    hc_rms_linear,
+    hc_rms_linear_enabled,
 )
 from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm import (
     fused_rms_norm,
@@ -320,6 +332,9 @@ class HyperMixer(nn.Module):
         ``PRIMUS_RMSNORM_TRITON`` (default on).
         """
         flat = x.flatten(-2)
+        if hc_rms_linear_enabled() and flat.is_cuda:
+            # RMS + fp32 projection in one pass over x (no fp32 [.., K*D] tensor); PRIMUS_HC_RMS_LINEAR=0 reverts.
+            return hc_rms_linear(flat, self.fn.weight, self.eps)
         normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
         logits = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))
         return logits
@@ -368,6 +383,16 @@ class HyperMixer(nn.Module):
 
         # Cast back to the activation dtype to match downstream block compute.
         return pre.to(out_dtype), post.to(out_dtype), comb.to(out_dtype)
+
+    def fused_pre(self, x: torch.Tensor, norm_weight=None, norm_eps: float = 1e-6):
+        """Fused weights + collapse: ``(collapsed, post, comb^T, link)`` for :func:`hc_fused_post`.
+
+        Same math as ``compute_weights`` + ``collapse``; see ``_triton_common/hc_fused.py``. With ``norm_weight``
+        the first output is ``rmsnorm(collapsed, norm_eps) * norm_weight``.
+        """
+        return hc_fused_pre(
+            x, self.fn.weight, self.scale, self.base, self.eps, self.sinkhorn_iters, norm_weight, norm_eps
+        )
 
     @staticmethod
     def collapse(x: torch.Tensor, pre: torch.Tensor) -> torch.Tensor:
@@ -456,11 +481,47 @@ class HyperHead(nn.Module):
         packed ``K*D`` axis is fused into one Triton FWD + one BWD kernel
         (fp32 output for ``F.linear``). Gated by ``PRIMUS_RMSNORM_TRITON``.
         """
+        slot = None
+        x_c = x
+        if hc_rms_linear_enabled() and x.is_cuda and x.requires_grad and torch.is_grad_enabled():
+            from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.hc_head import (
+                HeadFanOut,
+                HeadGradSlot,
+                head_gadd_enabled,
+            )
+
+            if (
+                head_gadd_enabled()
+                and hc_head_fused_enabled()
+                and x.dtype == torch.bfloat16
+                and x.is_contiguous()
+            ):
+                # PRIMUS_FUSE2_HEAD_GADD: the two x-gradients are summed inside the rms-linear backward
+                slot = HeadGradSlot()
+                x, x_c = HeadFanOut.apply(x, slot)
         flat = x.flatten(-2)
-        normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
-        mixes = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))  # [..., K]
-        pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
-        return (pre.unsqueeze(-1) * x).sum(dim=-2).to(x.dtype)
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common import (
+            launch_head_mg as _lhm,
+        )
+
+        if hc_rms_linear_enabled() and flat.is_cuda:
+            if _lhm.enabled() and _lhm.head_weight_mg(self.fn.weight):
+                # PRIMUS_LAUNCH_HEAD_MG: fn.weight's gradient written straight into its main_grad
+                mixes = hc_rms_linear(flat, self.fn.weight, self.eps, gslot=slot, wmg=True)
+            else:
+                mixes = hc_rms_linear(flat, self.fn.weight, self.eps, gslot=slot)  # [..., K]
+        else:
+            normed = fused_rms_norm(flat, None, eps=self.eps, mid_cast=False, out_dtype=torch.float32)
+            mixes = F.linear(normed, self.fn.weight.to(dtype=normed.dtype))  # [..., K]
+        pre = _lhm.head_pre(mixes, self.scale, self.base, self.eps) if _lhm.enabled() else None
+        if pre is None:
+            pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
+
+        if hc_head_fused_enabled() and hc_head_supported(x_c, pre):
+            # one streaming kernel each way instead of the fp32 [.., K, D] product + reduce + cast
+            # (forward bit-identical; backward dx bit-identical, dpre summed in a different fp32 order)
+            return hc_head_collapse(x_c, pre, gslot=slot)
+        return (pre.unsqueeze(-1) * x_c).sum(dim=-2).to(x_c.dtype)
 
 
 __all__ = [
