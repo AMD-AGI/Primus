@@ -34,6 +34,10 @@ _TWO_POW_M32 = np.float32(2.3283064e-10)
 #: draw ``v`` to ``(v + 1) / 2**32``, cuRAND to ``v / 2**32 + 2**-33``.
 FLAVORS = ("rocrand", "curand")
 
+#: Resident threads per compute unit on MI300X; with the compute-unit count it sizes PyTorch's
+#: ``uniform_`` grid.
+THREADS_PER_CU = 2048
+
 
 def philox4x32_10(counter: Sequence, key: Tuple[int, int]) -> Tuple[np.ndarray, ...]:
     """Philox4x32 with 10 rounds on arrays of counter words; returns four ``uint32`` arrays."""
@@ -50,13 +54,13 @@ def philox4x32_10(counter: Sequence, key: Tuple[int, int]) -> Tuple[np.ndarray, 
     return c0, c1, c2, c3
 
 
-def grid_threads(numel: int, compute_units: int, threads_per_cu: int = 2048) -> int:
+def grid_threads(numel: int, compute_units: int, threads_per_cu: int = THREADS_PER_CU) -> int:
     """Threads the kernel launches for a tensor of ``numel`` elements."""
     blocks = min((int(numel) + 255) // 256, int(compute_units) * (int(threads_per_cu) // 256))
     return blocks * 256
 
 
-def offset_increment(numel: int, compute_units: int, threads_per_cu: int = 2048) -> int:
+def offset_increment(numel: int, compute_units: int, threads_per_cu: int = THREADS_PER_CU) -> int:
     """How far one ``uniform_`` call on ``numel`` elements advances the generator offset."""
     threads = grid_threads(numel, compute_units, threads_per_cu)
     return ((int(numel) - 1) // (threads * 4) + 1) * 4
@@ -69,7 +73,7 @@ def uniform_unit(
     compute_units: int,
     seed: int,
     flavor: str = "rocrand",
-    threads_per_cu: int = 2048,
+    threads_per_cu: int = THREADS_PER_CU,
 ) -> np.ndarray:
     """Values in (0, 1] that ``uniform_`` draws for flat element ``index`` of an ``numel`` tensor.
 
@@ -104,7 +108,7 @@ def uniform_like_torch(
     dtype,
     seed: int,
     flavor: str = "rocrand",
-    threads_per_cu: int = 2048,
+    threads_per_cu: int = THREADS_PER_CU,
 ):
     """``torch.empty(numel, dtype=dtype, device=gpu).uniform_(low, high)`` at ``index``.
 

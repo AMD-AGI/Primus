@@ -38,10 +38,14 @@ import torch
 
 from primus.backends.megatron.checkpoint.philox_uniform import (
     FLAVORS,
+    THREADS_PER_CU,
     grid_threads,
     offset_increment,
     uniform_like_torch,
 )
+
+#: Seed the HyLo reference checkpoints were built with.
+REFERENCE_SEED = 42
 
 _CONV_KEY = re.compile(r"^(.*)layers\.(\d+)\.mamba\.conv1d\.weight$")
 
@@ -136,12 +140,14 @@ class ReferenceMamba2:
         return Mamba2Widths(int(d_model), int(d_inner), int(d_xb), int(nheads), int(d_conv), num_layers)
 
 
-def layer_offsets(widths: Mamba2Widths, compute_units: int, threads_per_cu: int = 2048) -> List[List[int]]:
+def layer_offsets(
+    widths: Mamba2Widths, compute_units: int, threads_per_cu: int = THREADS_PER_CU
+) -> List[List[int]]:
     """Generator offset at the start of each draw, per layer, from offset 0 at the first layer."""
-    offset, out = 0, []
+    offset, out, sizes = 0, [], widths.draw_sizes()
     for _ in range(widths.num_layers):
         row = []
-        for numel in widths.draw_sizes():
+        for numel in sizes:
             row.append(offset)
             offset += offset_increment(numel, compute_units, threads_per_cu)
         out.append(row)
@@ -152,9 +158,9 @@ def rebuild_layer(
     widths: Mamba2Widths,
     offsets: Sequence[int],
     compute_units: int,
-    seed: int = 42,
+    seed: int = REFERENCE_SEED,
     flavor: str = "rocrand",
-    threads_per_cu: int = 2048,
+    threads_per_cu: int = THREADS_PER_CU,
     ranges: InitRanges = InitRanges(),
 ) -> Dict[str, torch.Tensor]:
     """The random tensors of one layer: z and dt rows of ``in_proj``, conv, ``dt_bias``, ``A_log``."""
@@ -236,9 +242,9 @@ class ScanResult:
 def scan(
     reference: ReferenceMamba2,
     candidates: Iterable[int],
-    seed: int = 42,
+    seed: int = REFERENCE_SEED,
     flavor: str = "rocrand",
-    threads_per_cu: int = 2048,
+    threads_per_cu: int = THREADS_PER_CU,
     z_samples: int = 65536,
     ties: float = 1e-6,
 ) -> List[ScanResult]:
@@ -305,9 +311,9 @@ def write(
     reference: ReferenceMamba2,
     compute_units: int,
     output_dir: Path,
-    seed: int = 42,
+    seed: int = REFERENCE_SEED,
     flavor: str = "rocrand",
-    threads_per_cu: int = 2048,
+    threads_per_cu: int = THREADS_PER_CU,
 ) -> dict:
     """Copy ``template`` with each mixer's random tensors replaced by the rebuilt draw."""
     from primus.backends.megatron.checkpoint.hybrid_upcycle import (
@@ -382,11 +388,13 @@ def _candidates(text: str) -> List[int]:
 
 def _common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--reference", required=True, help="the reference model.safetensors")
-    parser.add_argument("--seed", type=int, default=42, help="seed the reference was built with")
+    parser.add_argument("--seed", type=int, default=REFERENCE_SEED, help="seed the reference was built with")
     parser.add_argument(
         "--flavor", choices=FLAVORS, default="rocrand", help="random library's float conversion"
     )
-    parser.add_argument("--threads-per-cu", type=int, default=2048, help="resident threads per compute unit")
+    parser.add_argument(
+        "--threads-per-cu", type=int, default=THREADS_PER_CU, help="resident threads per compute unit"
+    )
 
 
 def scan_main(argv: Optional[Sequence[str]] = None) -> List[ScanResult]:

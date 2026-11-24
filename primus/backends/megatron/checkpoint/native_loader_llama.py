@@ -61,8 +61,12 @@ def derive_megatron_fields(cfg):
     num_heads = cfg["num_attention_heads"]
     rope_scaling = cfg.get("rope_scaling") or {}
     rope_type = rope_scaling.get("rope_type", rope_scaling.get("type"))
+    if rope_scaling and rope_type is None:
+        raise ValueError(f"rope_scaling {rope_scaling} has no rope_type")
     if rope_type not in (None, "default", "llama3"):
         raise ValueError(f"rope_scaling type {rope_type!r} has no Megatron conversion; llama3 does")
+    if rope_type == "llama3" and "factor" not in rope_scaling:
+        raise ValueError("llama3 rope_scaling has no factor")
     other = {
         name: rope_scaling[name]
         for name, fixed in _LLAMA3_ROPE_FIXED.items()

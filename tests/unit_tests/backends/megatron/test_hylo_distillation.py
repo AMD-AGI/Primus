@@ -144,6 +144,10 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "tensor_model_parallel_size": 2}))
     with pytest.raises(ValueError, match="pipeline_model_parallel_size=1"):
         validate_hylo_args(Namespace(**{**base, "pipeline_model_parallel_size": 2}))
+    with pytest.raises(ValueError, match="context_parallel_size=1"):
+        validate_hylo_args(Namespace(**{**base, "context_parallel_size": 2}))
+    with pytest.raises(ValueError, match="recompute_granularity"):
+        validate_hylo_args(Namespace(**{**base, "recompute_granularity": "full"}))
     with pytest.raises(ValueError, match="hylo_ce_weight must be 0"):
         validate_hylo_args(Namespace(**{**base, "hylo_ce_weight": 1.0}))
     with pytest.raises(ValueError, match="LoRA"):

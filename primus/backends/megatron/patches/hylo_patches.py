@@ -18,6 +18,8 @@ reference HyLo (TRL) run recorded, in its order. Megatron's random sampler would
 the patch also sets ``dataloader_type`` to ``single``.
 """
 
+import traceback
+
 from primus.core.patches import PatchContext, get_args, get_param, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
@@ -53,5 +55,5 @@ def patch_hylo(ctx: PatchContext) -> None:
             f"[Patch:{_PATCH_KEY}] HyLo {args.hylo_distill_stage} with teacher {args.hylo_teacher_checkpoint}"
         )
     except Exception as exc:
-        log_rank_0(f"[Patch:{_PATCH_KEY}] FATAL: {exc}")
+        log_rank_0(f"[Patch:{_PATCH_KEY}] FATAL: {exc}\n{traceback.format_exc()}")
         raise SystemExit(f"[{_PATCH_KEY}] HyLo setup failed: {exc}") from exc
