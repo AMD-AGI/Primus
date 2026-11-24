@@ -34,17 +34,28 @@ modules:
 
       # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
       # weights and adds cached FP8 weight copies, so it fits fewer samples
-      # than BF16. micro_batch_size 184 is the size the earlier MI325X recipe
-      # used. With the compute paths below it peaks at about 202 of 256 GB per
-      # GPU, so larger micro batches may fit; this recipe keeps 184 so its
-      # numbers compare with the earlier one. On fewer GPUs, lower
-      # micro_batch_size or num_layers (keep it even). Do not edit the model
-      # yaml to shrink the architecture.
+      # than BF16. micro_batch_size 264 is the largest multiple of 8 that
+      # completes the run, including the end-of-training evaluation, on MI325X
+      # (8 x 256 GiB) with the compute paths below. On the internal CI image
+      # unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_b06d0c1_20261116
+      # (PyTorch 2.16.0a0+rocm10.3.0a20261111, Transformer Engine
+      # 2.21.0.dev0+b5c00f432, Primus-Turbo 0.6.1.dev27) it peaks at about 239
+      # GiB allocated, 245 GiB reserved and 253 GiB at the device; 272 runs out
+      # of memory. It also fits on rocm/primus:v26.9 (PyTorch
+      # 2.16.0a0+rocm10.2.0a20261020, Transformer Engine 2.20.0.dev0+023639b51,
+      # Primus-Turbo 0.6.1.dev4), with 253 GiB at the device. That leaves about
+      # 2.5 GiB of device headroom, measured on those two images only. If
+      # another image, Primus-Turbo or Transformer Engine build, or other
+      # GPU-memory users run out of memory at evaluation, lower micro_batch_size
+      # in steps of 8 (global_batch_size is 8 times it). History: 184 since
+      # #1269 (about 202 GiB). Throughput at 264 is not comparable with earlier
+      # runs at 184. On fewer GPUs, lower micro_batch_size or num_layers (keep
+      # it even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
-      micro_batch_size: 184
+      micro_batch_size: 264
       # One micro batch per GPU per step at DP=8.
       # Must be divisible by micro_batch_size * data_parallel_size.
-      global_batch_size: 1472
+      global_batch_size: 2112
       seq_length: 128
       max_position_embeddings: 4096
 
