@@ -319,13 +319,11 @@ def assemble_ild_state_dict(
         raise ValueError("HyLo ILD assembly requires paired mixer/MLP sublayers")
     pattern = validate_upcycle_pattern(pattern, num_sublayers // 2)
     for name, state in (("GDN", gdn_ild_state), ("MLA", mla_ild_state)):
-        if count_decoder_layers(state) != num_sublayers:
-            raise ValueError(
-                f"{name} ILD checkpoint has {count_decoder_layers(state)} sublayers; "
-                f"expected {num_sublayers}"
-            )
+        sublayers = count_decoder_layers(state)
+        if sublayers != num_sublayers:
+            raise ValueError(f"{name} ILD checkpoint has {sublayers} sublayers; expected {num_sublayers}")
 
-    assembled = {key: value for key, value in hybrid_base_state.items()}
+    assembled = dict(hybrid_base_state)
     for block in range(num_sublayers // 2):
         symbol = pattern[2 * block]
         source = mla_ild_state if symbol == ATTENTION else gdn_ild_state

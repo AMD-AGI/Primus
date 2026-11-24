@@ -9,8 +9,13 @@ set -euo pipefail
 #   HYLO_GDN_UPCYCLED_CKPT         all-GDN from-teacher initialization
 #   HYLO_MLA_UPCYCLED_CKPT         all-MLA from-teacher initialization
 #   HYLO_STAGE2_BASE_CKPT           target 4MLA12GDN from-teacher initialization
-# Other optional settings: HYLO_SFT_DATASET, HYLO_OUTPUT_ROOT,
-#   HYLO_ILD_TRAIN_ITERS, HYLO_SFT_TRAIN_ITERS, PRIMUS_IMAGE.
+#   HYLO_GDN_ILD_OUTPUT, HYLO_MLA_ILD_OUTPUT  stage-1 checkpoints; a run that already reached
+#                                  HYLO_ILD_TRAIN_ITERS is not trained again
+# Other optional settings: HYLO_SFT_DATASET, HYLO_TOKENIZER_MODEL, HYLO_OUTPUT_ROOT,
+#   HYLO_ILD_TRAIN_ITERS, HYLO_SFT_TRAIN_ITERS, HYLO_ILD_SEQ_LENGTH, HYLO_SFT_SEQ_LENGTH,
+#   HYLO_SEQ_LENGTH (both stages), HYLO_MICRO_BATCH_SIZE, HYLO_GLOBAL_BATCH_SIZE,
+#   HYLO_DISABLE_LAST_SAVING, GPUS_PER_NODE, HIP_VISIBLE_DEVICES, PRIMUS_IMAGE, and
+#   PRIMUS_TEAM and PRIMUS_USER (exported; they name the output directories).
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IMAGE="${PRIMUS_IMAGE:-rocm/primus:v26.9}"
@@ -25,8 +30,8 @@ export HYLO_MLA_UPCYCLED_CKPT="${HYLO_MLA_UPCYCLED_CKPT:-${OUT}/mla-kv8-upcycled
 export HYLO_STAGE2_BASE_CKPT="${HYLO_STAGE2_BASE_CKPT:-${OUT}/4mla12gdn-kv8-upcycled}"
 RUN_GROUP="${PRIMUS_TEAM:-amd}"
 RUN_USER="${PRIMUS_USER:-root}"
-export HYLO_GDN_ILD_OUTPUT="${OUT}/${RUN_GROUP}/${RUN_USER}/gdn-ild/checkpoints"
-export HYLO_MLA_ILD_OUTPUT="${OUT}/${RUN_GROUP}/${RUN_USER}/mla-ild/checkpoints"
+export HYLO_GDN_ILD_OUTPUT="${HYLO_GDN_ILD_OUTPUT:-${OUT}/${RUN_GROUP}/${RUN_USER}/gdn-ild/checkpoints}"
+export HYLO_MLA_ILD_OUTPUT="${HYLO_MLA_ILD_OUTPUT:-${OUT}/${RUN_GROUP}/${RUN_USER}/mla-ild/checkpoints}"
 export HYLO_STAGE2_INIT_CKPT="${OUT}/stage2-init"
 export HYLO_SFT_OUTPUT="${OUT}/${RUN_GROUP}/${RUN_USER}/4mla12gdn-8k-sft/checkpoints"
 
@@ -127,10 +132,18 @@ if [[ ! -f "${HYLO_STAGE2_BASE_CKPT}/latest_checkpointed_iteration.txt" ]]; then
     "${TARGET_PATTERN}" "${HYLO_STAGE2_BASE_CKPT}"
 fi
 
-run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml" \
-  "gdn-ild" "${HYLO_ILD_SEQ_LENGTH:-${HYLO_SEQ_LENGTH:-}}"
-run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml" \
-  "mla-ild" "${HYLO_ILD_SEQ_LENGTH:-${HYLO_SEQ_LENGTH:-}}"
+ild_done() {
+  [[ "$(cat "$1/latest_checkpointed_iteration.txt" 2>/dev/null)" == "${HYLO_ILD_TRAIN_ITERS:-1000}" ]]
+}
+
+if ! ild_done "${HYLO_GDN_ILD_OUTPUT}"; then
+  run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild.yaml" \
+    "gdn-ild" "${HYLO_ILD_SEQ_LENGTH:-${HYLO_SEQ_LENGTH:-}}"
+fi
+if ! ild_done "${HYLO_MLA_ILD_OUTPUT}"; then
+  run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild.yaml" \
+    "mla-ild" "${HYLO_ILD_SEQ_LENGTH:-${HYLO_SEQ_LENGTH:-}}"
+fi
 
 docker run --rm \
   -v "${ROOT}:${ROOT}" -w "${ROOT}" \
@@ -139,6 +152,7 @@ docker run --rm \
     --hybrid-base-checkpoint "${HYLO_STAGE2_BASE_CKPT}" \
     --gdn-ild-checkpoint "${HYLO_GDN_ILD_OUTPUT}" \
     --mla-ild-checkpoint "${HYLO_MLA_ILD_OUTPUT}" \
+    --hybrid-pattern "${TARGET_PATTERN}" \
     --output-dir "${HYLO_STAGE2_INIT_CKPT}"
 
 run_primus "${ROOT}/examples/megatron/configs/MI300X/hylo_4MLA12GDN_1B-8K-sft.yaml" \
