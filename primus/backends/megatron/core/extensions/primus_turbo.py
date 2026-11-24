@@ -1091,6 +1091,119 @@ def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, tra
         return _get_fp8_autocast_for_quant_recipe(qparams.training_recipe)
 
 
+# ---------------------------------------------------------------------------
+# Turbo-only low precision: Primus-Turbo quantizes, Transformer Engine does no FP8.
+#
+#   turbo_precision: mxfp8          (primus_turbo.yaml; env PRIMUS_TURBO_PRECISION wins)
+#       Megatron runs WITHOUT fp8 / fp8_recipe, so TE does no FP8 and the embedding, output
+#       layer, router, norms and attention core stay BF16. Every Primus-Turbo dense linear
+#       (use_turbo_gemm) and grouped linear (use_turbo_grouped_gemm) quantizes its own operands
+#       and runs Turbo MXFP8 GEMMs (E4M3, one E8M0 scale per 32 elements) for fwd, dgrad and
+#       wgrad. On gfx1250 that is the FlyDSL WMMA-scale dense GEMM and the Triton MX grouped
+#       GEMM; Turbo raises rather than fall back to hipBLASLt MXFP8 there.
+#   PRIMUS_TURBO_DENSE_RECIPE / PRIMUS_TURBO_GROUPED_RECIPE = inherit | bf16 | mxfp8
+#       Per-kind override. inherit (default) follows turbo_precision, or in an --fp8 run the
+#       layer's own Turbo recipe. bf16 keeps that kind on the Turbo BF16 GEMM.
+# ---------------------------------------------------------------------------
+_TURBO_ONLY_PRECISIONS = ("mxfp8",)
+_TURBO_KIND_RECIPES = ("inherit", "bf16", "mxfp8")
+
+
+def _turbo_only_precision() -> Optional[str]:
+    """The Turbo-only precision (``turbo_precision`` / ``PRIMUS_TURBO_PRECISION``), or None."""
+    value = os.environ.get("PRIMUS_TURBO_PRECISION")
+    if value is None:
+        try:
+            value = getattr(get_args(), "turbo_precision", None)
+        except AssertionError:  # Megatron's args are not initialized (e.g. a unit test)
+            value = None
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    if value in ("", "none", "null", "bf16"):
+        return None
+    if value not in _TURBO_ONLY_PRECISIONS:
+        raise ValueError(f"turbo_precision={value!r}: expected one of {_TURBO_ONLY_PRECISIONS} or null")
+    return value
+
+
+@lru_cache(maxsize=None)
+def _precision_env() -> Tuple[str, str, Optional[str]]:
+    turbo_only = _turbo_only_precision()
+    default = turbo_only or "inherit"
+    dense = os.environ.get("PRIMUS_TURBO_DENSE_RECIPE", default).strip().lower()
+    grouped = os.environ.get("PRIMUS_TURBO_GROUPED_RECIPE", default).strip().lower()
+    for name, kind in (("PRIMUS_TURBO_DENSE_RECIPE", dense), ("PRIMUS_TURBO_GROUPED_RECIPE", grouped)):
+        if kind not in _TURBO_KIND_RECIPES:
+            raise ValueError(f"{name}={kind!r}: expected one of {_TURBO_KIND_RECIPES}")
+    if turbo_only is not None:
+        args = get_args()
+        if getattr(args, "fp8", None) or getattr(args, "fp4", None):
+            raise ValueError(
+                f"turbo_precision={turbo_only} replaces fp8 / fp8_recipe (Transformer Engine FP8); "
+                f"unset fp8 (got fp8={getattr(args, 'fp8', None)}, fp4={getattr(args, 'fp4', None)})."
+            )
+        for fused in ("turbo_fused_grouped_gemm", "turbo_fused_gemm"):
+            if getattr(args, fused, False):
+                raise ValueError(f"turbo_precision={turbo_only} does not cover {fused}; set {fused}: false.")
+        if "mxfp8" in (dense, grouped):
+            ok, reason = check_mxfp8_support()
+            if not ok:
+                raise RuntimeError(f"turbo_precision={turbo_only}: {reason}")
+    warning_rank_0(
+        f"[precision] turbo_precision={turbo_only} (Transformer Engine FP8 "
+        f"{'off' if turbo_only else 'per fp8_recipe'}): Turbo dense linears={dense}, "
+        f"Turbo grouped linears={grouped}; primus_turbo imported from {primus_turbo_torch.__file__}"
+    )
+    return dense, grouped, turbo_only
+
+
+@lru_cache(maxsize=None)
+def _override_quant_config(kind: str) -> PrimusTurboQuantConfig:
+    assert kind == "mxfp8", kind
+    return PrimusTurboQuantConfig(
+        granularity=ScalingGranularity.MX_BLOCKWISE,
+        format=Format.E4M3,
+        block_size=32,
+        scale_dtype=ScaleDtype.E8M0,
+    )
+
+
+@contextmanager
+def _turbo_precision(kind: str):
+    """Temporarily switch the Turbo low-precision state (TE's own state is left alone)."""
+    mgr = PrimusTurboLowPrecisionGlobalStateManager
+    saved = (mgr.PRIMUS_TURBO_FP8_ENABLED, mgr.PRIMUS_TURBO_FP4_ENABLED, mgr.PRIMUS_TURBO_QUANT_CONFIG)
+    mgr.PRIMUS_TURBO_FP4_ENABLED = False
+    if kind == "bf16":
+        mgr.PRIMUS_TURBO_FP8_ENABLED = False
+    else:
+        mgr.PRIMUS_TURBO_FP8_ENABLED = True
+        mgr.PRIMUS_TURBO_QUANT_CONFIG = _override_quant_config(kind)
+    try:
+        yield
+    finally:
+        mgr.PRIMUS_TURBO_FP8_ENABLED, mgr.PRIMUS_TURBO_FP4_ENABLED, mgr.PRIMUS_TURBO_QUANT_CONFIG = saved
+
+
+def _kind_precision_context(kind: str):
+    if kind == "inherit":
+        return nullcontext()
+    mgr = PrimusTurboLowPrecisionGlobalStateManager
+    if _precision_env()[2] is None and not (mgr.is_turbo_fp8_enabled() or mgr.is_turbo_fp4_enabled()):
+        # --fp8 runs: BF16 layers (e.g. first_last_layers_bf16) are left alone.
+        return nullcontext()
+    return _turbo_precision(kind)
+
+
+def _dense_precision_context():
+    return _kind_precision_context(_precision_env()[0])
+
+
+def _grouped_precision_context():
+    return _kind_precision_context(_precision_env()[1])
+
+
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
     """
     Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
@@ -1431,7 +1544,7 @@ class PrimusTurboLinear(TELinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context():
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -1641,7 +1754,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context():
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -1854,7 +1967,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context():
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -2082,7 +2195,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         # Rewrite quant context
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
-        with quant_context:
+        with quant_context, _dense_precision_context():
             out = self.forward_internal(x, _is_first_microbatch)
 
         self.is_first_microbatch = False
@@ -2686,7 +2799,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
         quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
-        with quant_context:
+        with quant_context, _grouped_precision_context():
             out = self.forward_internal(x, m_splits)
         return out
 
