@@ -19,7 +19,6 @@ modules:
       hylo_teacher_checkpoint: ${HYLO_LLAMA32_1B_MEGATRON_CKPT:./data/checkpoints/llama32-1b-megatron}
       hylo_teacher_num_layers: 16
       hylo_teacher_use_rope_scaling: true
-      hylo_kl_weight: 1.0
 
       load: ${HYLO_GDN_UPCYCLED_CKPT:./data/checkpoints/hylo-gdn-1b-upcycled}
       save: ${HYLO_GDN_ILD_OUTPUT:./output/hylo-gdn-1b-ild}

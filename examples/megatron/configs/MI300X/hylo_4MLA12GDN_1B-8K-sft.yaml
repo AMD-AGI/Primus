@@ -20,6 +20,8 @@ modules:
       hylo_teacher_checkpoint: ${HYLO_LLAMA31_8B_MEGATRON_CKPT:./data/checkpoints/llama31-8b-megatron}
       hylo_teacher_num_layers: 32
       hylo_teacher_use_rope_scaling: true
+      hylo_teacher_yarn_factor: ${HYLO_TEACHER_YARN_FACTOR:null}
+      hylo_teacher_yarn_original_max_position_embeddings: ${HYLO_TEACHER_YARN_ORIGINAL_MAX:null}
       hylo_kl_weight: 1.0
       # Used by hylo_kl_impl: chunked, the PyTorch reference.
       hylo_kl_chunk_size: 4096

@@ -25,7 +25,6 @@ SHARED = (
     "hylo_distill_stage",
     "hylo_teacher_num_layers",
     "hylo_teacher_use_rope_scaling",
-    "hylo_kl_weight",
     "lr",
     "min_lr",
     "lr_decay_style",
