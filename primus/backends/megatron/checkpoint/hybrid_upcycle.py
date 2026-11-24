@@ -730,9 +730,9 @@ def _copy_mamba_hylo(
 
     HyLo writes V into ``x``, K into ``B``, and Q into ``C`` of an ``in_proj``
     whose width is ``2 * d_inner + 2 * d_xb + nheads``, and copies ``o_proj``
-    and the attention input norm. Megatron's ``MambaMixer`` has that width
-    only when ``d_xb == d_inner == n_groups * d_state``. Any other width is
-    left untouched.
+    and the attention input norm. ``Mamba2DxbMixer`` has that width; Megatron's
+    ``MambaMixer`` has it only when ``d_xb == d_inner == n_groups * d_state``.
+    Any other width is left untouched.
     """
     if layout.mamba_d_inner is None or layout.mamba_d_xb is None or layout.mamba_nheads is None:
         return False

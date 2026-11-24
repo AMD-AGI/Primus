@@ -27,7 +27,8 @@ class ModelFamily:
     with ``package`` set, its own (``inkling``, whose model takes no
     GPTModel-style arguments) -- or declares the pieces the shared builder in
     ``builder.py`` assembles. A Primus family with its own builder still names
-    its ``config_class``, which ``schema_check`` reads.
+    its ``config_class``, which ``schema_check`` reads. Without ``package``, the
+    builder may also be a Primus one around an upstream model (``hylo``).
 
     * ``config_class``: the dataclass handed to ``core_transformer_config_from_args``.
     * ``model_class``: constructed with GPTModel-style arguments.
@@ -38,7 +39,7 @@ class ModelFamily:
     * ``check_model``: ``fn(args, config, model)``, run on the built model.
 
     Module paths are relative to ``package`` when it is set. ``training`` is
-    the upstream entry point providing ``forward_step`` and
+    the entry point, upstream's or a Primus module, providing ``forward_step`` and
     ``train_valid_test_datasets_provider``; ``legacy_training`` is its name on
     older Megatron-LM, tried when ``training`` is missing or does not provide them.
     """
@@ -86,6 +87,11 @@ MODEL_FAMILIES = {
         builder="mamba_builders:mamba_builder",
         training="pretrain_hybrid",
         legacy_training="pretrain_mamba",
+    ),
+    # The mamba student distilled from a frozen dense teacher (HyLo).
+    "hylo": ModelFamily(
+        builder="primus.backends.megatron.training.hylo_distillation:hylo_builder",
+        training="primus.backends.megatron.training.hylo_distillation",
     ),
     "deepseek_v4": ModelFamily(
         package="primus.backends.megatron.core.models.deepseek_v4",
