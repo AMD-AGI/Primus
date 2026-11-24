@@ -36,6 +36,7 @@ class _MSAAttention(torch.autograd.Function):
         owner_carry=False,
         ds_chunk_store=False,
         dq_early_issue=False,
+        two_tile_slots=False,
     ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
@@ -50,6 +51,7 @@ class _MSAAttention(torch.autograd.Function):
             shared_tiles=shared_tiles,
             step_mask_skip=step_mask_skip,
             owner_carry=owner_carry,
+            two_tile_slots=two_tile_slots,
         )
         o, lse = outs[0], outs[1]
         ctx.save_for_backward(q, k, v, o, lse, block_table)
@@ -86,7 +88,7 @@ class _MSAAttention(torch.autograd.Function):
             ds_chunk_store=ctx.ds_chunk_store,
             dq_early_issue=ctx.dq_early_issue,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def msa_attention(
@@ -106,6 +108,7 @@ def msa_attention(
     owner_carry=False,
     ds_chunk_store=False,
     dq_early_issue=False,
+    two_tile_slots=False,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
@@ -130,6 +133,9 @@ def msa_attention(
 
     ``dq_early_issue`` (``msa_dq_early_issue``, with ``dq_from_ds``): the slim dQ kernel issues a
     step's copies one wait earlier; same bits (``msa_token_bwd``).
+
+    ``two_tile_slots`` (``msa_two_tile_slots``, with ``owner_carry``): the forward with two LDS
+    tile slots per wave instead of four; same bits (``msa_token_fwd_wave32``).
     """
     q, k, v = (t.contiguous() for t in (q, k, v))
     table = getattr(plan, "table", None) if plan is not None else None
@@ -162,4 +168,5 @@ def msa_attention(
         bool(owner_carry),
         bool(ds_chunk_store) and bool(dq_from_ds),
         bool(dq_early_issue) and bool(dq_from_ds),
+        bool(two_tile_slots) and bool(owner_carry),
     )

@@ -84,6 +84,7 @@ _MSA_RELAXED = (
     "msa_owner_carry",
     "msa_ds_chunk_store",
     "msa_dq_early_issue",
+    "msa_two_tile_slots",
 )
 _FUSIONS_LOGGED = False
 
@@ -330,6 +331,9 @@ class MinimaxSparseAttention(SelfAttention):
             or not self._gfx1250
         ):
             return {}
+        if getattr(config, "msa_two_tile_slots", False):
+            # a layout of the carry kernel (two LDS tile slots per wave): same conditions
+            return {"owner_carry": True, "two_tile_slots": True}
         return {"owner_carry": True}
 
     def msa_core(

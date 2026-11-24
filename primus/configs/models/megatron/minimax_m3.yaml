@@ -121,6 +121,10 @@ msa_ds_chunk_store: false
 # waits for the previous step's (two in flight). Bit-identical dq, checked on first use;
 # msa_exact_numerics turns it off.
 msa_dq_early_issue: false
+# gfx1250 flydsl MSA forward with msa_owner_carry: two LDS tile slots per wave instead of four, so
+# four workgroups instead of two fit a compute unit. Bit-identical outputs, checked on first use;
+# msa_exact_numerics turns it off.
+msa_two_tile_slots: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 

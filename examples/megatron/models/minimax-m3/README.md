@@ -169,7 +169,7 @@ the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel confi
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
 off; apart from `msa_shared_tile_staging`, `msa_lean_masks`, `msa_aligned_block_walk`,
-`msa_dq_from_ds`, `msa_owner_carry`, `msa_ds_chunk_store` and `msa_dq_early_issue` the FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
+`msa_dq_from_ds`, `msa_owner_carry`, `msa_ds_chunk_store`, `msa_dq_early_issue` and `msa_two_tile_slots` the FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
 **Relaxed-numerics MSA options.** Two options are not bit-identical to the reference FlyDSL
 kernels. With `msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
@@ -193,7 +193,11 @@ writes `dS` through one buffer descriptor per workgroup instead of one per recor
 (batch, KV head) slice of the buffer is at most 2 GiB, i.e. up to S 32768 at top-k 16),
 `msa_dq_early_issue` (with `msa_dq_from_ds`, the slim dQ kernel issues the copies of the next
 step before it waits for those of the current one, so two steps' copies are in flight; the first
-call for a shape compares every bit of `dq`).
+call for a shape compares every bit of `dq`) and `msa_two_tile_slots` (with `msa_owner_carry`,
+the forward keeps one K and one V tile slot per wave instead of two of each: a step's V tile is
+copied while the step works on K, the next step's K tile while it works on V; a workgroup then
+takes 68 KB instead of 140 KB of LDS and four instead of two fit a compute unit; the first call
+for a shape compares every output bit).
 `--msa_exact_numerics True` turns these options, and any other
 option of this kind, off and reproduces the reference kernels' losses bit for bit.
 

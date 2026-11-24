@@ -90,6 +90,8 @@ modules:
       msa_ds_chunk_store: true
       # same class: the slim dQ kernel keeps two steps' copies in flight
       msa_dq_early_issue: false
+      # same class: the forward keeps two LDS tile slots per wave (four workgroups per compute unit)
+      msa_two_tile_slots: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.

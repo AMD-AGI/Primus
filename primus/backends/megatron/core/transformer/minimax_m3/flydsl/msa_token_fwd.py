@@ -776,6 +776,7 @@ def msa_token_fwd(
     shared_tiles=False,
     step_mask_skip=False,
     owner_carry=False,
+    two_tile_slots=False,
     **config,
 ):
     """MSA forward.
@@ -793,6 +794,9 @@ def msa_token_fwd(
             workgroup and one staging of each K/V tile they have in common; same bits.
         step_mask_skip: gfx1250 only (``msa_lean_masks``): steps whose keys are all visible
             skip the per-key causal compare and select; same bits.
+        owner_carry, two_tile_slots: gfx1250 only (``msa_owner_carry``,
+            ``msa_two_tile_slots``): the lockstep kernel with the tile owner in its loop state,
+            and with two LDS tile slots per wave instead of four; same bits.
         config: ``build_fwd`` tuning knobs (``step_keys``, ``k_via_lds``, ``remap``,
             ``waves``).
 
@@ -817,6 +821,7 @@ def msa_token_fwd(
             shared_tiles=shared_tiles,
             step_mask_skip=step_mask_skip,
             owner_carry=owner_carry,
+            two_tile_slots=two_tile_slots,
             **config,
         )
     S, B, Hq, Dq = q.shape

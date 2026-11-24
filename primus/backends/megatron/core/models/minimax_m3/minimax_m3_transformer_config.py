@@ -255,6 +255,17 @@ class MSATransformerConfig(TransformerConfig):
     kernel without it and keeps that one on a mismatch. Part of the msa_dq_from_ds path, so
     msa_exact_numerics turns it off."""
 
+    msa_two_tile_slots: bool = False
+    """flydsl backend on gfx1250, with msa_owner_carry (and msa_shared_tile_staging): the MSA
+    forward keeps two LDS tile slots per wave, one for K and one for V, instead of a 2-stage ring
+    of both. A step reads its K tile first and its V tile last, so the step's V is copied while
+    the step works on K and the next step's K while it works on V, each after a workgroup barrier
+    (flydsl/msa_token_fwd_w32.py, two_tile_slots). A workgroup then takes 68 KB of LDS instead of
+    140 KB, and four workgroups instead of two fit a compute unit's 320 KB. Same tiles, arithmetic
+    and order: the outputs are bit-identical, and the first call for a shape compares every output
+    bit with the kernel without it and keeps that one on a mismatch. An MSA operator kernel
+    option: msa_exact_numerics turns it off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for
