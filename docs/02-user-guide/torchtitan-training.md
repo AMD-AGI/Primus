@@ -8,7 +8,7 @@ PyTorch is an open-source machine learning framework that is widely used for mod
 
 The PyTorch for ROCm training Docker image `rocm/primus:v26.10`, available through [Docker Hub](https://hub.docker.com/r/rocm/primus/tags), provides a prebuilt, optimized environment for fine-tuning and pretraining a model on the AMD Instinct™ MI300X, MI325X, MI350X, and MI355X GPUs.
 
-For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.10`](../01-getting-started/release-notes.md#rocmprimusv2610). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.8`](../01-getting-started/release-notes.md#rocmprimusv268).
+For the full software stack of this image (ROCm, PyTorch, Transformer Engine, Flash Attention, hipBLASLt, Triton, RCCL, and the rest), see [Release notes → `rocm/primus:v26.10`](../01-getting-started/release-notes.md#rocmprimusv2610). The release notes are the single source of truth for image contents, and also cover the previous [`rocm/primus:v26.9`](../01-getting-started/release-notes.md#rocmprimusv269).
 
 Training is launched with `primus-cli`, the unified Primus CLI that covers direct, container, and Slurm execution from the same YAML configuration. See the [CLI reference](./cli-reference.md).
 
@@ -24,11 +24,9 @@ Read this section before starting a training run. It collects the settings this 
 
 ### Changes you might need to act on
 
-**AdamW runs on a Triton fused kernel by default.** TorchTitan's `AdamW` is replaced by a Triton implementation sized to the GPU (`optimizer.use_triton_fused_adam: true`, also assumed when the key is absent); set it to `false` to keep `torch.optim.AdamW`. It keeps the stock optimizer's state layout, so checkpoints are interchangeable in both directions. Step counts are kept on the host, so reading `optimizer.state` directly between steps shows stale `step` values; `state_dict()` is correct ([#1233](https://github.com/AMD-AGI/Primus/pull/1233)).
+**The pretrain prepare step honors `DATA_PATH`.** It used `./data/` unless `--data_path` was passed, ignoring the `DATA_PATH` environment variable, so TorchTitan looked for tokenizer assets in `./data/` and downloaded them again when they were missing there. It now defaults to `DATA_PATH`, falling back to `./data/`; `--data_path` still takes precedence, and a relative `DATA_PATH` resolves against the launch directory ([#1414](https://github.com/AMD-AGI/Primus/pull/1414)).
 
-**A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so a job restricted to particular GPUs could land on another user's GPU on a shared node. It now keeps the value you or your scheduler set, and warns when it lists a different number of GPUs than `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
-
-**The Turbo grouped-GEMM config was renamed** in v26.7 ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). If you are moving from v26.6 with a local TorchTitan config that sets it, update the key.
+**The MI355X Llama 3.1 70B recipes train for fewer iterations** ([#1306](https://github.com/AMD-AGI/Primus/pull/1306)), so their runs are shorter than with v26.9.
 
 ### Architecture-specific settings
 
@@ -41,12 +39,11 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Known issues
 
-The v26.9 QA runs found no TorchTitan issues. They covered MI300X and MI355X; the MI325X recipes were not re-run on this image.
+The v26.10 QA runs found no TorchTitan issues. They covered MI355X (DeepSeek-V3-16B BF16, and Llama 3.1 8B and 70B in BF16 and FP8); the MI300X and MI325X recipes were not re-run on this image.
 
-**Fixed in v26.9:**
+**Fixed in v26.10:**
 
-- With full activation checkpointing, `torch.compile` compiled the checkpoint wrapper itself, so the whole checkpointed MoE block of a DeepSeek model ran eagerly. Checkpoint-wrapped blocks are now compiled inside the wrapper; runs without activation checkpointing are unchanged. This affects the DeepSeek-671B recipes and completes the DeepSeek compile work of [#1216](https://github.com/AMD-AGI/Primus/pull/1216), which landed on `release/v26.8` ([#1320](https://github.com/AMD-AGI/Primus/pull/1320)).
-- With `primus_turbo.enable_primus_turbo` or `use_turbo_attention` turned off, the first forward failed under `torch.compile` with `TypeError: Unexpected keyword arguments: ['block_mask', 'enable_gqa']`. The Primus Turbo converter now replaces attention only when both are on ([#1234](https://github.com/AMD-AGI/Primus/pull/1234)).
+- Selective op activation checkpointing under `torch.compile` with FSDP2 failed in the backward pass with `profiler._record_function_enter_new ... not found in storage`, because the profiler's `record_function` markers do not repeat between forward and recompute as PyTorch's selective checkpointing requires. Those profiler-only ops are now ignored by selective checkpointing ([#1274](https://github.com/AMD-AGI/Primus/pull/1274)).
 
 ### Registry change
 
