@@ -369,6 +369,183 @@ class TestUnsupportedReason:
         reason = _backend_registry.unsupported_reason("m", 0.5, (8, 8), True, object())
         assert "context parallelism" in reason
 
+    def test_a_cp_capable_override_is_not_turned_away_for_cp(self):
+        assert (
+            _backend_registry.unsupported_reason(None, 0.0, (-1, -1), False, object(), cp_capable=True)
+            is None
+        )
+
+    def test_a_cp_capable_override_still_checks_the_rest(self):
+        reason = _backend_registry.unsupported_reason("m", 0.0, (-1, -1), False, object(), cp_capable=True)
+        assert "attn_mask" in reason
+
+
+def fake_parallel_config(ulysses_degree=2, ring_degree=1, meshes=True, **flags):
+    cp = types.SimpleNamespace(
+        ulysses_degree=ulysses_degree,
+        ring_degree=ring_degree,
+        ulysses_anything=flags.get("ulysses_anything", False),
+        ring_anything=flags.get("ring_anything", False),
+        _ulysses_mesh=types.SimpleNamespace(get_group=lambda: "ulysses-group") if meshes else None,
+        _ring_mesh=types.SimpleNamespace(get_group=lambda: "ring-group") if meshes else None,
+    )
+    return types.SimpleNamespace(context_parallel_config=cp)
+
+
+class TestContextParallel:
+    """An override with a CP kernel serves diffusers' plain ulysses/ring calls;
+    everything a CP kernel cannot lay out the same way stays on the original."""
+
+    query = types.SimpleNamespace(shape=(1, 18720, 40, 128))
+
+    def _wrapper(self, fake_diffusers, calls, cp_calls):
+        def cp_kernel(q, k, v, softmax_scale=None, causal=False, parallel_config=None):
+            cp_calls.append({"softmax_scale": softmax_scale, "causal": causal, "pc": parallel_config})
+            return "cp-output"
+
+        _backend_registry.install_override(
+            kernel=spy_kernel(calls),
+            override_name="test-cp",
+            log_prefix="[test]",
+            description="a test kernel",
+            probe=lambda: None,
+            configured_backend="flash",
+            cp_kernel=cp_kernel,
+        )
+        flash = next(b for b in fake_diffusers._backends if b.value == "flash")
+        return fake_diffusers._backends[flash]
+
+    def test_a_cp_call_reaches_the_cp_kernel_with_its_config(self, fake_diffusers):
+        calls, cp_calls = [], []
+        wrapper = self._wrapper(fake_diffusers, calls, cp_calls)
+        pc = fake_parallel_config()
+        assert wrapper(query=self.query, key="k", value="v", scale=0.125, _parallel_config=pc) == "cp-output"
+        assert cp_calls == [{"softmax_scale": 0.125, "causal": False, "pc": pc}]
+        assert calls == []
+
+    def test_a_plain_call_still_reaches_the_plain_kernel(self, fake_diffusers):
+        calls, cp_calls = [], []
+        wrapper = self._wrapper(fake_diffusers, calls, cp_calls)
+        assert wrapper(query=self.query, key="k", value="v") == "kernel-output"
+        assert len(calls) == 1 and cp_calls == []
+
+    def test_an_override_without_a_cp_kernel_falls_back_under_cp(self, fake_diffusers):
+        calls = []
+        install(kernel=spy_kernel(calls))
+        flash = next(b for b in fake_diffusers._backends if b.value == "flash")
+        result = fake_diffusers._backends[flash](
+            query=self.query, key="k", value="v", _parallel_config=fake_parallel_config()
+        )
+        assert result[0] == "original-flash" and calls == []
+
+    @pytest.mark.parametrize(
+        "pc,kwargs,reason",
+        [
+            (fake_parallel_config(ulysses_anything=True), {}, "ulysses_anything"),
+            (fake_parallel_config(ulysses_degree=1, ring_degree=2, ring_anything=True), {}, "ring_anything"),
+            (fake_parallel_config(meshes=False), {}, "meshes"),
+            (fake_parallel_config(ulysses_degree=3), {}, "do not divide"),
+            (fake_parallel_config(), {"is_causal": True}, "causal"),
+            (fake_parallel_config(), {"return_lse": True}, "return_lse"),
+            (fake_parallel_config(), {"attn_mask": "mask"}, "attn_mask"),
+        ],
+    )
+    def test_what_a_cp_kernel_cannot_serve_reaches_the_original(
+        self, fake_diffusers, caplog, pc, kwargs, reason
+    ):
+        calls, cp_calls = [], []
+        wrapper = self._wrapper(fake_diffusers, calls, cp_calls)
+        with caplog.at_level("WARNING"):
+            result = wrapper(query=self.query, key="k", value="v", _parallel_config=pc, **kwargs)
+        assert result[0] == "original-flash"
+        assert calls == [] and cp_calls == []
+        assert any(reason in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize(
+        "key_shape,reason",
+        [((1, 512, 40, 128), "keys of length 512"), ((1, 18720, 5, 128), "5 key heads do not divide")],
+    )
+    def test_cross_attention_and_indivisible_key_heads_reach_the_original(
+        self, fake_diffusers, caplog, key_shape, reason
+    ):
+        """Turbo's head exchange sizes the keys from the queries and splits their heads too."""
+        calls, cp_calls = [], []
+        wrapper = self._wrapper(fake_diffusers, calls, cp_calls)
+        key = types.SimpleNamespace(shape=key_shape)
+        with caplog.at_level("WARNING"):
+            result = wrapper(query=self.query, key=key, value=key, _parallel_config=fake_parallel_config())
+        assert result[0] == "original-flash"
+        assert calls == [] and cp_calls == []
+        assert any(reason in r.getMessage() for r in caplog.records)
+
+    def test_a_self_attention_key_is_served(self, fake_diffusers):
+        calls, cp_calls = [], []
+        wrapper = self._wrapper(fake_diffusers, calls, cp_calls)
+        key = types.SimpleNamespace(shape=self.query.shape)
+        out = wrapper(query=self.query, key=key, value=key, _parallel_config=fake_parallel_config())
+        assert out == "cp-output" and len(cp_calls) == 1
+
+    def test_cp_and_plain_service_are_announced_separately(self, fake_diffusers, caplog):
+        wrapper = self._wrapper(fake_diffusers, [], [])
+        with caplog.at_level("INFO"):
+            wrapper(query=self.query, key="k", value="v")
+            wrapper(query=self.query, key="k", value="v", _parallel_config=fake_parallel_config())
+            wrapper(query=self.query, key="k", value="v", _parallel_config=fake_parallel_config())
+        messages = [r.getMessage() for r in caplog.records]
+        assert sum("first call served" in m for m in messages) == 1
+        assert sum("first context-parallel call served" in m for m in messages) == 1
+
+    def test_the_nondeterministic_cp_kernel_passes_both_groups(self, monkeypatch):
+        """Turbo reads a missing ring group as the world group, so the size-1 ring
+        group of a pure-ulysses config has to be passed explicitly."""
+        from primus.backends.automodel.attention import nondeterministic
+
+        seen = {}
+
+        def flash_attn_usp_func(q, k, v, **kwargs):
+            seen.update(kwargs)
+            return "usp-output"
+
+        ops = types.ModuleType("primus_turbo.pytorch.ops")
+        ops.flash_attn_usp_func = flash_attn_usp_func
+        monkeypatch.setitem(sys.modules, "primus_turbo.pytorch.ops", ops)
+
+        out = nondeterministic.flash_attn_bf16_nondet_cp(
+            "q", "k", "v", softmax_scale=0.1, causal=False, parallel_config=fake_parallel_config()
+        )
+        assert out == "usp-output"
+        assert seen == {
+            "softmax_scale": 0.1,
+            "causal": False,
+            "deterministic": False,
+            "ulysses_group": "ulysses-group",
+            "ring_group": "ring-group",
+        }
+
+    @pytest.mark.parametrize("with_usp", [True, False])
+    def test_the_nondeterministic_install_brings_the_cp_kernel_turbo_has(self, monkeypatch, caplog, with_usp):
+        """A Turbo without the sequence-parallel entry keeps the plain override."""
+        from primus.backends.automodel.attention import nondeterministic
+
+        ops = types.ModuleType("primus_turbo.pytorch.ops")
+        ops.flash_attn_func = lambda *args, **kwargs: None
+        if with_usp:
+            ops.flash_attn_usp_func = lambda *args, **kwargs: None
+        monkeypatch.setitem(sys.modules, "primus_turbo.pytorch.ops", ops)
+        seen = {}
+
+        def install_override(**kwargs):
+            kwargs["probe"]()
+            seen.update(kwargs)
+            return True
+
+        monkeypatch.setattr(nondeterministic._backend_registry, "install_override", install_override)
+        with caplog.at_level("WARNING"):
+            assert nondeterministic.install("flash") is True
+        assert seen["cp_kernel"] is (nondeterministic.flash_attn_bf16_nondet_cp if with_usp else None)
+        warned = any("no flash_attn_usp_func" in r.getMessage() for r in caplog.records)
+        assert warned is not with_usp
+
 
 class TestSettings:
     def test_fp8_attn_is_off_by_default(self, set_option):

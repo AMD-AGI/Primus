@@ -657,11 +657,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         train_valid_test_datasets_provider = create_sft_datasets_provider()
         forward_step = create_sft_forward_step()
 
-        # Keep model-provider behavior aligned with pretrain trainer.
-        if self.model_type != "gpt":
-            base_model_provider = get_model_provider(model_type=self.model_type)
-        else:
-            base_model_provider = get_model_provider()
+        base_model_provider = get_model_provider(model_type=self.model_type)
 
         hylo_stage = getattr(self.backend_args, "hylo_distill_stage", None)
         if hylo_stage:

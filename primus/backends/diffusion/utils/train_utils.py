@@ -60,7 +60,8 @@ def count_parameters(model):
 
 
 def get_memory(unit=1e9):
-    torch.cuda.synchronize()
+    if os.getenv("FLUX_LIGHT_LOG", "0") != "1":
+        torch.cuda.synchronize()
     allocated = torch.cuda.memory_allocated()
     reserved = torch.cuda.memory_reserved()
     max_alloc = torch.cuda.max_memory_allocated()

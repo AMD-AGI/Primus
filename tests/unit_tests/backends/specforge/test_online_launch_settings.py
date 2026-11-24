@@ -58,9 +58,9 @@ class TestOnlineLaunchSettings:
     def test_sglang_aux_layers_match_draft_json(self, specforge_checkout, tmp_path):
         params = _params(specforge_checkout, tmp_path)
         argv = sglang_server_argv(0, online_settings(params, env={}))
-        port_at = argv.index("--port")
-        layer_at = argv.index("--spec-capture-aux-layer-ids")
-        assert argv[layer_at + 1 : port_at] == ["1", "8", "15", "22", "29"]
+        layer_end = argv.index("--return-hidden-states-mode")
+        layer_at = argv.index("--return-aux-hidden-state-layer-ids")
+        assert argv[layer_at + 1 : layer_end] == ["1", "8", "15", "22", "29"]
         assert argv.count("--skip-tokenizer-init") == 1
         assert "--disable-radix-cache" in argv
 

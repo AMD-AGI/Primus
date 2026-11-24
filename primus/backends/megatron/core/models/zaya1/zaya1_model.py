@@ -22,10 +22,19 @@ from megatron.core.models.common.language_module.language_module import Language
 from megatron.core.transformer.enums import ModelType
 from torch import Tensor
 
-from primus.backends.megatron.core.models.zaya1.zaya1_modules import ZayaStack
+from primus.backends.megatron.core.fusions.chunked_linear_cross_entropy import (
+    chunked_ce_blocker,
+    chunked_linear_cross_entropy,
+    mup_logit_scale,
+)
+from primus.backends.megatron.core.models.zaya1.zaya1_modules import (
+    ZayaStack,
+    switch_summary,
+)
 from primus.backends.megatron.core.models.zaya1.zaya1_transformer_config import (
     Zaya1TransformerConfig,
 )
+from primus.core.utils.module_utils import log_rank_0
 
 __all__ = ["Zaya1Model"]
 
@@ -100,6 +109,27 @@ class Zaya1Model(LanguageModule):
         if self.pre_process or self.post_process:
             self.setup_embeddings_and_output_layer()
 
+        log_rank_0(f"ZAYA1: {switch_summary(self.config)}; loss: {self._loss_summary()}")
+
+    def _chunked_ce_blocker(self) -> Optional[str]:
+        """Why the loss isn't the chunked linear cross-entropy (``fused_ce_mode`` 3), or None when it is."""
+        tp = getattr(self.pg_collection, "tp", None) if self.pg_collection is not None else None
+        tp_size = tp.size() if tp is not None and hasattr(tp, "size") else 1
+        return chunked_ce_blocker(self.config, tp_size, self.config.fused_ce_mode)
+
+    def _use_chunked_ce(self) -> bool:
+        return self._chunked_ce_blocker() is None
+
+    def _loss_summary(self) -> str:
+        blocker = self._chunked_ce_blocker()
+        if blocker is not None:
+            return f"Megatron's cross-entropy, as {blocker}"
+        mode = "compiled" if self.config.fused_ce_compile else "eager"
+        return (
+            f"chunked linear cross-entropy (fused_ce_mode 3, "
+            f"{self.config.fused_ce_chunk_tokens} tokens per chunk, {mode})"
+        )
+
     def set_input_tensor(self, input_tensor: Tensor) -> None:
         """Pipeline hook. This port only runs with pipeline size 1."""
         if not isinstance(input_tensor, list):
@@ -155,6 +185,19 @@ class Zaya1Model(LanguageModule):
         output_weight = None
         if self.share_embeddings_and_output_weights:
             output_weight = self.shared_embedding_or_output_weight()
+
+        if labels is not None and self._use_chunked_ce():
+            # Output projection + CE in token chunks: the full [s*b, vocab]
+            # logits (bf16) and their fp32 upcast / softmax are never resident.
+            weight = output_weight if output_weight is not None else self.output_layer.weight
+            return chunked_linear_cross_entropy(
+                hidden_states,
+                weight,
+                labels,
+                chunk_tokens=self.config.fused_ce_chunk_tokens,
+                logit_scale=mup_logit_scale(self.config),
+                compiled=self.config.fused_ce_compile,
+            )
 
         logits, _ = self.output_layer(
             hidden_states,

@@ -33,6 +33,9 @@ modules:
         gradient_accumulation_steps: 1
         output_dir: ${OUTPUT_DIR:./output/benchmark-mochi-1-posttrain}
         save_steps: 0
+        # A benchmark reads only the step times: no final model (19-31 GB of DiT weights per run).
+        # SAVE_STRATEGY=dit_only keeps it.
+        save_strategy: ${SAVE_STRATEGY:none}
         run_name: benchmark-mochi-1-posttrain
 
       data:

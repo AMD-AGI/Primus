@@ -7,8 +7,8 @@
 #
 # Llama-3.1-8B pretraining on one MI455X node.
 #
-#   TURBO_DIR=/path/to/Primus-Turbo bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh  # on the host
-#   PRIMUS_LAUNCHER=direct TURBO_DIR=... bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh  # in a container
+#   bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh                         # on the host
+#   PRIMUS_LAUNCHER=direct bash examples/megatron/models/llama3.1-8b/run_llama3.1_8b_mi455x.sh  # in a container
 #
 # Settings are the environment variables below. Extra arguments are appended
 # to the Primus command line.
@@ -27,7 +27,7 @@ cd "$(dirname "${SCRIPT}")/../../../.."
 
 # container: re-run this script in a new container of DOCKER_IMAGE; direct: run in this container
 export PRIMUS_LAUNCHER=${PRIMUS_LAUNCHER:-container}
-export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261019}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-amdprimus/amdprimus:tas-20261109}
 export EXP=${EXP:-examples/megatron/configs/MI455X/llama3.1_8B-BF16-pretrain.yaml}
 # Primus-Turbo checkout built in place for DOCKER_IMAGE (see README.md); empty: the image's primus_turbo
 export TURBO_DIR=${TURBO_DIR:-}

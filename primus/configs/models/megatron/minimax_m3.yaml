@@ -80,9 +80,9 @@ sparse_indexer_loss_coeff: 1.0e-2
 # the full score matrix, so eager only.
 sparse_indexer_loss_type: sparse
 
-# Attention core: flydsl runs the gfx950 (MI355X) kernels in
+# Attention core: flydsl runs the gfx950 (MI355X) and gfx1250 (MI455X) kernels in
 # core/transformer/minimax_m3/flydsl for the attention and the indexer's block
-# scoring, neither of which forms a score matrix -- on the 8-layer proxy,
+# scoring, neither of which forms a score matrix -- on the MI355X 8-layer proxy,
 # 1.75x faster per step and 51 GB less memory than eager, same loss curve. It needs head_dim 128, 16 query heads per KV head, and no
 # dataloader attention mask. eager is the plain-PyTorch reference, for other
 # GPUs and for checking numerics. Neither supports tensor parallelism yet.

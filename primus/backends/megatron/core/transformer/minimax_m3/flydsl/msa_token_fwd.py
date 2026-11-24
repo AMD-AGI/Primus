@@ -784,6 +784,15 @@ def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, retu
         ``o`` ``[S, B, Hq, 128]`` bf16 and ``lse`` ``[S, B, Hq]`` fp32 (and
         ``slot_lse``).
     """
+    # gfx1250 is wave32 with WMMA instead of MFMA and has no permlane32.
+    if "gfx1250" in get_hip_arch():
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
+            msa_token_fwd_wave32,
+        )
+
+        return msa_token_fwd_wave32(
+            q, k, v, block_table, softmax_scale, block_size, return_slot_lse, **config
+        )
     S, B, Hq, Dq = q.shape
     Hkv = k.shape[2]
     topk = block_table.shape[-1]

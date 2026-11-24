@@ -33,6 +33,7 @@ class BaseDiffusionConfig(TransformerConfig):
         fp8_force_nt_layout: FP8 backward GEMM layout (default: False)
         fp8_reduce_amax: Whether to allreduce amax across ranks (default: False)
         mxfp4_backward_precision: MXFP4 backward precision, 'mxfp4' or 'fp8' (default: 'mxfp4')
+        mxfp4_forward_precision: MXFP4 forward precision, 'mxfp4' or 'bf16' (default: 'mxfp4')
         mxfp4_gradient_stochastic_rounding: Stochastic rounding on gradients (default: False)
         sensitive_layers_enabled: Enable sensitive layer configuration (default: False)
         sensitive_layers_start: Number of sensitive layers at start (default: 0)
@@ -73,6 +74,10 @@ class BaseDiffusionConfig(TransformerConfig):
 
     # MXFP4 backward precision: "mxfp4" (pure) or "fp8" (hybrid)
     mxfp4_backward_precision: str = "mxfp4"
+
+    # MXFP4 forward precision: "mxfp4" (pure) or "bf16" (bf16 forward GEMM,
+    # MXFP4 backward). Read by the MXFP4 local linears.
+    mxfp4_forward_precision: str = "mxfp4"
 
     # Stochastic rounding on MXFP4 gradients (paper Section 4.4)
     mxfp4_gradient_stochastic_rounding: bool = False

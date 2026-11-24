@@ -19,6 +19,7 @@ Pure CPU; no GPU, no yq, no Primus import required.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1492,6 +1493,44 @@ def test_train_steps_that_megatrons_schedule_rejects(tmp_path, framework, overri
         assert why.startswith(f"TRAIN_STEPS={train_steps} is not more than lr_warmup_iters={warmup},")
 
 
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "env,mbs,gbs",
+    [
+        pytest.param("", "1", "64", id="defaults"),
+        pytest.param("PRIMUS_MBS=2", "2", "64", id="forwarded-PRIMUS-value"),
+    ],
+)
+def test_placeholder_batch_sizes_resolve_and_make_a_valid_log_name(tmp_path, env, mbs, gbs):
+    """inkling_large_6L (MI355X) writes `${PRIMUS_MBS:1}` / `${PRIMUS_GBS:64}`: the run uses the resolved values,
+    and the log name must not carry the placeholder, whose ':' some NFS servers refuse (EINVAL), leaving the
+    run with no log at all (killed by SIGPIPE in 1 s)."""
+    config = tmp_path / "inkling-pretrain.yaml"
+    config.write_text(
+        "modules:\n  pre_trainer:\n    framework: megatron\n    config: pre_trainer.yaml\n    overrides:\n"
+        "      micro_batch_size: ${PRIMUS_MBS:1}\n      global_batch_size: ${PRIMUS_GBS:64}\n"
+        "      train_iters: ${PRIMUS_TRAIN_ITERS:50}\n"
+    )
+    script = (
+        f"set -uo pipefail\n{env}\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\nTRAIN_STEPS=20\nRESULT_DIR=/r\nBATCH_TS=t\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        f"source {MODULE_PATH.parent}/lib/run.sh\n"
+        f'prepare_config {config}; echo "$MBS|$GBS|$YAML_STEPS"; run_log_name 1\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    values, name = out.stdout.strip().splitlines()[-2:]
+    assert values == f"{mbs}|{gbs}|50"
+    assert name.startswith("/r/megatron-inkling-pretrain-") and f"-MBS{mbs}-GBS{gbs}-rep1_t.log" in name
+    assert not set("${}:") & set(name)
+
+
+def test_sanitize_keeps_only_filename_safe_characters():
+    script = f'source {MODULE_PATH.parent}/lib/run.sh; sanitize "a b/c:d\\${{X:1}}*e.f_g-h+i"'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.stdout.strip() == "a_b_c_d__X_1__e.f_g-h+i"  # bash takes the backslash: d${X:1}*e
+
+
 def _volume_yaml(volume):
     return f'\n      - "{volume}"' if volume else " []"
 
@@ -2277,3 +2316,430 @@ def test_diffusion_dlrm_rows_reach_the_outputs(tmp_path, monkeypatch):
     dlrm = next(r for r in rows if r["backend"] == "dlrm")
     assert dlrm["rec_per_s"] == "552606.4500"
     assert dlrm["rec_per_s_cv"] == "0.01"
+
+
+# --------------------------------------------------------------------------
+# diffusion configs run through primus-cli
+# --------------------------------------------------------------------------
+
+DIFFUSION_CONFIG = """\
+modules:
+  post_trainer:
+    framework: diffusion
+    config: post_trainer.yaml
+    model: benchmark_flux_dev.yaml
+    overrides:
+      training:
+        local_batch_size: ${LOCAL_BATCH_SIZE:16}
+        steps: ${MAX_STEPS:100}
+        gradient_accumulation_steps: 1
+      parallelism:
+        sp_size: %s
+"""
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "mode,env,extra_env,sp,expected",
+    [
+        pytest.param("container", "", "", 1, "16|128|100|N/A", id="defaults"),
+        pytest.param("container", "", "", 2, "16|64|100|N/A", id="sequence-parallel"),
+        pytest.param("container", "", "LOCAL_BATCH_SIZE=8 MAX_STEPS=50", 1, "8|64|50|N/A", id="extra-env"),
+        # A plain export does not reach primus-cli's container.
+        pytest.param(
+            "container", "export LOCAL_BATCH_SIZE=8", "", 1, "16|128|100|N/A", id="export-container"
+        ),
+        pytest.param("direct", "export LOCAL_BATCH_SIZE=8", "", 1, "8|64|100|N/A", id="export-direct"),
+    ],
+)
+def test_diffusion_config_fields_are_the_values_the_run_uses(tmp_path, mode, env, extra_env, sp, expected):
+    config = tmp_path / "benchmark_flux_dev-posttrain.yaml"
+    config.write_text(DIFFUSION_CONFIG % sp)
+    script = (
+        f"set -uo pipefail\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE={mode}\nNNODES=1\nGPUS_PER_NODE=8\n"
+        f"TRAIN_STEPS=20\nEXTRA_ENV='{extra_env}'\n{env}\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/run.sh\n"
+        f"source {MODULE_PATH.parent}/lib/control.sh\nperf_parse_extra_env || exit 9\n"
+        f'prepare_config {config}; echo "$MBS|$GBS|$YAML_STEPS|$SEQ_LEN|$FRAMEWORK|$TRAIN_SUITE|$STEPS"\n'
+        f'LAUNCH_ARGV=(); append_train_steps_override {config} "$FRAMEWORK"; echo "argv=${{LAUNCH_ARGV[*]}}"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    fields, argv = out.stdout.strip().splitlines()
+    mbs, gbs, steps, seq, framework, suite, shown = fields.split("|")
+    assert "|".join((mbs, gbs, steps, seq)) == expected
+    assert (framework, suite) == ("diffusion", "posttrain")
+    # TRAIN_STEPS does not apply to the diffusion benchmarks.
+    assert shown == f"{steps} (TRAIN_STEPS=20 not applied to diffusion)"
+    assert argv == "argv="
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "mode,data_path,cache,primus_hf_home,extra_env,expected",
+    [
+        pytest.param(
+            "container",
+            "",
+            "",
+            "",
+            "",
+            (0, "--env PRIMUS_HF_HOME={checkout}/data/huggingface_diffusion"),
+            id="default",
+        ),
+        pytest.param(
+            "container",
+            "/scratch/data",
+            "",
+            "",
+            "",
+            (0, "--env PRIMUS_HF_HOME=/scratch/data/huggingface_diffusion"),
+            id="under-data-path",
+        ),
+        pytest.param(
+            "container",
+            "",
+            "/mnt/hf/",
+            "",
+            "",
+            (0, "--volume /mnt/hf:/mnt/hf --env PRIMUS_HF_HOME=/mnt/hf"),
+            id="own",
+        ),
+        pytest.param(
+            "container",
+            "",
+            "",
+            "/mnt/phf",
+            "",
+            (0, "--volume /mnt/phf:/mnt/phf --env PRIMUS_HF_HOME=/mnt/phf"),
+            id="primus-hf-home",
+        ),
+        pytest.param(
+            "container",
+            "",
+            "",
+            "",
+            "PRIMUS_HF_HOME=/b",
+            (0, "--volume /b:/b --env PRIMUS_HF_HOME=/b"),
+            id="extra-env",
+        ),
+        pytest.param("container", "", "/a", "", "PRIMUS_HF_HOME=/b", (1, ""), id="both-differ"),
+        pytest.param(
+            "container", "", "/runner-vol/hf", "", "", (0, "--env PRIMUS_HF_HOME=/runner-vol/hf"), id="volume"
+        ),
+        pytest.param("direct", "", "/mnt/hf", "", "", (0, "--env PRIMUS_HF_HOME=/mnt/hf"), id="direct-mode"),
+        pytest.param("container", "", "hf", "", "", (1, ""), id="relative"),
+        pytest.param("container", "", "/mnt/a:b", "", "", (1, ""), id="colon"),
+    ],
+)
+def test_diffusion_model_cache_reaches_the_container(
+    tmp_path, mode, data_path, cache, primus_hf_home, extra_env, expected
+):
+    checkout = tmp_path / "checkout"
+    (checkout / "runner").mkdir(parents=True)
+    (checkout / "runner" / "lib").symlink_to(REPO_ROOT / "runner" / "lib")
+    (checkout / "runner" / ".primus.yaml").write_text(
+        'container:\n  options:\n    volume:\n      - "/runner-vol"\n'
+    )
+    config = tmp_path / "exp.yaml"
+    config.write_text(DIFFUSION_CONFIG % 1)
+    other = tmp_path / "other.yaml"
+    other.write_text("modules:\n  pre_trainer:\n    framework: megatron\n")
+    guards = "export __PRIMUS_COMMON_SOURCED=1 __PRIMUS_CONFIG_SOURCED=1\n"
+    hf_home = f"export PRIMUS_HF_HOME={primus_hf_home}\n" if primus_hf_home else "unset PRIMUS_HF_HOME\n"
+    script = (
+        f"set -uo pipefail\n{guards}HOME={tmp_path}\nPRIMUS_PATH={checkout}\nPRIMUS_MODE={mode}\n"
+        f"DATA_PATH='{data_path}'\nDIFFUSION_HF_CACHE='{cache}'\nEXTRA_ENV='{extra_env}'\n{hf_home}"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        "perf_parse_extra_env || exit 9\nperf_prepare_data_path || exit 8\n"
+        f"CONFIG_FILES=({other})\n"
+        'perf_prepare_diffusion_cache; echo "none:$?|${PERF_DIFFUSION_ARGS[*]}"\n'
+        f"CONFIG_FILES=({other} {config})\n"
+        'perf_prepare_diffusion_cache 2>/dev/null; echo "$?|${PERF_DIFFUSION_ARGS[*]}"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    without, with_diffusion = out.stdout.strip().splitlines()
+    # A batch without a diffusion config gets nothing.
+    assert without == "none:0|"
+    code, args = with_diffusion.split("|", 1)
+    assert (int(code), args) == (expected[0], expected[1].format(checkout=checkout))
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+def test_diffusion_model_cache_is_created_before_the_first_run(tmp_path):
+    target = tmp_path / "new" / "hf"
+    config = tmp_path / "exp.yaml"
+    config.write_text(DIFFUSION_CONFIG % 1)
+    script = (
+        f"set -uo pipefail\nHOME={tmp_path}\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=direct\n"
+        f"DIFFUSION_HF_CACHE={target}\nsource {MODULE_PATH.parent}/lib/common.sh\n"
+        f"source {MODULE_PATH.parent}/lib/control.sh\nCONFIG_FILES=({config})\n"
+        'perf_prepare_diffusion_cache && perf_ensure_diffusion_cache >/dev/null; echo "rc=$? $PERF_DIFFUSION_CACHE_CHECK"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    assert target.is_dir()
+    line = out.stdout.strip()
+    assert line.startswith(f"rc=0 {target} (") and line.endswith("; no container)")
+
+
+def diffusion_step(step: int, fps: float, tflops: float, peak: float = 90.89, rank: int = 0) -> str:
+    """A diffusion benchmark step line as Primus logs it (coloured)."""
+    return (
+        f"[\x1b[32m20261113 04:02:50\x1b[0m][\x1b[36mrank-{rank}/8\x1b[0m][\x1b[1m[INFO]     \x1b[0m"
+        f"\x1b[1mstep={step} step_loss=0.135316 train_loss=0.114623 mem=1.96/105.24GB peak_mem={peak}GB "
+        f"grad_norm=0.0000 step_time_total=0.515924s step_time_gpu=0.514851s fps_gpu={fps} "
+        f"tflops/s={tflops} elapsed=2.79m eta=1.70m\x1b[0m\n"
+    )
+
+
+def diffusion_log(tmp_path, body: str, config_body: str = "") -> Path:
+    return write_log(
+        tmp_path,
+        body,
+        framework="diffusion",
+        config_name="examples/diffusion/configs/MI355X/benchmark_sdxl-posttrain",
+        config_body=config_body or DIFFUSION_CONFIG % 1,
+        name="diffusion-benchmark_sdxl-posttrain-32fba895-MBS12-GBS96-rep1_20261113-035553.log",
+    )
+
+
+def test_diffusion_skips_five_warmup_steps_and_uses_the_harmonic_mean(tmp_path):
+    # Steps 1-5 are warmup (step 1 includes MIOpen's solver search).
+    body = diffusion_step(1, 0.0727, 1.3003, peak=89.61)
+    body += "".join(diffusion_step(s, 5.0, 100.0) for s in range(2, 6))
+    body += diffusion_step(6, 20.0, 400.0) + diffusion_step(7, 30.0, 600.0, peak=92.89)
+    result = extract.parse_log_file(str(diffusion_log(tmp_path, body)))
+    assert result["backend"] == "diffusion"
+    assert (result["model_name"], result["precision"]) == ("benchmark_sdxl", None)
+    assert result["status"] == "ok"
+    assert (result["num_iterations"], result["warmup_steps"], result["num_post_warmup"]) == (7, 5, 2)
+    assert result["hmean_samples_per_gpu"] == pytest.approx(24.0)
+    assert result["hmean_tflops"] == pytest.approx(480.0)
+    assert result["amean_memory_usage"] == pytest.approx(91.89)
+    assert result["hmean_tps_per_gpu"] is None and result["hmean_frames_per_gpu"] is None
+
+
+def test_diffusion_learning_rate_warmup_is_not_the_perf_warmup(tmp_path):
+    config = DIFFUSION_CONFIG % 1 + "      lr_scheduler:\n        warmup_steps: ${WARMUP_STEPS:100}\n"
+    body = "".join(diffusion_step(s, 10.0, 200.0) for s in range(1, 21))
+    result = extract.parse_log_file(str(diffusion_log(tmp_path, body, config)))
+    assert (result["warmup_steps"], result["num_post_warmup"]) == (5, 15)
+
+
+def test_diffusion_keeps_a_single_rank_and_reads_the_other_trainers_line(tmp_path):
+    other = "[20261113 04:02:50][rank-0/8][INFO] step={} loss=0.1 mem=1.0/2.0GB peak_mem=3.50GB gnorm=0.1 step_time=1.00s throughput=2.5000samples/gpu/s elapsed=1.00m\n"
+    body = "".join(other.format(s) for s in range(1, 9))
+    body += "".join(diffusion_step(s, 99.0, 999.0, rank=3) for s in range(1, 9))
+    result = extract.parse_log_file(str(diffusion_log(tmp_path, body)))
+    assert (result["num_iterations"], result["num_post_warmup"]) == (8, 3)
+    assert result["hmean_samples_per_gpu"] == pytest.approx(2.5)
+    assert result["hmean_tflops"] is None
+    assert result["amean_memory_usage"] == pytest.approx(3.5)
+
+
+def test_diffusion_run_that_failed_in_setup_has_its_cause(tmp_path):
+    body = (
+        "[ERROR] diffusion prepare: GatedRepoError: 401 Client Error. (Request ID: Root=1-6af6)\n"
+        "[2026-11-13 03:56:00] [NODE-0(node)] [ERROR] [direct] Hooks execution failed\n"
+    )
+    log = write_log(
+        tmp_path,
+        body,
+        framework="diffusion",
+        config_name="examples/diffusion/configs/MI355X/benchmark_flux_dev-posttrain",
+        config_body=DIFFUSION_CONFIG % 1,
+        exit_code=1,
+        failure_reason="exit: launcher exited with code 1",
+    )
+    result = extract.parse_log_file(str(log))
+    assert (result["status"], result["failed_at"]) == ("failed", "setup")
+    assert result["failure_reason"] == "python_error"
+    assert result["failure_detail"].startswith("GatedRepoError: 401 Client Error.")
+
+
+# --------------------------------------------------------------------------
+# recommendation (DLRMv4) configs run through primus-cli
+# --------------------------------------------------------------------------
+
+RECOMMENDATION_CONFIG = """\
+modules:
+  pre_trainer:
+    framework: recommendation
+    config: pre_trainer.yaml
+    model: dlrm_v4_hstu_yambda_5b.yaml
+    overrides:
+      synthetic_data: ${DLRM_SYNTHETIC_DATA:true}
+      batch_size: ${BATCH_SIZE:1024}
+      num_train_ts: 1
+      num_train_batches: ${NUM_TRAIN_BATCHES:200}
+"""
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "extra_env,expected",
+    [
+        pytest.param("", "1024|8192|200|N/A", id="defaults"),
+        pytest.param("BATCH_SIZE=512 NUM_TRAIN_BATCHES=50", "512|4096|50|N/A", id="extra-env"),
+    ],
+)
+def test_recommendation_config_fields_are_the_values_the_run_uses(tmp_path, extra_env, expected):
+    config = tmp_path / "dlrm_v4-FP8-pretrain.yaml"
+    config.write_text(RECOMMENDATION_CONFIG)
+    script = (
+        f"set -uo pipefail\nPRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\nNNODES=1\nGPUS_PER_NODE=8\n"
+        f"TRAIN_STEPS=20\nEXTRA_ENV='{extra_env}'\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/run.sh\n"
+        f"source {MODULE_PATH.parent}/lib/control.sh\nperf_parse_extra_env || exit 9\n"
+        f'prepare_config {config}; echo "$MBS|$GBS|$YAML_STEPS|$SEQ_LEN|$FRAMEWORK|$TRAIN_SUITE|$STEPS"\n'
+        f'LAUNCH_ARGV=(); append_train_steps_override {config} "$FRAMEWORK"; echo "argv=${{LAUNCH_ARGV[*]}}"\n'
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    fields, argv = out.stdout.strip().splitlines()
+    mbs, gbs, steps, seq, framework, suite, shown = fields.split("|")
+    assert "|".join((mbs, gbs, steps, seq)) == expected
+    assert (framework, suite) == ("recommendation", "pretrain")
+    # TRAIN_STEPS does not apply: the run length is part of the benchmark.
+    assert shown == f"{steps} (TRAIN_STEPS=20 not applied to recommendation)"
+    assert argv == "argv="
+
+
+def recommendation_perf(step: int, sps: float, real: float, algo: float) -> str:
+    """A DLRMv4 perf line, as each of the eight ranks prints it."""
+    return (
+        f"INFO:utils:train - Step {step} perf: local_sps={sps} global_sps={sps * 8:.1f} step_ms=117.79 "
+        f"elapsed_sec=370.1 total_samples=204800 wall_step_ms=117.79 eval_ms=0.0 ckpt_ms=0.0 "
+        f"tflops_algo/gpu={algo} mfu=109.8% tflops_real/gpu={real} hfu=42.3% fill=53.8% exec=38.6%\n"
+    )
+
+
+def recommendation_log(tmp_path, body: str, **kw) -> Path:
+    return write_log(
+        tmp_path,
+        body,
+        framework="recommendation",
+        config_name="examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain",
+        config_body=RECOMMENDATION_CONFIG,
+        name="recommendation-dlrm_v4-FP8-pretrain-1a2b3c4d-MBS1024-GBS8192-rep1_20261118-131634.log",
+        **kw,
+    )
+
+
+def test_recommendation_averages_the_ranks_and_skips_the_warmup(tmp_path):
+    # Step 10 holds the kernel builds and the FP8 calibration; the first three
+    # logged steps are always left out.
+    body = recommendation_perf(10, 29.5, 3.6, 9.3) * 8
+    body += recommendation_perf(20, 8000.0, 900.0, 2500.0) * 8
+    body += recommendation_perf(30, 8000.0, 900.0, 2500.0) * 8
+    for step, sps in ((40, 8000.0), (50, 12000.0)):
+        # every rank prints its own line, without a rank tag
+        body += recommendation_perf(step, sps - 10, 1000.0, 2700.0) * 4
+        body += recommendation_perf(step, sps + 10, 1000.0, 2700.0) * 4
+    body += "INFO:utils:train - Step 50 train_loss=0.12345\n"
+    result = extract.parse_log_file(str(recommendation_log(tmp_path, body)))
+    assert result["backend"] == "recommendation"
+    assert (result["model_name"], result["precision"]) == ("dlrm_v4", "FP8")
+    assert result["status"] == "ok"
+    assert (result["num_iterations"], result["warmup_steps"], result["num_post_warmup"]) == (5, 30, 2)
+    assert result["hmean_samples_per_gpu"] == pytest.approx(9600.0)
+    assert result["hmean_tflops"] == pytest.approx(1000.0)
+    assert result["hmean_nominal_tflops"] == pytest.approx(2700.0)
+    assert "tflops_real" in result["throughput_note"]
+    assert result["hmean_tps_per_gpu"] is None
+
+
+def test_recommendation_run_without_perf_lines_has_no_metrics(tmp_path):
+    body = "INFO:utils:train - Step 10 train_loss=0.5\n"
+    result = extract.parse_log_file(str(recommendation_log(tmp_path, body)))
+    assert (result["status"], result["failure_reason"]) == ("failed", "no_metrics")
+    assert result["throughput_note"] in (None, "")
+
+
+def test_recommendation_warmup_is_twenty_steps_when_logged_every_step(tmp_path):
+    body = "".join(recommendation_perf(s, 8000.0, 1000.0, 2700.0) * 8 for s in range(1, 31))
+    result = extract.parse_log_file(str(recommendation_log(tmp_path, body)))
+    assert (result["warmup_steps"], result["num_post_warmup"]) == (20, 10)
+
+
+# --------------------------------------------------------------------------
+# DLRMv4 (recommendation) is a single-node benchmark: run_batch_multinode.sh refuses it
+# --------------------------------------------------------------------------
+
+MEGATRON_CONFIG = "modules:\n  pre_trainer:\n    framework: megatron\n"
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "configs,framework,expected",
+    [
+        pytest.param(("recommendation", "megatron"), "recommendation", 0, id="in-a-mixed-batch"),
+        pytest.param(("megatron",), "recommendation", 1, id="absent"),
+        pytest.param(("recommendation",), "diffusion", 1, id="another-framework"),
+        pytest.param((), "recommendation", 1, id="no-configs"),
+    ],
+)
+def test_perf_batch_has_framework(tmp_path, configs, framework, expected):
+    bodies = {"recommendation": RECOMMENDATION_CONFIG, "megatron": MEGATRON_CONFIG}
+    files = []
+    for i, name in enumerate(configs):
+        files.append(tmp_path / f"{i}-{name}.yaml")
+        files[-1].write_text(bodies[name])
+    listed = " ".join(f"'{f}'" for f in files)
+    script = (
+        f"PRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\nNNODES=1\nCONFIG_FILES=({listed})\n"
+        f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+        f"perf_batch_has_framework {framework}; echo $?\n"
+    )
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().splitlines()[-1] == str(expected)
+
+
+def test_perf_batch_has_diffusion_is_still_the_diffusion_check(tmp_path):
+    if not _mikefarah_yq():
+        pytest.skip("needs mikefarah yq v4")
+    results = {}
+    for name, body in (("diffusion", DIFFUSION_CONFIG % 1), ("recommendation", RECOMMENDATION_CONFIG)):
+        config = tmp_path / f"{name}.yaml"
+        config.write_text(body)
+        script = (
+            f"PRIMUS_PATH={REPO_ROOT}\nPRIMUS_MODE=container\nNNODES=1\nCONFIG_FILES=('{config}')\n"
+            f"source {MODULE_PATH.parent}/lib/common.sh\nsource {MODULE_PATH.parent}/lib/control.sh\n"
+            "perf_batch_has_diffusion; echo $?\n"
+        )
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        assert out.returncode == 0, out.stderr
+        results[name] = out.stdout.strip().splitlines()[-1]
+    assert results == {"diffusion": "0", "recommendation": "1"}
+
+
+@pytest.mark.skipif(not _mikefarah_yq(), reason="needs mikefarah yq v4")
+@pytest.mark.parametrize(
+    "backend,exit_code",
+    [
+        pytest.param("recommendation", 2, id="refused"),
+        # The same dry run for a backend that does run multi-node, so the refusal is specific.
+        pytest.param("megatron", 0, id="megatron-is-planned"),
+    ],
+)
+def test_multinode_runner_refuses_the_recommendation_configs(tmp_path, backend, exit_code):
+    env = {**os.environ, "DRY_RUN": "1", "NNODES": "2", "GPU": "MI355X", "BACKEND": backend}
+    env["RESULT_DIR"] = str(tmp_path / "results")
+    for name in ("CONFIG_FILE", "CONFIG_DIR", "TRAIN_STEPS", "EXTRA_ENV"):
+        env.pop(name, None)
+    out = subprocess.run(
+        ["bash", str(MODULE_PATH.parent / "run_batch_multinode.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert out.returncode == exit_code, out.stderr
+    if exit_code:
+        assert "recommendation (DLRMv4) configs are single-node benchmarks" in out.stderr
+    else:
+        assert "DRY RUN" in out.stdout

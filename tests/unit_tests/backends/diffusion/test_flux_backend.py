@@ -221,14 +221,17 @@ def test_fsdp2_compile_transformer_blocks_in_place(monkeypatch):
     original_blocks = [*root.double_blocks, *root.single_blocks]
     compiled_inputs = []
 
-    def fake_compile(module, *, fullgraph, mode):
+    def fake_compile(module, *, backend, fullgraph, dynamic, mode):
+        assert backend == "inductor"
         assert fullgraph is True
+        assert dynamic is False
         compiled_inputs.append((module, mode))
 
     monkeypatch.setattr(torch.nn.Module, "compile", fake_compile)
     monkeypatch.setenv("TORCH_COMPILE_MODE", "reduce-overhead")
     trainer = FSDP2Trainer.__new__(FSDP2Trainer)
     trainer.rank = 1
+    trainer.args = {}
 
     trainer._compile_transformer_blocks(root)
 

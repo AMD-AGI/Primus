@@ -18,9 +18,16 @@ import torch
 pytest.importorskip("megatron")
 pytest.importorskip("flydsl")
 
+
+def _gcn_arch() -> str:
+    if not torch.cuda.is_available():
+        return ""
+    return torch.cuda.get_device_properties(0).gcnArchName
+
+
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available() or "gfx950" not in torch.cuda.get_device_properties(0).gcnArchName,
-    reason="the flydsl MSA kernels target gfx950",
+    "gfx950" not in _gcn_arch() and "gfx1250" not in _gcn_arch(),
+    reason="flydsl MSA kernels target gfx950, plus the wave32 WMMA path on gfx1250",
 )
 
 BLOCK = 128

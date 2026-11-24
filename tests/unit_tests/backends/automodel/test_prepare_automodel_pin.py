@@ -185,13 +185,14 @@ def test_requirements_on_the_held_rocm_packages_are_not_counted(monkeypatch):
 
     monkeypatch.setattr(md, "requires", lambda name: ["torch>=99", "flash_attn>=99", "transformers==5.15.1"])
     monkeypatch.setattr(md, "version", lambda name: "1.0")
-    monkeypatch.setattr(prepare, "_COMPAT_CAPS", [])
+    monkeypatch.setattr(prepare, "_COMPAT_BOUNDS", [])
     assert prepare._unsatisfied_requirements() == ["transformers==5.15.1 (installed 1.0)"]
 
 
-class TestCompatCaps:
-    """diffusers 0.41.0 cannot import next to the images' torchao, and AutoModel
-    asks only for diffusers>=0.39, so the hook has to cap it itself."""
+class TestCompatBounds:
+    """AutoModel asks only for diffusers>=0.39, but its FLUX 3 and Qwen-Image-2.1
+    recipes need 0.42 (0.42.1 is its security release), so the hook has to raise
+    the floor itself."""
 
     @pytest.fixture
     def installed(self, monkeypatch):
@@ -208,25 +209,39 @@ class TestCompatCaps:
         monkeypatch.setattr(md, "version", version)
         return versions
 
-    def test_the_constraints_file_carries_the_cap(self, installed):
+    def test_the_constraints_file_carries_the_bound(self, installed):
         path = prepare.write_rocm_constraints()
         try:
             lines = Path(path).read_text(encoding="utf-8").split()
         finally:
             Path(path).unlink()
         assert "torch==2.9.1" in lines
-        assert "diffusers<0.41" in lines
+        assert "diffusers>=0.42.1" in lines
 
-    def test_an_install_above_the_cap_is_stale(self, installed):
-        """A copy installed before the cap existed passes AutoModel's own
-        requirements, so without this the broken diffusers would be kept."""
-        installed["diffusers"] = "0.41.0"
-        assert prepare._unsatisfied_requirements() == ["diffusers<0.41 (installed 0.41.0)"]
+    def test_an_install_below_the_floor_is_stale(self, installed):
+        """The images' diffusers passes AutoModel's own requirements, so without
+        this it would be kept and the newer recipes would fail at import."""
+        installed["diffusers"] = "0.40.0"
+        assert prepare._unsatisfied_requirements() == ["diffusers>=0.42.1 (installed 0.40.0)"]
 
-    @pytest.mark.parametrize("diffusers", ["0.39.0", "0.40.0"])
-    def test_an_install_under_the_cap_is_kept(self, installed, diffusers):
+    @pytest.mark.parametrize("diffusers", ["0.42.1", "0.43.0"])
+    def test_an_install_at_or_above_the_floor_is_kept(self, installed, diffusers):
         installed["diffusers"] = diffusers
         assert prepare._unsatisfied_requirements() == []
+
+    @pytest.mark.parametrize("extras, stale", [("diffusion,diffusion-media", True), ("vlm", False)])
+    def test_the_floor_counts_only_when_the_extras_require_it(self, installed, monkeypatch, extras, stale):
+        """The install leaves a package no selected extra requires alone, so
+        counting it would reinstall on every launch."""
+        import importlib.metadata as md
+
+        monkeypatch.setattr(
+            md, "requires", lambda name: ["transformers==5.15.1", 'diffusers>=0.39.0; extra == "diffusion"']
+        )
+        monkeypatch.setenv("AUTOMODEL_EXTRAS", extras)
+        installed["diffusers"] = "0.40.0"
+        expected = ["diffusers>=0.42.1 (installed 0.40.0)"] if stale else []
+        assert prepare._unsatisfied_requirements() == expected
 
 
 class TestCudaOnlyPackages:

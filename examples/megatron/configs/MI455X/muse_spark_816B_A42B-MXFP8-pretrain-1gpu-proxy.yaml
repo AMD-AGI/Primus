@@ -1,0 +1,43 @@
+# Muse-Spark-Open-816B-A42B MXFP8 pretraining proxy on ONE MI455X (gfx1250): the precision
+# sibling of muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml (same shape and MI455X
+# settings; see its header), with MXFP8 (E4M3 data, one E8M0 scale per 32 elements) on the
+# linear GEMMs:
+#   - the dense linears through Transformer Engine;
+#   - the expert grouped GEMMs through Primus-Turbo's MX-blockwise FP8 grouped GEMM. FlyDSL's
+#     FP8 grouped GEMMs are gfx950-only, so these take Turbo's default backend on gfx1250.
+# Master weights, attention, norms and the LM head stay BF16.
+#
+# BLOCKED on gfx1250 for now: Transformer Engine refuses MXFP8 there at startup ("Device arch
+# gfx95x or newer is required for MXFP8 execution"; its check admits gfx950 only, "TODO: enable
+# for gfx1250 when GEMM is available"), and Primus-Turbo runs the same check before its own MXFP8
+# path. Kept so the run can be retried as soon as TE / Turbo enable MXFP8 on gfx1250.
+#
+# Run (one GPU, e.g. ROCR_VISIBLE_DEVICES=3 in the container):
+#   GPUS_PER_NODE=1 bash ./runner/primus-cli direct -- train pretrain \
+#     --config examples/megatron/configs/MI455X/muse_spark_816B_A42B-MXFP8-pretrain-1gpu-proxy.yaml
+
+extends:
+  - muse_spark_816B_A42B-BF16-pretrain-1gpu-proxy.yaml
+
+# Repeated from the BF16 config: the runtime reads `env:` from the launched file alone, so it
+# is not inherited through `extends`. Without it the fused HIP Adam (clip + BF16 writeback) is
+# skipped and the step pays the separate Adam, clip-scale and parameter-copy passes.
+env:
+  PRIMUS_FUSED_ADAM_CLIP: "1"
+  PRIMUS_FUSED_ADAM_BF16_WRITEBACK: "1"
+  PRIMUS_STATIC_BF16_LOSS_SCALE_CPU: "1"
+
+exp_name: ${PRIMUS_EXP_NAME:muse_spark_816B_A42B-MXFP8-1gpu-proxy}
+
+modules:
+  pre_trainer:
+    overrides:
+      fp8: e4m3
+      fp8_recipe: mxfp8
+      # the FlyDSL fp32-accumulating expert wgrad is BF16-only
+      turbo_grouped_gemm_wgrad_accum_fusion: false
+      # Turbo's grouped GEMMs take the unaligned per-expert token counts as they are. With the
+      # default per-expert quantization padding the expert row count changes every micro-batch,
+      # which recompiles the fixed-shape compiled expert SwiGLU until it hits torch.compile's
+      # recompile limit, and the padding reads the counts on the host.
+      turbo_grouped_gemm_without_padding: true

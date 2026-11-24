@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 from primus.core.projection.simulation_backends.base import (
     GEMMSimulationBackend,
     SimulationResult,
+    hbm_bandwidth_override_gbps,
     register_gemm_backend,
 )
 
@@ -237,10 +238,15 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
     def hbm_bandwidth_gbps(self) -> Optional[float]:
         """Peak HBM bandwidth for the target architecture (GB/s).
 
-        Resolved from the arch profile (``_KNOWN_PROFILES``) or the
+        A process-wide override (``--hbm-bandwidth-gbps``, the benchmark-mode
+        STREAM calibration, or ``PRIMUS_HBM_BANDWIDTH_GBPS``) wins; otherwise
+        resolved from the arch profile (``_KNOWN_PROFILES``) or the
         ``PRIMUS_GPU_ARCH`` env var.  Returns ``None`` only when no
         architecture could be determined.
         """
+        override = hbm_bandwidth_override_gbps()
+        if override is not None:
+            return override
         arch = self._gpu_arch or os.getenv("PRIMUS_GPU_ARCH", "mi300x")
         arch = arch.lower().strip()
         profile = _KNOWN_PROFILES.get(arch)

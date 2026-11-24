@@ -188,8 +188,9 @@ Optional: `torchrec` (DLRM/recommendation stack).
   install (it has rocshmem headers and device bitcode, but no host
   `librocshmem.a`) and the link then fails. Intranode DeepEP is unaffected.
   Export a real `ROCSHMEM_HOME` to opt back in.
-- **MLPerf `primus_mllog` / `mlperf-common`**: the image installs it; it is not
-  part of the core training path, so it is not installed here.
+- **MLPerf logging (AMD `mlperf-common`, formerly `primus_mllog`)**: not part of
+  the core training path, so it is not installed here; the MLPerf
+  `run_with_docker.sh` launchers install it.
 - **DLRM / FBGEMM / Flux**: not part of the default Primus training path.
   `torchrec` is provided as an optional stage; FBGEMM additionally needs apt
   `libtbb-dev`.

@@ -66,8 +66,11 @@ def get_sdma_process_group(
         # name is assigned, and publishes that comm under an empty name.
         # symm_mem.rendezvous then misses it ("NCCL host communicator for group
         # N not found"). nccl-lazy creates the comm on the first collective,
-        # after the name exists, so the rendezvous lookup succeeds.
-        backend = os.getenv("MEGATRON_RCCL_SDMA_GROUP_BACKEND", "nccl-lazy")
+        # after the name exists, so the rendezvous lookup succeeds. Torch
+        # builds without the nccl2 engine (2.12 and older) have no nccl-lazy;
+        # their stock nccl backend registers the comm for rendezvous itself.
+        default_backend = "nccl-lazy" if dist.is_backend_available("nccl-lazy") else "nccl"
+        backend = os.getenv("MEGATRON_RCCL_SDMA_GROUP_BACKEND", default_backend)
         _SDMA_GROUP = dist.new_group(
             ranks=list(range(dist.get_world_size())),
             backend=backend,

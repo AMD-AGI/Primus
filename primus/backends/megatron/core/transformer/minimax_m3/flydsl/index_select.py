@@ -45,8 +45,8 @@ class _FusedSelect(torch.autograd.Function):
         slots = block_indices.clamp_min(0)
         keys = argmax.gather(-1, slots)
         forced = torch.isposinf(block_scores.gather(-1, slots))
-        live = (block_indices >= 0) & ~forced & (keys >= 0)
-        ctx.save_for_backward(q, k, block_indices, keys, live)
+        dead = (block_indices < 0) | forced | (keys < 0)
+        ctx.save_for_backward(q, k, block_indices, keys, dead)
         ctx.block_size = block_size
         # filled by fused_select_blocks once the selection exists
         ctx.plan_slot = plan_slot
@@ -55,13 +55,13 @@ class _FusedSelect(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, _grad_indices, grad_scores):
-        q, k, block_indices, keys, live = ctx.saved_tensors
+        q, k, block_indices, keys, dead = ctx.saved_tensors
         S, B, H, D = q.shape
         if grad_scores is None:
             return torch.zeros_like(q), torch.zeros_like(k), None, None, None
 
         g = (
-            grad_scores.gather(-1, block_indices.clamp_min(0)).masked_fill(~live, 0.0).float()
+            grad_scores.gather(-1, block_indices.clamp_min(0)).masked_fill_(dead, 0.0).float()
         )  # [B, H, S, topk]
         dq = index_dq(g, keys.clamp_min(0), k.reshape(S, B, D), H)
         plan = ctx.plan_slot[0] if ctx.plan_slot else build_block_plan(block_indices, ctx.block_size)

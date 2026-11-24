@@ -30,7 +30,7 @@ Check the AMD published training Docker images:
 # For Megatron-LM and TorchTitan backends
 docker pull rocm/primus:v26.9
 # For MaxText backend
-docker pull rocm/jax-training:maxtext-v26.9
+docker pull rocm/jax-training:maxtext-v26.10
 ```
 
 ### Step 2: Clone the repository
@@ -39,7 +39,7 @@ docker pull rocm/jax-training:maxtext-v26.9
 git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
 cd Primus
 # checkout the branch for the specific release
-git checkout release/v26.9
+git checkout release/v26.10
 git submodule update --init --recursive
 ```
 
@@ -65,7 +65,7 @@ Install Primus in a virtual environment:
 ```bash
 python -m venv primus-env
 source primus-env/bin/activate
-pip install "primus==26.9.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
+pip install "primus==26.10.0" --no-deps --extra-index-url https://amd-agi.github.io/Primus/simple/
 ```
 
 > **Note:** This installs only the Primus CLI into your virtual environment (under `site-packages`), without other dependencies. Third-party submodules are downloaded on the first run of the container, and the complete training software stack is provided in the AMD-published Docker images. You can launch `primus-cli` from any directory.

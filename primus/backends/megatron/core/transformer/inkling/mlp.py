@@ -16,6 +16,10 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from megatron.core.transformer.mlp import MLP
+from megatron.core.transformer.utils import (
+    ensure_metadata_has_dp_cp_group,
+    make_sharded_tensors_for_checkpoint,
+)
 
 from primus.backends.megatron.core.transformer.keep_in_fp32 import (
     KeepInFp32Mixin,
@@ -66,3 +70,19 @@ class InklingMLP(KeepInFp32Mixin, MLP):
             raise ValueError("Inkling's MLP has no biases")
         output, bias = self.linear_fc2(fp32_swiglu(intermediate))
         return (output.float() * self.global_scale.float()).to(output.dtype), bias
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Megatron's MLP shards only its submodules; ``global_scale`` is replicated."""
+        metadata = ensure_metadata_has_dp_cp_group(metadata)
+        sharded = super().sharded_state_dict(prefix, sharded_offsets, metadata)
+        sharded.update(
+            make_sharded_tensors_for_checkpoint(
+                {"global_scale": self.global_scale},
+                prefix,
+                {},
+                sharded_offsets,
+                tp_group=self.tp_group,
+                dp_cp_group=metadata["dp_cp_group"],
+            )
+        )
+        return sharded

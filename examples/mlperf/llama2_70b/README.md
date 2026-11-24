@@ -10,10 +10,10 @@ Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 
 - `configs/MI355X/llama2_70b_lora_mlperf_posttrain.yaml` — post-train overrides
 - `config_MI355X_1x8x1.sh` — system config and env vars (set `PRIMUS_PATH` to your Primus clone)
-- `run_with_docker.sh` — **recommended**: host-side Docker orchestration (N timed trials). Builds `libfakeuname.so` in the container and passes it as `LD_PRELOAD` on every `docker exec`.
-- `runtime_tunables.sh` — host CPU/THP/cache tuning before each trial
-- `run_and_time.sh` — timed MLPerf run inside the container (called by `run_with_docker.sh`). Builds and preloads `libfakeuname.c` before `primus-cli`.
-- `libfakeuname.c` — container-only `uname` shim. Lux reports RHEL 5.14, and RCCL turns cuMem off below kernel 6.8. `LUX_FAKE_KERNEL=6.8.0-lux` keeps the copy-engine collectives on. The host kernel string is unchanged.
+- `run_with_docker.sh` — **recommended**: host-side Docker orchestration (N timed trials). When the reported kernel is older than 6.8, builds `libfakeuname.so` in the container and passes it as `LD_PRELOAD` on every `docker exec`.
+- `runtime_tunables.sh` — optional host CPU/THP/cache tuning before each trial (`RUN_RUNTIME_TUNABLES=1`; needs sudo)
+- `run_and_time.sh` — timed MLPerf run inside the container (called by `run_with_docker.sh`). Preloads `libfakeuname.c` when the reported kernel is older than 6.8.
+- `libfakeuname.c` — container-only `uname` shim. RCCL turns cuMem off when `uname -r` is older than 6.8, even if amdgpu supports cuMem (a RHEL 5.14 report is one example). The launcher then sets `FAKE_UNAME_RELEASE=6.8.0` so the copy-engine collectives stay on. A kernel that already reports 6.8 or newer is left unchanged. `LUX_FAKE_KERNEL` is still accepted.
 - `a4w4_tuned_gemms.csv` — tuned AITER A4W4 GEMM configs
 
 ---
@@ -24,6 +24,7 @@ Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 - Hugging Face access to `meta-llama/Llama-2-70b-hf` (`HF_TOKEN`)
 - ~300 GB disk for packed data + Megatron checkpoint
 - Docker with ROCm (`/dev/kfd`, `/dev/dri`)
+- Primus checkout with submodules (`git submodule update --init --recursive`); training needs `third_party/Megatron-Bridge`
 
 ---
 
@@ -32,7 +33,7 @@ Precision: **MXFP4** + BF16; **FP8 delayed scaling** after healing at step 340.
 Use this only if you are **not** using **`run_with_docker.sh`** and want an interactive shell inside the image.
 
 ```bash
-docker pull rocm/primus:v26.5
+docker pull rocm/primus:v26.9
 
 docker run -it \
   --device=/dev/kfd \
@@ -51,7 +52,7 @@ docker run -it \
   --ulimit nofile=65535:65535 \
   -v /path/to/Primus:/workspace/Primus \
   -v /path/on/host/data:/data \
-  rocm/primus:v26.5
+  rocm/primus:v26.9
 ```
 
 Repo is at **`/workspace/Primus`** inside the container. Then follow [§4](#4-run-training-inside-an-existing-container).
@@ -85,7 +86,7 @@ Checkpoint root must contain **`latest_train_state.pt`**, not only **`iter_00000
 
 ## 3. Run with `run_with_docker.sh` (recommended)
 
-Use this when you want the **MLPerf submission-style flow** from the **host**: one command pulls up Docker, mounts data and results, applies host runtime tunables, runs **N** timed trials, and collects logs under **`LOGDIR`**. You do **not** need to `docker run -it` manually unless you are debugging inside the container (see [§4](#4-run-training-inside-an-existing-container)).
+Use this when you want the **MLPerf submission-style flow** from the **host**: one command pulls up Docker, mounts data and results, runs **N** timed trials, and collects logs under **`LOGDIR`**. Set **`RUN_RUNTIME_TUNABLES=1`** to apply host runtime tunables before each trial (needs sudo). You do **not** need to `docker run -it` manually unless you are debugging inside the container (see [§4](#4-run-training-inside-an-existing-container)).
 
 ### 3.1 Quick start (non-interactive)
 
@@ -97,12 +98,16 @@ cd /path/to/Primus
 export HF_TOKEN=hf_...                      # required: Llama-2-70b + GovReport hooks
 export DATADIR=/data/mlperf_llama2          # writable: dataset + checkpoint (host)
 export LOGDIR=/data/mlperf_llama2/results   # writable: trial logs + MLLOG (host)
-export CONT=rocm/primus:v26.5               # Primus ROCm image
+export CONT=rocm/primus:v26.9               # Primus ROCm image
 export DGXSYSTEM=MI355X_1x8x1               # selects config_${DGXSYSTEM}.sh
 export NEXP=1                               # use 10 for MLPerf submission runs
+# export SEED=1234                          # same seed for every trial (default: random per trial)
 
 # Optional: quiet stdout (:::MLLOG + timing banners only)
 export SUBMISSION_QUIET=1
+
+# Optional host runtime tunables before each trial (cpupower, THP, drop_caches; see runtime_tunables.sh):
+# export RUN_RUNTIME_TUNABLES=1
 
 bash examples/mlperf/llama2_70b/run_with_docker.sh
 ```
@@ -130,9 +135,9 @@ INTERACTIVE=1 bash examples/mlperf/llama2_70b/run_with_docker.sh
 2. **Removes** any existing container named **`CONT_NAME`** (default `mlperf_llama2_70b_lora_primus`), then starts a **detached** container (`sleep infinity`) with ROCm devices and mounts below.
 3. **Installs** editable Primus from the mount (`pip install -e /workspace/Primus --no-deps`); Python/torchrun come from the image venv **`/opt/venv/bin`** (not the host `PATH`).
 4. For each trial **`1..NEXP`**:
-   - Runs **`runtime_tunables.sh`** on the **host** (unless disabled).
+   - Runs **`runtime_tunables.sh`** on the **host** when **`RUN_RUNTIME_TUNABLES=1`**.
    - Optionally drops host page cache if **`CLEAR_CACHES=1`**.
-   - **`docker exec`** → **`bash /workspace/code/run_and_time.sh`** with a new **`SEED=$RANDOM`** and env from **`config_MI355X_1x8x1.sh`** (+ MLLOG paths under **`/results`**).
+   - **`docker exec`** → **`bash /workspace/code/run_and_time.sh`** with **`SEED`** (the host's `SEED` if set, else a new `$RANDOM`) and env from **`config_MI355X_1x8x1.sh`** (+ MLLOG paths under **`/results`**).
    - Streams container stdout to **`${LOGDIR}/${DATESTAMP}_<trial>.log`** on the host.
    - Copies **`mlperf_logging.out`** and **`train.mlperfposttrain.exp.log`** into **`${LOGDIR}/artifacts/`** after each successful trial.
 5. **Removes** the container on exit (success or failure).
@@ -174,9 +179,10 @@ Variables you set most often:
 | **`HF_TOKEN`** | *(none)* | **Required.** Hugging Face token for Llama-2-70b + dataset hooks |
 | **`DATADIR`** | `$HOME/data/mlperf_llama2` | Host data + checkpoint tree (mounted at `/data`) |
 | **`LOGDIR`** | `${DATADIR}/results` | Host results (mounted at `/results`) |
-| **`CONT`** | `rocm/primus:v26.5` | Docker image |
+| **`CONT`** | `rocm/primus:v26.9` | Docker image |
 | **`DGXSYSTEM`** | `MI355X_1x8x1` | Suffix for `config_${DGXSYSTEM}.sh` |
 | **`NEXP`** | `1` | Number of timed trials (submission often uses **10**) |
+| **`SEED`** | random per trial | Set it to use that value for every trial |
 | **`SUBMISSION_QUIET`** | `0` | `1` → sets `PRIMUS_LOG_SUPPRESSION=1`, `MLPERF_VERBOSE_LOGS=0`, `PRIMUS_LOG_GPU_MEM=0`, `VERBOSE_TRAINING_LOG=0` |
 | **`INTERACTIVE`** | `0` | `1` → prompt for missing settings |
 | **`PRIMUS_HOST`** | auto (repo root) | Host path to Primus checkout |
@@ -186,7 +192,7 @@ Optional tuning:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | **`CONT_NAME`** | `mlperf_llama2_70b_lora_primus` | Docker container name |
-| **`RUN_RUNTIME_TUNABLES`** | `1` | `0` → skip host **`runtime_tunables.sh`** |
+| **`RUN_RUNTIME_TUNABLES`** | `0` | `1` → run host **`runtime_tunables.sh`** before each trial (needs sudo) |
 | **`CLEAR_CACHES`** | `0` | `1` → extra host page-cache drop before each trial (needs sudo) |
 | **`CHECK_COMPLIANCE`** | `0` | `1` → run `mlperf_logging.compliance_checker` after each trial (non-blocking on failure) |
 | **`MLPERF_RULESET`** | `6.1.0` | Ruleset passed to compliance checker |
@@ -207,11 +213,11 @@ export SUBMISSION_QUIET=1
 bash examples/mlperf/llama2_70b/run_with_docker.sh
 ```
 
-Each trial gets a random **`SEED`**. Collect **`${LOGDIR}/${DATESTAMP}_*.log`** and **`${LOGDIR}/artifacts/`** for your submission bundle.
+Each trial gets a random **`SEED`** unless **`SEED`** is set. Collect **`${LOGDIR}/${DATESTAMP}_*.log`** and **`${LOGDIR}/artifacts/`** for your submission bundle.
 
 ### 3.7 Host runtime tunables
 
-Before each trial, **`runtime_tunables.sh`** (when **`RUN_RUNTIME_TUNABLES=1`**) adjusts cpupower governor, transparent huge pages, and may drop caches—matching the MLPerf reference host setup. Some steps need **root** (`sudo` for `cpupower`, `/proc/sys/vm/drop_caches`). If tunables fail on your cluster policy, set **`RUN_RUNTIME_TUNABLES=0`** and apply equivalent settings via your admin workflow.
+Host tuning is off unless **`RUN_RUNTIME_TUNABLES=1`**. That runs **`runtime_tunables.sh`** on the host before each trial (cpupower governor, transparent huge pages, and a page-cache drop). Some steps need **root** (`sudo` for `cpupower`, `/proc/sys/vm/drop_caches`).
 
 ### 3.8 Troubleshooting (`run_with_docker.sh`)
 
@@ -369,6 +375,8 @@ export VERBOSE_TRAINING_LOG=0
 ---
 
 ## 7. Optional overrides
+
+Set these on the host before `run_with_docker.sh`. A host `SEED` is used for every trial:
 
 ```bash
 export PRIMUS_TRAIN_ITERS=550

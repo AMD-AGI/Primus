@@ -34,6 +34,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | Variable | Default | Where set | Where used | Description |
 |----------|---------|-----------|------------|-------------|
 | `PRIMUS_PATCHES` | `""` / `"all"` | User | `primus/core/patches/patch_runner.py` | `"all"` or empty enables all patches; `"none"` disables; comma list enables subset. |
+| `PRIMUS_TP_GROUP_TRACE_FIX` | `1` | User | `primus/backends/megatron/patches/tp_group_trace_warning_patches.py` | Skips Megatron's `tp_group is None` deprecation warning while Dynamo traces, which otherwise breaks the graph in every `RowParallelLinear` forward. The other deprecation warnings in `megatron.core.utils` are skipped while tracing too; eager still warns. `0`, `false`, `no` or `off` restores the unpatched shim, for A/B measurement of the breaks; any other value keeps it on. Patch id `megatron.tp_group_trace_warning`. |
 | `PRIMUS_LOG_LEVEL` | `INFO` | User; debug paths in `runner/primus-cli-*.sh` set `DEBUG` | `runner/lib/common.sh` | Log verbosity: `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `PRIMUS_LOG_TIMESTAMP` | `1` | User | `runner/lib/common.sh` | `1` prefixes logs with timestamps; `0` disables. |
 | `PRIMUS_LOG_COLOR` | `1` (auto-off if not a TTY) | User; tests may set `0` | `runner/lib/common.sh` | ANSI colors in runner logs. |
@@ -50,6 +51,7 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_PREFLIGHT_MIN_TFLOPS` | `10.0` | User | `primus/tools/preflight/gpu/utils.py` | Minimum TFLOPS threshold for preflight GEMM checks. |
 | `PRIMUS_TURBO_AUTO_TUNE` | (unset) | User / tests | `tests/trainer/test_megatron_trainer.py` (integration) | Enables Turbo auto-tuning in supported Turbo/Megatron test flows; not referenced in core `primus/` Python outside tests. **Optional**. |
 | `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` | `TURBO` | User; hooks may set `DEEP_EP` | `primus/backends/megatron/patches/args/rocm_arg_validation.py`, `runner/helpers/hooks/05_using_uep.sh` | MoE dispatch/combine backend selector. |
+| `PRIMUS_CONVERT_RUN_ID` | (unset) | User | `primus/backends/megatron/checkpoint/native_loader_muse_spark.py` (`conversion_run_tag`) | Optional launch id for a multi-node Muse Spark checkpoint conversion. Set one new value per launch, the same on every node (for example `${SLURM_JOB_ID}.${SLURM_STEP_ID}`). With it, the waiting nodes see a failure of node 0 at once, also one that happened before they started waiting. Without it, such a failure is seen after 1800 s. The conversion's markers and records are in the checkpoint directory (`DATA_PATH`), which must be on storage that every node shares. Under `primus-cli container` it reaches the container without any setting: `runner/primus-cli-container.sh` passes every `PRIMUS_*` variable that is set on the host. See [Megatron parameters §11.6](megatron-parameters.md). |
 
 ---
 
