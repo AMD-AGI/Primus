@@ -4,7 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import contextlib
 import copy
+import io
 import json
 import math
 import os
@@ -19,6 +21,15 @@ import yaml
 
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.bench_harness import get_bench_runner, resolve_model_adapter
+from primus.core.projection.ceiling import (
+    active_levers,
+    at_ceiling,
+    ceiling_levers,
+    check_simulate_only,
+    format_headroom,
+    headroom,
+    parse_levers,
+)
 from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
     recompute_is_enabled,
@@ -820,7 +831,7 @@ def calculate_collective_communication_time(
             ag_multiplier = message_info.get("fsdp_ag_multiplier", 1.0)
 
             # Legacy ceiling (used when compute_time_ms not provided)
-            FSDP_OVERLAP_LEGACY = 0.93
+            FSDP_OVERLAP_LEGACY = 1.0 if at_ceiling("overlap") else 0.93
 
             if compute_time_ms is not None and num_layers > 0 and compute_time_ms > 0:
                 # Physics-based per-layer overlap:
@@ -848,6 +859,8 @@ def calculate_collective_communication_time(
                 AG_FWD_CEILING = 0.95
                 AG_RECOMPUTE_CEILING = 0.93
                 RS_CEILING = 0.92
+                if at_ceiling("overlap"):
+                    AG_FWD_CEILING = AG_RECOMPUTE_CEILING = RS_CEILING = 1.0
 
                 def _overlap(comm_ms, compute_ms, ceiling):
                     if comm_ms <= 0 or compute_ms <= 0:
@@ -975,6 +988,14 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
             # dense profile is implicitly discarded below because
             # num_dense_layers=0.
             observed_type = layer_data.get("type")
+            if "hybrid_kinds" in layer_data:
+                # A hybrid stack's per-layer average already weights every layer
+                # kind, so it stands for every layer, dense or MoE.
+                profiled_dense_times.append(layer_time)
+                profiled_dense_fwd_times.append(fwd_time)
+                profiled_moe_times.append(layer_time)
+                profiled_moe_fwd_times.append(fwd_time)
+                continue
             if observed_type == "dense":
                 is_dense = True
             elif observed_type == "moe":
@@ -1125,6 +1146,49 @@ def _flatten_pipeline_for_single_node(module_config):
             setattr(module_config, attr, None)
 
 
+def _limit_hybrid_layers_for_projection(module_config) -> bool:
+    """Shrink a hybrid stack to the shortest stretch that still has every layer kind.
+
+    A hybrid stack is built in mixer/MLP pairs, so the default 1-layer cap builds
+    no layers at all. Returns False for non-hybrid models.
+    """
+    from primus.core.projection.training_config import (
+        allocate_hybrid_layers,
+        hybrid_layer_pattern,
+        hybrid_layer_types,
+    )
+
+    full = hybrid_layer_types(module_config)
+    if full is None:
+        return False
+    if not full:
+        raise ValueError("hybrid model has no decoder layers: check hybrid_layer_pattern / num_layers")
+    kinds = set(full)
+    shortest = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
+    # A smaller explicit cap would drop layer kinds the projection must price.
+    cap = max(shortest, int(os.environ.get("PRIMUS_PROJ_MAX_LAYERS") or 0))
+    pattern = hybrid_layer_pattern(module_config)
+    if pattern is not None:
+        trimmed = pattern[:cap]
+        for name in ("hybrid_layer_pattern", "hybrid_override_pattern"):
+            if getattr(module_config, name, None):
+                setattr(module_config, name, trimmed)
+        module_config.num_layers = len(trimmed)
+    else:
+        ratio = getattr(module_config, "hybrid_attention_ratio", 0.0) or 0.0
+        layers = next(
+            (
+                n
+                for n in range(2, len(full) + 1, 2)
+                if set(allocate_hybrid_layers(n, ratio)) == kinds and n >= cap
+            ),
+            len(full),
+        )
+        module_config.num_layers = layers
+    module_config.moe_layer_freq = [0] * module_config.num_layers
+    return True
+
+
 def _limit_layers_for_projection(module_config):
     """
     Restrict the transformer stack to a small number of layers for profiling.
@@ -1134,6 +1198,10 @@ def _limit_layers_for_projection(module_config):
     has_moe = getattr(module_config, "num_experts", None)
     has_moe = has_moe is not None and module_config.num_experts > 0
     original_layers = getattr(module_config, "num_layers", 1) or 1
+    # Op models that run on a share of the layers (hybrid linear attention)
+    # need the full count after the stack is trimmed below.
+    if not getattr(module_config, "projection_full_num_layers", None):
+        module_config.projection_full_num_layers = original_layers
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
 
@@ -1153,6 +1221,9 @@ def _limit_layers_for_projection(module_config):
         and len(_distinct_crs) > 1
         and os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is None
     ):
+        _flatten_pipeline_for_single_node(module_config)
+        return
+    if _limit_hybrid_layers_for_projection(module_config):
         _flatten_pipeline_for_single_node(module_config)
         return
     # Use 1 layer for fast profiling - results are extrapolated to full model.
@@ -1472,7 +1543,7 @@ def _estimate_pp_communication_overhead(training_config, pp_size, hardware_confi
     Returns:
         float: Estimated PP communication time in ms per iteration
     """
-    if pp_size <= 1:
+    if pp_size <= 1 or at_ceiling("overlap"):
         return 0.0
 
     mp_config = training_config.model_parallel_config
@@ -1532,6 +1603,8 @@ def _get_deepep_overlap_efficiency(model_config):
     eliminate CPU synchronisation stalls and use fully-async dispatch,
     yielding higher overlap efficiencies.
     """
+    if at_ceiling("overlap"):
+        return 1.0
     sync_free_stage = getattr(model_config, "turbo_sync_free_moe_stage", 0)
     if sync_free_stage >= 3:
         return 0.85
@@ -3522,6 +3595,31 @@ def _print_scheduler_comparison(all_results, training_config):
     print("=" * 100 + "\n")
 
 
+def _bubble_free_step_time_ms(training_config, profiling_results) -> Optional[float]:
+    """Pipeline step with zero bubbles: the busiest stage's compute over all microbatches.
+
+    Stage imbalance is kept (it is a property of the layer split, not of the
+    schedule), so this is what any schedule converges to as bubbles vanish.
+    """
+    chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
+    if not chunk_time_matrix:
+        return None
+    micro_batches = _compute_micro_batches(
+        training_config.runtime_config, training_config.model_parallel_config
+    )
+    stage_ms = [
+        sum(c.get("fwd", 0.0) + c.get("bwd", 0.0) + c.get("wgrad", 0.0) for c in rank_chunks)
+        for rank_chunks in chunk_time_matrix
+    ]
+    step_ms = max(stage_ms) * micro_batches
+    if int(os.getenv("RANK", "0")) == 0:
+        print(
+            f"[Primus:Performance Projection] Ceiling (launch): bubble-free pipeline step "
+            f"{step_ms:.2f} ms (busiest stage {max(stage_ms):.2f} ms x {micro_batches} microbatches)"
+        )
+    return step_ms
+
+
 def _run_pipeline_simulation(
     training_config,
     profiling_results,
@@ -3547,6 +3645,9 @@ def _run_pipeline_simulation(
     Returns:
         float: Step time in ms from pipeline simulation, or None if simulation failed
     """
+    if at_ceiling("launch"):
+        return _bubble_free_step_time_ms(training_config, profiling_results)
+
     is_compare_mode = scheduler_algorithm == "all"
     run_seaailab_ilp = scheduler_algorithm in ("seaailab-ilp", "all")
 
@@ -3848,7 +3949,7 @@ def _run_multinode_projection(
         )
         target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
 
-        if overlap_grad_reduce:
+        if overlap_grad_reduce or at_ceiling("overlap"):
             # Overlapped: bucketed grad sync runs concurrently with compute.
             # The hiding window spans the full fwd+bwd of ALL microbatches in the
             # iteration, not just the backward of one: gradients accumulate and
@@ -3884,7 +3985,9 @@ def _run_multinode_projection(
             #      window, comm/compute overlap is never perfect (per-bucket launch
             #      & sync overhead, reduce-scatter reduction compute, and the param
             #      all-gather not fully tucking under the next forward).
-            GRAD_AR_OVERLAP_INEFFICIENCY = 0.20  # 80% of the reduce is hidden
+            GRAD_AR_OVERLAP_INEFFICIENCY = (
+                0.0 if at_ceiling("overlap") else 0.20
+            )  # 80% of the reduce is hidden
             residual = GRAD_AR_OVERLAP_INEFFICIENCY * effective_ar
             grad_ar_per_iteration_ms = min(
                 effective_ar,
@@ -4182,6 +4285,47 @@ def _run_multinode_projection(
 
 
 def launch_projection_from_cli(args, overrides):
+    """Entry point for ``projection performance``: expected or ceiling bound, plus optional headroom.
+
+    ``--bound ceiling`` projects with ``--ceiling-levers`` at their physical
+    best; ``--headroom`` additionally re-runs the projection per lever (quietly)
+    and prints expected vs. ceiling with a per-lever waterfall.  Returns the
+    multinode result dict (with ``"headroom"`` when requested), or None when no
+    multinode projection ran.
+    """
+    bound = getattr(args, "projection_bound", None) or "expected"
+    levers = parse_levers(getattr(args, "ceiling_levers", None))
+    want_headroom = bool(getattr(args, "headroom", False))
+    if bound == "ceiling" or want_headroom:
+        check_simulate_only(args)
+
+    shown = levers if bound == "ceiling" else ()
+    pristine = (copy.deepcopy(args), list(overrides or [])) if want_headroom else None
+    with ceiling_levers(shown):
+        if bound == "ceiling" and int(os.getenv("RANK", "0")) == 0:
+            print(f"[Primus:Performance Projection] Bound: ceiling ({', '.join(active_levers())})")
+        result = _launch_projection(args, overrides)
+
+    report = None
+    if want_headroom:
+
+        def _project(active):
+            with ceiling_levers(active), contextlib.redirect_stdout(io.StringIO()):
+                return _launch_projection(copy.deepcopy(pristine[0]), list(pristine[1]))
+
+        report = headroom(
+            _project, levers, getattr(args, "headroom_measured", None), known={tuple(shown): result}
+        )
+
+    if report is not None:
+        if int(os.getenv("RANK", "0")) == 0:
+            print(format_headroom(report))
+        if result is not None:
+            result["headroom"] = report
+    return result
+
+
+def _launch_projection(args, overrides):
     """
     Entry point for the 'performance_projection' subcommand.
 
@@ -4518,7 +4662,7 @@ def launch_projection_from_cli(args, overrides):
     if getattr(args, "profile_only", False):
         if is_rank_0:
             print("[Primus:Performance Projection] --profile-only: exiting after profiling.")
-        return
+        return None
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
@@ -4785,7 +4929,7 @@ def launch_projection_from_cli(args, overrides):
                     # measured compute is already correct for the target.
                     # Only the A2A portion changes (via additive delta).
                     model_cfg = training_config.model_config
-                    use_deepep = getattr(model_cfg, "use_turbo_deepep", False)
+                    use_deepep = getattr(model_cfg, "use_turbo_deepep", False) or at_ceiling("overlap")
 
                     if use_deepep and benchmark_ep != original_ep:
                         DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
@@ -5114,7 +5258,9 @@ def launch_projection_from_cli(args, overrides):
 
                         net_change_total = 0.0
                         total_overlap_per_layer = 0.0
-                        use_deepep = getattr(training_config.model_config, "use_turbo_deepep", False)
+                        use_deepep = getattr(
+                            training_config.model_config, "use_turbo_deepep", False
+                        ) or at_ceiling("overlap")
                         for layer_idx, layer_data in profiling_results.items():
                             if isinstance(layer_data, dict) and layer_data.get("type") == "moe":
                                 mlp_info = layer_data.get("mlp", {})
@@ -5284,7 +5430,7 @@ def launch_projection_from_cli(args, overrides):
 
         # Run multinode projection
         benchmark_ep = reduction_info.get("benchmark_ep", reduction_info.get("original_ep", None))
-        _run_multinode_projection(
+        return _run_multinode_projection(
             training_config,
             benchmarked_time_ms,
             profiling_results,
@@ -5293,3 +5439,4 @@ def launch_projection_from_cli(args, overrides):
             time_includes_all_microbatches,
             benchmark_ep=benchmark_ep,
         )
+    return None

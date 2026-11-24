@@ -61,6 +61,27 @@ def run(args, overrides):
     """
     framework = _experiment_framework(args)
 
+    if args.suite == "both" and (
+        (getattr(args, "projection_bound", None) or "expected") == "ceiling"
+        or getattr(args, "headroom", False)
+    ):
+        # The both suite benchmarks, and the ceiling only splits simulated layer times.
+        raise ValueError(
+            "--bound ceiling / --headroom need `projection performance --profiling-mode simulate`"
+        )
+    if args.suite == "performance":
+        from primus.core.projection.ceiling import parse_levers
+
+        parse_levers(getattr(args, "ceiling_levers", None))
+
+    if getattr(args, "op_bringup", "off") != "off":
+        # The projection agent adds models for the ops this workload needs and
+        # the projection does not price yet; the run below then picks them up.
+        from primus.agents.projection_agent.cli import agent_from_args
+
+        agent = agent_from_args(args, gpu_arch=getattr(args, "gpu_arch", None))
+        agent.ensure_ops(args.config)
+
     if args.suite == "memory":
         # Benchmark / both modes need the backend on the import path
         # because they actually run the trainer.  Simulate stays import-free.
@@ -475,6 +496,46 @@ def _add_performance_args(parser):
         default=False,
         help=_argparse.SUPPRESS,
     )
+    _add_ceiling_args(parser)
+
+
+def _add_ceiling_args(parser):
+    parser.add_argument(
+        "--bound",
+        dest="projection_bound",
+        type=str,
+        default="expected",
+        choices=["expected", "ceiling"],
+        help=(
+            "Projection bound (simulate mode only):\n"
+            "  expected - what today's stack achieves (default)\n"
+            "  ceiling  - same deployment with --ceiling-levers at their physical best;\n"
+            "             kernels stay Origami's. A measurement above it is a modelling gap.\n"
+        ),
+    )
+    parser.add_argument(
+        "--ceiling-levers",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated levers the ceiling removes (default: all):\n"
+            "  overlap - TP/A2A/grad-reduce/FSDP comm hidden behind compute, PP sends free\n"
+            "  fusion  - norm/residual, MoE permute/activation/quant, mixer gate passes fused\n"
+            "  launch  - zero kernel-launch latency and pipeline bubbles\n"
+        ),
+    )
+    parser.add_argument(
+        "--headroom",
+        action="store_true",
+        default=False,
+        help="Also print expected vs ceiling with each lever's gain and a stacked waterfall.",
+    )
+    parser.add_argument(
+        "--headroom-measured",
+        type=float,
+        default=None,
+        help="Measured tokens/s/GPU to place against the expected and ceiling bounds in the headroom report.",
+    )
 
 
 def register_subcommand(subparsers):
@@ -562,6 +623,11 @@ def register_subcommand(subparsers):
     # it should NOT be a memory-load alias here because the orchestrator
     # always runs a fresh bench.
     _add_perf_compute_baseline_arg(both)
+
+    from primus.agents.projection_agent.cli import add_op_bringup_args
+
+    for suite in (memory, performance, both):
+        add_op_bringup_args(suite, default="off")
 
     parser.set_defaults(func=run)
     return parser
