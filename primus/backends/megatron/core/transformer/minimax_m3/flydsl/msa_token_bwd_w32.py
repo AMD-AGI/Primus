@@ -980,6 +980,14 @@ def build_dq_ds_w32(
     order: ``dq`` is bit-identical. The deadlock argument is the one above with two barriers per
     iteration instead of one: both are outside any branch, the trip count is unchanged, and the
     owner test now selects a row count instead of guarding the copy.
+
+    The count-based wait rests on a documented property of the instruction set (AMD, "CDNA5"
+    Instruction Set Architecture Reference Guide, 27-July-2026, section 10.11.1): "Tensor
+    instructions complete in-order with other Tensor instructions from the same wave (both loads
+    and stores stay in-order)", and Tensor-Done is returned once per instruction, so a zero-row
+    copy counts like any other. A zero-row copy still zero-fills its LDS tile: it must never
+    target a slot another wave reads in that step (here it targets the wave's own slot, which
+    nobody reads when the wave is not the owner).
     """
     EARLY = bool(early_issue) and tokens_per_wg > 1
     NBUF = 2

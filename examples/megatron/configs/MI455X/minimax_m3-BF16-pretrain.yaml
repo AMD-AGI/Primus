@@ -91,7 +91,7 @@ modules:
       msa_owner_carry: true
       msa_ds_chunk_store: true
       # same class: the slim dQ kernel keeps two steps' copies in flight
-      msa_dq_early_issue: false
+      msa_dq_early_issue: true
       # same class: the forward keeps two LDS tile slots per wave (four workgroups per compute unit)
       msa_two_tile_slots: true
       # same table, the aligned walk's kernel with one wave per program
