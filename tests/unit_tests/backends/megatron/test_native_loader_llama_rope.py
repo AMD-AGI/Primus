@@ -47,6 +47,8 @@ def test_unscaled_llama_keeps_megatron_rope_scaling_disabled():
         ({"rope_type": "linear", "factor": 2.0}, "'linear' has no Megatron conversion"),
         ({"type": "yarn", "factor": 4.0}, "'yarn' has no Megatron conversion"),
         ({"rope_type": "llama3", "factor": 8.0, "high_freq_factor": 2.0}, "'high_freq_factor': 2.0"),
+        ({"rope_type": "llama3", "low_freq_factor": 1.0}, "no factor"),
+        ({"factor": 8.0}, "no rope_type"),
     ],
 )
 def test_rope_scaling_megatron_cannot_reproduce_is_rejected(rope_scaling, match):
