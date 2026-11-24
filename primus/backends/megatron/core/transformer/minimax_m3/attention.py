@@ -75,9 +75,9 @@ _MSA_FUSIONS = (
     "msa_fused_zero_centered_gamma",
     "msa_fused_indexer_input_norm",
 )
-# Options of the MSA operator kernels that msa_exact_numerics turns off: the ones whose arithmetic
-# is not bit-identical to the reference flydsl kernels (reordered sums: msa_aligned_block_walk,
-# msa_dq_from_ds) and the bit-preserving kernel options that came after them.
+# Options of the MSA operator kernels that msa_exact_numerics turns off. Relaxed numerics (not
+# bit-identical to the reference flydsl kernels): msa_aligned_block_walk, msa_dq_from_ds,
+# msa_index_dk_scatter, msa_indexer_loss_one_pass. The others keep the bits of the path they sit on.
 _MSA_RELAXED = (
     "msa_aligned_block_walk",
     "msa_dq_from_ds",

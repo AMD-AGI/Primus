@@ -136,7 +136,8 @@ msa_walk_one_wave: false
 # their backward in one more. Relaxed numerics (Triton row sums, exp, log); msa_exact_numerics
 # turns it off.
 msa_indexer_loss_one_pass: false
-# true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
+# true: the MSA operator kernel options above from msa_aligned_block_walk on stay off (the relaxed-
+# numerics ones and the bit-preserving ones built on them): the reference flydsl kernels' bits
 msa_exact_numerics: false
 
 # MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared

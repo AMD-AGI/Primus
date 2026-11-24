@@ -233,6 +233,7 @@ SHAPES = [
     (641, 1, 4, 16, "local", "minus_one"),  # fewer blocks than topk: -1 padded rows
     (384, 3, 1, 4, "random", "valid"),
     (8192, 1, 4, 16, "zipf", "minus_one"),
+    (32768, 1, 4, 16, "zipf", "minus_one"),  # 256 blocks: the long-sequence shape (gate's rule below)
 ]
 
 

@@ -26,8 +26,10 @@ pytest.importorskip("triton")
 
 BLOCK = 128
 COEFF = 1.0e-2
-# kernel against the eager reference (FP32 row sums, exp and log in another order / library)
-LOSS_RTOL = 2.0e-6
+# kernel against the eager reference (FP32 row sums, exp and log in another order / library). The
+# loss tolerance is the MSA operator check's limit for this path (1.25 x the starting tree's
+# relative error, which is 0 for the loss, + 1e-6), not a looser one.
+LOSS_RTOL = 1.0e-6
 GRAD_RTOL = 5.0e-5
 
 gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
@@ -222,6 +224,7 @@ GPU_CASES = [
     (384, 1, 2, 4, 18, "ties", True),  # topk not a power of two, tied maxima
     (8320, 1, 4, 16, 16, "random", True),  # 65 blocks: the direct (zero-filled) scatter
     (16384, 1, 4, 64, 16, "zipf", True),  # 128 blocks
+    (32768, 1, 4, 64, 16, "zipf", True),  # 256 blocks: the long-sequence shape, at the gate's tolerance
 ]
 
 

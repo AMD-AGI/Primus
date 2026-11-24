@@ -169,10 +169,15 @@ the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel confi
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
 off; apart from `msa_shared_tile_staging`, `msa_lean_masks`, `msa_aligned_block_walk`,
-`msa_dq_from_ds`, `msa_owner_carry`, `msa_ds_chunk_store`, `msa_dq_early_issue` and `msa_two_tile_slots` the FlyDSL MSA kernels have no switch other than `PRIMUS_MSA_BACKEND=eager`.
+`msa_dq_from_ds`, `msa_owner_carry`, `msa_ds_chunk_store`, `msa_dq_early_issue`, `msa_two_tile_slots`,
+`msa_walk_one_wave`, `msa_indexer_loss_one_pass` and `msa_index_dk_scatter` the FlyDSL MSA kernels have
+no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
-**Relaxed-numerics MSA options.** Two options are not bit-identical to the reference FlyDSL
-kernels. With `msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
+**Relaxed-numerics MSA options.** Four options are not bit-identical to the reference FlyDSL
+kernels: `msa_aligned_block_walk`, `msa_dq_from_ds`, `msa_indexer_loss_one_pass` and
+`msa_index_dk_scatter`. The other options of the group (`msa_owner_carry`, `msa_ds_chunk_store`,
+`msa_dq_early_issue`, `msa_two_tile_slots`, `msa_walk_one_wave`) keep every bit of the path they sit
+on and are only switched off together with them. With `msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
 with the token's neighbours (groups of four consecutive tokens; a block that an earlier token of
 the group selected is visited at that token's step), so the tokens of a workgroup meet a common
 block at the same step and `msa_shared_tile_staging` copies its K/V tiles once. The block selection
@@ -207,7 +212,9 @@ fourteen small launches forward and six backward; the loss is the same block-lev
 row sums, `exp` and `log` taken by Triton and, under `msa_aligned_block_walk`, in walk order
 (relaxed numerics, deterministic; the first call for a shape compares it with the bit-exact path:
 loss within 5e-7, gradient within 2e-5, two runs identical).
-`msa_index_dk_scatter` (relaxed numerics) replaces the indexer backward's dK chunk kernel, a
+`msa_index_dk_scatter` (relaxed numerics; used only for an index dimension of 128 and a power-of-two
+top-k, the form that was compiled and run on the device, other shapes keep the WMMA kernel)
+replaces the indexer backward's dK chunk kernel, a
 one-hot masked WMMA product over all 128 keys of a block, by a scatter: each plan entry's
 `g * q` row is added in fp32 to its one winning key row, in plan order, one wave per chunk; the
 same fixed-order reduce follows. `d index k` differs in its last bits (deterministic; the first

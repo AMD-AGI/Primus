@@ -246,8 +246,10 @@ class MSATransformerConfig(TransformerConfig):
     added in entry order, so d index k differs in its last bits (deterministic). The first
     call for a shape runs the kernel twice and the reference kernel once on that call's
     inputs: identical bits between the two runs and partials within 1e-4 of the reference's
-    largest partial, else the reference kernel stays. Needs sparse_index_dim a multiple of 32
-    (2, 4 or 8 elements per lane). msa_exact_numerics turns it off."""
+    largest partial, else the reference kernel stays. Used only for sparse_index_dim 128 (4
+    elements per lane) and a power-of-two top-k, the one form that was compiled and run on the
+    device (index_dk_scatter_supported and the dispatcher in index_dk); any other shape keeps the
+    reference kernel. msa_exact_numerics turns it off."""
 
     msa_ds_chunk_store: bool = False
     """flydsl backend on gfx1250, with msa_dq_from_ds: the dK/dV kernel writes its dS records
@@ -301,9 +303,15 @@ class MSATransformerConfig(TransformerConfig):
     path otherwise. msa_exact_numerics turns it off."""
 
     msa_exact_numerics: bool = False
-    """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
-    kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for
-    regression checks). Each such option checks this flag; the bit-identical ones above ignore it."""
+    """Keep the options of the MSA operator kernels off, whatever their own switches say, so a run
+    reproduces the reference flydsl kernels' losses bit for bit (for regression checks). The group
+    is attention._MSA_RELAXED: the four relaxed-numerics options, whose arithmetic is not
+    bit-identical to the reference kernels (msa_aligned_block_walk, msa_dq_from_ds,
+    msa_index_dk_scatter, msa_indexer_loss_one_pass), and the bit-preserving options that are
+    built on them or change the same kernels (msa_owner_carry, msa_ds_chunk_store,
+    msa_dq_early_issue, msa_two_tile_slots, msa_walk_one_wave). Each of them, or the option it
+    is a part of, tests this flag before any work; the Triton fusions and msa_shared_tile_staging
+    / msa_lean_masks, which are bit-identical and part of the reference state, ignore it."""
 
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not
