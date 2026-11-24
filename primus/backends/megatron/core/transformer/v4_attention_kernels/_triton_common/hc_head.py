@@ -13,11 +13,11 @@ Both become one streaming pass each way:
 * :func:`hc_lift` -- fwd: x[t, k, :] = h[t, :]; bwd: dh = bf16(sum_k float(dx_k)) in torch's summation order.
 * :func:`hc_head_collapse` -- fwd: y = bf16(sum_k pre_k * float(x_k)) (fp32 products rounded separately, no FMA,
   torch's summation order); bwd: dx_k = bf16(float(dy) * pre_k) (bit-identical to the eager autograd) and
-  dpre_k = sum_d float(dy) * float(x_k): with ``PRIMUS_HC_HEAD_FUSED=1`` the exact fp32 products are written and
-  reduced by the same torch reduce as the eager path (bit-identical); ``=2`` sums them in registers (one pass,
-  different fp32 order: loss@20 9.8672 in one e2e run, outside the 9.868-9.872 spread, so not the default).
+  dpre_k = sum_d float(dy) * float(x_k) in the order of torch's reduce over the exact fp32 products
+  (bit-identical): for D = 4096 summed in registers in one pass (``_hc_head_bwd_fused_kernel``), otherwise the
+  products are written and reduced by torch itself.
 
-Opt-in: ``PRIMUS_HC_LIFT_FUSED=1`` / ``PRIMUS_HC_HEAD_FUSED=1|2``; bf16 x, K = 4, CUDA, contiguous only.
+Switches: ``PRIMUS_HC_LIFT_FUSED=1`` / ``PRIMUS_HC_HEAD_FUSED=1``; bf16 x, K = 4, CUDA, contiguous only.
 """
 
 from __future__ import annotations
@@ -103,6 +103,55 @@ def _hc_head_bwd_prod_kernel(G, X, PRE, DX, PROD, D, BD: tl.constexpr):
         xk = tl.load(base + k * D, mask=m, other=0.0).to(tl.float32)
         tl.store(dbase + k * D, (g * pk).to(DX.dtype.element_ty), mask=m)
         tl.store(pbase + k * D, g * xk, mask=m)
+
+
+@triton.jit
+def _pair(s, R: tl.constexpr, W: tl.constexpr):
+    """[R, W] -> [R, W/2]: s[2m] + s[2m+1] (one shfl_down level)."""
+    a, b = tl.split(tl.reshape(s, [R, W // 2, 2]))
+    return a + b
+
+
+@triton.jit
+def _hc_head_bwd_fused_kernel(G, X, PRE, DX, DPRE, D, BR: tl.constexpr):
+    """dx_k as ``_hc_head_bwd_prod_kernel`` and dpre_k = sum_d dy * x_k for D = 4096, without the fp32 product tensor.
+
+    dpre follows torch's ``reduce_kernel<512, 1>`` for the contiguous inner reduction ``prod.sum(-1)`` over 4096 fp32
+    with at least 16 outputs (32 x 16 blocks, 4-wide vector loads): lane l keeps acc_i += prod[128 j + 4 l + i]
+    (i < 4, j < 32), the lane value is ((acc_0 + acc_1) + acc_2) + acc_3 and the 32 lanes combine as a shfl_down
+    tree with offsets 1, 2, ..., 16.
+    The products are exact in fp32 (bf16 x bf16), so acc + dy * x rounds as torch's add of the stored product
+    (``enable_fp_fusion=False`` keeps dx's multiply unfused too).
+    """
+    pid = tl.program_id(0)
+    R: tl.constexpr = BR * 4
+    rr = pid * BR + tl.arange(0, BR)
+    kk = tl.arange(0, 4)
+    ll = tl.arange(0, 32)
+    ii = tl.arange(0, 4)
+    r64 = rr.to(tl.int64)
+    # [BR, 4, 32, 4] element offsets (row, stream, lane, vector slot) inside one 128-column slice j
+    col = ll[None, None, :, None] * 4 + ii[None, None, None, :]
+    xoff = (r64[:, None, None, None] * 4 + kk[None, :, None, None]) * D + col
+    goff = r64[:, None, None, None] * D + col
+    pk = tl.load(PRE + r64[:, None, None, None] * 4 + kk[None, :, None, None])
+    acc = tl.zeros([BR, 4, 32, 4], dtype=tl.float32)
+    for j in range(0, D // 128):
+        g = tl.load(G + goff + j * 128).to(tl.float32)
+        x = tl.load(X + xoff + j * 128).to(tl.float32)
+        tl.store(DX + xoff + j * 128, (g * pk).to(DX.dtype.element_ty))
+        acc = acc + g * x
+    a = tl.reshape(acc, [R, 32, 2, 2])
+    e0, e1 = tl.split(a)  # e0: i in {0, 2}, e1: i in {1, 3}
+    a0, a2 = tl.split(e0)
+    a1, a3 = tl.split(e1)
+    s = ((a0 + a1) + a2) + a3  # [R, 32]
+    s = _pair(s, R, 32)
+    s = _pair(s, R, 16)
+    s = _pair(s, R, 8)
+    s = _pair(s, R, 4)
+    s = _pair(s, R, 2)
+    tl.store(DPRE + (pid * BR) * 4 + tl.arange(0, R), tl.reshape(s, [R]))
 
 
 def _bd(D):
@@ -215,6 +264,15 @@ class HCHeadCollapseFn(torch.autograd.Function):
         M, K, D = x3.shape
         g = gy.contiguous().view(M, D)
         dx = torch.empty_like(x3)
+        # torch reduces 16+ outputs with 32 x 16 blocks (the order the one-pass kernel follows); fewer outputs widen
+        # the block to 64 lanes, a different order
+        if D == 4096 and M * K >= 16:
+            dpre = torch.empty((M, K), dtype=torch.float32, device=x3.device)
+            _ok_ptr(g, x3, p2, dx, dpre)
+            _hc_head_bwd_fused_kernel[(M,)](g, x3, p2, dx, dpre, D, BR=1, num_warps=4, enable_fp_fusion=False)
+            if ctx.gslot is not None:
+                ctx.gslot.g, ctx.gslot = dx, None
+            return dx.view(*ctx.lead, K, D), dpre.view(ctx.pre_shape).to(p2.dtype), None
         # exact: the fp32 products go through the same torch reduce as the eager autograd (sum_to over the last dim
         # of a contiguous [..., 4, D] fp32 tensor), so dpre is bit-identical
         prod = torch.empty((*ctx.lead, K, D), dtype=torch.float32, device=x3.device)
