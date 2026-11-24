@@ -201,6 +201,12 @@ for a shape compares every output bit).
 `msa_walk_one_wave` launches the aligned walk's Triton kernel with one wave per program, which
 removes the workgroup barriers of its cross-wave reductions; the table it writes is the same
 integers (checked against the PyTorch reference on the first table of a shape).
+`msa_indexer_loss_one_pass` (with `msa_fused_indexer_loss`) computes the slot mass and the sparse
+indexer KL of a layer in one Triton kernel and their backward in one more, instead of about
+fourteen small launches forward and six backward; the loss is the same block-level KL, with the
+row sums, `exp` and `log` taken by Triton and, under `msa_aligned_block_walk`, in walk order
+(relaxed numerics, deterministic; the first call for a shape compares it with the bit-exact path:
+loss within 5e-7, gradient within 2e-5, two runs identical).
 `--msa_exact_numerics True` turns these options, and any other
 option of this kind, off and reproduces the reference kernels' losses bit for bit.
 

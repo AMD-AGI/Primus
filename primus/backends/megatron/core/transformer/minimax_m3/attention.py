@@ -86,6 +86,7 @@ _MSA_RELAXED = (
     "msa_dq_early_issue",
     "msa_two_tile_slots",
     "msa_walk_one_wave",
+    "msa_indexer_loss_one_pass",
 )
 _FUSIONS_LOGGED = False
 
@@ -339,6 +340,17 @@ class MinimaxSparseAttention(SelfAttention):
             return {"owner_carry": True, "two_tile_slots": True}
         return {"owner_carry": True}
 
+    def _loss_one_pass(self) -> bool:
+        """``msa_indexer_loss_one_pass``: whether ``msa_core`` asks the one-pass kernels for the
+        indexer loss. Relaxed numerics, so ``msa_exact_numerics`` turns it off; it stands in for
+        the Triton path of ``msa_fused_indexer_loss`` and needs that switch."""
+        config = self.config
+        return bool(
+            getattr(config, "msa_indexer_loss_one_pass", False)
+            and not getattr(config, "msa_exact_numerics", False)
+            and getattr(config, "msa_fused_indexer_loss", False)
+        )
+
     def msa_core(
         self,
         query: torch.Tensor,
@@ -373,25 +385,37 @@ class MinimaxSparseAttention(SelfAttention):
         )
         if not want_loss:
             return outs[0], None
-        slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
-        if walk is not None:
-            # the kernel's slot_lse is in walk order: position p of a row is the indexer's slot
-            # walk[1][p]. One scatter on the [b, n_index, sq, topk] mass puts it back.
-            slot_mass = torch.empty_like(slot_mass).scatter_(-1, walk[1], slot_mass)
-        if self.config.msa_fused_indexer_loss:
-            # bitwise, in a few Triton launches
-            from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
-                sparse_indexer_loss as loss_fn,
+
+        def exact_loss(scores):
+            """The loss on the bit-exact path (also the one-pass path's first-call reference)."""
+            slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
+            if walk is not None:
+                # the kernel's slot_lse is in walk order: position p of a row is the indexer's slot
+                # walk[1][p]. One scatter on the [b, n_index, sq, topk] mass puts it back.
+                slot_mass = torch.empty_like(slot_mass).scatter_(-1, walk[1], slot_mass)
+            if self.config.msa_fused_indexer_loss:
+                # bitwise, in a few Triton launches
+                from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
+                    sparse_indexer_loss as loss_fn,
+                )
+            else:
+                loss_fn = compute_sparse_indexer_loss
+            if self.config.msa_fused_indexer_loss and self.config.msa_fused_indexer_loss_scatter:
+                return loss_fn(slot_mass, scores, block_indices, self.indexer_loss_coeff, fold_scatter=True)
+            return loss_fn(slot_mass, scores, block_indices, self.indexer_loss_coeff)
+
+        # msa_indexer_loss_one_pass (relaxed numerics): eligibility is decided before any work
+        if self._loss_one_pass():
+            from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_one_pass import (
+                one_pass_indexer_loss,
             )
-        else:
-            loss_fn = compute_sparse_indexer_loss
-        if self.config.msa_fused_indexer_loss and self.config.msa_fused_indexer_loss_scatter:
-            indexer_loss = loss_fn(
-                slot_mass, block_scores, block_indices, self.indexer_loss_coeff, fold_scatter=True
+
+            indexer_loss = one_pass_indexer_loss(
+                outs[2], outs[1], block_scores, block_indices, walk, self.indexer_loss_coeff, exact_loss
             )
-        else:
-            indexer_loss = loss_fn(slot_mass, block_scores, block_indices, self.indexer_loss_coeff)
-        return outs[0], indexer_loss
+            if indexer_loss is not None:
+                return outs[0], indexer_loss
+        return outs[0], exact_loss(block_scores)
 
     def forward(
         self,

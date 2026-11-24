@@ -128,6 +128,10 @@ msa_two_tile_slots: false
 # with msa_aligned_block_walk: the walk kernel runs one wave per program (no workgroup barriers);
 # the same integer table. Off with the walk under msa_exact_numerics.
 msa_walk_one_wave: false
+# flydsl backend with msa_fused_indexer_loss: slot mass + sparse indexer KL in one Triton kernel,
+# their backward in one more. Relaxed numerics (Triton row sums, exp, log); msa_exact_numerics
+# turns it off.
+msa_indexer_loss_one_pass: false
 # true: every MSA kernel option that is not bit-identical to the reference flydsl kernels stays off
 msa_exact_numerics: false
 

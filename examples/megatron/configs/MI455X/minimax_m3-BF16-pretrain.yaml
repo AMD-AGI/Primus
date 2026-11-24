@@ -94,6 +94,8 @@ modules:
       msa_two_tile_slots: true
       # same table, the aligned walk's kernel with one wave per program
       msa_walk_one_wave: true
+      # relaxed numerics: slot mass and indexer KL in one Triton kernel, their backward in one
+      msa_indexer_loss_one_pass: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.

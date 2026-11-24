@@ -275,6 +275,18 @@ class MSATransformerConfig(TransformerConfig):
     launch), so every output keeps its bits. An option of the aligned walk, which
     msa_exact_numerics turns off."""
 
+    msa_indexer_loss_one_pass: bool = False
+    """flydsl backend, with msa_fused_indexer_loss: the slot mass and the sparse indexer KL of an
+    MSA layer come from one Triton kernel (it reads the forward's slot_lse / lse, the block table
+    and the block scores and writes each row's KL), and their backward from one more
+    (indexer_loss_one_pass.py), instead of three ATen launches for the slot mass, the walk-order
+    scatter and the bit-exact fused loss's kernels and ATen reductions. The loss is the same
+    block-level KL over the selected blocks; relaxed numerics: a row's sums, exp and log are
+    Triton's, and with msa_aligned_block_walk a row is summed in walk order (deterministic). The
+    first call for a shape runs it twice and compares it with the path it replaces (loss within
+    5e-7, block-score gradient within 2e-5, identical bits between the two runs) and keeps that
+    path otherwise. msa_exact_numerics turns it off."""
+
     msa_exact_numerics: bool = False
     """Keep every MSA kernel option whose arithmetic is not bit-identical to the reference flydsl
     kernels off, whatever its own switch says, so a run reproduces their losses bit for bit (for
