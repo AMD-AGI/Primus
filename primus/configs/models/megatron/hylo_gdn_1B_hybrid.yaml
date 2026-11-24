@@ -2,8 +2,8 @@ extends:
   - mamba_base.yaml
 
 # Native HyLo Llama-3.2-1B topology: 16 mixer/MLP blocks represented as
-# 32 flat HybridStack sublayers. Recipes override hybrid_attention_ratio to
-# 0.0 (GDN ILD), 1.0 (MLA ILD), or 0.25 (4MLA12GDN stage 2).
+# 32 flat HybridStack sublayers, laid out as 4MLA12GDN (stage 2). The ILD
+# recipes override hybrid_attention_ratio to 0.0 (GDN) or 1.0 (MLA).
 model_type: mamba
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B-Instruct

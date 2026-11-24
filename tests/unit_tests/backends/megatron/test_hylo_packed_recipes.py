@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from primus.backends.megatron.training import hylo_distillation
 from primus.backends.megatron.training.hylo_distillation import _derive_warmup
 from primus.core.config.primus_config import load_primus_config
 from primus.core.utils import file_utils
@@ -17,6 +18,7 @@ CONFIGS = Path(__file__).resolve().parents[4] / "examples/megatron/configs/MI300
 
 # Settings the packed recipes share with the SFT-path recipes: model, teacher, and optimizer.
 SHARED = (
+    "model_type",
     "spec",
     "hybrid_override_pattern",
     "hybrid_attention_ratio",
@@ -24,7 +26,6 @@ SHARED = (
     "hylo_teacher_num_layers",
     "hylo_teacher_use_rope_scaling",
     "hylo_kl_weight",
-    "hylo_ce_weight",
     "lr",
     "min_lr",
     "lr_decay_style",
@@ -107,6 +108,22 @@ def test_warmup_ratio_leaves_the_megatron_settings_alone_when_unset():
     )
     _derive_warmup(args)
     assert args.lr_warmup_iters == 40
+
+
+def test_warmup_ratio_says_which_warmup_it_replaces(monkeypatch):
+    # pre_trainer.yaml's lr_warmup_iters: 40 reaches every packed recipe.
+    logged = []
+    monkeypatch.setattr(hylo_distillation, "log_rank_0", logged.append)
+    args = SimpleNamespace(
+        hylo_warmup_ratio=0.01,
+        lr_warmup_iters=40,
+        lr_warmup_fraction=None,
+        train_iters=6934,
+        lr_decay_iters=None,
+    )
+    _derive_warmup(args)
+    assert args.lr_warmup_iters == 70
+    assert logged == ["[HyLo] hylo_warmup_ratio 0.01 sets lr_warmup_iters to 70, not 40"]
 
 
 @pytest.mark.parametrize(

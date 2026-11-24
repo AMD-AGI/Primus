@@ -175,6 +175,21 @@ def test_masked_fused_kl_matches_the_chunked_reference(masked, dtype):
     assert count.item() == expected_count.item()
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or hylo_distillation._fla_kl_kernel() is None,
+    reason="the fused KL needs a GPU and flash-linear-attention",
+)
+def test_masked_fused_kl_backward_runs_once():
+    # The backward scales its saved gradient in place, so nothing may differentiate through it again.
+    student = torch.randn(1, 3, 64, device="cuda", requires_grad=True)
+    loss, _count = hylo_distillation.masked_fused_kl(student, torch.randn(1, 3, 64, device="cuda"))
+    # Only an incoming gradient that itself requires grad makes a graph through the backward.
+    weight = torch.ones((), device="cuda", requires_grad=True)
+    (grad,) = torch.autograd.grad(loss, student, grad_outputs=weight, create_graph=True)
+    with pytest.raises(RuntimeError, match="once_differentiable"):
+        grad.sum().backward()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="off GPU the fused KL is the chunked loop")
 def test_masked_fused_kl_without_fla_says_how_to_fall_back(monkeypatch):
     monkeypatch.setattr(hylo_distillation, "_fla_kl_kernel", lambda: None)
@@ -241,8 +256,11 @@ def test_validate_hylo_args_rejects_unsupported_parallelism():
         validate_hylo_args(Namespace(**{**base, "tensor_model_parallel_size": 2}))
     with pytest.raises(ValueError, match="pipeline_model_parallel_size=1"):
         validate_hylo_args(Namespace(**{**base, "pipeline_model_parallel_size": 2}))
-    with pytest.raises(ValueError, match="hylo_ce_weight=0"):
-        validate_hylo_args(Namespace(**{**base, "hylo_ce_weight": 1.0}))
+    for stage in ("sft", "ild"):
+        with pytest.raises(ValueError, match="hylo_ce_weight must be 0"):
+            validate_hylo_args(Namespace(**{**base, "hylo_distill_stage": stage, "hylo_ce_weight": 1.0}))
+    with pytest.raises(ValueError, match="LoRA"):
+        validate_hylo_args(Namespace(**{**base, "lora": SimpleNamespace(enabled=True)}))
     with pytest.raises(ValueError, match="hylo_distill_stage"):
         validate_hylo_args(Namespace(**{**base, "hylo_distill_stage": "pretrain"}))
     with pytest.raises(ValueError, match="hylo_teacher_checkpoint"):
@@ -258,6 +276,24 @@ def test_teacher_args_keep_the_checkpoint_and_fill_newer_megatron_fields():
     assert (teacher.num_layers, teacher.use_rope_scaling) == (32, True)
     assert (teacher.fp4_param_gather, teacher.bf16, teacher.moe_deepep_num_sms) == (False, True, None)
     assert saved.num_layers == 32 and not hasattr(saved, "fp4_param_gather")
+
+
+def test_teacher_args_take_this_runs_parallel_layout_and_precision():
+    run = Namespace(
+        tensor_model_parallel_size=1, sequence_parallel=False, bf16=True, fp16=False, seq_length=2048
+    )
+    saved = Namespace(
+        tensor_model_parallel_size=8,
+        sequence_parallel=True,
+        bf16=False,
+        fp16=True,
+        seq_length=8192,
+        masked_softmax_fusion=False,
+    )
+    teacher = hylo_distillation.teacher_args_from_checkpoint(run, saved)
+    assert (teacher.tensor_model_parallel_size, teacher.sequence_parallel) == (1, False)
+    assert (teacher.bf16, teacher.fp16) == (True, False)
+    assert (teacher.seq_length, teacher.masked_softmax_fusion) == (8192, False)
 
 
 def test_validate_hylo_args_derives_the_trainer_warmup():
@@ -417,7 +453,6 @@ class _StudentHybrid(nn.Module):
 
 def test_ild_step_scores_last_layer_after_final_norm_once_per_micro_batch(monkeypatch):
     monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "ild"))
-    monkeypatch.setattr(hylo_distillation, "_log_loss", lambda metrics: None)
     monkeypatch.setattr(hylo_distillation, "_sft_pad_id", lambda: 0)
     tokens = torch.tensor([[1, 2]])
     batch = {"input_ids": tokens, "loss_mask": torch.ones(1, 2)}
@@ -436,7 +471,6 @@ def test_ild_step_scores_last_layer_after_final_norm_once_per_micro_batch(monkey
 
 def test_sft_ild_step_ignores_padding(monkeypatch):
     monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "ild"))
-    monkeypatch.setattr(hylo_distillation, "_log_loss", lambda metrics: None)
     monkeypatch.setattr(hylo_distillation, "_sft_pad_id", lambda: 9)
     # A prompt token, the supervised EOS (the label at position 0), then padding, whose token value
     # would raise the loss if it counted.
@@ -445,6 +479,47 @@ def test_sft_ild_step_ignores_padding(monkeypatch):
     loss, _count, _report = loss_func(_output)
     width = torch.norm(torch.ones(4)) * torch.tensor([1.0, 2.0]).mean()
     torch.testing.assert_close(loss.cpu(), 40 * width)
+
+
+def test_pure_kl_installs_no_capture_hooks():
+    teacher, student = _TeacherGPT(), _StudentHybrid()
+    runtime = HyLoRuntime(teacher, "sft")
+    runtime.install_student_hooks(student)
+    tokens = torch.tensor([[1, 2]])
+    with torch.no_grad():
+        teacher(tokens, None, None)
+        student(tokens, None, None)
+    for capture in (runtime.teacher_capture, runtime.student_capture):
+        assert capture.layer_inputs == capture.hidden == capture.mixer == capture.final == []
+
+
+def test_removed_hooks_capture_nothing():
+    teacher, student = _TeacherGPT(), _StudentHybrid()
+    runtime = HyLoRuntime(teacher, "ild")
+    runtime.install_student_hooks(student)
+    runtime.remove_hooks()
+    tokens = torch.tensor([[1, 2]])
+    with torch.no_grad():
+        teacher(tokens, None, None)
+        student(tokens, None, None)
+    for capture in (runtime.teacher_capture, runtime.student_capture):
+        assert capture.layer_inputs == capture.hidden == capture.mixer == capture.final == []
+
+
+def test_sft_step_on_an_exhausted_iterator_has_the_sft_trainers_empty_loss(monkeypatch):
+    from primus.backends.megatron.sft.forward_step import _empty_loss_result
+
+    monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(_TeacherGPT(), "sft"))
+    for data_iterator in (None, iter([])):
+        output, loss_func = create_sft_forward_step()(data_iterator, _StudentHybrid())
+        loss, count, report = loss_func(output)
+        expected_loss, expected_count, _ = _empty_loss_result()
+        assert output is None and report == {}
+        assert (loss.device, count.device, count.dtype) == (
+            expected_loss.device,
+            expected_count.device,
+            expected_count.dtype,
+        )
 
 
 def test_ild_requires_final_norm_on_both_models():
@@ -524,9 +599,9 @@ def test_hylo_recipes_match_stage_contract(monkeypatch):
     for relative, (stage, seq_length, attention_ratio) in recipes.items():
         module = load_primus_config(ROOT / relative, None).modules[0]
         params = module.params
+        assert params.model_type == "hylo"
         assert params.hylo_distill_stage == stage
         assert params.hylo_kl_weight == 1.0
-        assert params.hylo_ce_weight == 0.0
         assert params.seq_length == seq_length
         assert params.tensor_model_parallel_size == 1
         assert params.pipeline_model_parallel_size == 1
@@ -576,3 +651,78 @@ def test_hylo_mla_recipes_follow_zebra_mla_ild(monkeypatch):
     assert (ild.micro_batch_size, ild.global_batch_size) == (12, 96)
     assert (ild.seed, ild.weight_decay, ild.adam_beta1, ild.adam_beta2) == (42, 0.0, 0.9, 0.999)
     assert (ild.adam_eps, ild.clip_grad) == (1.0e-8, 1.0)
+
+
+@pytest.mark.parametrize("value", [None, "", "null", "None", " NULL "])
+def test_unset_values(value):
+    assert hylo_distillation.unset(value)
+
+
+@pytest.mark.parametrize("value", [32.0, "32", "/data/run"])
+def test_set_values(value):
+    assert not hylo_distillation.unset(value)
+
+
+LEGACY = ("tokens", "labels", "loss_mask", "attention_mask", "position_ids")
+
+
+def _module(name, **attrs):
+    module = ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    return module
+
+
+def _install(monkeypatch, mamba, hybrid=None):
+    monkeypatch.setitem(sys.modules, "pretrain_mamba", mamba)
+    if hybrid is not None:
+        monkeypatch.setitem(sys.modules, "pretrain_hybrid", hybrid)
+
+
+def test_old_megatron_reads_pretrain_mamba_positionally(monkeypatch):
+    # Before 0.19 get_batch returns the legacy five first, then any packing metadata.
+    mamba = _module(
+        "pretrain_mamba",
+        train_valid_test_datasets_provider=object(),
+        get_batch=lambda it: [f"{key}:{next(it)}" for key in LEGACY] + ["cu_seqlens", "max_seqlen"],
+    )
+    _install(monkeypatch, mamba)
+    assert hylo_distillation.hybrid_pretrain_module() is mamba
+    assert hylo_distillation.hybrid_batch_getter()(iter([7] * 5)) == tuple(f"{key}:7" for key in LEGACY)
+
+
+def test_megatron_0_19_reads_pretrain_hybrid_by_batch_key(monkeypatch):
+    # Megatron-core 0.19 returns [batch[key] for key in BATCH_KEYS], in alphabetical order.
+    keys = (
+        "attention_mask",
+        "cu_seqlens",
+        "cu_seqlens_padded",
+        "hybrid_cp_group",
+        "labels",
+        "local_cp_size",
+        "loss_mask",
+        "max_seqlen",
+        "position_ids",
+        "tokens",
+    )
+    hybrid = _module(
+        "pretrain_hybrid",
+        train_valid_test_datasets_provider=object(),
+        BATCH_KEYS=keys,
+        get_batch=lambda it: [key for key in keys],
+    )
+    _install(monkeypatch, _module("pretrain_mamba"), hybrid)
+    assert hylo_distillation.hybrid_pretrain_module() is hybrid
+    assert hylo_distillation.hybrid_batch_getter()(iter(())) == LEGACY
+
+
+def test_megatron_0_19_get_batch_must_still_carry_the_legacy_keys(monkeypatch):
+    hybrid = _module(
+        "pretrain_hybrid",
+        train_valid_test_datasets_provider=object(),
+        BATCH_KEYS=("tokens", "labels"),
+        get_batch=lambda it: ["t", "l"],
+    )
+    _install(monkeypatch, _module("pretrain_mamba"), hybrid)
+    with pytest.raises(KeyError):
+        hylo_distillation.hybrid_batch_getter()(iter(()))

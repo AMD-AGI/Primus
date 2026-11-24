@@ -11,6 +11,7 @@ modules:
     config: sft_trainer.yaml
     model: hylo_gdn_1B_hybrid.yaml
     overrides:
+      model_type: hylo
       stage: sft
       spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hylo_grouped_mla_hybrid_stack_spec']
       hybrid_attention_ratio: 1.0
@@ -25,7 +26,6 @@ modules:
       # teacher keeps Llama-3's rope scaling while the student runs YaRN.
       hylo_teacher_use_rope_scaling: true
       hylo_kl_weight: 1.0
-      hylo_ce_weight: 0.0
 
       load: ${HYLO_MLA_UPCYCLED_CKPT:./data/checkpoints/hylo-mla-1b-upcycled}
       save: ${HYLO_MLA_ILD_OUTPUT:./output/hylo-mla-1b-ild}
@@ -41,7 +41,6 @@ modules:
       sft_dataset_name: ${HYLO_SFT_DATASET:JunxiongWang/sftdatasetv3}
       sft_conversation_format: openai
       seq_length: ${HYLO_SEQ_LENGTH:4096}
-      max_position_embeddings: 131072
       original_max_position_embeddings: 8192
       rotary_scaling_factor: 32.0
       micro_batch_size: ${HYLO_MICRO_BATCH_SIZE:12}

@@ -37,9 +37,7 @@ def test_eval_summary_averages_every_logged_step(tmp_path):
     summary = _load("summarize_hylo_ild_eval")
     log = tmp_path / "eval.log"
     log.write_text(
-        "noise\n"
-        "[x] : [HyLo] hylo ild=30.000000, hylo hidden ild=18.000000, hylo mixer ild=12.000000\n"
-        "[x] : [HyLo] hylo ild=34.000000, hylo hidden ild=20.000000, hylo mixer ild=14.000000\n"
+        "noise\n" + _iteration_line(1, 2, 30.0, 18.0, 12.0) + _iteration_line(2, 2, 34.0, 20.0, 14.0)
     )
     s = summary.summarize(summary.parse(str(log)))
     assert s["n"] == 2

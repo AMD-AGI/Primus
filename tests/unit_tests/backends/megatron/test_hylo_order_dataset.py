@@ -50,15 +50,20 @@ def test_megatron_sampler_gives_each_rank_its_recorded_batch(tmp_path):
         np.testing.assert_array_equal(np.stack(served), batches[rank])
 
 
-def test_every_position_is_supervised_and_padding_none(tmp_path):
+def test_every_position_is_supervised(tmp_path):
     batches = _record(tmp_path)
     ds = HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
     sample = ds[1]
     assert sample["loss_mask"].tolist() == [1.0] * SEQ
     assert sample["labels"].tolist() == batches[0, 0, 1, 1:].tolist() + [0]
-    padding = ds[None]
-    assert padding["loss_mask"].tolist() == [0.0] * SEQ
-    assert padding["tokens"].shape == (SEQ,)
+
+
+@pytest.mark.parametrize("idx", [None, -1, STEPS * MBS * DP])
+def test_rejects_padding_and_indices_past_the_recording(tmp_path, idx):
+    _record(tmp_path)
+    ds = HyLoOrderDataset(str(tmp_path), seq_length=SEQ, micro_batch_size=MBS, data_parallel_size=DP)
+    with pytest.raises(IndexError, match="recorded samples 0 to 29"):
+        ds[idx]
 
 
 def test_rejects_a_mismatched_layout(tmp_path):

@@ -95,7 +95,7 @@ class Mamba2DxbMixer(MegatronModule):
         if d_xb is None:
             from megatron.training import get_args
 
-            d_xb = get_args().mamba_d_xb
+            d_xb = getattr(get_args(), "mamba_d_xb", None)
         if d_xb is None:
             raise ValueError("Mamba2DxbMixer needs mamba_d_xb")
 

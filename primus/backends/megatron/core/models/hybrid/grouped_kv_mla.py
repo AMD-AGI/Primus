@@ -19,7 +19,8 @@ from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
 
 
 def repeat_kv_heads(kv: torch.Tensor, head_dim: int, repeats: int) -> torch.Tensor:
-    """Repeat each ``head_dim`` block of the last dimension ``repeats`` times in place."""
+    """A new tensor with each ``head_dim`` block of ``kv``'s last dimension repeated ``repeats`` times
+    in a row."""
     if repeats == 1:
         return kv
     return kv.unflatten(-1, (-1, head_dim)).repeat_interleave(repeats, dim=-2).flatten(-2)
@@ -47,12 +48,18 @@ class GroupedKVUpProjection(TEColumnParallelLinear):
         if kv_heads is None:
             from megatron.training import get_args
 
-            kv_heads = get_args().hylo_mla_kv_heads
+            kv_heads = getattr(get_args(), "hylo_mla_kv_heads", None)
         heads = config.num_attention_heads
         if not kv_heads or heads % int(kv_heads) or output_size % heads:
             raise ValueError(
                 f"GroupedKVUpProjection needs hylo_mla_kv_heads dividing the {heads} "
                 f"attention heads, got {kv_heads}"
+            )
+        tp = int(getattr(config, "tensor_model_parallel_size", 1) or 1)
+        if int(kv_heads) % tp:
+            raise ValueError(
+                f"GroupedKVUpProjection needs tensor_model_parallel_size {tp} dividing "
+                f"hylo_mla_kv_heads {kv_heads}, so each rank holds whole key/value heads"
             )
         repeats = heads // int(kv_heads)
         super().__init__(input_size, output_size // repeats, config=config, **kwargs)

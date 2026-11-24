@@ -6,7 +6,8 @@
 ###############################################################################
 """Mean Enhanced-ILD loss per evaluated checkpoint, from ``run_hylo_ild_eval.sh`` logs.
 
-Every evaluation step logs ``[HyLo] hylo ild=..., hylo hidden ild=..., hylo mixer ild=...``.
+Reads Megatron's iteration lines (``iteration N/ M | ... | hylo ild: ... |``). The evaluation
+recipes log every step and train one micro-batch a step, so each line is one evaluated batch.
 Pass one ``name=log`` pair per checkpoint::
 
     python tools/hybrid/summarize_hylo_ild_eval.py init=eval-init.log it6934=eval-it6934.log \\
@@ -20,7 +21,8 @@ import statistics
 import sys
 from typing import Dict, List, Sequence
 
-_PART = re.compile(r"(hylo (?:hidden |mixer )?ild)=([0-9.eE+-]+)")
+_ITER = re.compile(r"iteration\s+\d+/\s*\d+ \|(.*)")
+_NUM = re.compile(r"\s*([-+]?[0-9.]+(?:[eE][-+]?[0-9]+)?)")
 _KEYS = ("hylo ild", "hylo hidden ild", "hylo mixer ild")
 
 
@@ -29,9 +31,14 @@ def parse(path: str) -> Dict[str, List[float]]:
     values: Dict[str, List[float]] = {}
     with open(path, errors="replace") as f:
         for line in f:
-            if "[HyLo]" in line:
-                for key, value in _PART.findall(line):
-                    values.setdefault(key, []).append(float(value))
+            m = _ITER.search(line)
+            if not m:
+                continue
+            for part in m.group(1).split("|"):
+                key, _, value = part.partition(":")
+                number = _NUM.match(value)
+                if number and key.strip() in _KEYS:
+                    values.setdefault(key.strip(), []).append(float(number.group(1)))
     return values
 
 
@@ -56,7 +63,7 @@ def main(argv: Sequence[str] = None) -> List[tuple]:
         s = summarize(parse(path))
         rows.append((name, s))
         if not s:
-            print(f"{name:18s} no [HyLo] lines")
+            print(f"{name:18s} no iteration lines with 'hylo ild'")
             continue
         print(
             f"{name:18s} {s['n']:4d} {s['hylo ild']:9.3f} {s['median']:9.3f} "

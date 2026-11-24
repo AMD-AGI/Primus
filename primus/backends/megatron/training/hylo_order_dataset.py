@@ -14,7 +14,9 @@ rank ``r`` the samples ``[t * G + r * M, t * G + (r + 1) * M)`` of step ``t`` (`
 each rank the batch the reference rank of the same index trained on at the same step.
 
 Every position is supervised, as in HyLo's packed KL (FLA's ``kl_div_kernel`` over all of the
-window's logits). Enhanced-ILD ignores the mask on packed windows.
+window's logits). Enhanced-ILD ignores the mask on packed windows. ``labels`` (the next tokens, 0
+at the last position) go unread: ``model_type: hylo``, the only one that replays, compares the
+student with the teacher.
 """
 
 from __future__ import annotations
@@ -57,17 +59,20 @@ class HyLoOrderDataset(Dataset):
         return self.steps * self.mbs * self.dp
 
     def __getitem__(self, idx):
-        # Megatron pads a short last batch with None; like GPTDataset, it contributes no loss.
-        padding = idx is None
-        step, within = divmod(0 if padding else int(idx), self.mbs * self.dp)
+        # Megatron pads only a short last batch (with None), and every step here is a whole one.
+        if idx is None or not 0 <= int(idx) < len(self):
+            raise IndexError(
+                f"HyLoOrderDataset serves recorded samples 0 to {len(self) - 1}, not {idx!r}; "
+                "train for at most the recorded steps"
+            )
+        step, within = divmod(int(idx), self.mbs * self.dp)
         rank, j = divmod(within, self.mbs)
         tokens = torch.from_numpy(np.array(self.ranks[rank][step, j], dtype=np.int64))
         labels = torch.roll(tokens, shifts=-1, dims=0)
         labels[-1] = 0
-        loss_mask = torch.zeros(self.seq) if padding else torch.ones(self.seq)
         return {
             "tokens": tokens,
             "labels": labels,
-            "loss_mask": loss_mask,
+            "loss_mask": torch.ones(self.seq),
             "position_ids": self.position_ids,
         }

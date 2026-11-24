@@ -23,7 +23,6 @@ modules:
       create_attention_mask_in_dataloader: false
 
       seq_length: 128
-      max_position_embeddings: 131072
       micro_batch_size: 1
       global_batch_size: 1
       train_iters: 1

@@ -3,7 +3,11 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Native Megatron runtime for HyLo Enhanced-ILD and pure-KL SFT.
+"""Native Megatron runtime for HyLo Enhanced-ILD and pure-KL SFT (``model_type: hylo``).
+
+``registry.py`` builds the student with ``hylo_builder`` and trains it with this module's
+``forward_step`` and ``train_valid_test_datasets_provider``; ``patches/hylo_patches.py`` checks the
+run's settings and gives the SFT trainer ``create_sft_forward_step``.
 
 The first implementation intentionally supports TP=PP=1. Data parallel ranks
 each own a frozen teacher, which keeps the layer mapping identical to the
@@ -13,20 +17,56 @@ reference Hugging Face implementation and avoids sharding ambiguities.
 from __future__ import annotations
 
 import functools
-import glob
 import math
 from argparse import Namespace
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from types import ModuleType
+from typing import Any, Iterable, Optional
 
 import torch
 import torch.nn.functional as F
+from torch.autograd.function import once_differentiable
 
-from primus.backends.megatron.training.hylo_utils import hybrid_batch_getter, unset
+from primus.core.utils.module_utils import log_rank_0
 
 _KL_CHUNK = 4096
 _RUNTIME: Optional["HyLoRuntime"] = None
+
+
+def unset(value) -> bool:
+    """True for a config value left empty: ``None`` or a blank/``null``/``none`` string."""
+    return value is None or (isinstance(value, str) and value.strip().lower() in ("", "null", "none"))
+
+
+def hybrid_pretrain_module() -> ModuleType:
+    """Megatron-LM's hybrid-model training script, whose ``get_batch`` and dataset provider HyLo uses.
+
+    Megatron-core 0.19 moved them to ``pretrain_hybrid``; its ``pretrain_mamba`` only forwards there.
+    """
+    import pretrain_mamba
+
+    if hasattr(pretrain_mamba, "train_valid_test_datasets_provider"):
+        return pretrain_mamba
+    import pretrain_hybrid
+
+    return pretrain_hybrid
+
+
+# get_batch's order before Megatron-core 0.19; from 0.19 it returns its module's BATCH_KEYS order.
+_LEGACY_BATCH_KEYS = ("tokens", "labels", "loss_mask", "attention_mask", "position_ids")
+
+
+def hybrid_batch_getter():
+    """``data_iterator -> (tokens, labels, loss_mask, attention_mask, position_ids)`` from the hybrid
+    script's ``get_batch``."""
+    module = hybrid_pretrain_module()
+    keys = tuple(getattr(module, "BATCH_KEYS", _LEGACY_BATCH_KEYS))
+
+    def get(data_iterator):
+        batch = dict(zip(keys, module.get_batch(data_iterator)))
+        return tuple(batch[key] for key in _LEGACY_BATCH_KEYS)
+
+    return get
 
 
 def _unwrap(model: Any) -> Any:
@@ -161,9 +201,11 @@ class _FusedMaskedKL(torch.autograd.Function):
         return loss.sum()
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_output):
         grad, mask = ctx.saved_tensors
         scale = grad_output if mask is None else mask.unsqueeze(-1) * grad_output
+        # In place: another full-vocabulary copy would double the backward's peak memory.
         return grad.mul_(scale), None, None
 
 
@@ -197,8 +239,6 @@ _KL_IMPLS = ("fused", "chunked")
 
 @functools.lru_cache(maxsize=None)
 def _log_kl_impl(impl: str, dtype: torch.dtype) -> None:
-    from primus.core.utils.module_utils import log_rank_0
-
     how = "FLA's fused kl_div_kernel" if impl == "fused" else "the chunked PyTorch loop"
     log_rank_0(f"[HyLo] KL(teacher || student) with {how}, on {dtype} logits")
 
@@ -261,7 +301,10 @@ class _Capture:
 
 
 class HyLoRuntime:
-    """Own the frozen teacher and hook state for one Megatron process."""
+    """Own the frozen teacher and hook state for one Megatron process.
+
+    Only Enhanced-ILD (stage ``ild``) reads the captures, so the pure-KL stage installs no hooks.
+    """
 
     def __init__(self, teacher: torch.nn.Module, stage: str):
         self.teacher = teacher
@@ -270,7 +313,8 @@ class HyLoRuntime:
         self.student_capture = _Capture()
         self._student_hooked: set[int] = set()
         self._handles: list[Any] = []
-        self._install_teacher_hooks()
+        if stage == "ild":
+            self._install_teacher_hooks()
 
     def _install_teacher_hooks(self) -> None:
         decoder = _unwrap(self.teacher).decoder
@@ -323,6 +367,8 @@ class HyLoRuntime:
         )
 
     def install_student_hooks(self, model: torch.nn.Module) -> None:
+        if self.stage != "ild":
+            return
         base = _unwrap(model)
         if id(base) in self._student_hooked:
             return
@@ -379,28 +425,19 @@ class HyLoRuntime:
         self.teacher_capture.clear()
         self.student_capture.clear()
 
-
-def _resolve_legacy_checkpoint(path: str) -> str:
-    root = Path(path)
-    if root.is_file():
-        return str(root)
-    tracker = root / "latest_checkpointed_iteration.txt"
-    if tracker.is_file():
-        value = tracker.read_text().strip()
-        iteration = "release" if value == "release" else f"iter_{int(value):07d}"
-        root = root / iteration
-    elif not root.name.startswith(("iter_", "release")):
-        candidates = sorted(glob.glob(str(root / "iter_*")))
-        if candidates:
-            root = Path(candidates[-1])
-    candidates = sorted(root.glob("mp_rank_00*/model_optim_rng.pt"))
-    if not candidates:
-        raise FileNotFoundError(f"no TP=1 legacy checkpoint below {path}")
-    return str(candidates[0])
+    def remove_hooks(self) -> None:
+        for handle in self._handles:
+            handle.remove()
+        self._handles.clear()
+        self._student_hooked.clear()
 
 
 def _load_teacher_envelope(checkpoint: str) -> dict:
-    envelope = torch.load(_resolve_legacy_checkpoint(checkpoint), map_location="cpu", weights_only=False)
+    from primus.backends.megatron.checkpoint.hybrid_upcycle import (
+        resolve_checkpoint_file,
+    )
+
+    envelope = torch.load(resolve_checkpoint_file(checkpoint), map_location="cpu", weights_only=False)
     if not isinstance(envelope, dict):
         raise ValueError(f"teacher checkpoint {checkpoint} is not a mapping")
     return envelope
@@ -432,17 +469,42 @@ def set_teacher_yarn(config: Any, factor: float, original_max_position_embedding
     config.yarn_correction_range_round_to_int = True
 
 
+# The teacher runs in this run's process groups and precision, whatever its checkpoint was saved with.
+_RUN_FIELDS = (
+    "tensor_model_parallel_size",
+    "pipeline_model_parallel_size",
+    "context_parallel_size",
+    "sequence_parallel",
+    "fp16",
+    "bf16",
+    "params_dtype",
+)
+
+
 def teacher_args_from_checkpoint(args: Any, saved: Any) -> Namespace:
-    """The teacher checkpoint's saved args, with any field its Megatron predates taken from this run.
+    """The teacher checkpoint's saved args, with this run's parallel layout and precision, and any
+    field its Megatron predates taken from this run.
 
     The teacher is built dense, so its saved ``moe_*`` fields are only the defaults of the Megatron that
     wrote it; newer Megatron rejects some of them (deprecated knobs), so those come from this run too.
+    Other saved runtime fields, such as ``seq_length`` and the fusion flags, are kept.
     """
-    kept = {name: value for name, value in vars(saved).items() if not name.startswith("moe_")}
+    kept = {
+        name: value
+        for name, value in vars(saved).items()
+        if not name.startswith("moe_") and name not in _RUN_FIELDS
+    }
+    changed = [
+        name
+        for name in _RUN_FIELDS
+        if hasattr(saved, name) and hasattr(args, name) and getattr(saved, name) != getattr(args, name)
+    ]
+    if changed:
+        log_rank_0(f"[HyLo] the teacher takes this run's {', '.join(changed)}, not its checkpoint's")
     return Namespace(**{**vars(args), **kept})
 
 
-def _build_teacher(args, pre_process, post_process, config, pg_collection):
+def _build_teacher(args, pre_process, post_process, pg_collection):
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.gpt_layer_specs import (
         get_gpt_layer_with_transformer_engine_spec,
@@ -508,30 +570,25 @@ def _build_teacher(args, pre_process, post_process, config, pg_collection):
     return teacher
 
 
-def wrap_model_provider(base_provider: Callable, args: Any) -> Callable:
-    """Build the student normally and create one frozen dense teacher beside it."""
+def hylo_builder(args, pre_process, post_process, vp_stage=None, config=None, pg_collection=None):
+    """The hybrid student, built as ``model_type: mamba`` builds it, and the frozen dense teacher
+    the forward steps run beside it. A new model gets a new teacher."""
+    global _RUNTIME
+    from primus.backends.megatron.core.models.registry import MODEL_FAMILIES
 
-    def provider(*provider_args, **provider_kwargs):
-        global _RUNTIME
-        student = base_provider(*provider_args, **provider_kwargs)
-        if _RUNTIME is None:
-            config = provider_kwargs.get("config") or getattr(student, "config", None)
-            if config is None:
-                raise RuntimeError("HyLo could not resolve the student TransformerConfig")
-            pre_process = provider_kwargs.get("pre_process", provider_args[0] if provider_args else True)
-            post_process = provider_kwargs.get(
-                "post_process", provider_args[1] if len(provider_args) > 1 else True
-            )
-            pg_collection = provider_kwargs.get("pg_collection")
-            teacher = _build_teacher(args, pre_process, post_process, config, pg_collection)
-            stage = str(args.hylo_distill_stage).lower()
-            _RUNTIME = HyLoRuntime(teacher, stage)
-        return student
-
-    return provider
+    mamba = MODEL_FAMILIES["mamba"]
+    student = mamba.resolve(mamba.builder)(
+        args, pre_process, post_process, vp_stage, config=config, pg_collection=pg_collection
+    )
+    if _RUNTIME is not None:
+        _RUNTIME.remove_hooks()
+    teacher = _build_teacher(args, pre_process, post_process, pg_collection)
+    _RUNTIME = HyLoRuntime(teacher, str(args.hylo_distill_stage).lower())
+    return student
 
 
 def validate_hylo_args(args: Any) -> None:
+    """Reject settings native HyLo does not support, and set the warmup ``hylo_warmup_ratio`` asks for."""
     if int(getattr(args, "tensor_model_parallel_size", 1)) != 1:
         raise ValueError("native HyLo currently requires tensor_model_parallel_size=1")
     if int(getattr(args, "pipeline_model_parallel_size", 1)) != 1:
@@ -545,9 +602,28 @@ def validate_hylo_args(args: Any) -> None:
         getattr(args, "hylo_teacher_yarn_original_max_position_embeddings", None)
     ):
         raise ValueError("hylo_teacher_yarn_factor needs hylo_teacher_yarn_original_max_position_embeddings")
-    if stage == "sft" and float(getattr(args, "hylo_ce_weight", 0.0)) != 0.0:
-        raise ValueError("the native 4MLA12GDN recipe requires hylo_ce_weight=0")
+    if float(getattr(args, "hylo_ce_weight", 0.0) or 0.0) != 0.0:
+        raise ValueError("HyLo distillation has no cross-entropy term; hylo_ce_weight must be 0")
+    if getattr(getattr(args, "lora", None), "enabled", False):
+        raise ValueError("native HyLo does not support LoRA")
+    if not unset(getattr(args, "hylo_order_data_dir", None)):
+        _check_replay_args(args)
     _derive_warmup(args)
+
+
+def _check_replay_args(args: Any) -> None:
+    """Replay serves one recorded micro-batch per data-parallel rank per optimizer step."""
+    if int(getattr(args, "context_parallel_size", 1) or 1) != 1:
+        raise ValueError("hylo_order_data_dir does not support context_parallel_size > 1")
+    tp = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
+    pp = int(getattr(args, "pipeline_model_parallel_size", 1) or 1)
+    data_parallel = int(args.world_size) // (tp * pp)
+    if args.global_batch_size != args.micro_batch_size * data_parallel:
+        raise ValueError(
+            "hylo_order_data_dir replays one recorded micro-batch per rank per step; "
+            f"global_batch_size={args.global_batch_size} must be micro_batch_size x data-parallel size "
+            f"({args.micro_batch_size} x {data_parallel})"
+        )
 
 
 def _derive_warmup(args: Any) -> None:
@@ -562,14 +638,39 @@ def _derive_warmup(args: Any) -> None:
         raise ValueError("hylo_warmup_ratio needs train_iters")
     train_iters = int(args.train_iters)
     decay_iters = int(getattr(args, "lr_decay_iters", None) or train_iters)
-    args.lr_warmup_iters = max(0, min(math.ceil(train_iters * float(ratio)), decay_iters - 1))
+    warmup = max(0, min(math.ceil(train_iters * float(ratio)), decay_iters - 1))
+    previous = getattr(args, "lr_warmup_iters", None)
+    if previous not in (None, warmup):
+        log_rank_0(f"[HyLo] hylo_warmup_ratio {ratio} sets lr_warmup_iters to {warmup}, not {previous}")
+    args.lr_warmup_iters = warmup
 
 
-def _log_loss(metrics: dict[str, torch.Tensor]) -> None:
-    from primus.core.utils.module_utils import log_rank_0
+def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None):
+    """The hybrid script's datasets, or with ``hylo_order_data_dir`` set, a reference HyLo run's
+    recorded batches (``HyLoOrderDataset``) in its order. Replay builds no validation or test set."""
+    from megatron.core import parallel_state
+    from megatron.training import get_args, print_rank_0
 
-    parts = ", ".join(f"{name}={value.detach().float().item():.6f}" for name, value in metrics.items())
-    log_rank_0(f"[HyLo] {parts}")
+    from primus.backends.megatron.training.hylo_order_dataset import HyLoOrderDataset
+
+    args = get_args()
+    if unset(getattr(args, "hylo_order_data_dir", None)):
+        return hybrid_pretrain_module().train_valid_test_datasets_provider(
+            train_val_test_num_samples, vp_stage=vp_stage
+        )
+    train_ds = HyLoOrderDataset(
+        args.hylo_order_data_dir,
+        seq_length=args.seq_length,
+        micro_batch_size=args.micro_batch_size,
+        data_parallel_size=parallel_state.get_data_parallel_world_size(),
+    )
+    if len(train_ds) < args.train_iters * args.global_batch_size:
+        raise ValueError(
+            f"{args.hylo_order_data_dir} has {train_ds.steps} recorded steps, "
+            f"fewer than train_iters={args.train_iters}"
+        )
+    print_rank_0(f"> HyLo-order dataset: {train_ds.steps} steps from {args.hylo_order_data_dir}")
+    return train_ds, None, None
 
 
 def sft_real_tokens(tokens: torch.Tensor, loss_mask: torch.Tensor, pad_id: int) -> torch.Tensor:
@@ -587,6 +688,7 @@ def sft_real_tokens(tokens: torch.Tensor, loss_mask: torch.Tensor, pad_id: int) 
     return (real_from_here > 0).transpose(0, 1)
 
 
+@functools.lru_cache(maxsize=1)
 def _sft_pad_id() -> int:
     from megatron.training import get_tokenizer
 
@@ -602,7 +704,6 @@ def _ild_count(loss: torch.Tensor) -> torch.Tensor:
 
 
 def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, torch.Tensor]):
-    _log_loss(metrics)
     report = {
         name: torch.cat([value.detach().float().view(1), tokens.detach().float().view(1)])
         for name, value in metrics.items()
@@ -610,51 +711,46 @@ def _loss_result(loss: torch.Tensor, tokens: torch.Tensor, metrics: dict[str, to
     return loss, tokens, report
 
 
-def create_pretrain_forward_step():
+def forward_step(data_iterator, model, return_schedule_plan=False):
+    """Megatron forward step on a hybrid-script batch: the frozen teacher, then the student."""
     from megatron.training import get_args
 
-    get_batch = hybrid_batch_getter()
+    if return_schedule_plan:
+        raise NotImplementedError("HyLo distillation does not support schedule plans")
+    assert _RUNTIME is not None
+    tokens, labels, loss_mask, attention_mask, position_ids = hybrid_batch_getter()(data_iterator)
+    _RUNTIME.install_student_hooks(model)
+    _RUNTIME.clear()
+    logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
+    with torch.no_grad():
+        teacher_logits = _RUNTIME.teacher(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
+    student_logits = model(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
 
-    def forward_step(data_iterator, model, return_schedule_plan=False):
-        if return_schedule_plan:
-            raise NotImplementedError("HyLo distillation does not support schedule plans")
-        assert _RUNTIME is not None
-        tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator)
-        _RUNTIME.install_student_hooks(model)
-        _RUNTIME.clear()
-        logits_kwargs = {} if _RUNTIME.stage == "ild" else _logits_kwargs()
-        with torch.no_grad():
-            teacher_logits = _RUNTIME.teacher(
-                tokens, position_ids, attention_mask, labels=None, **logits_kwargs
-            )
-        student_logits = model(tokens, position_ids, attention_mask, labels=None, **logits_kwargs)
+    def loss_func(_output):
+        if _RUNTIME.stage == "ild":
+            loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
+            return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
+        loss, tokens_count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
+        weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
+        return _loss_result(weighted_loss, tokens_count, {"hylo kl": loss.detach()})
 
-        def loss_func(_output):
-            if _RUNTIME.stage == "ild":
-                loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures())
-                return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
-            loss, tokens_count = teacher_kl(student_logits, teacher_logits.detach(), loss_mask)
-            weighted_loss = loss * float(getattr(get_args(), "hylo_kl_weight", 1.0))
-            return _loss_result(weighted_loss, tokens_count, {"hylo kl": loss.detach()})
-
-        return student_logits, loss_func
-
-    return forward_step
+    return student_logits, loss_func
 
 
 def create_sft_forward_step():
-    """SFT forward step for the exact HyLo pure teacher-KL objective."""
+    """SFT forward step for the exact HyLo objectives, in place of the SFT trainer's."""
+    from primus.backends.megatron.sft.forward_step import _empty_loss_result
 
     def forward_step(data_iterator, model, return_schedule_plan=False):
         if return_schedule_plan:
             raise NotImplementedError("HyLo SFT does not support schedule plans")
         assert _RUNTIME is not None
         if data_iterator is None:
-            return None, lambda _output: _loss_result(torch.tensor(0.0), torch.tensor(0, dtype=torch.int), {})
+            return None, lambda _output: _empty_loss_result()
         try:
             batch = next(data_iterator)
         except StopIteration:
-            return None, lambda _output: _loss_result(torch.tensor(0.0), torch.tensor(0, dtype=torch.int), {})
+            return None, lambda _output: _empty_loss_result()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         tokens = batch["input_ids"].to(device=device, dtype=torch.long)
         loss_mask = batch["loss_mask"].to(device=device, dtype=torch.float32)
@@ -684,8 +780,3 @@ def create_sft_forward_step():
         return student_logits, loss_func
 
     return forward_step
-
-
-def reset_runtime_for_tests() -> None:
-    global _RUNTIME
-    _RUNTIME = None
