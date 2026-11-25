@@ -20,8 +20,8 @@ rather than on a tag, a release branch, or HEAD:
     did not exist while v26.7.0 was already tagged.
 
 Resolution order per family: `--build-commit FAMILY=SHA` when given, then
-`ARG PRIMUS_BRANCH` from the release Dockerfile when it is a commit (the primus
-image pins one), otherwise the image's own /workspace/Primus HEAD from the
+`ARG PRIMUS_COMMIT` (`PRIMUS_BRANCH` before v26.10) from the release Dockerfile
+when it is a commit (the primus image pins one), otherwise the image's own /workspace/Primus HEAD from the
 snapshot (the JAX Dockerfile pinned PRIMUS_BRANCH=main through v26.7, so only the
 image knew).
 
@@ -128,7 +128,8 @@ def resolve_family(version, family, previous, override=None):
     image = (snapshot or {}).get("image") or C.image_for(family, version)
     ships_primus = snapshot is None or "Primus" in snapshot.get("workspace_repos", {})
 
-    pinned = args.get("PRIMUS_BRANCH", "")
+    pin_arg = "PRIMUS_COMMIT" if "PRIMUS_COMMIT" in args else "PRIMUS_BRANCH"  # renamed in v26.10
+    pinned = args.get(pin_arg, "")
     if override:
         resolved = git("rev-parse", "--verify", "--quiet", f"{override}^{{commit}}").stdout.strip()
         build_commit = resolved or None
@@ -138,10 +139,10 @@ def resolve_family(version, family, previous, override=None):
             else f"unresolved: --build-commit {override} is not a local commit (fetch origin)"
         )
     elif SHA40.match(pinned):
-        build_commit, origin = pinned, "Dockerfile ARG PRIMUS_BRANCH"
+        build_commit, origin = pinned, f"Dockerfile ARG {pin_arg}"
     elif snapshot and snapshot.get("build_commit"):
         build_commit = snapshot["build_commit"]
-        origin = f"image /workspace/Primus (Dockerfile pins PRIMUS_BRANCH={pinned or 'unset'})"
+        origin = f"image /workspace/Primus (Dockerfile pins {pin_arg}={pinned or 'unset'})"
     elif not ships_primus:
         build_commit = None
         origin = "unresolved: the image ships no /workspace/Primus; pass --build-commit " f"{family}=<sha>"
