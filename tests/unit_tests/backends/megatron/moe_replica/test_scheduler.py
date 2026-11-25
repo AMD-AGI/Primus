@@ -5,8 +5,8 @@
 ###############################################################################
 
 """ReplicaScheduler bookkeeping on one CPU process (gloo, EP size 1): configuration, evaluation vs. recompute
-forwards, the end-of-step guard, and the routes and grouped GEMM operand handed to the dispatcher and the
-experts."""
+forwards, the end of the step and the slot restores in pipeline order, the end-of-step guard, and the routes and
+grouped GEMM operand handed to the dispatcher and the experts."""
 
 import weakref
 from collections import deque
@@ -103,12 +103,12 @@ def test_recompute_replays_the_forward(group, placement):
     for mb in range(3):
         with torch.no_grad():
             fwd = s.remap(topk(mb))
-        state = (s.use_slots, s.plan, s.cur_mb)
+        state = (s.use_slots, s.slot_target, s.cur_mb)
         assert len(s.replay) == 1
-        s.use_slots, s.cur_mb = "anything", 99  # the recompute must restore both
+        s.use_slots, s.slot_target, s.cur_mb = "anything", "anything", 99  # the recompute must restore them
         rec = s.remap(topk(mb))
         assert rec is fwd and not s.replay
-        assert (s.use_slots, s.plan, s.cur_mb) == state
+        assert (s.use_slots, s.slot_target, s.cur_mb) == state
         outs.append(state[2])
     assert outs == [0, 1, 2] and s.mb_in_step == 2
     s.end_step()
@@ -164,8 +164,8 @@ def slots_with_table(table, grad_dtype=torch.float32, transport_cls=RecordingTra
         B=2,
         rank=0,
         transport=transport,
-        plan=SimpleNamespace(slot_expert=torch.tensor(table)),
-        version=1,
+        slot_target=(torch.tensor(table), 1),
+        has_replicas=True,
         slots=[],
         cfg=SimpleNamespace(async_comm=False, grad_dtype=grad_dtype),
         is_last_microbatch=lambda: False,
@@ -182,11 +182,11 @@ def test_slots_push_only_changed_experts_and_return_before_reassigning():
     slots.sync()  # same table: nothing moves
     assert len(transport.calls) == 1
     # a new expert in an empty slot: push only
-    sched.plan.slot_expert, sched.version = torch.tensor([[2, 3], [0, 1]]), 2
+    sched.slot_target = (torch.tensor([[2, 3], [0, 1]]), 2)
     slots.sync()
     assert transport.calls[1:] == [("push", [[2, -1], [0, 1]], [[2, 3], [0, 1]])]
     # a slot that held expert 1 gets expert 3: its gradients go back first, then the push
-    sched.plan.slot_expert, sched.version = torch.tensor([[2, 3], [0, 3]]), 3
+    sched.slot_target = (torch.tensor([[2, 3], [0, 3]]), 3)
     slots.sync()
     assert transport.calls[2:] == [
         ("return", [[2, 3], [0, 1]]),
@@ -199,7 +199,7 @@ def test_slots_return_before_a_slot_is_emptied():
     # it collected must go back first, or they are lost and later added to whatever expert the slot gets next
     slots, sched, transport = slots_with_table([[2, -1], [0, 1]])
     slots.sync()
-    sched.plan.slot_expert, sched.version = torch.tensor([[2, -1], [0, -1]]), 2
+    sched.slot_target = (torch.tensor([[2, -1], [0, -1]]), 2)
     slots.sync()
     assert transport.calls[1:] == [
         ("return", [[2, -1], [0, 1]]),
@@ -212,7 +212,7 @@ def test_slots_return_everything_and_start_over_after_invalidate():
     slots.sync()
     slots.return_grads()
     slots.invalidate()
-    sched.version = 2  # the next step's plan, with the same table
+    sched.slot_target = (sched.slot_target[0], 2)  # the next step's plan, with the same table
     slots.sync()
     assert transport.calls[1:] == [
         ("return", [[2, -1], [0, 1]]),
@@ -277,36 +277,158 @@ class _FakeLinear(torch.nn.Module):
         self.sched = sched
 
 
-class _FakeMoELayer(torch.nn.Module):
-    def forward(self, x, scale=1.0):
-        return x * scale
-
-
-def test_attach_hands_over_the_scheduler_and_ends_the_step_after_the_last_microbatch(group, monkeypatch):
-    monkeypatch.setattr(sch, "_num_microbatches", lambda: 2)
+def test_attach_hands_over_the_scheduler(group):
     s, _ = make(group)
     s.experts = None
-    layer = _FakeMoELayer()
+    layer = torch.nn.Module()
     layer.token_dispatcher = SimpleNamespace(replica=s)
     layer.experts = torch.nn.Module()
     layer.experts.linear_fc1, layer.experts.linear_fc2 = _FakeLinear(), _FakeLinear()
     sch.attach(layer)
     assert layer.experts.linear_fc1.sched is s and layer.experts.linear_fc2.sched is s
     assert s.experts() is layer.experts and s.moe_layer() is layer
+
+
+def _forward(s, x, mb):
+    s.cur_mb = mb  # set by the micro-batch's remap
+    return s.end_step_after_backward(x) * 2.0
+
+
+def test_the_step_ends_after_the_last_microbatch_in_pipeline_order(group, monkeypatch):
+    # 1F1B with two micro-batches in flight: later forwards run before the backward of earlier ones, so the end of
+    # the step must follow the micro-batch of each backward's own forward, not the scheduler's latest
+    monkeypatch.setattr(sch, "_num_microbatches", lambda: 3)
+    s, module = make(group)
+    module.train()
     ended = []
-    s.end_step = lambda: ended.append(s.cur_mb)
+    s.end_step = lambda: ended.append(s.next_backward)
     x = torch.ones(3, requires_grad=True)
-    for mb in range(2):
-        s.cur_mb = mb  # set by the micro-batch's remap
-        layer(x, 2.0).sum().backward()  # the arguments after the input pass through
-        assert ended == ([1] if mb == 1 else [])
-    assert torch.equal(x.grad, torch.full((3,), 4.0))
+    outs = {mb: _forward(s, x, mb) for mb in (0, 1)}
+    outs[0].sum().backward()
+    outs[2] = _forward(s, x, 2)
+    for mb in (1, 2):
+        assert ended == []
+        outs[mb].sum().backward()
+    assert ended == [3] and torch.equal(x.grad, torch.full((3,), 6.0))
     with torch.no_grad():
-        layer(x)  # evaluation: no backward, no end of step
-    assert ended == [1]
+        _forward(s, x, 0)  # evaluation: no backward, no end of step
+    assert ended == [3]
     # a training input without a gradient would never end the step
     with pytest.raises(RuntimeError, match="needs a gradient"):
-        layer(torch.ones(3))
+        s.end_step_after_backward(torch.ones(3))
+
+
+def test_reset_forgets_a_pass_outside_the_steps(group, monkeypatch):
+    # Primus's pipeline warmup runs one micro-batch forward and backward before training; without the reset the
+    # first step would count it and never end
+    monkeypatch.setattr(sch, "_num_microbatches", lambda: 2)
+    s, module = make(group)
+    module.train()
+    slots, _, _ = slots_with_table([[2, -1], [0, 1]])
+    slots.sync()
+    slots.main_grad.fill_(1.0)  # the warmup's slot gradients
+    s.slots.append(slots)
+    x = torch.ones(3, requires_grad=True)
+    s.remap(topk(0))
+    s.end_step_after_backward(x).sum().backward()
+    s.reset()
+    assert not slots.main_grad.any() and bool((slots.held < 0).all())
+    for mb in range(2):
+        s.remap(topk(1 + mb))
+        s.end_step_after_backward(x).sum().backward()
+    assert s.new_step and s.mb_in_step == 0 and s.next_backward == 0
+
+
+def test_pp_warmup_resets_every_replica_scheduler():
+    from primus.backends.megatron.patches.pp_warmup_patches import (
+        reset_moe_replica_schedulers,
+    )
+
+    reset = []
+    chunks = [torch.nn.Module(), torch.nn.Module()]  # virtual pipeline stages
+    for i, chunk in enumerate(chunks):
+        chunk.mlp = torch.nn.Module()
+        chunk.mlp.token_dispatcher = SimpleNamespace(
+            replica=SimpleNamespace(reset=lambda i=i: reset.append(i))
+        )
+        chunk.attention = torch.nn.Linear(1, 1)
+    chunks.append(torch.nn.Module())  # a chunk without MoE layers
+    chunks[-1].mlp = torch.nn.Module()
+    chunks[-1].mlp.token_dispatcher = SimpleNamespace()  # replication off
+    reset_moe_replica_schedulers(chunks)
+    assert reset == [0, 1]
+
+
+def test_a_backward_out_of_forward_order_is_an_error(group, monkeypatch):
+    # the slots and the end of the step depend on each layer running its backwards in forward order
+    monkeypatch.setattr(sch, "_num_microbatches", lambda: 2)
+    s, module = make(group)
+    module.train()
+    x = torch.ones(3, requires_grad=True)
+    outs = [_forward(s, x, mb) for mb in range(2)]
+    with pytest.raises(RuntimeError, match="backward of micro-batch 1 ran where micro-batch 0 was expected"):
+        outs[1].sum().backward()
+
+
+def test_each_backward_restores_its_forwards_slots():
+    # per_microbatch with two micro-batches in flight: the second forward reassigns slot 1 of rank 1 before the
+    # first one's backward, which must return the second's slot gradients and push the first's weights again
+    slots, sched, transport = slots_with_table([[2, -1], [0, 1]])
+    out = torch.ones(2, requires_grad=True)
+    slots.sync()
+    first = slots.restore_before_backward(out * 1.0)
+    sched.slot_target = (torch.tensor([[2, -1], [0, 3]]), 2)
+    slots.sync()
+    second = slots.restore_before_backward(out * 1.0)
+    del transport.calls[:]
+    first.sum().backward()
+    assert transport.calls == [
+        ("return", [[2, -1], [0, 3]]),
+        ("push", [[2, -1], [0, 3]], [[2, -1], [0, 1]]),
+    ]
+    second.sum().backward()
+    assert transport.calls[2:] == [
+        ("return", [[2, -1], [0, 1]]),
+        ("push", [[2, -1], [0, 1]], [[2, -1], [0, 3]]),
+    ]
+    first = slots.restore_before_backward(out * 1.0)
+    first.sum().backward()  # the slots still hold the forward's table: nothing moves
+    assert len(transport.calls) == 4
+    # without replicas the GEMM did not use the slots, and without grad there is no backward
+    sched.has_replicas = False
+    assert slots.restore_before_backward(out) is out
+    sched.has_replicas = True
+    with torch.no_grad():
+        assert slots.restore_before_backward(out) is out
+
+
+def test_a_recompute_leaves_the_planning_state_to_the_latest_plan(group, monkeypatch):
+    # per_microbatch with recompute: the first micro-batch is recomputed after the second planned another table.
+    # The recompute takes its own slot table along, but the next plan is compared with the latest one: were the
+    # planning state set back, a plan equal to the first would keep the second's routing lookup
+    from primus.backends.megatron.core.transformer.moe.replica.planner import (
+        ReplicaPlan,
+    )
+
+    tables = [[[3, -1]], [[5, -1]], [[3, -1]]]
+
+    def make_plan(planner, counts, num_slots, **kwargs):
+        return ReplicaPlan(counts.sum(dim=0).view(-1, 1).to(torch.int64), torch.tensor(tables.pop(0)))
+
+    monkeypatch.setattr(sch, "make_plan", make_plan)
+    s, module = make(group, "per_microbatch")
+    module.train()
+    with torch.no_grad():
+        s.remap(topk(0))
+        first = s.slot_target
+        s.remap(topk(1))
+    plan, version = s.plan, s.version
+    s.remap(topk(0))  # the first micro-batch's recompute
+    assert s.slot_target is first and s.plan is plan and s.version == version == 2
+    with torch.no_grad():
+        s.remap(topk(2))  # plans the first table again
+    assert s.version == 3 and torch.equal(s.lut, sch.slot_lookup(s.plan))
+    assert torch.equal(s.slot_target[0], torch.tensor([[3, -1]])) and s.slot_target[1] == 3
 
 
 def test_the_step_needs_megatrons_microbatch_count(group, monkeypatch):

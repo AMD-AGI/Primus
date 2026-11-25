@@ -10,16 +10,17 @@ With replication on, replicas of hot experts compute some of their rows on other
 (``primus.backends.megatron.core.transformer.moe.replica``). Two hooks, off without ``moe_replica_planner``:
 
 - ``megatron.moe.replica_attach``: once a ``MoELayer`` is built, its token dispatcher's scheduler is handed to the
-  layer's two expert linears, which allocate their replica slots, and the step ends in the backward of the layer's
-  input (``replica.scheduler.attach``). Subclasses of ``MoELayer`` build their own experts or forward and are
-  rejected; ``attach`` also rejects a layer whose dispatcher has no replica scheduler (replication would silently
-  not run).
+  layer's two expert linears, which allocate their replica slots (``replica.scheduler.attach``). Subclasses of
+  ``MoELayer`` build their own experts or forward and are rejected; ``attach`` also rejects a layer whose
+  dispatcher has no replica scheduler (replication would silently not run).
 - ``megatron.moe.replica_ddp``: DDP's backward hook of a replica owner's weights (``moe_replica_owner``) does not
   mark them ready for the gradient reduction on the last micro-batch: with ``overlap_grad_reduce`` their bucket
   would be scaled and reduced before the replica gradients reach ``main_grad``. ``end_step`` marks them ready
-  after returning the replica gradients (``moe_replica_grad_ready``), once per step. With ``overlap_param_gather``
-  the replica weights are pushed before the expert linears' forward pre-hook waits for their all-gather, so the
-  push first waits for it the same way (``moe_replica_wait_param_gather``).
+  after returning the replica gradients (``moe_replica_grad_ready``), once per step, if the hook ran in the last
+  micro-batch; Megatron's pipeline schedules (with ``align_grad_reduce``) may run every backward of a stage in
+  ``no_sync`` and start a model chunk's reduction after its last backward, and then there is nothing to mark.
+  With ``overlap_param_gather`` the replica weights are pushed before the expert linears' forward pre-hook waits
+  for their all-gather, so the push first waits for it the same way (``moe_replica_wait_param_gather``).
 """
 
 import functools
@@ -88,10 +89,10 @@ def defer_owner_grad_ready(ddp, param, hook):
     """The DDP backward hook ``hook`` of a replica owner's ``param``, without its grad-ready registration on the
     last micro-batch; puts ``moe_replica_grad_ready`` and ``moe_replica_wait_param_gather`` on ``param``."""
     ddp_ref = weakref.ref(ddp)
-    pending = False
+    ran = pending = False
 
     def deferred_hook(*args):
-        nonlocal pending
+        nonlocal ran, pending
         group = ddp.param_to_bucket_group.get(param)
         if group is None or not ddp.ddp_config.overlap_grad_reduce:
             return hook(*args)
@@ -101,20 +102,22 @@ def defer_owner_grad_ready(ddp, param, hook):
             hook(*args)
         finally:
             group.is_last_microbatch = last
-        pending = pending or last
+        ran, pending = True, pending or last
 
     def grad_ready():
-        nonlocal pending
+        nonlocal ran, pending
         ddp = ddp_ref()
         if ddp is None or not ddp.ddp_config.overlap_grad_reduce or param not in ddp.param_to_bucket_group:
             return
-        if not pending:
+        if not ran:
             raise RuntimeError(
-                "moe replica: the DDP backward hook of a replica owner's weights did not run in the last "
-                "micro-batch before the step ended"
+                "moe replica: the DDP backward hook of a replica owner's weights did not run before the step ended"
             )
-        pending = False
-        ddp.param_to_bucket_group[param].register_grad_ready(param, ddp.force_all_reduce)
+        # the hook ran in no_sync only (pipeline schedules with align_grad_reduce): DDP's hook would not have
+        # marked the weights either, the schedule starts the reduction itself
+        if pending:
+            ddp.param_to_bucket_group[param].register_grad_ready(param, ddp.force_all_reduce)
+        ran = pending = False
 
     def wait_param_gather():
         ddp = ddp_ref()

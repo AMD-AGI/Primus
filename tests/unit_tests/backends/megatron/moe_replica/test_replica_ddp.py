@@ -56,8 +56,9 @@ def test_the_last_microbatch_marks_owners_ready_only_at_the_end_of_the_step():
     param, ddp, hook, seen = owner()
     ddp.group.is_last_microbatch = False
     hook()  # an earlier micro-batch (inside no_sync)
-    with pytest.raises(RuntimeError, match="did not run in the last micro-batch"):
-        param.moe_replica_grad_ready()
+    # pipeline schedules run every backward in no_sync and start the reduction themselves: nothing to mark
+    param.moe_replica_grad_ready()
+    assert ddp.group.ready == []
     ddp.group.is_last_microbatch = True
     hook()
     ddp.force_all_reduce = True  # read when the owner is marked ready, not when its hook ran
@@ -65,8 +66,10 @@ def test_the_last_microbatch_marks_owners_ready_only_at_the_end_of_the_step():
     assert seen == [False, False] and ddp.group.is_last_microbatch and ddp.group.ready == []
     param.moe_replica_grad_ready()  # end_step, after the replica gradients are in main_grad
     assert ddp.group.ready == [(param, True)]
-    with pytest.raises(RuntimeError, match="did not run in the last micro-batch"):
-        param.moe_replica_grad_ready()  # once per step
+    # a step whose backward never reached the owner would silently lose the overlapped reduction
+    with pytest.raises(RuntimeError, match="did not run before the step ended"):
+        param.moe_replica_grad_ready()
+    assert ddp.group.ready == [(param, True)]
 
 
 def test_a_failing_ddp_hook_leaves_the_last_microbatch_flag_as_it_was():

@@ -2765,6 +2765,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 trans_b=True,
                 fuse_bgrad_accum_pattern=fuse_wgrad_accum_pattern,
             )
+            if self._replica_slots is not None:
+                out = self._replica_slots.restore_before_backward(out)
 
         return out, None
 
@@ -3058,6 +3060,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             routing_map, probs, token_indices = self.replica.to_physical_routes(
                 routing_map, probs, token_indices, self.config.moe_router_topk
             )
+            hidden_states = self.replica.end_step_after_backward(hidden_states)
 
         hidden_states, probs = self.deepep_dispatcher._pre_dispatch(
             hidden_states, probs, routing_map, token_indices

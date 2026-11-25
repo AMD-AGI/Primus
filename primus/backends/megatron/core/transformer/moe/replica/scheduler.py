@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Dynamic redundant experts inside a Megatron MoE layer (BF16, TP 1, PP 1).
+"""Dynamic redundant experts inside a Megatron MoE layer (BF16, TP 1).
 
 ``ReplicaScheduler`` (one per MoE layer, owned by the token dispatcher) all-gathers the routed counts of every
 micro-batch, plans (a full plan on the first micro-batch of a step with ``per_step``, every micro-batch with
@@ -16,21 +16,28 @@ every expert's rows among its owner and replicas in the first plan's proportions
 before the slots are used in a forward, the weights of every slot whose expert changed (after returning the
 gradients of the slots being reassigned); slot gradients add up across micro-batches and go back into the owner's
 ``main_grad``, in increasing source-rank order, before the slots are reassigned and at the end of the step: in the
-backward of the step's last micro-batch, once the gradient of the MoE layer's input is computed (``end_step``), so
-before Megatron's ``finalize_model_grads`` reduces the expert gradients. The slot tensors live in a ``SlotStorage``
-(``storage.py``) and a ``SlotTransport`` (``transport.py``, NCCL point to point here) moves them. The router, the
-aux loss and the expert bias only ever see logical experts.
+backward of the step's last micro-batch, once the gradient of the dispatcher's input tokens is computed
+(``end_step``), so before Megatron's ``finalize_model_grads`` reduces the expert gradients. The slot tensors live in a
+``SlotStorage`` (``storage.py``) and a ``SlotTransport`` (``transport.py``, NCCL point to point here) moves them. The
+router, the aux loss and the expert bias only ever see logical experts.
+
+Pipeline parallelism: a layer runs the forwards of later micro-batches before the backward of an earlier one, in
+the same order for both (``_backward_done`` checks it). So every forward takes its micro-batch's state along: the
+backward that ends the step knows from its forward whether it is the last micro-batch, and the backward of every
+expert grouped GEMM first makes the slots hold its forward's slot table again (``restore_before_backward``), as
+UltraEP restores its replica weights; with ``per_step`` the table does not change within a step and nothing moves.
 
 Activation recompute: a training forward that runs without grad (the first pass of Megatron's checkpoint) plans and
-pushes as usual and queues its remap; the recompute in the backward replays the queued remap instead of planning
-again, so both passes route every token to the same rank and slot. The scheduler tells training from evaluation by
-the ``training`` flag of the layer's experts.
+pushes as usual and queues its remap; the recompute in the backward replays the queued remap and slot table instead
+of planning again, so both passes route every token to the same rank and slot. The scheduler tells training from
+evaluation by the ``training`` flag of the layer's experts.
 
 Wiring (the ``megatron.moe.replica_attach`` patch in
 ``primus/backends/megatron/patches/moe_patches/moe_replica_patches.py``): ``attach`` runs once the MoE layer is
 built. It hands the dispatcher's scheduler to the layer's two expert linears, which allocate their slots then, in the
-dtype ``ReplicaConfig.grad_dtype`` predicts for the owners' ``main_grad``, and puts the end of the step on the
-gradient of the layer's input. Under DDP, the ``megatron.moe.replica_ddp`` patch puts two callbacks on the owners'
+dtype ``ReplicaConfig.grad_dtype`` predicts for the owners' ``main_grad``. The dispatcher puts the end of the step on
+the gradient of its input tokens (``end_step_after_backward``) and each expert linear the slot restore on the output
+of its grouped GEMM. Under DDP, the ``megatron.moe.replica_ddp`` patch puts two callbacks on the owners'
 weights: ``end_step`` marks them ready for the gradient reduction after the replica gradients are in (needed with
 ``overlap_grad_reduce``), and the weight push first waits for their all-gather (needed with
 ``overlap_param_gather``).
@@ -95,27 +102,41 @@ class ReplicaConfig:
         )
 
 
-class _EndStepAfterLayerBackward(torch.autograd.Function):
-    """Identity on the MoE layer's input. Its backward runs after the whole layer's backward, so after both expert
-    linears put their slot gradients in the slots' ``main_grad``; after the step's last micro-batch it ends the
-    step."""
+class _EndStepAfterExpertsBackward(torch.autograd.Function):
+    """Identity on the dispatcher's input tokens. Its backward runs after the experts' backward, so after both
+    expert linears put their slot gradients in the slots' ``main_grad``; after the step's last micro-batch it ends
+    the step. The micro-batch comes from the forward: with pipeline parallelism later forwards run before this
+    backward."""
 
     @staticmethod
-    def forward(ctx, x, sched):
-        ctx.sched = sched
+    def forward(ctx, x, sched, mb, last):
+        ctx.sched, ctx.mb, ctx.last = sched, mb, last
         return x.view_as(x)
 
     @staticmethod
     def backward(ctx, grad):
-        if ctx.sched.is_last_microbatch():
-            ctx.sched.end_step()
-        return grad, None
+        ctx.sched._backward_done(ctx.mb, ctx.last)
+        return grad, None, None, None
+
+
+class _RestoreSlotsBeforeBackward(torch.autograd.Function):
+    """Identity on the output of a grouped GEMM that used the slots; its backward, which runs right before the
+    GEMM's, makes the slots hold the forward's slot table again."""
+
+    @staticmethod
+    def forward(ctx, out, slots, target):
+        ctx.slots, ctx.target = slots, target
+        return out.view_as(out)
+
+    @staticmethod
+    def backward(ctx, grad):
+        ctx.slots.sync(ctx.target)
+        return grad, None, None
 
 
 def attach(moe_layer: torch.nn.Module) -> None:
     """Once a MoE layer is built with replication on: hand its token dispatcher's scheduler to the layer's two
-    expert linears, which then also compute the replica slots (and allocate them), and end the step in the backward
-    of the layer's input."""
+    expert linears, which then also compute the replica slots (and allocate them)."""
     dispatcher = getattr(moe_layer, "token_dispatcher", None)
     sched = getattr(dispatcher, "replica", None)
     if sched is None:
@@ -135,16 +156,6 @@ def attach(moe_layer: torch.nn.Module) -> None:
     sched.moe_layer = weakref.ref(moe_layer)
     for linear in linears:
         linear.attach_replica(sched)
-
-    def end_step_after_backward(module, args):
-        x = args[0]
-        if sched.training and torch.is_grad_enabled() and not x.requires_grad:
-            raise RuntimeError(
-                "moe replica: the MoE layer's input needs a gradient in training; the step ends in its backward"
-            )
-        return (_EndStepAfterLayerBackward.apply(x, sched), *args[1:])
-
-    moe_layer.register_forward_pre_hook(end_step_after_backward)
 
 
 class ReplicaScheduler:
@@ -174,7 +185,10 @@ class ReplicaScheduler:
         self.plan: Optional[ReplicaPlan] = None
         self.lut = None
         self.cum_frac = None  # per_step: the step's plan as per-expert shares, on the device
-        self.version = 0  # bumped whenever the slot table changes
+        self.version = 0  # bumped whenever a new plan changes the slot table, so a version names one table
+        # (slot table, version) the slots hold for the current forward: the last plan's, or the one a recompute
+        # replays; the planning state above only follows new plans
+        self.slot_target = None
         self.new_step = True
         self.use_slots = False  # the current micro-batch may route to replica slots (the same on every rank)
         self.slots: List["ReplicaSlots"] = []
@@ -182,6 +196,7 @@ class ReplicaScheduler:
         self.num_kept = 0  # per_microbatch micro-batches that kept their slots (replan_above)
         self.mb_in_step = 0  # index of the current micro-batch in the step (forward order)
         self.cur_mb = 0  # micro-batch of the forward (or recompute) whose experts run next
+        self.next_backward = 0  # micro-batch whose backward ends next (_backward_done)
         self.replay = deque()  # remaps of no-grad training forwards, in order, for their recompute
 
     @property
@@ -219,16 +234,36 @@ class ReplicaScheduler:
             self.use_slots = False
             return self._owner_ids(topk)
         if grad and self.replay:
-            phys, use_slots, plan, version, mb = self.replay.popleft()
-            if version != self.version:
-                raise RuntimeError("moe replica: the slots changed between a forward and its recompute")
+            # later forwards may have planned since: the recompute takes its forward's slot table along, the
+            # planning state stays with the latest plan
+            phys, use_slots, slot_target, mb = self.replay.popleft()
             assert phys.shape == topk.shape, "moe replica: recompute routed a different number of tokens"
-            self.use_slots, self.plan, self.cur_mb = use_slots, plan, mb
+            self.use_slots, self.slot_target, self.cur_mb = use_slots, slot_target, mb
             return phys
         phys = self._remap(topk)
         if not grad:
-            self.replay.append((phys, self.use_slots, self.plan, self.version, self.cur_mb))
+            self.replay.append((phys, self.use_slots, self.slot_target, self.cur_mb))
         return phys
+
+    def end_step_after_backward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """The dispatcher's input tokens through an identity whose backward ends the step after the step's last
+        micro-batch; the dispatcher calls it right after ``to_physical_routes`` set the micro-batch."""
+        if self.training and torch.is_grad_enabled() and not hidden_states.requires_grad:
+            raise RuntimeError(
+                "moe replica: the MoE layer's input needs a gradient in training; the step ends in its backward"
+            )
+        return _EndStepAfterExpertsBackward.apply(hidden_states, self, self.cur_mb, self.is_last_microbatch())
+
+    def _backward_done(self, mb: int, last: bool):
+        if mb != self.next_backward:
+            raise RuntimeError(
+                f"moe replica: the backward of micro-batch {mb} ran where micro-batch {self.next_backward} was "
+                "expected; replication needs every MoE layer to run the backwards of a step in forward order "
+                "(Megatron's pipeline schedules do), the slots and the end of the step depend on it"
+            )
+        self.next_backward += 1
+        if last:
+            self.end_step()
 
     def to_physical_routes(self, routing_map, probs: torch.Tensor, token_indices, topk: int):
         """Logical routes -> the ``R * (L + B)`` physical experts a dispatcher built for them takes. Returns
@@ -253,8 +288,8 @@ class ReplicaScheduler:
         if self.mb_in_step >= n:
             raise RuntimeError(
                 f"moe replica: micro-batch {self.mb_in_step} of a {n}-micro-batch step; the last step did not end "
-                "(the backward of its last micro-batch never reached the MoE layer's input, where attach() ends "
-                "the step)"
+                "(the backward of its last micro-batch never reached the dispatcher's input tokens, where "
+                "end_step_after_backward ends the step)"
             )
         self.cur_mb = self.mb_in_step
         later = cfg.placement == "per_step" and not self.new_step and self.plan is not None
@@ -268,6 +303,7 @@ class ReplicaScheduler:
         if later:
             # the step's slots and shares, applied to this micro-batch's counts without a host round trip
             self.use_slots = True
+            self.slot_target = (self.plan.slot_expert, self.version)
             alloc = resplit_alloc(self.cum_frac, counts_dev.sum(dim=0))
             return remap_alloc(topk, counts_dev, self.rank, alloc, self.lut, B)
         counts = counts_dev.cpu()
@@ -295,6 +331,7 @@ class ReplicaScheduler:
             self.version += 1
             self.lut = slot_lookup(plan)
         self.plan = plan
+        self.slot_target = (plan.slot_expert, self.version)
         self.use_slots = plan.num_replicas() > 0
         if cfg.placement == "per_step":
             self.cum_frac = alloc_fractions(plan.alloc, L).to(topk.device)
@@ -314,7 +351,7 @@ class ReplicaScheduler:
 
     def end_step(self):
         """Return all pending slot gradients; the owners' weights change next, so every slot is pushed again. Runs
-        in the backward of the step's last micro-batch (``attach``)."""
+        in the backward of the step's last micro-batch (``end_step_after_backward``)."""
         # whether a return is in flight is the same on every rank (posted by all of them), so reduce() stays collective
         returned = [s.returning is not None for s in self.slots]
         for s in self.slots:
@@ -331,8 +368,23 @@ class ReplicaScheduler:
                 grad_ready()
         self.new_step = True
         self.mb_in_step = 0
+        self.next_backward = 0
         if self.replay:
             raise RuntimeError(f"moe replica: {len(self.replay)} forwards without grad were never recomputed")
+
+    def reset(self):
+        """Forget the micro-batches run since the last step without ending a step: their slot gradients are
+        dropped and the slots emptied. For passes outside training steps, such as Primus's pipeline warmup (one
+        forward and backward on synthetic data)."""
+        for s in self.slots:
+            s.finish_push()
+            s.finish_return()
+            s.main_grad.zero_()
+            s.invalidate()
+        self.replay.clear()
+        self.new_step = True
+        self.mb_in_step = 0
+        self.next_backward = 0
 
 
 class ReplicaSlots:
@@ -369,21 +421,24 @@ class ReplicaSlots:
         self.held = self._empty_table()
         self.version = -1
 
-    def sync(self):
-        """Make the slots match the scheduler's current slot table (collective over the EP group) before they are
-        used."""
-        self.start_sync()
-        if self.pushing is not None:
-            self.pushing.wait()
-            self.pushing = None
+    def sync(self, target=None):
+        """Make the slots hold ``target`` (a slot table and its version; the scheduler's ``slot_target`` by
+        default) before they are used. Collective over the EP group."""
+        self.start_sync(target)
+        self.finish_push()
 
-    def start_sync(self):
-        """Post the weight push for the current slot table without waiting for it."""
+    def finish_push(self):
+        if self.pushing is not None:
+            pushing, self.pushing = self.pushing, None
+            pushing.wait()
+
+    def start_sync(self, target=None):
+        """Post the weight push for ``target`` (see ``sync``) without waiting for it."""
         s = self.sched
-        if self.version == s.version:
+        table, version = target if target is not None else s.slot_target
+        if self.version == version:
             return
         self.finish_return()
-        table = s.plan.slot_expert
         held = self.held if self.storage.claim(self) else self._empty_table()
         # a slot that held an expert and now holds another one or none: its gradients go back first. Decided from
         # the slot tables only, which every rank agrees on: the return is collective
@@ -396,7 +451,16 @@ class ReplicaSlots:
             wait_param_gather()
         self.pushing = s.transport.push_weights(self.param.detach(), self.storage, held, table)
         self.held = table.clone()
-        self.version = s.version
+        self.version = version
+
+    def restore_before_backward(self, out: torch.Tensor) -> torch.Tensor:
+        """``out`` of the grouped GEMM of the current micro-batch. If it used the slots, through an identity whose
+        backward first makes the slots hold this micro-batch's slot table again (later forwards may have planned
+        another one), so the GEMM's backward reads its own slot weights and adds into its own slots' ``main_grad``;
+        the gradients of reassigned slots go back first, as in any sync."""
+        if not self.sched.has_replicas or not torch.is_grad_enabled():
+            return out
+        return _RestoreSlotsBeforeBackward.apply(out, self, self.sched.slot_target)
 
     def leaf(self, fused: bool) -> torch.Tensor:
         """The slot weights as a fresh autograd leaf whose gradient lands in ``main_grad``: written by the grouped

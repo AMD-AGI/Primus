@@ -13,8 +13,10 @@ after the step's backward (the step ends in the last micro-batch's backward, wit
 layer without replicas, with the transfers synchronous or overlapped and with the layer recomputed. When only the
 first micro-batch has replicas, the slot gradients it left must still reach the owners. With a minimum gain no plan
 reaches, replication is on but no micro-batch has replicas: the experts must then run the same grouped GEMM call as
-without replication (own weights, ``L`` groups). Wrapped in Megatron's DDP with overlap_grad_reduce (expert data
-parallel size 1 and 2), the reduced expert gradients must include the replica gradients.
+without replication (own weights, ``L`` groups). In pipeline order (three micro-batches, F0 F1 B0 F2 B1 B2) each
+backward runs after a later forward planned other slots, which the backward must restore. Wrapped in Megatron's DDP
+with overlap_grad_reduce (expert data parallel size 1 and 2, and as the pipeline schedules reduce), the reduced expert
+gradients must include the replica gradients.
 """
 
 from types import SimpleNamespace
@@ -76,14 +78,19 @@ GLOBAL_ARGS = dict(
     params_dtype=torch.bfloat16,
 )
 
-# name -> (replica arguments, the sign added to each micro-batch's inputs, recompute the layer)
+# name -> (replica arguments, the sign added to each micro-batch's inputs, recompute the layer, pipeline order)
 CASES = {
-    "replicas": ({}, (1.0, -1.0), False),
-    "replicas_async": ({"moe_replica_async_comm": True}, (1.0, -1.0), False),
-    "replicas_recompute": ({}, (1.0, -1.0), True),
+    "replicas": ({}, (1.0, -1.0), False, False),
+    "replicas_async": ({"moe_replica_async_comm": True}, (1.0, -1.0), False, False),
+    "replicas_recompute": ({}, (1.0, -1.0), True, False),
     # the second micro-batch is balanced: it plans no replica, so the step's end returns what the first left
-    "last_microbatch_without_replicas": ({"moe_replica_min_gain": 0.2}, (1.0, 0.0), False),
-    "no_replicas": ({"moe_replica_min_gain": 1e9}, (1.0, -1.0), False),
+    "last_microbatch_without_replicas": ({"moe_replica_min_gain": 0.2}, (1.0, 0.0), False, False),
+    "no_replicas": ({"moe_replica_min_gain": 1e9}, (1.0, -1.0), False, False),
+    # 1F1B order (F0 F1 B0 F2 B1 B2): each backward runs after a later forward planned other slots
+    "pipelined": ({}, (1.0, -1.0, 1.0), False, True),
+    "pipelined_async": ({"moe_replica_async_comm": True}, (1.0, -1.0, 1.0), False, True),
+    "pipelined_recompute": ({}, (1.0, -1.0, 1.0), True, True),
+    "pipelined_per_step": ({"moe_replica_placement": "per_step"}, (1.0, -1.0, 1.0), False, True),
 }
 
 
@@ -164,7 +171,7 @@ def _worker(rank: int, init_file: str, case: str):
 
     from primus.backends.megatron.core.transformer.moe.replica import scheduler as sch
 
-    replica_args, signs, recompute = CASES[case]
+    replica_args, signs, recompute, pipelined = CASES[case]
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", init_method=f"file://{init_file}", rank=rank, world_size=WORLD)
     try:
@@ -174,7 +181,7 @@ def _worker(rank: int, init_file: str, case: str):
         rep = _moe_layer("ultraep", **replica_args)
         rep.load_state_dict(ref.state_dict())
         sch.attach(rep)  # what the megatron.moe.replica_attach patch does once the layer is built
-        sch._num_microbatches = lambda: 2
+        sch._num_microbatches = lambda: len(signs)
         _skew_router(ref, rep)
         gen = torch.Generator().manual_seed(1 + rank)
         inputs = [
@@ -183,15 +190,23 @@ def _worker(rank: int, init_file: str, case: str):
         grads = [torch.randn(TOKENS, 1, HIDDEN, generator=gen).cuda().to(torch.bfloat16) for _ in inputs]
 
         def step(layer):
-            outs, dxs = [], []
-            for x, g in zip(inputs, grads):
-                x = x.clone().requires_grad_()
+            # under Megatron's DDP the owners have a main_grad from the start; here a restore can return slot
+            # gradients before the owners' first backward creates their grad
+            for linear in (layer.experts.linear_fc1, layer.experts.linear_fc2):
+                linear.weights.grad = torch.zeros_like(linear.weights)
+            xs = [x.clone().requires_grad_() for x in inputs]
+            outs = []
+            for i, x in enumerate(xs):
                 out, _ = checkpoint(layer, x, use_reentrant=True) if recompute else layer(x)
-                out.backward(g)
-                outs.append(out.detach())
-                dxs.append(x.grad)
+                outs.append(out)
+                if not pipelined:
+                    out.backward(grads[i])
+                elif i > 0:
+                    outs[i - 1].backward(grads[i - 1])
+            if pipelined:
+                outs[-1].backward(grads[-1])
             wgrads = [layer.experts.linear_fc1.weights.grad, layer.experts.linear_fc2.weights.grad]
-            return outs, dxs, wgrads
+            return [out.detach() for out in outs], [x.grad for x in xs], wgrads
 
         want = step(ref)
         # the weight operand and group count of every expert grouped GEMM of the replicated layer
@@ -208,11 +223,12 @@ def _worker(rank: int, init_file: str, case: str):
         finally:
             primus_turbo_torch.ops.grouped_gemm = grouped_gemm
         sched = rep.token_dispatcher.replica
-        assert sched.num_plans == 2, sched.num_plans
+        per_step = replica_args.get("moe_replica_placement") == "per_step"
+        assert sched.num_plans == (1 if per_step else len(signs)), sched.num_plans
         assert sched.new_step and sched.mb_in_step == 0, "the step did not end in the last backward"
         plain = (True, E // WORLD)
-        # 2 micro-batches x 2 expert linears (the recompute runs the forward again)
-        assert len(calls) == (8 if recompute else 4), calls
+        # micro-batches x 2 expert linears (the recompute runs the forward again)
+        assert len(calls) == 2 * len(signs) * (2 if recompute else 1), calls
         if case == "no_replicas":
             assert sched.plan.num_replicas() == 0, sched.plan.num_replicas()
             assert calls == [plain] * 4, calls
@@ -228,9 +244,8 @@ def _worker(rank: int, init_file: str, case: str):
         for name, a, b in zip(("output", "input grad", "weight grad"), got, want):
             for i, (x, y) in enumerate(zip(a, b)):
                 assert rel(x, y) <= TOL, (name, i, rel(x, y))
-        assert not bool(
-            rep.experts.linear_fc1._replica_slots.main_grad.any()
-        ), "slot gradients left after the step"
+        for linear in (rep.experts.linear_fc1, rep.experts.linear_fc2):
+            assert not bool(linear._replica_slots.main_grad.any()), "slot gradients left after the step"
     finally:
         dist.destroy_process_group()
 
@@ -270,12 +285,14 @@ def test_moe_layer_with_replicas_matches_without(tmp_path, case):
     mp.spawn(_worker, args=(str(tmp_path / "pg_init"), case), nprocs=WORLD, join=True)
 
 
-def _ddp_worker(rank: int, init_file: str, world: int, ep: int):
+def _ddp_worker(rank: int, init_file: str, world: int, ep: int, aligned: bool):
     """The layer with and without replicas, each wrapped in Megatron's DDP with overlap_grad_reduce: two steps of
     two micro-batches (the first in no_sync); the experts' main_grad after finish_grad_sync of the second step must
     match, and the expert buckets' reduction must have started in the backward (overlapped). The second step is the
     test: in the first one DDP starts every reduction in finish_grad_sync, after the replica gradients are back, even
-    without the megatron.moe.replica_ddp patch."""
+    without the megatron.moe.replica_ddp patch. ``aligned``: as Megatron's pipeline schedules with
+    align_grad_reduce, both micro-batches in flight (F0 F1 B0 B1), every backward in no_sync and the reduction started
+    by an explicit start_grad_sync."""
     import contextlib
 
     from megatron.core import parallel_state as ps
@@ -312,10 +329,17 @@ def _ddp_worker(rank: int, init_file: str, world: int, ep: int):
 
         def train_step(model):
             model.zero_grad_buffer()
-            for i, (x, g) in enumerate(zip(inputs, grads)):
-                with model.no_sync() if i < len(inputs) - 1 else contextlib.nullcontext():
-                    out, _ = model(x.clone().requires_grad_())
-                    out.backward(g)
+            if aligned:
+                with model.no_sync():
+                    outs = [model(x.clone().requires_grad_())[0] for x in inputs]
+                    for out, g in zip(outs, grads):
+                        out.backward(g)
+                model.start_grad_sync()
+            else:
+                for i, (x, g) in enumerate(zip(inputs, grads)):
+                    with model.no_sync() if i < len(inputs) - 1 else contextlib.nullcontext():
+                        out, _ = model(x.clone().requires_grad_())
+                        out.backward(g)
             # overlapped: the expert buckets' reduction started in the backward (from the second step on; without
             # the owners' grad-ready marking DDP would fall back to reducing them in finish_grad_sync)
             dispatched = all(g.grad_reduce_handle is not None for g in model.expert_parallel_bucket_groups)
@@ -338,8 +362,12 @@ def _ddp_worker(rank: int, init_file: str, world: int, ep: int):
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize(("world", "ep"), [(2, 2), (4, 2)], ids=["expert_dp1", "expert_dp2"])
-def test_overlapped_ddp_gradient_reduction_includes_the_replica_gradients(tmp_path, world, ep):
+@pytest.mark.parametrize(
+    ("world", "ep", "aligned"),
+    [(2, 2, False), (4, 2, False), (2, 2, True)],
+    ids=["expert_dp1", "expert_dp2", "pipeline_aligned"],
+)
+def test_overlapped_ddp_gradient_reduction_includes_the_replica_gradients(tmp_path, world, ep, aligned):
     if torch.cuda.device_count() < world:
         pytest.skip(f"needs {world} GPUs")
-    mp.spawn(_ddp_worker, args=(str(tmp_path / "pg_init"), world, ep), nprocs=world, join=True)
+    mp.spawn(_ddp_worker, args=(str(tmp_path / "pg_init"), world, ep, aligned), nprocs=world, join=True)

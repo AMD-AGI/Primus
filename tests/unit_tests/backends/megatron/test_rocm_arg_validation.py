@@ -285,6 +285,10 @@ def test_moe_replica_memory_is_logged_without_touching_cuda(monkeypatch):
     monkeypatch.setattr(rocm_arg_validation, "log_rank_0", logged.append)
     validate_moe_replica(_dsv3_replica_args(moe_replica_planner="moonep", moe_replica_slots=32))
     assert len(logged) == 1 and "304.5 GiB per GPU" in logged[0], logged
+    validate_moe_replica(
+        _dsv3_replica_args(moe_replica_planner="moonep", moe_replica_slots=32, pipeline_model_parallel_size=4)
+    )
+    assert "304.5 GiB summed over the pipeline stages" in logged[1], logged
 
 
 def _replica_args(**overrides):
@@ -329,6 +333,10 @@ def test_moe_replica_off_is_noop():
         {"turbo_grouped_gemm_backend": "triton"},
         # the megatron.moe.replica_ddp patch defers the owners' grad-ready marking and waits for their all-gather
         {"overlap_grad_reduce": True, "overlap_param_gather": True, "use_distributed_optimizer": True},
+        # each forward takes its micro-batch along for the backward
+        {"pipeline_model_parallel_size": 2, "moe_replica_placement": "per_microbatch"},
+        {"pipeline_model_parallel_size": 2, "num_layers_per_virtual_pipeline_stage": 1},
+        {"pipeline_model_parallel_size": 2, "patch_primus_pipeline": True, "pp_algorithm": "zero-bubble"},
     ],
 )
 def test_moe_replica_accepts_supported(overrides):
@@ -351,7 +359,6 @@ def test_moe_replica_accepts_supported(overrides):
         ({"turbo_grouped_gemm_backend": "ck"}, "turbo_grouped_gemm_backend=ck"),
         ({"tensor_model_parallel_size": 2}, "tensor_model_parallel_size=1"),
         ({"expert_tensor_parallel_size": 2}, "expert_tensor_parallel_size=1"),
-        ({"pipeline_model_parallel_size": 2}, "pipeline_model_parallel_size=1"),
         ({"use_turbo_mega_moe": True}, "use_turbo_mega_moe"),
         ({"fp8": "e4m3"}, "does not support fp8"),
         ({"turbo_fused_grouped_gemm": True}, "turbo_fused_grouped_gemm"),
@@ -359,7 +366,10 @@ def test_moe_replica_accepts_supported(overrides):
         ({"delay_wgrad_compute": True}, "delay_wgrad_compute"),
         ({"use_torch_fsdp2": True}, "use_torch_fsdp2"),
         ({"moe_router_grad_merge": True}, "moe_router_grad_merge"),
+        ({"patch_zero_bubble": True}, "patch_zero_bubble"),
+        ({"patch_primus_pipeline": True, "pp_algorithm": "v-half"}, "pp_algorithm=v-half"),
         ({"mlp_chunks_for_training": 2}, "mlp_chunks_for_training > 1"),
+        ({"num_microbatches_with_partial_activation_checkpoints": 2}, "partial_activation_checkpoints"),
         ({"moe_expert_capacity_factor": 1.0}, "token dropping"),
         (
             {"moe_router_force_load_balancing": True, "moe_router_force_load_balancing_type": "even"},

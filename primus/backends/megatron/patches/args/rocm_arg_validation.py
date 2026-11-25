@@ -223,8 +223,13 @@ def _log_moe_replica_memory(args, option: str) -> None:
     # out-of-memory error when the MoE layers allocate them
     need = moe_replica_slot_bytes(args)
     if need:
+        where = (
+            "per GPU"
+            if getattr(args, "pipeline_model_parallel_size", 1) == 1
+            else "summed over the pipeline stages (each GPU holds its stage's layers)"
+        )
         log_rank_0(
-            f"{option}: the replica slots take {need / 2**30:.1f} GiB per GPU ({_num_moe_layers(args)} MoE "
+            f"{option}: the replica slots take {need / 2**30:.1f} GiB {where} ({_num_moe_layers(args)} MoE "
             f"layers x {getattr(args, 'moe_replica_slots', 4)} slots x one expert's weights and gradients)"
         )
 
@@ -273,8 +278,12 @@ def validate_moe_routing_replay(args) -> None:
         )
 
 
+# patch_primus_pipeline schedules verified end to end with replication
+_MOE_REPLICA_PRIMUS_PIPELINES = ("1f1b", "1f1b-interleaved", "zero-bubble", "zbv-formatted")
+
+
 def validate_moe_replica(args) -> None:
-    """Dynamic expert replication (``moe_replica_planner``): BF16 Turbo DeepEP and Turbo grouped GEMM, TP 1, PP 1.
+    """Dynamic expert replication (``moe_replica_planner``): BF16 Turbo DeepEP and Turbo grouped GEMM, TP 1.
 
     The replicas live in ``PrimusTurboDeepEPTokenDispatcher`` and ``PrimusTurboGroupedLinear``; a combination
     they do not handle would silently run without replicas or lose replica gradients, so it is rejected here.
@@ -330,11 +339,9 @@ def validate_moe_replica(args) -> None:
 
     tp = getattr(args, "tensor_model_parallel_size", 1)
     etp = getattr(args, "expert_tensor_parallel_size", None) or tp
-    pp = getattr(args, "pipeline_model_parallel_size", 1)
     for name, value in (
         ("tensor_model_parallel_size", tp),
         ("expert_tensor_parallel_size", etp),
-        ("pipeline_model_parallel_size", pp),
     ):
         if value != 1:
             raise ValueError(f"{option} requires {name}=1, got {value}.")
@@ -343,20 +350,35 @@ def validate_moe_replica(args) -> None:
         "turbo_fused_grouped_gemm": "replicas run on the BF16 grouped GEMM only",
         "fp8": "replicas run on the BF16 grouped GEMM only",
         "fp4": "replicas run on the BF16 grouped GEMM only",
-        "overlap_moe_expert_parallel_comm": "the replica scheduler assumes one micro-batch in flight",
+        "overlap_moe_expert_parallel_comm": "it interleaves two micro-batches inside a layer on separate streams, "
+        "which the replica transfers are not ordered for",
         "delay_wgrad_compute": "the replica gradients are returned with the weight gradients",
         "use_megatron_fsdp": "the replica gradients go into the owners' DDP main_grad",
         "use_torch_fsdp2": "the replica gradients go into the owners' DDP main_grad",
         "use_deprecated_20241209_moe_layer": "the replicas attach to Megatron's MoELayer",
-        "moe_router_grad_merge": "its input-gradient join skips MoE layers with the replica forward pre-hook",
+        "moe_router_grad_merge": "its input-gradient join is not tested with the replicas' end of step on the "
+        "dispatcher input",
+        "patch_zero_bubble": "Primus's zero-bubble runtime is not verified with the replicas (it did not run on the "
+        "pinned Megatron when tested); use patch_primus_pipeline",
     }
     for name, why in unsupported.items():
         if getattr(args, name, None):
             raise ValueError(f"{option} does not support {name} ({why}).")
+    algorithm = getattr(args, "pp_algorithm", None)
+    if getattr(args, "patch_primus_pipeline", False) and algorithm not in _MOE_REPLICA_PRIMUS_PIPELINES:
+        raise ValueError(
+            f"{option} is verified with the patch_primus_pipeline schedules "
+            f"{', '.join(_MOE_REPLICA_PRIMUS_PIPELINES)}, got pp_algorithm={algorithm}."
+        )
     if (getattr(args, "mlp_chunks_for_training", None) or 1) > 1:
         raise ValueError(
             f"{option} does not support mlp_chunks_for_training > 1 "
             "(the replica scheduler counts one MoE call per micro-batch)."
+        )
+    if getattr(args, "num_microbatches_with_partial_activation_checkpoints", None) is not None:
+        raise ValueError(
+            f"{option} does not support num_microbatches_with_partial_activation_checkpoints (a recompute replays "
+            "the routes of its forward, which a micro-batch that is not recomputed would take)."
         )
     if getattr(args, "moe_expert_capacity_factor", None) is not None:
         raise ValueError(f"{option} does not support token dropping (moe_expert_capacity_factor).")
