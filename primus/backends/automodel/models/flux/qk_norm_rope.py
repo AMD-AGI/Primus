@@ -53,18 +53,17 @@ from typing import Optional
 import torch
 
 from primus.backends.automodel import options
-from primus.backends.automodel.models.flux.turbo_ops import dit_qk_norm_rope
+from primus.backends.automodel.models.flux.turbo_ops import turbo_ops
 
 logger = logging.getLogger(__name__)
 
 _SECTION = "primus_perf"
-_FLAG = f"{_SECTION}.flux_fused_qk_norm_rope"
 _PATCHED_ATTR = "_primus_fused_qk_norm_rope"
 _HEAD_DIM = 128
 
 
 def is_enabled() -> bool:
-    return options.flag(_FLAG)
+    return options.flag(f"{_SECTION}.flux_fused_qk_norm_rope")
 
 
 def _norm_eps(norms) -> Optional[float]:
@@ -81,7 +80,7 @@ def _norm_eps(norms) -> Optional[float]:
     return eps.pop() if len(eps) == 1 and None not in eps else None
 
 
-def _fusable(attn, hidden_states, encoder_hidden_states, image_rotary_emb) -> Optional[float]:
+def fused_eps(attn, hidden_states, encoder_hidden_states, image_rotary_emb) -> Optional[float]:
     """eps for the op if this call is one it computes exactly as diffusers does, else None."""
     if not getattr(attn, "fused_projections", False) or attn.head_dim != _HEAD_DIM:
         return None
@@ -122,14 +121,14 @@ def install() -> bool:
             "not applied."
         )
         return False
-    op = dit_qk_norm_rope("PrimusFluxQkNormRope")
-    if op is None:
+    ops = turbo_ops("PrimusFluxQkNormRope", "dit_qk_norm_rope")
+    if ops is None:
         return False
     from primus.backends.automodel.models.flux.attn_processor import (
         PrimusFluxAttnProcessor,
     )
 
-    PrimusFluxAttnProcessor.dit_qk_norm_rope = staticmethod(op)
+    PrimusFluxAttnProcessor.dit_qk_norm_rope = staticmethod(ops.dit_qk_norm_rope)
     FluxAttention._default_processor_cls = PrimusFluxAttnProcessor
     if PrimusFluxAttnProcessor not in FluxAttention._available_processors:
         FluxAttention._available_processors = [*FluxAttention._available_processors, PrimusFluxAttnProcessor]

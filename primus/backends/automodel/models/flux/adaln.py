@@ -21,8 +21,10 @@ WHAT:
   are copies of the inputs for the residual add, ``y`` the modulated LayerNorm of their concat. The
   residual leaves as two tensors so that its gradient comes back as the two block-output
   gradients, which the backward reads directly: with a single concatenated residual, Inductor
-  materializes their concatenation around the op and gives the fusion's gain back. Calls the op does
-  not take (its ``adaln_modulate_shape_error``) keep ``mlp_gelu.py``'s forward.
+  materializes their concatenation around the op and gives the fusion's gain back. The forward computes
+  the block's ``AdaLayerNormZeroSingle`` itself (its modulation GEMM, then the op), so it takes only a
+  stock one with an affine-free LayerNorm and no hooks. Other calls, and calls the op does not take
+  (its ``adaln_modulate_shape_error``), keep ``mlp_gelu.py``'s forward.
 
 NUMERICS:
   Inductor's arithmetic: 1 + scale rounded to BF16, FP32 inside, one rounding per output; only
@@ -33,32 +35,36 @@ NUMERICS:
 REQUIRES:
   gfx950 (the op runs unfused eager PyTorch arithmetic elsewhere, so the
   patch declines there) and Primus-Turbo with ``adaln_modulate`` and ``linear_gelu``. ``mlp_gelu.py``'s
-  single-stream forward, on diffusers 0.40.0's (source hash), which this forward re-implements with the
-  adaLN replaced. Installs after it (priority 75) and before ``block_outputs.py`` (80), which wraps it
-  and clones its two outputs; the clones cost nothing on this forward, which already returns two tensors
-  of their own.
+  single-stream forward, not wrapped by another patch, which this forward re-implements with the adaLN
+  replaced, and diffusers' ``AdaLayerNormZeroSingle.forward`` (0.38.0 to 0.43.0, checked by
+  ``pinned_source``). Installs after it (priority 75) and before ``block_outputs.py`` (80), which wraps
+  it and clones its two outputs; the clones cost nothing on this forward, which already returns two
+  tensors of their own.
 
 Settings (module config, ``primus_perf:`` section):
-    flux_fused_adaln_flydsl: false     apply this patch
+    flux_fused_adaln: false     apply this patch
 """
 import functools
-import hashlib
-import inspect
 import logging
 
-import torch
-
 from primus.backends.automodel import options
+from primus.backends.automodel.models.flux import mlp_gelu, pinned_source
+from primus.backends.automodel.models.flux.plain_modules import (
+    has_no_hooks,
+    is_plain_layer_norm,
+)
 from primus.backends.automodel.models.flux.turbo_ops import turbo_ops
 
 logger = logging.getLogger(__name__)
 
 _SECTION = "primus_perf"
-_PATCHED_ATTR = "_primus_fused_adaln_flydsl"
+_PATCHED_ATTR = "_primus_fused_adaln"
+# pinned_source digest of diffusers' (0.38.0 to 0.43.0) AdaLayerNormZeroSingle.forward.
+ADA_NORM_FORWARD_DIGEST = "673055fd6685db65053d1dee96b78f098fc3d3d4b8e37a089f0c83100f4a7b5e"
 
 
 def is_enabled() -> bool:
-    return options.flag(f"{_SECTION}.flux_fused_adaln_flydsl")
+    return options.flag(f"{_SECTION}.flux_fused_adaln")
 
 
 # --- the single-stream block -------------------------------------------------------------------
@@ -67,20 +73,21 @@ def is_enabled() -> bool:
 def make_forward(orig, ops):
     """``mlp_gelu.py``'s single-stream forward with cat + LayerNorm + modulation as ``adaln_modulate``;
     ``orig`` serves the calls it does not take."""
+    from diffusers.models.normalization import AdaLayerNormZeroSingle
     from primus_turbo.pytorch.kernels.normalization.adaln_modulate_impl import (
         adaln_modulate_shape_error,
     )
-
-    from primus.backends.automodel.models.flux import mlp_gelu
 
     @functools.wraps(orig)
     def forward(
         self, hidden_states, encoder_hidden_states, temb, image_rotary_emb=None, joint_attention_kwargs=None
     ):
-        act = self.act_mlp
         norm = self.norm
-        if not mlp_gelu.fusable(
-            hidden_states, self.proj_mlp, isinstance(act, torch.nn.GELU) and act.approximate == "tanh"
+        if (
+            type(norm) is not AdaLayerNormZeroSingle
+            or not has_no_hooks(norm)
+            or not is_plain_layer_norm(norm.norm)
+            or not mlp_gelu.single_block_fusable(self, hidden_states)
         ):
             return orig(
                 self, hidden_states, encoder_hidden_states, temb, image_rotary_emb, joint_attention_kwargs
@@ -100,14 +107,7 @@ def make_forward(orig, ops):
             image_rotary_emb=image_rotary_emb,
             **(joint_attention_kwargs or {}),
         )
-        batch, seq, dim = norm_hidden_states.shape
-        concat = ops.linear_gelu(
-            norm_hidden_states.reshape(batch * seq, dim),
-            self.proj_mlp.weight,
-            self.proj_mlp.bias,
-            attn_output.reshape(batch * seq, -1),
-        )
-        gated = gate.unsqueeze(1) * self.proj_out(concat.view(batch, seq, -1))
+        gated = mlp_gelu.single_block_mlp_out(self, ops, norm_hidden_states, attn_output, gate)
         # diffusers' residual + gated, split into the text and image tokens, on the two residual halves.
         return r_txt + gated[:, :text_seq_len], r_img + gated[:, text_seq_len:]
 
@@ -115,21 +115,23 @@ def make_forward(orig, ops):
 
 
 def install() -> bool:
+    from diffusers.models.normalization import AdaLayerNormZeroSingle
     from diffusers.models.transformers.transformer_flux import (
         FluxSingleTransformerBlock,
     )
 
-    from primus.backends.automodel.models.flux import mlp_gelu
-
     if getattr(FluxSingleTransformerBlock, _PATCHED_ATTR, False):
         return True
     orig = FluxSingleTransformerBlock.forward
-    diffusers_forward = inspect.unwrap(orig)
-    digest = hashlib.sha256(inspect.getsource(diffusers_forward).encode()).hexdigest()
-    if not mlp_gelu.installed() or orig is diffusers_forward or digest != mlp_gelu.SINGLE_FORWARD_SHA256:
+    if orig is not mlp_gelu.single_forward():
         logger.warning(
-            "[PrimusFluxAdaLN] needs mlp_gelu.py's single-stream forward (primus_perf.flux_fused_gelu) "
-            "on diffusers 0.40.0's; not applied."
+            "[PrimusFluxAdaLN] needs mlp_gelu.py's single-stream forward (primus_perf.flux_fused_gelu), "
+            "not wrapped by another patch; not applied."
+        )
+        return False
+    if pinned_source.digest(AdaLayerNormZeroSingle.forward) != ADA_NORM_FORWARD_DIGEST:
+        logger.warning(
+            "[PrimusFluxAdaLN] AdaLayerNormZeroSingle.forward is not diffusers 0.38.0's to 0.43.0's; not applied."
         )
         return False
     ops = turbo_ops("PrimusFluxAdaLN", "adaln_modulate", "linear_gelu", gain_on_gfx950_only=True)

@@ -3,9 +3,9 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Register the FLUX single-stream adaLN as one FlyDSL op each way.
+"""Register the FLUX single-stream adaLN as one Primus-Turbo op each way.
 
-Gated on ``primus_perf.flux_fused_adaln_flydsl`` for FLUX runs; see ``models/flux/adaln_flydsl.py``.
+Gated on ``primus_perf.flux_fused_adaln`` for FLUX runs; see ``models/flux/adaln.py``.
 Runs after the fused GELU (priority 70), whose single-stream forward it re-implements, and before the
 fresh single-stream block outputs (80), which wrap it.
 """
@@ -14,26 +14,26 @@ from primus.backends.automodel import options
 from primus.backends.automodel.patches._conditions import transformer_is
 from primus.core.patches import PatchContext, register_patch
 
-options.declare("primus_perf", "flux_fused_adaln_flydsl")
+options.declare("primus_perf", "flux_fused_adaln")
 
 _is_flux = transformer_is("FluxTransformer2DModel")
 
 
 def _enabled(ctx: PatchContext) -> bool:
-    from primus.backends.automodel.models.flux import adaln_flydsl
+    from primus.backends.automodel.models.flux import adaln
 
-    return _is_flux(ctx) and adaln_flydsl.is_enabled()
+    return _is_flux(ctx) and adaln.is_enabled()
 
 
 @register_patch(
-    "automodel.models.flux.fused_adaln_flydsl",
+    "automodel.models.flux.fused_adaln",
     backend="automodel",
     phase="before_train",
-    description="FLUX single-stream adaLN as one FlyDSL op each way (primus_perf.flux_fused_adaln_flydsl)",
+    description="FLUX single-stream adaLN as one Primus-Turbo op each way (primus_perf.flux_fused_adaln)",
     condition=_enabled,
     priority=75,
 )
 def apply(ctx: PatchContext) -> None:
-    from primus.backends.automodel.models.flux import adaln_flydsl
+    from primus.backends.automodel.models.flux import adaln
 
-    adaln_flydsl.install()
+    adaln.install()

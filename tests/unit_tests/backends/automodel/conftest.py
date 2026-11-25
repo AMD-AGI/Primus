@@ -103,8 +103,8 @@ def flux_fused_patches(monkeypatch):
     from diffusers.models.attention import FeedForward
 
     from primus.backends.automodel.models.flux import (
-        adaln_dual_flydsl,
-        adaln_flydsl,
+        adaln,
+        adaln_dual,
         mlp_gelu,
         qk_norm_rope,
     )
@@ -117,18 +117,20 @@ def flux_fused_patches(monkeypatch):
     for attr in ("_default_processor_cls", "_available_processors"):
         monkeypatch.setattr(attention, attr, getattr(attention, attr))
     monkeypatch.setattr(PrimusFluxAttnProcessor, "dit_qk_norm_rope", None)
+    monkeypatch.setattr(mlp_gelu, "_single_forward", None)
     for cls in (FeedForward, single, dual, transformer_flux.FluxTransformer2DModel):
         monkeypatch.setattr(cls, "forward", cls.forward)
     for cls, attr in (
         (FeedForward, mlp_gelu._PATCHED_ATTR),
+        (single, mlp_gelu._PATCHED_ATTR),
         (attention, qk_norm_rope._PATCHED_ATTR),
-        (single, adaln_flydsl._PATCHED_ATTR),
-        (dual, adaln_dual_flydsl._PATCHED_ATTR),
+        (single, adaln._PATCHED_ATTR),
+        (dual, adaln_dual._PATCHED_ATTR),
     ):
         monkeypatch.setattr(cls, attr, False, raising=False)
     return SimpleNamespace(
-        adaln_dual=adaln_dual_flydsl,
-        adaln=adaln_flydsl,
+        adaln_dual=adaln_dual,
+        adaln=adaln,
         mlp_gelu=mlp_gelu,
         qk_norm_rope=qk_norm_rope,
     )

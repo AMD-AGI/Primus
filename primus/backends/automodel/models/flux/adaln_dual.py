@@ -33,45 +33,35 @@ NUMERICS:
 
 REQUIRES:
   gfx950 (the op runs unfused eager PyTorch arithmetic elsewhere, so the
-  patch declines there) and Primus-Turbo with ``gated_residual_adaln``; diffusers 0.40.0's
-  ``FluxTransformerBlock.forward`` (source hash), BF16 activations and the diffusers attention
-  processor (two outputs). Other calls keep diffusers' forward.
+  patch declines there) and Primus-Turbo with ``gated_residual_adaln``; diffusers'
+  ``FluxTransformerBlock.forward`` (0.38.0 to 0.43.0, checked by ``pinned_source``; not wrapped by another
+  patch), BF16 activations and the diffusers attention processor (two outputs). Other calls keep
+  diffusers' forward.
 
 Settings (module config, ``primus_perf:`` section):
-    flux_fused_adaln_dual_flydsl: false     apply this patch
+    flux_fused_adaln_dual: false     apply this patch
 """
 import functools
-import hashlib
-import inspect
 import logging
 
-import torch
-
 from primus.backends.automodel import options
+from primus.backends.automodel.models.flux import pinned_source
+from primus.backends.automodel.models.flux.plain_modules import is_plain_layer_norm
 from primus.backends.automodel.models.flux.turbo_ops import turbo_ops
 
 logger = logging.getLogger(__name__)
 
 _SECTION = "primus_perf"
-_PATCHED_ATTR = "_primus_fused_adaln_dual_flydsl"
-# sha256 of diffusers 0.40.0's FluxTransformerBlock.forward.
-_DUAL_FORWARD_SHA256 = "0b184cbe172708b6f072a779e13866a44ef5a8ee706fcd3e6887923b11c00785"
+_PATCHED_ATTR = "_primus_fused_adaln_dual"
+# pinned_source digest of diffusers' (0.38.0 to 0.43.0) FluxTransformerBlock.forward.
+DUAL_FORWARD_DIGEST = "80d2db652a7562eb359529e84c6e8d58b561b0df5328dcabf95225f92954e4b3"
 
 
 def is_enabled() -> bool:
-    return options.flag(f"{_SECTION}.flux_fused_adaln_dual_flydsl")
+    return options.flag(f"{_SECTION}.flux_fused_adaln_dual")
 
 
 # --- the dual-stream block ---------------------------------------------------------------------
-
-
-def _plain_norm(n) -> bool:
-    return (
-        isinstance(n, torch.nn.LayerNorm)
-        and n.weight is None
-        and n.bias is None
-        and len(n.normalized_shape) == 1
-    )
 
 
 def make_forward(orig, ops):
@@ -89,7 +79,7 @@ def make_forward(orig, ops):
         if (
             joint_attention_kwargs
             or not isinstance(self.attn.processor, FluxAttnProcessor)
-            or not (_plain_norm(self.norm2) and _plain_norm(self.norm2_context))
+            or not (is_plain_layer_norm(self.norm2) and is_plain_layer_norm(self.norm2_context))
             or self.norm2.eps != self.norm2_context.eps
         ):
             return orig(
@@ -150,10 +140,10 @@ def install() -> bool:
     if getattr(FluxTransformerBlock, _PATCHED_ATTR, False):
         return True
     orig = FluxTransformerBlock.forward
-    digest = hashlib.sha256(inspect.getsource(inspect.unwrap(orig)).encode()).hexdigest()
-    if digest != _DUAL_FORWARD_SHA256:
+    if pinned_source.digest(orig) != DUAL_FORWARD_DIGEST:
         logger.warning(
-            "[PrimusFluxAdaLNDual] FluxTransformerBlock.forward is not diffusers 0.40.0's; not applied."
+            "[PrimusFluxAdaLNDual] FluxTransformerBlock.forward is not diffusers 0.38.0's to 0.43.0's "
+            "(or another patch wrapped it); not applied."
         )
         return False
     ops = turbo_ops("PrimusFluxAdaLNDual", "gated_residual_adaln", gain_on_gfx950_only=True)

@@ -16,8 +16,8 @@ import torch.nn.functional as F
 from diffusers.models.attention_dispatch import dispatch_attention_fn
 from diffusers.models.transformers.transformer_flux import FluxAttnProcessor
 
-from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
-from primus.backends.automodel.models.flux.qk_norm_rope import _fusable
+from primus.backends.automodel.models.flux.plain_modules import is_plain_linear
+from primus.backends.automodel.models.flux.qk_norm_rope import fused_eps
 
 
 class PrimusFluxAttnProcessor(FluxAttnProcessor):
@@ -29,7 +29,7 @@ class PrimusFluxAttnProcessor(FluxAttnProcessor):
     def __call__(
         self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, image_rotary_emb=None
     ):
-        eps = _fusable(attn, hidden_states, encoder_hidden_states, image_rotary_emb)
+        eps = fused_eps(attn, hidden_states, encoder_hidden_states, image_rotary_emb)
         if eps is None or self.dit_qk_norm_rope is None:
             return super().__call__(
                 attn, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb

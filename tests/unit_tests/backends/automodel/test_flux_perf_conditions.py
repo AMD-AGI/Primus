@@ -29,8 +29,8 @@ from primus.core.patches import PatchContext  # noqa: E402
 FLUX_PATCHES = [
     ("flux_mlp_gelu_patches", "primus_perf.flux_fused_gelu"),
     ("flux_qk_norm_rope_patches", "primus_perf.flux_fused_qk_norm_rope"),
-    ("flux_adaln_flydsl_patches", "primus_perf.flux_fused_adaln_flydsl"),
-    ("flux_adaln_dual_flydsl_patches", "primus_perf.flux_fused_adaln_dual_flydsl"),
+    ("flux_adaln_patches", "primus_perf.flux_fused_adaln"),
+    ("flux_adaln_dual_patches", "primus_perf.flux_fused_adaln_dual"),
 ]
 
 
@@ -77,17 +77,17 @@ class SwappedLinear(torch.nn.Linear):
 
 class TestStockLinearOnly:
     def test_stock_linear(self):
-        from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
+        from primus.backends.automodel.models.flux.plain_modules import is_plain_linear
 
         assert is_plain_linear(torch.nn.Linear(4, 4)) is True
 
     def test_declines_a_swapped_linear(self):
-        from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
+        from primus.backends.automodel.models.flux.plain_modules import is_plain_linear
 
         assert is_plain_linear(SwappedLinear(4, 4)) is False
 
     def test_declines_without_bias_or_with_hooks(self):
-        from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
+        from primus.backends.automodel.models.flux.plain_modules import is_plain_linear
 
         hooked = torch.nn.Linear(4, 4)
         hooked.register_forward_pre_hook(lambda module, args: None)
@@ -100,3 +100,27 @@ class TestStockLinearOnly:
         x = SimpleNamespace(is_cuda=True, dtype=torch.bfloat16)
         assert mlp_gelu.fusable(x, torch.nn.Linear(4, 4, dtype=torch.bfloat16), True) is True
         assert mlp_gelu.fusable(x, SwappedLinear(4, 4, dtype=torch.bfloat16), True) is False
+
+
+class TestAffineFreeLayerNormOnly:
+    def test_affine_free_layer_norm(self):
+        from primus.backends.automodel.models.flux.plain_modules import (
+            is_plain_layer_norm,
+        )
+
+        assert is_plain_layer_norm(torch.nn.LayerNorm(4, elementwise_affine=False)) is True
+
+    def test_declines_weights_hooks_and_subclasses(self):
+        from primus.backends.automodel.models.flux.plain_modules import (
+            is_plain_layer_norm,
+        )
+
+        class AnotherLayerNorm(torch.nn.LayerNorm):
+            pass
+
+        hooked = torch.nn.LayerNorm(4, elementwise_affine=False)
+        hooked.register_forward_hook(lambda module, args, out: None)
+        assert is_plain_layer_norm(torch.nn.LayerNorm(4)) is False
+        assert is_plain_layer_norm(hooked) is False
+        assert is_plain_layer_norm(AnotherLayerNorm(4, elementwise_affine=False)) is False
+        assert is_plain_layer_norm(torch.nn.RMSNorm(4, elementwise_affine=False)) is False

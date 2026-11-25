@@ -17,7 +17,8 @@ WHAT THESE ARE DEFENDING:
   as close to it as diffusers' block in BF16 is (twice its distance, plus a small floor). Calls an
   op does not take (token counts off its tiling) must take the fallback path and still match. The
   fallbacks match the references too, so each test also counts the calls of every op: a guard that
-  always declined would otherwise pass.
+  always declined would otherwise pass. An adaLN norm the op cannot compute (a LayerNorm with weights)
+  must take the fallback too.
 
   A QKV projection that a low-precision swap replaced runs its own forward, its bias included, so the
   q/k op must not add that bias again.
@@ -31,8 +32,6 @@ the wiring on any GPU. The class-level patches are undone after each test.
 """
 
 import copy
-import hashlib
-import inspect
 
 import pytest
 
@@ -52,14 +51,26 @@ def _turbo_flux_ops() -> bool:
 
 
 def _known_diffusers() -> bool:
-    from primus.backends.automodel.models.flux import adaln_dual_flydsl, mlp_gelu
+    from diffusers.models.activations import GELU
+    from diffusers.models.attention import FeedForward
+    from diffusers.models.normalization import AdaLayerNormZeroSingle
 
-    def digest(fn):
-        return hashlib.sha256(inspect.getsource(inspect.unwrap(fn)).encode()).hexdigest()
+    from primus.backends.automodel.models.flux import (
+        adaln,
+        adaln_dual,
+        mlp_gelu,
+        pinned_source,
+    )
 
-    return (
-        digest(transformer_flux.FluxSingleTransformerBlock.forward) == mlp_gelu.SINGLE_FORWARD_SHA256
-        and digest(transformer_flux.FluxTransformerBlock.forward) == adaln_dual_flydsl._DUAL_FORWARD_SHA256
+    return all(
+        pinned_source.digest(fn) == expected
+        for fn, expected in (
+            (transformer_flux.FluxSingleTransformerBlock.forward, mlp_gelu.SINGLE_FORWARD_DIGEST),
+            (FeedForward.forward, mlp_gelu.FEED_FORWARD_DIGEST),
+            (GELU.forward, mlp_gelu.GELU_FORWARD_DIGEST),
+            (AdaLayerNormZeroSingle.forward, adaln.ADA_NORM_FORWARD_DIGEST),
+            (transformer_flux.FluxTransformerBlock.forward, adaln_dual.DUAL_FORWARD_DIGEST),
+        )
     )
 
 
@@ -69,7 +80,9 @@ pytestmark = [
         not (torch.cuda.is_available() and _turbo_flux_ops()),
         reason="needs Primus-Turbo's adaln_modulate, gated_residual_adaln, linear_gelu and dit_qk_norm_rope",
     ),
-    pytest.mark.skipif(not _known_diffusers(), reason="the patches re-implement diffusers 0.40.0's forwards"),
+    pytest.mark.skipif(
+        not _known_diffusers(), reason="the patches re-implement diffusers 0.38.0's to 0.43.0's forwards"
+    ),
 ]
 
 BF16, DEV = torch.bfloat16, "cuda"
@@ -208,6 +221,27 @@ def test_single_stream_block(s_txt, takes_adaln, patches, calls, gen):
     _compare(_run(_installed_processor(block), BF16, *args), ref32, ref16)
     assert calls == {
         "adaln_modulate": int(takes_adaln),
+        "gated_residual_adaln": 0,
+        "linear_gelu": 1,
+        "dit_qk_norm_rope": 1,
+    }
+
+
+def test_single_stream_block_with_an_affine_ada_norm(patches, calls, gen):
+    """The adaLN forward computes only an affine-free LayerNorm from its eps; one with weights keeps the
+    fused GELU forward around the other two ops."""
+    block = _block(transformer_flux.FluxSingleTransformerBlock)
+    block.norm.norm = torch.nn.LayerNorm(C, eps=1e-6, device=DEV)
+    with torch.no_grad():
+        block.norm.norm.weight.normal_(1.0, 0.1)
+        block.norm.norm.bias.normal_(0.0, 0.1)
+    block = block.to(BF16).float()
+    args = _inputs(256, gen)
+    ref32, ref16 = _run(block, torch.float32, *args), _run(block, BF16, *args)
+    assert patches.mlp_gelu.install() and patches.qk_norm_rope.install() and patches.adaln.install()
+    _compare(_run(_installed_processor(block), BF16, *args), ref32, ref16)
+    assert calls == {
+        "adaln_modulate": 0,
         "gated_residual_adaln": 0,
         "linear_gelu": 1,
         "dit_qk_norm_rope": 1,

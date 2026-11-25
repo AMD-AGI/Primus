@@ -9,7 +9,7 @@
 
 import logging
 from types import ModuleType
-from typing import Callable, Optional
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +32,3 @@ def turbo_ops(tag: str, *names: str, gain_on_gfx950_only: bool = False) -> Optio
         logger.warning("[%s] Primus-Turbo's %s gain only on gfx950; not applied.", tag, ", ".join(names))
         return None
     return ops
-
-
-def dit_qk_norm_rope(tag: str) -> Optional[Callable]:
-    """Primus-Turbo's ``dit_qk_norm_rope``, or None after logging that this Primus-Turbo has none and the
-    ``tag`` patch is not applied."""
-    ops = turbo_ops(tag, "dit_qk_norm_rope")
-    return None if ops is None else ops.dit_qk_norm_rope
