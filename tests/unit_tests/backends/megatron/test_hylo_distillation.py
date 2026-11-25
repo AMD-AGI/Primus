@@ -520,25 +520,37 @@ def test_sft_ild_step_ignores_padding(monkeypatch):
     torch.testing.assert_close(loss.cpu(), 40 * width)
 
 
-def test_sft_kl_step_is_the_weighted_kl_over_the_loss_mask(monkeypatch):
+def test_sft_kl_step_is_the_weighted_kl_over_every_real_target(monkeypatch):
     _megatron_args(monkeypatch, hylo_kl_impl="chunked", hylo_kl_weight=0.5)
+    monkeypatch.setattr(hylo_distillation, "_sft_pad_id", lambda: 9)
     teacher = _TeacherGPT()
     monkeypatch.setattr(hylo_distillation, "_RUNTIME", HyLoRuntime(teacher, "sft"))
-    tokens = torch.tensor([[1, 2, 3]])
-    loss_mask = torch.tensor([[1.0, 1.0, 0.0]])
+    # Prompt 5, response 6 7, the supervised EOS (the pad id), then padding.
+    tokens = torch.tensor([[5, 6, 7, 9, 9]])
+    loss_mask = torch.tensor([[0.0, 1.0, 1.0, 0.0, 0.0]])
+    masks = []
+
+    def chunked(student_logits, teacher_logits, mask, chunk_size):
+        masks.append(mask)
+        return masked_chunked_kl(student_logits, teacher_logits, mask, chunk_size=chunk_size)
+
+    monkeypatch.setattr(hylo_distillation, "masked_chunked_kl", chunked)
     student = _StudentHybrid()
     output, loss_func = create_sft_forward_step()(
         iter([{"input_ids": tokens, "loss_mask": loss_mask}]), student
     )
     loss, count, report = loss_func(output)
 
+    # Label space: the targets 6, 7 and the EOS are real, the padding after the EOS is not.
+    real_targets = torch.tensor([[1.0, 1.0, 1.0, 0.0, 0.0]])
+    torch.testing.assert_close(masks[0].cpu(), real_targets)
     with torch.no_grad():
-        expected, expected_count = masked_chunked_kl(
-            student(tokens, None, None), teacher(tokens, None, None), loss_mask
+        expected, _ = masked_chunked_kl(
+            student(tokens, None, None), teacher(tokens, None, None), real_targets
         )
     torch.testing.assert_close(loss, 0.5 * expected)
     torch.testing.assert_close(report["hylo kl"][0], expected)
-    assert count.item() == expected_count.item() == 2
+    assert count.item() == 3
 
 
 def test_pure_kl_installs_no_capture_hooks():

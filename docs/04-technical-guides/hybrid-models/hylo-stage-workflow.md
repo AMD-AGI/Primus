@@ -55,8 +55,9 @@ Llama-3.1-8B teacher. Its objective is pure
 `KL(teacher || student)`: KL weight 1 and CE weight 0. The recipes'
 `hylo_kl_impl: fused` computes it in one pass with FLA's fused KL kernel;
 `chunked`, the PyTorch reference, takes `hylo_kl_chunk_size` token rows at a
-time over the full vocabulary. This padded recipe takes the KL over the SFT
-loss mask, the response tokens; the packed recipe takes it over every position.
+time over the full vocabulary. This padded recipe takes the KL over every real
+target, prompt and template included, and skips only the padding; the packed
+recipe takes it over every position.
 
 The reference recipe uses 8K context, BF16, learning rate `6e-5`, cosine decay,
 1% warmup, micro-batch 4 per GPU, and YaRN factor 4 over the original 2K

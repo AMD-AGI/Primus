@@ -801,13 +801,13 @@ def create_sft_forward_step():
         student_logits = model(tokens, position_ids, None, labels=None, **logits_kwargs)
 
         def loss_func(_output):
+            real = sft_real_tokens(tokens, loss_mask, _sft_pad_id())
             if _RUNTIME.stage == "ild":
-                loss, parts = enhanced_ild_loss(
-                    *_RUNTIME.ild_captures(), token_mask=sft_real_tokens(tokens, loss_mask, _sft_pad_id())
-                )
+                loss, parts = enhanced_ild_loss(*_RUNTIME.ild_captures(), token_mask=real)
                 return _loss_result(loss, _ild_count(loss), {"hylo ild": loss.detach(), **parts})
-            # The SFT loss_mask: KL on the supervised response tokens only.
-            return _kl_loss_result(student_logits, teacher_logits, loss_mask)
+            # KL over every real target, prompt and template included, as HyLo and the packed data do.
+            kl_mask = F.pad(real.transpose(0, 1)[..., 1:].to(loss_mask.dtype), (0, 1))
+            return _kl_loss_result(student_logits, teacher_logits, kl_mask)
 
         return student_logits, loss_func
 
