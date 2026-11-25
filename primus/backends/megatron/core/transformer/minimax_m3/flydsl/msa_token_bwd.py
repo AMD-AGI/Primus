@@ -1033,6 +1033,21 @@ def plan_chunk_size(
     return max(min_chunk, -(-max_tokens // target_chunks))
 
 
+def plan_chunk_size_of(
+    n_rows: int, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64, bounded: bool = False
+) -> int:
+    """The chunk size :func:`plan_chunks` uses for a table of ``n_rows`` rows: :func:`plan_chunk_size`,
+    except that a bounded plan whose worst-case chunk count would take the dK / dV partials past
+    the kernels' 32-bit buffer limit falls back to the reference rule. An integer function of the
+    shape, decided before any work; every builder of a :class:`BlockPlan` that can see such row
+    counts (``plan_chunks``, ``select_plan``'s wide plan) takes its size from here."""
+    size = plan_chunk_size(max_tokens, target_chunks, min_chunk, bounded)
+    if bounded and (n_rows + -(-max_tokens // size)) * BOUNDED_CHUNK_WS_BYTES >= MAX_BUFFER_BYTES:
+        # B * Hkv * n_blocks rows of 8192 and more: the reference rule
+        size = plan_chunk_size(max_tokens, target_chunks, min_chunk)
+    return size
+
+
 def plan_chunks(
     ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64, bounded: bool = False
 ):
@@ -1050,11 +1065,7 @@ def plan_chunks(
     """
     n_rows = ptr.numel() - 1
     assert n_rows < 2**_SEARCH_STEPS
-    size = plan_chunk_size(max_tokens, target_chunks, min_chunk, bounded)
-    if bounded and (n_rows + -(-max_tokens // size)) * BOUNDED_CHUNK_WS_BYTES >= MAX_BUFFER_BYTES:
-        # eligibility, before any work: the bounded plan's dK / dV partials would pass the kernels'
-        # 32-bit buffer limit (B * Hkv * n_blocks rows of 8192 and more): the reference rule
-        size = plan_chunk_size(max_tokens, target_chunks, min_chunk)
+    size = plan_chunk_size_of(n_rows, max_tokens, target_chunks, min_chunk, bounded)
     per_row = torch.div(ptr[1:] - ptr[:-1] + (size - 1), size, rounding_mode="floor").clamp_min_(1)
     chunk_ptr = torch.cat([torch.zeros_like(ptr[:1]), torch.cumsum(per_row, 0, dtype=torch.int32)])
 

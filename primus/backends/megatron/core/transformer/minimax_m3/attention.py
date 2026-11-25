@@ -71,6 +71,8 @@ _MSA_FUSIONS = (
     "msa_fused_indexer_loss",
     "msa_fused_indexer_loss_scatter",
     "msa_fused_select_plan",
+    "msa_select_plan_wide",
+    "msa_select_skip_fill",
     "msa_shared_rope_tables",
     "msa_fused_zero_centered_gamma",
     "msa_fused_indexer_input_norm",

@@ -96,6 +96,13 @@ msa_shared_rope_tables: false
 msa_fused_zero_centered_gamma: false
 msa_fused_indexer_input_norm: false
 msa_fused_select_plan: false
+# with msa_fused_select_plan: the fused selection bookkeeping and BlockPlan past 64 blocks (16k,
+# 32k, 64k; the eager ops around the plan's two FlyDSL passes fused); bit-identical, checked on first use.
+msa_select_plan_wide: false
+# gfx1250, with msa_fused_select_plan: no -inf / -1 fill launches before the indexer's scoring
+# kernel (the boost kernel writes the -inf of the blocks after a query's own); bit-identical,
+# checked on first use.
+msa_select_skip_fill: false
 # gfx1250 flydsl kernels: adjacent tokens share a workgroup and one staging of each K/V tile they
 # have in common; bit-identical, checked on first use (MSATransformerConfig).
 msa_shared_tile_staging: false

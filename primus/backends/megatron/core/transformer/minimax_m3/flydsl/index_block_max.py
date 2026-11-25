@@ -1390,7 +1390,15 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
     return dk
 
 
-def index_block_max(q: torch.Tensor, k: torch.Tensor, block_size: int = 128, mask_skip: bool = False):
+# index_block_max(fill="poison"): what the outputs hold where the kernel does not write, for the
+# self-check and the tests of msa_select_skip_fill (a reader of those elements would show)
+FILL_POISON_SCORE = float("nan")
+FILL_POISON_KEY = -2
+
+
+def index_block_max(
+    q: torch.Tensor, k: torch.Tensor, block_size: int = 128, mask_skip: bool = False, fill=True
+):
     """Per-block max of ``q . k`` over each query's causal keys.
 
     Args:
@@ -1400,9 +1408,16 @@ def index_block_max(q: torch.Tensor, k: torch.Tensor, block_size: int = 128, mas
             (``_build_index_block_max_w32``). The first call for a shape compares every bit of
             both outputs with the kernel without it and keeps that kernel on a mismatch.
 
+        fill: True writes -inf / -1 into both outputs before the kernel, which itself writes
+            every (query, block) with ``block <= query // block_size`` and, depending on the
+            kernel, some of the later blocks of its query group. False (``msa_select_skip_fill``,
+            gfx1250 kernel) leaves the blocks after the query's own unspecified: the caller must
+            not read them (``select_plan.boost_forced(causal_block=...)`` restores -inf there).
+            ``"poison"`` fills with NaN / -2 instead, for checks of such callers.
+
     Returns:
         ``block_max`` fp32 and ``argmax`` int32, both ``[B, n_index, S, n_blocks]``;
-        -inf / -1 on blocks with no visible key.
+        -inf / -1 on blocks with no visible key (with ``fill=True``).
     """
     S, B, H, DI = q.shape
     k = k.reshape(S, B, DI)
@@ -1410,9 +1425,17 @@ def index_block_max(q: torch.Tensor, k: torch.Tensor, block_size: int = 128, mas
     q, k = q.contiguous(), k.contiguous()
     n_blocks = -(-S // block_size)
 
-    def run(skip):
-        block_max = torch.full((B, H, S, n_blocks), float("-inf"), dtype=torch.float32, device=q.device)
-        argmax = torch.full((B, H, S, n_blocks), -1, dtype=torch.int32, device=q.device)
+    def run(skip, fill=True):
+        shape = (B, H, S, n_blocks)
+        if fill is True:
+            block_max = torch.full(shape, float("-inf"), dtype=torch.float32, device=q.device)
+            argmax = torch.full(shape, -1, dtype=torch.int32, device=q.device)
+        elif fill == "poison":
+            block_max = torch.full(shape, FILL_POISON_SCORE, dtype=torch.float32, device=q.device)
+            argmax = torch.full(shape, FILL_POISON_KEY, dtype=torch.int32, device=q.device)
+        else:
+            block_max = torch.empty(shape, dtype=torch.float32, device=q.device)
+            argmax = torch.empty(shape, dtype=torch.int32, device=q.device)
         args = (q, k, block_max, argmax, int(S), int(B), int(n_blocks), torch.cuda.current_stream())
         key = (H, DI, block_size, "mask_skip") if skip else (H, DI, block_size)
         fn = _CACHE.get(key)
@@ -1435,4 +1458,4 @@ def index_block_max(q: torch.Tensor, k: torch.Tensor, block_size: int = 128, mas
             lambda: run(False),
             key=(S, B, H, DI, block_size),
         )
-    return run(skip)
+    return run(skip, fill)

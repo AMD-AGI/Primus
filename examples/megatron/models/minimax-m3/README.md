@@ -137,7 +137,9 @@ and the experts), `fused_probs_mul` (the experts' routing-probs multiply), `defe
 scale of the BF16 gradients, which TE's `multi_tensor_scale_tensor` runs at a fifth of the memory
 bandwidth), `embedding_rows_grad` (the word-embedding gradient is added into the gradient buffer for
 the rows the micro-batch touches, not as a dense vocabulary-sized tensor), and around the MSA attention
-`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the gfx1250
+`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan` (with
+`msa_select_plan_wide` for more than 64 blocks, i.e. above 8k tokens, and `msa_select_skip_fill`, which
+drops the two fill launches before the indexer's scoring kernel), and inside the gfx1250
 MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens per
 workgroup and stage a K/V tile they share once) and `msa_lean_masks` (the forward, dQ and dK/dV
 kernels and the indexer's scoring kernel skip the per-key causal compare and select on steps whose

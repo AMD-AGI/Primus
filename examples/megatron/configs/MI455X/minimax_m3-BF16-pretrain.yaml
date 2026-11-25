@@ -75,6 +75,9 @@ modules:
       msa_fused_zero_centered_gamma: true
       msa_fused_indexer_input_norm: true
       msa_fused_select_plan: true
+      # the same selection plan past 64 blocks (above 8k tokens); no fill launches before the scoring kernel
+      msa_select_plan_wide: true
+      msa_select_skip_fill: true
       # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens
       msa_shared_tile_staging: true
       # gfx1250 MSA and indexer kernels: no per-element mask selects where they cannot change the result

@@ -188,6 +188,24 @@ class MSATransformerConfig(TransformerConfig):
     bookkeeping, identical by construction; shapes past select_plan.supported() keep the eager
     path."""
 
+    msa_select_plan_wide: bool = False
+    """flydsl backend with msa_fused_select_plan: shapes past select_plan.supported() (more than
+    64 blocks, i.e. sequences above 8k, or more than 1024 rows of blocks) get the selection
+    bookkeeping from one Triton launch and the BlockPlan from build_block_plan's two FlyDSL
+    passes with two Triton launches for the eager ops around them (select_plan.wide_supported():
+    up to 4096 rows of blocks, topk <= 64). Integer bookkeeping, exact class: the first
+    call for a shape compares every output with the unfused selection's and keeps that one on a
+    mismatch. Not a relaxed-numerics option: msa_exact_numerics leaves it on."""
+
+    msa_select_skip_fill: bool = False
+    """flydsl backend on gfx1250 with msa_fused_select_plan and forced (local / init) blocks: the
+    indexer's scoring kernel gets its two output tables unfilled (no -inf / -1 fill launches).
+    The kernel writes every block up to a query's own; the forced-block boost kernel, which
+    rewrites the score table anyway, writes -inf on the later blocks, and the argmax table is
+    never read there. Same bits, exact class: the first call for a shape runs the selection on
+    poisoned tables and on filled ones and keeps the fills on a mismatch. msa_exact_numerics
+    leaves it on."""
+
     msa_shared_tile_staging: bool = False
     """flydsl backend on gfx1250: the MSA forward and dQ kernels run 4 / 2 adjacent tokens of a KV
     group per workgroup, in lockstep, and stage a K/V tile that several of them select at the same

@@ -24,7 +24,11 @@ picked it, which is exactly a plan row -- deterministic, no atomics, and no
 sort of its own.
 """
 
+import functools
+
 import torch
+
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl import select_plan
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_block_max import (
@@ -61,12 +65,13 @@ def bounded_plan_chunks_enabled(config) -> bool:
     )
 
 
-def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_plan, bounded_chunks=False):
-    """:func:`select_plan`'s five-launch form of ``select_from_block_scores`` plus the
-    ``_FusedSelect`` bookkeeping and the :class:`BlockPlan`; None if it does not apply."""
+def _fused_mode(select_from_block_scores, B, H, S, NB):
+    """Which form of the fused selection serves this shape, decided from the config and the
+    shape before any work: ``"plan"`` (:func:`select_plan.supported`), ``"wide"``
+    (``msa_select_plan_wide`` and :func:`select_plan.wide_supported`) or None (the unfused
+    selection)."""
     from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
         MinimaxM3Indexer,
-        _forced_blocks,
     )
 
     indexer = getattr(select_from_block_scores, "__self__", None)
@@ -78,58 +83,182 @@ def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_pla
         or type(indexer)._boost_always_visible is not MinimaxM3Indexer._boost_always_visible
     ):
         return None
+    topk = min(indexer.topk_blocks, NB)
+    if select_plan.supported(B, H, S, NB, topk):
+        return "plan"
+    wide = bool(getattr(indexer.config, "msa_select_plan_wide", False))
+    if wide and select_plan.wide_supported(B, H, S, NB, topk):
+        return "wide"
+    global _UNSUPPORTED_WARNED
+    if not _UNSUPPORTED_WARNED:
+        _UNSUPPORTED_WARNED = True
+        warning_rank_0(
+            f"MSA indexer: fused block selection off for B={B}, H={H}, n_blocks={NB}, topk={topk} "
+            "(needs n_blocks <= 64, topk <= 32, B*H*n_blocks <= 1024"
+            + (
+                "; msa_select_plan_wide: topk <= 64, B*H*n_blocks <= 4096"
+                if wide
+                else "; msa_select_plan_wide is off"
+            )
+            + "); using the unfused selection."
+        )
+    return None
 
+
+@functools.lru_cache(maxsize=1)
+def _on_gfx1250() -> bool:
+    return "gfx1250" in get_hip_arch()
+
+
+def _forced_of(indexer, S, NB, device):
+    from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
+        _forced_blocks,
+    )
+
+    return _forced_blocks(S, NB, indexer.block_size, indexer.local_blocks, indexer.init_blocks, device)
+
+
+def _fused_selection(
+    raw, argmax, indexer, block_size, want_plan, bounded_chunks=False, wide=False, causal=False
+):
+    """:func:`select_plan`'s form of ``select_from_block_scores`` plus the ``_FusedSelect``
+    bookkeeping and the :class:`BlockPlan` (``bounded_chunks``: the ``msa_bounded_plan_chunks``
+    chunk size, as in ``build_block_plan``; ``wide``: the ``msa_select_plan_wide`` kernels).
+    ``causal`` (``msa_select_skip_fill``): ``raw`` / ``argmax`` are unspecified on the blocks after
+    each query's own; needs forced blocks, whose boost kernel then writes the -inf there."""
     B, H, S, NB = raw.shape
     topk = min(indexer.topk_blocks, NB)
-    if not select_plan.supported(B, H, S, NB, topk):
-        global _UNSUPPORTED_WARNED
-        if not _UNSUPPORTED_WARNED:
-            _UNSUPPORTED_WARNED = True
-            warning_rank_0(
-                f"MSA indexer: fused block selection off for B={B}, H={H}, n_blocks={NB}, topk={topk} "
-                "(needs n_blocks <= 64, topk <= 32, B*H*n_blocks <= 1024); using the unfused selection."
-            )
-        return None
-    forced = _forced_blocks(S, NB, indexer.block_size, indexer.local_blocks, indexer.init_blocks, raw.device)
-    block_scores = raw if forced is None else select_plan.boost_forced(raw, forced)
+    forced = _forced_of(indexer, S, NB, raw.device)
+    assert forced is not None or not causal
+    if forced is None:
+        block_scores = raw
+    else:
+        block_scores = select_plan.boost_forced(raw, forced, causal_block=indexer.block_size if causal else 0)
     topk_scores, topk_idx = block_scores.topk(topk, dim=-1)
     bi, keys, keys_c, dead, table, plan = select_plan.select_post_and_plan(
-        topk_scores, topk_idx, argmax, block_scores, block_size, want_plan, bounded_chunks
+        topk_scores, topk_idx, argmax, block_scores, block_size, want_plan, bounded_chunks, wide=wide
     )
     return bi, block_scores, keys, keys_c, dead, table, plan
+
+
+def _unfused_selection(raw, argmax, select_from_block_scores, S):
+    """The original selection and ``_FusedSelect`` bookkeeping: ``(block_indices, block_scores,
+    keys, dead)``."""
+    block_indices, block_scores = select_from_block_scores(raw, S)
+    slots = block_indices.clamp_min(0)
+    keys = argmax.gather(-1, slots)
+    forced = torch.isposinf(block_scores.gather(-1, slots))
+    dead = (block_indices < 0) | forced | (keys < 0)
+    return block_indices, block_scores, keys, dead
+
+
+def _live(values, n_live):
+    """``values`` with its rows from ``n_live`` (a 0-dim tensor) on zeroed: the plan's spare
+    entries / chunk rows are scratch."""
+    at = torch.arange(values.shape[0], device=values.device)
+    keep = at < n_live
+    return torch.where(keep.view(-1, *([1] * (values.dim() - 1))), values, torch.zeros_like(values))
+
+
+def _comparable(bi, block_scores, keys, keys_c, dead, table, plan):
+    """What a selection hands on, as a list ``bitwise_check`` can compare."""
+    return [
+        bi,
+        block_scores,
+        keys,
+        keys_c,
+        dead,
+        table,
+        plan.ptr,
+        _live(plan.entries, plan.ptr[-1]),
+        plan.chunk_ptr,
+        _live(plan.chunks, plan.chunk_ptr[-1]),
+    ]
+
+
+def _select_checked(name, shape_key, run_new, run_old) -> bool:
+    """First-call self-check of a selection variant for a shape, on that call's own inputs
+    (``bitwise_check.passed``; ``run_new`` / ``run_old`` return :func:`_comparable` lists)."""
+    from primus.backends.megatron.core.fusions import bitwise_check
+
+    return bitwise_check.passed(name, run_new, run_old, key=shape_key)
 
 
 class _FusedSelect(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, select_from_block_scores, block_size, plan_slot):
         indexer = getattr(select_from_block_scores, "__self__", None)
+        config = getattr(indexer, "config", None)
         # msa_lean_masks: bit-identical scoring and dK kernels, each checked on its first call
-        lean = bool(getattr(getattr(indexer, "config", None), "msa_lean_masks", False))
+        lean = bool(getattr(config, "msa_lean_masks", False))
         ctx.lean = lean
-        ctx.dk_scatter = index_dk_scatter_enabled(getattr(indexer, "config", None))
-        ctx.bounded_chunks = bounded_plan_chunks_enabled(getattr(indexer, "config", None))
-        raw, argmax = index_block_max(q, k, block_size, mask_skip=lean)
+        ctx.dk_scatter = index_dk_scatter_enabled(config)
+        ctx.bounded_chunks = bounded = bounded_plan_chunks_enabled(config)
         ctx.set_materialize_grads(False)
         ctx.block_size = block_size
         want_plan = bool(plan_slot) and plan_slot[0] is True  # fused_select_blocks: grad was on
         del plan_slot[:]
-        fused = _fused_selection(
-            raw, argmax, select_from_block_scores, block_size, want_plan, ctx.bounded_chunks
+
+        # ---- eligibility, before any work ----
+        S, B, H = q.shape[0], q.shape[1], q.shape[2]
+        NB = -(-S // block_size)
+        mode = _fused_mode(select_from_block_scores, B, H, S, NB)
+        # the plan's chunk rule is part of what the self-checks compare, so it is part of their key
+        shape_key = (S, B, H, NB, block_size, min(indexer.topk_blocks, NB), bounded) if mode else None
+        # msa_select_skip_fill: with forced blocks the boost kernel rewrites the whole score table
+        # and nothing else reads the blocks after a query's own, so the gfx1250 scoring kernel's
+        # outputs need no -inf / -1 fill. Exact class: stays on under msa_exact_numerics.
+        skip_fill = (
+            mode is not None
+            and bool(getattr(config, "msa_select_skip_fill", False))
+            and _on_gfx1250()
+            and _forced_of(indexer, S, NB, q.device) is not None
         )
-        if fused is not None:
-            block_indices, block_scores, keys, keys_c, dead, table, plan = fused
+
+        def scored(fill=True):
+            return index_block_max(q, k, block_size, mask_skip=lean, fill=fill)
+
+        def fused(fill, plan=want_plan, wide=None):
+            raw, argmax = scored(fill)
+            wide = mode == "wide" if wide is None else wide
+            return _fused_selection(
+                raw, argmax, indexer, block_size, plan, bounded, wide, causal=fill is not True
+            )
+
+        if mode == "wide":
+            # the wide kernels against the unfused selection and build_block_plan (same chunk rule)
+
+            def unfused_reference():
+                raw, argmax = scored()
+                bi, block_scores, keys, dead = _unfused_selection(raw, argmax, select_from_block_scores, S)
+                plan = build_block_plan(bi, block_size, bounded)
+                return _comparable(bi, block_scores, keys, keys.clamp_min(0), dead, bi.to(torch.int32), plan)
+
+            if not _select_checked(
+                "msa_select_plan_wide", shape_key, lambda: _comparable(*fused(True, True)), unfused_reference
+            ):
+                mode, skip_fill = None, False
+        if skip_fill:
+            # unwritten outputs poisoned, against the same selection on filled outputs
+            skip_fill = _select_checked(
+                "msa_select_skip_fill",
+                shape_key,
+                lambda: _comparable(*fused("poison", True)),
+                lambda: _comparable(*fused(True, True)),
+            )
+
+        if mode is not None:
+            block_indices, block_scores, keys, keys_c, dead, table, plan = fused(not skip_fill)
             ctx.save_for_backward(q, k, block_indices, keys, keys_c, dead)
             ctx.fused = True
             ctx.plan_slot = [plan] if plan is not None else []
             plan_slot.append((plan, table))
             ctx.mark_non_differentiable(block_indices)
             return block_indices, block_scores
-        block_indices, block_scores = select_from_block_scores(raw, q.shape[0])
-
-        slots = block_indices.clamp_min(0)
-        keys = argmax.gather(-1, slots)
-        forced = torch.isposinf(block_scores.gather(-1, slots))
-        dead = (block_indices < 0) | forced | (keys < 0)
+        raw, argmax = scored()
+        block_indices, block_scores, keys, dead = _unfused_selection(
+            raw, argmax, select_from_block_scores, q.shape[0]
+        )
         ctx.save_for_backward(q, k, block_indices, keys, dead)
         ctx.fused = False
         # filled by fused_select_blocks once the selection exists

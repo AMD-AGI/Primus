@@ -29,7 +29,10 @@ bit-identical to the eager path it replaces by construction:
 
 The outputs match :func:`msa_token_bwd.build_block_plan` element for element on
 every live entry (``entries`` past ``ptr[-1]`` are unused scratch in both).
-Shapes outside :func:`supported` keep the eager/FlyDSL path.
+Shapes outside :func:`supported` keep the eager/FlyDSL path, unless
+``msa_select_plan_wide`` is on and :func:`wide_supported` holds: then the
+bookkeeping is one launch (no counting), and the plan is the two FlyDSL passes of
+``build_inverted_table`` with two Triton launches for the eager ops around them.
 """
 
 from __future__ import annotations
@@ -39,13 +42,25 @@ import triton
 import triton.language as tl
 
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+    _PLACE_MAX_BLOCKS,
+)
+from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
     _PLACE_SUB as _SUB,
 )
 
 
 @triton.jit
 def _boost_kernel(
-    raw_ptr, forced_ptr, out_ptr, R, S, NB: tl.constexpr, NBP: tl.constexpr, F: tl.constexpr, BR: tl.constexpr
+    raw_ptr,
+    forced_ptr,
+    out_ptr,
+    R,
+    S,
+    NB: tl.constexpr,
+    NBP: tl.constexpr,
+    F: tl.constexpr,
+    BR: tl.constexpr,
+    BS: tl.constexpr,
 ):
     pid = tl.program_id(0)
     rows = pid * BR + tl.arange(0, BR)
@@ -55,6 +70,10 @@ def _boost_kernel(
     off = rows[:, None] * NB + cols[None, :]
     v = tl.load(raw_ptr + off, mask=m, other=0.0)
     s = rows % S
+    if BS > 0:
+        # msa_select_skip_fill: the scoring kernel left the blocks after the query's own
+        # unwritten; they are -inf whatever the buffer holds
+        v = tl.where(cols[None, :] > (s // BS)[:, None], float("-inf"), v)
     for f in tl.static_range(F):
         idx = tl.load(forced_ptr + s * F + f, mask=rmask, other=-1)
         v = tl.where(cols[None, :] == idx[:, None], float("inf"), v)
@@ -81,6 +100,7 @@ def _post_kernel(
     K: tl.constexpr,
     KP: tl.constexpr,
     TT: tl.constexpr,
+    COUNT: tl.constexpr,
 ):
     # one program per (b * Hkv + g, token chunk of TC tokens), TT tokens at a time
     bg = tl.program_id(0)
@@ -109,11 +129,13 @@ def _post_kernel(
         tl.store(dead_ptr + off, dead.to(tl.int8), mask=m)
         b32 = bi.to(tl.int32)
         tl.store(tbl_ptr + off, b32, mask=m)
-        # counting pass: live entries of this chunk per block
-        blk = tl.where(m, b32, -1)
-        hit = (blk[:, :, None] == nb[None, None, :]).to(tl.int32)  # [TT, KP, NBP]
-        cnt += tl.sum(tl.sum(hit, axis=1), axis=0)
-    tl.store(runs_ptr + (bg * NB + nb) * NC + c, cnt, mask=nb < NB)
+        if COUNT:
+            # counting pass: live entries of this chunk per block
+            blk = tl.where(m, b32, -1)
+            hit = (blk[:, :, None] == nb[None, None, :]).to(tl.int32)  # [TT, KP, NBP]
+            cnt += tl.sum(tl.sum(hit, axis=1), axis=0)
+    if COUNT:
+        tl.store(runs_ptr + (bg * NB + nb) * NC + c, cnt, mask=nb < NB)
 
 
 @triton.jit
@@ -206,6 +228,84 @@ def _place_kernel(
     tl.store(chunks_ptr + ch * 3 + 2, tl.where(live, end, 0), mask=cm)
 
 
+@triton.jit
+def _scan_kernel(runs_ptr, tot_ptr, NC, NCP: tl.constexpr):
+    """One program per plan row: the row's chunk counts become their exclusive prefix (in place)
+    and the row total goes to ``tot``."""
+    r = tl.program_id(0)
+    cc = tl.arange(0, NCP)
+    m = cc < NC
+    runs = tl.load(runs_ptr + r * NC + cc, mask=m, other=0)
+    incl = tl.cumsum(runs, axis=0)
+    tl.store(runs_ptr + r * NC + cc, incl - runs, mask=m)
+    tl.store(tot_ptr + r, tl.sum(runs, axis=0))
+
+
+@triton.jit
+def _rows_kernel(
+    off_ptr,
+    tot_ptr,
+    ptr_ptr,
+    chptr_ptr,
+    chunks_ptr,
+    NC,
+    NROWS,
+    NCH,
+    SIZE,
+    RP: tl.constexpr,
+    NCP: tl.constexpr,
+    CS: tl.constexpr,
+):
+    """After :func:`_scan_kernel`: program ``p`` turns row ``p``'s in-row chunk offsets into
+    offsets into the entry array (in place: ``torch.cumsum(runs) - runs`` of the eager path),
+    and writes ``CS`` rows of the chunk table; program 0 also writes ``ptr`` and ``chunk_ptr``
+    (:func:`msa_token_bwd.plan_chunks`). Everything comes from the row totals."""
+    p = tl.program_id(0)
+    r = tl.arange(0, RP)
+    rm = r < NROWS
+    tot = tl.load(tot_ptr + r, mask=rm, other=0)
+    rincl = tl.cumsum(tot, axis=0)
+    rexcl = rincl - tot
+    # ---- row p: entries of the rows before it + the row's earlier chunks ----
+    before = tl.sum(tl.where(r < p, tot, 0), axis=0)
+    cc = tl.arange(0, NCP)
+    m = (cc < NC) & ((cc * 0 + p) < NROWS)
+    inrow = tl.load(off_ptr + p * NC + cc, mask=m, other=0)
+    tl.store(off_ptr + p * NC + cc, inrow + before, mask=m)
+    # ---- CSR ptr, chunk_ptr (program 0) and CS chunk rows ----
+    per_row = tl.maximum((tot + (SIZE - 1)) // SIZE, 1)
+    per_row = tl.where(rm, per_row, 0)
+    cpi = tl.cumsum(per_row, axis=0)
+    cpe = cpi - per_row  # chunk_ptr[r] for r < NROWS
+    total_live = tl.sum(per_row, axis=0)
+    ptr_last = tl.sum(tot, axis=0)
+    if p == 0:
+        tl.store(ptr_ptr + r, rexcl, mask=rm)
+        tl.store(ptr_ptr + NROWS, ptr_last)
+        tl.store(chptr_ptr + r, cpe, mask=rm)
+        tl.store(chptr_ptr + NROWS, total_live)
+    ch = p * CS + tl.arange(0, CS)
+    # last row whose first chunk is <= ch (chunk_ptr strictly increases: every row has a chunk)
+    le = (cpe[None, :] <= ch[:, None]) & rm[None, :]  # [CS, RP]
+    row = tl.sum(le.to(tl.int32), axis=1) - 1
+    row = tl.minimum(tl.maximum(row, 0), NROWS - 1)
+    pick = r[None, :] == row[:, None]
+    row_ptr = tl.sum(tl.where(pick, rexcl[None, :], 0), axis=1)
+    row_cp = tl.sum(tl.where(pick, cpe[None, :], 0), axis=1)
+    row_end = tl.sum(tl.where(pick, rexcl[None, :] + tot[None, :], 0), axis=1)
+    live = ch < total_live
+    begin = row_ptr + (ch - row_cp) * SIZE
+    end = tl.minimum(begin + SIZE, row_end)
+    cm = ch < NCH
+    tl.store(chunks_ptr + ch * 3 + 0, tl.where(live, row, 0), mask=cm)
+    tl.store(chunks_ptr + ch * 3 + 1, tl.where(live, begin, 0), mask=cm)
+    tl.store(chunks_ptr + ch * 3 + 2, tl.where(live, end, 0), mask=cm)
+
+
+# msa_select_plan_wide: elements of the [chunk rows, plan rows] compare a _rows_kernel program holds
+_WIDE_HOT = 8192
+
+
 def _np2(x: int) -> int:
     return 1 << max(0, (int(x) - 1).bit_length())
 
@@ -216,24 +316,103 @@ def supported(B: int, H: int, S: int, n_blocks: int, topk: int) -> bool:
     return 0 < n_blocks <= 64 and topk <= 32 and B * H * n_blocks <= 1024
 
 
-def boost_forced(raw: torch.Tensor, forced: torch.Tensor) -> torch.Tensor:
+def _wide_chunking(S: int, n_blocks: int):
+    """Token chunk size and chunks per row of :func:`msa_token_bwd.build_inverted_table`."""
+    tc = _SUB * -(-n_blocks // 256)
+    return tc, -(-S // tc)
+
+
+def wide_supported(B: int, H: int, S: int, n_blocks: int, topk: int) -> bool:
+    """Shapes ``msa_select_plan_wide`` handles (used past :func:`supported`): those of the FlyDSL
+    counting sort of :func:`msa_token_bwd.build_inverted_table` (not its sort fallback) with at
+    most 4096 rows of blocks (the row totals fit a program) and 1024 token chunks per row: 16k
+    to 128k tokens at B = 1, 32k up to B = 4, 8k up to B = 16."""
+    return (
+        0 < n_blocks <= _PLACE_MAX_BLOCKS
+        and 0 < topk <= 64
+        and B * H * n_blocks <= 4096
+        and _wide_chunking(S, n_blocks)[1] <= 1024
+    )
+
+
+def boost_forced(raw: torch.Tensor, forced: torch.Tensor, causal_block: int = 0) -> torch.Tensor:
     """``raw.scatter(-1, forced[None, None].expand(...), +inf)`` for ``raw`` ``[B, H, S, NB]`` fp32
-    and ``forced`` ``[S, F]`` int64."""
+    and ``forced`` ``[S, F]`` int64.
+
+    ``causal_block`` (``msa_select_skip_fill``; the block size, 0 = off): ``raw`` is taken as -inf
+    on the blocks after each query's own (``block > s // causal_block``), whatever it holds there
+    -- the scoring kernel's caller then need not fill them."""
     B, H, S, NB = raw.shape
     out = torch.empty_like(raw)
     forced = forced.contiguous()
     F = forced.shape[1]
     R = B * H * S
-    BR = 64
-    _boost_kernel[(triton.cdiv(R, BR),)](raw, forced, out, R, S, NB=NB, NBP=_np2(NB), F=F, BR=BR, num_warps=4)
+    NBP = _np2(NB)
+    BR = min(64, max(1, 4096 // NBP))  # 64 rows per program up to 64 blocks
+    _boost_kernel[(triton.cdiv(R, BR),)](
+        raw, forced, out, R, S, NB=NB, NBP=NBP, F=F, BR=BR, BS=int(causal_block), num_warps=4
+    )
     return out
 
 
-def select_post_and_plan(topk_scores, topk_idx, argmax, boosted, block_size, want_plan, bounded_chunks=False):
+def _wide_plan(table: torch.Tensor, NB: int, block_size: int, bounded_chunks: bool = False):
+    """:func:`msa_token_bwd.build_block_plan` of the int32 ``table`` ``[B, H, S, K]`` in four
+    launches: its two FlyDSL passes, with :func:`_scan_kernel` and :func:`_rows_kernel` for the
+    eager ops between and after them. The chunk size is ``plan_chunks``' own
+    (:func:`msa_token_bwd.plan_chunk_size_of`: the reference rule, or with ``bounded_chunks`` the
+    ``msa_bounded_plan_chunks`` rule and its 2 GiB fallback, which these row counts can reach)."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        _PLACE_CACHE,
+        BlockPlan,
+        build_inverted_pass,
+        plan_chunk_size_of,
+    )
+
+    B, H, S, K = table.shape
+    dev = table.device
+    BG = B * H
+    n_rows = BG * NB
+    tc, nc = _wide_chunking(S, NB)
+    nb_cap = max(64, _np2(NB))
+    stream = torch.cuda.current_stream()
+    max_tokens = BG * S * K
+    runs = torch.empty(n_rows * nc, dtype=torch.int32, device=dev)
+    entries = torch.empty(max_tokens, dtype=torch.int32, device=dev)
+    args = (table, runs, entries, int(S), int(BG), int(NB), int(nc), int(tc), stream)
+    fns = _PLACE_CACHE.get((K, nb_cap))
+    if fns is None:
+        fns = tuple(build_inverted_pass(K, nb_cap, place).compile(*args) for place in (False, True))
+        _PLACE_CACHE[(K, nb_cap)] = fns
+    fns[0](*args)  # runs <- counts
+    size = plan_chunk_size_of(n_rows, max_tokens, bounded=bool(bounded_chunks))  # as plan_chunks
+    n_chunks = n_rows + -(-max_tokens // size)
+    tot = torch.empty(n_rows, dtype=torch.int32, device=dev)
+    ptr = torch.empty(n_rows + 1, dtype=torch.int32, device=dev)
+    chunk_ptr = torch.empty(n_rows + 1, dtype=torch.int32, device=dev)
+    chunks = torch.empty((n_chunks, 3), dtype=torch.int32, device=dev)
+    NCP, RP = _np2(nc), _np2(n_rows)
+    _scan_kernel[(n_rows,)](runs, tot, nc, NCP=NCP, num_warps=1 if NCP <= 256 else 4)
+    CS = max(1, _WIDE_HOT // RP)
+    _rows_kernel[(max(n_rows, -(-n_chunks // CS)),)](
+        runs, tot, ptr, chunk_ptr, chunks, nc, n_rows, n_chunks, size, RP=RP, NCP=NCP, CS=CS, num_warps=4
+    )
+    fns[1](*args)  # runs now holds each (row, chunk)'s offset into entries
+    return BlockPlan(ptr, entries, chunks, chunk_ptr, n_chunks, -(-S // block_size))
+
+
+def select_post_and_plan(
+    topk_scores, topk_idx, argmax, boosted, block_size, want_plan, bounded_chunks=False, wide=False
+):
     """Returns ``(block_indices int64, keys int32, keys_c int32, dead bool, table int32, plan)``.
 
     ``plan`` is the :class:`msa_token_bwd.BlockPlan` of ``block_indices`` when ``want_plan``;
     ``bounded_chunks`` (``msa_bounded_plan_chunks``) picks its chunk size as in ``build_block_plan``.
+
+    ``wide`` (``msa_select_plan_wide``, shapes of :func:`wide_supported`): the same outputs
+    without a ``[tokens, topk, blocks]`` one-hot or a program that reads the whole run table.
+    The bookkeeping kernel does not count; the plan's counting sort is the two FlyDSL passes of
+    :func:`msa_token_bwd.build_inverted_table` (LDS counters), and the eager ops between and
+    after them (cumsum, cat, ``plan_chunks``) are :func:`_scan_kernel` and :func:`_rows_kernel`.
     """
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
         BlockPlan,
@@ -252,8 +431,12 @@ def select_post_and_plan(topk_scores, topk_idx, argmax, boosted, block_size, wan
     keys_c = torch.empty_like(keys)
     dead = torch.empty((B, H, S, K), dtype=torch.bool, device=dev)
     table = torch.empty((B, H, S, K), dtype=torch.int32, device=dev)
-    runs = torch.empty(n_rows * nc, dtype=torch.int32, device=dev)
     NBP, KP, TT = _np2(NB), _np2(K), 16
+    if wide:
+        NBP = 2  # no one-hot over the blocks: the counting part is compiled out
+        runs = table  # placeholder, not written (COUNT off)
+    else:
+        runs = torch.empty(n_rows * nc, dtype=torch.int32, device=dev)
     _post_kernel[(BG, nc)](
         topk_scores.contiguous(),
         topk_idx.contiguous(),
@@ -273,8 +456,14 @@ def select_post_and_plan(topk_scores, topk_idx, argmax, boosted, block_size, wan
         K=K,
         KP=KP,
         TT=TT,
+        COUNT=not wide,
         num_warps=4,
     )
+    if wide:
+        plan = None
+        if want_plan:
+            plan = _wide_plan(table, NB, block_size, bounded_chunks)
+        return bi, keys, keys_c, dead, table, plan
     plan = None
     if want_plan:
         max_tokens = BG * S * K
