@@ -20,6 +20,9 @@ import torch
 import torch.nn as nn
 
 from primus.backends.megatron.diffusion_trainer import DiffusionPretrainTrainer
+from primus.backends.megatron.training.diffusion.rng import (
+    seed_training_rng_per_dp_rank,
+)
 from primus.backends.megatron.training.diffusion.schedulers import (
     FlowMatchEulerDiscreteScheduler,
 )
@@ -260,6 +263,8 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
 
         On the first call, sets a per-DP-rank random seed so that each data-parallel
         rank independently samples timesteps and noise (matching NeMo's approach).
+        The seed also depends on the resume iteration, so a resumed run does not
+        replay the step-0 draws.
 
         Args:
             data_iterator: Data iterator
@@ -273,13 +278,15 @@ class FluxPretrainTrainer(DiffusionPretrainTrainer):
             from megatron.core import parallel_state
             from megatron.training import get_args
 
-            seed = get_args().seed
+            args = get_args()
             dp_rank = parallel_state.get_data_parallel_rank()
-            per_rank_seed = seed + 100 * dp_rank
-            torch.manual_seed(per_rank_seed)
-            torch.cuda.manual_seed(per_rank_seed)
+            iteration = getattr(args, "iteration", 0) or 0
+            per_rank_seed = seed_training_rng_per_dp_rank(args.seed, dp_rank, iteration)
             self._training_rng_seeded = True
-            log_rank_0(f"Per-DP-rank training seed: {per_rank_seed} " f"(base={seed}, dp_rank={dp_rank})")
+            log_rank_0(
+                f"Per-DP-rank training seed: {per_rank_seed} "
+                f"(base={args.seed}, dp_rank={dp_rank}, iteration={iteration})"
+            )
 
         return super().forward_step(data_iterator, model, return_schedule_plan=return_schedule_plan)
 
