@@ -78,7 +78,7 @@ and the other files against
 **B: build it from the HuggingFace release.** This takes about 53 minutes for
 download and preprocessing, about 313 GB of disk at the peak (about 275 GB after
 deleting `raw/`), and a host with about 190 GB of RAM for the cache build. Run it
-in the `rocm/primus:v26.9` image with `polars-u64-idx` installed
+in the `rocm/primus:v26.10` image with `polars-u64-idx` installed
 (`pip install --no-deps polars-u64-idx==1.33.1`; the install hook does this at a
 container's first training launch). Stock `polars` silently overflows its 32-bit
 row index on Yambda-5b.

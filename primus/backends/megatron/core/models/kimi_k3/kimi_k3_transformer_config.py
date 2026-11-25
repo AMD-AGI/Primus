@@ -248,6 +248,15 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     # an explicit opt-in, exactly as kda_backend does.
     attn_res_backend: str = "eager"
 
+    # ---- situ activation backend ------------------------------------------
+    # Kernel behind the dense MLP and expert situ activations
+    # (primus/backends/.../kimi_k3/situ_kernels):
+    # "eager"  -- the fp32 reference (situ_activation.situ_pre_mul_fused)
+    # "flydsl" -- one fused FlyDSL kernel per direction, gfx1250 only; on the
+    #             routed experts the router probability is folded into it
+    # Defaults to "eager" for the same reason as attn_res_backend.
+    situ_backend: str = "eager"
+
     # ---- Stable Latent MoE ------------------------------------------------
     # HF: routed_expert_hidden_size (3584 = hidden_size / 2). None keeps the
     # routed experts in model space, i.e. no latent bottleneck. ``__post_init__``
