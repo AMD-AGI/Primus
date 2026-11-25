@@ -5,7 +5,7 @@
 
 | Family | Model | Recipe | Docs |
 |---|---|---|---|
-| `dlrm_v4` | HSTU ranker on yambda-5b (MLPerf Training `dlrmv4`) | `examples/mlperf/dlrm_v4/` | `docs/04-technical-guides/recommendation/` |
+| `dlrm_v4` | HSTU ranker on yambda-5b (MLPerf Training `dlrmv4`) | `examples/mlperf/dlrm_v4/`; throughput on synthetic data: `examples/recommendation/` | `docs/04-technical-guides/recommendation/` |
 
 ## dlrm_v4
 
@@ -15,6 +15,7 @@
 | `dlrm_v4/trainer.py` | Primus lifecycle: run-shape environment, gin file, page-cache flush and warm, launch; environment defaults (`ENV_DEFAULTS`). |
 | `dlrm_v4/run_config.py` | Config to environment / gin translation (no GPU; unit-tested). |
 | `dlrm_v4/pagecache.py` | Evict / verify / warm the dataset in the page cache. |
+| `dlrm_v4/synthetic_data.py` | Synthetic yambda-5b data with the real data's statistics, for throughput runs (`synthetic_data: true`). |
 
 `dlrm_v4/src/` holds only the package (and its license) because it goes on
 `sys.path`: anything else in it would become a top-level module. A different

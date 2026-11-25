@@ -52,7 +52,11 @@ def patch_te_spec_provider(ctx: PatchContext):
     """
     import megatron.core.extensions as meg_ext
     from megatron.core.extensions import transformer_engine_spec_provider
-    from megatron.core.models.gpt import gpt_layer_specs, moe_module_specs
+    from megatron.core.models.gpt import (
+        experimental_attention_variant_module_specs,
+        gpt_layer_specs,
+        moe_module_specs,
+    )
     from megatron.core.transformer import multi_token_prediction
 
     from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
@@ -99,6 +103,15 @@ def patch_te_spec_provider(ctx: PatchContext):
     log_rank_0(
         "[Patch:megatron.turbo.te_spec_provider]   Patched "
         f"megatron.core.transformer.multi_token_prediction.TESpecProvider -> {PrimusTurboSpecProvider.__name__}"
+    )
+
+    # Hybrid layer specs (gated_delta_net, e.g. Qwen3.5) build their backend from this
+    # module's own TESpecProvider name.
+    experimental_attention_variant_module_specs.TESpecProvider = PrimusTurboSpecProvider
+    log_rank_0(
+        "[Patch:megatron.turbo.te_spec_provider]   Patched "
+        "megatron.core.models.gpt.experimental_attention_variant_module_specs.TESpecProvider -> "
+        f"{PrimusTurboSpecProvider.__name__}"
     )
 
     log_rank_0(f"[Patch:megatron.turbo.te_spec_provider] Using Primus spec provider ({reason})")

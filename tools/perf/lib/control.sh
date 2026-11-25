@@ -322,9 +322,14 @@ perf_path_under() {
 
 # True when a selected config trains the diffusion framework.
 perf_batch_has_diffusion() {
+    perf_batch_has_framework diffusion
+}
+
+# Whether the batch (CONFIG_FILES) has a config of framework $1.
+perf_batch_has_framework() {
     local f
     for f in ${CONFIG_FILES[@]+"${CONFIG_FILES[@]}"}; do
-        [ "$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null)" = diffusion ] &&
+        [ "$(yq -r '.modules.pre_trainer.framework // .modules.post_trainer.framework // ""' "$f" 2>/dev/null)" = "$1" ] &&
             return 0
     done
     return 1

@@ -20,7 +20,8 @@ Everything comes out of one `docker run`: the artifacts the image ships under
 Dockerfile it was built from), the native library versions that are not pip
 packages (hipBLASLt, RCCL, read from ROCm headers), and the git HEAD of every
 checkout under /workspace/ -- which is where the per-family build commit comes
-from when the Dockerfile pins PRIMUS_BRANCH=main rather than a commit.
+from when the Dockerfile pins PRIMUS_BRANCH=main rather than a commit (the
+ARG is PRIMUS_COMMIT from v26.10).
 
 Also verifies the in-repo release Dockerfile against the image's baked-in copy.
 The release notes claim v26.4-v26.6 were "cross-checked against the release
@@ -88,12 +89,23 @@ done
 emit python
 python --version 2>&1 || true
 
+# The library's own header under ROCm's include/<lib>/; a search only when that is missing. `find` order
+# depends on the storage driver, and the ROCm SDK also ships rocprofiler-sdk/rccl.h, which has no version:
+# under rootless podman the search found that one first (v26.10 jax: RCCL UNRESOLVED).
+version_header() {  # <lib dir> <file> <grep pattern>
+    for h in "${ROCM_PATH:-/opt/rocm}/include/$1/$2" "/opt/rocm/include/$1/$2"; do
+        [ -f "$h" ] && { echo "$h"; return; }
+    done
+    find ${ROCM_PATH:-/opt/rocm} /opt/rocm /opt/venv -name "$2" -not -path '*rocprofiler*' 2>/dev/null \
+        | while read -r h; do grep -qE "$3" "$h" 2>/dev/null && { echo "$h"; break; }; done
+}
+
 emit hipblaslt
-header="$(find ${ROCM_PATH:-/opt/rocm} /opt/rocm /opt/venv -name hipblaslt-version.h 2>/dev/null | head -1)"
+header="$(version_header hipblaslt hipblaslt-version.h 'HIPBLASLT_VERSION_MAJOR')"
 [ -n "$header" ] && grep -hE 'HIPBLASLT_VERSION_(MAJOR|MINOR|PATCH|TWEAK)' "$header" 2>/dev/null
 
 emit rccl
-header="$(find ${ROCM_PATH:-/opt/rocm} /opt/rocm /opt/venv -name rccl.h 2>/dev/null | head -1)"
+header="$(version_header rccl rccl.h 'define NCCL_MAJOR')"
 [ -n "$header" ] && grep -hE 'define NCCL_(MAJOR|MINOR|PATCH)' "$header" 2>/dev/null
 
 emit workspace_repos
@@ -148,15 +160,24 @@ def inspect_image(image):
         raise SystemExit(f"ERROR: docker image inspect {image} failed:\n{result.stderr.strip()}")
     data = json.loads(result.stdout)
     full_id = data.get("Id", "")
-    image_id = full_id[len("sha256:") : len("sha256:") + 12] if full_id.startswith("sha256:") else full_id
+    hex_id = full_id.split(":", 1)[-1]  # docker: sha256:<hex>; podman: <hex>
+    image_id = hex_id[:12]
     created = (data.get("Created") or "")[:10]
     content_size = data.get("Size") or 0
 
-    disk = run(["docker", "images", "--no-trunc", "--format", "{{.ID}} {{.Size}}"])
     size_display = None
+    if is_podman():
+        # podman counts the image's storage differently (v26.10 jax: 39.4 GB vs docker's 56.2 GB), so its
+        # number is not comparable with the published tables: no size; probe on a docker host for it.
+        print(
+            "WARNING: docker is podman here: the image size is not recorded (probe on a docker host)",
+            file=sys.stderr,
+        )
+        return image_id, created, content_size, size_display, sorted(data.get("RepoDigests") or [])
+    disk = run(["docker", "images", "--no-trunc", "--format", "{{.ID}} {{.Size}}"])
     for line in disk.stdout.splitlines():
         fields = line.split(None, 1)
-        if len(fields) != 2 or fields[0] != full_id:
+        if len(fields) != 2 or fields[0].split(":", 1)[-1] != hex_id:
             continue
         match = re.match(r"([\d.]+)\s*([KMGT]?B)", fields[1].strip())
         if match:
@@ -164,6 +185,12 @@ def inspect_image(image):
             size_display = f"{value:.1f} {unit}"
         break
     return image_id, created, content_size, size_display, sorted(data.get("RepoDigests") or [])
+
+
+def is_podman():
+    """`docker` is podman (e.g. rootless podman behind a docker shim)."""
+    out = run(["docker", "--version"])
+    return "podman" in (out.stdout + out.stderr).lower()
 
 
 def digest_of(reference):

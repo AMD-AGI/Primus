@@ -1,0 +1,117 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""CPU equivalence of the zaya_fuse_norm and zaya_fuse_cca compiled functions with
+the same functions uncompiled, forward and backward, fp32 and bf16."""
+
+import pytest
+import torch
+from test_zaya1_math import _cfg  # noqa: E402  (pytest puts this dir on sys.path)
+
+from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
+from primus.backends.megatron.core.utils import maybe_compile
+
+
+def _perturb(module):
+    """Move every parameter off its init so scales, biases and norm weights all matter."""
+    with torch.no_grad():
+        for p in module.parameters():
+            p.add_(0.1 * torch.randn_like(p))
+
+
+def _twins(build, field, dtype, init=None):
+    """``build(**{field: flag})`` for flag off and on, both holding the same perturbed weights."""
+    off = build(**{field: False}).to(dtype)
+    _perturb(off)
+    if init is not None:
+        with torch.no_grad():
+            init(off)
+    on = build(**{field: True}).to(dtype)
+    on.load_state_dict(off.state_dict())
+    return {False: off, True: on}
+
+
+def _forward_backward(module, fn, hidden):
+    module.zero_grad(set_to_none=True)
+    h = hidden.detach().clone().requires_grad_(True)
+    out = fn(h)
+    outs = out if isinstance(out, tuple) else (out,)
+    sum((o.float() * torch.linspace(-1, 1, o.numel()).view_as(o)).sum() for o in outs).backward()
+    grads = {n: p.grad.detach().clone() for n, p in module.named_parameters() if p.grad is not None}
+    return [o.detach() for o in outs] + [h.grad], grads
+
+
+def _assert_close(got, ref, dtype, name=""):
+    if dtype == torch.float32:
+        torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4, msg=name)
+        return
+    # bf16 rounding differs between Inductor's fused kernels and eager, so
+    # compare whole tensors instead of single elements.
+    err = (got.float() - ref.float()).norm() / ref.float().norm().clamp_min(1e-12)
+    assert err < 2e-2, f"{name}: relative error {err:.3e}"
+
+
+def _compare(eager, fused, dtype):
+    (out_e, grads_e), (out_f, grads_f) = eager, fused
+    for i, (a, b) in enumerate(zip(out_f, out_e)):
+        _assert_close(a, b, dtype, f"output {i}")
+    assert grads_f.keys() == grads_e.keys()
+    for name, ref in grads_e.items():
+        _assert_close(grads_f[name], ref, dtype, name)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fused_norm_chain_matches_eager(monkeypatch, dtype):
+    """Stage 0's scale + RMSNorm, every later stage's scale + merge + RMSNorm, and the final norm."""
+    fused_res = maybe_compile(zm._scale_merge_norm_res)
+    fused_first = maybe_compile(zm._scale_merge_norm_first)
+    monkeypatch.setattr(zm, "_fused_smn_res", fused_res)
+    monkeypatch.setattr(zm, "_fused_smn_first", fused_first)
+    torch.manual_seed(0)
+    stacks = _twins(lambda **f: zm.ZayaStack(_cfg(num_layers=4, **f)), "zaya_fuse_norm", dtype)
+    hidden = torch.randn(6, 2, 32, dtype=dtype)
+    runs = {}
+    for flag, stack in stacks.items():
+        stack.eval()  # keep the balancing biases fixed between the two runs
+        runs[flag] = _forward_backward(
+            stack, lambda h: stack(h, position_ids=None, attention_mask=None), hidden
+        )
+    _compare(runs[False], runs[True], dtype)
+    assert fused_res.compiled_ok() and fused_first.compiled_ok()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "clamp_temp, rotary_factor, positions",
+    [
+        (False, 0.5, "none"),
+        (False, 0.5, "per_row"),
+        (True, 0.5, "per_row"),
+        (True, 0.0, "none"),
+    ],
+)
+def test_fused_cca_qk_matches_eager(monkeypatch, dtype, clamp_temp, rotary_factor, positions):
+    """Grouped means, qk-norm, temperature and partial RoPE (1-D and per-row positions, or none)."""
+    fused = maybe_compile(zm._cca_qk_post)
+    monkeypatch.setattr(zm, "_fused_cca_qk", fused)
+    torch.manual_seed(1)
+
+    ccas = _twins(
+        lambda **f: zm.CCA(_cfg(clamp_temp=clamp_temp, partial_rotary_factor=rotary_factor, **f)),
+        "zaya_fuse_cca",
+        dtype,
+        init=lambda cca: cca.temp.uniform_(0.2, 1.5),
+    )
+    seq, batch = 7, 3
+    position_ids = None
+    if positions == "per_row":
+        position_ids = torch.stack([torch.arange(seq) + 3 * row for row in range(batch)])
+    hidden = torch.randn(seq, batch, 32, dtype=dtype)
+    runs = {}
+    for flag, cca in ccas.items():
+        runs[flag] = _forward_backward(cca, lambda h: cca.project(h, position_ids), hidden)
+    _compare(runs[False], runs[True], dtype)
+    assert fused.compiled_ok()
