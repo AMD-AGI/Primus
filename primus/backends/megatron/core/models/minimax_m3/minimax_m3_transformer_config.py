@@ -302,6 +302,17 @@ class MSATransformerConfig(TransformerConfig):
     kernel without it and keeps that one on a mismatch. Part of the msa_dq_from_ds path, so
     msa_exact_numerics turns it off."""
 
+    msa_dkdv_two_token_steps: bool = False
+    """flydsl backend on gfx1250, sparse_block_size 128: the backward's dK/dV kernel takes two
+    tokens per step instead of four (flydsl/msa_token_bwd_w32.py, tokens_per_step): four of the
+    eight waves issue a Tensor Data Mover tile per step, the Q / dO stage ring is half as large
+    and a chunk of the block plan takes twice the steps. Same entries, accumulators and order,
+    so dk / dv (and the dS records of msa_dq_from_ds) are bit-identical; the first call for a
+    shape compares every bit of the fp32 chunk partials and of dS with the four-token kernel and
+    keeps that one on a mismatch. Eligibility is the kernel family and the block size, not S, B
+    or the selection. It changes a kernel of the MSA operator, so msa_exact_numerics turns it
+    off."""
+
     msa_two_tile_slots: bool = False
     """flydsl backend on gfx1250, with msa_owner_carry (and msa_shared_tile_staging): the MSA
     forward keeps two LDS tile slots per wave, one for K and one for V, instead of a 2-stage ring
@@ -342,7 +353,7 @@ class MSATransformerConfig(TransformerConfig):
     msa_index_dk_scatter, msa_indexer_loss_one_pass, msa_bounded_plan_chunks), and the
     bit-preserving options that are
     built on them or change the same kernels (msa_owner_carry, msa_ds_chunk_store,
-    msa_dq_early_issue, msa_two_tile_slots, msa_walk_one_wave). Each of them, or the option it
+    msa_dq_early_issue, msa_two_tile_slots, msa_walk_one_wave, msa_dkdv_two_token_steps). Each of them, or the option it
     is a part of, tests this flag before any work; the Triton fusions and msa_shared_tile_staging
     / msa_lean_masks, which are bit-identical and part of the reference state, ignore it."""
 

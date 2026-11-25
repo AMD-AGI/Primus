@@ -92,6 +92,7 @@ _MSA_RELAXED = (
     "msa_walk_one_wave",
     "msa_indexer_loss_one_pass",
     "msa_bounded_plan_chunks",
+    "msa_dkdv_two_token_steps",
 )
 _FUSIONS_LOGGED = False
 
@@ -345,6 +346,21 @@ class MinimaxSparseAttention(SelfAttention):
             return {"owner_carry": True, "two_tile_slots": True}
         return {"owner_carry": True}
 
+    def _dkdv_two_token_steps(self) -> dict:
+        """``msa_dkdv_two_token_steps``: the keyword argument that turns it on for the MSA backward,
+        or none when the switch is off, ``msa_exact_numerics`` is set or the kernels are not the
+        gfx1250 ones. It changes a kernel of the MSA operator (the dK/dV kernel's step layout), so
+        it is handled as an option of the relaxed group and ``msa_exact_numerics`` turns it off,
+        although its outputs are bit-identical (checked on the first call for a shape)."""
+        config = self.config
+        if (
+            not getattr(config, "msa_dkdv_two_token_steps", False)
+            or getattr(config, "msa_exact_numerics", False)
+            or not self._gfx1250
+        ):
+            return {}
+        return {"dkdv_two_token_steps": True}
+
     def _loss_one_pass(self) -> bool:
         """``msa_indexer_loss_one_pass``: whether ``msa_core`` asks the one-pass kernels for the
         indexer loss. Relaxed numerics, so ``msa_exact_numerics`` turns it off; it stands in for
@@ -387,6 +403,7 @@ class MinimaxSparseAttention(SelfAttention):
             **({} if walk is None else {"walk_table": walk[0]}),
             **self._dq_from_ds(walk),
             **self._owner_carry(),
+            **self._dkdv_two_token_steps(),
         )
         if not want_loss:
             return outs[0], None

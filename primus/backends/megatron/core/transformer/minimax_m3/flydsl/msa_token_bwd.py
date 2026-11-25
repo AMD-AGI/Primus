@@ -1139,6 +1139,19 @@ def _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots) -> bool:
     return True
 
 
+# msa_dkdv_two_token_steps: the gfx1250 dK/dV kernel's 4-token step needs 8 waves of 16 keys
+# (sparse_block_size 128); the 2-token layout is offered for exactly that kernel
+_TWO_TOKEN_STEP_BLOCK = 128
+
+
+def dkdv_two_token_steps_eligible(block_size: int, w32: bool) -> bool:
+    """``msa_dkdv_two_token_steps``: whether the dK/dV kernel with two tokens per step may stand
+    in for the one with four. A rule on the kernel family and the block size alone (the layout
+    is the same at every S, B and selection; a longer table only means more chunks of the same
+    kind), decided before any buffer or kernel is made."""
+    return bool(w32) and int(block_size) == _TWO_TOKEN_STEP_BLOCK
+
+
 def _ds_first_call(key, args, kwargs, walk_slots):
     """Both paths on the first call's tensors: use ``dq_from_ds`` for this shape only if its
     ``dq``, ``dk`` and ``dv`` are finite and within ``_DS_CHECK_TOL`` of the reference kernels'.
@@ -1187,6 +1200,7 @@ def msa_token_bwd(
     walk_slots=None,
     ds_chunk_store=False,
     dq_early_issue=False,
+    dkdv_two_token_steps=False,
 ):
     """Gradients of ``msa_token_fwd``.
 
@@ -1231,6 +1245,11 @@ def msa_token_bwd(
         walk_slots: with ``dq_from_ds`` and a permuted ``block_table`` (``msa_aligned_block_walk``),
             the int32 ``[B, Hkv, S, topk]`` slot of each walk position in the table ``plan`` was
             built from.
+        dkdv_two_token_steps: gfx1250 only (``msa_dkdv_two_token_steps``): the dK/dV kernel takes
+            two tokens per step instead of four (``build_dkdv_w32``, ``tokens_per_step``). Same
+            entries, accumulators and order; the first call for a shape compares every bit of
+            the fp32 chunk partials (and of dS with ``dq_from_ds``) with the four-token kernel
+            and keeps that one on a mismatch.
 
     Returns:
         ``dq`` ``[S, B, Hq, 128]``, ``dk`` and ``dv`` ``[S, B, Hkv, 128]``, bf16.
@@ -1264,6 +1283,8 @@ def msa_token_bwd(
                 kwargs["ds_chunk_store"] = True  # the comparison runs the variant that will be used
             if dq_early_issue:
                 kwargs["dq_early_issue"] = True
+            if dkdv_two_token_steps:
+                kwargs["dkdv_two_token_steps"] = True
             key = (
                 S,
                 B,
@@ -1274,6 +1295,7 @@ def msa_token_bwd(
                 walk_slots is not None,
                 bool(ds_chunk_store),
                 bool(dq_early_issue),
+                bool(dkdv_two_token_steps),
             )
             decided = _DS_OK.get(key)
             if decided is None:
@@ -1360,7 +1382,7 @@ def msa_token_bwd(
             )
         dq, delta = run_dq(tpw, skip)
 
-    def run_kv(skip, ws_out, ds_out=None):
+    def run_kv(skip, ws_out, ds_out=None, two=False):
         emit = ds_out is not None
         kv_args = (
             q,
@@ -1389,6 +1411,8 @@ def msa_token_bwd(
         chunk_store = emit and bool(ds_chunk_store) and S * topk * block_size * HPW * 2 <= _DS_SLICE_MAX_BYTES
         if chunk_store:
             kv_key = ("ds_chunk_store",) + kv_key
+        if two:
+            kv_key = ("two_token_steps",) + kv_key
         fn = _DKDV_CACHE.get(kv_key)
         if fn is None:
             if w32:
@@ -1404,13 +1428,14 @@ def msa_token_bwd(
                     **({"step_mask_skip": True} if skip else {}),
                     **({"emit_ds": True} if emit else {}),
                     **({"ds_chunk_store": True} if chunk_store else {}),
+                    **({"tokens_per_step": 2} if two else {}),
                 )
             else:
                 built = build_dkdv(Hkv, block_size, float(softmax_scale), topk)
             fn = built.compile(*kv_args)
             _DKDV_CACHE[kv_key] = fn
         fn(*kv_args)
-        return (ws_out,)
+        return (ws_out, ds_out) if emit else (ws_out,)
 
     skip = False
     if step_mask_skip and w32:
@@ -1431,7 +1456,36 @@ def msa_token_bwd(
 
         # one [block_size keys, 16 heads] bf16 record per table entry; dK/dV writes the live ones
         ds = torch.empty((B * Hkv * S * topk, block_size, HPW), dtype=torch.bfloat16, device=q.device)
-    run_kv(skip, ws, ds)
+    two = False
+    # eligibility first (kernel family, block size), then one comparison per shape and kernel variant
+    if dkdv_two_token_steps and dkdv_two_token_steps_eligible(block_size, w32):
+        from primus.backends.megatron.core.fusions import bitwise_check
+
+        def run_kv_probe(two_tokens):
+            # the variant this call is about to use (lean masks, dS stores), on this call's tensors:
+            # the fp32 chunk partials and, with msa_dq_from_ds, every dS record (zeroed first: the
+            # kernels write the live records only)
+            ds_probe = torch.zeros_like(ds) if use_ds else None
+            return run_kv(skip, torch.empty_like(ws), ds_probe, two=two_tokens)
+
+        two = bitwise_check.passed(
+            "msa_dkdv_two_token_steps dK/dV",
+            lambda: run_kv_probe(True),
+            lambda: run_kv_probe(False),
+            key=(
+                S,
+                B,
+                Hkv,
+                topk,
+                block_size,
+                float(softmax_scale),
+                int(n_chunks),
+                skip,
+                use_ds,
+                bool(ds_chunk_store),
+            ),
+        )
+    run_kv(skip, ws, ds, two=two)
     if use_ds:
         tpw2 = _w32.dq_ds_tokens_per_wg(int(S), block_size)
         if tpw2 > 1 and (S % tpw2 or block_size % tpw2):

@@ -136,6 +136,10 @@ msa_ds_chunk_store: false
 # waits for the previous step's (two in flight). Bit-identical dq, checked on first use;
 # msa_exact_numerics turns it off.
 msa_dq_early_issue: false
+# gfx1250 flydsl MSA backward, block size 128: the dK/dV kernel takes two tokens per step instead
+# of four (half the stage ring). Bit-identical dk / dv, checked on first use; msa_exact_numerics
+# turns it off.
+msa_dkdv_two_token_steps: false
 # gfx1250 flydsl MSA forward with msa_owner_carry: two LDS tile slots per wave instead of four, so
 # four workgroups instead of two fit a compute unit. Bit-identical outputs, checked on first use;
 # msa_exact_numerics turns it off.

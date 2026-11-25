@@ -516,7 +516,14 @@ def build_dkdv_w32(
     ``ds_load_tr16_b128`` (lane row half*16 + lane%8, column ((lane//8)%2)*8: each lane gets
     16 token-head rows of one d column). Each of the 8 waves issues one 16-row
     TDM tile per step (token w//2, Q or dO by w%2) into a 2-stage ring; tokens come from
-    scalar loads two steps ahead, and entries map to tokens by a subtraction."""
+    scalar loads two steps ahead, and entries map to tokens by a subtraction.
+
+    ``tokens_per_step`` (2 with ``msa_dkdv_two_token_steps``; 4 is the reference layout, which
+    needs ``2 * tokens_per_step`` waves): with fewer tokens per step than half the waves only
+    the first ``2 * tokens_per_step`` waves issue a tile (a wave-uniform scalar branch around the
+    copy, no barrier inside it; every wave still runs the same steps and barriers), the stage
+    ring is half as large and a chunk takes twice the steps. The same entries reach the same
+    accumulators in the same order, so the fp32 chunk partials keep their bits."""
     elem = fx.BFloat16
     Hkv = num_kv_heads
     Hq = Hkv * HPW
@@ -524,10 +531,11 @@ def build_dkdv_w32(
     threads = WAVE * waves
     tps = tokens_per_step
     rows = tps * HPW
-    if tps % 2 or 2 * tps != waves or rows > threads:
-        # one TDM tile per wave per step: 2 * tokens_per_step waves of TK keys
+    if tps % 2 or 2 * tps > waves or rows > threads:
+        # one TDM tile per issuing wave per step: 2 * tokens_per_step of the block's waves of TK keys
         raise NotImplementedError(
-            f"gfx1250 MSA dK/dV backward supports sparse_block_size {2 * tps * TK} only, got {block_size}"
+            f"gfx1250 MSA dK/dV backward with {tps} tokens per step needs sparse_block_size "
+            f"{2 * tps * TK} or a larger multiple of {TK} with at least {rows} threads, got {block_size}"
         )
     NBUF = 2
     T_BYTES = rows * STRIDE * 2
@@ -536,6 +544,7 @@ def build_dkdv_w32(
     KV_OFF = LSE_OFF + 2 * threads * 4
     KV_W = 2 * TK * STRIDE * 2  # per wave: K tile then V tile, 16 keys x STRIDE bf16
     LDS_BYTES = KV_OFF + waves * KV_W
+    ISSUERS = 2 * tps  # waves that stage a tile each step
     DS_BYTES = block_size * HPW * 2  # one (token, slot) record of the dS buffer
     CHUNK_DS = bool(emit_ds) and bool(ds_chunk_store)
     NTK = 2 * tps if CHUNK_DS else tps  # loop-state values per step: tokens (+ their entry ids)
@@ -713,7 +722,9 @@ def build_dkdv_w32(
         def stage_base(i_step):
             return lds_base + fx.Int32(i_step % fx.Index(2)) * fx.Int32(STAGE)
 
-        def issue(i_step, tok):
+        wave_u = uniform(fx.Int32(wave))
+
+        def issue_tile(i_step, tok):
             t_w = uniform(pick(tok, w_tok))
             off = fx.Int64(fx.Int32(head_row(t_w, fx.Index(0)) * fx.Index(D))) + src_shift
             gbase = fx.add_offset(q_iter, off)
@@ -729,6 +740,13 @@ def build_dkdv_w32(
             dst = uniform(stage_base(i_step) + dst_shift)
             l_view = fx.Tensor(fx.make_view(fx.inttoptr(lds_ty, dst), fx.make_layout((HPW, D), (STRIDE, 1))))
             fx.copy_atom_call(atom, g_view, l_view)
+
+        def issue(i_step, tok):
+            if const_expr(ISSUERS < waves):
+                if wave_u < fx.Int32(ISSUERS):
+                    issue_tile(i_step, tok)
+            else:
+                issue_tile(i_step, tok)
 
         # per-lane LDS byte offsets
         a_lane = fx.Int32(lo) * fx.Int32(STRIDE * 2) + fx.Int32(half) * fx.Int32(32)

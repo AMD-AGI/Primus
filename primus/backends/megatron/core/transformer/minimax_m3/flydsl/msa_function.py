@@ -37,6 +37,7 @@ class _MSAAttention(torch.autograd.Function):
         ds_chunk_store=False,
         dq_early_issue=False,
         two_tile_slots=False,
+        dkdv_two_token_steps=False,
     ):
         # lse / slot_lse never carry a gradient: don't materialise zeros for them
         ctx.set_materialize_grads(False)
@@ -64,6 +65,7 @@ class _MSAAttention(torch.autograd.Function):
         ctx.walk_slots = walk_slots
         ctx.ds_chunk_store = ds_chunk_store
         ctx.dq_early_issue = dq_early_issue
+        ctx.dkdv_two_token_steps = dkdv_two_token_steps
         ctx.mark_non_differentiable(*outs[1:])
         return outs
 
@@ -87,8 +89,9 @@ class _MSAAttention(torch.autograd.Function):
             walk_slots=ctx.walk_slots,
             ds_chunk_store=ctx.ds_chunk_store,
             dq_early_issue=ctx.dq_early_issue,
+            dkdv_two_token_steps=ctx.dkdv_two_token_steps,
         )
-        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return dq, dk, dv, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
 def msa_attention(
@@ -109,6 +112,7 @@ def msa_attention(
     ds_chunk_store=False,
     dq_early_issue=False,
     two_tile_slots=False,
+    dkdv_two_token_steps=False,
 ):
     """Differentiable MSA over ``[S, B, H, 128]`` q/k/v.
 
@@ -133,6 +137,9 @@ def msa_attention(
 
     ``dq_early_issue`` (``msa_dq_early_issue``, with ``dq_from_ds``): the slim dQ kernel issues a
     step's copies one wait earlier; same bits (``msa_token_bwd``).
+
+    ``dkdv_two_token_steps`` (``msa_dkdv_two_token_steps``): the backward's dK/dV kernel takes two
+    tokens per step instead of four; same bits, checked on the first call for a shape.
 
     ``two_tile_slots`` (``msa_two_tile_slots``, with ``owner_carry``): the forward with two LDS
     tile slots per wave instead of four; same bits (``msa_token_fwd_wave32``).
@@ -169,4 +176,5 @@ def msa_attention(
         bool(ds_chunk_store) and bool(dq_from_ds),
         bool(dq_early_issue) and bool(dq_from_ds),
         bool(two_tile_slots) and bool(owner_carry),
+        bool(dkdv_two_token_steps),
     )
