@@ -484,7 +484,7 @@ class _StudentHybrid(nn.Module):
         self.decoder.final_norm = _Scale(7.0)
 
     def forward(self, tokens, position_ids, attention_mask, labels=None):
-        hidden = torch.zeros(*tokens.t().shape, 4)
+        hidden = torch.zeros(*tokens.t().shape, 4, device=tokens.device)
         for layer in self.decoder.layers:
             hidden = layer(hidden_states=hidden)
         return self.decoder.final_norm(hidden)
@@ -548,8 +548,8 @@ def test_sft_kl_step_is_the_weighted_kl_over_every_real_target(monkeypatch):
         expected, _ = masked_chunked_kl(
             student(tokens, None, None), teacher(tokens, None, None), real_targets
         )
-    torch.testing.assert_close(loss, 0.5 * expected)
-    torch.testing.assert_close(report["hylo kl"][0], expected)
+    torch.testing.assert_close(loss.cpu(), 0.5 * expected)
+    torch.testing.assert_close(report["hylo kl"][0].cpu(), expected)
     assert count.item() == 3
 
 
