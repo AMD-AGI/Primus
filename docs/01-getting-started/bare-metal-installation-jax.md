@@ -287,12 +287,6 @@ scripts use the same pins; change one and you may have to change the others.
 | **GPU arch**           | AMD Instinct **gfx942** (MI300/MI325) or **gfx950** (MI350/MI355) | The pinned ROCm wheels + JAX plugin target these. Other archs (e.g. gfx90a/MI250) need matching wheels not pinned here. |
 | **GPU driver (KMD)**   | amdgpu / ROCm kernel driver loaded             | `/dev/kfd` + `/dev/dri` present; user in `video`/`render` groups. |
 
-> **Validated for v26.8:** the scripts' default flow (prebuilt `te`, `tf_source`)
-> ran end-to-end on **MI325X (gfx942) / Ubuntu 22.04 (glibc 2.35) / Python 3.12**
-> with no host clang, followed by single-node 8-GPU MaxText pretraining
-> (`examples/maxtext/configs/MI325X/llama2_7B-bf16-pretrain.yaml`), compared
-> against the `rocm/jax-training:maxtext-v26.8` container on that node.
->
 > **Validated for v26.10:** the v26.10 pins' default flow (prebuilt `te`,
 > `tf_source`, `turbo`) ran end-to-end on **MI325X (gfx942) / Ubuntu 24.04 /
 > Python 3.12**, followed by single-node 8-GPU MaxText pretraining
@@ -756,7 +750,7 @@ pip install --upgrade \
 > scipy (1.18.1), and protobuf (7.x). pip's `--upgrade` only touches the packages
 > named, so a bare-metal install keeps MaxText's own pins. This is the largest
 > difference between the two package sets; training was unaffected when this was
-> validated for v26.8.
+> validated for v26.10.
 
 If you already have a local Primus checkout (e.g. this repository), you can skip
 the clone and just run the `git submodule update`, `pip uninstall`, and
