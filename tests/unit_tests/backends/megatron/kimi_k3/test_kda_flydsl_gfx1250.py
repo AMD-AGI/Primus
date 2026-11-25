@@ -54,7 +54,7 @@ def _rel_err(a, b):
     """Norm-relative error; NaN counts as infinite."""
     a, b = a.double(), b.double()
     err = ((a - b).norm() / b.norm().clamp_min(1e-30)).item()
-    return float("inf") if err != err else err
+    return math.inf if math.isnan(err) else err
 
 
 def _gfx1250_or_skip():

@@ -17,6 +17,7 @@ the option resolution (defaults, errors, the fields being ignored by other backe
 from __future__ import annotations
 
 import dataclasses
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -55,7 +56,7 @@ def _rel_err(a, b):
     """Max-normalised error; NaN counts as infinite."""
     a, b = a.float(), b.float()
     err = ((a - b).abs().max() / a.abs().max().clamp_min(1e-30)).item()
-    return float("inf") if err != err else err
+    return math.inf if math.isnan(err) else err
 
 
 def _opts(**kw):

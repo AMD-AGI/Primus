@@ -39,7 +39,6 @@ _BT = 64
 _D = 128
 _NW = 4
 _WAVE = 32
-_MAX_VIEW_BYTES = (1 << 31) - 4096
 
 # LDS (bytes). Rows are padded by 16 B so the 16 rows of a ds_load_tr16 start in distinct bank groups.
 _DV_ROWB = 32 * 2 + 16  # one wave's dv column slice: 32 bf16 per row

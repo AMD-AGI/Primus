@@ -36,7 +36,6 @@ _BC = 16
 _D = 128
 _NW = 4
 _WAVE = 32
-_MAX_VIEW_BYTES = (1 << 31) - 4096
 # Which two reduction rows a lane holds in a 16x16x4 FP32 WMMA operand: 2h + {0, 1} (pairs) or h + {0, 2}
 # (strided), h = lane // 16. scripts/probe_wmma_gfx1250.py measures it.
 _F32_STRIDED = False

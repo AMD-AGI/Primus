@@ -45,7 +45,6 @@ _BC = 16
 _D = 128
 _NW = 4
 _WAVE = 32
-_MAX_VIEW_BYTES = (1 << 31) - 4096
 
 # LDS (bytes): the chunk's q, k (bf16), g (FP32) and L; after step 1 the inverse takes q's place, v beta k's and
 # k beta 2^g g's. Row pitches are 4 mod 64 dwords, so 16 lanes reading one column / one 16 B slot of 16 rows hit

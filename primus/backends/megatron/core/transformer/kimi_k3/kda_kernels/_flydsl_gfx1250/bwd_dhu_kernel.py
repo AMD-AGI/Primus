@@ -31,7 +31,6 @@ _BT = 64
 _D = 128
 _NW = 8
 _WAVE = 32
-_MAX_VIEW_BYTES = (1 << 31) - 4096
 
 _ROWB = _D * 2 + 16
 _TILE = _BT * _ROWB

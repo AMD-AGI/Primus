@@ -26,7 +26,6 @@ _BT = 64
 _D = 128
 _NW = 4
 _WAVE = 32
-_MAX_VIEW_BYTES = (1 << 31) - 4096
 
 _DO_ROWB = _D * 2 + 16
 _A_ROWB = _BT * 2 + 16

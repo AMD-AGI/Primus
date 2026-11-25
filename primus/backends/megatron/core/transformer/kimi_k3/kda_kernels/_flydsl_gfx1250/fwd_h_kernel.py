@@ -34,7 +34,6 @@ _BT = 64
 _D = 128
 _NW = 8
 _WAVE = 32
-_MAX_VIEW_BYTES = (1 << 31) - 4096
 
 # LDS (bytes). Ring stage: w and kg tiles [64][128] bf16 (16 B row pad), then gk's last row (FP32).
 _ROWB = _D * 2 + 16
