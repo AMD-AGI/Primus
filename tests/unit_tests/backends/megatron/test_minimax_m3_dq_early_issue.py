@@ -103,7 +103,9 @@ def _walk(table, aligned):
 def test_backward_dq_early_issue(force_checks, require_bitwise, S, B, Hkv, topk, kind, aligned):
     """dq / dk / dv with the early issue: bit-identical to ``msa_dq_from_ds`` without it (five
     runs), and within the tolerances of that path against the FP32 reference."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd,
+    )
 
     q, k, v, dout, table = _inputs(S, B, Hkv, topk, kind)
     walk = _walk(table, aligned)
@@ -139,7 +141,9 @@ def test_dq_early_issue_repeats_with_every_wave_copying(force_checks, require_bi
 def test_dq_early_issue_dispatcher_checks_once_and_falls_back(monkeypatch):
     """The dispatcher takes the option only after a bit-identical first call, per shape."""
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd,
+    )
 
     q, k, v, dout, table = H._inputs(1024, 1, 2, 4, "local")
     calls = []
@@ -190,7 +194,9 @@ def test_switch_defaults_off_and_exact_numerics_turns_it_off():
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
-    from primus.backends.megatron.core.transformer.minimax_m3.attention import MinimaxSparseAttention
+    from primus.backends.megatron.core.transformer.minimax_m3.attention import (
+        MinimaxSparseAttention,
+    )
 
     assert MSATransformerConfig.__dataclass_fields__["msa_dq_early_issue"].default is False
     assert "msa_dq_early_issue" in attention._MSA_RELAXED

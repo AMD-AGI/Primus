@@ -104,7 +104,9 @@ def _walk(table, aligned):
 def test_forward_two_tile_slots(force_checks, require_bitwise, S, B, Hkv, topk, kind, aligned, slot_lse):
     """o within tolerance of the FP32 reference and no further from it than the kernel without
     the option; every output bit equal to that kernel's, five times."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_fwd_w32
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_fwd_w32,
+    )
 
     q, k, v, dout, table = _inputs(S, B, Hkv, topk, kind)
     walk = _walk(table, aligned)
@@ -126,7 +128,9 @@ def test_two_tile_slots_dispatcher_checks_once_and_falls_back(monkeypatch):
     """The dispatcher takes the layout only after a bit-identical first call, per shape, and only
     as a layout of the carry kernel."""
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_fwd_w32
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_fwd_w32,
+    )
 
     q, k, v, _, table = H._inputs(1024, 1, 2, 4, "local")
     calls = []
@@ -156,7 +160,9 @@ def test_two_tile_slots_dispatcher_checks_once_and_falls_back(monkeypatch):
 def test_two_tile_slots_self_check_passes(require_bitwise):
     """The real self-check, on the training shape with an aligned walk and the slot lse."""
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_fwd_w32
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_fwd_w32,
+    )
 
     q, k, v, _, table = H._inputs(4096, 1, 4, 16, "local")
     walk = _walk(table, True)
@@ -169,7 +175,10 @@ def test_two_tile_slots_self_check_passes(require_bitwise):
 
 def test_two_tile_slots_lds_fits_four_workgroups():
     """The layout's point: four workgroups of four waves in a compute unit's 320 KB of LDS."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import D, TK
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
+        TK,
+        D,
+    )
 
     slot = 2 * TK * (D + 8) * 2
     assert 4 * (2 * slot * 4) <= 320 * 1024 < 3 * (2 * (slot + 2 * TK * (D + 16) * 2) * 4)
@@ -191,7 +200,9 @@ def test_switch_defaults_off_and_exact_numerics_turns_it_off():
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
-    from primus.backends.megatron.core.transformer.minimax_m3.attention import MinimaxSparseAttention
+    from primus.backends.megatron.core.transformer.minimax_m3.attention import (
+        MinimaxSparseAttention,
+    )
 
     assert MSATransformerConfig.__dataclass_fields__["msa_two_tile_slots"].default is False
     assert "msa_two_tile_slots" in attention._MSA_RELAXED

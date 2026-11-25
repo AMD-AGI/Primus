@@ -114,7 +114,6 @@ def _emulate_scatter(table, g, keys, q, chunk=64):
     head by head and chunk by chunk (the reduce kernel's order) and rounded to bf16."""
     S, B, H, Dq = q.shape
     n_blocks = -(-S // BLOCK)
-    topk = table.shape[-1]
     out = torch.zeros(n_blocks * BLOCK, B, Dq, dtype=torch.float32)
     qf = q.float().cpu()
     table, g, keys = table.cpu(), g.cpu(), keys.cpu()

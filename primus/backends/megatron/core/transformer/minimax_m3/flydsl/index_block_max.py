@@ -791,7 +791,6 @@ def _build_index_dk_scatter_w32(
         else:
             # a loop carrying one value hands it back unwrapped, so it carries two counters
             init = [fx.Int32(0), fx.Int32(0)]
-        results = init
         for r0, it in range(fx.Index(e_begin), fx.Index(e_end), fx.Index(U), init=init):
             r0_i32 = fx.Int32(r0)
             if const_expr(ahead):
@@ -833,7 +832,7 @@ def _build_index_dk_scatter_w32(
                     s_j = c_j + gvs[i] * fx.Float32(_raw(qfs[i][j]))
                     new.append(fx.Float32(hits[i].select(_raw(s_j), _raw(c_j))))
                 Vec.from_elements(new, fx.Float32).store(lds_acc, [at])
-            results = yield state
+            yield state
 
         # the chunk's fp32 partial, [chunk][key in block][d], as build_index_dk writes it
         for r in range_constexpr(block_size):
