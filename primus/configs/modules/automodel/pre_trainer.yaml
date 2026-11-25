@@ -17,6 +17,80 @@ seed: 42
 wandb:
   enable: false
 
+# AutoModel's own MLflow settings, consumed by RecipeConfig.mlflow. This block
+# must reach AutoModel, so it is deliberately not a `primus_` section, and it
+# must hold only MLflowConfig fields (experiment_name, run_name, tracking_uri,
+# artifact_location, tags, resume, description, flatten_depth) -- an unknown key
+# here raises TypeError when the typed config is built.
+#
+# Inert on its own: the diffusion recipe never calls cfg.mlflow.build(), so
+# nothing is tracked until primus_mlflow.enable turns the patch on.
+#
+# tracking_uri null means "use MLFLOW_TRACKING_URI, else ./mlruns", which is
+# what keeps credentials out of this file -- the dev container resolves a
+# Databricks profile from a mounted config, never a token in a config or an
+# environment variable.
+mlflow:
+  # Resolves from PRIMUS_MLFLOW_EXPERIMENT, falling back to a plain name that
+  # works against any tracking server. On Databricks the value must be an
+  # absolute workspace path that does not collide with an existing directory --
+  # directories and experiments share one namespace there.
+  experiment_name: ${PRIMUS_MLFLOW_EXPERIMENT:automodel-diffusion}
+  run_name: ""
+  tracking_uri: null
+  artifact_location: null
+  tags: {}
+  # false, against upstream's default of true. build() reads a `mlflow_run_id`
+  # sidecar from checkpoint.checkpoint_dir, which exists even with
+  # checkpoint.enabled: false because setup() makedirs it first. Left on, the
+  # second run of this config resumes the first instead of starting a new one,
+  # and log_params is skipped on the resumed path -- so repeat runs would share
+  # one run and only the first run's inputs would ever be recorded.
+  resume: false
+  description: null
+  flatten_depth: 1
+
+# Primus-side MLflow knobs. Stripped before the config reaches AutoModel.
+primus_mlflow:
+  # Off by default: adding this file must not make Primus runs start talking to
+  # a tracking server. Our own runs turn it on through the shared launch
+  # settings, not by changing this default.
+  enable: false
+  # Per-step metrics stay off until an A/B shows median step time within 0.5%.
+  # Upstream's to_float_metrics() calls .item() on tensors, which forces
+  # a GPU sync, and the Megatron path's GPU-utilisation collection adds an
+  # all_gather every log interval -- both are exactly the cost being measured.
+  # Cadence, when enabled, is step_scheduler.log_remote_every_steps.
+  per_step: false
+  # Extra environment variable names to log, on top of the built-in allow-list
+  # in mlflow_patches.py. Names only; values are still entropy-checked.
+  env_allowlist_extra: []
+  # End-of-run artifacts. All uploaded after the train loop returns, so none of
+  # this is inside the timed region and none of it can move a step-time number.
+  # Off by default because artifacts cost storage on a shared tracking server;
+  # turn them on for a run whose evidence someone will actually read.
+  upload_logs: false
+  upload_traces: false
+  # TraceLens reports. Requires TraceLens in the image -- unlike the Megatron
+  # path this never pip-installs at run time, because a job that reaches for
+  # the network during teardown is a job that hangs during teardown.
+  upload_tracelens_report: false
+  tracelens_output_format: csv          # xlsx or csv
+  # Which ranks' traces to upload and analyse. null means every rank, which on
+  # a multinode run is a lot of gigabytes; [0] is the usual choice.
+  tracelens_ranks: [0]
+  # Total upload budget per category. Smallest files are kept first, so one
+  # enormous trace cannot starve every other rank, and whatever is dropped is
+  # logged rather than silently omitted. 0 disables the cap.
+  upload_max_bytes: 2147483648           # 2 GiB
+  # Median step time, median samples/s/GPU and peak memory, logged as perf/*
+  # metrics. Derived by parsing the run's own log after it finishes -- the same
+  # source auto_benchmark reads -- so it adds no per-step cost and cannot
+  # perturb what it measures. Cheap enough to leave on.
+  summary: true
+  # Name shown in the experiment's Models column.
+  logged_model_name: Wan
+
 dist_env:
   backend: nccl
   timeout_minutes: 30

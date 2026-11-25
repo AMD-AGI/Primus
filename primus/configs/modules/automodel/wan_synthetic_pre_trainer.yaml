@@ -13,6 +13,47 @@ seed: 42
 wandb:
   enable: false
 
+# AutoModel's own MLflow settings, consumed by RecipeConfig.mlflow. This block
+# must reach AutoModel, so it is deliberately not a `primus_` section, and it
+# must hold only MLflowConfig fields (experiment_name, run_name, tracking_uri,
+# artifact_location, tags, resume, description, flatten_depth) -- an unknown key
+# here raises TypeError, because the RecipeConfig.mlflow property builds the
+# dataclass with **kwargs.
+#
+# Inert on its own: the diffusion recipe never calls cfg.mlflow.build(), so
+# nothing is tracked until primus_mlflow.enable turns the patch on -- which our
+# shared launch settings do, not this file. No `primus_mlflow:` block is needed
+# here: options.get returns its default for a missing section, so absence
+# already means disabled.
+#
+# tracking_uri null means "use MLFLOW_TRACKING_URI, else ./mlruns", which keeps
+# credentials out of this file: the container resolves a Databricks profile from
+# a read-only mount, never a token.
+#
+# experiment_name resolves from PRIMUS_MLFLOW_EXPERIMENT, falling back to a
+# plain name that works against any tracking server. Set the variable to route
+# runs somewhere specific.
+#
+# On Databricks the value must be an absolute workspace path, and it must NOT
+# collide with an existing directory: workspace directories and MLflow
+# experiments share one namespace, so creating an experiment where a directory
+# already sits fails with BAD_REQUEST.
+mlflow:
+  experiment_name: ${PRIMUS_MLFLOW_EXPERIMENT:automodel-diffusion}
+  run_name: ""
+  tracking_uri: null
+  artifact_location: null
+  tags: {}
+  # false, against upstream's default of true. build() reads a `mlflow_run_id`
+  # sidecar from checkpoint.checkpoint_dir, which exists even with
+  # checkpoint.enabled: false because setup() makedirs it first. Left on, the
+  # second run of this config resumes the first instead of starting a new one,
+  # and log_params is skipped on the resumed path -- so repeat runs would share
+  # one run and only the first run's inputs would ever be recorded.
+  resume: false
+  description: null
+  flatten_depth: 1
+
 dist_env:
   backend: nccl
   timeout_minutes: 30

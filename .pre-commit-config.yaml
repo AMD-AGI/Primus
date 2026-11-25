@@ -55,7 +55,7 @@ repos:
       # the regenerated lock gets staged. Mirrors the release CI drift check.
       - id: thirdparty-lock
         name: regenerate primus/_thirdparty.lock from submodule pins
-        entry: python tools/pip_index/gen_thirdparty_lock.py
+        entry: python3 tools/pip_index/gen_thirdparty_lock.py
         language: system
         pass_filenames: false
         always_run: true

@@ -1,0 +1,43 @@
+# Primus EXP — FLUX.1-schnell T2I pretrain on SYNTHETIC data, FP8 linears.
+#
+# Identical to flux_1_schnell-synthetic.yaml except for the primus_turbo block
+# below, so a BF16/FP8 comparison differs in the precision and nothing else.
+#
+# Primus-Turbo's Float8Linear: tensorwise scaling, E4M3 forward / E5M2 backward
+# ("hybrid"). The conditioning embedders stay in bf16 -- the patch swaps
+# nn.Linear inside the transformer blocks only. No new code is involved;
+# primus/backends/automodel/patches/fp8_linear_patches.py already declares and
+# applies these options.
+#
+# Launch (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/automodel/configs/MI355X/diffusion/flux_1_schnell-synthetic-fp8.yaml
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:flux_1_schnell-synthetic-fp8}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: automodel
+    config: flux_synth_pre_trainer.yaml
+    model: flux_1_schnell.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 25
+        local_batch_size: 4
+        global_batch_size: 32
+      checkpoint:
+        enabled: false
+      flow_matching:
+        adapter_kwargs:
+          use_guidance_embeds: false
+      mlflow:
+        experiment_name: ${PRIMUS_MLFLOW_EXPERIMENT:automodel-diffusion}
+      primus_turbo:
+        fp8_linear: true
+        fp8_linear_granularity: tensorwise
+        fp8_linear_format: hybrid
