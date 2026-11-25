@@ -251,6 +251,20 @@ class MSATransformerConfig(TransformerConfig):
     device (index_dk_scatter_supported and the dispatcher in index_dk); any other shape keeps the
     reference kernel. msa_exact_numerics turns it off."""
 
+    msa_bounded_plan_chunks: bool = False
+    """flydsl backend, relaxed numerics: the BlockPlan that the dK/dV kernel and the indexer
+    backward's dK walk is cut into chunks of ceil(B * Hkv * S * topk / 4096) entries kept within
+    [256, 384], instead of max(64, ceil(B * Hkv * S * topk / 2048)) (flydsl/msa_token_bwd.py,
+    plan_chunk_size; the same rule in the fused selection plan and in build_block_plan). A chunk
+    is one workgroup: the reference rule gives 128-entry chunks at S 4096, where the fixed part
+    of a workgroup (K/V prologue, pipeline fill, 131 KB of FP32 partials and their reduce) is
+    paid too often, and 1024-entry chunks at S 32768, where the longest rows end late (a
+    workgroup takes its steps one after another). Never more than 8192 chunks plus one per
+    row: larger tables get ceil(entries / 8192) per chunk. The constants are not functions of
+    the shape. Same entries, same order inside a row; the FP32 chunk partials are summed over
+    other groups of entries, so dk, dv and d index k differ in their last bits (deterministic:
+    the chunking is a pure function of the table). msa_exact_numerics turns it off."""
+
     msa_ds_chunk_store: bool = False
     """flydsl backend on gfx1250, with msa_dq_from_ds: the dK/dV kernel writes its dS records
     through one buffer descriptor per workgroup (the (batch, KV head) slice of the dS buffer, with
@@ -305,9 +319,10 @@ class MSATransformerConfig(TransformerConfig):
     msa_exact_numerics: bool = False
     """Keep the options of the MSA operator kernels off, whatever their own switches say, so a run
     reproduces the reference flydsl kernels' losses bit for bit (for regression checks). The group
-    is attention._MSA_RELAXED: the four relaxed-numerics options, whose arithmetic is not
+    is attention._MSA_RELAXED: the five relaxed-numerics options, whose arithmetic is not
     bit-identical to the reference kernels (msa_aligned_block_walk, msa_dq_from_ds,
-    msa_index_dk_scatter, msa_indexer_loss_one_pass), and the bit-preserving options that are
+    msa_index_dk_scatter, msa_indexer_loss_one_pass, msa_bounded_plan_chunks), and the
+    bit-preserving options that are
     built on them or change the same kernels (msa_owner_carry, msa_ds_chunk_store,
     msa_dq_early_issue, msa_two_tile_slots, msa_walk_one_wave). Each of them, or the option it
     is a part of, tests this flag before any work; the Triton fusions and msa_shared_tile_staging

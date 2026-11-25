@@ -84,6 +84,8 @@ modules:
       msa_aligned_block_walk: true
       # relaxed numerics: the indexer backward's dK as a per-entry scatter into the winning key row
       msa_index_dk_scatter: true
+      # relaxed numerics: the backward's block plan in chunks of 256 to 384 entries (dK/dV, index dK)
+      msa_bounded_plan_chunks: true
       # relaxed numerics: dQ from the dK/dV kernel's dS (4 KB of transient buffer per token and block)
       msa_dq_from_ds: true
       # MSA operator kernels, same bits, fewer scalar loads / descriptors per step (off under

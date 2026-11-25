@@ -77,7 +77,8 @@ _MSA_FUSIONS = (
 )
 # Options of the MSA operator kernels that msa_exact_numerics turns off. Relaxed numerics (not
 # bit-identical to the reference flydsl kernels): msa_aligned_block_walk, msa_dq_from_ds,
-# msa_index_dk_scatter, msa_indexer_loss_one_pass. The others keep the bits of the path they sit on.
+# msa_index_dk_scatter, msa_indexer_loss_one_pass, msa_bounded_plan_chunks. The others keep the bits of
+# the path they sit on.
 _MSA_RELAXED = (
     "msa_aligned_block_walk",
     "msa_dq_from_ds",
@@ -88,6 +89,7 @@ _MSA_RELAXED = (
     "msa_two_tile_slots",
     "msa_walk_one_wave",
     "msa_indexer_loss_one_pass",
+    "msa_bounded_plan_chunks",
 )
 _FUSIONS_LOGGED = False
 

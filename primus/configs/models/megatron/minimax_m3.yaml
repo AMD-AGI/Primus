@@ -118,6 +118,10 @@ msa_owner_carry: false
 # into its winning key row (one wave per plan chunk) instead of a one-hot masked WMMA product;
 # msa_exact_numerics turns it off.
 msa_index_dk_scatter: false
+# flydsl kernels, relaxed numerics: the backward's BlockPlan in chunks of 256 to 384 entries (one
+# workgroup of the dK/dV and index dK kernels each) instead of entries / 2048; msa_exact_numerics
+# turns it off.
+msa_bounded_plan_chunks: false
 # gfx1250 flydsl kernels with msa_dq_from_ds: the dK/dV kernel stores dS through one buffer
 # descriptor per workgroup instead of one per record (same bytes); msa_exact_numerics turns it off.
 msa_ds_chunk_store: false

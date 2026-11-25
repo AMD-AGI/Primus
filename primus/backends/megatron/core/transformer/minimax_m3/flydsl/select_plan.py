@@ -229,13 +229,15 @@ def boost_forced(raw: torch.Tensor, forced: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def select_post_and_plan(topk_scores, topk_idx, argmax, boosted, block_size, want_plan):
+def select_post_and_plan(topk_scores, topk_idx, argmax, boosted, block_size, want_plan, bounded_chunks=False):
     """Returns ``(block_indices int64, keys int32, keys_c int32, dead bool, table int32, plan)``.
 
-    ``plan`` is the :class:`msa_token_bwd.BlockPlan` of ``block_indices`` when ``want_plan``.
+    ``plan`` is the :class:`msa_token_bwd.BlockPlan` of ``block_indices`` when ``want_plan``;
+    ``bounded_chunks`` (``msa_bounded_plan_chunks``) picks its chunk size as in ``build_block_plan``.
     """
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
         BlockPlan,
+        plan_chunk_size,
     )
 
     B, H, S, K = topk_idx.shape
@@ -276,7 +278,7 @@ def select_post_and_plan(topk_scores, topk_idx, argmax, boosted, block_size, wan
     plan = None
     if want_plan:
         max_tokens = BG * S * K
-        size = max(64, -(-max_tokens // 2048))  # plan_chunks(target_chunks=2048, min_chunk=64)
+        size = plan_chunk_size(max_tokens, bounded=bool(bounded_chunks))  # as plan_chunks
         n_chunks = n_rows + -(-max_tokens // size)
         entries = torch.empty(max_tokens, dtype=torch.int32, device=dev)
         ptr = torch.empty(n_rows + 1, dtype=torch.int32, device=dev)

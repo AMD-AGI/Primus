@@ -50,7 +50,18 @@ def index_dk_scatter_enabled(config) -> bool:
     )
 
 
-def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_plan):
+def bounded_plan_chunks_enabled(config) -> bool:
+    """``msa_bounded_plan_chunks`` as the selection builds its :class:`BlockPlan`: the switch,
+    unless ``msa_exact_numerics`` is set (relaxed numerics: the chunk partials of dK / dV and of
+    the index dK are summed over other groups of entries). Decided before any work, from the
+    config alone; the chunk size itself is a function of ``B * Hkv * S * topk``
+    (``msa_token_bwd.plan_chunk_size``)."""
+    return bool(getattr(config, "msa_bounded_plan_chunks", False)) and not bool(
+        getattr(config, "msa_exact_numerics", False)
+    )
+
+
+def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_plan, bounded_chunks=False):
     """:func:`select_plan`'s five-launch form of ``select_from_block_scores`` plus the
     ``_FusedSelect`` bookkeeping and the :class:`BlockPlan`; None if it does not apply."""
     from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
@@ -83,7 +94,7 @@ def _fused_selection(raw, argmax, select_from_block_scores, block_size, want_pla
     block_scores = raw if forced is None else select_plan.boost_forced(raw, forced)
     topk_scores, topk_idx = block_scores.topk(topk, dim=-1)
     bi, keys, keys_c, dead, table, plan = select_plan.select_post_and_plan(
-        topk_scores, topk_idx, argmax, block_scores, block_size, want_plan
+        topk_scores, topk_idx, argmax, block_scores, block_size, want_plan, bounded_chunks
     )
     return bi, block_scores, keys, keys_c, dead, table, plan
 
@@ -96,12 +107,15 @@ class _FusedSelect(torch.autograd.Function):
         lean = bool(getattr(getattr(indexer, "config", None), "msa_lean_masks", False))
         ctx.lean = lean
         ctx.dk_scatter = index_dk_scatter_enabled(getattr(indexer, "config", None))
+        ctx.bounded_chunks = bounded_plan_chunks_enabled(getattr(indexer, "config", None))
         raw, argmax = index_block_max(q, k, block_size, mask_skip=lean)
         ctx.set_materialize_grads(False)
         ctx.block_size = block_size
         want_plan = bool(plan_slot) and plan_slot[0] is True  # fused_select_blocks: grad was on
         del plan_slot[:]
-        fused = _fused_selection(raw, argmax, select_from_block_scores, block_size, want_plan)
+        fused = _fused_selection(
+            raw, argmax, select_from_block_scores, block_size, want_plan, ctx.bounded_chunks
+        )
         if fused is not None:
             block_indices, block_scores, keys, keys_c, dead, table, plan = fused
             ctx.save_for_backward(q, k, block_indices, keys, keys_c, dead)
@@ -141,7 +155,11 @@ class _FusedSelect(torch.autograd.Function):
             )  # [B, H, S, topk]
             keys_c = keys.clamp_min(0)
         dq = index_dq(g, keys_c, k.reshape(S, B, D), H)
-        plan = ctx.plan_slot[0] if ctx.plan_slot else build_block_plan(block_indices, ctx.block_size)
+        plan = (
+            ctx.plan_slot[0]
+            if ctx.plan_slot
+            else build_block_plan(block_indices, ctx.block_size, ctx.bounded_chunks)
+        )
         dk = index_dk(plan, g, keys, q, ctx.block_size, lean=ctx.lean, scatter=ctx.dk_scatter)
         return dq, dk.reshape(k.shape), None, None, None
 
@@ -166,6 +184,8 @@ def fused_select_blocks(q, k, select_from_block_scores, block_size):
         return block_indices, block_scores, plan
     plan = None
     if torch.is_grad_enabled():
-        plan = build_block_plan(block_indices, block_size)
+        indexer = getattr(select_from_block_scores, "__self__", None)
+        bounded = bounded_plan_chunks_enabled(getattr(indexer, "config", None))
+        plan = build_block_plan(block_indices, block_size, bounded)
         plan_slot.append(plan)
     return block_indices, block_scores, plan

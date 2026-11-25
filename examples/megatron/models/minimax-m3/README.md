@@ -170,12 +170,14 @@ Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gra
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
 off; apart from `msa_shared_tile_staging`, `msa_lean_masks`, `msa_aligned_block_walk`,
 `msa_dq_from_ds`, `msa_owner_carry`, `msa_ds_chunk_store`, `msa_dq_early_issue`, `msa_two_tile_slots`,
-`msa_walk_one_wave`, `msa_indexer_loss_one_pass` and `msa_index_dk_scatter` the FlyDSL MSA kernels have
+`msa_walk_one_wave`, `msa_indexer_loss_one_pass`, `msa_index_dk_scatter` and `msa_bounded_plan_chunks` the
+FlyDSL MSA kernels have
 no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
-**Relaxed-numerics MSA options.** Four options are not bit-identical to the reference FlyDSL
-kernels: `msa_aligned_block_walk`, `msa_dq_from_ds`, `msa_indexer_loss_one_pass` and
-`msa_index_dk_scatter`. The other options of the group (`msa_owner_carry`, `msa_ds_chunk_store`,
+**Relaxed-numerics MSA options.** Five options are not bit-identical to the reference FlyDSL
+kernels: `msa_aligned_block_walk`, `msa_dq_from_ds`, `msa_indexer_loss_one_pass`,
+`msa_index_dk_scatter` and `msa_bounded_plan_chunks` (the backward's block plan in chunks of 256 to 384
+entries: other groups of the same FP32 terms in dk, dv and d index k). The other options of the group (`msa_owner_carry`, `msa_ds_chunk_store`,
 `msa_dq_early_issue`, `msa_two_tile_slots`, `msa_walk_one_wave`) keep every bit of the path they sit
 on and are only switched off together with them. With `msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
 with the token's neighbours (groups of four consecutive tokens; a block that an earlier token of

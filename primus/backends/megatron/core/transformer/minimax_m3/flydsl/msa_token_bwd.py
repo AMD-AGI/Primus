@@ -73,6 +73,7 @@ from primus_turbo.flydsl.utils import buffer_ops
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
     HPW,
     KS,
+    MAX_BUFFER_BYTES,
     STRIDE,
     TK,
     D,
@@ -996,8 +997,47 @@ def build_chunk_writer():
 _CHUNK_WRITER: list = []
 
 
-def plan_chunks(ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64):
-    """Split every CSR row into equal-sized token chunks, about ``target_chunks`` in all.
+# msa_bounded_plan_chunks: entries per chunk = ceil(capacity / target), kept between the two bounds,
+# and never more than BOUNDED_CHUNK_COUNT chunks (plus one per row)
+BOUNDED_CHUNK_TARGET = 4096
+BOUNDED_CHUNK_MIN = 256
+BOUNDED_CHUNK_MAX = 384
+BOUNDED_CHUNK_COUNT = 8192
+# FP32 dK and dV partials of one chunk (block 128, D 128): the largest per-chunk workspace of the plan's kernels
+BOUNDED_CHUNK_WS_BYTES = 2 * 128 * 128 * 4
+
+
+def plan_chunk_size(
+    max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64, bounded: bool = False
+) -> int:
+    """Entries per chunk of a :class:`BlockPlan` whose table holds ``max_tokens`` entries
+    (``B * Hkv * S * topk``, its capacity).
+
+    The reference rule aims at ``target_chunks`` chunks in all: ``max(min_chunk, ceil(max_tokens /
+    target_chunks))``, 128 entries at S 4096 and 1024 at S 32768 (B 1, 4 KV heads, top-k 16).
+
+    ``bounded`` (``msa_bounded_plan_chunks``): ``ceil(max_tokens / BOUNDED_CHUNK_TARGET)`` kept
+    within ``[BOUNDED_CHUNK_MIN, BOUNDED_CHUNK_MAX]``. A chunk is one workgroup of the dK/dV and
+    index dK kernels, and its size has two costs. Short chunks pay the workgroup's fixed part (the
+    K/V prologue, the pipeline fill, 131 KB of FP32 partials and their reduce) too often; long
+    chunks make a tail, because a workgroup takes its steps one after another and the kernel
+    cannot end before its longest chunk does while the rows of a causal table are very uneven.
+    Past ``BOUNDED_CHUNK_MAX * BOUNDED_CHUNK_COUNT`` entries the size grows again,
+    ``ceil(max_tokens / BOUNDED_CHUNK_COUNT)``, so a plan never has more than that many chunks plus
+    one per row and the kernels' FP32 partial workspace (131 KB per chunk for dK / dV) stays
+    bounded as the reference rule's does. The constants do not depend on the shape, so the rule
+    holds for any S, B and top-k."""
+    if bounded:
+        size = min(BOUNDED_CHUNK_MAX, max(BOUNDED_CHUNK_MIN, -(-max_tokens // BOUNDED_CHUNK_TARGET)))
+        return max(size, -(-max_tokens // BOUNDED_CHUNK_COUNT))
+    return max(min_chunk, -(-max_tokens // target_chunks))
+
+
+def plan_chunks(
+    ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64, bounded: bool = False
+):
+    """Split every CSR row into equal-sized token chunks, about ``target_chunks`` in all
+    (``bounded``: the ``msa_bounded_plan_chunks`` size, see :func:`plan_chunk_size`).
 
     Every row gets at least one chunk, so rows no token selected still write zero
     partials. Sync-free: the chunk size comes from ``max_tokens`` (the table's
@@ -1010,7 +1050,11 @@ def plan_chunks(ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, m
     """
     n_rows = ptr.numel() - 1
     assert n_rows < 2**_SEARCH_STEPS
-    size = max(min_chunk, -(-max_tokens // target_chunks))
+    size = plan_chunk_size(max_tokens, target_chunks, min_chunk, bounded)
+    if bounded and (n_rows + -(-max_tokens // size)) * BOUNDED_CHUNK_WS_BYTES >= MAX_BUFFER_BYTES:
+        # eligibility, before any work: the bounded plan's dK / dV partials would pass the kernels'
+        # 32-bit buffer limit (B * Hkv * n_blocks rows of 8192 and more): the reference rule
+        size = plan_chunk_size(max_tokens, target_chunks, min_chunk)
     per_row = torch.div(ptr[1:] - ptr[:-1] + (size - 1), size, rounding_mode="floor").clamp_min_(1)
     chunk_ptr = torch.cat([torch.zeros_like(ptr[:1]), torch.cumsum(per_row, 0, dtype=torch.int32)])
 
@@ -1041,11 +1085,17 @@ class BlockPlan(NamedTuple):
     table: Optional[torch.Tensor] = None
 
 
-def build_block_plan(block_table: torch.Tensor, block_size: int = 128) -> BlockPlan:
-    """:class:`BlockPlan` for a ``[B, Hkv, S, topk]`` block table (-1 padded)."""
+def build_block_plan(
+    block_table: torch.Tensor, block_size: int = 128, bounded_chunks: bool = False
+) -> BlockPlan:
+    """:class:`BlockPlan` for a ``[B, Hkv, S, topk]`` block table (-1 padded).
+
+    ``bounded_chunks`` (``msa_bounded_plan_chunks``, relaxed numerics): the chunk size of
+    :func:`plan_chunk_size` with ``bounded``. The entries and their order are the same; the FP32
+    partials of dK / dV and of the index dK are summed over other groups of them."""
     n_blocks = -(-block_table.shape[2] // block_size)
     ptr, entries = build_inverted_table(block_table, n_blocks)
-    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, entries.numel())
+    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, entries.numel(), bounded=bounded_chunks)
     return BlockPlan(ptr, entries, chunks, chunk_ptr, n_chunks, n_blocks)
 
 
