@@ -20,7 +20,7 @@ recipe is [examples/mlperf/dlrm_v4](../../../../examples/mlperf/dlrm_v4/README.m
 | | |
 |---|---|
 | GPUs | 1, 2 or 4 nodes of 8× AMD Instinct MI355X (`gfx950`). The FP8 and FlyDSL kernels are gfx950-only. |
-| Image | `rocm/primus:v26.9` |
+| Image | `rocm/primus:v26.10` |
 | Dataset | 227 GB, on node-local NVMe on every node (training reads it with random page faults) |
 | Host memory | The data loaders pin about 180 GiB per node before `run_start`. Each NUMA node must have its share of that (about 22 GiB with 8 NUMA nodes) plus `DL_PIN_PREWARM_HEADROOM_GIB` (default 512 GiB) free, or the run stops before `run_start`. On hosts with less free memory per NUMA node, lower the headroom; the 2- and 4-node results used 128. |
 | Container | Host network and IPC, `--ulimit memlock=-1:-1`. `--privileged` is not needed. `run_with_docker.sh` sets all of this. |
@@ -56,7 +56,7 @@ DATADIR=/mnt/nvme/dlrm_data LOGDIR=/mnt/nvme/dlrm_results \
     bash examples/mlperf/dlrm_v4/run_with_docker.sh
 ```
 
-`run_with_docker.sh` starts a `rocm/primus:v26.9` container and runs
+`run_with_docker.sh` starts a `rocm/primus:v26.10` container and runs
 `examples/mlperf/dlrm_v4/run_and_time.sh` in it. Each trial prints
 `RESULT,DLRM_V4,<seed>,<seconds>,...` and writes three files to `LOGDIR`: the
 MLPerf log (`mlperf_<date>_<n>.log`), the train log (`train_<date>_<n>.log`)
@@ -180,7 +180,7 @@ sequence lengths, anchors per user (the trainer batches a window user-major),
 the share of each event type, and items replayed from per-user artist
 libraries. Tokens per batch, users per batch and unique items, artists and
 albums per batch come within a few percent of the real day's, and so does the
-throughput: on one MI355X node with `rocm/primus:v26.9`, two 200-step runs gave
+throughput: on one MI355X node with `rocm/primus:v26.10`, two 200-step runs gave
 8397 samples/s per GPU (launched with `primus-cli direct`) and 8379 (through
 tools/perf), against 8454 on the real day 200 (harmonic means over steps
 31-200; TFLOP/s 1013 and 1011 against 1017).
@@ -236,7 +236,7 @@ at 1024 it runs out of its 192 GB. The other gfx950-only kernels turn
 themselves off with a log line. `dlrm_v4-BF16-pretrain.yaml` for MI355X runs
 the same settings, to compare the three GPUs on the same work.
 
-On `rocm/primus:v26.9`, 200 steps on synthetic data: MI325X 1207 samples/s and
+On `rocm/primus:v26.10`, 200 steps on synthetic data: MI325X 1207 samples/s and
 203 TFLOP/s per GPU, MI300X 1052 and 178 (batch 512), MI355X 2025 and 340 with
 these settings (8379 and 1011 with the recipe's FP8 kernels). The trainer's pinned
 Triton configurations are tuned on MI350X; `TRITON_FULL_AUTOTUNE=1` gave MI325X
@@ -258,7 +258,7 @@ The MLPerf recipe leaves checkpointing off.
 
 ## Results
 
-One MI355X node, `rocm/primus:v26.9`, the MLPerf recipe (global batch 8192, LR
+One MI355X node, `rocm/primus:v26.10`, the MLPerf recipe (global batch 8192, LR
 1e-6), measured 2026-11-06:
 
 | | |
@@ -290,7 +290,7 @@ one sources the 1-node config and then changes what depends on the node count:
 `SKIP_EVAL_EPOCH_PCT` stays unset, so the first eval follows the global batch.
 
 **Running.** `run_with_docker.sh` launches one node. For 2 or 4 nodes, start one
-task per node, each in a `rocm/primus:v26.9` container with the Primus checkout
+task per node, each in a `rocm/primus:v26.10` container with the Primus checkout
 at `/workspace/Primus` and the dataset on the node's local NVMe. In each task:
 
 ```bash
@@ -322,7 +322,7 @@ target rises by about 3%. With 0, the streams land on separate queues. On one no
 1 shows no stall and stays. The full analysis is in the comment above the
 setting in `config_MI355X_2x8x1.sh`.
 
-**Results** (OLCF Lux, MI355X, 8 × 400 Gb/s RoCE per node, `rocm/primus:v26.9`,
+**Results** (OLCF Lux, MI355X, 8 × 400 Gb/s RoCE per node, `rocm/primus:v26.10`,
 2 runs per seed, run with `DL_PIN_PREWARM_HEADROOM_GIB=128`):
 
 | Nodes | Seed 731542219 | Seed 1234567 | Seed 20261103 |
