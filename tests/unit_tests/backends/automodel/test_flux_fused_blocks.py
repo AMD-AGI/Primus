@@ -164,6 +164,13 @@ def _swap_qkv(block):
     return block
 
 
+def _installed_processor(block):
+    """``block`` with the processor its attention is now built with. The blocks are built before the
+    installs, so that the references run diffusers' processor."""
+    block.attn.set_processor(transformer_flux.FluxAttention._default_processor_cls())
+    return block
+
+
 def _inputs(s_txt, gen):
     inputs = (_randn(B, S_IMG, C, gen=gen), _randn(B, s_txt, C, gen=gen), _randn(B, C, gen=gen))
     upstream = (_randn(B, s_txt, C, gen=gen), _randn(B, S_IMG, C, gen=gen))
@@ -198,7 +205,7 @@ def test_single_stream_block(s_txt, takes_adaln, patches, calls, gen):
     args = _inputs(s_txt, gen)
     ref32, ref16 = _run(block, torch.float32, *args), _run(block, BF16, *args)
     assert patches.mlp_gelu.install() and patches.qk_norm_rope.install() and patches.adaln.install()
-    _compare(_run(block, BF16, *args), ref32, ref16)
+    _compare(_run(_installed_processor(block), BF16, *args), ref32, ref16)
     assert calls == {
         "adaln_modulate": int(takes_adaln),
         "gated_residual_adaln": 0,
@@ -216,7 +223,7 @@ def test_dual_stream_block(s_txt, takes_op, patches, calls, gen):
     args = _inputs(s_txt, gen)
     ref32, ref16 = _run(block, torch.float32, *args), _run(block, BF16, *args)
     assert patches.mlp_gelu.install() and patches.qk_norm_rope.install() and patches.adaln_dual.install()
-    _compare(_run(block, BF16, *args), ref32, ref16)
+    _compare(_run(_installed_processor(block), BF16, *args), ref32, ref16)
     assert calls == {
         "adaln_modulate": 0,
         "gated_residual_adaln": int(takes_op),
@@ -232,5 +239,5 @@ def test_swapped_qkv_projections(block_cls, patches, calls, gen):
     args = _inputs(256, gen)
     ref32, ref16 = _run(block, torch.float32, *args), _run(block, BF16, *args)
     assert patches.qk_norm_rope.install()
-    _compare(_run(block, BF16, *args), ref32, ref16)
+    _compare(_run(_installed_processor(block), BF16, *args), ref32, ref16)
     assert calls["dit_qk_norm_rope"] == 1

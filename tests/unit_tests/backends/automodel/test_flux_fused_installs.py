@@ -8,11 +8,15 @@
 Unit tests for when the FLUX fused-op patches install and when they decline.
 
 WHAT THESE ARE DEFENDING:
-  Each patch replaces a diffusers forward only when the installed source is the one it re-implements
-  and the installed Primus-Turbo has its ops (the adaLN patches also only on gfx950, the one GPU where
-  their ops are faster). Otherwise it must return False and leave the class as it was, so the run keeps
-  diffusers' forward. Installing twice must not wrap a forward twice. The block tests that run the ops
-  need a GPU; these run anywhere, with stand-ins for Primus-Turbo, which needs a GPU to import.
+  The block patches replace a diffusers forward only when the installed source is the one they
+  re-implement, and the q/k patch makes its processor diffusers' default only while that default is
+  diffusers' own ``FluxAttnProcessor``. Each also needs its ops in the installed Primus-Turbo (the
+  adaLN patches also gfx950, the one GPU where their ops are faster). Otherwise a patch must return
+  False and leave the classes as they were, so the run keeps diffusers' code. Installing twice must
+  not wrap a forward twice. The q/k processor must reach every attention module built afterwards and
+  compute exactly what diffusers' processor does on the calls its op does not take. The block tests
+  that run the ops need a GPU; these run anywhere, with stand-ins for Primus-Turbo, which needs a GPU
+  to import.
 """
 
 import hashlib
@@ -33,10 +37,13 @@ from primus.backends.automodel.models.flux import (  # noqa: E402
     mlp_gelu,
     qk_norm_rope,
 )
+from primus.backends.automodel.models.flux.attn_processor import (  # noqa: E402
+    PrimusFluxAttnProcessor,
+)
 from primus.backends.automodel.models.flux.turbo_ops import turbo_ops  # noqa: E402
 
 SINGLE, DUAL = transformer_flux.FluxSingleTransformerBlock, transformer_flux.FluxTransformerBlock
-PROCESSOR = transformer_flux.FluxAttnProcessor
+ATTENTION = transformer_flux.FluxAttention
 
 
 def _digest(fn):
@@ -47,9 +54,8 @@ known_diffusers = pytest.mark.skipif(
     not (
         _digest(SINGLE.forward) == mlp_gelu.SINGLE_FORWARD_SHA256
         and _digest(DUAL.forward) == adaln_dual_flydsl._DUAL_FORWARD_SHA256
-        and _digest(PROCESSOR.__call__) in qk_norm_rope._PROCESSOR_SHA256
     ),
-    reason="the patches re-implement diffusers 0.40.0's to 0.43.0's forwards",
+    reason="the block patches re-implement diffusers 0.40.0's to 0.43.0's forwards",
 )
 
 
@@ -81,17 +87,21 @@ def _not_diffusers(self, *args, **kwargs):
     """A forward whose source is not diffusers'."""
 
 
+class _AnotherProcessor(transformer_flux.FluxAttnProcessor):
+    """A default processor another patch might have installed."""
+
+
 def _unchanged(**expected):
-    """Whether the FLUX classes still have these forwards and no patch marker."""
+    """Whether the FLUX classes still have these forwards and default processor and no patch marker."""
     current = {
         "feed_forward": FeedForward.forward,
         "single": SINGLE.forward,
         "dual": DUAL.forward,
-        "processor": PROCESSOR.__call__,
+        "processor": ATTENTION._default_processor_cls,
     }
     markers = (
         (FeedForward, mlp_gelu._PATCHED_ATTR),
-        (PROCESSOR, qk_norm_rope._PATCHED_ATTR),
+        (ATTENTION, qk_norm_rope._PATCHED_ATTR),
         (SINGLE, adaln_flydsl._PATCHED_ATTR),
         (DUAL, adaln_dual_flydsl._PATCHED_ATTR),
     )
@@ -132,15 +142,15 @@ class TestDeclines:
         assert flux_fused_patches.mlp_gelu.install() is True
         assert SINGLE.forward is _not_diffusers
 
-    def test_qk_norm_rope_on_a_foreign_processor(self, flux_fused_patches, monkeypatch):
+    def test_qk_norm_rope_over_another_default_processor(self, flux_fused_patches, monkeypatch):
         _fake_turbo(monkeypatch, "dit_qk_norm_rope")
-        monkeypatch.setattr(PROCESSOR, "__call__", _not_diffusers)
+        monkeypatch.setattr(ATTENTION, "_default_processor_cls", _AnotherProcessor)
         assert flux_fused_patches.qk_norm_rope.install() is False
-        assert _unchanged(processor=_not_diffusers)
+        assert _unchanged(processor=_AnotherProcessor)
 
     def test_qk_norm_rope_without_the_op(self, flux_fused_patches, monkeypatch):
         _fake_turbo(monkeypatch)
-        before = PROCESSOR.__call__
+        before = ATTENTION._default_processor_cls
         assert flux_fused_patches.qk_norm_rope.install() is False
         assert _unchanged(processor=before)
 
@@ -173,8 +183,34 @@ class TestDeclines:
         assert _unchanged(dual=before)
 
 
-@known_diffusers
+class TestQkNormRopeProcessor:
+    def test_attention_built_afterwards_takes_it(self, flux_fused_patches, monkeypatch):
+        ops = _fake_turbo(monkeypatch, "dit_qk_norm_rope")
+        assert flux_fused_patches.qk_norm_rope.install() is True
+        assert PrimusFluxAttnProcessor.dit_qk_norm_rope is ops.dit_qk_norm_rope
+        assert type(ATTENTION(query_dim=64, heads=2, dim_head=32).processor) is PrimusFluxAttnProcessor
+
+    @pytest.mark.parametrize("dual", [False, True])
+    def test_calls_off_the_op_compute_what_diffusers_does(self, dual, flux_fused_patches, monkeypatch):
+        _fake_turbo(monkeypatch, "dit_qk_norm_rope")
+        assert flux_fused_patches.qk_norm_rope.install() is True
+        torch.manual_seed(0)
+        attn = ATTENTION(
+            query_dim=64, heads=2, dim_head=32, added_kv_proj_dim=64 if dual else None, bias=True
+        )
+        hidden_states = torch.randn(2, 8, 64)
+        encoder_hidden_states = torch.randn(2, 4, 64) if dual else None
+        # CPU tensors, which the op does not take.
+        args = (attn, hidden_states, encoder_hidden_states)
+        got = PrimusFluxAttnProcessor()(*args)
+        expected = transformer_flux.FluxAttnProcessor()(*args)
+        if not dual:
+            got, expected = (got,), (expected,)
+        assert all(torch.equal(g, e) for g, e in zip(got, expected, strict=True))
+
+
 class TestIdempotent:
+    @known_diffusers
     def test_fused_gelu(self, flux_fused_patches, monkeypatch):
         _fake_turbo(monkeypatch, "linear_gelu")
         diffusers_single = SINGLE.forward
@@ -187,6 +223,6 @@ class TestIdempotent:
     def test_qk_norm_rope(self, flux_fused_patches, monkeypatch):
         _fake_turbo(monkeypatch, "dit_qk_norm_rope")
         assert flux_fused_patches.qk_norm_rope.install() is True
-        patched = PROCESSOR.__call__
         assert flux_fused_patches.qk_norm_rope.install() is True
-        assert PROCESSOR.__call__ is patched
+        assert ATTENTION._default_processor_cls is PrimusFluxAttnProcessor
+        assert ATTENTION._available_processors.count(PrimusFluxAttnProcessor) == 1

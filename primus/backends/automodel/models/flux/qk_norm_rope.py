@@ -26,11 +26,15 @@ WHAT:
   re-reads the whole gradient, goes. The weight and bias gradients are reduced from partial sums in a
   fixed order, so they are deterministic.
 
-  ``install()`` swaps ``FluxAttnProcessor.__call__`` for the same forward with the op in the
-  middle, pinned to diffusers 0.40.0 by a source hash (0.43.0's differs only in the return
-  annotation). Other calls (unfused projections, no RoPE, other dtypes, head_dim != 128,
-  weightless norms) take diffusers' path; projections that are not stock
-  ``nn.Linear`` modules keep their own forward and autograd sums their bias gradients.
+  ``install()`` makes ``attn_processor.PrimusFluxAttnProcessor``, a subclass of diffusers'
+  ``FluxAttnProcessor`` whose ``__call__`` is diffusers' with the op in the middle, the processor
+  diffusers builds every FLUX attention module with (``FluxAttention._default_processor_cls``), so it
+  must run before the model is built. Nothing in diffusers is replaced, so no diffusers source is
+  pinned: the processor reads only the attention module's projections, norms and head size (the same
+  in diffusers 0.38.0 to 0.43.0), and the block tests compare it with diffusers' processor on the
+  installed diffusers. Other calls (unfused projections, no RoPE, other dtypes, head_dim != 128,
+  weightless norms) take diffusers' ``__call__``; projections that are not stock ``nn.Linear``
+  modules keep their own forward and autograd sums their bias gradients.
 
 NUMERICS:
   The QKV GEMMs run without their biases and the op adds them to the BF16 GEMM output (and rounds the sum to
@@ -43,16 +47,12 @@ Settings (module config, ``primus_perf:`` section):
 """
 from __future__ import annotations
 
-import hashlib
-import inspect
 import logging
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 
 from primus.backends.automodel import options
-from primus.backends.automodel.models.flux.plain_linear import is_plain_linear
 from primus.backends.automodel.models.flux.turbo_ops import dit_qk_norm_rope
 
 logger = logging.getLogger(__name__)
@@ -61,12 +61,6 @@ _SECTION = "primus_perf"
 _FLAG = f"{_SECTION}.flux_fused_qk_norm_rope"
 _PATCHED_ATTR = "_primus_fused_qk_norm_rope"
 _HEAD_DIM = 128
-# sha256 of FluxAttnProcessor.__call__ in diffusers 0.40.0 (also 0.41 and 0.42) and 0.43.0, which
-# differ only in the return annotation; _install_processor re-implements it.
-_PROCESSOR_SHA256 = (
-    "d5b36134887ebe450b6c15f200bf33f781ba8258201d25caceb16bb9bc07d2c9",
-    "65d9ce34cf9616095ab895f48c09042bbb74987ea7a342714e7ce19412de8922",
-)
 
 
 def is_enabled() -> bool:
@@ -111,95 +105,35 @@ def _fusable(attn, hidden_states, encoder_hidden_states, image_rotary_emb) -> Op
     return _norm_eps(norms)
 
 
-def _install_processor(op) -> bool:
-    from diffusers.models.attention_dispatch import dispatch_attention_fn
-    from diffusers.models.transformers.transformer_flux import FluxAttnProcessor
+def install() -> bool:
+    """Make every FLUX attention module built from now on use ``PrimusFluxAttnProcessor``. Idempotent;
+    edits no diffusers source. Declines, changing nothing, when diffusers' default processor is not its
+    own ``FluxAttnProcessor`` (another patch replaced it, or diffusers builds processors otherwise)."""
+    from diffusers.models.transformers.transformer_flux import (
+        FluxAttention,
+        FluxAttnProcessor,
+    )
 
-    orig = FluxAttnProcessor.__call__
-    digest = hashlib.sha256(inspect.getsource(orig).encode()).hexdigest()
-    if digest not in _PROCESSOR_SHA256:
+    if getattr(FluxAttention, _PATCHED_ATTR, False):
+        return True
+    if getattr(FluxAttention, "_default_processor_cls", None) is not FluxAttnProcessor:
         logger.warning(
-            "[PrimusFluxQkNormRope] FluxAttnProcessor.__call__ is not diffusers 0.40.0's or 0.43.0's; "
+            "[PrimusFluxQkNormRope] FluxAttention's default processor is not diffusers' FluxAttnProcessor; "
             "not applied."
         )
         return False
-
-    def __call__(
-        self, attn, hidden_states, encoder_hidden_states=None, attention_mask=None, image_rotary_emb=None
-    ):
-        eps = _fusable(attn, hidden_states, encoder_hidden_states, image_rotary_emb)
-        if eps is None:
-            return orig(self, attn, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb)
-        # diffusers 0.40.0's forward with the q/k norms, the stream concat and RoPE in one op.
-        cos, sin = image_rotary_emb
-        dual = encoder_hidden_states is not None
-        projections = [attn.to_qkv] + ([attn.to_added_qkv] if dual else [])
-        if all(is_plain_linear(p) for p in projections):
-            # The op adds the biases and returns their gradients from its backward, so the GEMMs
-            # run without them: a bias in the GEMM as well would be added twice.
-            qkv = F.linear(hidden_states, attn.to_qkv.weight)
-            txt_qkv = None
-            if dual:
-                txt_qkv = F.linear(encoder_hidden_states, attn.to_added_qkv.weight)
-            biases = (attn.to_qkv.bias, attn.to_added_qkv.bias if dual else None)
-        else:
-            qkv = attn.to_qkv(hidden_states)
-            txt_qkv = attn.to_added_qkv(encoder_hidden_states) if dual else None
-            biases = (None, None)
-        query, key, value = op(
-            qkv,
-            attn.norm_q.weight,
-            attn.norm_k.weight,
-            cos,
-            sin,
-            eps,
-            layout="bshd",
-            txt_qkv=txt_qkv,
-            w_txt_q=attn.norm_added_q.weight if dual else None,
-            w_txt_k=attn.norm_added_k.weight if dual else None,
-            bias=biases[0],
-            txt_bias=biases[1],
-        )
-
-        hidden_states = dispatch_attention_fn(
-            query,
-            key,
-            value,
-            attn_mask=attention_mask,
-            backend=self._attention_backend,
-            parallel_config=self._parallel_config,
-        )
-        hidden_states = hidden_states.flatten(2, 3)
-        hidden_states = hidden_states.to(query.dtype)
-
-        if encoder_hidden_states is not None:
-            encoder_hidden_states, hidden_states = hidden_states.split_with_sizes(
-                [encoder_hidden_states.shape[1], hidden_states.shape[1] - encoder_hidden_states.shape[1]],
-                dim=1,
-            )
-            hidden_states = attn.to_out[0](hidden_states.contiguous())
-            hidden_states = attn.to_out[1](hidden_states)
-            encoder_hidden_states = attn.to_add_out(encoder_hidden_states.contiguous())
-
-            return hidden_states, encoder_hidden_states
-        else:
-            return hidden_states
-
-    __call__.__wrapped__ = orig
-    FluxAttnProcessor.__call__ = __call__
-    return True
-
-
-def install() -> bool:
-    """Route FLUX attention's q/k norm + RoPE through the fused op. Idempotent; edits no diffusers source."""
-    from diffusers.models.transformers.transformer_flux import FluxAttnProcessor
-
-    if getattr(FluxAttnProcessor, _PATCHED_ATTR, False):
-        return True
     op = dit_qk_norm_rope("PrimusFluxQkNormRope")
-    if op is None or not _install_processor(op):
+    if op is None:
         return False
-    setattr(FluxAttnProcessor, _PATCHED_ATTR, True)
+    from primus.backends.automodel.models.flux.attn_processor import (
+        PrimusFluxAttnProcessor,
+    )
+
+    PrimusFluxAttnProcessor.dit_qk_norm_rope = staticmethod(op)
+    FluxAttention._default_processor_cls = PrimusFluxAttnProcessor
+    if PrimusFluxAttnProcessor not in FluxAttention._available_processors:
+        FluxAttention._available_processors = [*FluxAttention._available_processors, PrimusFluxAttnProcessor]
+    setattr(FluxAttention, _PATCHED_ATTR, True)
     logger.info(
         "[PrimusFluxQkNormRope] FLUX attention's q/k RMSNorm, stream concat and RoPE run as Primus-Turbo's "
         "dit_qk_norm_rope (fused QKV projections only; the op adds the QKV biases and returns their gradients)."
