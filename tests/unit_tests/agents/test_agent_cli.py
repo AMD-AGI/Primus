@@ -26,6 +26,8 @@ def test_parse_args_defaults():
     assert ns.profiling_mode == "simulate"
     assert ns.seed_budget == 12
     assert ns.dry_run is False and ns.seed_only is False
+    # Op bring-up writes and runs code, so the search only reports unmodeled ops unless asked.
+    assert ns.op_bringup == "report" and ns.op_register_in_tree is False
 
 
 def test_parse_args_flags_and_choices():

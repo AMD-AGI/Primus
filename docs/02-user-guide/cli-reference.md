@@ -169,6 +169,26 @@ These run under `primus/cli/main.py` unless you change `--script` in direct mode
 | `projection performance --config <yaml>` | Performance projection from a merged config. |
 | `projection both --config <yaml>` | Single benchmark → both performance and memory projections (cluster sizing). |
 
+Any `projection` suite accepts `--op-bringup auto` (default `off`): before it
+projects, the projection agent (`primus/agents/projection_agent/`) adds a
+validated analytical model for every op of the model the projection does not
+price yet, so the run uses it instead of a built-in stand-in. `--op-coder-cmd`
+or `--op-llm-model` says who writes the model; without either, the agent only
+writes a context pack per op (`op_bringup/<op_id>/context.md`). With
+`--op-pr pr` each op it adds is also committed on its own branch, pushed, and
+opened as a draft pull request. See the
+[tuning agent's README, "Op bring-up (new ops)"](https://github.com/AMD-AGI/Primus/blob/main/primus/agents/tuning_agent/README.md#op-bring-up-new-ops)
+for the flags.
+
+Op bring-up writes code and runs it. `--op-coder-cmd` is run through the
+shell, and every op model the agent registers is Python that the validator and
+later projections import. Registered models go to `<op-out-dir>/op_models/`
+(default `output/op_bringup/op_models/`, put on `PRIMUS_OP_MODEL_DIRS` for the
+run), not into the checkout; `--op-register-in-tree` writes them into
+`primus/core/projection/op_models/generated/` and `tests/` instead. Only point
+the coder at a coding agent you trust, and review generated op models before
+publishing them.
+
 ### Benchmark suites
 
 Implemented in `primus/cli/subcommands/benchmark.py`:
