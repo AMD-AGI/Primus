@@ -20,7 +20,8 @@ Everything comes out of one `docker run`: the artifacts the image ships under
 Dockerfile it was built from), the native library versions that are not pip
 packages (hipBLASLt, RCCL, read from ROCm headers), and the git HEAD of every
 checkout under /workspace/ -- which is where the per-family build commit comes
-from when the Dockerfile pins PRIMUS_BRANCH=main rather than a commit.
+from when the Dockerfile pins PRIMUS_BRANCH=main rather than a commit (the
+ARG is PRIMUS_COMMIT from v26.10).
 
 Also verifies the in-repo release Dockerfile against the image's baked-in copy.
 The release notes claim v26.4-v26.6 were "cross-checked against the release
