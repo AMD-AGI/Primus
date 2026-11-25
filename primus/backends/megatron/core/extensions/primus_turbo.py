@@ -2770,8 +2770,10 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
     def attach_replica(self, sched: ReplicaScheduler) -> None:
         """This expert linear also computes the replica slots of ``sched``'s MoE layer; allocates them on the
-        device Megatron trains on (the weights may still be on the host)."""
+        device Megatron trains on (the weights may still be on the host). Marks the weights as a replica owner
+        for the ``megatron.moe.replica_ddp`` patch."""
         self._replica_slots = ReplicaSlots(sched, self.weights, torch.cuda.current_device())
+        self.weights.moe_replica_owner = True
 
     def _with_replica_segments(self, weights, m_splits, fuse_wgrad_accum_pattern):
         """Dynamic expert replication: the weight operand of this micro-batch with the replica slots

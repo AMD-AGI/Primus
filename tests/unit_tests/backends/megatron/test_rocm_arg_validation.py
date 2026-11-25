@@ -327,6 +327,8 @@ def test_moe_replica_off_is_noop():
         {"moe_replica_planner": "moonep", "moe_replica_slots": 32},
         {"moe_replica_placement": "per_microbatch", "moe_replica_replan_above": 1.08},
         {"turbo_grouped_gemm_backend": "triton"},
+        # the megatron.moe.replica_ddp patch defers the owners' grad-ready marking and waits for their all-gather
+        {"overlap_grad_reduce": True, "overlap_param_gather": True, "use_distributed_optimizer": True},
     ],
 )
 def test_moe_replica_accepts_supported(overrides):
@@ -364,7 +366,12 @@ def test_moe_replica_accepts_supported(overrides):
             "force_load_balancing_type=even",
         ),
         ({"enable_cuda_graph": True}, "CUDA graphs"),
-        ({"overlap_grad_reduce": True}, "overlap_grad_reduce=True"),
+        ({"gtp_weight_remat_size": 2}, "tensor_parallel_num_weight_shards > 1"),
+        ({"num_distributed_optimizer_instances": 2}, "num_distributed_optimizer_instances > 1"),
+        (
+            {"overlap_grad_reduce": True, "overlap_param_gather": True, "use_distributed_optimizer": False},
+            "overlap_param_gather only with the distributed optimizer",
+        ),
     ],
 )
 def test_moe_replica_rejects_unsupported(overrides, match):

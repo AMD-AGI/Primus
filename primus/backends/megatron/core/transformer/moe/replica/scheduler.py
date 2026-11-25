@@ -30,7 +30,10 @@ Wiring (the ``megatron.moe.replica_attach`` patch in
 ``primus/backends/megatron/patches/moe_patches/moe_replica_patches.py``): ``attach`` runs once the MoE layer is
 built. It hands the dispatcher's scheduler to the layer's two expert linears, which allocate their slots then, in the
 dtype ``ReplicaConfig.grad_dtype`` predicts for the owners' ``main_grad``, and puts the end of the step on the
-gradient of the layer's input.
+gradient of the layer's input. Under DDP, the ``megatron.moe.replica_ddp`` patch puts two callbacks on the owners'
+weights: ``end_step`` marks them ready for the gradient reduction after the replica gradients are in (needed with
+``overlap_grad_reduce``), and the weight push first waits for their all-gather (needed with
+``overlap_param_gather``).
 """
 
 import weakref
@@ -320,6 +323,12 @@ class ReplicaScheduler:
             if not done:
                 s.return_grads()
             s.invalidate()
+        for s in self.slots:
+            # the owners' main_grad is complete only now: their DDP bucket may start its reduction (set by the
+            # megatron.moe.replica_ddp patch; once per step, whether or not the step had replicas)
+            grad_ready = getattr(s.param, "moe_replica_grad_ready", None)
+            if grad_ready is not None:
+                grad_ready()
         self.new_step = True
         self.mb_in_step = 0
         if self.replay:
@@ -380,6 +389,11 @@ class ReplicaSlots:
         # the slot tables only, which every rank agrees on: the return is collective
         if bool(((held >= 0) & (table != held)).any()):
             self.return_grads()
+        # with overlap_param_gather the owners' weights are all-gathered only by the expert linears' forward
+        # pre-hook, after this push (set by the megatron.moe.replica_ddp patch)
+        wait_param_gather = getattr(self.param, "moe_replica_wait_param_gather", None)
+        if wait_param_gather is not None:
+            wait_param_gather()
         self.pushing = s.transport.push_weights(self.param.detach(), self.storage, held, table)
         self.held = table.clone()
         self.version = s.version

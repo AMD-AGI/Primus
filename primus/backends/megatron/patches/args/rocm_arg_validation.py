@@ -369,10 +369,22 @@ def validate_moe_replica(args) -> None:
         raise ValueError(
             f"{option} does not support CUDA graphs: planning reads the routed counts on the host."
         )
-    if getattr(args, "overlap_grad_reduce", False):
+    # DDP paths the megatron.moe.replica_ddp patch does not cover
+    if (getattr(args, "gtp_weight_remat_size", None) or 1) > 1:
         raise ValueError(
-            f"{option} does not support overlap_grad_reduce=True: the expert gradient buckets are reduced during "
-            "the backward, before the replica gradients reach the owners' main_grad. Set overlap_grad_reduce=False."
+            f"{option} does not support tensor_parallel_num_weight_shards > 1 (its weights take another DDP hook "
+            "path, where the replica gradients would miss the gradient reduction)."
+        )
+    if (getattr(args, "num_distributed_optimizer_instances", None) or 1) > 1:
+        raise ValueError(
+            f"{option} does not support num_distributed_optimizer_instances > 1 (the gradient reduction then runs on "
+            "a separate communication stream, which the replica DDP patch is not tested with)."
+        )
+    if getattr(args, "overlap_param_gather", False) and not getattr(args, "use_distributed_optimizer", False):
+        raise ValueError(
+            f"{option} supports overlap_param_gather only with the distributed optimizer "
+            "(use_distributed_optimizer=True): the layer-wise optimizers' parameter sync copies parameters per layer "
+            "and is not tested with the replicas' weight push."
         )
     _log_moe_replica_memory(args, option)
 

@@ -236,6 +236,27 @@ def test_end_step_waits_for_an_early_return_once_and_returns_the_rest():
     assert sched.new_step and sched.mb_in_step == 0
 
 
+def test_the_push_waits_for_the_owner_and_end_step_marks_every_owner_ready_last():
+    # DDP callbacks of the megatron.moe.replica_ddp patch: wait for the owner's all-gather before pushing, mark it
+    # ready for the gradient reduction after its replica gradients are back, also when its slots were never used
+    used, _, used_transport = slots_with_table([[2, -1], [0, 1]], transport_cls=WaitRecordingTransport)
+    unused, _, unused_transport = slots_with_table([[2, -1], [0, 1]], transport_cls=WaitRecordingTransport)
+    for slots, transport in ((used, used_transport), (unused, unused_transport)):
+        slots.param.moe_replica_wait_param_gather = lambda t=transport: t.calls.append(("wait_param_gather",))
+        slots.param.moe_replica_grad_ready = lambda t=transport: t.calls.append(("grad_ready",))
+    used.sync()
+    sched = SimpleNamespace(slots=[used, unused], replay=deque(), new_step=False, mb_in_step=3)
+    sch.ReplicaScheduler.end_step(sched)
+    assert [c[0] for c in used_transport.calls] == [
+        "wait_param_gather",
+        "push",
+        "return",
+        "wait",
+        "grad_ready",
+    ]
+    assert [c[0] for c in unused_transport.calls] == ["return", "wait", "grad_ready"]
+
+
 def test_slots_follow_the_configured_grad_dtype_and_check_the_owner():
     slots, _, _ = slots_with_table([[2, -1], [0, 1]], grad_dtype=torch.bfloat16)
     assert slots.main_grad.dtype == torch.bfloat16 and slots.w.dtype == slots.param.dtype
@@ -318,6 +339,7 @@ def test_attach_patch_rejects_moe_layer_subclasses(monkeypatch):
     monkeypatch.setattr(moe_layer, "MoELayer", FakeMoELayer)
     monkeypatch.setattr(sch, "attach", attached.append)
     monkeypatch.setattr(moe_replica_patches, "log_rank_0", lambda msg: None)
+    monkeypatch.setattr(moe_replica_patches, "get_args", lambda ctx: SimpleNamespace())
     moe_replica_patches.patch_moe_replica_attach(None)
     layer = FakeMoELayer()
     assert layer.built and attached == [layer]
