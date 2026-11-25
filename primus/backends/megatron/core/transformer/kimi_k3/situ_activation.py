@@ -101,6 +101,11 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels import (
+    SITU_BACKENDS,
+    resolve_situ_backend,
+)
+
 __all__ = [
     "situ_pre_mul",
     "situ_pre_mul_fused",
@@ -211,9 +216,20 @@ class SituActivation(nn.Module):
 
     Parameter-less, so it adds nothing to the state dict -- but it still has
     to *implement* :meth:`sharded_state_dict`; see that method.
+
+    The kernel comes from the config's ``situ_backend`` (``eager`` without a
+    config), resolved once here as ``attention_residual.py`` resolves
+    ``attn_res_backend``.
     """
 
-    def __init__(self, *, config=None, beta: Optional[float] = None, linear_beta: Optional[float] = None):
+    def __init__(
+        self,
+        *,
+        config=None,
+        beta: Optional[float] = None,
+        linear_beta: Optional[float] = None,
+        backend: Optional[str] = None,
+    ):
         super().__init__()
         if config is not None:
             cfg_beta, cfg_linear_beta = situ_betas_from_config(config)
@@ -221,10 +237,47 @@ class SituActivation(nn.Module):
             linear_beta = cfg_linear_beta if linear_beta is None else linear_beta
         self.beta = float(beta) if beta else _DEFAULT_BETA
         self.linear_beta = None if linear_beta is None else float(linear_beta)
+        if backend is None:
+            backend = str(getattr(config, "situ_backend", "eager") or "eager")
+        if backend not in SITU_BACKENDS:
+            raise ValueError(f"situ_backend must be one of {list(SITU_BACKENDS)}; got {backend!r}")
+        if backend == "flydsl" and self.linear_beta is None:
+            raise ValueError(
+                "situ_backend 'flydsl' needs activation_situ_linear_beta (its kernels always soft-clamp the up "
+                "branch); set it or select situ_backend: eager"
+            )
+        self.backend_name = backend
+        self._situ = resolve_situ_backend(backend)
+        self._probs_kernel = None
+        if backend == "flydsl":
+            from primus.backends.megatron.core.transformer.kimi_k3.situ_kernels._flydsl_gfx1250 import (
+                flydsl_situ_with_probs,
+                supports_situ_probs_inputs,
+            )
+
+            self._probs_kernel = (supports_situ_probs_inputs, flydsl_situ_with_probs)
 
     def forward(self, x: Tensor) -> Tensor:
         """Apply ``situ`` to a fused ``[..., 2I]`` ``[gate | up]`` tensor."""
-        return situ_pre_mul_fused(x, beta=self.beta, linear_beta=self.linear_beta)
+        return self._situ(x, beta=self.beta, linear_beta=self.linear_beta)
+
+    @property
+    def fuses_probs(self) -> bool:
+        """Whether :meth:`forward_with_probs` folds the router probability into the FlyDSL kernel: true with
+        the flydsl backend."""
+        return self._probs_kernel is not None
+
+    def forward_with_probs(self, x: Tensor, probs: Tensor) -> Tensor:
+        """``situ(x) * probs`` (one probability per row, e.g. ``[rows, 1]``) in ``x``'s dtype. With
+        :attr:`fuses_probs` the multiply runs inside the FlyDSL kernel for the inputs it takes; every other input,
+        and the eager backend, take the eager reference and the routed experts' unfused
+        ``(act * probs).to(act.dtype)``."""
+        if self._probs_kernel is not None:
+            unsupported, situ_with_probs = self._probs_kernel
+            if unsupported(x, probs) is None:
+                return situ_with_probs(x, probs, beta=self.beta, linear_beta=self.linear_beta)
+        out = situ_pre_mul_fused(x, beta=self.beta, linear_beta=self.linear_beta)
+        return (out * probs).to(out.dtype)
 
     def sharded_state_dict(
         self, prefix: str = "", sharded_offsets: tuple = (), metadata: Optional[dict] = None
@@ -262,4 +315,4 @@ class SituActivation(nn.Module):
         )
 
     def extra_repr(self) -> str:
-        return f"beta={self.beta}, linear_beta={self.linear_beta}"
+        return f"beta={self.beta}, linear_beta={self.linear_beta}, backend={self.backend_name}"
