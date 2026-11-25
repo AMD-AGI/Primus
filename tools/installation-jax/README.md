@@ -199,7 +199,7 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus turbo jaxreqs manifest
   installed package (uv's `--upgrade` semantics), so the v26.10 image floats numpy
   to 2.5.5, scipy to 1.18.1 and protobuf to 7.x. `jaxreqs` uses pip, whose
   `--upgrade` touches only the named packages, so those stay at MaxText's own
-  pins. Training was unaffected when this was validated for v26.8; it is the
+  pins. Training was unaffected when this was validated for v26.10; it is the
   largest difference between the two package sets.
 - **TE's `rocm10` core-package patch is normally a no-op.** The Dockerfile
   seds `transformer-engine-rocm10` into TE's core-package list; wheels since
@@ -222,17 +222,13 @@ bash setup.sh venv rocm maxtext tf_cpu_fix jax te primus turbo jaxreqs manifest
   + XLA.
 - **Two MaxText checkouts** (`$MAXTEXT_DIR` and `Primus/third_party/maxtext`) are
   collapsed here: we install deps from one checkout and point `MAXTEXT_PATH` at it.
-- **Runtime-validated for v26.8.** The default flow (prebuilt `te` wheel,
-  `tf_source`) ran end to end on **MI325X (gfx942) / Ubuntu 22.04 (glibc 2.35) /
-  Python 3.12**, followed by single-node 8-GPU MaxText pretraining
-  (`examples/maxtext/configs/MI325X/llama2_7B-bf16-pretrain.yaml`). Earlier
-  releases also exercised a 2-node run over the JAX distributed coordinator +
-  RCCL, with no UCX/OpenMPI; that was not repeated for v26.8.
 - **Runtime-validated for v26.10.** The v26.10 pins' default flow (prebuilt `te`,
   `tf_source`, `turbo`) ran end to end on **MI325X (gfx942) / Ubuntu 24.04 /
   Python 3.12**, followed by single-node 8-GPU MaxText pretraining
   (`llama2_7B-bf16-pretrain.yaml` and `mixtral_8x7B-bf16-pretrain.yaml` from
-  `examples/maxtext/configs/MI325X/`).
+  `examples/maxtext/configs/MI325X/`). Earlier releases also exercised a 2-node
+  run over the JAX distributed coordinator + RCCL, with no UCX/OpenMPI; that was
+  not repeated for v26.10.
 
 Treat the reference `Dockerfile` as the authoritative, tested version
 combination; if you bump one pin you may need to bump the others.

@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import inspect
 import os
 import sys
 from dataclasses import dataclass
@@ -314,11 +313,9 @@ def module_format(module_name: str, line: int):
 def debug(__message: str, *args: Any, **kwargs: Any) -> None:
     global _logger
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
-    caller_frame.f_code.co_name
+    caller_frame = sys._getframe(1)
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
     __message = f"{module_format(module_name, line)}: {__message}"
 
     _logger.debug(__message, *args, **kwargs)
@@ -333,11 +330,9 @@ def debug_with_caller(__message: str, module_name: str, function_name: str, line
 def log(__message: str, *args: Any, **kwargs: Any) -> None:
     global _logger
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
-    caller_frame.f_code.co_name
+    caller_frame = sys._getframe(1)
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
     __message = f"{module_format(module_name, line)}: {__message}"
 
     _logger.info(__message, *args, **kwargs)
@@ -363,11 +358,9 @@ def log_kv_with_caller(
 def log_kv(key: str, value: str, width=18, fillchar=" ") -> None:
     global _logger
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
-    caller_frame.f_code.co_name
+    caller_frame = sys._getframe(1)
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
     __message = f"{key}:".ljust(width, fillchar) + f"{value}"
     __message = f"{module_format(module_name, line)}: {__message}"
 
@@ -377,11 +370,9 @@ def log_kv(key: str, value: str, width=18, fillchar=" ") -> None:
 def info(__message: str, *args: Any, **kwargs: Any) -> None:
     global _logger
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
-    caller_frame.f_code.co_name
+    caller_frame = sys._getframe(1)
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
     __message = f"{module_format(module_name, line)}: {__message}"
 
     _logger.info(__message, *args, **kwargs)
@@ -402,11 +393,9 @@ def info_with_caller(__message: str, module_name: str, function_name: str, line:
 def warning(__message: str, *args: Any, **kwargs: Any) -> None:
     global _logger
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
-    caller_frame.f_code.co_name
+    caller_frame = sys._getframe(1)
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
     __message = f"{module_format(module_name, line)}: {__message}"
 
     _logger.warning(__message, *args, **kwargs)
@@ -424,11 +413,9 @@ def warning_with_caller(__message: str, module_name: str, function_name: str, li
 def error(__message: str, *args: Any, **kwargs: Any) -> None:
     global _logger
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
-    caller_frame.f_code.co_name
+    caller_frame = sys._getframe(1)
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
     __message = f"{module_format(module_name, line)}: {__message}"
 
     _logger.error(__message, *args, **kwargs)

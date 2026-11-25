@@ -226,6 +226,14 @@ write_summary training
         source "$INSTALL_DIR/env.sh" || exit 3
     fi
     cd "$ROOT" || exit 3
+    # A short TMPDIR for the training only: Python's multiprocessing puts a socket at
+    # $TMPDIR/pymp-*/listener-* (torch DataLoader fd sharing), and under the base's long tmp/ that path
+    # passes the 107-byte AF_UNIX limit. The install keeps $BASE/tmp for its large source builds.
+    if [ "$DRY_RUN" != 1 ]; then
+        TRAIN_TMP="$(mktemp -d /tmp/pdra-train.XXXXXX)" || exit 3
+        trap 'rm -rf "$TRAIN_TMP"' EXIT
+        export TMPDIR="$TRAIN_TMP"
+    fi
     PRIMUS_MODE=direct CONFIG_FILE="$catalog" BACKEND="$backend_list" GPU="$GPU" \
         TRAIN_STEPS="$TRAIN_STEPS" NUM_REPS=1 RESULT_DIR="$RESULT_DIR/train" \
         DOCKER_IMAGE="bare-metal:$FAMILY" REPORT=0 \

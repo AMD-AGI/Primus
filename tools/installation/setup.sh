@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh — Reproduce the Primus training environment in a Python venv
 # (no sudo, no docker). Mirrors the pins of
-#   .github/workflows/docker-release/Dockerfile.primus-v26.9
+#   .github/workflows/docker-release/Dockerfile.primus-v26.10
 # adapted for:
 #   * Python 3.12, auto-provisioned with `uv` (the pinned torch nightly is
 #     cp312-only on Linux; see README.md)
@@ -31,7 +31,7 @@ OPTIONAL_STAGES=(torchrec)
 
 usage() {
     cat <<EOF
-setup.sh — build the Primus v26.9 training environment in a venv.
+setup.sh — build the Primus v26.10 training environment in a venv.
 
 PRIMUS_BASE must be exported first; it has no default because the right location
 is site-specific. Point it at a writable dir on a disk with tens of GB free:
@@ -64,7 +64,7 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 # shellcheck disable=SC1091
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
-# ---- pinned versions / commits (from Dockerfile.primus-v26.9) ----
+# ---- pinned versions / commits (from Dockerfile.primus-v26.10) ----
 # ROCm core and the torch set live on separate nightly.repo.amd.com indexes, so
 # stage_torch passes one as --index-url and the other as --extra-index-url.
 ROCM_INDEX="https://nightly.repo.amd.com/rocm/core/whl-next/"
@@ -72,20 +72,21 @@ TORCH_INDEX="https://nightly.repo.amd.com/rocm/pytorch/whl-next/"
 # The Dockerfile pins torch, torchaudio and torchvision exactly (the latter two
 # inline, as <version>+rocm${THE_ROCK_VERSION}) but installs apex unpinned,
 # leaving it to the resolver. APEX_VERSION is the version read out of the
-# rocm/primus:v26.9 image, i.e. what the Dockerfile resolved to on build day (a
-# ROCm 10.3 nightly build), so a later index cannot hand bare metal another one.
-PYTORCH_VERSION="2.16.0a0+rocm10.2.0a20261020"
-ROCM_SDK_VERSION="10.2.0a20261020"
-TORCHAUDIO_VERSION="2.11.0a0+rocm10.2.0a20261020"
-TORCHVISION_VERSION="0.30.0a0+rocm10.2.0a20261020"
-APEX_VERSION="1.16.0a0+rocm10.3.0a20261029"
+# rocm/primus:v26.10 image, i.e. what the Dockerfile resolved to on build day (a
+# later ROCm 10.3 nightly than the torch set's), so a later index cannot hand bare
+# metal another one.
+PYTORCH_VERSION="2.16.0a0+rocm10.3.0a20261111"
+ROCM_SDK_VERSION="10.3.0a20261111"
+TORCHAUDIO_VERSION="2.11.0a0+rocm10.3.0a20261111"
+TORCHVISION_VERSION="0.30.0a0+rocm10.3.0a20261111"
+APEX_VERSION="1.16.0a0+rocm10.3.0a20261123"
 # TransformerEngine is built from source, as since v26.8 (v26.7 installed wheels). The
 # Dockerfile names the commit TE_VERSION; the same name is kept here. CK fused
 # attention is JIT-compiled at run time from an aiter tree that TE's QoLA tool
 # checks out at the commit its manifest pins; stage_te keeps that tree under
 # $WORKSPACE_DIR/deps/te-aiter, where the image keeps /workspace/deps/te-aiter.
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
-TE_VERSION="023639b5168152a339e99d2e06c495dba26cf6cb"
+TE_VERSION="b5c00f43283086bf0751f3bf3a179f1e921bbe59"
 # Numerically validated gfx950 backward attention payload, assembled and dropped
 # into the te-aiter tree before TE is built. Only used on gfx950.
 BWD_ATTN_ASM_REPO="https://github.com/mawad-amd/bwd-attn-asm.git"
@@ -110,20 +111,21 @@ MAMBA_REPO="https://github.com/AndreasKaratzas/mamba.git"
 MAMBA_BRANCH="enable-primus-hybrid-models"
 TVM_FFI_VERSION="0.1.11"
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-# The commit Dockerfile.primus-v26.9 pins (2026-10-30, on `release/v26.9`). The
-# commit is used rather than the branch so the install keeps matching the image
-# if later commits land on the branch.
-PRIMUS_BRANCH="db1a41601833294231daadb3cdbb2933eb805c73"
+# The commit Dockerfile.primus-v26.10 pins (2026-11-19, on `release/v26.10`). The
+# commit is used rather than the branch so the install keeps matching the image.
+# `release/v26.10` has moved since (a fix to tools/perf batch-size resolution and
+# log names); set PRIMUS_COMMIT=release/v26.10 here to take it.
+PRIMUS_COMMIT="b66e63e1e45ed27a6ff74119c26e96d5870c3df9"
 # The image clones Primus with `uv pip install --override` forcing filelock 4.2.1
 # (CVE fix) past multi-storage-client's filelock<4 cap; pip has no --override, so
 # stage_primus re-pins it with --no-deps after the requirements install.
 FILELOCK_VERSION="4.2.1"
 AITER_REPO="https://github.com/ROCm/aiter.git"
-AITER_COMMIT="778d74d57c765616ee36a0c3295dc446e5027d5f"
+AITER_COMMIT="a0c4b69c146d94e393984bbe553b704e8c89a5e4"
 TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
-# The commit Dockerfile.primus-v26.9 pins; ships as primus-turbo 0.6.1.dev4.
-TURBO_COMMIT="de8fa6ca7f4986334070d5ee62beee07552f8ad8"
-# The flydsl the rocm/primus:v26.9 image resolved through Primus-Turbo's
+# The commit Dockerfile.primus-v26.10 pins; ships as primus-turbo 0.6.1.dev27.
+TURBO_COMMIT="9ad9d38d0317d0b8e5435f24aa2d9c746b5aebab"
+# The flydsl the rocm/primus:v26.10 image resolved through Primus-Turbo's
 # requirements; it is spelled out here because Turbo is installed with --no-deps
 # (see stage_turbo). aiter only needs `flydsl.expr.vector` at runtime, which
 # survived until 0.3.0 removed it -- and with it aiter's whole CK/HIP JIT path
@@ -248,7 +250,7 @@ stage_venv() {
         have="$("$VENV_DIR/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo unknown)"
         [ "$have" = "$PRIMUS_PYTHON_VERSION" ] || die \
 "existing venv at $VENV_DIR is Python $have, but this environment is built on
-  Python $PRIMUS_PYTHON_VERSION, matching the v26.9 image. A venv cannot change its
+  Python $PRIMUS_PYTHON_VERSION, matching the v26.10 image. A venv cannot change its
   interpreter in place. Remove it and re-run:
       rm -rf '$VENV_DIR' && bash setup.sh"
     else
@@ -321,6 +323,7 @@ stage_torch() {
 
     patch_apex_cxx20
     patch_torch_cpp_extension
+    restore_torch_jit_script
 
     log "Running rocm-sdk init"
     rocm-sdk init
@@ -335,7 +338,7 @@ stage_torch() {
 
 # apex JIT-compiles its fused wgrad kernel at run time through
 # apex/op_builder/builder.py, which hardcodes -std=c++17 and so hits a C++20
-# #error on the first fused-wgrad call. Same sed as Dockerfile.primus-v26.9,
+# #error on the first fused-wgrad call. Same sed as Dockerfile.primus-v26.10,
 # which also moves the from-source builds below to C++20.
 patch_apex_cxx20() {
     local f
@@ -356,7 +359,7 @@ PY
 
 # torch 2.16 (pytorch/pytorch#194641) added a ROCm hipify warning in CUDAExtension
 # that calls source.endswith(), which crashes on the pathlib.Path sources
-# Primus-Turbo passes. Same sed as Dockerfile.primus-v26.9; a no-op once upstream
+# Primus-Turbo passes. Same sed as Dockerfile.primus-v26.10; a no-op once upstream
 # fixes it.
 patch_torch_cpp_extension() {
     local f
@@ -374,9 +377,32 @@ PY
     log "Patched $f (Path sources in the hipify warning)"
 }
 
+# torch 2.16 nightlies drop the public torch.jit.script alias (torch.jit._script.script
+# remains), which Megatron-LM and modelopt call at import time. Same restore as
+# Dockerfile.primus-v26.10, including its check that the alias is callable afterwards;
+# a no-op on a torch that still exports it.
+restore_torch_jit_script() {
+    python -c "import sys, torch; sys.exit(not hasattr(torch.jit, 'script'))" && return 0
+    local f
+    f="$(python - <<'PY'
+import os, sysconfig
+for base in {sysconfig.get_paths()[k] for k in ("purelib", "platlib")}:
+    p = os.path.join(base, "torch", "jit", "__init__.py")
+    if os.path.exists(p):
+        print(p)
+        break
+PY
+)"
+    [ -n "$f" ] || die "torch/jit/__init__.py not found; did the torch wheel install?"
+    printf '\n# Restored public alias (dropped in torch 2.16 nightlies).\nfrom torch.jit._script import script  # noqa: E402\n' >> "$f"
+    python -c "import torch; assert callable(torch.jit.script)" \
+        || die "torch.jit.script is still missing after patching $f"
+    log "Restored torch.jit.script in $f"
+}
+
 # rocm-sdk-core and rocm-sdk-devel both ship libamd_comgr.so.3 as separate
 # inodes, causing duplicate LLVM static constructor registration (SIGABRT).
-# Same workaround as Dockerfile.primus-v26.9 (AIMA-248).
+# Same workaround as Dockerfile.primus-v26.10 (AIMA-248).
 relink_comgr() {
     python - <<'PY' || true
 import os, pathlib
@@ -489,7 +515,7 @@ build_bwd_attn_payload() {  # build_bwd_attn_payload <te_aiter_dir>
     rm -rf "$SRC_DIR/bwd-attn-asm" "$SRC_DIR/bwd_attn.s" "$SRC_DIR/bwd_attn.co"
 }
 
-# TransformerEngine from source, as Dockerfile.primus-v26.9 builds it: QoLA
+# TransformerEngine from source, as Dockerfile.primus-v26.10 builds it: QoLA
 # checks out the aiter commit TE's manifest pins, the gfx950 payload is dropped
 # into that tree, and four source patches are applied before the build:
 #   * QoLA's export script: drop the quoted typeinfo patterns, which ROCm LLVM 24
@@ -559,8 +585,8 @@ stage_torchtune() {
     fresh_clone "$TORCHTUNE_REPO" torchtune
     # huggingface-hub is capped below 2: hub 2.x conflicts with tokenizers<2.0,
     # so pip backtracks tokenizers to 0.13.3, which has no cp312 wheel and fails
-    # to build without Rust. The image applies the same cap in its Flux stage,
-    # which runs before torchtune there but is skipped here.
+    # to build without Rust. The image capped it in its Flux stage until v26.10
+    # dropped that stage; its resolve still lands below 2 (huggingface-hub 1.33.0).
     ( cd "$SRC_DIR/torchtune" \
         && git checkout "$TORCHTUNE_BRANCH" \
         && sed -i 's/use_grouped_mm = True/use_grouped_mm = False/g' torchtune/modules/moe/utils.py \
@@ -615,6 +641,9 @@ stage_pydeps() {
         z3-solver \
         "huggingface_hub[cli]"
     python -m nltk.downloader punkt_tab || true
+    # The Primus diffusion backend decodes video (Wan, Mochi, HunyuanVideo) with
+    # decord; the image installs it in its own step after flash-attention.
+    pipi decord==0.6.0
 }
 
 stage_grouped_gemm() {
@@ -731,13 +760,15 @@ PY
 
 stage_primus() {
     reload_env
-    log "Installing Primus @ $PRIMUS_BRANCH (kept in $WORKSPACE_DIR/Primus)"
+    log "Installing Primus @ $PRIMUS_COMMIT (kept in $WORKSPACE_DIR/Primus)"
     rm -rf "$WORKSPACE_DIR/Primus"
     git clone --recurse-submodules "$PRIMUS_REPO" "$WORKSPACE_DIR/Primus" || die "Primus clone failed"
+    # The image appends nvidia-modelopt==0.48.0 to requirements.txt before this
+    # install; passing it alongside resolves the same set without editing the clone.
     ( cd "$WORKSPACE_DIR/Primus" \
-        && git checkout "$PRIMUS_BRANCH" \
+        && git checkout "$PRIMUS_COMMIT" \
         && git submodule update --init --recursive \
-        && pipi -r requirements.txt ) || die "Primus install failed"
+        && pipi -r requirements.txt nvidia-modelopt==0.48.0 ) || die "Primus install failed"
     # The image's `--override filelock==4.2.1`: multi-storage-client caps filelock<4
     # but only uses FileLock/BaseFileLock/Timeout, which 4.x still provides.
     $PIP install --no-deps "filelock==${FILELOCK_VERSION}"
@@ -774,7 +805,7 @@ stage_turbo() {
     # statically linked LLVM, so importing it segfaults inside LLVM's static
     # initialisers -- taking down torch._dynamo, aiter, torchao and mamba_ssm.
     # Since v26.8 it asks for `triton>=3.7.0`, which ROCm's
-    # 3.9.0+git...rocm10.2.0a20261020 satisfies, but the install stays --no-deps: it is the
+    # 3.9.0+git...rocm10.3.0a20261111 satisfies, but the install stays --no-deps: it is the
     # tested path, and it keeps a future re-pin from undoing the fix. The real
     # runtime requirements (scipy, flydsl) are supplied explicitly.
     #
@@ -810,7 +841,7 @@ stage_turbo() {
     # aiter silently downgrades itself to Triton-only ops if this symbol is gone,
     # so say so here rather than losing the CK/HIP kernels unnoticed at training time.
     # A check the Dockerfile does not make warns, never stops (the image ships the same
-    # flydsl; v26.9: 0.3.4.1 with aiter 0.1.27, which wants 0.4.0).
+    # flydsl, 0.3.4.1 since v26.9, whose aiter 0.1.27 wanted 0.4.0).
     python -c "from flydsl.expr import vector" 2>/dev/null \
         || log "WARNING: flydsl ${FLYDSL_VERSION} has no flydsl.expr.vector, so aiter's CK/HIP
   ops are disabled (its Triton ops remain), as in the image built from the same Dockerfile."
@@ -818,7 +849,7 @@ stage_turbo() {
 
 # fla 0.5.2 lists a stale "BT" autotune key on merge_fwd_bwd_kernel, which Triton
 # 3.9 rejects at import (fixed upstream in fla-org/flash-linear-attention#1330, not
-# yet released). Same guarded sed as Dockerfile.primus-v26.9.
+# yet released). Same guarded sed as Dockerfile.primus-v26.10.
 patch_fla_autotune_key() {
     local f
     f="$(python - <<'PY'
@@ -836,7 +867,7 @@ PY
 
 stage_boto() {
     reload_env
-    log "Installing boto3/botocore and CVE-fix pins from the v26.9 image"
+    log "Installing boto3/botocore and CVE-fix pins from the v26.10 image"
     pipi boto3==1.35.42 botocore==1.35.99
     pipi cryptography==50.0.0 diffusers==0.38.0 "jaraco.context==6.1.0" pyarrow==23.0.1 hydra-core==1.3.8
     # mlflow caps cryptography<50; --no-deps keeps the 50.0.0 pin above. mlflow pins
@@ -859,7 +890,7 @@ stage_manifest() {
     env > "$WORKSPACE_DIR/.manifest/env.txt"
     $PIP list > "$WORKSPACE_DIR/.manifest/requirements.txt"
     python --version > "$WORKSPACE_DIR/.manifest/python_version"
-    echo "Dockerfile.primus-v26.9" > "$WORKSPACE_DIR/.manifest/derived_from"
+    echo "Dockerfile.primus-v26.10" > "$WORKSPACE_DIR/.manifest/derived_from"
     cp "$SCRIPT_DIR/env.sh" "$WORKSPACE_DIR/.manifest/env.sh"
     [ -f "$PRIMUS_PIP_CONSTRAINTS" ] && cp "$PRIMUS_PIP_CONSTRAINTS" "$WORKSPACE_DIR/.manifest/"
     log "Environment ready. torch: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo '??')"
