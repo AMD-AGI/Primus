@@ -694,7 +694,7 @@ class TestMegatronTrainer(PrimusUT):
     # recompute_method / recompute_num_layers have no effect. CPU coverage of the model
     # code, patches and converter: tests/unit_tests/backends/megatron/muse_spark/.
     _MUSE_SPARK_MARKERS = (
-        "Loaded Muse-Spark model_provider",
+        "Loaded Primus model_provider + builder for model_type 'muse_spark'",
         "[Patch:megatron.args.muse_spark_layer_patterns]",
         # logged by the built MuseSparkModel: the decoder layer, attention, gated residual,
         # MoE layer, router and experts are the Muse Spark classes (not stock GPT layers)
