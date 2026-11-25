@@ -6,8 +6,8 @@
 
 """Unit tests for the tuning-agent tool helpers (``tools.py``).
 
-Covers the pure helpers (`_safe_load_json`, `_tag`); the LLM tool-belt itself
-holds live evaluator/history state and is out of scope here.
+Covers the pure helpers (`_safe_load_json`, `_tag`) and the tools that only
+read evaluator state; the rest of the tool-belt holds live history state.
 """
 
 from __future__ import annotations
@@ -42,3 +42,29 @@ def test_safe_load_json_returns_none_on_invalid():
 def test_tag_encodes_parallelism_axes():
     cfg = TrialConfig(tp=2, pp=4, ep=8, cp=1, mbs=2)
     assert _tag(cfg, 7) == "007_tp2_pp4_ep8_cp1_mbs2"
+
+
+def _tools(evaluator):
+    import json
+    from types import SimpleNamespace
+
+    from primus.agents.tuning_agent.tools import build_tools
+
+    cfg = SimpleNamespace(optimization=SimpleNamespace(budget=1))
+    tools = build_tools(cfg, None, None, None, evaluator, None, [], quiet=True)
+    return {t.__name__: t for t in tools}, json
+
+
+def test_get_op_coverage_is_registered_and_reports_bringup_off():
+    from types import SimpleNamespace
+
+    tools, json = _tools(SimpleNamespace(op_bringup=None))
+    assert json.loads(tools["get_op_coverage"]()) == {"op_bringup": "off"}
+
+
+def test_get_op_coverage_returns_the_agent_summary():
+    from types import SimpleNamespace
+
+    summary = {"policy": "auto", "gaps_seen": {"fancy": {}}, "results": [], "published": {}}
+    tools, json = _tools(SimpleNamespace(op_bringup=SimpleNamespace(summary=lambda: summary)))
+    assert json.loads(tools["get_op_coverage"]()) == summary
