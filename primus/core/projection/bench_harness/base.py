@@ -85,6 +85,9 @@ class ModelParts:
     layers: List[Any] = field(default_factory=list)
     embedding: Optional[Any] = None
     output_layer: Optional[Any] = None
+    #: Per-layer kind symbols of a hybrid stack (``*`` attention, ``M`` Mamba/GDN/KDA,
+    #: ``-`` MLP, ``E`` MoE), parallel to ``layers``; empty for a uniform stack.
+    layer_types: List[str] = field(default_factory=list)
 
 
 @dataclass

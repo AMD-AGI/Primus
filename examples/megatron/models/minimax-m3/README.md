@@ -75,7 +75,9 @@ HIP_VISIBLE_DEVICES=1 DOCKER_IMAGE=amdprimus/amdprimus:tas-20261019 TURBO_DIR=/p
     bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 ```
 
-ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
+ff4898e4 pins FlyDSL 0.3.4.1, the image's version. The gfx1250 MSA kernels use FlyDSL's Tensor Data
+Mover ops (`flydsl.expr.rocdl.tdm_ops`), `SharedAllocator` and `ds_load_tr16_b128`, which 0.3.4.1
+has; with a FlyDSL that lacks them, building an MSA layer stops with an `ImportError` that says so.
 
 **Settings** are environment variables:
 
@@ -88,8 +90,9 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
 - Training: `TRAIN_ITERS` (default 10; at least 3, because the yaml warms the learning rate up over
   2), `MBS` (default 1), `GBS`, `PRIMUS_SEQ_LENGTH` (default 4096), `PRIMUS_MAX_POSITION_EMBEDDINGS`
   (default `PRIMUS_SEQ_LENGTH`; the preset would otherwise build the RoPE cache at 1,048,576),
-  `PRIMUS_RECOMPUTE_NUM_LAYERS` (default 1). The yaml's `recompute_method: block` recomputes the
-  first that many layers, so the default recomputes dense layer 1, not an MSA/MoE layer.
+  `PRIMUS_RECOMPUTE_NUM_LAYERS` (default 0, no recomputation). The yaml's
+  `recompute_method: block` recomputes the first that many layers: dense layer 1 on M3, an MSA layer
+  on M3.1-Flash, whose recomputation cost 2.7 ms a step on one GPU, where memory is not the limit.
 - MSA: `PRIMUS_MSA_BACKEND`, `flydsl` (default) or `eager`.
 - Experts: `USE_TURBO_GROUPED_GEMM` (default `True`; `False` is TE's grouped GEMM, one hipBLASLt GEMM
   per expert) and `TURBO_GROUPED_GEMM_BACKEND` (default `bf16:flydsl`; `default` is Triton here, and
@@ -102,14 +105,16 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
   as the default image's does, and to `False` and `triton` otherwise. Asking for `flydsl` without
   those kernels stops the launcher before training. Primus-Turbo's own default backend fails with
   `invalid argument for fmha_bwd` here. MSA layers are unaffected.
-- Optimizer: `PRIMUS_FUSED_ADAM_CLIP` (default `1`) runs Primus's HIP Adam, which applies the
-  gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and
+- Optimizer: the MI455X configs keep BF16 gradients and Adam moments
+  (`use_precision_aware_optimizer`, `main_grads_dtype`, `exp_avg_dtype`, `exp_avg_sq_dtype`), as the
+  MI455X DeepSeek-V3 recipe does. `PRIMUS_FUSED_ADAM_CLIP` (default `0`) at `1` runs Primus's HIP Adam,
+  which applies the gradient-clip coefficient inside the kernel. `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` and
   `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU` (default: the value of `PRIMUS_FUSED_ADAM_CLIP`) also have it
-  write the BF16 parameters and keep the loss scale on the host. Megatron then logs no grad norm. With
-  `PRIMUS_FUSED_ADAM_CLIP=0` Adam is Primus's Triton AdamW (`use_triton_fused_adam`, on by default),
-  and `--use_triton_fused_adam False` keeps TE's FusedAdam. `--use_precision_aware_optimizer True`
-  needs `PRIMUS_FUSED_ADAM_CLIP=0`: the BF16 writeback needs separate FP32 master parameters, and the
-  run stops at the first step without them.
+  write the BF16 parameters and keep the loss scale on the host. Megatron then logs no grad norm. The
+  BF16 writeback needs separate FP32 master parameters, so `PRIMUS_FUSED_ADAM_CLIP=1` also needs
+  `--use_precision_aware_optimizer False`; the run stops at the first step otherwise. At `0` Adam is
+  Primus's Triton AdamW (`use_triton_fused_adam`, on by default), and `--use_triton_fused_adam False`
+  keeps TE's FusedAdam.
 - `HIPBLASLT_TUNING_OVERRIDE_FILE` (default: the file in `hipblaslt_tuning/`; empty: hipBLASLt's own
   kernel choice): see hipBLASLt tuning below. A file of your own may be given relative to the current
   directory; the launcher checks that it can be read and mounts it into the container.
@@ -125,12 +130,49 @@ ff4898e4 pins FlyDSL 0.3.4.1, the image's version.
 The defaults are in the script. Arguments to the script are appended to the Primus command line, for
 example `--use_turbo_autotune True`.
 
+**Bitwise kernels.** The experiment yaml turns on kernels that replace an existing path with
+bit-identical outputs and gradients: `fused_clamped_geglu` (the clamped quick-GEGLU of the dense MLPs
+and the experts), `fused_probs_mul` (the experts' routing-probs multiply), `deferred_cross_entropy`
+(TE's cross entropy with its gradient built in the backward), `bitwise_clip_scale` (the gradient-clip
+scale of the BF16 gradients, which TE's `multi_tensor_scale_tensor` runs at a fifth of the memory
+bandwidth), `embedding_rows_grad` (the word-embedding gradient is added into the gradient buffer for
+the rows the micro-batch touches, not as a dense vocabulary-sized tensor), and around the MSA attention
+`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the gfx1250
+MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens per
+workgroup and stage a K/V tile they share once), and two launch cuts, `msa_shared_rope_tables` (the
+cos / sin RoPE tables are kept per rotary `freqs` tensor, not recomputed in every layer call) and
+`msa_fused_indexer_loss_scatter` (the indexer-loss backward writes the block-score gradient from
+its last kernel, without the zero fill, clamp and `scatter_add_`; rows of up to 64 blocks, i.e.
+sequences up to 8192), and two more launch cuts, `msa_fused_zero_centered_gamma` (the q / k and
+indexer norm + RoPE kernels form a zero-centered norm's BF16 `1 + weight` themselves, without the
+separate `weight + 1` launches) and `msa_fused_indexer_input_norm` (the indexer's input norm, an
+FP32 `rms_norm` of the residual stream cast back to BF16, as one Triton launch in ATen's reduction
+order instead of five launches). Each one compares
+itself with the path it replaces on its first call and keeps that path, with a warning in the log,
+if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).
+`grad_accum_group` is off in the yaml (0). Set to 4, the gradient buffer takes the gradients of four
+micro-batches in one pass, with the same additions and roundings in the same order, and holds up to
+three extra BF16 gradients per parameter of the rank: on the 4-layer proxy at GBS 8, 358.4 -> 343.4 ms
+per step for a peak of 116.7 -> 166.8 GB allocated and 125.6 -> 181.7 GB reserved. It pays only where
+a rank runs several micro-batches per step and the gradients reach DDP's hook: with
+`gradient_accumulation_fusion` on, the linear and expert weight gradients go straight into the buffer
+and nothing is left to group or to hold. It was checked bit for bit on one GPU only (DP = EP = 1), so
+leave it at 0 for multi-GPU runs until it is checked there.
+`msa_fused_qk_norm_rope` and `embedding_rows_grad` also stay off for modules with hooks, such as DDP's
+parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs why), and
+`embedding_rows_grad` stays off with multi-token prediction (`mtp_num_layers`), whose layers look
+the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
+Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
+that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
+off; apart from `msa_shared_tile_staging` the FlyDSL MSA kernels have no switch other than
+`PRIMUS_MSA_BACKEND=eager`.
+
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a
 container it runs as the container's user, which has to be root for the Triton patch. Iterations 1–2
 compile the FlyDSL and Triton kernels (iteration 1 takes about 30 s), so the ms/iter on this page is
 Primus's average over iterations 3–10 (`log_avg_skip_iterations=2`). Memory is the logged
-`hip mem usage`, which counts the whole device, other processes included. With the default
+`hip mem usage`, which counts the whole device, other processes included. With
 `PRIMUS_FUSED_ADAM_CLIP=1`, check that the log has `[Patch:megatron.optimizer.te_fused_adam_clip]
 enabled`: when its HIP extension does not build, Primus logs the error and trains without it.
 
@@ -265,17 +307,18 @@ The expert GEMMs are Primus-Turbo's Triton kernels (`_grouped_bf16_persistent_ge
 `PrimusTurboRowParallelGroupedLinear`), not TE's grouped GEMM. In the trace every FlyDSL kernel is
 named `k_fn_0`; the launching Python frame tells MSA forward, MSA backward and the indexer apart.
 
-The three Adam paths, on the same node. The runs in each column ran side by side: one GPU each on
+The three Adam paths, on the same node, with the FP32 gradients and Adam moments of the time (before
+the BF16 recipe under Optimizer above). The runs in each column ran side by side: one GPU each on
 separate GPUs, and EP2 on GPUs 0–1 and 2–3.
 
 | Adam | Settings | 1 GPU | EP2 | lm loss, iteration 10 (1 GPU / EP2) |
 | --- | --- | --- | --- | --- |
-| Primus HIP fused Adam (default) | `PRIMUS_FUSED_ADAM_CLIP=1` | 142.9 ms | 130.1 ms | 10.98864 / 10.31194 |
+| Primus HIP fused Adam | `PRIMUS_FUSED_ADAM_CLIP=1` | 142.9 ms | 130.1 ms | 10.98864 / 10.31194 |
 | Primus Triton AdamW | `PRIMUS_FUSED_ADAM_CLIP=0` | 157.5 ms | 138.5 ms | 10.98862 / 10.31211 |
 | TE FusedAdam | `PRIMUS_FUSED_ADAM_CLIP=0 --use_triton_fused_adam False` | 157.9 ms | not run | 10.98837 / – |
 
 Triton AdamW is 10% slower than the HIP Adam on one GPU and 6.5% slower on EP2, and on one GPU no faster
-than TE's FusedAdam, so the default stays `PRIMUS_FUSED_ADAM_CLIP=1`. Triton AdamW and TE FusedAdam
+than TE's FusedAdam, so with FP32 gradients the default was `PRIMUS_FUSED_ADAM_CLIP=1`. Triton AdamW and TE FusedAdam
 log the grad norm (10.378 and 10.379 at iteration 10 on one GPU); the HIP Adam does not.
 
 The unit tests pass on gfx1250: `tests/unit_tests/backends/megatron/test_minimax_m3_*.py`,
@@ -747,6 +790,11 @@ The defaults ran at 157.7 ms again during this sweep, so differences under 1% ar
 - `USE_TURBO_ATTENTION=True` replaces TE's unfused softmax in the three dense layers.
 - `--use_turbo_autotune` takes iteration 1 from 28 to 35 s.
 - `--moe_shared_expert_overlap` has no dispatch to overlap with on one GPU.
+- `--use_turbo_norm_te_linear True` was noise on those bases. With the tas-20261109 image's TE, the
+  RMSNorm backward of TE's fused LayerNormLinear (`rmsnorm_bwd_general_kernel`) takes 0.9 ms per call
+  at hidden 6144 against about 0.03 ms for Primus-Turbo's: 6.3 ms a step on the 4-layer M3.1-Flash
+  proxy (four qkv and three dense fc1 input norms), so the M3.1-Flash experiment sets it. Not
+  re-measured on M3. A different norm kernel, so the loss is not bit-identical to TE's.
 - FP8: with the default `delayed` recipe only TE's dense linears run FP8, and Primus-Turbo logs
   `Primus-Turbo FP8 delayed not work since Primus-Turbo not support delayed scaling`, so the experts
   stay BF16. With `tensorwise` that warning is gone and Primus-Turbo's FP8 path covers the experts too.
@@ -833,7 +881,8 @@ Do not run:
 - **gfx1250 MSA kernels.** `msa_backend=flydsl` on gfx1250 needs the wave32 WMMA port. It does not
   use `v_permlane32_swap`, MFMA, or `ds_read_tr16`. gfx950 still uses the original kernels; only the
   dispatch changed. The kernels address buffers with 32-bit offsets, so each tensor must stay under
-  2 GiB.
+  2 GiB. The gfx1250 dK/dV backward stages 8 waves of 16 keys, so gfx1250 takes `sparse_block_size`
+  128 (M3's) only; building an MSA layer with another size stops.
 - **Eager MSA memory.** Eager materialises the `[batch, heads, seq, seq]` fp32 score matrix and the
   indexer's `[batch, 4, seq, seq]` scores. At seq 4096 that is about 21 GiB for attention forward
   alone. FlyDSL does not.
