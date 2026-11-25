@@ -16,7 +16,7 @@
       "name": "maxtext",
       "path": "third_party/maxtext",
       "url": "https://github.com/ROCm/maxtext.git",
-      "commit": "2fb48f50e8614650639802ec304e2195c27d7598"
+      "commit": "3beddbaac82deceb059040c763d75dc71aa625a8"
     },
     {
       "name": "Emerging-Optimizers",
