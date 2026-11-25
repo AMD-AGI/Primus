@@ -6,32 +6,48 @@
 
 """Defer TE fused cross entropy's gradient construction to the backward pass.
 
-TE without ``overwrite_input`` (e.g. rocm/primus:v26.6) builds the full logits
-gradient in the forward pass. With ``deferred_cross_entropy`` the forward only
-computes the loss and two FP32 statistics per token (running max and softmax
-denominator); the backward rebuilds the softmax from the saved logits and
-writes the gradient over them, with that TE's BF16 rounding (probability
-rounded to BF16, the target column rounded again after subtracting 1), so loss
-and gradient match it bit for bit. TE with ``overwrite_input`` already defers
-and rounds once; there the loss is unchanged and the gradient differs from it
-by at most one BF16 ulp. Like ``te_ce_overwrite_input``, the logits hold their
-gradient after the loss backward.
+TE without ``overwrite_input`` builds the full logits gradient in the forward
+pass. With ``deferred_cross_entropy`` the forward only computes the loss and two
+FP32 statistics per token (running max and softmax denominator); the backward
+rebuilds the softmax from the saved logits and writes the gradient over them
+with the installed TE's rounding, so loss and gradient match it bit for bit:
+
+* TE <= 2.17 (e.g. rocm/primus:v26.6) writes the gradient into the BF16 logits:
+  the probability is rounded to BF16 and the target column rounded again after
+  subtracting 1.
+* TE with a separate FP32 gradient buffer (``cross_entropy_kernel`` takes a
+  ``grad_input_ptr``) rounds once, after the upstream multiply in backward.
+
+The first eligible call runs this path and the TE path it replaces (TE's
+``overwrite_input`` one under ``te_ce_overwrite_input``, where the installed TE has it)
+on a few positions of the real logits and as many wide random ones, and compares loss
+and gradient bit for bit (``bitwise_check``); on a mismatch the run keeps TE. Like ``te_ce_overwrite_input``,
+the logits hold their gradient after the loss backward.
 
 Only TP=1, contiguous BF16 logits outside CUDA-graph capture take this path;
 everything else calls the configured TE cross entropy.
 """
+
+from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 from torch.autograd.function import once_differentiable
 
+from primus.backends.megatron.core.fusions import bitwise_check
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 IGNORE_INDEX = -100
+# leading sequence positions the first call compares with TE
+CHECK_ROWS = 16
 MAX_BLOCK = 32768
 NUM_WARPS = 16
+# The gradient is elementwise, so its tile does not change any value; this one
+# streams faster than TE's.
+GRAD_BLOCK = 8192
+GRAD_WARPS = 4
 
 
 # Derived from the Transformer Engine Triton cross-entropy implementation.
@@ -42,12 +58,16 @@ def _loss_stats_kernel(X, Y, STATS, LOSS, n_cols, IGNORE: tl.constexpr, BLOCK: t
     row = tl.program_id(0).to(tl.int64)
     X += row * n_cols
     y = tl.load(Y + row)
-    # Same FP32 online recurrence, exp and reduction geometry as TE.
+    # Same FP32 online recurrence, exp and reduction geometry as TE; the next
+    # chunk's load is issued before the current chunk's reductions.
     m = float("-inf")
     d = 0.0
+    offsets = tl.arange(0, BLOCK)
+    x_next = tl.load(X + offsets, offsets < n_cols, other=float("-inf"))
     for i in range(0, n_cols, BLOCK):
-        offsets = i + tl.arange(0, BLOCK)
-        x = tl.load(X + offsets, offsets < n_cols, other=float("-inf")).to(tl.float32)
+        x = x_next.to(tl.float32)
+        next_offsets = i + BLOCK + offsets
+        x_next = tl.load(X + next_offsets, next_offsets < n_cols, other=float("-inf"))
         m_new = tl.maximum(m, tl.max(x))
         d = d * tl.exp(m - m_new) + tl.sum(tl.exp(x - m_new))
         m = m_new
@@ -59,7 +79,16 @@ def _loss_stats_kernel(X, Y, STATS, LOSS, n_cols, IGNORE: tl.constexpr, BLOCK: t
 
 
 @triton.jit
-def _deferred_grad_kernel(X, Y, STATS, UPSTREAM, n_cols, IGNORE: tl.constexpr, BLOCK: tl.constexpr):
+def _deferred_grad_kernel(
+    X,
+    Y,
+    STATS,
+    UPSTREAM,
+    n_cols,
+    IGNORE: tl.constexpr,
+    ROUND_ONCE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     row = tl.program_id(0).to(tl.int64)
     X += row * n_cols
     y = tl.load(Y + row)
@@ -70,18 +99,33 @@ def _deferred_grad_kernel(X, Y, STATS, UPSTREAM, n_cols, IGNORE: tl.constexpr, B
         offsets = i + tl.arange(0, BLOCK)
         x = tl.load(X + offsets, offsets < n_cols, other=float("-inf")).to(tl.float32)
         p = tl.exp(x - m) / d
-        # Forward-gradient TE stores the BF16 probability and rounds the target column
-        # again after subtracting 1; do not combine the two roundings algebraically.
-        rounded_p = p.to(tl.bfloat16).to(tl.float32)
-        target_grad = (rounded_p - 1.0).to(tl.bfloat16).to(tl.float32)
-        unscaled = tl.where(offsets == y, target_grad, rounded_p)
+        if ROUND_ONCE:
+            target_grad = p - 1.0
+        else:
+            # Do not combine the two roundings algebraically.
+            p = p.to(tl.bfloat16).to(tl.float32)
+            target_grad = (p - 1.0).to(tl.bfloat16).to(tl.float32)
+        unscaled = tl.where(offsets == y, target_grad, p)
         unscaled = tl.where(y == IGNORE, 0.0, unscaled)
         tl.store(X + offsets, (unscaled * upstream).to(tl.bfloat16), offsets < n_cols)
 
 
+def te_rounds_once() -> Optional[bool]:
+    """Whether the installed TE keeps the forward gradient in a separate FP32 buffer; None if
+    its Triton kernel cannot be inspected."""
+    try:
+        from transformer_engine.common.triton.cross_entropy import cross_entropy_kernel
+    except ImportError:
+        return None
+    arg_names = getattr(cross_entropy_kernel, "arg_names", None)
+    if not arg_names:
+        return None
+    return "grad_input_ptr" in arg_names
+
+
 class DeferredCrossEntropy(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, logits, target):
+    def forward(ctx, logits, target, round_once):
         vocab = logits.shape[-1]
         rows = target.numel()
         block = min(MAX_BLOCK, triton.next_power_of_2(vocab))
@@ -92,7 +136,7 @@ class DeferredCrossEntropy(torch.autograd.Function):
                 logits, target, stats, loss, vocab, IGNORE_INDEX, block, num_warps=NUM_WARPS
             )
         ctx.save_for_backward(logits.detach(), target, stats)
-        ctx.block = block
+        ctx.round_once = bool(round_once)
         ctx.consumed = False
         return loss
 
@@ -112,11 +156,12 @@ class DeferredCrossEntropy(torch.autograd.Function):
                 grad_output,
                 logits.shape[-1],
                 IGNORE_INDEX,
-                ctx.block,
-                num_warps=NUM_WARPS,
+                ctx.round_once,
+                min(GRAD_BLOCK, triton.next_power_of_2(logits.shape[-1])),
+                num_warps=GRAD_WARPS,
             )
         torch.autograd.graph.increment_version(logits)
-        return logits, None
+        return logits, None, None
 
 
 def eligible(logits, labels, tp_group, is_cg_capturable) -> bool:
@@ -133,13 +178,40 @@ def eligible(logits, labels, tp_group, is_cg_capturable) -> bool:
     )
 
 
-def make_deferred_cross_entropy(original):
+def _matches_original(original, logits, labels, tp_group, round_once) -> bool:
+    def inputs():
+        """The leading positions of the real logits (near uniform early in training), then as
+        many of wide random logits with one ignored label."""
+        x, y = logits[:CHECK_ROWS], labels[:CHECK_ROWS]
+        wide = (4 * bitwise_check.randn(x.shape, x.device)).to(x.dtype)
+        y_ignored = y.clone()
+        y_ignored.view(-1)[0] = IGNORE_INDEX
+        return torch.cat([x, wide]), torch.cat([y, y_ignored])
+
+    return bitwise_check.passed(
+        "deferred_cross_entropy",
+        lambda: bitwise_check.outputs_and_grads(
+            lambda x, y: DeferredCrossEntropy.apply(x, y, round_once), *inputs()
+        ),
+        lambda: bitwise_check.outputs_and_grads(lambda x, y: original(x, y, tp_group, False), *inputs()),
+        key=logits.shape[-1],
+    )
+
+
+def make_deferred_cross_entropy(original, round_once=None):
     """Megatron's ``te_parallel_cross_entropy`` with the gradient deferred to backward."""
+    if round_once is None:
+        round_once = te_rounds_once()
+    if round_once is None:
+        raise RuntimeError("cannot tell how the installed TE cross entropy rounds its gradient")
 
     def te_parallel_cross_entropy(logits, labels, tp_group, is_cg_capturable=False):
-        if not eligible(logits, labels, tp_group, is_cg_capturable):
+        if not (
+            eligible(logits, labels, tp_group, is_cg_capturable)
+            and _matches_original(original, logits, labels, tp_group, round_once)
+        ):
             return original(logits, labels, tp_group, is_cg_capturable)
-        return DeferredCrossEntropy.apply(logits, labels)
+        return DeferredCrossEntropy.apply(logits, labels, round_once)
 
     te_parallel_cross_entropy._primus_deferred_ce = True
     return te_parallel_cross_entropy
@@ -171,10 +243,18 @@ def patch_te_cross_entropy_deferred(ctx: PatchContext) -> None:
     original = te_ext.te_parallel_cross_entropy
     if original is None or getattr(original, "_primus_deferred_ce", False):
         return
-    wrapped = make_deferred_cross_entropy(original)
+    round_once = te_rounds_once()
+    if round_once is None:
+        warning_rank_0(
+            "[Patch:megatron.te.cross_entropy_deferred] skipped: cannot inspect TE's Triton "
+            "cross_entropy_kernel to match its gradient rounding; TE cross entropy unchanged"
+        )
+        return
+    wrapped = make_deferred_cross_entropy(original, round_once)
     te_ext.te_parallel_cross_entropy = wrapped
     language_module.te_parallel_cross_entropy = wrapped
     log_rank_0(
         "[Patch:megatron.te.cross_entropy_deferred] TE cross entropy builds its gradient "
-        "in backward over the logits (TP=1 BF16; other cases keep TE)"
+        f"in backward over the logits (TP=1 BF16, rounded {'once' if round_once else 'twice'} "
+        "like the installed TE and checked against it on the first call; other cases keep TE)"
     )

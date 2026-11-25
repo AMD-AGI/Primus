@@ -27,7 +27,7 @@ or the component spec.
    tag it will be published as (`rocm/primus:v26.9`,
    `rocm/jax-training:maxtext-v26.9`) and, preferably, its digest.
 2. **The Primus commit each image pairs with** — normally read from the release
-   Dockerfile (`ARG PRIMUS_BRANCH`). An image built without Primus (the v26.8 JAX
+   Dockerfile (`ARG PRIMUS_COMMIT`; `PRIMUS_BRANCH` before v26.10). An image built without Primus (the v26.8 JAX
    image) needs it passed with `--build-commit`.
 3. **A machine with docker for the probe** — a compute node, never a login node
    (`docker run` of a 40-60 GB image). The rest runs anywhere with git.
@@ -264,7 +264,7 @@ tag, or a branch:
   `v26.7.0` was already tagged.
 
 The two families have **different** build commits: each Dockerfile pins
-`PRIMUS_BRANCH` to its own commit. An image built without Primus (the v26.8 JAX
+`PRIMUS_COMMIT` (`PRIMUS_BRANCH` before v26.10) to its own commit. An image built without Primus (the v26.8 JAX
 image) has none; its commit is then the Primus commit it is released with, passed
 as `--build-commit jax=<sha>`. `preflight.py` resolves both, and the previous release's commit per
 family (for a JAX release without one it falls back to the primus build commit

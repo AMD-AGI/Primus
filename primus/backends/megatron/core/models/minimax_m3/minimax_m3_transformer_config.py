@@ -151,6 +151,51 @@ class MSATransformerConfig(TransformerConfig):
     msa_backend: str = "eager"
     """Which kernel computes the block-sparse attention: 'eager' or 'flydsl'."""
 
+    msa_fused_qk_norm_rope: bool = False
+    """The attention's q/k split, q/k RMSNorm and partial RoPE, and the indexer's RMSNorm + RoPE,
+    as one Triton pass each way (qk_norm_rope.py). Bit-identical to the eager ops, checked on
+    first use; off for shapes or modules it does not cover."""
+
+    msa_fused_indexer_loss: bool = False
+    """The sparse indexer loss in a few Triton launches (indexer_loss_fused.py). Bit-identical to
+    compute_sparse_indexer_loss, checked on first use."""
+
+    msa_fused_indexer_loss_scatter: bool = False
+    """With msa_fused_indexer_loss: the loss backward writes the gradient of block_scores row by
+    row from its last kernel instead of zeros + clamp + scatter_add_ (three launches fewer per
+    call). Bit-identical, checked on first use; rows wider than 64 blocks keep scatter_add_."""
+
+    msa_fused_zero_centered_gamma: bool = False
+    """With msa_fused_qk_norm_rope: the q / k and indexer norm + RoPE kernels form a zero-centered
+    norm's BF16 ``1 + weight`` in-register instead of reading the result of a separate
+    ``weight + 1`` launch (four launches fewer per MSA layer call). Bit-identical, checked on
+    first use; norms that are not zero-centered or whose weight is not BF16 are unaffected."""
+
+    msa_fused_indexer_input_norm: bool = False
+    """The MSA indexer's input norm (``rms_norm`` of the FP32 copy of the residual stream, cast
+    back) as one Triton launch that follows ATen's reduction order (indexer_input_norm.py)
+    instead of five launches. Bit-identical, checked on first use per row width; other shapes
+    keep the eager ops."""
+
+    msa_shared_rope_tables: bool = False
+    """The cos / sin RoPE tables of the MSA layers are kept per rotary ``freqs`` tensor (Megatron
+    caches that tensor) instead of being recomputed in every layer call (rope.py). Same ops, so
+    the same bits; the first reuse is compared with recomputed tables."""
+
+    msa_fused_select_plan: bool = False
+    """flydsl backend: the indexer's block selection and the backward's BlockPlan in a few Triton
+    launches (flydsl/select_plan.py) instead of the eager ops and build_block_plan. Integer
+    bookkeeping, identical by construction; shapes past select_plan.supported() keep the eager
+    path."""
+
+    msa_shared_tile_staging: bool = False
+    """flydsl backend on gfx1250: the MSA forward and dQ kernels run 4 / 2 adjacent tokens of a KV
+    group per workgroup, in lockstep, and stage a K/V tile that several of them select at the same
+    step once (flydsl/msa_token_fwd_w32.py, msa_token_bwd_w32.py). Each token keeps its own step
+    order and arithmetic; the first call for a shape compares every output bit with the
+    one-token-per-workgroup kernels and keeps those on a mismatch. Needs S and the block size to be
+    multiples of 4 / 2, else unchanged."""
+
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not
     differentiable, so this loss is the only gradient its projections ever receive."""

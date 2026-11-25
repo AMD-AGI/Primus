@@ -435,6 +435,13 @@ def test_index_heads_must_match_the_gqa_groups():
         _msa_config(sparse_num_index_heads=N_INDEX + 1)
 
 
+def test_msa_triton_fusions_are_opt_in():
+    config = _msa_config()
+    assert not (
+        config.msa_fused_qk_norm_rope or config.msa_fused_indexer_loss or config.msa_fused_select_plan
+    )
+
+
 def test_flydsl_backend_needs_the_sparse_indexer_loss():
     """The dense loss needs the full score matrix, which the flydsl kernels never form."""
     assert _msa_config(msa_backend="flydsl").sparse_indexer_loss_type == "sparse"
@@ -520,6 +527,13 @@ class TestMinimaxSparseAttentionModule:
 
         assert output.shape == (SQ, 2, config.hidden_size)
         assert torch.isfinite(output).all()
+
+    def test_flydsl_rejects_other_block_sizes_on_gfx1250(self):
+        pytest.importorskip("flydsl")
+        if "gfx1250" not in torch.cuda.get_device_properties(0).gcnArchName:
+            pytest.skip("the gfx1250 dK/dV backward is the one limited to 128-key blocks")
+        with pytest.raises(NotImplementedError, match="sparse_block_size 128 only"):
+            self._build(msa_backend="flydsl")
 
     def test_builds_with_the_module_name(self):
         """TransformerLayer passes `name=` to its self_attention from Megatron-core 0.19 on."""
