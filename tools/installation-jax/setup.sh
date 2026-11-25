@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
-# setup.sh — Reproduce the Primus JAX/MaxText training environment (v26.9) in a
-# Python venv (no sudo, no docker). Mirrors the v26.9 JAX training Dockerfile,
+# setup.sh — Reproduce the Primus JAX/MaxText training environment (v26.10) in a
+# Python venv (no sudo, no docker). Mirrors the v26.10 JAX training Dockerfile,
 # adapted for bare metal:
-#   * ROCm from pip TheRock wheels (`rocm-sdk-*` 10.3.0a20261026, a nightly on
+#   * ROCm from pip TheRock wheels (`rocm-sdk-*` 10.3.0a20261109, a nightly on
 #     nightly.repo.amd.com), same delivery as the image
 #   * builds/checkouts on a big disk (home quota is usually tiny)
 #   * GPU arch auto-detected (gfx942 and/or gfx950); apt/sudo steps skipped
 #   * MaxText's own setup.sh apt/interactive steps skipped (system packages are
 #     a one-time root action, documented in the guide's Section 2)
 #   * TensorFlow (2.21 CPU) is built from source in the default flow (matching
-#     the v26.9 image); RCCL is not — the image uses the ROCm SDK copy
-#   * JAX 0.12.0 + jax_rocm10_{pjrt,plugin} 0.12.0+rocm10.3.0a20261026 from the
+#     the v26.10 image); RCCL is not — the image uses the ROCm SDK copy
+#   * JAX 0.12.0 + jax_rocm10_{pjrt,plugin} 0.12.0+rocm10.3.0a20261109 from the
 #     ROCm nightly index
+#   * Primus-Turbo (JAX) built from source for MaxText's grouped-GEMM MoE path,
+#     as in the image
 #
 # Usage:
 #   bash setup.sh                # run all default stages in order
@@ -31,32 +33,32 @@ die()  { echo -e "\033[1;31m[setup][ERROR] $*\033[0m" >&2; exit 1; }
 # shellcheck disable=SC1091
 reload_env() { source "$SCRIPT_DIR/env.sh"; }
 
-# ---- pinned versions / commits (from Dockerfile.jax-v26.9) ----
-# ROCm: TheRock pip wheels. Since v26.8 the image takes a ROCm nightly (v26.9: a
+# ---- pinned versions / commits (from Dockerfile.jax-v26.10) ----
+# ROCm: TheRock pip wheels. Since v26.8 the image takes a ROCm nightly (v26.10: a
 # 10.3 nightly), so the SDK comes from nightly.repo.amd.com.
 # Nightly indexes are pruned; see the README if this pin stops resolving.
 # See: https://nightly.repo.amd.com/rocm/core/whl-next/rocm/
 ROCM_INDEX="https://nightly.repo.amd.com/rocm/core/whl-next/"
-THE_ROCK_VERSION="10.3.0a20261026"
+THE_ROCK_VERSION="10.3.0a20261109"
 
 # JAX + ROCm PJRT/plugin (jax_rocm10_*), from the ROCm nightly jax index.
 JAX_VERSION="0.12.0"
-JAX_ROCM_VERSION="0.12.0+rocm10.3.0a20261026"
+JAX_ROCM_VERSION="0.12.0+rocm10.3.0a20261109"
 JAX_ROCM_INDEX="https://nightly.repo.amd.com/rocm/jax/whl-next/"
 
 # TransformerEngine (prebuilt ROCm JAX wheels). Two distributions since v26.8,
 # both from the frameworks-nightlies staging index: the jax flavour and the
-# transformer-engine-rocm10 native core (a manylinux_2_28 wheel). Note the
-# v26.9 wheels are a ROCm 10.2 build next to the 10.3 SDK, as in the image.
+# transformer-engine-rocm10 native core (a manylinux_2_28 wheel). The v26.10
+# wheels are built against the same ROCm 10.3 nightly as the SDK.
 # See: https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/transformer-engine-rocm-jax/
-TE_VERSION="2.19.0.dev0+rocm10.2.0a20261002.bfe94fb"
+TE_VERSION="2.21.0.dev0+rocm10.3.0a20261109.4c7ed18"
 TE_INDEX="https://rocm.frameworks-nightlies.amd.com/whl-multi-arch-staging/"
 # From-source TransformerEngine (the optional `te_source` stage, used on hosts
 # whose glibc is older than the wheels need). The commit is the one the wheel's
 # local label names; the label carries only the abbreviated id, so that is what
 # is checked out until the full commit id is pinned here.
 TE_REPO="https://github.com/ROCm/TransformerEngine.git"
-TE_SOURCE_COMMIT="${TE_SOURCE_COMMIT:-bfe94fb}"
+TE_SOURCE_COMMIT="${TE_SOURCE_COMMIT:-4c7ed18}"
 
 # TensorFlow (CPU) built from source — replaces the stock PyPI wheel, whose
 # bundled LLVM collides with ROCm's libLLVM in Grain workers (SIGSEGV on
@@ -69,27 +71,38 @@ TF_BRANCH="upstream-v2.21.0"
 TF_LLVM_SHA256="3f986184ee126677dbd77edb16d6b82c057ec869fefd7a9871979941e52e837a"
 BAZELISK_VERSION="v1.29.0"
 
-# RCCL. Not built since v26.7: the pip ROCm SDK ships RCCL (2.32.3 in the v26.9
-# image), so the `rccl` stage is not in DEFAULT_STAGES. These pins remain only
-# for the optional stage, which reproduces the v26.6 behaviour of overriding the
-# SDK copy from rocm-systems.
+# RCCL. Not built since v26.7: the pip ROCm SDK ships RCCL (2.32.3 in the v26.10
+# image), and the image uses that copy, so the `rccl` stage is not in
+# DEFAULT_STAGES. These pins remain only for the optional stage, which reproduces
+# the v26.6 behaviour of overriding the SDK copy from rocm-systems.
 RCCL_REPO="https://github.com/ROCm/rocm-systems.git"
 RCCL_COMMIT="9e5e4084a4b8e1e86551b0eb054725c62354a926"
 
 # MaxText (ROCm fork)
 MAXTEXT_REPO="https://github.com/ROCm/maxtext.git"
-MAXTEXT_BRANCH="${MAXTEXT_BRANCH:-release/v26.9}"
+MAXTEXT_BRANCH="${MAXTEXT_BRANCH:-release/v26.10}"
 # Which MaxText requirements set to install. The reference Docker image runs
 # MaxText's setup.sh with defaults (DEVICE=tpu), which — on ROCm — pulls the
 # framework-agnostic deps WITHOUT any CUDA packages. Override to `cuda12` only
 # if you specifically need that set.
 MAXTEXT_DEVICE="${MAXTEXT_DEVICE:-tpu}"
 
-# Primus. The v26.9 image bundles Primus again (v26.8 shipped none). This is the
-# commit Dockerfile.jax-v26.9 pins (2026-10-30, on `release/v26.9`); the commit
-# is used rather than the branch so the install keeps matching the image.
+# Primus. This is the commit Dockerfile.jax-v26.10 pins (2026-11-16, on
+# `release/v26.10`); the commit is used rather than the branch so the install
+# keeps matching the image. `release/v26.10` has moved since (cherry-picks for
+# the PyTorch backends, diffusion recipes and config defaults); export
+# PRIMUS_COMMIT=release/v26.10 to take them.
 PRIMUS_REPO="https://github.com/AMD-AGI/Primus.git"
-PRIMUS_BRANCH="db1a41601833294231daadb3cdbb2933eb805c73"
+PRIMUS_COMMIT="${PRIMUS_COMMIT:-31128a29033de9da05f93ffdffe159f94fe90ce1}"
+
+# Primus-Turbo (JAX): grouped GEMM for dropless MoE in MaxText
+# (use_turbo_grouped_gemm: true) -- hipBLASLt on gfx942, FlyDSL and hipBLASLt on
+# gfx950. The image builds the branch below (its checkout is fe9229ef); export
+# PRIMUS_TURBO_BRANCH=fe9229efc1caea65665f74402578d30ff7af88f8 to reproduce it
+# exactly. flydsl is Primus-Turbo's only extra dependency (inert on gfx942).
+PRIMUS_TURBO_REPO="https://github.com/AMD-AGI/Primus-Turbo.git"
+PRIMUS_TURBO_BRANCH="${PRIMUS_TURBO_BRANCH:-feat/jax-grouped-gemm-flydsl-hipblaslt}"
+FLYDSL_VERSION="0.3.4.1"
 
 PIP="python -m pip"
 UVPIP="python -m uv pip"
@@ -259,7 +272,7 @@ for base in {sysconfig.get_paths()[k] for k in ("purelib", "platlib")}:
 PY
 }
 
-# TE locates its native core by distribution name. Dockerfile.jax-v26.9 seds
+# TE locates its native core by distribution name. Dockerfile.jax-v26.10 seds
 # `transformer-engine-rocm10` into that list; wheels since 2.18.0.dev0 already
 # carry it (the image then lists it twice), so only patch when missing.
 patch_te_rocm10_core() {
@@ -385,7 +398,7 @@ stage_tf_source() {
     fresh_clone "$TF_REPO" tensorflow-upstream --depth 1 --branch "$TF_BRANCH"
     # The image's own check: TF must still pin the LLVM archive it was built with.
     grep -q "$TF_LLVM_SHA256" "$SRC_DIR/tensorflow-upstream/third_party/xla/third_party/llvm/workspace.bzl" \
-        || die "$TF_BRANCH no longer pins the LLVM archive sha256 $TF_LLVM_SHA256 that Dockerfile.jax-v26.9 checks"
+        || die "$TF_BRANCH no longer pins the LLVM archive sha256 $TF_LLVM_SHA256 that Dockerfile.jax-v26.10 checks"
     local distdir="$SRC_DIR/bazel_distdir"
     fetch_tf_llvm_archive "$SRC_DIR/tensorflow-upstream" "$distdir"
     # Build the wheel for the venv's ACTUAL Python (the reference image uses 3.12;
@@ -550,16 +563,35 @@ stage_rccl() {
 
 stage_primus() {
     reload_env
-    log "Installing Primus @ $PRIMUS_BRANCH (kept in $WORKSPACE_DIR/Primus)"
+    log "Installing Primus @ $PRIMUS_COMMIT (kept in $WORKSPACE_DIR/Primus)"
     rm -rf "$WORKSPACE_DIR/Primus"
     git clone --recurse-submodules "$PRIMUS_REPO" "$WORKSPACE_DIR/Primus" || die "Primus clone failed"
     ( cd "$WORKSPACE_DIR/Primus" \
-        && git checkout "$PRIMUS_BRANCH" \
+        && git checkout "$PRIMUS_COMMIT" \
         && git submodule update --init third_party/maxtext/ ) || die "Primus checkout failed"
     # Primus' (torch-oriented) requirements.txt is not installed; the JAX runtime
     # deps live in requirements-jax.txt (the `jaxreqs` stage). As in the image,
     # stale dataclasses backports, which conflict on modern Python, are removed.
     $PIP uninstall -y dataclasses dataclasses_json || true
+}
+
+stage_turbo() {
+    reload_env
+    # v26.10: the image builds Primus-Turbo's JAX extension for gfx942 and gfx950
+    # (one image serves both); this does the same. --no-deps keeps the jax/jaxlib
+    # pins; the editable install needs the checkout, so it is kept like Primus.
+    log "Installing Primus-Turbo (JAX) @ $PRIMUS_TURBO_BRANCH (kept in $WORKSPACE_DIR/Primus-Turbo)"
+    rm -rf "$WORKSPACE_DIR/Primus-Turbo"
+    git clone --recurse-submodules "$PRIMUS_TURBO_REPO" "$WORKSPACE_DIR/Primus-Turbo" || die "Primus-Turbo clone failed"
+    ( cd "$WORKSPACE_DIR/Primus-Turbo" \
+        && git checkout "$PRIMUS_TURBO_BRANCH" \
+        && git submodule update --init --recursive \
+        && PRIMUS_TURBO_FRAMEWORK=JAX GPU_ARCHS="gfx942;gfx950" MAX_JOBS="$(nproc)" \
+           $PIP install --no-build-isolation --no-deps -e ".[jax]" ) || die "Primus-Turbo build failed"
+    $PIP install --no-deps "flydsl==${FLYDSL_VERSION}"
+    # The image's own check.
+    python -c "import primus_turbo.jax.lax as l; print('primus_turbo.jax OK')" \
+        || die "primus_turbo.jax failed to import"
 }
 
 stage_jaxreqs() {
@@ -576,11 +608,11 @@ stage_jaxreqs() {
     # maxtext/Primus pull these in transitively at older, CVE-affected versions.
     # jax/jaxlib are re-pinned as a guardrail, as in the image, so nothing in the
     # requirements above can move them off JAX_VERSION.
-    log "Force-upgrading CVE-fix pins from the v26.9 image"
+    log "Force-upgrading CVE-fix pins from the v26.10 image"
     $PIP install --upgrade \
         pillow==13.0.0 \
         starlette==1.3.1 \
-        pyasn1==0.6.4 \
+        pyasn1==0.6.5 \
         cryptography==50.0.0 \
         httplib2==0.32.0 \
         aiohttp==3.14.4 \
@@ -593,7 +625,7 @@ stage_jaxreqs() {
         flax==0.12.10 \
         keras==3.15.0 \
         nltk==3.10.4 \
-        oauthlib==4.0.0 \
+        oauthlib==4.0.1 \
         "jax==${JAX_VERSION}" \
         "jaxlib==${JAX_VERSION}"
     python - <<'PY' || true
@@ -611,15 +643,15 @@ stage_manifest() {
     log "Writing manifest to $WORKSPACE_DIR/.manifest"
     mkdir -p "$WORKSPACE_DIR/.manifest"
     env > "$WORKSPACE_DIR/.manifest/env.txt"
-    echo "Dockerfile.jax-v26.9" > "$WORKSPACE_DIR/.manifest/derived_from"
+    echo "Dockerfile.jax-v26.10" > "$WORKSPACE_DIR/.manifest/derived_from"
     $PIP list > "$WORKSPACE_DIR/.manifest/requirements.txt"
     cp "$SCRIPT_DIR/env.sh" "$WORKSPACE_DIR/.manifest/env.sh"
 }
 
 # Order: pip ROCm -> MaxText -> TF-from-source -> JAX (overrides MaxText)
-# -> TE -> Primus. JAX/TE stay after MaxText so its setup.sh
+# -> TE -> Primus -> Primus-Turbo. JAX/TE stay after MaxText so its setup.sh
 # cannot clobber the ROCm plugin / TE wheels.
-DEFAULT_STAGES=(venv rocm maxtext tf_source jax te primus jaxreqs manifest)
+DEFAULT_STAGES=(venv rocm maxtext tf_source jax te primus turbo jaxreqs manifest)
 
 run_stage() { local s="$1"; local fn="stage_$s"; declare -F "$fn" >/dev/null || die "unknown stage: $s"; "$fn"; }
 

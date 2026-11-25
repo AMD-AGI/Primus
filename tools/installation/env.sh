@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # env.sh — Primus venv environment (Python 3.12, ROCm via pip rocm-sdk-devel)
-# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.9
+# Derived from .github/workflows/docker-release/Dockerfile.primus-v26.10
 #
 # Source this both during the build (setup.sh does it) and every time you
 # want to USE the environment:   source env.sh
@@ -162,7 +162,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 export GPU_USE_DEVICE_QUEUE="${GPU_USE_DEVICE_QUEUE:-1}"
 export DEBUG_CLR_AQL_DEV_QUEUE="${DEBUG_CLR_AQL_DEV_QUEUE:-1}"
 
-# Set by the v26.9 image, alongside Primus #1286, to resolve memory issues.
+# Set by the image since v26.9, alongside Primus #1286, to resolve memory issues.
 export TORCH_DIST_USE_NCCL2="${TORCH_DIST_USE_NCCL2:-0}"
 
 # ---- ROCm path: comes from the pip-installed _rocm_sdk_devel package ----
