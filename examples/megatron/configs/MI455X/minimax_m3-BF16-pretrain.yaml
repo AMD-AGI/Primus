@@ -65,6 +65,18 @@ modules:
       # flydsl: gfx950 MFMA kernels, or the wave32 WMMA kernels on gfx1250.
       # eager: plain PyTorch, for numerics. flydsl rejects a dataloader mask.
       msa_backend: ${PRIMUS_MSA_BACKEND:flydsl}
+      # Triton fusions around the attention, bit-identical to the eager ops (minimax_m3.yaml)
+      msa_fused_qk_norm_rope: true
+      msa_fused_indexer_loss: true
+      # launch cuts: block_scores gradient written by the loss kernel; RoPE tables kept per freqs tensor
+      msa_fused_indexer_loss_scatter: true
+      msa_shared_rope_tables: true
+      # launch cuts: zero-centered gamma formed in the norm + RoPE kernels; indexer input norm in one launch
+      msa_fused_zero_centered_gamma: true
+      msa_fused_indexer_input_norm: true
+      msa_fused_select_plan: true
+      # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens
+      msa_shared_tile_staging: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.
@@ -78,19 +90,28 @@ modules:
       overlap_param_gather: false
       use_torch_fsdp2: false
       use_distributed_optimizer: true
+      # BF16 gradient buffer and Adam moments, as in the MI455X DeepSeek-V3 recipe. On the
+      # one-GPU M3.1-Flash proxy (4 layers, GBS 8): 402 -> 372 ms per step, peak 200 -> 117 GB.
+      # Not bit-identical to FP32 main grads (iteration-6 lm loss 11.95907 vs 11.95885).
+      # Needs PRIMUS_FUSED_ADAM_CLIP=0, the launcher's default.
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
       # Fusing the wgrad accumulation into the fp32 main_grad was 14-16% slower (15% on the
-      # EP4 baseline with 8 micro-batches per step): hipBLASLt
-      # picks a 3.7x slower kernel for fp32-output GEMMs on gfx1250. Into a bf16 main_grad
-      # it is 1% faster.
+      # EP4 baseline with 8 micro-batches per step): hipBLASLt picks a 3.7x slower kernel for
+      # fp32-output GEMMs on gfx1250. Into the bf16 main_grad it needs an expert grouped GEMM
+      # whose wgrad accumulates: FlyDSL's cannot (Primus-Turbo 0.6.1), and the Triton backend,
+      # which can, costs more than the fusion saves (406.5 vs 372.1 ms on the proxy above).
       gradient_accumulation_fusion: false
       # The check is a norm over every gradient each step: 5 ms at EP4 with 8 layers.
       check_for_nan_in_loss_and_grad: false
 
-      # block recomputes the first recompute_num_layers layers: on the 4-layer proxy,
-      # dense layer 1, not the MSA/MoE layer.
+      # block recomputes the first recompute_num_layers layers (dense layer 1 on M3, an MSA
+      # layer on M3.1-Flash). 0: every proxy shape fits without recomputation.
       recompute_granularity: full
       recompute_method: block
-      recompute_num_layers: ${PRIMUS_RECOMPUTE_NUM_LAYERS:1}
+      recompute_num_layers: ${PRIMUS_RECOMPUTE_NUM_LAYERS:0}
 
       # data. MSA builds its own causal mask; a dataloader mask is rejected by flydsl.
       create_attention_mask_in_dataloader: false
@@ -134,12 +155,26 @@ modules:
       use_turbo_attention: false
       use_turbo_grouped_gemm: true
       use_turbo_rms_norm: true
+      # the config the reference run's autotune picks, so the gradient bits do not depend
+      # on step-1 timing
+      turbo_rmsnorm_bwd_config: [4, 2]
       use_turbo_deepep: false
       moe_shared_expert_overlap: false
 
       # cross entropy
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+      deferred_cross_entropy: true
+
+      # bitwise kernel replacements (primus_megatron_module.yaml)
+      fused_clamped_geglu: true
+      fused_probs_mul: true
+      bitwise_clip_scale: true
+      embedding_rows_grad: true
+      # 4: main_grad += the gradients of 4 micro-batches in one pass (-15 ms per step on the
+      # 4-layer proxy), holding up to 3 extra BF16 gradients per parameter (about +49 GB there);
+      # no gain with gradient_accumulation_fusion on.
+      grad_accum_group: 0
 
       # training control. A full gc.collect() takes about 280 ms here, longer than
       # the 1-GPU step, and collects nothing, so not every iteration.

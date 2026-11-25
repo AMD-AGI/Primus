@@ -46,7 +46,10 @@ export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-4096}
 export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-${PRIMUS_SEQ_LENGTH}}
 # flydsl or eager (the PyTorch reference)
 export PRIMUS_MSA_BACKEND=${PRIMUS_MSA_BACKEND:-flydsl}
-export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-1}
+# 0: no recomputation. Every proxy shape the launcher allows fits without it (one GPU: 234 of 432 GB),
+# and on M3.1-Flash the recomputed first layer is an MSA layer, so recomputing it repeats its
+# whole forward (projections, indexer, MSA kernels) inside the backward.
+export PRIMUS_RECOMPUTE_NUM_LAYERS=${PRIMUS_RECOMPUTE_NUM_LAYERS:-0}
 # Primus-Turbo attention for the three dense layers. Empty: on with the flydsl backend when the
 # Primus-Turbo in use has the gfx1250 head-dim-128 kernels (see README.md), off otherwise; decided in
 # the container, below. The default backend fails in fmha_bwd here.
@@ -74,10 +77,12 @@ if [[ -n "${HIPBLASLT_TUNING_OVERRIDE_FILE}" && ! -r "${HIPBLASLT_TUNING_OVERRID
     echo "cannot read HIPBLASLT_TUNING_OVERRIDE_FILE=${HIPBLASLT_TUNING_OVERRIDE_FILE}" >&2
     exit 2
 fi
-# Primus's HIP Adam applies the clip coefficient in-kernel and writes the BF16 parameters, so the
-# step has no host sync, no separate grad scale and no parameter copy. Megatron then logs no grad
-# norm. The other two need the first.
-export PRIMUS_FUSED_ADAM_CLIP=${PRIMUS_FUSED_ADAM_CLIP:-1}
+# 1: Primus's HIP Adam applies the clip coefficient in-kernel and writes the BF16 parameters, so
+# the step has no host sync, no separate grad scale and no parameter copy. Megatron then logs no
+# grad norm. The other two need the first. The BF16 writeback needs separate FP32 master
+# parameters, which the config's precision-aware optimizer (BF16 grads and moments) does not keep,
+# so the default is 0.
+export PRIMUS_FUSED_ADAM_CLIP=${PRIMUS_FUSED_ADAM_CLIP:-0}
 export PRIMUS_FUSED_ADAM_BF16_WRITEBACK=${PRIMUS_FUSED_ADAM_BF16_WRITEBACK:-${PRIMUS_FUSED_ADAM_CLIP}}
 export PRIMUS_STATIC_BF16_LOSS_SCALE_CPU=${PRIMUS_STATIC_BF16_LOSS_SCALE_CPU:-${PRIMUS_FUSED_ADAM_CLIP}}
 
