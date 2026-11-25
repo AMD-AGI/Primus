@@ -136,7 +136,7 @@ modules:
       eod_mask_loss: false       # we use loss_mask (response-only) instead
 
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
+      layernorm_epsilon: 1.0e-6
 
       # ---- parallelism --------------------------------------------------
       # Qwen3-30B has 128 routed experts. EP=8 -> 16 experts per rank,

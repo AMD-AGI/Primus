@@ -122,7 +122,6 @@ modules:
       finetune: true
       ckpt_format: torch_dist
       auto_detect_ckpt_format: true
-      auto_continue_train: false
       load: null
       # As shipped this file keeps NO weights (save: null, no final save): it is a smoke
       # run of the convert + fine-tune flow. To keep the fine-tuned model, pass

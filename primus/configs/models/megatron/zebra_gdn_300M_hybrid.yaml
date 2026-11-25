@@ -80,7 +80,7 @@ add_bias_linear: false
 
 # Scale-only RMSNorm, no bias (matches FLA norm)
 normalization: RMSNorm
-norm_epsilon: 1.0e-6
+layernorm_epsilon: 1.0e-6
 
 # Positional encoding — MLA handles its own RoPE (rotary_base=500000);
 # GDN layers use delta-rule recurrence and need no position embedding.

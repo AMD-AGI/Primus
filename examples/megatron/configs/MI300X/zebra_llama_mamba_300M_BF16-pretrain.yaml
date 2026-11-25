@@ -123,7 +123,6 @@ modules:
       # GDN hybrid run, avoids mid-training host-RAM OOM from the state-dict
       # materialisation).
       finetune: false
-      auto_continue_train: false
       load: null
       save: ./output/zebra_llama_mamba_300M_BF16-pretrain
       save_interval: 99999

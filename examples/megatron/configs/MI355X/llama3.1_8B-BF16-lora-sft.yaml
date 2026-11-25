@@ -79,7 +79,6 @@ modules:
 
       # Model initialization
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
 
       # Parallelism: pure data parallelism (DP=8 on a single node)
       tensor_model_parallel_size: 1

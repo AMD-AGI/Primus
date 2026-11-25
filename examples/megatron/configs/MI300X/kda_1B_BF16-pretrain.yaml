@@ -77,7 +77,6 @@ modules:
 
       # Checkpoints
       finetune: false
-      auto_continue_train: true
       load: null
       save: ./output/kda_1B_BF16-pretrain
       save_interval: 2048

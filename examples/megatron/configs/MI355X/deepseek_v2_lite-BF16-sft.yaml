@@ -57,7 +57,7 @@ modules:
 
       # Model initialization
       init_method_std: 0.008
-      norm_epsilon: 1.0e-6
+      layernorm_epsilon: 1.0e-6
 
       # Parallelism configuration
       tensor_model_parallel_size: ${PRIMUS_TP:1}

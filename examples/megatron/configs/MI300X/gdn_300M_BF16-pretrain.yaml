@@ -109,7 +109,6 @@ modules:
 
       # Checkpoints
       finetune: false
-      auto_continue_train: false
       save: ./output/gdn_300M_BF16-pretrain
       save_interval: 1024
       disable_last_saving: false

@@ -73,8 +73,6 @@ modules:
       tensorboard_dir: output/tensorboard/flux_535m_pretrain
       log_throughput: true
       log_timers_to_tensorboard: true
-      log_batch_size_to_tensorboard: true
-      log_learning_rate_to_tensorboard: true
 
       # Checkpointing (disabled)
       save_interval: 5000          # Save checkpoint every N steps
@@ -83,7 +81,6 @@ modules:
       finetune: false
       no_save_optim: true
       no_save_rng: true
-      auto_continue_train: false
       disable_last_saving: true
 
       # Precision

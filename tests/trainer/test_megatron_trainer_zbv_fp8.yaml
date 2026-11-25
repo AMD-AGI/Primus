@@ -69,7 +69,6 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: false
       load: null
       no_load_optim: null
       no_load_rng: null
@@ -95,5 +94,3 @@ modules:
       # FP8
       fp8: ${PRIMUS_FP8:hybrid}
       fp8_recipe: ${PRIMUS_FP8_RECIPE:delayed}
-
-      debug: true

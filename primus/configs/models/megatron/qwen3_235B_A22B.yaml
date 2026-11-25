@@ -41,7 +41,7 @@ rotary_seq_len_interpolation_factor: 1
 normalization: RMSNorm
 
 # max_position_embeddings: 40960
-norm_epsilon: 1.0e-6
+layernorm_epsilon: 1.0e-6
 init_method_std: 0.008
 
 apply_rope_fusion: true

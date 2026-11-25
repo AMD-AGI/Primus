@@ -11,3 +11,6 @@ ffn_hidden_size: 13824
 num_layers: 48
 num_attention_heads: 40
 num_query_groups: 8
+
+# norm: Qwen2.5-14B uses rms_norm_eps=1e-5; the qwen2.5_base value (1e-6) is for the smaller sizes
+layernorm_epsilon: 1.0e-5

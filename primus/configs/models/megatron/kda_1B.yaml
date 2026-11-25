@@ -43,7 +43,7 @@ num_attention_heads: 16
 untie_embeddings_and_output_weights: false
 
 # Norm epsilon (matches FLA norm_eps=1e-6)
-norm_epsilon: 1.0e-6
+layernorm_epsilon: 1.0e-6
 
 # Positional encoding
 rotary_base: 500000

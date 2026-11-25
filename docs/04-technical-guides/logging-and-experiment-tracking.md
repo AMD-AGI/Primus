@@ -48,10 +48,8 @@ Enable with `disable_tensorboard: false` and set an output directory:
 | `tensorboard_dir` | `null` | Output directory for event files (**required** when enabled). |
 | `tensorboard_log_interval` | `1` | Steps between TensorBoard writes. |
 | `tensorboard_queue_size` | `1000` | Event queue size before flush. |
-| `log_learning_rate_to_tensorboard` | `true` | Log LR. |
 | `log_loss_scale_to_tensorboard` | `true` | Log loss scale (mixed precision). |
 | `log_timers_to_tensorboard` | `false` | Log per-stage timers. |
-| `log_batch_size_to_tensorboard` | `false` | Log batch size. |
 | `log_memory_to_tensorboard` | `false` | Log GPU memory. |
 | `log_world_size_to_tensorboard` | `false` | Log world size. |
 | `log_validation_ppl_to_tensorboard` | `false` | Log validation perplexity. |
@@ -92,7 +90,6 @@ Enable with `disable_mlflow: false`. Run identification and upload behavior:
 | `mlflow_experiment_name` | `null` | MLflow experiment name. |
 | `mlflow_upload_traces` | `false` | Upload profiler trace files. |
 | `mlflow_upload_logs` | `false` | Upload training log files. |
-| `mlflow_upload_performance_metrics` | `false` | Upload the comprehensive perf/memory/utilization metric set (implicitly enables throughput calc). |
 | `mlflow_upload_tracelens_report` | `false` | Generate + upload TraceLens reports (see [Profiling & observability](./profiling-and-observability.md)). |
 
 **Credentials and endpoints:**
@@ -150,7 +147,7 @@ MaxText logging cadence is controlled by `log_period` (`primus/configs/modules/m
 
 1. **Local-only:** enable TensorBoard (`disable_tensorboard: false`, set `tensorboard_dir`)—no credentials required.
 2. **Team tracking:** enable WandB (`disable_wandb: false`) + export `WANDB_API_KEY` and `wandb_project`/`wandb_entity`.
-3. **Enterprise / scaling studies:** enable MLflow (`disable_mlflow: false`) + `MLFLOW_TRACKING_URI` (or Databricks host/token), and turn on `mlflow_upload_performance_metrics` for throughput/memory/utilization dashboards.
+3. **Enterprise / scaling studies:** enable MLflow (`disable_mlflow: false`) + `MLFLOW_TRACKING_URI` (or Databricks host/token) for throughput/memory dashboards.
 4. **Keep `WANDB_API_KEY` and tokens out of YAML**—pass them as environment variables (allowlisted for container passthrough). See [Security](../05-operations/security.md).
 
 ---

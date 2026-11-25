@@ -2,7 +2,7 @@ extends:
   - llama_base.yaml
 
 # norm
-norm_epsilon: 1.0e-06
+layernorm_epsilon: 1.0e-06
 
 # mla
 multi_latent_attention: true
