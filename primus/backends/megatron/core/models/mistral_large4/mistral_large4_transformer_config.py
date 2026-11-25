@@ -25,6 +25,7 @@ Per-layer lists longer than ``num_layers`` are cut to their prefix, so a depth-r
 from __future__ import annotations
 
 import copy
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -115,12 +116,24 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
         check_kv_sources(self.kv_source_layers, self.no_rope_layers)
         sources = sorted({s for i, s in enumerate(self.kv_source_layers) if s != i})
         # the one layer whose latent other layers reuse (shared_kv_layer); checked just below
-        self._kv_source_layer = sources[0] if sources else None
+        self._shared_kv_layer = sources[0] if sources else None
         if len(sources) > 1:
             # the decoder block (and its pipeline carrier) holds the latent of one source layer
             raise NotImplementedError(
                 f"Mistral Large 4: KV sharing from more than one source layer ({sources}) is not supported; "
                 "the released checkpoint shares only layer 35's latent"
+            )
+        if self.final_logit_softcapping is None:
+            # the release caps at 30 (its preset sets it): a config without it trains uncapped logits
+            warnings.warn(
+                "Mistral Large 4: final_logit_softcapping is unset, the logits are not softcapped "
+                "(the release uses 30.0)",
+                stacklevel=2,
+            )
+        elif not float(self.final_logit_softcapping) > 0:
+            raise ValueError(
+                f"Mistral Large 4: final_logit_softcapping must be > 0 or None (unset), not "
+                f"{self.final_logit_softcapping!r}"
             )
         if self.q_lora_rank is not None:
             raise ValueError("Mistral Large 4 has no Q-LoRA: q_lora_rank must be None")
@@ -146,12 +159,12 @@ class MistralLarge4TransformerConfig(MLATransformerConfig):
     def stores_kv(self, layer_idx: int) -> bool:
         """Whether layer ``layer_idx`` keeps its latent for later layers: it is the one KV source
         layer (``shared_kv_layer``, found and checked in ``__post_init__``)."""
-        return layer_idx == self._kv_source_layer
+        return layer_idx == self._shared_kv_layer
 
     @property
     def shared_kv_layer(self) -> Optional[int]:
         """The one layer whose latent other layers reuse, or None (computed in ``__post_init__``)."""
-        return self._kv_source_layer
+        return self._shared_kv_layer
 
     def layer_config(self, layer_idx: int) -> "MistralLarge4TransformerConfig":
         """This config with the MLA head split of layer ``layer_idx`` (NoPE: all dims content)."""

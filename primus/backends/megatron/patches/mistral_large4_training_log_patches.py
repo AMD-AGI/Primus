@@ -7,8 +7,7 @@
 """Mistral Large 4 (``model_type: mistral_large4``): when the first iteration of a run is also a
 log step (``log_interval`` 1, or a resume at ``k * log_interval - 1``), reset the loss accumulators
 and the timers Megatron's log step resets (``interval-time`` and the logged per-phase timers) after
-``training_log``, as a normal log step does; otherwise the next log line averages two iterations. Limited to this model (ADR 0030: behaviour only this port
-changes stays a patch of this model) so that other models' loss baselines are unchanged. As a
+``training_log``, as a normal log step does; otherwise the next log line averages two iterations. Limited to this model so that other models' loss baselines are unchanged. As a
 result, when the first iteration is a log step, this model's second log line (loss average and
 throughput) covers only its own iterations, while other Primus models on the same version include
 the first iteration in it: those first-interval numbers are not comparable across models. Later
@@ -24,6 +23,7 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     is_mistral_large4_args,
 )
 from primus.core.patches import PatchContext, get_args, register_patch
+from primus.core.utils.flag_utils import bool_flag
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 # attribute set on the training_log wrapper this patch installs, so a second application detects
@@ -159,8 +159,12 @@ def _is_this_model(ctx: PatchContext) -> bool:
     return is_mistral_large4_args(get_args(ctx))
 
 
+PATCH_ID = "megatron.mistral_large4.first_iteration_log"
+_TAG = f"[Patch:{PATCH_ID}]"
+
+
 @register_patch(
-    "megatron.mistral_large4.first_iteration_log",
+    PATCH_ID,
     backend="megatron",
     phase="before_train",
     # before every other training_log wrapper (mlperf_logging 15, training_log.unified_patch 50):
@@ -176,6 +180,7 @@ def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
     del ctx
     import megatron.training.training as megatron_training
     from megatron.training.global_vars import get_args as get_megatron_args
+    from megatron.training.global_vars import get_timers
 
     if getattr(megatron_training.training_log, _WRAPPED_MARK, False):
         return
@@ -184,7 +189,7 @@ def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
         # another wrapper or a Megatron with a different signature: the wrapper could not see the
         # arguments it needs, so it is not installed (instead of installing a silent no-op)
         warning_rank_0(
-            "[Patch:megatron.mistral_large4.first_iteration_log] training_log has no "
+            f"{_TAG} training_log has no "
             f"parameter(s) {missing}; not wrapped (with log_interval 1 or after a resume, the next log line may average two iterations)"
         )
         return
@@ -193,15 +198,15 @@ def patch_mistral_large4_first_iteration_log(ctx: PatchContext):
         # runs right after training_log returns (the first iteration's log step), not inside it:
         # the next interval also counts the few host operations between the two, as each later
         # interval does after Megatron's own reset
-        from megatron.training.global_vars import get_timers
-
         args = get_megatron_args()
         extra = ()
-        if getattr(args, "perform_rl_step", False):
-            extra = tuple(getattr(megatron_training, "RL_LOGGABLE_TIMER_NAMES", ()) or ())
-        reset_megatron_timers(get_timers(), logged_timer_names(getattr(args, "timing_log_level", 0), extra))
+        if bool_flag(getattr(args, "perform_rl_step", None), "perform_rl_step", False):
+            # training.py imports RL_LOGGABLE_TIMER_NAMES (the list its training_log extends
+            # timers_to_log with); a test checks that line in the pinned source
+            extra = tuple(megatron_training.RL_LOGGABLE_TIMER_NAMES)
+        reset_megatron_timers(get_timers(), logged_timer_names(args.timing_log_level, extra))
 
     megatron_training.training_log = make_training_log(
         megatron_training.training_log, lambda: get_megatron_args().log_interval, reset_timers
     )
-    log_rank_0("[Patch:megatron.mistral_large4.first_iteration_log] wrapped training_log")
+    log_rank_0(f"{_TAG} wrapped training_log")

@@ -36,11 +36,16 @@ Checkpoint specifics:
 
 Memory: tensors are read in fp32 and copied into the model's own tensors (no second copy of the
 weights), and the torch_dist save writes the model's tensors without cloning them
-(``save_without_copies``). The routed experts of a layer are read by EXPERT_WORKERS threads at once, so up to that
-many experts' fp32 temporaries (w1, w3, w2 and the fc1 concatenation) are alive beside the model. The conversion runs in one process (TP = PP = EP = 1) and saves
-a ``torch_dist`` checkpoint, which Megatron reshards to the training layout when it loads. The
-model is held on the host in params_dtype: the 16-layer cut needs ~420 GiB in bf16, the full
-1T-parameter text model ~2 TiB, so convert it on a host with at least that much RAM.
+(``save_without_copies``). The routed experts of a layer are read by EXPERT_WORKERS threads at once,
+so up to that many experts' fp32 temporaries (w1, w3, w2 and the fc1 concatenation) are alive beside
+the model. ``ConsolidatedStore`` reads each tensor with ``os.preadv`` (no memory map of the 1 TB
+release) and drops the pages it read from the page cache, so page-cache pressure cannot fault a
+mapped page (SIGBUS) while the model fills host memory. The conversion runs in one process
+(TP = PP = EP = 1) and saves a ``torch_dist`` checkpoint, written by SAVE_WRITER_THREADS threads,
+which Megatron reshards to the training layout when it loads. The model is held on the host in
+params_dtype: the 16-layer cut needs ~420 GiB in bf16, the full 1T-parameter text model ~2 TiB, so
+convert it on a host with at least that much RAM.
+
 """
 
 import argparse
@@ -52,7 +57,9 @@ import json
 import logging
 import os
 import shutil
+import struct
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -210,12 +217,52 @@ def dequant_block_fp8(w: torch.Tensor, scale: torch.Tensor, block: int = FP8_BLO
 DEFAULT_INDEX = "consolidated.safetensors.index.json"
 
 
+# safetensors header dtype names -> torch dtypes (the release uses F8_E4M3, BF16 and F32)
+_ST_DTYPES = {
+    "F64": torch.float64,
+    "F32": torch.float32,
+    "F16": torch.float16,
+    "BF16": torch.bfloat16,
+    "I64": torch.int64,
+    "I32": torch.int32,
+    "I16": torch.int16,
+    "I8": torch.int8,
+    "U8": torch.uint8,
+    "BOOL": torch.bool,
+    "F8_E4M3": getattr(torch, "float8_e4m3fn", None),
+    "F8_E5M2": getattr(torch, "float8_e5m2", None),
+}
+# bytes per preadv call: large enough to stream at disk speed, small enough to retry a short read
+_READ_CHUNK = 1 << 30
+
+
+def read_safetensors_header(path: str):
+    """``(header, data_start)`` of a safetensors file: its JSON header (tensor name -> dtype, shape,
+    data_offsets; ``__metadata__`` dropped) and the file offset its tensor data starts at."""
+    with open(path, "rb") as f:
+        head = f.read(8)
+        if len(head) != 8:
+            raise ValueError(f"{path}: not a safetensors file (no header length)")
+        n = struct.unpack("<Q", head)[0]
+        header = json.loads(f.read(n))
+    header.pop("__metadata__", None)
+    return header, 8 + n
+
+
 class ConsolidatedStore(common.SafetensorsStore):
     """``SafetensorsStore`` over the index config.json names in ``transformers_weights``
     (``consolidated.safetensors.index.json``; the base store reads only
-    ``model.safetensors.index.json``, so the constructor sets the weight map itself and every
-    read goes through the base ``get``). ``read_weight`` (the converter's one read path, for
-    this store and the base one) dequantises FP8 weights with their ``qscale_weight``."""
+    ``model.safetensors.index.json``, so the constructor sets the weight map itself).
+
+    Tensors are read with ``os.preadv`` (in ``_READ_CHUNK`` pieces) into memory of their own, not through ``safe_open``'s
+    memory map: the full release is ~1 TB, and a fault on a mapped page of a network file system
+    that cannot be served under host-memory pressure kills the process with SIGBUS, where a read error
+    is an exception. After each read the file's pages
+    are dropped from the page cache (``POSIX_FADV_DONTNEED``), so the converter's memory is the
+    model plus the tensors in flight, not the model plus the checkpoint's cached pages.
+    ``read_weight`` (the converter's one read path, for this store and the base one) dequantises
+    FP8 weights with their ``qscale_weight``. Reads are thread-safe (one descriptor per file,
+    positional reads)."""
 
     def __init__(self, hf_dir: str):
         cfg = common.read_hf_config(hf_dir)
@@ -234,14 +281,22 @@ class ConsolidatedStore(common.SafetensorsStore):
             )
         self.hf_dir = hf_dir
         self._local = threading.local()  # per-thread safe_open handles (see _handle)
+        self._lock = threading.Lock()
+        self._headers = {}  # file -> (header, data_start)
+        self._fds = {}  # file -> read-only descriptor
         self._single = None
         self._bin_cache = None
         with open(index) as f:
             self._name_to_file = {k: os.path.join(hf_dir, v) for k, v in json.load(f)["weight_map"].items()}
 
+    def __del__(self):
+        for fd in getattr(self, "_fds", {}).values():
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
     def _handle(self, filepath: str):
-        """One ``safe_open`` handle per file and per thread (the converter reads experts in a
-        thread pool)."""
+        """One ``safe_open`` handle per file and per thread (kept for callers that want
+        safetensors' own API; the converter's reads go through ``get``)."""
         handles = getattr(self._local, "handles", None)
         if handles is None:
             handles = self._local.handles = {}
@@ -252,12 +307,61 @@ class ConsolidatedStore(common.SafetensorsStore):
             h = handles[filepath] = safe_open(filepath, framework="pt", device="cpu")
         return h
 
+    def _file(self, path: str):
+        """``(fd, header, data_start)`` of ``path``, opened and parsed once."""
+        with self._lock:
+            if path not in self._fds:
+                self._headers[path] = read_safetensors_header(path)
+                self._fds[path] = os.open(path, os.O_RDONLY)
+            header, data_start = self._headers[path]
+            return self._fds[path], header, data_start
+
+    def _entry(self, name: str):
+        path = self._name_to_file[name]
+        fd, header, data_start = self._file(path)
+        if name not in header:
+            raise KeyError(f"{name} is in the weight index but not in {path}")
+        return path, fd, header[name], data_start
+
+    def stored_dtype(self, name: str) -> str:
+        """The safetensors dtype name ``name`` is stored in (``F8_E4M3``, ``BF16``, ...)."""
+        return self._entry(name)[2]["dtype"]
+
+    def read_raw(self, name: str) -> torch.Tensor:
+        """``name`` as stored (its own memory, no file mapping)."""
+        path, fd, entry, data_start = self._entry(name)
+        dtype = _ST_DTYPES.get(entry["dtype"])
+        if dtype is None:
+            raise ValueError(f"{name} in {path}: unsupported safetensors dtype {entry['dtype']!r}")
+        begin, end = entry["data_offsets"]
+        nbytes = end - begin
+        buf = torch.empty(nbytes, dtype=torch.uint8)
+        view = memoryview(buf.numpy())
+        done, offset = 0, data_start + begin
+        while done < nbytes:
+            got = os.preadv(fd, [view[done : min(nbytes, done + _READ_CHUNK)]], offset + done)
+            if got <= 0:
+                raise OSError(f"{path}: short read of {name} ({done} of {nbytes} bytes)")
+            done += got
+        if nbytes and hasattr(os, "posix_fadvise"):
+            with contextlib.suppress(OSError):  # advice only: a file system may not take it
+                os.posix_fadvise(fd, offset, nbytes, os.POSIX_FADV_DONTNEED)
+        return buf.view(dtype).reshape(entry["shape"])
+
+    def has(self, name: str) -> bool:
+        return name in self._name_to_file
+
+    def get(self, name: str, dtype) -> torch.Tensor:
+        return self.read_raw(name).to(dtype)
+
 
 def _stored_is_fp8(store, name: str) -> bool:
     """Whether ``name`` is stored as a float8 tensor (read from the safetensors header, no data).
     A store that is not a ``SafetensorsStore`` (a test's dict store) says it with ``is_fp8``."""
     if not isinstance(store, common.SafetensorsStore):
         return bool(getattr(store, "is_fp8", lambda n: False)(name))
+    if isinstance(store, ConsolidatedStore):
+        return store.stored_dtype(name).upper().startswith("F8")
     if store._bin_cache is not None:
         return "float8" in str(store._bin_cache[name].dtype)
     path = store._single if store._single is not None else store._name_to_file[name]
@@ -326,6 +430,11 @@ def yarn_attention_factor(rope: dict) -> float:
     return get_mscale(factor)
 
 
+# how far the resolved YaRN attention_factor may be from 1.0: float rounding only (the release
+# writes 1.0; any real scale differs by far more)
+_YARN_FACTOR_TOL = 1e-12
+
+
 def _check_yarn_scaling(rope: dict) -> None:
     """The model applies YaRN frequencies with no cos / sin scale and a softmax scale of
     ``qk_head_dim ** -0.5`` (the release: ``attention_factor`` 1.0, no ``mscale_all_dim``). A config
@@ -333,7 +442,7 @@ def _check_yarn_scaling(rope: dict) -> None:
     then uses ``0.1 ln(factor) + 1``, ~1.76 for 2048) is refused instead of converting to a model
     with different attention logits."""
     factor = yarn_attention_factor(rope)
-    if abs(factor - 1.0) > 1e-12 or rope.get("mscale_all_dim"):
+    if abs(factor - 1.0) > _YARN_FACTOR_TOL or rope.get("mscale_all_dim"):
         raise ValueError(
             f"Mistral Large 4 converter expects YaRN attention_factor 1.0 and no mscale_all_dim; this config "
             f"gives attention_factor {factor:.6g} (rope parameters {dict(rope)}), which the model does not apply"
@@ -795,6 +904,39 @@ def storage_exact_alias(t: torch.Tensor) -> torch.Tensor:
     return alias
 
 
+# parallel torch_dist writer threads (one file each): with one thread, saving a multi-hundred-GB
+# checkpoint is bound by a single write stream; 8 keeps a node's disks busy without many small files
+SAVE_WRITER_THREADS = 8
+
+
+@contextlib.contextmanager
+def parallel_torch_dist_writes(threads: int = SAVE_WRITER_THREADS):
+    """Inside the block, Megatron's synchronous torch_dist save writes ``threads`` files in parallel.
+
+    ``megatron.training.checkpointing.save_checkpoint`` builds its ``TorchDistSaveShardedStrategy``
+    with the default ``thread_count=1`` for a synchronous save (a parallel write is only wired for
+    async saves). The conversion's one process saves the whole model, so the block substitutes, in
+    that module only, a subclass whose default is ``threads``. The checkpoint holds the same tensors
+    in more ``.distcp`` files; its loading does not depend on the file count. The original class is
+    restored when the block exits."""
+    from megatron.core.dist_checkpointing.strategies.torch import (
+        TorchDistSaveShardedStrategy,
+    )
+    from megatron.training import checkpointing
+
+    class _ParallelWrites(TorchDistSaveShardedStrategy):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("thread_count", max(1, int(threads)))
+            super().__init__(*args, **kwargs)
+
+    original = checkpointing.TorchDistSaveShardedStrategy
+    checkpointing.TorchDistSaveShardedStrategy = _ParallelWrites
+    try:
+        yield
+    finally:
+        checkpointing.TorchDistSaveShardedStrategy = original
+
+
 @contextlib.contextmanager
 def save_without_copies(model):
     """Inside the block, ``model.sharded_state_dict`` (this instance only: the conversion's save)
@@ -891,11 +1033,20 @@ def convert(
     check_vocab(margs.padded_vocab_size, fields, hf_dir)
     common.assert_bridge_free("post-init")
     # the training builder (model_type mistral_large4) through Primus's model provider
+    t0 = time.monotonic()
     model = build_model(margs)
+    log(f"model built in {time.monotonic() - t0:.0f} s")
+    t0 = time.monotonic()
     sd, consumed = build_mcore_state_dict(model, store, margs, fields, log)
+    log(f"weights mapped in {time.monotonic() - t0:.0f} s")
+    t0 = time.monotonic()
     # torch_dist: one copy of the weights on the host, also while saving
-    aliasing = save_without_copies(model) if margs.ckpt_format == "torch_dist" else contextlib.nullcontext()
-    with aliasing:
+    torch_dist = margs.ckpt_format == "torch_dist"
+    with contextlib.ExitStack() as stack:
+        if torch_dist:
+            stack.enter_context(save_without_copies(model))
+            stack.enter_context(parallel_torch_dist_writes())
         _save_with_retry(model, sd, consumed, store, margs, save_dir, log)
+    log(f"checkpoint saved in {time.monotonic() - t0:.0f} s")
     common.assert_bridge_free("post-save")
     return save_dir

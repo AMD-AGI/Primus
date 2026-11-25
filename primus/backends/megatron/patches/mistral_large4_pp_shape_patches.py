@@ -26,6 +26,7 @@ from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout i
     kv_carrier_rows,
 )
 from primus.core.patches import PatchContext, get_args, register_patch
+from primus.core.utils.flag_utils import bool_flag
 from primus.core.utils.module_utils import log_rank_0
 
 # a model-neutral mark on the wrappers this patch installs (get_tensor_shapes and the interleaved
@@ -34,7 +35,8 @@ from primus.core.utils.module_utils import log_rank_0
 WIRE_OWNER_ATTR = "_primus_pp_wire_owner"
 # the values a wrapper of this patch was built with (and ``__wrapped__``, set by functools.wraps,
 # is the function it wraps): a second application with other values rebuilds the wrapper from
-# the unwrapped function instead of keeping the stale values
+# the unwrapped function when ours is the outermost wrapper; when ours sits under another
+# wrapper it cannot be rebuilt without dropping that wrapper, and the patch raises RuntimeError
 WIRE_PARAMS_ATTR = "_primus_mistral_large4_wire_params"
 # attributes other models' PP shape patches set on their wrappers: Kimi K3's get_tensor_shapes
 # (kimi_k3_pp_shape_patches.py) and DeepSeek-V4's get_tensor_shapes / interleaved schedule
@@ -100,8 +102,9 @@ def _wire_params(fn):
 
 
 def _wants_mistral_large4_pp_shape_patch(ctx: PatchContext) -> bool:
-    # this model only: args.model_type (is_mistral_large4_args, in _run_needs_carrier)
-    return _run_needs_carrier(get_args(ctx))
+    # this model only (args.model_type), and only when the P2P tensor carries the shared KV latent
+    args = get_args(ctx)
+    return is_mistral_large4_args(args) and _carrier_needed_by_lists(args)
 
 
 def _carrier_needed_by_lists(args) -> bool:
@@ -112,11 +115,6 @@ def _carrier_needed_by_lists(args) -> bool:
         getattr(args, "pipeline_model_parallel_size", 1),
         getattr(args, "no_rope_layers", None),
     )
-
-
-def _run_needs_carrier(args) -> bool:
-    """The run of ``args`` is a Mistral Large 4 run whose P2P tensor carries the shared KV latent."""
-    return is_mistral_large4_args(args) and _carrier_needed_by_lists(args)
 
 
 def _current_run_needs_carrier() -> bool:
@@ -190,9 +188,10 @@ def make_interleaved_schedule(original, kv_lora_rank: int, hidden_size: int, seq
                 "keyword; its P2P shape cannot be sized for the shared KV latent"
             )
         cp, tp = _cp_tp(kwargs)
-        model = kwargs.get("model")
-        sp = bool(_model_config_value(model, "sequence_parallel", sequence_parallel))
-        h = int(_model_config_value(model, "hidden_size", hidden_size))
+        config = _model_config(kwargs.get("model"))
+        sp = _config_value(config, "sequence_parallel", sequence_parallel)
+        sp = bool_flag(sp, "sequence_parallel", False)
+        h = int(_config_value(config, "hidden_size", hidden_size))
         div = cp * (tp if sp else 1)
         s = int(kwargs["seq_length"]) // div
         kwargs["seq_length"] = (s + kv_carrier_rows(s, kv_lora_rank, h)) * div
@@ -206,18 +205,23 @@ def make_interleaved_schedule(original, kv_lora_rank: int, hidden_size: int, seq
     return schedule
 
 
-def _model_config_value(model, name: str, default):
-    """``config.<name>`` of the (first) model chunk, as the interleaved schedule reads its config
-    (``get_model_config``); ``default`` when the model has no config or the config lacks it."""
+def _model_config(model):
+    """The config of the (first) model chunk, as the interleaved schedule reads it
+    (``get_model_config``); None when the model has no config."""
     chunk = model[0] if isinstance(model, (list, tuple)) and model else model
     if chunk is None:
-        return default
+        return None
     try:
         from megatron.core.utils import get_model_config
 
-        value = getattr(get_model_config(chunk), name)
+        return get_model_config(chunk)
     except (AttributeError, ImportError, RuntimeError):
-        return default
+        return None
+
+
+def _config_value(config, name: str, default):
+    """``config.<name>``; ``default`` when there is no config or it lacks (or leaves unset) ``name``."""
+    value = getattr(config, name, None) if config is not None else None
     return default if value is None else value
 
 
@@ -246,12 +250,13 @@ def patch_mistral_large4_pp_tensor_shape(ctx: PatchContext):
 
     args = get_args(ctx)
     for flag in ("patch_zero_bubble", "patch_primus_pipeline"):
-        if getattr(args, flag, False):
+        if bool_flag(getattr(args, flag, False), flag, False):
             raise NotImplementedError(
                 f"Mistral Large 4 KV sharing with pipeline parallelism does not support {flag}"
             )
     names = ("get_tensor_shapes", "forward_backward_pipelining_with_interleaving")
-    states = {n: _wire_state(getattr(schedules_module, n)) for n in names}
+    fns = {n: getattr(schedules_module, n) for n in names}
+    states = {n: _wire_state(fns[n]) for n in names}
     foreign = [n for n, st in states.items() if st == "foreign"]
     if foreign:
         # another model's wire (e.g. Kimi K3's): this model's rows would be added to the wrong shape
@@ -266,7 +271,9 @@ def patch_mistral_large4_pp_tensor_shape(ctx: PatchContext):
         "forward_backward_pipelining_with_interleaving": {
             "kv_lora_rank": kv_lora_rank,
             "hidden_size": hidden_size,
-            "sequence_parallel": bool(getattr(args, "sequence_parallel", False)),
+            "sequence_parallel": bool_flag(
+                getattr(args, "sequence_parallel", False), "sequence_parallel", False
+            ),
         },
     }
     makers = {
@@ -277,7 +284,7 @@ def patch_mistral_large4_pp_tensor_shape(ctx: PatchContext):
     }
     changed = False
     for n in names:
-        fn = getattr(schedules_module, n)
+        fn = fns[n]
         if states[n] == "ours":
             params = _wire_params(fn)
             if params == wanted[n]:

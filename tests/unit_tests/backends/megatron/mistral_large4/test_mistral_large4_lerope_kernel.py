@@ -53,6 +53,12 @@ def test_cpu_falls_back_to_the_reference_and_alpha_gets_a_gradient():
     y = lerope_rotary(x, pos, _inv(alpha))
     y.square().sum().backward()
     assert alpha.grad is not None and torch.isfinite(alpha.grad).all() and alpha.grad.abs().sum() > 0
+    # the values and the gradient are the reference's
+    ref_alpha = alpha.detach().clone().requires_grad_(True)
+    y_ref = lerope_rotary_reference(x, pos, _inv(ref_alpha))
+    y_ref.square().sum().backward()
+    torch.testing.assert_close(y, y_ref)
+    torch.testing.assert_close(alpha.grad, ref_alpha.grad)
 
 
 @pytest.mark.parametrize("device", ["cpu"] + (["cuda"] if GPU else []))

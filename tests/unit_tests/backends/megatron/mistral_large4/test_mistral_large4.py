@@ -400,15 +400,31 @@ def _source_grad(model, ids, detach_latent=False, recompute=False):
             orig_set(ctx, None if latent is None else latent.detach())
 
         consumer.set_forward_context = set_detached
+    # the block caches its chunk plan per mode (build-time settings): drop it so the recompute
+    # settings set here are read, and again afterwards so later runs see the restored ones
+    model.decoder.__dict__.pop("_plan_cache", None)
+    from megatron.core import tensor_parallel
+
+    real_checkpoint, checkpointed = tensor_parallel.checkpoint, []
+
+    def counting_checkpoint(*a, **k):
+        checkpointed.append(1)
+        return real_checkpoint(*a, **k)
+
+    tensor_parallel.checkpoint = counting_checkpoint
     model.zero_grad(set_to_none=True)
     model.train()
     try:
         loss = model(ids[None], pos, attention_mask=None).float().pow(2).mean()
         loss.backward()
+        # full recompute really ran through checkpoint (and the plain run did not)
+        assert bool(checkpointed) is recompute, (recompute, len(checkpointed))
         return loss.detach(), model.decoder.layers[3].self_attention.linear_kv_down_proj.weight.grad.clone()
     finally:
+        tensor_parallel.checkpoint = real_checkpoint
         consumer.set_forward_context = orig_set
         cfg.recompute_granularity, cfg.recompute_method, cfg.recompute_num_layers = old
+        model.decoder.__dict__.pop("_plan_cache", None)
         model.eval()
 
 

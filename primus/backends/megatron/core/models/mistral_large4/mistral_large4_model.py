@@ -32,10 +32,13 @@ __all__ = ["MistralLarge4Model", "softcap"]
 
 
 def softcap(logits: Tensor, cap: Optional[float]) -> Tensor:
-    """``cap * tanh(logits / cap)`` (differentiable); identity when ``cap`` is falsy. Computed in
+    """``cap * tanh(logits / cap)`` (differentiable); identity when ``cap`` is None (the config
+    refuses a cap <= 0 and warns when it is unset). Computed in
     fp32 (bf16 resolution near the cap is ~0.125) and returned in fp32 for the cross-entropy, which
-    upcasts the logits to fp32 anyway; no extra bf16 copy is kept."""
-    if not cap:
+    upcasts the logits to fp32 anyway. Autograd keeps the fp32 tanh output for the backward (one
+    fp32 [s, b, V/tp] tensor). ``MistralLarge4Model.forward`` casts the result back to the logits'
+    dtype when it returns logits instead of a loss."""
+    if cap is None:
         return logits
     return torch.tanh(logits.float() / cap) * cap
 
@@ -63,6 +66,12 @@ class MistralLarge4Model(LanguageModule):
         given = sorted(k for k, v in unsupported.items() if v is not None)
         if given:
             raise TypeError(f"MistralLarge4Model does not take {given}")
+        if fp16_lm_cross_entropy:
+            # softcap computes and returns fp32 logits (and Megatron's cross-entropy upcasts
+            # unsoftcapped logits); an fp16 loss path is not supported
+            raise NotImplementedError(
+                "Mistral Large 4: fp16_lm_cross_entropy is not supported (the loss is computed in fp32)"
+            )
         super().__init__(config=config, pg_collection=pg_collection)
         self.transformer_layer_spec = transformer_layer_spec
         self.vocab_size = vocab_size
@@ -150,7 +159,9 @@ class MistralLarge4Model(LanguageModule):
         logits, _ = self.output_layer(
             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
         )
-        logits = softcap(logits, getattr(self.config, "final_logit_softcapping", None))
+        dtype = logits.dtype
+        logits = softcap(logits, self.config.final_logit_softcapping)
         if labels is None:
-            return logits.transpose(0, 1).contiguous()
+            # returned logits keep the compute dtype, as GPTModel's do (fp32 only for the loss)
+            return logits.to(dtype).transpose(0, 1).contiguous()
         return self.compute_language_model_loss(labels, logits)

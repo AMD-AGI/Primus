@@ -12,8 +12,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #   layout; it was not measured at full scale on MI325X.
 #   If it does not fit (longer sequences): recompute_granularity full, or PRIMUS_PP=6 PRIMUS_GBS=96
 #   on 24 nodes.
-#   EP8 with Primus-Turbo DeepEP inside a node:
-#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=6 PRIMUS_GBS=96 on 24 nodes.
+#   EP8 with Primus-Turbo DeepEP inside a node (only a code-path check for this model: the
+#   weekly 4-layer trainer test, 3 iterations, finite losses and grad norms; not validated at scale):
+#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=6 PRIMUS_GBS=96 PRIMUS_TURBO_DEEPEP_NUM_CU=64 on 24 nodes.
 #   EP above 8 with DeepEP needs an image whose Primus-Turbo is built with rocSHMEM, and
 #   turbo_deepep_num_cu <= 32 at EP >= 16. Every pipeline stage must start on a full-indexer
 #   layer (indexer_types), checked before the model is built: with an even split of the 72
@@ -39,6 +40,8 @@ modules:
       # GBS / (MBS x DP) micro-batches per pipeline; keep it well above PP (the 1F1B bubble is
       # (PP - 1) / micro-batches). TP8 x PP3 on 96 GPUs: DP 4, so 64 = 16 micro-batches of MBS 1
       # per pipeline for 3 stages.
+      # Rule for any layout: DP = GPUs / (TP x PP x CP) (EP does not change DP), and GBS must be a
+      # multiple of MBS x DP. Set PRIMUS_GBS when PRIMUS_TP / PRIMUS_PP / PRIMUS_CP or the node count change.
       global_batch_size: ${PRIMUS_GBS:64}
       # <= index_topk (2048): every causal key is selected, so attention is the dense causal
       # kernel (Primus-Turbo's here; TE's when CP > 1), exact. Longer sequences (> index_topk) run the eager (unfused) DSA path.
@@ -95,7 +98,8 @@ modules:
       # PRIMUS_TURBO_DEEPEP=true switches to Primus-Turbo DeepEP (its patch sets the dispatcher to
       # flex); across nodes (EP above 8) that needs a Primus-Turbo built with rocSHMEM.
       use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
-      # rocm_arg_validation: <= 32 CUs for DeepEP at ep_size >= 16 (EP32); 32 also serves EP8
+      # rocm_arg_validation: <= 32 CUs for DeepEP at ep_size >= 16 (EP32), so the default is 32;
+      # the EP8 recipe in the header sets 64 (intra-node DeepEP, no such limit)
       turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:32}
       # not set: use_turbo_fused_act_with_probs (needs a Primus-Turbo whose swiglu_with_probs
       # accepts clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the

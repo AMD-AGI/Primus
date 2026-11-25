@@ -22,8 +22,9 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 #   Default global batch 64 (16 micro-batches of 1 per pipeline at data parallel 4). It differs
 #   from MI325X / MI355X (PP3 on 12 nodes) because PP6 leaves memory headroom on the MI300X's
 #   192 GB. PP3 on the same 24 nodes: PRIMUS_PP=3 PRIMUS_GBS=128.
-#   EP8 with Primus-Turbo DeepEP inside a node:
-#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=9 PRIMUS_GBS=144 on 36 nodes.
+#   EP8 with Primus-Turbo DeepEP inside a node (only a code-path check for this model: the
+#   weekly 4-layer trainer test, 3 iterations, finite losses and grad norms; not validated at scale):
+#   PRIMUS_EP=8 PRIMUS_TURBO_DEEPEP=true PRIMUS_PP=9 PRIMUS_GBS=144 PRIMUS_TURBO_DEEPEP_NUM_CU=64 on 36 nodes.
 #   EP above 8 with DeepEP needs an image whose Primus-Turbo is built with rocSHMEM, and
 #   turbo_deepep_num_cu <= 32 at EP >= 16. Every pipeline stage must start on a full-indexer
 #   layer (indexer_types), checked before the model is built: with an even split of the 72
@@ -54,6 +55,8 @@ modules:
       # hyper parameters
       train_iters: ${PRIMUS_TRAIN_ITERS:20}
       micro_batch_size: 1
+      # Rule for any layout: DP = GPUs / (TP x PP x CP) (EP does not change DP), and GBS must be a
+      # multiple of MBS x DP. Set PRIMUS_GBS when PRIMUS_TP / PRIMUS_PP / PRIMUS_CP or the node count change.
       global_batch_size: ${PRIMUS_GBS:64}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
       lr: 1.0e-5
@@ -118,7 +121,8 @@ modules:
       # PRIMUS_TURBO_DEEPEP=true switches to Primus-Turbo DeepEP (its patch sets the dispatcher to
       # flex); across nodes (EP above 8) that needs a Primus-Turbo built with rocSHMEM.
       use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
-      # rocm_arg_validation: <= 32 CUs for DeepEP at ep_size >= 16 (EP32); 32 also serves EP8
+      # rocm_arg_validation: <= 32 CUs for DeepEP at ep_size >= 16 (EP32), so the default is 32;
+      # the EP8 recipe in the header sets 64 (intra-node DeepEP, no such limit)
       turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:32}
       # not set: use_turbo_fused_act_with_probs (needs a Primus-Turbo whose swiglu_with_probs
       # accepts clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the

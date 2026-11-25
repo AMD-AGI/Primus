@@ -8,7 +8,6 @@
 the posttrain hook's family resolution and the model-provider registration."""
 
 import importlib.util
-import inspect
 import json
 import re
 from pathlib import Path
@@ -87,6 +86,52 @@ def test_normalize_layer_list_refuses(value):
         normalize_layer_list(value, 2, "no_rope_layers", int)
 
 
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_kv_sharing_active_blank_is_unset(value):
+    """A blank kv_source_layers (or no_rope_layers) is unset, as for the model config."""
+    from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
+        kv_sharing_active,
+    )
+
+    assert kv_sharing_active(value, 4) is False
+    assert kv_sharing_active([0, 1, 2, 1], 4, no_rope_layers=value) is True
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_normalize_layer_list_blank_is_unset(value):
+    """A blank string (an unset env-substituted value) takes the default, like None."""
+    from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
+        normalize_layer_list,
+    )
+
+    assert normalize_layer_list(value, 3, "no_rope_layers", int, 1) == [1, 1, 1]
+
+
+def test_normalize_layer_list_accepts_any_sequence_and_integral_entries():
+    """A ListConfig-like sequence and numpy integers are accepted; entries come back as int."""
+    import collections.abc
+
+    import numpy as np
+
+    from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
+        normalize_layer_list,
+    )
+
+    class Seq(collections.abc.Sequence):  # what an OmegaConf ListConfig looks like to the check
+        def __init__(self, items):
+            self._items = items
+
+        def __getitem__(self, i):
+            return self._items[i]
+
+        def __len__(self):
+            return len(self._items)
+
+    out = normalize_layer_list(Seq([np.int64(1), np.int32(0)]), 2, "no_rope_layers", int)
+    assert out == [1, 0] and all(type(v) is int for v in out)
+    assert normalize_layer_list(Seq(["full", "shared"]), 2, "indexer_types", str) == ["full", "shared"]
+
+
 def test_moe_layer_freq_list_refuses_negative_k():
     with pytest.raises(ValueError):
         moe_layer_freq_list(-2, 4, 8)
@@ -149,25 +194,36 @@ def megatron_moe_freq_type():
         pytest.skip(f"Megatron's parser (megatron.training.arguments) needs a GPU to import: {e!r}")
 
 
-@pytest.mark.parametrize(
-    "given,k,want",
-    [
-        (1, 1, [0, 1, 1, 1]),  # the preset (Megatron's default): derived
-        (1, 2, [0, 0, 1, 1]),  # a non-default k (user or checkpoint) needs no moe_layer_freq override
-        ("([0]*1+[1]*3)", 1, [0, 1, 1, 1]),
-        ("[0, 0, 1, 1]", 2, [0, 0, 1, 1]),
-        ([0, 1, 1, 1], 1, [0, 1, 1, 1]),
-        ("1", 1, [0, 1, 1, 1]),  # the CLI / env spelling of the default
-        (" 1 ", 2, [0, 0, 1, 1]),
-        ("[1]*4", 0, [1, 1, 1, 1]),  # Megatron's other expression spellings
-        ("[0]+[1]*3", 1, [0, 1, 1, 1]),
-    ],
-)
-def test_moe_layer_freq_patch_accepts(given, k, want, megatron_moe_freq_type):
+_ACCEPTS = [
+    (1, 1, [0, 1, 1, 1]),  # the preset (Megatron's default): derived
+    (1, 2, [0, 0, 1, 1]),  # a non-default k (user or checkpoint) needs no moe_layer_freq override
+    ("([0]*1+[1]*3)", 1, [0, 1, 1, 1]),
+    ("[0, 0, 1, 1]", 2, [0, 0, 1, 1]),
+    ([0, 1, 1, 1], 1, [0, 1, 1, 1]),
+    ("1", 1, [0, 1, 1, 1]),  # the CLI / env spelling of the default
+    (" 1 ", 2, [0, 0, 1, 1]),
+    ("[1]*4", 0, [1, 1, 1, 1]),  # Megatron's other expression spellings
+    ("[0]+[1]*3", 1, [0, 1, 1, 1]),
+]
+
+
+def _accepts(given, k, want):
     params = SimpleNamespace(model_type="mistral_large4")
     args = SimpleNamespace(num_layers=4, num_experts=16, first_k_dense_replace=k, moe_layer_freq=given)
     mistral_large4_args_patches.patch_mistral_large4_moe_layer_freq(_ctx("build_args", args, params))
     assert args.moe_layer_freq == want
+
+
+# only a string reaches Megatron's moe_freq_type: the int / list cases run without it (on a CPU
+# host too), the string cases need the fixture
+@pytest.mark.parametrize("given,k,want", [c for c in _ACCEPTS if not isinstance(c[0], str)])
+def test_moe_layer_freq_patch_accepts(given, k, want):
+    _accepts(given, k, want)
+
+
+@pytest.mark.parametrize("given,k,want", [c for c in _ACCEPTS if isinstance(c[0], str)])
+def test_moe_layer_freq_patch_accepts_expression(given, k, want, megatron_moe_freq_type):
+    _accepts(given, k, want)
 
 
 DISAGREES = "disagrees with first_k_dense_replace"
@@ -176,24 +232,23 @@ NOT_01 = "is not a list of 0 / 1"
 NOT_EXPR = "Megatron list expression"
 
 
-@pytest.mark.parametrize(
-    "given,match",
-    [
-        ([1, 1, 1, 1], DISAGREES),
-        ("([0]*1+[1]*1)*2", DISAGREES),  # evaluates, but to a different layout
-        ("([0]*1+[1]*71)", DISAGREES),  # wrong length
-        ([0, 1, 1, 1, 1], DISAGREES),
-        ("([0]*3+[1]*N)", NOT_EXPR),
-        ("garbage", NOT_EXPR),
-        ("__import__('os')", NOT_EXPR),
-        ("[1]*'4'", NOT_EXPR),
-        (2, NOT_SUPPORTED),
-        ("2", NOT_SUPPORTED),
-        ([False, True, True, True], NOT_01),
-        ([None, 1, 1, 1], NOT_01),
-    ],
-)
-def test_moe_layer_freq_patch_refuses(given, match, megatron_moe_freq_type):
+_REFUSES = [
+    ([1, 1, 1, 1], DISAGREES),
+    ("([0]*1+[1]*1)*2", DISAGREES),  # evaluates, but to a different layout
+    ("([0]*1+[1]*71)", DISAGREES),  # wrong length
+    ([0, 1, 1, 1, 1], DISAGREES),
+    ("([0]*3+[1]*N)", NOT_EXPR),
+    ("garbage", NOT_EXPR),
+    ("__import__('os')", NOT_EXPR),
+    ("[1]*'4'", NOT_EXPR),
+    (2, NOT_SUPPORTED),
+    ("2", NOT_SUPPORTED),
+    ([False, True, True, True], NOT_01),
+    ([None, 1, 1, 1], NOT_01),
+]
+
+
+def _refuses(given, match):
     """A list that disagrees with first_k_dense_replace, a wrong length or an unparsable value
     raises (never silently replaced), each with the message of its branch."""
     params = SimpleNamespace(model_type="mistral_large4")
@@ -202,11 +257,27 @@ def test_moe_layer_freq_patch_refuses(given, match, megatron_moe_freq_type):
         mistral_large4_args_patches.patch_mistral_large4_moe_layer_freq(_ctx("build_args", args, params))
 
 
+@pytest.mark.parametrize("given,match", [c for c in _REFUSES if not isinstance(c[0], str)])
+def test_moe_layer_freq_patch_refuses(given, match):
+    _refuses(given, match)
+
+
+@pytest.mark.parametrize("given,match", [c for c in _REFUSES if isinstance(c[0], str)])
+def test_moe_layer_freq_patch_refuses_expression(given, match, megatron_moe_freq_type):
+    _refuses(given, match)
+
+
 def test_moe_layer_freq_patch_other_models():
-    ctx = _ctx(
-        "build_args", SimpleNamespace(num_layers=2, moe_layer_freq=1), SimpleNamespace(model_type="gpt")
-    )
-    assert not mistral_large4_args_patches._is_mistral_large4(ctx)
+    """The registered patch's condition (not only the helper) is False for another model and True
+    for this one, with the same args."""
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    args = SimpleNamespace(num_layers=2, num_experts=16, first_k_dense_replace=1, moe_layer_freq=1)
+    ctx = _ctx("build_args", args, SimpleNamespace(model_type="gpt"))
+    patch = PatchRegistry.get("megatron.mistral_large4.moe_layer_freq")
+    assert patch.condition(ctx) is False
+    # the same args on this model: selected
+    assert patch.condition(_ctx("build_args", args, SimpleNamespace(model_type="mistral_large4"))) is True
 
 
 @pytest.mark.parametrize(
@@ -228,6 +299,7 @@ def test_deepep_single_rank(tp, etp, ep, deepep, hit):
         expert_model_parallel_size=ep,
         use_turbo_deepep=deepep,
         moe_token_dispatcher_type="flex",
+        moe_enable_deepep=True,
     )
     ctx = _ctx("setup", params=params)
     assert mistral_large4_args_patches._deepep_unusable(ctx) is hit
@@ -237,6 +309,7 @@ def test_deepep_single_rank(tp, etp, ep, deepep, hit):
     if hit:
         mistral_large4_args_patches.patch_mistral_large4_deepep_single_rank(ctx)
         assert params.use_turbo_deepep is False and params.moe_token_dispatcher_type == "alltoall"
+        assert params.moe_enable_deepep is False
         # any dispatcher other than flex (user-set allgather, unset) is left as it is
         for kept in ("allgather", "alltoall", None):
             params.use_turbo_deepep, params.moe_token_dispatcher_type = True, kept
@@ -260,11 +333,23 @@ def test_deepep_single_rank(tp, etp, ep, deepep, hit):
         ({"tensor_model_parallel_size": 8, "expert_tensor_parallel_size": 8}, True),
         ({"tensor_model_parallel_size": 8, "expert_tensor_parallel_size": 1}, False),
         ({"tensor_model_parallel_size": 2, "expert_tensor_parallel_size": None}, True),  # ETP defaults to TP
+        # Primus-Turbo off: its grouped linear is never built, so nothing falls back
+        (
+            {"enable_primus_turbo": False, "tensor_model_parallel_size": 2, "expert_tensor_parallel_size": 2},
+            False,
+        ),
+        ({"enable_primus_turbo": False, "use_megatron_fsdp": True}, False),
     ],
 )
 def test_turbo_grouped_gemm_fallback(overrides, hit, monkeypatch):
+    from primus.backends.megatron.core.models.mistral_large4 import (
+        mistral_large4_layout as layout,
+    )
+
+    monkeypatch.setattr(layout.importlib.util, "find_spec", lambda name: object())
     params = SimpleNamespace(
         model_type="mistral_large4",
+        enable_primus_turbo=True,
         use_turbo_grouped_gemm=True,
         moe_grouped_gemm=True,
         use_megatron_fsdp=False,
@@ -650,6 +735,16 @@ def _cfg(**kw):
     return MistralLarge4TransformerConfig(**base)
 
 
+def test_final_logit_softcapping_validated():
+    """An unset cap warns (the release caps at 30), a cap <= 0 is refused, a positive cap is kept."""
+    assert _cfg(final_logit_softcapping=30.0).final_logit_softcapping == 30.0
+    with pytest.warns(UserWarning, match="not softcapped"):
+        _cfg(final_logit_softcapping=None)
+    for bad in (0, 0.0, -1.0):
+        with pytest.raises(ValueError, match="must be > 0"):
+            _cfg(final_logit_softcapping=bad)
+
+
 def test_q_lora_rank_defaults_to_none():
     """The config has no Q-LoRA by default (Megatron's MLA default is 512); a set rank is refused."""
     base = _cfg()
@@ -879,7 +974,12 @@ def test_model_type_other_than_mistral_large4_with_its_layout_is_refused(model_t
 
 @pytest.mark.parametrize(
     "flags,want",
-    [({}, True), ({"use_distributed_optimizer": True}, False), ({"use_megatron_fsdp": True}, False)],
+    [
+        ({}, True),
+        ({"use_distributed_optimizer": True}, False),
+        ({"use_megatron_fsdp": True}, False),
+        ({"use_torch_fsdp2": True}, False),
+    ],
 )
 def test_experts_marked_expert_parallel(flags, want):
     from primus.backends.megatron.core.models.mistral_large4 import (
@@ -1054,9 +1154,12 @@ def test_first_iteration_log_reset():
     assert float(acc["lm loss"]) == 0.0
     assert seen == [True, True]
     # a non-tensor accumulator is zeroed too, as Megatron's own reset zeroes every non-counter key
-    acc = {"aux": 3.0, "lm loss": torch.ones(1), "skipped iterations": 2}
+    acc = {"aux": 3.0, "lm loss": torch.ones(2, dtype=torch.float64), "skipped iterations": 2}
     tl.reset_loss_accumulators(acc)
-    assert acc["aux"] == 0.0 and float(acc["lm loss"]) == 0.0 and acc["skipped iterations"] == 0
+    assert acc["aux"] == 0.0 and acc["skipped iterations"] == 0
+    # a tensor accumulator stays a tensor of the same shape and dtype (Megatron adds tensors to it)
+    assert torch.is_tensor(acc["lm loss"]) and acc["lm loss"].shape == (2,)
+    assert acc["lm loss"].dtype == torch.float64 and not acc["lm loss"].any()
     from primus.core.patches.patch_registry import PatchRegistry
 
     patch = PatchRegistry.get("megatron.mistral_large4.first_iteration_log")
@@ -1167,6 +1270,7 @@ def test_logged_timer_names_match_megatron_training_log():
     text = src.read_text()
     body = text[text.index("def training_log(") :]
     body = body[: body.index("timers_to_log.extend(RL_LOGGABLE_TIMER_NAMES)")]
+    assert "RL_LOGGABLE_TIMER_NAMES," in text[: text.index("def training_log(")]  # imported name
     lists = re.findall(r"timers_to_log\.extend\(\[(.*?)\]\)", body, re.S)
     assert [re.findall(r"'([^']+)'", x) for x in lists] == [
         list(tl.LOGGED_TIMERS_LEVEL_1),
@@ -1240,6 +1344,58 @@ def test_pp_carrier_before_source_and_missing_latent():
     assert _stage([1], False, False)._split_input(torch.zeros(5, 1, 8))[1] is None
     with pytest.raises(RuntimeError):  # the source ran on this stage but no latent reached the carrier
         _stage([0, 1], True, False)._join_output(h, None)
+
+
+def _chain_stages(chunks, kv, src):
+    """Run the P2P carrier through ``chunks`` (lists of layer indices, in the schedule's transfer
+    order); return the latent each consumer layer read."""
+    s, b, h, r = 3, 1, 8, 4
+    lat_src = torch.randn(s, b, r)
+    seen, wire = {}, None
+    for n, layers in enumerate(chunks):
+        blk = _stage(layers, n == 0, n == len(chunks) - 1, kv=kv)
+        blk.shared_kv_layer = src
+        blk._set_source_position()
+        blk.config.kv_lora_rank = r
+        blk._check_latent_reachable()
+        hid = torch.randn(s, b, h)
+        latent = None
+        if wire is not None:
+            hid, latent = blk._split_input(wire)
+        for i in layers:
+            if i == src:
+                latent = lat_src
+            elif kv[i] == src:
+                seen[i] = latent
+        wire = blk._join_output(hid, latent)
+    return lat_src, seen
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [[0, 1, 2, 3], [4, 5, 6, 7]],  # even PP2
+        [[0], [1, 2, 3, 4, 5], [6, 7]],  # uneven (decoder_first/last_pipeline_num_layers)
+        [[0, 1], [2, 3], [4, 5], [6, 7]],  # VPP: PP2 x vp2 in transfer order (0,0) (1,0) (0,1) (1,1)
+        [[0, 1, 2], [3], [], [4, 5, 6, 7]],  # pipeline_model_parallel_layout with an empty stage
+        [[0, 1, 2, 3, 4, 5], [6, 7]],  # source and first consumer in one stage
+    ],
+)
+def test_pp_carrier_reaches_every_consumer_for_any_layout(chunks):
+    """The carrier does not depend on the split (every P2P tensor carries the rows when PP > 1),
+    so each consumer of layer 3's latent gets it for even, uneven, VPP and layout splits."""
+    kv = (0, 1, 2, 3, 4, 3, 6, 3)
+    lat, seen = _chain_stages(chunks, kv, 3)
+    assert set(seen) == {5, 7}
+    assert all(v is not None and torch.equal(v, lat) for v in seen.values())
+
+
+def test_pp_carrier_unreachable_latent_refused_at_build():
+    """A consumer on a later stage without the carrier is refused when the block is built."""
+    blk = _stage([2, 3], False, True)
+    blk.carrier = False
+    with pytest.raises(RuntimeError, match="does not carry the latent"):
+        blk._check_latent_reachable()
 
 
 def test_pp_carrier_empty_stage_forwards_the_latent():
@@ -1652,13 +1808,13 @@ def test_check_stage_starts_before_build(pp, vp, first, last, bad):
     cfg = _pp_config(pp, vp, first, last)
     starts = b.stage_start_layers(cfg)
     assert starts[0] == 0 and starts == sorted(set(starts))
-    b.check_stage_starts(cfg, SimpleNamespace(seq_length=2048))  # dense path only: always allowed
+    b.check_stage_starts(SimpleNamespace(seq_length=2048), cfg)  # dense path only: always allowed
     if bad is None:
-        b.check_stage_starts(cfg, SimpleNamespace(seq_length=4096))
+        b.check_stage_starts(SimpleNamespace(seq_length=4096), cfg)
     else:
         assert [i for i in starts if cfg.indexer_types[i] == "shared"] == bad
         with pytest.raises(ValueError, match=r"start on layers \[" + str(bad[0])):
-            b.check_stage_starts(cfg, SimpleNamespace(seq_length=4096))
+            b.check_stage_starts(SimpleNamespace(seq_length=4096), cfg)
 
 
 def test_valid_even_pp_sizes_from_the_config():
@@ -1670,17 +1826,38 @@ def test_valid_even_pp_sizes_from_the_config():
     assert b.valid_even_pp_sizes(_pp_config(1)) == [1, 2, 3, 6, 9, 18]
     assert b.valid_even_pp_sizes(_pp_config(1, num_layers=20)) == [1, 2, 4, 5]
     with pytest.raises(ValueError, match=r"these 72 layers with an even split: PP \[1, 2, 3, 6, 9, 18\]"):
-        b.check_stage_starts(_pp_config(4), SimpleNamespace(seq_length=4096))
+        b.check_stage_starts(SimpleNamespace(seq_length=4096), _pp_config(4))
 
 
-def test_check_stage_starts_runs_before_the_build():
-    """The builder refuses the split before build_mistral_large4_model allocates the stage."""
+def test_check_stage_starts_runs_before_the_build(monkeypatch):
+    """The builder refuses the split before build_mistral_large4_model allocates the stage: with
+    check_stage_starts raising, the model builder is never called."""
+    import sys
+    import types
+
     from primus.backends.megatron.core.models.mistral_large4 import (
         mistral_large4_builders as b,
     )
 
-    src = inspect.getsource(b.mistral_large4_builder)
-    assert src.index("check_stage_starts(config, args)") < src.index("build_mistral_large4_model(")
+    training = types.ModuleType("megatron.training")
+    training.print_rank_0 = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "megatron.training", training)
+    config = b.MistralLarge4TransformerConfig.__new__(b.MistralLarge4TransformerConfig)
+    config.no_rope_layers, config.indexer_types, config.kv_source_layers = [1], ["full"], [0]
+    for name in ("check_position_layout", "check_sparse_context_parallel", "check_indexer_source"):
+        monkeypatch.setattr(b, name, lambda *a, **k: None)
+    calls = []
+
+    def refuse(args, cfg):
+        calls.append("check")
+        raise ValueError("bad split")
+
+    monkeypatch.setattr(b, "check_stage_starts", refuse)
+    monkeypatch.setattr(b, "build_mistral_large4_model", lambda *a, **k: calls.append("build"))
+    args = SimpleNamespace(use_legacy_models=False, spec=None)
+    with pytest.raises(ValueError, match="bad split"):
+        b.mistral_large4_builder(args, True, True, config=config)
+    assert calls == ["check"]
 
 
 def test_layer_lists_from_checkpoint_refuses_user_overrides(tmp_path, monkeypatch):
@@ -1932,6 +2109,7 @@ def test_preset_values_cases(case, monkeypatch):
     P = mistral_large4_args_patches
     if case == "missing":
         assert P._preset_values(SimpleNamespace(model="no_such_model_preset.yaml")) is None
+        assert P._preset_values(SimpleNamespace(model="dir/")) is None
     elif case == "no_model":
         assert P._preset_values(SimpleNamespace(model=None)) is None
     elif case == "path_traversal":
@@ -2283,6 +2461,7 @@ def test_full_recompute_backward_order_restores_shared_topk(monkeypatch):
         att.layer_idx, att.index_source_idx = idx, src
         att.consumes_kv = att.stores_kv = False
         att.kv_source_idx = idx
+        att.has_indexer = src == idx
         att.indexer = (lambda *a, _i=idx: topks[_i]) if src == idx else None
         return att
 
@@ -2778,6 +2957,16 @@ def test_converter_refuses_yarn_scaling_the_model_does_not_apply():
         conv.derive_megatron_fields(cfg(mscale=1.0, mscale_all_dim=1.0))  # ratio 1 but softmax mscale
     with pytest.raises(ValueError, match="attention_factor"):
         conv.derive_megatron_fields(cfg(mscale=2.0, mscale_all_dim=1.0))
+    # the mscale / mscale_all_dim ratio itself (transformers' get_mscale: 0.1 * m * ln(f) + 1)
+    ratio = (0.2 * math.log(2048) + 1) / (0.1 * math.log(2048) + 1)
+    assert conv.yarn_attention_factor(
+        {"factor": 2048, "mscale": 2.0, "mscale_all_dim": 1.0}
+    ) == pytest.approx(ratio)
+    assert conv.yarn_attention_factor(
+        {"factor": 2048, "mscale": 1.0, "mscale_all_dim": 1.0}
+    ) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match=f"attention_factor {ratio:.6g}"):
+        conv.derive_megatron_fields(cfg(mscale=2.0, mscale_all_dim=1.0))
 
 
 def test_converter_rope_theta_layouts():
@@ -2819,6 +3008,7 @@ def test_patches_install_their_wrappers_once(monkeypatch):
     # stand-ins for Megatron's modules (the real training module imports GPU-only packages)
     megatron_global_vars = types.ModuleType("megatron.training.global_vars")
     megatron_global_vars.get_args = lambda: SimpleNamespace(log_interval=1)
+    megatron_global_vars.get_timers = lambda: None  # imported by the patch, called only after a log step
     megatron_training = types.ModuleType("megatron.training.training")
     megatron_training.training_log = training_log
     package = types.ModuleType("megatron.training")
@@ -2910,6 +3100,13 @@ def test_layer_list_value_not_a_list_names_the_key(value):
     """A scalar or a non-list literal for a per-layer list raises ValueError naming the key."""
     with pytest.raises(ValueError, match="no_rope_layers .* is not a list literal"):
         mistral_large4_args_patches._comparable(value, "no_rope_layers", 4)
+
+
+@pytest.mark.parametrize("value", ["one", "1.5", [1]])
+def test_first_k_dense_replace_not_an_integer_names_the_key(value):
+    """A non-integer first_k_dense_replace raises ValueError naming the key."""
+    with pytest.raises(ValueError, match="first_k_dense_replace .* is not an integer"):
+        mistral_large4_args_patches._comparable(value, "first_k_dense_replace", 4)
 
 
 def _without_rope_key(*keys):
@@ -3072,6 +3269,7 @@ def test_turbo_modules_follow_enable_primus_turbo(monkeypatch):
 def _ws_params(**kw):
     base = dict(
         model_type="mistral_large4",
+        num_experts=128,
         enable_primus_turbo=True,
         use_turbo_grouped_gemm=True,
         moe_grouped_gemm=True,
@@ -3105,92 +3303,177 @@ def test_turbo_switches_are_parsed_strictly(value, want, monkeypatch):
         layout.turbo_enabled(SimpleNamespace(enable_primus_turbo="ture"))
 
 
-def test_te_gemm_workspace_defaults_mib_variable(monkeypatch):
-    """Experts on TE GEMMs: PRIMUS_TE_GEMM_WORKSPACE_MIB defaults to 512 (setup phase, before the base
-    patch megatron.te.hipblaslt_gemm_workspace reads it in before_train); a user value is kept."""
+def _stub_te_gemm(monkeypatch, mib=64):
+    """A stand-in for TE's gemm module (size getter + memoized workspace) in sys.modules."""
+    import functools
+    import sys
+    import types
+
+    module = types.ModuleType("transformer_engine.pytorch.cpp_extensions.gemm")
+    module.get_cublas_workspace_size_bytes = lambda: mib * 1024 * 1024
+
+    @functools.lru_cache(maxsize=None)
+    def get_cublas_workspace():
+        return module.get_cublas_workspace_size_bytes()
+
+    module.get_cublas_workspace = get_cublas_workspace
+    package = types.ModuleType("transformer_engine.pytorch.cpp_extensions")
+    package.gemm = module
+    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.cpp_extensions", package)
+    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.cpp_extensions.gemm", module)
+    return module
+
+
+def test_te_gemm_workspace_enlarges_without_the_environment(monkeypatch):
+    """Experts on TE GEMMs: the workspace is enlarged to 512 MiB in process (before_train, the
+    base patch's code); PRIMUS_TE_GEMM_WORKSPACE_MIB is never written, so nothing leaks into a
+    later run or a child process."""
+    import os
 
     from primus.backends.megatron.core.models.mistral_large4 import (
         mistral_large4_layout as layout,
     )
-    from primus.backends.megatron.patches.te_patches import hipblaslt_workspace_patches
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as base,
+    )
     from primus.core.patches.patch_registry import PatchRegistry
 
     m = mistral_large4_args_patches
     env = m.ENV_VAR
-    assert env is hipblaslt_workspace_patches.ENV_VAR  # the one variable the base patch reads
+    assert env is base.ENV_VAR
     patch = PatchRegistry.get("megatron.mistral_large4.te_gemm_workspace")
-    assert patch.phase == "setup"
+    assert patch.phase == "before_train"
     monkeypatch.setattr(layout.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(base, "log_rank_0", lambda *a, **k: None)
+    monkeypatch.setattr(m, "log_rank_0", lambda *a, **k: None)
 
-    # Primus-Turbo grouped GEMM: not applied
-    monkeypatch.setitem(m._workspace_env_written, "value", None)
-    assert patch.condition(_ctx("setup", params=_ws_params())) is False
-    # another model: not applied
+    # Primus-Turbo grouped GEMM or another model: not applied
+    assert patch.condition(_ctx("before_train", params=_ws_params())) is False
     other = _ws_params(model_type="glm5_next", use_turbo_grouped_gemm=False)
-    assert patch.condition(_ctx("setup", params=other)) is False
-    # SequentialMLP (grouped GEMM off) and the setup-phase fallback (Megatron-FSDP), not switched yet
+    assert patch.condition(_ctx("before_train", params=other)) is False
     for params in (_ws_params(moe_grouped_gemm=False), _ws_params(use_megatron_fsdp=True)):
-        assert patch.condition(_ctx("setup", params=params)) is True
+        assert patch.condition(_ctx("before_train", params=params)) is True
+    # no routed experts (a dense-only cut): no expert GEMMs, nothing to enlarge
+    for n in (None, 0):
+        params = _ws_params(moe_grouped_gemm=False, num_experts=n)
+        assert patch.condition(_ctx("before_train", params=params)) is False
 
-    # record the variable's original state before the patch writes os.environ directly, so
-    # teardown restores it (removes it when it was unset) instead of keeping the patch's 512
-    monkeypatch.setenv(env, "placeholder")
-    monkeypatch.delenv(env)
-    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
-    assert hipblaslt_workspace_patches._requested_workspace_mib() == 512
-    warned = []
-    monkeypatch.setattr(m, "warning_rank_0", lambda msg, *a, **k: warned.append(msg))
-    monkeypatch.setenv(env, "128")
-    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
-    assert hipblaslt_workspace_patches._requested_workspace_mib() == 128  # the user's value wins
-    assert len(warned) == 1 and "below the 512 MiB" in warned[0]  # but a smaller one is warned about
-    monkeypatch.setenv(env, "1024")
-    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
-    assert len(warned) == 1
+    monkeypatch.delenv(env, raising=False)
+    gemm = _stub_te_gemm(monkeypatch)
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("before_train", params=_ws_params(moe_grouped_gemm=False)))
+    assert gemm.get_cublas_workspace_size_bytes() == 512 * 1024 * 1024
+    assert env not in os.environ  # not written
 
 
-def test_te_gemm_workspace_is_restored_after_train(monkeypatch):
-    """after_train removes the variable te_gemm_workspace wrote, so a later run in the same process
-    does not inherit 512 (or log it as the user's); a value the user set is never touched."""
+@pytest.mark.parametrize(
+    "value,applied", [("128", 128), ("1024", 1024), ("512", 512), ("512MiB", 512), ("0", 512), ("abc", 512)]
+)
+def test_te_gemm_workspace_user_value(value, applied, monkeypatch):
+    """Owner decision dec-cd39d9f0: 512 MiB when the variable is unset or invalid; an explicit
+    valid value is honoured, a smaller one included, with a warning. With a valid value the resize
+    is the base patch's (it asks for that value); this model's patch does not resize a second
+    time. The environment is left as the user set it."""
     import os
 
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as base,
+    )
     from primus.core.patches.patch_registry import PatchRegistry
 
     m = mistral_large4_args_patches
     env = m.ENV_VAR
-    restore = PatchRegistry.get("megatron.mistral_large4.te_gemm_workspace_restore")
-    assert restore.phase == "after_train"
-    monkeypatch.setitem(m._workspace_env_written, "value", None)
-    monkeypatch.setenv(env, "placeholder")
-    monkeypatch.delenv(env)
-    assert restore.condition(_ctx("after_train", params=_ws_params())) is False  # nothing written
+    warned, base_logged = [], []
+    monkeypatch.setattr(m, "warning_rank_0", lambda msg, *a, **k: warned.append(msg))
+    monkeypatch.setattr(m, "log_rank_0", lambda *a, **k: None)
+    monkeypatch.setattr(base, "warning_rank_0", lambda *a, **k: None)
+    monkeypatch.setattr(base, "log_rank_0", lambda msg, *a, **k: base_logged.append(msg))
+    monkeypatch.setenv(env, value)
+    gemm = _stub_te_gemm(monkeypatch)
+    valid = base.requested_workspace_mib(warn=False) is not None
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("before_train", params=_ws_params(moe_grouped_gemm=False)))
+    if valid:  # left to the base patch: nothing resized yet
+        assert gemm.get_cublas_workspace_size_bytes() == 64 * 1024 * 1024
+        assert not base_logged
+    base_patch = PatchRegistry.get(base.BASE_PATCH_ID)
+    assert base_patch.condition(None) is valid
+    if valid:
+        base.patch_te_gemm_workspace_size(None)
+    assert gemm.get_cublas_workspace_size_bytes() == applied * 1024 * 1024
+    assert os.environ[env] == value
+    assert any("below the 512 MiB" in x for x in warned) is (value == "128")
+    tag = base.BASE_PATCH_ID if valid else "megatron.mistral_large4.te_gemm_workspace"
+    assert base_logged and base_logged[-1].startswith(f"[Patch:{tag}]")
 
-    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
-    assert os.environ[env] == "512"
-    assert restore.condition(_ctx("after_train", params=_ws_params())) is True
-    other = _ws_params(model_type="glm5_next")
-    assert restore.condition(_ctx("after_train", params=other)) is False  # another model's run
-    m.patch_mistral_large4_te_gemm_workspace_restore(_ctx("after_train", params=_ws_params()))
-    assert env not in os.environ and m._workspace_env_written["value"] is None
 
-    # the user's own value: the setup patch keeps it and after_train leaves it
-    monkeypatch.setenv(env, "256")
-    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
-    assert restore.condition(_ctx("after_train", params=_ws_params())) is False
-    assert os.environ[env] == "256"
+def test_te_gemm_workspace_te_without_workspace_cache_warns(monkeypatch):
+    """Owner decision dec-b81a06eb: a TE with the size getter but no get_cublas_workspace warns
+    and skips (no exception) in this model's patch."""
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as base,
+    )
 
-    # a run that raised before after_train: the next run's setup removes the 512 it left (not
-    # taken as the user's) and writes its own default again
-    monkeypatch.delenv(env)
-    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
-    logged = []
-    monkeypatch.setattr(m, "log_rank_0", logged.append)
-    m.patch_mistral_large4_te_gemm_workspace(_ctx("setup", params=_ws_params(moe_grouped_gemm=False)))
-    assert any("left by an earlier run" in x for x in logged)
-    assert not any("set by the user" in x for x in logged)
-    assert os.environ[env] == "512" and m._workspace_env_written["value"] == "512"
-    m.patch_mistral_large4_te_gemm_workspace_restore(_ctx("after_train", params=_ws_params()))
-    assert env not in os.environ
+    m = mistral_large4_args_patches
+    warned = []
+    monkeypatch.setattr(base, "warning_rank_0", lambda msg, *a, **k: warned.append(msg))
+    monkeypatch.setattr(m, "warning_rank_0", lambda *a, **k: None)
+    monkeypatch.delenv(m.ENV_VAR, raising=False)
+    gemm = _stub_te_gemm(monkeypatch)
+    del gemm.get_cublas_workspace
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("before_train", params=_ws_params(moe_grouped_gemm=False)))
+    assert gemm.get_cublas_workspace_size_bytes() == 64 * 1024 * 1024
+    assert len(warned) == 1 and "get_cublas_workspace" in warned[0]
+
+
+def test_te_gemm_workspace_without_te_warns(monkeypatch):
+    """No TE GEMM module: a warning, no exception."""
+    import builtins
+
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as base,
+    )
+
+    m = mistral_large4_args_patches
+    warned = []
+    monkeypatch.setattr(base, "warning_rank_0", lambda msg, *a, **k: warned.append(msg))
+    monkeypatch.delenv(m.ENV_VAR, raising=False)
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "transformer_engine.pytorch.cpp_extensions" and fromlist and "gemm" in fromlist:
+            raise ModuleNotFoundError("No module named 'transformer_engine'", name="transformer_engine")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("before_train", params=_ws_params(moe_grouped_gemm=False)))
+    assert len(warned) == 1 and "megatron.mistral_large4.te_gemm_workspace" in warned[0]
+
+
+def test_te_gemm_workspace_without_te_and_a_set_value_warns_once(monkeypatch):
+    """Variable set and no TE: only the base patch's condition reports it; this model's patch
+    leaves the resize to the base patch and adds no second 'no TE' warning."""
+    import builtins
+
+    from primus.backends.megatron.patches.te_patches import (
+        hipblaslt_workspace_patches as base,
+    )
+    from primus.core.patches.patch_registry import PatchRegistry
+
+    m = mistral_large4_args_patches
+    warned = []
+    monkeypatch.setattr(base, "warning_rank_0", lambda msg, *a, **k: warned.append(msg))
+    monkeypatch.setattr(m, "warning_rank_0", lambda msg, *a, **k: warned.append(msg))
+    monkeypatch.setenv(m.ENV_VAR, "1024")
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "transformer_engine.pytorch.cpp_extensions" and fromlist and "gemm" in fromlist:
+            raise ModuleNotFoundError("No module named 'transformer_engine'", name="transformer_engine")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert PatchRegistry.get(base.BASE_PATCH_ID).condition(None) is False
+    m.patch_mistral_large4_te_gemm_workspace(_ctx("before_train", params=_ws_params(moe_grouped_gemm=False)))
+    assert len(warned) == 1
 
 
 @pytest.mark.parametrize("cp,seq,raises", [(1, 4096, False), (2, 2048, False), (2, 4096, True)])
@@ -3208,3 +3491,91 @@ def test_sparse_context_parallel_refused_at_build(cp, seq, raises):
             b.check_sparse_context_parallel(args, cfg)
     else:
         b.check_sparse_context_parallel(args, cfg)
+
+
+def test_consolidated_store_reads_without_memory_map(tmp_path, monkeypatch):
+    """ConsolidatedStore reads each tensor with pread into memory of its own (no safetensors memory
+    map, whose page faults on the 1 TB release end in SIGBUS under memory pressure): every dtype the
+    release stores (F8_E4M3, BF16, F32) and an empty tensor read back exactly as safetensors writes
+    them, from several threads at once, and the result does not alias the file."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from safetensors.torch import save_file
+
+    from primus.backends.megatron.checkpoint import (
+        native_loader_mistral_large4_text as conv,
+    )
+
+    g = torch.Generator().manual_seed(0)
+    tensors = {
+        "a.weight": torch.randn(256, 128, generator=g).to(torch.float8_e4m3fn),
+        "a.qscale_weight": torch.rand(2, 1, generator=g) + 0.5,
+        "b.weight": torch.randn(3, 5, generator=g).to(torch.bfloat16),
+        "c": torch.zeros(0, 4),
+    }
+    save_file(tensors, str(tmp_path / "consolidated-00001-of-00001.safetensors"))
+    (tmp_path / "consolidated.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {k: "consolidated-00001-of-00001.safetensors" for k in tensors}})
+    )
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "mistral_large4"}))
+    store = conv.ConsolidatedStore(str(tmp_path))
+
+    def no_memory_map(*a, **k):
+        raise AssertionError("read_raw went through safetensors.safe_open (a memory map)")
+
+    import safetensors
+
+    monkeypatch.setattr(safetensors, "safe_open", no_memory_map)
+    monkeypatch.setattr("safetensors.torch.safe_open", no_memory_map, raising=False)
+    assert store.stored_dtype("a.weight") == "F8_E4M3" and conv._stored_is_fp8(store, "a.weight")
+    assert not conv._stored_is_fp8(store, "b.weight")
+    with ThreadPoolExecutor(4) as pool:
+        got = dict(zip(tensors, pool.map(store.read_raw, tensors)))
+    for k, want in tensors.items():
+        assert got[k].dtype == want.dtype and got[k].shape == want.shape, k
+        assert torch.equal(got[k].view(torch.uint8), want.view(torch.uint8)), k
+    got["b.weight"].zero_()  # its own memory: writing it changes neither the file nor a later read
+    assert torch.equal(store.get("b.weight", torch.float32), tensors["b.weight"].float())
+    want = tensors["a.weight"].float() * tensors["a.qscale_weight"].repeat_interleave(128, 0)
+    assert torch.equal(conv.read_weight(store, "a.weight", torch.float32, set()), want)
+    with pytest.raises(KeyError):
+        store.get("missing", torch.float32)
+
+
+def test_parallel_torch_dist_writes_sets_thread_count_and_restores():
+    """Inside parallel_torch_dist_writes, the strategy save_checkpoint builds writes several files at
+    once (thread_count SAVE_WRITER_THREADS unless the caller sets it); the class is restored after."""
+    # a Megatron import error fails, as in this file's fixtures
+    from megatron.training import checkpointing
+
+    from primus.backends.megatron.checkpoint import (
+        native_loader_mistral_large4_text as conv,
+    )
+
+    original = checkpointing.TorchDistSaveShardedStrategy
+    with conv.parallel_torch_dist_writes():
+        assert checkpointing.TorchDistSaveShardedStrategy().thread_count == conv.SAVE_WRITER_THREADS
+        assert checkpointing.TorchDistSaveShardedStrategy(thread_count=2).thread_count == 2
+    assert checkpointing.TorchDistSaveShardedStrategy is original
+    with pytest.raises(RuntimeError):
+        with conv.parallel_torch_dist_writes(3):
+            raise RuntimeError("save failed")
+    assert checkpointing.TorchDistSaveShardedStrategy is original
+
+
+def test_normalize_layer_list_warns_when_it_cuts(caplog):
+    """A per-layer list longer than num_layers is cut (a depth-reduced run) with a warning that
+    names the dropped entries; a list of the right length is silent."""
+    import logging
+
+    from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layout import (
+        normalize_layer_list,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert normalize_layer_list([1, 0, 1, 0, 1], 4, "x") == [1, 0, 1, 0]
+    assert any("x has 5 entries" in r.getMessage() and "[1]" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert normalize_layer_list([1, 0], 2, "x") == [1, 0]
+    assert not caplog.records

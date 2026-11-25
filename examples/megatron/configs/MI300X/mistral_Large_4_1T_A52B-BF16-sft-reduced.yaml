@@ -49,6 +49,8 @@ modules:
       # hyper parameters
       train_iters: ${PRIMUS_TRAIN_ITERS:20}
       micro_batch_size: 1
+      # Rule for any layout: DP = GPUs / (TP x PP x CP) (EP does not change DP), and GBS must be a
+      # multiple of MBS x DP. Set PRIMUS_GBS when PRIMUS_TP / PRIMUS_PP / PRIMUS_CP or the node count change.
       global_batch_size: ${PRIMUS_GBS:8}
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
       lr: 1.0e-5
@@ -114,8 +116,8 @@ modules:
       # validated yet; PRIMUS_TURBO_DEEPEP=true opts in (EP8 inside one node)
       use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
       # one node (EP8, intra-node DeepEP): 64 CUs for dispatch / combine, the value most other
-      # MI300X / MI325X MoE examples use (not tuned for this model on these SKUs; MI355X's SFT
-      # example uses 160, the value validated there)
+      # MI300X / MI325X MoE examples use (not tuned for this model; MI355X's sft-reduced example
+      # uses 160, also untested with DeepEP for this model)
       turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPEP_NUM_CU:64}
       # not set: use_turbo_fused_act_with_probs (needs a Primus-Turbo whose swiglu_with_probs
       # accepts clamp_limit, which PrimusGroupedMLP passes) and moe_use_fused_router_with_aux_score (the

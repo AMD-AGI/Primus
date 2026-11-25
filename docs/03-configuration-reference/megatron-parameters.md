@@ -629,7 +629,7 @@ In `deterministic_mode` the model runs Transformer Engine's attention and RMSNor
 
 With `context_parallel_size` > 1 the model also runs Transformer Engine's core attention (patch `megatron.mistral_large4.turbo_attention_cp` sets `use_turbo_attention` to `false`, with a log line): Primus-Turbo attention runs context parallelism as Ulysses all-to-all, which does not match the p2p ring Megatron's MLA uses.
 
-When the routed experts run on TE GEMMs (not on Primus-Turbo's grouped GEMM: `SequentialMLP`, or TE's grouped GEMM), patch `megatron.mistral_large4.te_gemm_workspace` sets `PRIMUS_TE_GEMM_WORKSPACE_MIB` to `512` unless it is already set, so the base patch `megatron.te.hipblaslt_gemm_workspace` enlarges TE's hipBLASLt workspace (see §11.5).
+When the routed experts run on TE GEMMs (not on Primus-Turbo's grouped GEMM: `SequentialMLP`, or TE's grouped GEMM), patch `megatron.mistral_large4.te_gemm_workspace` (before_train) enlarges TE's hipBLASLt workspace to 512 MiB in process, through the code of the base patch `megatron.te.hipblaslt_gemm_workspace` (see §11.5); it does not write the environment. 512 MiB is the default when `PRIMUS_TE_GEMM_WORKSPACE_MIB` is unset (the fix for hipBLASLt error 6 on gfx950). An explicit valid value replaces the 512 MiB default, a smaller one included (with a warning that these GEMMs can then fail with hipBLASLt error 6); the request goes through the base patch's grow-only rule, so a value at or below the current workspace (TE's own default) changes nothing. An invalid value is ignored with a warning and the 512 MiB default applies.
 
 ---
 

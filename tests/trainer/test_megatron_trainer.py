@@ -1056,6 +1056,10 @@ class TestMegatronTrainer(PrimusUT):
         losses = [float(x) for x in re.findall(r"lm loss: ([0-9A-Za-z.+-]+)", stdout)]
         self.assertGreaterEqual(len(losses), 3, losses)
         self.assertTrue(all(math.isfinite(x) for x in losses), losses)
+        # gradient flows: a finite, non-zero grad norm every iteration
+        norms = [float(v) for v in re.findall(r"grad norm: (\S+?)(?=\s|\||$)", stdout)]
+        self.assertGreaterEqual(len(norms), 3, norms)
+        self.assertTrue(all(math.isfinite(v) and v > 0.0 for v in norms), norms)
         # the per-layer kinds the model was built with (each list on its own)
         self.assertIn("[Patch:megatron.mistral_large4.moe_layer_freq] -moe_layer_freq:[0, 1, 1, 1]", stdout)
         for part in (

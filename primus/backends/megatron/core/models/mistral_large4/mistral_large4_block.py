@@ -105,6 +105,7 @@ class MistralLarge4TransformerBlock(TransformerBlock):
                     f"layer {attn.layer_idx} reuses layer {attn.kv_source_idx}, not {self.shared_kv_layer}"
                 )
         self._set_source_position()
+        self._check_latent_reachable()
         first = self.layer_indices[0] if self.layer_indices else None
         self._stage_starts_on_shared = first is not None and config.indexer_types[first] == "shared"
 
@@ -136,6 +137,28 @@ class MistralLarge4TransformerBlock(TransformerBlock):
         has_source = self.shared_kv_layer is not None and bool(self.layer_indices)
         self._source_ran_before_stage = has_source and self.layer_indices[0] > self.shared_kv_layer
         self._source_ran_by_stage_end = has_source and self.layer_indices[-1] >= self.shared_kv_layer
+
+    def _check_latent_reachable(self) -> None:
+        """At build: every consumer layer of this stage (or virtual stage) can read the shared
+        latent, either from the source layer earlier in this stage or from the P2P carrier when the
+        source ran on an earlier stage. ``layer_indices`` are the layers this stage built, so the
+        check holds for any split: an even or uneven one (``decoder_first/last_pipeline_num_layers``,
+        ``pipeline_model_parallel_layout``) and interleaved (VPP) chunks, which the schedule runs
+        in layer order (chunk ``(rank p, vp v)`` sends to ``(p + 1, v)``, the last rank's to
+        ``(0, v + 1)``), so the latent travels in the P2P tensor of every transfer after the source."""
+        src = self.shared_kv_layer
+        # stage-level facts: the source is in this stage, or the carrier brings its latent here
+        if src is None or src in self.layer_indices or (self.carrier and self._source_ran_before_stage):
+            return
+        consumer = next(
+            (i for i in self.layer_indices if i > src and self.config.kv_source_layer(i) == src), None
+        )
+        if consumer is not None:
+            raise RuntimeError(
+                f"Mistral Large 4: layer {consumer} reads layer {src}'s KV latent, which "
+                "runs on another pipeline stage, but this layout does not carry the latent between "
+                "stages (kv_carrier_needed is False)"
+            )
 
     def _pack_latent(self, latent, s, b, h):
         """``[s, b, r]`` latent -> ``[n, b, h]`` rows, each sample's ``s * r`` values dense, the
@@ -368,7 +391,7 @@ class MistralLarge4TransformerBlock(TransformerBlock):
 
     def _plan(self):
         """``_chunks()`` with, per chunk, its layers, whether one consumes / stores the shared
-        latent, and the top-k sources it reads from earlier chunks. Built-time facts only
+        latent, and the top-k sources it reads from earlier chunks. Build-time facts only
         (layers, recompute settings), so computed once per mode (train / eval) and cached."""
         cache = self.__dict__.setdefault("_plan_cache", {})
         key = bool(self.training)
@@ -448,7 +471,7 @@ class MistralLarge4TransformerBlock(TransformerBlock):
                         h, new_lat = self._run_layer(
                             layer, h, lat, ctx, attention_mask, packed_seq_params, padding_mask
                         )
-                        if layer.self_attention.stores_kv:
+                        if new_lat is not None:  # a layer that stores its latent (_run_layer)
                             lat = new_lat
                     return (h, lat) if _stores else h
 

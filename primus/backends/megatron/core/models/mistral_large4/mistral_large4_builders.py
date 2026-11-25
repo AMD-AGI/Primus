@@ -8,6 +8,13 @@
 
 import copy
 
+from megatron.core.transformer.enums import LayerType
+from megatron.core.transformer.pipeline_parallel_layer_layout import (
+    PipelineParallelLayerLayout,
+)
+from megatron.core.transformer.transformer_block import get_num_layers_to_build
+from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
+
 from primus.backends.megatron.core.models.mistral_large4.mistral_large4_layer_specs import (
     get_mistral_large4_decoder_block_spec,
 )
@@ -87,14 +94,13 @@ def mistral_large4_builder(args, pre_process, post_process, vp_stage=None, confi
     from megatron.training import print_rank_0  # see mistral_large4_config_from_args
 
     print_rank_0("[Primus:Mistral-Large-4] building MistralLarge4Model...")
-    if config is not None and not isinstance(config, MistralLarge4TransformerConfig):
-        # Megatron's training loop passes the generic config it built from args; this model needs
-        # its own class (per-layer lists, indexer), rebuilt from the same args
-        print_rank_0(
-            f"[Primus:Mistral-Large-4] rebuilding {type(config).__name__} as MistralLarge4TransformerConfig"
-        )
-        config = None
-    if config is None:
+    if not isinstance(config, MistralLarge4TransformerConfig):
+        if config is not None:
+            # Megatron's training loop passes the generic config it built from args; this model
+            # needs its own class (per-layer lists, indexer), rebuilt from the same args
+            print_rank_0(
+                f"[Primus:Mistral-Large-4] rebuilding {type(config).__name__} as MistralLarge4TransformerConfig"
+            )
         config = mistral_large4_config_from_args(args)
     print_rank_0(
         "[Primus:Mistral-Large-4] per-layer layout: "
@@ -107,7 +113,7 @@ def mistral_large4_builder(args, pre_process, post_process, vp_stage=None, confi
     check_position_layout(args)
     check_sparse_context_parallel(args, config)
     check_indexer_source(args, config)
-    check_stage_starts(config, args)
+    check_stage_starts(args, config)
     if getattr(args, "spec", None) is not None:
         # the block spec carries the per-layer NoPE / indexer / KV-sharing layout: a generic layer spec
         # would build another model
@@ -155,20 +161,20 @@ def freeze_routed_experts(model) -> int:
     return n
 
 
-def _runs_sparse(args, cfg) -> bool:
+def _runs_sparse(args, config) -> bool:
     """Whether ``args.seq_length`` can run the sparse DSA path (sequence > ``index_topk``; the
     sequence length bounds every document, packed or not)."""
-    return int(getattr(args, "seq_length", 0) or 0) > int(cfg.index_topk)
+    return int(getattr(args, "seq_length", 0) or 0) > int(config.index_topk)
 
 
-def check_sparse_context_parallel(args, cfg) -> None:
+def check_sparse_context_parallel(args, config) -> None:
     """At build time, before any checkpoint is loaded: the sparse DSA path (seq_length >
     index_topk) does not run with context parallelism; the block's first sparse forward refuses it
     too, after the whole model is built and loaded. A shorter seq_length runs dense attention with CP."""
     cp = int(getattr(args, "context_parallel_size", 1) or 1)
-    if cp > 1 and _runs_sparse(args, cfg):
+    if cp > 1 and _runs_sparse(args, config):
         raise NotImplementedError(
-            f"Mistral Large 4 DSA sparse attention (seq_length {args.seq_length} > index_topk {cfg.index_topk}) "
+            f"Mistral Large 4 DSA sparse attention (seq_length {args.seq_length} > index_topk {config.index_topk}) "
             f"with context_parallel_size {cp} is not supported; use context_parallel_size 1 or "
             "seq_length <= index_topk"
         )
@@ -183,13 +189,7 @@ def stage_start_layers(config) -> list:
     layout = getattr(config, "pipeline_model_parallel_layout", None)
     starts = []
     if layout is not None:
-        from megatron.core.transformer.enums import LayerType
-
         if isinstance(layout, (str, list)):
-            from megatron.core.transformer.pipeline_parallel_layer_layout import (
-                PipelineParallelLayerLayout,
-            )
-
             layout = PipelineParallelLayerLayout(layout, pp)
 
         offset = 0
@@ -202,9 +202,6 @@ def stage_start_layers(config) -> list:
         return starts
     if pp == 1:
         return [0] if config.num_layers else []
-    from megatron.core.transformer.transformer_block import get_num_layers_to_build
-    from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
-
     vp_stages = range(int(vpp)) if vpp else [None]
     for v in vp_stages:
         for p in range(pp):
@@ -213,7 +210,7 @@ def stage_start_layers(config) -> list:
     return starts
 
 
-def check_stage_starts(config, args) -> None:
+def check_stage_starts(args, config) -> None:
     """Before the model is built (no stage is allocated yet): a pipeline stage (or virtual
     stage) whose first layer is a ``shared`` indexer layer has no top-k to reuse, which the sparse
     path (sequence > index_topk) needs. Refuse that layout when ``seq_length`` can exceed
@@ -246,7 +243,7 @@ def valid_even_pp_sizes(config) -> list:
     ]
 
 
-def check_indexer_source(args, cfg) -> None:
+def check_indexer_source(args, config) -> None:
     """Build-time half of the frozen-indexer guard (the other half,
     ``MistralLarge4Attention._check_indexer_loaded``, checks at the first sparse forward that the
     indexer weights are not their init values, which also catches a run resumed from its own
@@ -258,7 +255,7 @@ def check_indexer_source(args, cfg) -> None:
     (``load`` / ``pretrained_checkpoint``) that selection would come from a random, never-trained
     indexer for the whole run. Refuse it. ``seq_length`` <= ``index_topk`` is dense causal
     attention (every key is selected), so from-scratch training is accepted there."""
-    if not _runs_sparse(args, cfg):
+    if not _runs_sparse(args, config):
         return
     if holds_megatron_checkpoint(getattr(args, "load", None)) or holds_megatron_checkpoint(
         getattr(args, "pretrained_checkpoint", None)
@@ -283,11 +280,11 @@ def check_indexer_source(args, cfg) -> None:
         )
         return
     raise ValueError(
-        f"Mistral Large 4: seq_length {args.seq_length} > index_topk {cfg.index_topk} runs DSA sparse "
+        f"Mistral Large 4: seq_length {args.seq_length} > index_topk {config.index_topk} runs DSA sparse "
         "attention, whose top-k comes from the frozen indexer (not trained, as in the reference). "
         "Without a checkpoint (load / pretrained_checkpoint) the indexer is random and the "
         "selection never improves. Load the converted release, or train from scratch with "
-        f"seq_length <= {cfg.index_topk} (dense causal attention); allow_untrained_indexer: true "
+        f"seq_length <= {config.index_topk} (dense causal attention); allow_untrained_indexer: true "
         "accepts it for code-path tests."
     )
 
@@ -312,10 +309,9 @@ def _experts_on_expert_groups(args) -> bool:
     Mistral Large 4 keeps its experts on the expert groups at every EP size in that case (with
     EP1 and ETP == TP the expert data-parallel group is the data-parallel group: same
     reductions)."""
-    return not (
-        getattr(args, "use_distributed_optimizer", False)
-        or getattr(args, "use_megatron_fsdp", False)
-        or getattr(args, "use_torch_fsdp2", False)
+    return not any(
+        bool_flag(getattr(args, key, None), key, False)
+        for key in ("use_distributed_optimizer", "use_megatron_fsdp", "use_torch_fsdp2")
     )
 
 

@@ -25,7 +25,9 @@ class ModelFamily:
 
     A family either names a ``builder`` -- upstream's (``gpt``, ``mamba``) or,
     with ``package`` set, its own (``inkling``, whose model takes no
-    GPTModel-style arguments) -- or declares the pieces the shared builder in
+    GPTModel-style arguments; ``mistral_large4``, whose builder also runs its
+    build-time layout checks and expert placement around the build) -- or
+    declares the pieces the shared builder in
     ``builder.py`` assembles. A Primus family with its own builder still names
     its ``config_class``, which ``schema_check`` reads.
 

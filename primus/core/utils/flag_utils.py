@@ -7,8 +7,7 @@
 """Strict yes/no parsing of config values (a YAML value from an environment substitution other
 than true/false stays a string, which plain truthiness would read as True).
 
-Shared by all models; ``muse_spark.model_types`` re-exports ``bool_flag``, ``TRUE_TEXT`` and
-``FALSE_TEXT``."""
+Shared by all models."""
 
 import numbers
 
@@ -23,13 +22,14 @@ def bool_flag(value, key, default=False) -> bool:
 
     * None or a blank string (unset, or an unset env-substituted value): ``default``, parsed by
       these same rules (a string default "false" is False; a None or blank default is False);
-    * a bool, or a numpy bool (``np.bool_``): as is;
+    * a bool: as is; a numpy bool (``np.bool_``): converted with ``bool()``;
     * the ints 0 / 1: False / True;
     * a string: true for 1 / true / yes / on, false for 0 / false / no / off (any case, surrounding
       whitespace stripped).
 
-    Anything else (e.g. a typo such as ``"ture"``, ``2``, ``1.0``) raises ValueError naming ``key``:
-    a typo must not silently turn a feature on or off."""
+    Anything else (e.g. a typo such as ``"ture"``, ``2``, ``1.0``) raises ValueError naming
+    ``key``: a typo must not silently turn a feature on or off. ``default`` is only parsed when
+    the value is unset."""
     if value is None or (isinstance(value, str) and not value.strip()):
         # the default is parsed by the same rules (a string default "false" is False)
         return bool_flag(default, key, False)

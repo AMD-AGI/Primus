@@ -8,7 +8,10 @@
 
 ``MistralLarge4Attention`` subclasses :class:`MLASelfAttention`, so its projections are the
 backend's TE column/row-parallel linears and its core attention is Megatron's (TE) core
-attention (selective recompute, CP and TP come from there). On top of MLA it adds:
+attention (selective recompute, CP and TP come from there; CP only on the dense path: the sparse
+DSA path, seq_length > index_topk, builds its masks on the local sequence and is refused with
+context_parallel_size > 1, at build by ``check_sparse_context_parallel`` and again at the first
+sparse forward). On top of MLA it adds:
 
 * NoPE layers: built from ``config.layer_config(i)`` (``qk_pos_emb_head_dim = 0``,
   ``qk_head_dim = 128``), so ``linear_kv_down_proj`` is ``[512, h]`` and no rope is applied;
@@ -403,7 +406,7 @@ class MistralLarge4Attention(MLASelfAttention):
     def _keep(self, hidden_states, ctx):
         """``[b, s, s]`` keep mask of this layer's top-k: a full-indexer layer runs its indexer;
         a ``shared`` layer reuses the mask its source layer built (same top-k, built once)."""
-        if self.indexer is not None:
+        if self.has_indexer:
             x = self._sp_gather(hidden_states)
             s = x.size(0)
             causal = self._cached(ctx, "causal_add", lambda: _causal_mask(s, s, x.device)).to(x.device)

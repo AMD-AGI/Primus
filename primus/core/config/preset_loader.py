@@ -20,27 +20,24 @@ class PresetLoader:
       preset = PresetLoader.load("llama2_7B", framework="megatron")
     """
 
+    # file suffixes a preset name may carry; any other name gets .yaml
+    _SUFFIXES = (".yaml", ".yml")
+
     @staticmethod
     def preset_path(name: Union[str, os.PathLike], framework: str, config_type: str = "models") -> str:
         """
-        The absolute path of primus/configs/<config_type>/<framework>/<name>[.yaml], the file
-        ``load`` reads (it may not exist). ``name`` is a str or a str ``os.PathLike``; any other
-        type (None, an int, bytes) raises TypeError. ``name`` may use
-        ``..`` to reach another directory under primus/configs (module configs extend
-        ``../module_base.yaml``), so the check is containment in primus/configs, not in
-        <config_type>/<framework>; a path outside primus/configs raises ValueError. The path is
-        made absolute, not resolved through symlinks.
+        Absolute path of primus/configs/<config_type>/<framework>/<name>[.yaml] (the file ``load``
+        reads; it may not exist). A name ending in .yaml or .yml is used as is; any other gets .yaml.
+        Raises TypeError for a name that is not a str or str os.PathLike, and ValueError for a path
+        outside primus/configs.
         """
         name = os.fspath(name) if isinstance(name, os.PathLike) else name
         if not isinstance(name, str):
             raise TypeError(
                 f"[Primus] preset name must be a str or a str os.PathLike, not {type(name).__name__}"
             )
-        # Handle suffix
-        if name.endswith(".yaml") or name.endswith(".yml"):
-            filename = name
-        else:
-            filename = f"{name}.yaml"
+        suffix = next((s for s in PresetLoader._SUFFIXES if name.endswith(s)), None)
+        filename = name if suffix else f"{name}.yaml"
 
         # Resolve base directory: primus/configs
         # MODELS_ROOT.__file__ -> primus/configs/models/__init__.py
@@ -56,7 +53,7 @@ class PresetLoader:
         return abs_preset_path
 
     @staticmethod
-    def load(name: str, framework: str, config_type: str = "models") -> Dict:
+    def load(name: Union[str, os.PathLike], framework: str, config_type: str = "models") -> Dict:
         """
         Load:
             primus/configs/<config_type>/<framework>/<name>[.yaml]

@@ -30,14 +30,14 @@ def warnings(monkeypatch):
 def test_unset_is_silent(monkeypatch, warnings):
     monkeypatch.delenv(patches.ENV_VAR, raising=False)
 
-    assert patches._requested_workspace_mib() is None
+    assert patches.requested_workspace_mib() is None
     assert warnings == []
 
 
 def test_a_whole_number_of_mib_is_used(monkeypatch, warnings):
     monkeypatch.setenv(patches.ENV_VAR, " 128 ")
 
-    assert patches._requested_workspace_mib() == 128
+    assert patches.requested_workspace_mib() == 128
     assert warnings == []
 
 
@@ -45,7 +45,7 @@ def test_a_whole_number_of_mib_is_used(monkeypatch, warnings):
 def test_a_malformed_value_warns_and_is_ignored(monkeypatch, warnings, raw):
     monkeypatch.setenv(patches.ENV_VAR, raw)
 
-    assert patches._requested_workspace_mib() is None
+    assert patches.requested_workspace_mib() is None
     assert len(warnings) == 1
     assert repr(raw) in warnings[0]
 
@@ -121,15 +121,69 @@ def test_no_te_gemm_module_warns_and_skips(monkeypatch, warnings, name):
     monkeypatch.setenv(patches.ENV_VAR, "128")
     _fail_te_gemm_import(monkeypatch, ModuleNotFoundError(f"No module named '{name}'", name=name))
 
+    # the condition warns once and does not select the patch (it is not reported as applied)
     assert not patches._needs_te_gemm_workspace_patch(None)
     assert len(warnings) == 1 and "no Transformer Engine PyTorch GEMM module" in warnings[0]
+
+
+def test_te_package_without_gemm_submodule_is_absent_not_broken(monkeypatch, warnings):
+    """A TE package without cpp_extensions.gemm raises a plain ImportError naming the parent
+    package: reported as no TE GEMM module, not as a broken install."""
+    monkeypatch.setenv(patches.ENV_VAR, "128")
+    exc = ImportError(
+        "cannot import name 'gemm' from 'transformer_engine.pytorch.cpp_extensions'",
+        name="transformer_engine.pytorch.cpp_extensions",
+    )
+    _fail_te_gemm_import(monkeypatch, exc)
+
+    patches.patch_te_gemm_workspace_size(None)
+    assert len(warnings) == 1 and "no Transformer Engine PyTorch GEMM module" in warnings[0]
+    assert "Traceback" not in warnings[0] and "HIPBLASLT Error: 6" in warnings[0]
+
+
+def test_enlarge_is_callable_without_the_variable(monkeypatch, te_gemm):
+    """A model patch enlarges the workspace in process, without writing the variable."""
+    monkeypatch.delenv(patches.ENV_VAR, raising=False)
+    patches.enlarge_te_gemm_workspace(te_gemm, 512, "a model default")
+
+    assert te_gemm.get_cublas_workspace() == 512 * MIB
+    assert patches.ENV_VAR not in __import__("os").environ
+
+
+@pytest.mark.parametrize("mib", [None, 0, -5, 1.5, True, "512"])
+def test_enlarge_warns_and_skips_a_bad_size(te_gemm, warnings, mib):
+    """Never raises: a bad size warns and changes nothing."""
+    getter = te_gemm.get_cublas_workspace_size_bytes
+    patches.enlarge_te_gemm_workspace(te_gemm, mib, "a test")
+    assert te_gemm.get_cublas_workspace_size_bytes is getter
+    assert len(warnings) == 1 and "positive whole number" in warnings[0]
+
+
+@pytest.mark.parametrize("name", patches._WORKSPACE_API)
+def test_enlarge_warns_and_skips_a_module_without_the_workspace_api(te_gemm, warnings, name):
+    """The action checks the same attributes as the gate (te_gemm_module) and warns, never raises."""
+    delattr(te_gemm, name)
+    getter = getattr(te_gemm, "get_cublas_workspace_size_bytes", None)
+    patches.enlarge_te_gemm_workspace(te_gemm, 512, "a test")
+    assert getattr(te_gemm, "get_cublas_workspace_size_bytes", None) is getter
+    assert len(warnings) == 1 and "not TE's GEMM module" in warnings[0] and name in warnings[0]
+
+
+def test_base_patch_with_size_getter_but_no_workspace_cache_warns(monkeypatch, te_gemm, warnings):
+    """A TE with the size getter but no get_cublas_workspace: the base patch warns and skips."""
+    del te_gemm.get_cublas_workspace
+    getter = te_gemm.get_cublas_workspace_size_bytes
+    monkeypatch.setenv(patches.ENV_VAR, "128")
+    patches.patch_te_gemm_workspace_size(None)
+    assert te_gemm.get_cublas_workspace_size_bytes is getter
+    assert len(warnings) == 1 and "get_cublas_workspace" in warnings[0]
 
 
 def test_te_without_the_size_getter_warns(monkeypatch, te_gemm, warnings):
     del te_gemm.get_cublas_workspace_size_bytes
     monkeypatch.setenv(patches.ENV_VAR, "128")
 
-    assert not patches._needs_te_gemm_workspace_patch(None)
+    patches.patch_te_gemm_workspace_size(None)
     assert len(warnings) == 1 and "get_cublas_workspace_size_bytes" in warnings[0]
 
 
@@ -152,19 +206,19 @@ def test_te_without_the_size_getter_warns(monkeypatch, te_gemm, warnings):
     ],
 )
 def test_a_broken_te_install_is_logged_and_skipped(monkeypatch, warnings, exc, match):
-    """Any other import failure (a broken install): the condition does not raise (it runs outside
-    the runner's error handling), skips the patch as before, and logs the failure with its
-    traceback instead of skipping silently."""
+    """Any other import failure (a broken install): the patch does not raise, changes nothing, and
+    logs the failure once with its traceback instead of skipping silently."""
     monkeypatch.setenv(patches.ENV_VAR, "128")
     _fail_te_gemm_import(monkeypatch, exc)
 
-    assert patches._needs_te_gemm_workspace_patch(None) is False
+    patches.patch_te_gemm_workspace_size(None)
     assert len(warnings) == 1 and "fails to import" in warnings[0]
     assert match in warnings[0] and "Traceback" in warnings[0]
 
 
 def test_a_broken_te_install_does_not_stop_the_patch_phase(monkeypatch, warnings):
-    """Through run_patches: the patch is skipped with a warning and the phase goes on."""
+    """Through run_patches: the patch is not selected (not reported as applied), one warning
+    names the failure, and the phase goes on."""
     from collections import defaultdict
 
     from primus.core.patches import patch_runner
@@ -189,5 +243,45 @@ def test_a_broken_te_install_does_not_stop_the_patch_phase(monkeypatch, warnings
         enabled_ids=["megatron.te.hipblaslt_gemm_workspace"],
     )
 
-    assert applied == 0
-    assert any("undefined symbol" in w for w in warnings)
+    assert applied == 0  # the condition skipped it; nothing raised
+    assert sum("undefined symbol" in w for w in warnings) == 1
+
+
+def _unreadable_size(te_gemm):
+    def broken():
+        raise RuntimeError("no device")
+
+    te_gemm.get_cublas_workspace_size_bytes = broken
+    return broken
+
+
+def test_unreadable_size_installs_a_request_above_every_te_default(monkeypatch, te_gemm):
+    """When the current size cannot be read, a request of at least the largest TE default
+    cannot shrink it: it is installed and logged as 'unknown -> N MiB'."""
+    logged = []
+    monkeypatch.setattr(patches, "log_rank_0", lambda msg, *a, **k: logged.append(msg))
+    _unreadable_size(te_gemm)
+    patches.enlarge_te_gemm_workspace(te_gemm, 128, "a test")
+    assert te_gemm.get_cublas_workspace_size_bytes() == 128 * MIB
+    assert te_gemm.get_cublas_workspace() == 128 * MIB
+    assert "unknown -> 128 MiB" in logged[-1]
+
+
+@pytest.mark.parametrize("mib", [4, 8, 32])
+def test_unreadable_size_never_installs_a_smaller_request(te_gemm, warnings, mib):
+    """A request below the largest TE default could shrink TE's workspace (or one another patch
+    set): with the size unknown it is skipped with a warning, never installed."""
+    broken = _unreadable_size(te_gemm)
+    patches.enlarge_te_gemm_workspace(te_gemm, mib, "a test")
+    assert te_gemm.get_cublas_workspace_size_bytes is broken
+    assert len(warnings) == 1 and "cannot be read" in warnings[0]
+
+
+def test_log_lines_carry_the_patch_id(monkeypatch, te_gemm):
+    """Resize lines are tagged [Patch:<id>] of the patch that asks (the base one by default)."""
+    logged = []
+    monkeypatch.setattr(patches, "log_rank_0", lambda msg, *a, **k: logged.append(msg))
+    patches.enlarge_te_gemm_workspace(te_gemm, 128, "a test")
+    patches.enlarge_te_gemm_workspace(te_gemm, 128, "a test", "megatron.some_model.ws")
+    assert logged[0].startswith("[Patch:megatron.te.hipblaslt_gemm_workspace]")
+    assert logged[1].startswith("[Patch:megatron.some_model.ws]")

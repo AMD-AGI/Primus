@@ -110,6 +110,8 @@ def get_mistral_large4_layer_spec(config, is_moe: bool, backend=None) -> ModuleS
     kv_down = backend.column_parallel_linear() if local else backend.linear()
     attention = ModuleSpec(
         module=MistralLarge4Attention,
+        # kv_layernorm is built by MistralLarge4Attention itself from this param (not from the MLA
+        # submodule slot below, left IdentityOp), so a KV-consumer layer can skip it
         params={
             "attn_mask_type": AttnMaskType.causal,
             "kv_layernorm": kv_norm,

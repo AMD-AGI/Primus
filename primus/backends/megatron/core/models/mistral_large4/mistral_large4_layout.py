@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import logging
+import numbers
 import os
+from collections.abc import Sequence
 from typing import List
 
 # torch and the standard library only (no Megatron): the module stays importable before Megatron
@@ -172,27 +175,45 @@ def text_config(cfg: dict) -> dict:
 
 
 def normalize_layer_list(value, num_layers: int, name: str, kind=int, default=None) -> List:
-    """A per-layer list from a list, a python-literal string, or None (``default`` per layer).
+    """A per-layer list from a sequence (a list, a tuple, an OmegaConf ListConfig), a python-literal
+    string, or None or a blank string (``default`` per layer; a blank string is an unset
+    env-substituted value, as for ``bool_flag``). Integer entries of any integral type (e.g. numpy
+    ints) are taken as int.
 
     A longer list is cut to ``num_layers`` (a depth-reduced run takes the release's first
-    layers); a shorter one, or anything that is not a list or tuple, raises ValueError naming
-    ``name``."""
+    layers), with a warning naming the dropped entries, so a list written for another layer count
+    does not go unnoticed; a shorter one, or anything that is not a sequence, raises ValueError
+    naming ``name``."""
+    if isinstance(value, str) and not value.strip():
+        value = None
     if value is None:
         if default is None:
             raise ValueError(f"{name}: not given and no default per layer")
-        value = [default(i) if callable(default) else default for i in range(num_layers)]
+        value = [default(i) for i in range(num_layers)] if callable(default) else [default] * num_layers
     if isinstance(value, str):
         try:
             value = ast.literal_eval(value)
         except (ValueError, SyntaxError) as e:
             raise ValueError(f"{name}: {value!r} is not a list literal") from e
-    if not isinstance(value, (list, tuple)):
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise ValueError(f"{name}: expected a per-layer list, got {value!r}")
-    if not all(isinstance(v, kind) and not isinstance(v, bool) for v in value):
-        raise ValueError(f"{name}: entries of {value!r} are not all {kind.__name__}")
     value = list(value)
+    entry_type = numbers.Integral if kind is int else kind
+    if not all(isinstance(v, entry_type) and not isinstance(v, bool) for v in value):
+        raise ValueError(f"{name}: entries of {value!r} are not all {kind.__name__}")
+    if kind is int:
+        value = [int(v) for v in value]
     if len(value) < num_layers:
         raise ValueError(f"{name} has {len(value)} entries, fewer than num_layers={num_layers}")
+    if len(value) > num_layers:
+        logging.getLogger(__name__).warning(
+            "%s has %d entries; using the first %d (num_layers) and dropping %s. Expected for a "
+            "depth-reduced run; otherwise the list was written for another layer count",
+            name,
+            len(value),
+            num_layers,
+            value[num_layers:],
+        )
     return value[:num_layers]
 
 
@@ -213,12 +234,13 @@ def moe_layer_freq_list(first_k_dense_replace, num_layers: int, num_experts) -> 
 def kv_sharing_active(kv_source_layers, num_layers: int, no_rope_layers=None) -> bool:
     """Whether any of the first ``num_layers`` layers reuses another layer's latent KV. The list is
     checked by ``check_kv_sources``, with the rope / NoPE kind rule when ``no_rope_layers`` is given
-    (as the model config checks it)."""
-    if kv_source_layers is None:
+    (as the model config checks it). None or a blank string is unset (no sharing), as for the
+    model config (``normalize_layer_list``)."""
+    if kv_source_layers is None or (isinstance(kv_source_layers, str) and not kv_source_layers.strip()):
         return False
     n = int(num_layers)
     nope = None
-    if no_rope_layers is not None:
+    if no_rope_layers is not None and not (isinstance(no_rope_layers, str) and not no_rope_layers.strip()):
         # the model config's check too: 0 / 1 values only
         nope = check_layer_list(
             "no_rope_layers", normalize_layer_list(no_rope_layers, n, "no_rope_layers", int)
@@ -235,6 +257,13 @@ def kv_carrier_needed(
     The decoder block (sender and receiver of the latent) and the PP shape patch (the size of
     the receive buffer) both decide with this one function, both passing ``no_rope_layers`` so the
     lists are checked by the model config's rule.
+
+    It does not depend on how the layers are split: with PP > 1 every P2P tensor of the run
+    carries the rows (zeros before the source layer has run), so an uneven split
+    (``decoder_first/last_pipeline_num_layers``), a ``pipeline_model_parallel_layout`` and VPP
+    chunks all get the same wire shape. Each built stage checks that its consumer layers can reach
+    the latent (``MistralLarge4TransformerBlock._check_latent_reachable``); the unit tests run the
+    carrier through even, uneven, VPP and layout splits.
     """
     return int(pipeline_model_parallel_size or 1) > 1 and kv_sharing_active(
         kv_source_layers, num_layers, no_rope_layers

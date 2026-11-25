@@ -45,6 +45,8 @@ except ImportError:  # pragma: no cover - CPU-only environments
 
 __all__ = ["lerope_rotary", "lerope_rotary_reference", "fused_lerope_available"]
 
+# rows (heads x rope rows) per program; backward writes cdiv(rows, BLOCK_ROWS) partial
+# inv_freq-gradient rows per position (s * that in total); 16 keeps register use low for dim 64
 BLOCK_ROWS = 16
 
 
@@ -114,7 +116,7 @@ if HAVE_TRITON:
         base = (s * rows_per_pos + r)[:, None] * (2 * F)
         dye = tl.load(DY + base + f[None, :], mask=m, other=0.0).to(tl.float32)
         dyo = tl.load(DY + base + F + f[None, :], mask=m, other=0.0).to(tl.float32)
-        # x = R^T y: dx0 = dye cos + dyo sin, dx1 = -dye sin + dyo cos
+        # dx = R^T dy: dx0 = dye cos + dyo sin, dx1 = dyo cos - dye sin
         dx0 = dye * c + dyo * sn
         dx1 = dyo * c - dye * sn
         tl.store(DX + base + 2 * f[None, :], dx0.to(DX.dtype.element_ty), mask=m)
@@ -129,7 +131,8 @@ if HAVE_TRITON:
 
 
 def fused_lerope_available(x: torch.Tensor) -> bool:
-    """Whether ``lerope_rotary`` runs the Triton kernel for ``x`` (a GPU tensor, Triton present)."""
+    """Whether the Triton kernel can run for ``x``: a GPU tensor and Triton present.
+    ``lerope_rotary`` still uses the eager reference for an empty ``x``."""
     return HAVE_TRITON and x.is_cuda
 
 
@@ -160,6 +163,7 @@ class _LeRoPEFn(torch.autograd.Function):
         need_dinv = ctx.needs_input_grad[2]
         ctx.save_for_backward(xc if need_dinv else None, pos, inv)
         ctx.x_meta = (xc.shape, xc.dtype, xc.device)
+        ctx.dims = (s, rows, F)  # checked by _shape above
         ctx.inv_dtype = inv_freq.dtype
         ctx.inv_device = inv_freq.device
         return y
@@ -171,7 +175,7 @@ class _LeRoPEFn(torch.autograd.Function):
         need_dinv = ctx.needs_input_grad[2]
         dyc = dy.contiguous()
         dx = torch.empty(shape, dtype=dtype, device=device)
-        s, rows, F = _shape(dx)
+        s, rows, F = ctx.dims
         if xc is None:  # not read by the kernel without NEED_DINV: any pointer of the right dtype
             xc = dyc
         block_f = triton.next_power_of_2(F)
