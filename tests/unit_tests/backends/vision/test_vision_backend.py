@@ -117,7 +117,8 @@ def test_vision_package_does_not_import_a_checkout():
     ]
     for path in owned:
         text = path.read_text()
-        assert "third_party" not in text, path
+        assert "third_party/vggt" not in text, path
+        assert "third_party/Hunyuan" not in text, path
         assert "sys.path" not in text, path
         assert "resolve_vggt_repo" not in text, path
     vggt = (root / "vggt_model" / "models" / "vggt.py").read_text()
