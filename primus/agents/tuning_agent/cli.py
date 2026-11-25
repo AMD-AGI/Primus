@@ -85,7 +85,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--seed-budget", type=int, default=12, help="Max seed candidates evaluated before the LLM takes over."
     )
+    from primus.agents.projection_agent.cli import add_op_bringup_args
+
+    # Bringing up ops writes and runs code: the search only reports them unless asked.
+    add_op_bringup_args(p, default="report")
     return p.parse_args(argv)
+
+
+def _projection_agent(args, agent_cfg, eval_mode: str, primus_root: Path):
+    """The projection agent that brings up ops this search meets unmodeled."""
+    from primus.agents.projection_agent.cli import agent_from_args
+
+    if args.op_coder == "auto" and not args.op_coder_cmd:
+        if eval_mode == "dry":
+            args.op_coder = "none"
+        elif args.op_bringup == "auto" and not args.op_llm_model:
+            # Without a model of its own the coder shares the search's LLM.
+            try:
+                from .agent import configure_dspy
+
+                configure_dspy(agent_cfg)
+            except Exception as e:
+                print(f"[tuning-agent] no LLM for op bring-up ({e})")
+    return agent_from_args(
+        args, out_dir=agent_cfg.out_dir, gpu_arch=agent_cfg.target_cluster.gpu_arch, primus_root=primus_root
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -148,6 +172,19 @@ def main(argv: list[str] | None = None) -> int:
             "marked illegal. Edit the target-cluster YAML to enable.",
             file=sys.stderr,
         )
+
+    # ── op coverage: the projection agent brings up unmodeled ops ───────
+    op_bringup = _projection_agent(args, agent_cfg, eval_mode, primus_root)
+    if op_bringup is not None:
+        for r in op_bringup.ensure_ops(workload_yaml, arch=arch):
+            scratchpad.append(
+                f"[op-bringup] {r.op_id}: {r.status} ({r.message})"
+                + (f"; model {r.op_name}" if r.op_name else "")
+                + (f"; context {r.context_path}" if r.status in ("context_only", "failed") else "")
+            )
+        evaluator.op_gap_handler = lambda gaps: op_bringup.handle_gaps(gaps, workload_yaml, arch=arch)
+        evaluator.handled_op_gaps.update(op_bringup.gaps_seen)
+        evaluator.op_bringup = op_bringup
 
     # ── seed evaluation ─────────────────────────────────────────────────
     if args.agent_only:
@@ -252,11 +289,16 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "best": best.as_dict(),
                     "trials_total": len(history.trials),
+                    **({"op_bringup": op_bringup.summary()} if op_bringup else {}),
                 },
                 indent=2,
                 default=str,
             )
         )
+    elif op_bringup and op_bringup.results:
+        data = json.loads(summary_path.read_text())
+        data["op_bringup"] = op_bringup.summary()
+        summary_path.write_text(json.dumps(data, indent=2, default=str))
 
     print(f"\n[tuning-agent] artifacts in {agent_cfg.out_dir}/")
     print(f"  trials.jsonl  trials.png  scratchpad.txt  summary.json  trials/*.yaml")

@@ -435,3 +435,13 @@ def test_evaluate_benchmark_handles_perf_failure(evaluator, tmp_path, monkeypatc
     assert result.legal is False
     assert n_calls["perf"] == 1 and n_calls["mem"] == 0
     assert "performance --benchmark failed" in (result.reason or "")
+
+
+def test_parse_metrics_collects_op_gap_markers():
+    from primus.core.projection.op_models.coverage import OpGap
+
+    gap = OpGap(op_id="fancy", severity="gap", slot="mlp", reason="r", keys={"fancy_gate": True})
+    out = _parse_metrics(f"Tokens/s/GPU: 1,234\n{gap.marker_line()}\n")
+    assert out["tokens_per_s_per_gpu"] == 1234.0
+    assert out["op_gaps"] == [gap.as_dict()]
+    assert "op_gaps" not in _parse_metrics("Tokens/s/GPU: 1,234\n")
