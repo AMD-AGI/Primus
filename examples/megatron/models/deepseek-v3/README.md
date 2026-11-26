@@ -76,8 +76,7 @@ stays BF16. It needs a Primus-Turbo with the gfx1250 MXFP8 GEMMs, through `TURBO
 image has one. It quantizes the MLA and shared-expert linears and the routed experts:
 
 - MegaMoE (EP 2 to 8, so the 4-GPU defaults): the yaml's `turbo_mega_moe_precision: mxfp8`;
-  `--turbo_mega_moe_precision bf16` keeps the routed experts BF16. MXFP8 MegaMoE has not been run on more
-  than one GPU yet.
+  `--turbo_mega_moe_precision bf16` keeps the routed experts BF16.
 - Grouped GEMMs: `USE_TURBO_MEGA_MOE=False`; `--turbo_fused_grouped_gemm True` runs them as the fused MXFP8
   grouped MLP.
 - One GPU: the 1-GPU variant with the fused grouped MLP, and the MoE permute fused into the experts'
