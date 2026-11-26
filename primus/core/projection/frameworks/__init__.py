@@ -100,10 +100,10 @@ def _ensure_builtins_registered() -> None:
     from primus.core.projection.training_config import (
         _DLRM_FRAMEWORKS,
         dlrm_derive_default_args,
-        megatron_derive_default_args,
+        megatron_backend_derive_default_args,
     )
 
-    register_config_adapter("megatron", megatron_derive_default_args)
+    register_config_adapter("megatron", megatron_backend_derive_default_args)
     for alias in _DLRM_FRAMEWORKS:
         register_config_adapter(alias, dlrm_derive_default_args)
 
