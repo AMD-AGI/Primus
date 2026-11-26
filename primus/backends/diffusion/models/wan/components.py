@@ -24,3 +24,4 @@ class WanComponents:
     vae: nn.Module
     text_encoder: nn.Module
     image_encoder: Optional[nn.Module] = None
+    tokenizer: Optional[object] = None

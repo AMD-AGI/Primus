@@ -165,6 +165,28 @@ class TestApply:
         )
         assert (mode, count) == (ac.MODE_FULL, 2)
 
+    def test_selective_without_a_save_set_adds_nothing(self, parallelizer):
+        """The stub has no save set; neither would an AutoModel that renamed it."""
+        assert ac.save_attention_under_selective_ac(parallelizer) == []
+        mode, _count = ac.apply(
+            parallelizer, model_with(blocks=[1]), ("blocks",), "selective", log_prefix="[t]"
+        )
+        assert mode == ac.MODE_SELECTIVE
+
+    def test_selective_adds_the_turbo_ops_to_the_save_set(self, parallelizer, monkeypatch):
+        """apply() itself extends the set, not only a caller that asks for it."""
+        parallelizer._SELECTIVE_AC_MUST_SAVE_OPS = frozenset({"mm"})
+        monkeypatch.setattr(ac, "_resolve_op", lambda name: f"op:{name}")
+        ac.apply(parallelizer, model_with(blocks=[1]), ("blocks",), "selective", log_prefix="[t]")
+        expected = {"mm", *(f"op:{name}" for name in ac.TURBO_ATTENTION_FORWARD_OPS)}
+        assert parallelizer._SELECTIVE_AC_MUST_SAVE_OPS == frozenset(expected)
+
+    def test_full_leaves_the_save_set_alone(self, parallelizer, monkeypatch):
+        parallelizer._SELECTIVE_AC_MUST_SAVE_OPS = frozenset({"mm"})
+        monkeypatch.setattr(ac, "_resolve_op", lambda name: f"op:{name}")
+        ac.apply(parallelizer, model_with(blocks=[1]), ("blocks",), "full", log_prefix="[t]")
+        assert parallelizer._SELECTIVE_AC_MUST_SAVE_OPS == frozenset({"mm"})
+
     def test_enable_compile_is_forwarded(self, parallelizer):
         ac.apply(
             parallelizer,
@@ -319,6 +341,18 @@ class TestStride:
 requires_automodel = pytest.mark.skipif(
     importlib.util.find_spec("nemo_automodel") is None, reason="AutoModel is not installed"
 )
+requires_turbo = pytest.mark.skipif(
+    importlib.util.find_spec("primus_turbo") is None, reason="Primus-Turbo is not installed"
+)
+
+
+@requires_turbo
+def test_the_listed_turbo_attention_ops_are_registered():
+    """A rename in Primus-Turbo would otherwise leave the save set without them, and
+    selective AC would quietly go back to recomputing the attention forward."""
+    import primus_turbo.pytorch.ops  # noqa: F401  (registers the ops)
+
+    assert [name for name in ac.TURBO_ATTENTION_FORWARD_OPS if ac._resolve_op(name) is None] == []
 
 
 @requires_automodel
@@ -386,6 +420,82 @@ class TestUpstreamHelpers:
         )
 
         return isinstance(getattr(block, "_checkpoint_wrapped_module", None), CheckpointWrapper)
+
+
+_OP_CALLS = []
+_OP_NAME = "primus_ac_test.double.default"
+
+
+def _counting_op():
+    """A custom op standing in for Turbo's attention forward; counts its executions."""
+    import torch
+
+    try:
+        return torch.ops.primus_ac_test.double
+    except AttributeError:
+        pass
+
+    @torch.library.custom_op("primus_ac_test::double", mutates_args=())
+    def double(x: torch.Tensor) -> torch.Tensor:
+        _OP_CALLS.append(1)
+        return x * 2
+
+    double.register_autograd(lambda ctx, grad: grad * 2)
+    return torch.ops.primus_ac_test.double
+
+
+@requires_automodel
+class TestSelectiveKeepsAttention:
+    """Selective AC must keep a listed custom op's output instead of rerunning it.
+
+    The op stands in for Turbo's attention forward: unlisted, AutoModel's policy
+    runs it again in the backward, which for attention is a whole extra forward.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore_save_set(self, monkeypatch):
+        helpers = ac.upstream_helpers()
+        monkeypatch.setattr(helpers, "_SELECTIVE_AC_MUST_SAVE_OPS", helpers._SELECTIVE_AC_MUST_SAVE_OPS)
+
+    @staticmethod
+    def executions(save):
+        import torch
+        import torch.nn as nn
+
+        op = _counting_op()
+
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.a, self.b = nn.Linear(4, 4), nn.Linear(4, 4)
+
+            def forward(self, x):
+                return self.b(op(self.a(x)))
+
+        model = nn.Module()
+        model.blocks = nn.ModuleList(Block() for _ in range(3))
+        helpers = ac.upstream_helpers()
+        if save:
+            assert ac.save_attention_under_selective_ac(helpers, (_OP_NAME,)) == [_OP_NAME]
+        ac.apply(helpers, model, ("blocks",), "selective", log_prefix="[t]")
+        x = torch.randn(2, 4, requires_grad=True)
+        _OP_CALLS.clear()
+        for block in model.blocks:
+            x = block(x)
+        x.sum().backward()
+        return len(_OP_CALLS)
+
+    def test_unlisted_it_runs_again_in_the_backward(self):
+        assert self.executions(save=False) == 6
+
+    def test_listed_it_runs_once(self):
+        assert self.executions(save=True) == 3
+
+    def test_unregistered_names_are_skipped(self):
+        helpers = ac.upstream_helpers()
+        before = helpers._SELECTIVE_AC_MUST_SAVE_OPS
+        assert ac.save_attention_under_selective_ac(helpers, ("primus_ac_test.no_such_op.default",)) == []
+        assert helpers._SELECTIVE_AC_MUST_SAVE_OPS == before
 
 
 if __name__ == "__main__":

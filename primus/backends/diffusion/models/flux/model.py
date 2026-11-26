@@ -13,6 +13,11 @@ from dataclasses import asdict, dataclass
 import torch
 from torch import Tensor, nn
 
+from primus.backends.diffusion.models.flux import layers
+from primus.backends.diffusion.models.flux.fused_norm_rope import (
+    RopeTables,
+    rope_tables,
+)
 from primus.backends.diffusion.models.flux.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -21,6 +26,14 @@ from primus.backends.diffusion.models.flux.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
+
+
+def build_rope_tables(pe, txt_len: int, img_len: int) -> RopeTables:
+    """cos/sin for the whole sequence and for each side of a double block."""
+    (a_cos, a_sin), (t_cos, t_sin), (i_cos, i_sin) = rope_tables(
+        pe, ((0, txt_len + img_len), (0, txt_len), (txt_len, img_len))
+    )
+    return RopeTables(a_cos, a_sin, t_cos, t_sin, i_cos, i_sin)
 
 
 @dataclass
@@ -38,6 +51,7 @@ class FluxParams:
     theta: int
     qkv_bias: bool
     guidance_embed: bool
+    qk_norm_eps: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -103,13 +117,19 @@ class Flux(nn.Module):
                     self.num_heads,
                     mlp_ratio=params.mlp_ratio,
                     qkv_bias=params.qkv_bias,
+                    qk_norm_eps=params.qk_norm_eps,
                 )
                 for _ in range(params.depth)
             ]
         )
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(self.hidden_size, self.num_heads, mlp_ratio=params.mlp_ratio)
+                SingleStreamBlock(
+                    self.hidden_size,
+                    self.num_heads,
+                    mlp_ratio=params.mlp_ratio,
+                    qk_norm_eps=params.qk_norm_eps,
+                )
                 for _ in range(params.depth_single_blocks)
             ]
         )
@@ -141,6 +161,31 @@ class Flux(nn.Module):
 
         return checkpoint_utils.checkpoint(block, img, vec, pe, use_reentrant=False)
 
+    def _run_double_blocks(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> tuple[Tensor, Tensor]:
+        use_checkpoint = self.training and self.gradient_checkpointing
+        for block in self.double_blocks:
+            if use_checkpoint:
+                img, txt = self._checkpoint_double(block, img, txt, vec, pe)
+            else:
+                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
+        return img, txt
+
+    def _run_single_blocks(self, img: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+        use_checkpoint = self.training and self.gradient_checkpointing
+        for block in self.single_blocks:
+            if use_checkpoint:
+                img = self._checkpoint_single(block, img, vec, pe)
+            else:
+                img = block(img, vec=vec, pe=pe)
+        return img
+
+    def _run_dit(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor) -> Tensor:
+        img, txt = self._run_double_blocks(img, txt, vec, pe)
+        img = torch.cat((txt, img), 1)
+        img = self._run_single_blocks(img, vec, pe)
+        img = img[:, txt.shape[1] :, ...]
+        return self.final_layer(img, vec)
+
     def forward(
         self,
         img: Tensor,
@@ -165,19 +210,8 @@ class Flux(nn.Module):
 
         ids = torch.cat((txt_ids, img_ids), dim=1)
         pe = self.pe_embedder(ids)
-
-        use_checkpoint = self.training and self.gradient_checkpointing
-        for block in self.double_blocks:
-            if use_checkpoint:
-                img, txt = self._checkpoint_double(block, img, txt, vec, pe)
-            else:
-                img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
-
-        img = torch.cat((txt, img), 1)
-        for block in self.single_blocks:
-            if use_checkpoint:
-                img = self._checkpoint_single(block, img, vec, pe)
-            else:
-                img = block(img, vec=vec, pe=pe)
-        img = img[:, txt.shape[1] :, ...]
-        return self.final_layer(img, vec)
+        if layers.FUSED_NORM_ROPE:
+            # Built once here and shared by all 57 blocks, so the per-span
+            # table copies are a per-step cost, not a per-block one.
+            pe = build_rope_tables(pe, txt.shape[1], img.shape[1])
+        return self._run_dit(img, txt, vec, pe)

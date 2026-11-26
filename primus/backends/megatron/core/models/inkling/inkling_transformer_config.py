@@ -152,6 +152,9 @@ class InklingTransformerConfig(TransformerConfig):
     (FlexAttention score_mod and block mask; compiled, no attention dropout)."""
 
     def __post_init__(self):
+        if self.tensor_model_parallel_size > 1:
+            # The short convs would also need TP-sharded checkpoint entries and a sequence-parallel halo.
+            raise ValueError("Inkling supports only tensor_model_parallel_size=1")
         # The YAML string form only resolves on the launcher path (Primus's
         # moe_layer_freq args patch); configs built in-process still carry it.
         if isinstance(self.moe_layer_freq, str):

@@ -124,13 +124,11 @@ modules:
       # MoE settings
       moe_apply_probs_on_input: false
       moe_aux_loss_coeff: 0.0 #0.9
-      moe_deepep_num_sms: 20
       moe_enable_deepep: false
       moe_expert_capacity_factor: null
       moe_ffn_hidden_size: 2880
       moe_flex_dispatcher_backend: deepep
       moe_grouped_gemm: true
-      moe_hybridep_num_sms: 16
       moe_input_jitter_eps: null
       moe_latent_size: null
       moe_layer_freq: 1

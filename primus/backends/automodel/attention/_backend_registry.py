@@ -82,19 +82,21 @@ def unsupported_reason(
     window_size,
     return_lse: bool,
     parallel_config,
+    *,
+    cp_capable: bool = False,
 ) -> Optional[str]:
     """Why the plain override path cannot serve this call, or None if it can.
 
     Correctness first: the overrides serve the plain, no-mask, dropout-free,
-    non-context-parallel, single-output call, which is what the diffusion forwards
-    use. Anything else falls back to the original kernel, so enabling an override
-    never changes results for a call it does not handle.
+    single-output call, which is what the diffusion forwards use. Anything else
+    falls back to the original kernel, so enabling an override never changes
+    results for a call it does not handle.
 
-    Context parallelism is in this list because none of the override kernels have
-    a CP-aware forward yet, so a run raised to ``cp_size > 1`` for memory reasons
-    quietly gets the original kernel instead.
+    Context parallelism is served only by an override that brings a CP kernel
+    (``cp_capable``); for the others a run raised to ``cp_size > 1`` gets the
+    original kernel, with a warning.
     """
-    if parallel_config is not None:
+    if parallel_config is not None and not cp_capable:
         return "context parallelism is active"
     if return_lse:
         return "return_lse was requested"
@@ -107,6 +109,40 @@ def unsupported_reason(
     return None
 
 
+def cp_unsupported_reason(query, is_causal: bool, parallel_config, key=None) -> Optional[str]:
+    """Why a CP kernel cannot serve this context-parallel call, or None if it can.
+
+    The CP kernels take diffusers' ulysses and ring groups as they are: the
+    query arrives split along the sequence, its heads are exchanged inside the
+    ulysses group and its keys travel around the ring. diffusers' variants for
+    uneven splits (``ulysses_anything`` / ``ring_anything``) lay the tensors out
+    differently, and a causal ring needs load balancing the kernels do not do,
+    so those stay on the original path. The head exchange also needs the keys
+    to match the queries' local length (no cross-attention) and their heads to
+    divide by the ulysses degree, like the queries'.
+    """
+    cp = getattr(parallel_config, "context_parallel_config", None)
+    if cp is None or getattr(cp, "_ulysses_mesh", None) is None or getattr(cp, "_ring_mesh", None) is None:
+        return "the context-parallel config has no ulysses/ring meshes set up"
+    if getattr(cp, "ulysses_anything", False) or getattr(cp, "ring_anything", False):
+        return "ulysses_anything/ring_anything context parallelism is active"
+    if is_causal:
+        return "causal attention under context parallelism"
+    shape = getattr(query, "shape", None)
+    key_shape = getattr(key, "shape", None)
+    degree = getattr(cp, "ulysses_degree", 1) or 1
+    if shape is not None and len(shape) == 4 and shape[2] % degree:
+        return f"{shape[2]} heads do not divide by the ulysses degree {degree}"
+    if key_shape is not None and len(key_shape) == 4:
+        if shape is not None and len(shape) == 4 and key_shape[1] != shape[1]:
+            return (
+                f"keys of length {key_shape[1]} meet queries of length {shape[1]} under context parallelism"
+            )
+        if key_shape[2] % degree:
+            return f"{key_shape[2]} key heads do not divide by the ulysses degree {degree}"
+    return None
+
+
 def make_override(
     orig_fn: Callable,
     backend_value: str,
@@ -116,6 +152,7 @@ def make_override(
     override_name: str,
     log_prefix: str,
     unsupported: Optional[Callable] = None,
+    cp_kernel: Optional[Callable] = None,
 ) -> Callable:
     """Wrap ``orig_fn`` so the plain path runs ``kernel`` and the rest falls back.
 
@@ -125,6 +162,9 @@ def make_override(
         unsupported: optional ``(q, k, v, is_causal) -> reason or None`` for
             calls the kernel cannot serve exactly; those fall back like the
             conditions in ``unsupported_reason``.
+        cp_kernel: optional ``(q, k, v, softmax_scale=, causal=, parallel_config=)
+            -> out`` for context-parallel calls, on this rank's sequence shard.
+            Without it a CP call falls back.
         supports_window: whether ``orig_fn`` accepts ``window_size``. Passing it
             to a backend that does not take it is a TypeError on the fallback
             path, which would only show up once a fallback actually triggers.
@@ -174,9 +214,14 @@ def make_override(
         _parallel_config=None,
         **extra,
     ):
-        reason = unsupported_reason(attn_mask, dropout_p, window_size, return_lse, _parallel_config)
+        cp = _parallel_config is not None
+        reason = unsupported_reason(
+            attn_mask, dropout_p, window_size, return_lse, _parallel_config, cp_capable=cp_kernel is not None
+        )
         if reason is None and extra:
             reason = f"the kernel does not take {', '.join(sorted(extra))}"
+        if reason is None and cp:
+            reason = cp_unsupported_reason(query, is_causal, _parallel_config, key=key)
         if reason is None and unsupported is not None:
             reason = unsupported(query, key, value, is_causal)
         if reason is not None:
@@ -203,11 +248,16 @@ def make_override(
         # Installing is not the same as running: a model can reach attention by
         # another route, so say when the kernel actually serves a call.
         _info_once(
-            f"{override_name}:{backend_value}",
-            "%s first call served on backend '%s'.",
+            f"{override_name}:{backend_value}:{'cp' if cp else 'plain'}",
+            "%s first %scall served on backend '%s'.",
             log_prefix,
+            "context-parallel " if cp else "",
             backend_value,
         )
+        if cp:
+            return cp_kernel(
+                query, key, value, softmax_scale=scale, causal=is_causal, parallel_config=_parallel_config
+            )
         return kernel(query, key, value, softmax_scale=scale, causal=is_causal)
 
     setattr(override, MARKER, override_name)
@@ -224,6 +274,7 @@ def install_override(
     probe: Callable[[], None],
     configured_backend: Optional[str] = None,
     unsupported: Optional[Callable] = None,
+    cp_kernel: Optional[Callable] = None,
 ) -> bool:
     """Rebind the target backends to ``kernel``. Returns whether anything took.
 
@@ -239,7 +290,7 @@ def install_override(
             unset, which is diffusers' default ``native`` SDPA). Only the
             backends rebound here run the override, so any other value gets a
             warning that the override will not run.
-        unsupported: passed to ``make_override``.
+        unsupported, cp_kernel: passed to ``make_override``.
     """
     probe()
 
@@ -292,6 +343,7 @@ def install_override(
                 override_name=override_name,
                 log_prefix=log_prefix,
                 unsupported=unsupported,
+                cp_kernel=cp_kernel,
             )
         installed.append(name.value)
 

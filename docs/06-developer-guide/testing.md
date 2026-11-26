@@ -155,7 +155,7 @@ From `.github/workflows/ci.yaml`:
 
 The torch job picks its tier from `PRIMUS_CI_FULL` and prints the resolved tier in the job summary. See [Test tiers](#test-tiers-slim-on-prs-full-on-weekends).
 
-The **`build-docker`** job builds images after lint passes; unit test jobs depend on **`code-lint`**, not on **`build-docker`**.
+The **`build-docker`** job builds images after lint passes. **`run-unittest-torch`** depends on **`build-docker`** and runs inside the image it built; **`run-unittest-jax`** depends only on **`code-lint`**.
 
 ## 6. Pre-commit hooks
 

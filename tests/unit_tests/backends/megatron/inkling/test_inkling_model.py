@@ -14,7 +14,9 @@ parameter maps one-to-one onto the released checkpoint.
 from __future__ import annotations
 
 import copy
+import re
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -24,7 +26,6 @@ from primus.backends.megatron.core.models.inkling.inkling_builders import (
     inkling_builder,
     inkling_config_from_model_yaml,
     megatron_args_from_model_yaml,
-    model_provider,
 )
 from primus.backends.megatron.core.models.inkling.inkling_hf_mapping import (
     InklingGeometry,
@@ -280,6 +281,170 @@ def test_deferred_lm_head_wgrad_matches_immediate():
     torch.testing.assert_close(grads[1], grads[0], rtol=1e-5, atol=1e-7)
 
 
+@pytest.fixture
+def turbo_args():
+    """The Primus fields Turbo's linears read from the global args."""
+    pytest.importorskip("primus_turbo")
+    import megatron.training.global_vars as gvars
+
+    args = gvars._GLOBAL_ARGS
+    fields = dict(
+        offload=False,
+        offload_ops=[],
+        patch_primus_pipeline=False,
+        pp_algorithm=None,
+        patch_zero_bubble=False,
+        enable_zero_bubble=False,
+        use_turbo_fused_act_with_probs=False,
+        moe_router_padding_for_quantization=False,
+    )
+    for name, value in fields.items():
+        setattr(args, name, value)
+    return args
+
+
+def _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm):
+    """Build Inkling's layer specs through ``PrimusTurboSpecProvider``, as a Turbo run does."""
+    from primus.backends.megatron.core.extensions import (
+        transformer_engine_spec_provider as spec_provider,
+    )
+    from primus.backends.megatron.core.models.inkling import inkling_layer_specs
+
+    turbo_cfg = SimpleNamespace(
+        **{
+            **vars(spec_provider._build_default_primus_args()),
+            **dict(
+                enable_primus_turbo=True,
+                use_turbo_grouped_gemm=use_turbo_grouped_gemm,
+                use_turbo_rms_norm=True,
+            ),
+        }
+    )
+
+    def turbo_provider(*args, **kwargs):
+        provider = spec_provider.PrimusTurboSpecProvider(*args, **kwargs)
+        provider.cfg = turbo_cfg
+        return provider
+
+    monkeypatch.setattr(
+        inkling_layer_specs.transformer_engine_spec_provider, "TESpecProvider", turbo_provider
+    )
+
+
+def test_turbo_grouped_experts_match_te(turbo_args, monkeypatch):
+    """With Turbo's spec provider and grouped GEMM the routed experts are ``PrimusGroupedMLP``,
+    load the TE build's per-expert ``weight{i}`` strictly and give its loss and gradients. Turbo
+    trains one stacked ``weights`` per linear and exposes ``weight{i}`` as frozen views of it."""
+    from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
+    ids = torch.randint(0, 512, (2, 96), generator=torch.Generator().manual_seed(0)).cuda()
+    results, state = [], None
+    for turbo in (False, True):
+        if turbo:
+            _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=True)
+        torch.manual_seed(0)
+        model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
+        assert isinstance(model.decoder.layers[1].mlp.experts, PrimusGroupedMLP) == turbo
+        if state is None:
+            state = model.state_dict()
+        stacked = {k for k in model.state_dict() if k.endswith(".weights")}
+        assert set(model.state_dict()) - stacked == set(state)
+        assert len(stacked) == (2 if turbo else 0)
+        model.load_state_dict(state, strict=True)
+        for name in stacked:
+            weights = model.get_parameter(name)
+            for i in range(weights.shape[0]):
+                torch.testing.assert_close(weights[i], state[f"{name[:-1]}{i}"], rtol=0, atol=0)
+        model.train()
+        loss = model(ids, None, None, labels=torch.roll(ids, -1, dims=1)).float().mean()
+        loss.backward()
+        grads = {}
+        for name, p in model.named_parameters():
+            if name in stacked:
+                grads.update({f"{name[:-1]}{i}": g.float() for i, g in enumerate(p.grad)})
+            elif p.requires_grad:
+                grads[name] = p.grad.float()
+        results.append((loss.detach(), grads))
+
+    (loss_ref, grads_ref), (loss, grads) = results
+    torch.testing.assert_close(loss, loss_ref, rtol=1e-3, atol=0)
+    assert grads.keys() == grads_ref.keys()
+    for name, grad in grads_ref.items():
+        assert grad.count_nonzero() > 0, name
+        torch.testing.assert_close(grads[name], grad, rtol=2e-2, atol=1e-3, msg=name)
+
+
+@pytest.mark.parametrize("fp32_activations", [False, True])
+def test_turbo_provider_without_grouped_gemm_keeps_inkling_experts(fp32_activations, turbo_args, monkeypatch):
+    """Turbo on with its grouped GEMM off builds TE's grouped experts, as Inkling's own class."""
+    from primus.backends.megatron.core.transformer.inkling.moe import InklingGroupedMLP
+
+    _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=False)
+    config = inkling_config_from_model_yaml(
+        preset("inkling_small_tiny"),
+        gradient_accumulation_fusion=False,
+        inkling_fp32_activations=fp32_activations,
+    )
+    model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096)
+    assert type(model.decoder.layers[1].mlp.experts) is InklingGroupedMLP
+
+
+@pytest.mark.parametrize("turbo", [False, True], ids=["te", "turbo"])
+def test_sharded_state_dict_covers_every_tensor(turbo, turbo_args, monkeypatch):
+    """Every parameter and persistent buffer reaches a ``torch_dist`` checkpoint. Turbo's stacked
+    ``weights`` (the trained parameter, which the distributed optimizer looks up) stand in for
+    their per-expert ``weight{i}`` views."""
+    from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
+
+    if turbo:
+        _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=True)
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
+    model = build_inkling_model(config, vocab_size=512, max_sequence_length=4096)
+    sharded = model.sharded_state_dict(metadata={"singleton_local_shards": False})
+    stacked = {k for k in model.state_dict() if k.endswith(".weights")}
+    assert len(stacked) == (2 if turbo else 0)
+    for key in stacked:
+        assert isinstance(sharded[key], ShardedTensorFactory)
+        assert sharded[key].data is model.get_parameter(key)
+    views = {k for k in model.state_dict() if re.sub(r"weight\d+$", "weights", k) in stacked}
+    tensors = {k for k in model.state_dict() if not k.endswith("_extra_state")} - views
+    assert tensors <= set(sharded), sorted(tensors - set(sharded))
+
+
+@pytest.mark.parametrize("save_turbo", [False, True], ids=["te_to_turbo", "turbo_to_te"])
+def test_torch_dist_moves_between_te_and_turbo(save_turbo, turbo_args, monkeypatch, tmp_path):
+    """A ``torch_dist`` checkpoint written by either expert implementation loads bit-exactly into
+    the other, so Turbo's factory builds TE's keys and offsets and merges them back in order."""
+    from megatron.core import dist_checkpointing
+    from megatron.core.extensions import transformer_engine_spec_provider
+
+    te_provider = transformer_engine_spec_provider.TESpecProvider
+    config = inkling_config_from_model_yaml(preset("inkling_small_tiny"), gradient_accumulation_fusion=False)
+    models = {}
+    for turbo, seed in ((save_turbo, 0), (not save_turbo, 1)):
+        if turbo:
+            _use_turbo_spec_provider(monkeypatch, use_turbo_grouped_gemm=True)
+        else:
+            monkeypatch.setattr(transformer_engine_spec_provider, "TESpecProvider", te_provider)
+        torch.manual_seed(seed)
+        models[turbo] = build_inkling_model(config, vocab_size=512, max_sequence_length=4096).cuda()
+    source, target = models[save_turbo], models[not save_turbo]
+    metadata = {"singleton_local_shards": False}
+
+    dist_checkpointing.save(
+        {"model": source.sharded_state_dict(metadata=metadata)}, str(tmp_path), content_metadata=metadata
+    )
+    loaded = dist_checkpointing.load({"model": target.sharded_state_dict(metadata=metadata)}, str(tmp_path))
+    target.load_state_dict(loaded["model"], strict=True)
+
+    expected = {k: v for k, v in source.state_dict().items() if not k.endswith(("_extra_state", ".weights"))}
+    state = target.state_dict()
+    assert any(re.search(r"weight\d+$", k) and "experts" in k for k in expected)
+    for key, tensor in expected.items():
+        torch.testing.assert_close(state[key], tensor, rtol=0, atol=0, msg=key)
+
+
 @pytest.mark.parametrize("keep_fp32", ["0", "1"])
 def test_fp32_activations_global_scale_storage(keep_fp32, monkeypatch):
     """``global_scale`` is stored in fp32 only with the flag and the ``keep_in_fp32`` contract."""
@@ -296,6 +461,7 @@ def test_fp32_activations_global_scale_storage(keep_fp32, monkeypatch):
 
 
 def test_trainer_entry_points_build_inkling():
+    from primus.backends.megatron.core.models.builder import model_provider
     from primus.core.utils.import_utils import get_model_provider
 
     provider = get_model_provider("inkling")

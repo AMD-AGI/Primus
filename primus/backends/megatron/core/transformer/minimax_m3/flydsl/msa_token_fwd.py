@@ -765,7 +765,17 @@ def build_fwd(
 _CACHE: dict = {}
 
 
-def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, return_slot_lse=False, **config):
+def msa_token_fwd(
+    q,
+    k,
+    v,
+    block_table,
+    softmax_scale=None,
+    block_size=128,
+    return_slot_lse=False,
+    shared_tiles=False,
+    **config,
+):
     """MSA forward.
 
     Args:
@@ -777,6 +787,8 @@ def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, retu
         return_slot_lse: also return ``slot_lse`` ``[S, B, Hq, topk]`` fp32, the
             logsumexp over each slot's keys; ``exp(slot_lse - lse)`` is the slot's
             share of the head's attention.
+        shared_tiles: gfx1250 only (``msa_shared_tile_staging``): adjacent tokens share a
+            workgroup and one staging of each K/V tile they have in common; same bits.
         config: ``build_fwd`` tuning knobs (``step_keys``, ``k_via_lds``, ``remap``,
             ``waves``).
 
@@ -784,6 +796,23 @@ def msa_token_fwd(q, k, v, block_table, softmax_scale=None, block_size=128, retu
         ``o`` ``[S, B, Hq, 128]`` bf16 and ``lse`` ``[S, B, Hq]`` fp32 (and
         ``slot_lse``).
     """
+    # gfx1250 is wave32 with WMMA instead of MFMA and has no permlane32.
+    if "gfx1250" in get_hip_arch():
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
+            msa_token_fwd_wave32,
+        )
+
+        return msa_token_fwd_wave32(
+            q,
+            k,
+            v,
+            block_table,
+            softmax_scale,
+            block_size,
+            return_slot_lse,
+            shared_tiles=shared_tiles,
+            **config,
+        )
     S, B, Hq, Dq = q.shape
     Hkv = k.shape[2]
     topk = block_table.shape[-1]

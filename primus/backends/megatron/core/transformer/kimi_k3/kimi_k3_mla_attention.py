@@ -378,7 +378,7 @@ class KimiK3MLASelfAttention(MLASelfAttention):
             return
         _warned_about_zero_width_pos_emb = True
         logger.warning(
-            "[Primus:Kimi-K3] qk_pos_emb_head_dim == 0. NoPE does not need it: this class "
+            "[Primus:kimi_k3] qk_pos_emb_head_dim == 0. NoPE does not need it: this class "
             "never applies a rotation. Zeroing it instead *removes* the 64 MQA-shared, "
             "unrotated K dims the release ships (qk_rope_head_dim=64, produced directly by "
             "kv_a_proj_with_mqa outside the kv_lora_rank latent), narrows q_b_proj from "

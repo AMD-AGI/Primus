@@ -92,5 +92,11 @@ modules:
       # MI300X has 192 GB HBM (vs 288 GB on MI355X); the MI355X config uses
       # per_device_batch_size 14. Lower here if FLUX.1-dev OOMs on MI300X.
       per_device_batch_size: 8
+      # The synthetic iterator builds every batch on GPU 0 and round-trips it
+      # through the host (~540 MB at batch 8), and FluxTrainer fetches it
+      # synchronously between steps, so regenerating it cost ~13% of each step.
+      # The data is random either way; WanTrainer hides the same cost behind a
+      # prefetch thread.
+      reuse_example_batch: True
       ici_data_parallelism: 1
       ici_tensor_parallelism: 1

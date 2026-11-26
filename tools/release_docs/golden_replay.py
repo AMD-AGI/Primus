@@ -20,6 +20,13 @@ Two past commits serve as ground truth:
             a parity checker that cannot see drift it was built to catch is worse
             than nothing.
 
+  4dbae4bd8 "docs(release): update documentation for v26.8 (#1235)" -- the
+            release-notes rotation. Its v26.8 section and Highlights are fed back to
+            `release_notes.py rotate` on the page as it was before, once for both
+            families and once a family at a time; both must give the shipped page
+            (Highlights moved into the v26.7 section included), and a re-run must
+            change nothing.
+
 Each replay runs today's tools against the tree as it was, in a throwaway
 worktree, so the check is a regression test rather than a self-consistency one.
 
@@ -221,6 +228,97 @@ def replay_parity():
     return ok
 
 
+ROTATE_FIXTURE = {
+    "commit": "4dbae4bd8",
+    "version": "v26.8",
+    "why": "the v26.8 rotation: new section, Highlights, v26.7's Highlights moved down, v26.5 evicted",
+}
+
+
+def family_parts(release_notes, blocks, family, shared):
+    """One family's blocks of a section or a Highlights body, the 'Changes since'
+    block cut down to that family's table."""
+    out = []
+    for block in blocks:
+        heading = release_notes.heading_of(block)
+        if heading.startswith("### Changes since"):
+            head, rest = block.split("`rocm/primus`:", 1)
+            primus, jax = rest.split("`rocm/jax-training:maxtext`:", 1)
+            part = "`rocm/primus`:" + primus if family == "primus" else "`rocm/jax-training:maxtext`:" + jax
+            out.append(head + part)
+        elif release_notes.block_family(heading) == family or (
+            shared and not release_notes.block_family(heading)
+        ):
+            out.append(block)
+    return out
+
+
+def replay_rotate():
+    fixture = ROTATE_FIXTURE
+    version = fixture["version"]
+    print(f"\n=== release_notes rotate replay: {fixture['commit']} ({fixture['why']})")
+    import release_notes as R  # noqa: E402 -- today's tool, for its parsers
+
+    rel = C.RELEASE_NOTES.relative_to(C.ROOT).as_posix()
+    shipped = git("show", f"{fixture['commit']}:{rel}")
+    _, start, end = R.highlights_bounds(shipped)
+    highlights = R.strip_rule(shipped[start:end]).split("\n", 1)[1]
+    _, start, end = next(entry for entry in R.release_section_bounds(shipped) if entry[0] == version)
+    section = R.strip_rule(shipped[start:end]).split("\n", 1)[1]
+    pre, blocks = R.split_blocks(section, 3)
+    hpre, hblocks = R.split_blocks(highlights, 3)
+
+    def region(text):
+        return text[text.index(f"## Highlights for {version}") : text.index("## Earlier releases")]
+
+    steps = {
+        "both families": [(None, section, highlights)],
+        "a family at a time": [
+            (
+                "primus",
+                R.join_section(pre, family_parts(R, blocks, "primus", True)),
+                R.join_section(hpre, family_parts(R, hblocks, "primus", True)),
+            ),
+            (
+                "jax",
+                R.join_section("", family_parts(R, blocks, "jax", False)),
+                R.join_section("", family_parts(R, hblocks, "jax", False)),
+            ),
+            (
+                "jax",
+                R.join_section("", family_parts(R, blocks, "jax", False)),
+                R.join_section("", family_parts(R, hblocks, "jax", False)),
+            ),
+        ],
+    }
+    ok = True
+    for label, runs in steps.items():
+        with Worktree(f"{fixture['commit']}^") as tree:
+            for family, body, hl in runs:
+                (tree.path / "body.md").write_text(body)
+                (tree.path / "highlights.md").write_text(hl)
+                cmd = [
+                    sys.executable,
+                    f"{TOOLS_REL}/release_notes.py",
+                    "rotate",
+                    "--version",
+                    version,
+                    "--body",
+                    "body.md",
+                    "--highlights",
+                    "highlights.md",
+                ]
+                result = run(cmd + (["--family", family] if family else []), cwd=tree.path)
+                if result.returncode != 0:
+                    print(result.stdout + result.stderr)
+                    return False
+            produced = (tree.path / rel).read_text()
+        same = region(produced) == region(shipped)
+        print(f"    {label:20} {'matches the shipped page' if same else 'DIFFERS from the shipped page'}")
+        ok = ok and same
+    return ok
+
+
 def check_sha_abbreviation():
     """Refuse any tool that reads a SHA git abbreviated for itself.
 
@@ -268,7 +366,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--only", choices=["bump", "parity", "abbrev"], help="run a single check")
+    parser.add_argument("--only", choices=["bump", "parity", "rotate", "abbrev"], help="run a single check")
     args = parser.parse_args()
 
     results = {}
@@ -276,6 +374,8 @@ def main():
         results["bump_version"] = replay_bump()
     if args.only in (None, "parity"):
         results["install_parity"] = replay_parity()
+    if args.only in (None, "rotate"):
+        results["rotate"] = replay_rotate()
     if args.only in (None, "abbrev"):
         results["sha_abbreviation"] = check_sha_abbreviation()
 

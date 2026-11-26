@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Fused FlyDSL attention-residual backend, gfx950 / CDNA4 only.
+"""Fused FlyDSL attention-residual backend, gfx950 (CDNA4) and gfx1250 only.
 
 Importing this package pulls in ``flydsl``, so it must only ever be reached
 through :func:`...attn_res_kernels.load_flydsl_attn_res_backend`, never from

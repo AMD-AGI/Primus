@@ -34,8 +34,10 @@ modules:
 
       remat_policy: "minimal_flash"
       max_target_length: 4096
-      # MI325X (256GB HBM): largest 3-step run; peak 222.6/230.4 GB, pdbs 19 OOMs.
-      per_device_batch_size: 18
+      # MI325X (256GB HBM): XLA estimate 217.1/230.1 GB on mi325x-do (v26.10 jax image).
+      # pdbs 18 (230.2 GB) OOMs there: FP8 temp memory grew across images and mi325x-do
+      # exposes slightly less HBM than mi325x-tw, where 18 fit at 222.6/230.4 GB.
+      per_device_batch_size: 17
 
       # quantization (nanoo_fp8)
       quantization: "nanoo_fp8"

@@ -1,0 +1,16 @@
+model:
+  name: flux-dev
+  config:
+    model_preset: flux.1-dev
+    load_from_pretrained_path: ${PRETRAINED_PATH:}
+    resolution: ${RESOLUTION:512}
+    config:
+      trainable_modules: dit
+      guidance: ${FLUX_GUIDANCE:1.0}
+      autoencoder_scale_factor: 0.3611
+      autoencoder_shift_factor: 0.1159
+    encoder:
+      t5_encoder: ${T5_ENCODER:google/t5-v1_1-xxl}
+      clip_encoder: ${CLIP_ENCODER:openai/clip-vit-large-patch14}
+      autoencoder: ${VAE_CHECKPOINT:}
+      max_t5_length: ${MAX_T5_LENGTH:512}

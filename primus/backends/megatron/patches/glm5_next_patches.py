@@ -149,7 +149,7 @@ def patch_glm5_next_hf_load(ctx: PatchContext):
         n = load_glm5_next_hf_checkpoint(model, hf_path)
         log_rank_0(f"[GLM5-Next] loaded {n} tensors from HF checkpoint {hf_path}")
 
-    def setup_model_and_optimizer(model_provider_func, model_type, *a, **kw):
+    def setup_model_and_optimizer(model_type, model_provider_func=None, *a, **kw):
         if eval_in:
             import torch.distributed as dist
 
@@ -160,7 +160,7 @@ def patch_glm5_next_hf_load(ctx: PatchContext):
             dist.barrier()
             dist.destroy_process_group()
             sys.exit(0)
-        model, optimizer, scheduler = original(model_provider_func, model_type, *a, **kw)
+        model, optimizer, scheduler = original(model_type, model_provider_func, *a, **kw)
         if hf_path and int(getattr(training_module.get_args(), "iteration", 0) or 0) == 0:
             _load(model)
             if optimizer is not None and hasattr(optimizer, "reload_model_params"):

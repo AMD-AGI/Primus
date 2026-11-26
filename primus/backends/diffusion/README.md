@@ -1,16 +1,42 @@
 # Primus Diffusion Backend
 
-`diffusion` is an in-tree PyTorch backend for Wan video training and FLUX
-text-to-image training. Primus owns config loading and launch; this backend owns
-model construction, datasets, attention selection, FSDP2 wrapping, and the
-training loop.
+`diffusion` is an in-tree PyTorch backend for Wan and FLUX training.
+Primus owns config loading and launch; this backend owns model construction,
+datasets, attention selection, FSDP2 wrapping, and the training loop.
 
 ## Supported Scope
 
-- Models: `wan`, `flux.1-schnell`, and `flux.1-dev`.
-- Trainer: FSDP2.
+- Native models: `wan`, `flux`, `flux.1-dev`, and `flux.1-schnell`.
+- AMDiffusionBenchmark workload `flux-dev`, built by `models/registrations/flux.py`.
+  It builds the native FLUX DiT. Benchmark-only behavior (BFL QK-norm epsilon,
+  logit-normal timesteps, and pre-encoded latents) is opt-in and stays off the
+  `flux.1-dev` and `flux.1-schnell` trainers.
+- AMDiffusionBenchmark workload `wan2.1-i2v`, built by `models/registrations/wan.py`.
+  It extends the native Wan DiT with image-to-video cross-attention. That path
+  stays off the existing `wan` trainer unless `model_type` is `i2v`.
+- AMDiffusionBenchmark workload `sdxl`, built by `models/registrations/sdxl.py`.
+  The UNet is the Stability generative-models module. It uses the shared
+  benchmark trainer and does not change the native Wan or FLUX trainers.
+- AMDiffusionBenchmark workload `mochi-1`, built by `models/registrations/mochi.py`.
+  The denoiser is Genmo's AsymmDiTJoint. It uses the shared benchmark
+  trainer and does not change the native Wan or FLUX trainers.
+- AMDiffusionBenchmark workload `hunyuan-video`, built by
+  `models/registrations/hunyuan.py`. The trainable module is the Tencent transformer.
+  It uses the shared benchmark trainer and does not change the native
+  Wan or FLUX trainers.
+- Trainer: FSDP2 for the native models. The benchmark workloads use
+  `amdb_benchmark`.
 - Wan sequence parallelism: supported through `sp_size`.
-- FLUX sequence parallelism: not supported; keep `sp_size: 1`.
+- FLUX and every AMDiffusionBenchmark workload keep `sp_size: 1`.
+- `primus-cli` downloads those benchmark checkpoints into
+  `~/cache/huggingface/hub` and the datasets into
+  `~/cache/huggingface/datasets/<org>/<name>`. `PRIMUS_HF_HOME` changes the
+  cache root. An explicit `HF_HOME` is used unless it is the runner's
+  automatic `$DATA_PATH/huggingface`.
+- `PRIMUS_FLUX_TRITON_ROPE=1` switches FLUX RoPE to the fused Triton kernel.
+  The `benchmark_flux_dev` configs set it. Left unset, FLUX keeps the eager RoPE.
+- `BENCHMARK_DENOISER_ONLY=1` skips encoder and VAE staging, and the encoder
+  prefetch, in the benchmark prepare hook. Leave it unset for a full run.
 
 Install backend dependencies with:
 
@@ -29,7 +55,30 @@ wan2.2_ti2v_5b.yaml
 wan2.2_ti2v_5b_sft.yaml
 flux.1_schnell_t2i.yaml
 flux.1_dev_t2i.yaml
+benchmark_flux_dev.yaml
+benchmark_wan2_1_i2v.yaml
+benchmark_sdxl.yaml
+benchmark_mochi_1.yaml
+benchmark_hunyuan_video.yaml
 ```
+
+`flux-dev` and `flux.1-dev` both build the native FLUX.1-dev DiT.
+`flux-dev` is the post-train preset: raw images and resolution 512.
+MI300X and MI325X use learning rate `1e-5`. The MI355X config defaults to
+`1e-4` (`LR` overrides it). The checkpoint is the official
+`flux1-dev.safetensors`, not a Diffusers-layout key set.
+
+`wan2.1-i2v` is the post-train preset. It trains the native Wan2.1 DiT
+with CLIP cross-attention, the Wan2.1 VAE, UMT5, and the CLIP vision tower.
+
+`sdxl` is the post-train preset. The checkpoint is the official
+`sd_xl_base_1.0.safetensors`, not a Diffusers-layout key set.
+
+`mochi-1` is the post-train preset. The checkpoint is the official DiT
+and VAE encoder safetensors, not a Diffusers-layout key set.
+
+`hunyuan-video` is the post-train preset. Gradient checkpointing stays
+off, and a snapshot without `vae/` still trains from latents.
 
 FLUX.1-schnell and FLUX.1-dev are separate presets. They share the same main
 transformer shape, but `flux.1-dev` has a guidance embedding module while
@@ -39,6 +88,41 @@ transformer shape, but `flux.1-dev` has a guidance embedding module while
 This follows the TorchTitan-style separation where `flux_schnell()` is its own
 config/preset and architecture differences such as `guidance_embed=False` are
 part of that preset, not a launch-time switch.
+
+## AMDiffusionBenchmark
+
+Run these from the Primus root. `primus-cli` downloads the checkpoint and the
+dataset before training. MI355X defaults are in each config. `LOCAL_BATCH_SIZE`
+and `MAX_STEPS` override them. On MI300X or MI325X, change the config directory.
+Keep sequence parallelism at 1.
+
+```bash
+# FLUX.1-dev, batch 16, 100 steps, frank-chieng/chinese_architecture_siheyuan
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_flux_dev-posttrain.yaml
+
+# Wan2.1 I2V 14B, Wild-Heart/Disney-VideoGeneration-Dataset
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_wan2_1_i2v-posttrain.yaml
+
+# SDXL, frank-chieng/chinese_architecture_siheyuan
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_sdxl-posttrain.yaml
+
+# Mochi-1, Wild-Heart/Disney-VideoGeneration-Dataset
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_mochi_1-posttrain.yaml
+
+# HunyuanVideo, Wild-Heart/Disney-VideoGeneration-Dataset
+./primus-cli direct -- train posttrain \
+  --config examples/diffusion/configs/MI355X/benchmark_hunyuan_video-posttrain.yaml
+```
+
+`DATASET_PATH=synthetic:hunyuan` repeats one denoiser batch and skips the
+dataset download. `BENCHMARK_DENOISER_ONLY=1` also skips the text encoder and
+VAE. A path ending in `.pt` loads cached encodings. The Disney dataset is
+pinned to commit `316b85f5d7c263260cc526a25eece96cc30e0c06` (Hugging Face PR 4,
+which adds `metadata.csv`).
 
 ## Public Config Sections
 

@@ -13,6 +13,7 @@ training entry point: ``get_model_provider("zaya1")`` -> ``zaya1_builder`` ->
 
 import os
 import socket
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -20,8 +21,11 @@ import torch.nn.functional as F
 from megatron.core.transformer.enums import AttnBackend
 from torch import nn
 
+from primus.backends.megatron.core.models.builder import model_provider
+from primus.backends.megatron.core.models.registry import MODEL_FAMILIES
+from primus.backends.megatron.core.models.zaya1 import zaya1_modules as zm
 from primus.backends.megatron.core.models.zaya1.zaya1_builders import (
-    model_provider,
+    check_zaya1_model,
     zaya1_builder,
 )
 from primus.backends.megatron.core.models.zaya1.zaya1_model import Zaya1Model
@@ -114,6 +118,14 @@ def _args(**overrides):
     return args
 
 
+def _fp8_config(fp8_recipe: str) -> Zaya1TransformerConfig:
+    # Set after construction: without Transformer Engine, as on the CPU,
+    # TransformerConfig rejects FP8 for MoE models.
+    config = _tiny_config()
+    config.fp8, config.fp8_recipe = "hybrid", fp8_recipe
+    return config
+
+
 @pytest.fixture(scope="module")
 def parallel_state():
     """TP=1 process group so ``Zaya1Model`` can build its embedding and logits."""
@@ -162,7 +174,8 @@ def test_get_model_provider_wires_zaya1_builder():
     _ensure_logger()
     provider = get_model_provider("zaya1")
     assert provider.func is model_provider
-    assert provider.args == (zaya1_builder,)
+    (builder,) = provider.args
+    assert (builder.func, builder.args) == (zaya1_builder.func, zaya1_builder.args)
 
 
 def test_builder_rejects_non_data_parallel():
@@ -195,6 +208,24 @@ def test_builder_rejects_mla_legacy_and_non_rope():
             post_process=True,
             config=_tiny_config(),
         )
+
+
+def test_check_model_rejects_overlap_grad_reduce_with_split_experts(monkeypatch):
+    family = MODEL_FAMILIES["zaya1"]
+    assert family.resolve(family.check_model) is check_zaya1_model
+    args = _args(overlap_grad_reduce=True)
+    with pytest.raises(ValueError, match="overlap_grad_reduce"):
+        check_zaya1_model(args, _tiny_config(), None)
+    check_zaya1_model(_args(overlap_grad_reduce=False), _tiny_config(), None)
+    # The Turbo experts give every parameter a gradient each step; under FP8
+    # they need the tensorwise recipe, and other recipes keep the experts split.
+    # FP8 is set on the config only, as when a caller passes the config in.
+    turbo = SimpleNamespace(enable_primus_turbo=True, use_turbo_grouped_gemm=True)
+    monkeypatch.setattr(zm, "_megatron_args", lambda: turbo)
+    check_zaya1_model(args, _tiny_config(), None)
+    check_zaya1_model(args, _fp8_config("tensorwise"), None)
+    with pytest.raises(ValueError, match="overlap_grad_reduce"):
+        check_zaya1_model(args, _fp8_config("delayed"), None)
 
 
 def test_rmsnorm_matches_fp32_formula():
@@ -267,6 +298,19 @@ def test_tiny_model_wires_stages_and_forwards(parallel_state, monkeypatch):
         model(input_ids, position_ids, None, packed_seq_params=object())
 
 
+def _te_fp8_off():
+    """Transformer Engine's own autocast with FP8 off, for a high-precision reference run.
+
+    Primus's FP8 context saves and restores TE's FP8 flag through class
+    attributes that Transformer Engine 2.20 no longer reads, so once an FP8
+    step has run, TE keeps quantizing outside the context.
+    """
+    import transformer_engine.pytorch as te
+
+    autocast = getattr(te, "autocast", None) or te.fp8_autocast
+    return autocast(enabled=False)
+
+
 def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch):
     """A fresh FP8 model is accurate on its first step, with no amax history.
 
@@ -311,8 +355,10 @@ def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch)
     with torch.no_grad():
         fp8_logits = model(input_ids, position_ids, attention_mask=None).float()
         config.fp8 = None
-        ref_logits = model(input_ids, position_ids, attention_mask=None).float()
+        with _te_fp8_off():
+            ref_logits = model(input_ids, position_ids, attention_mask=None).float()
         config.fp8 = "hybrid"
+    assert not torch.equal(fp8_logits, ref_logits), "the FP8 forward matches the high-precision one exactly"
     assert torch.isfinite(fp8_logits).all()
     cosine = F.cosine_similarity(fp8_logits.flatten(), ref_logits.flatten(), dim=0)
     assert cosine > 0.99, f"cold FP8 logits drifted from high precision: cosine={cosine:.4f}"
@@ -323,3 +369,44 @@ def test_cold_tensorwise_fp8_matches_high_precision(parallel_state, monkeypatch)
     assert torch.isfinite(loss).all()
     loss.sum().backward()
     assert torch.isfinite(cca.linear_q.linear.weight.grad).all()
+
+
+def test_chunked_ce_matches_stock_model_loss(parallel_state, monkeypatch):
+    """``fused_ce_mode`` 3 (chunked output projection + CE) vs unset (stock)."""
+    del parallel_state
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        monkeypatch.delenv(name, raising=False)
+    from megatron.training.global_vars import set_args
+
+    config = _tiny_config()
+    args = _args()
+    set_args(args)
+    model = get_model_provider("zaya1")(pre_process=True, post_process=True, config=config)
+    device = torch.device("cuda")
+    # Both runs must see the same model. In training mode the embedding applies
+    # hidden_dropout (Megatron's default of 0.1 here) and every forward moves the
+    # routers' balancing biases.
+    model.to(device).eval()
+    batch, seq, vocab = 3, 8, args.padded_vocab_size
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, vocab, (batch, seq), device=device)
+    position_ids = torch.arange(seq, device=device).unsqueeze(0).expand(batch, -1)
+    labels = torch.randint(0, vocab, (batch, seq), device=device)
+    mask = (torch.rand(batch, seq, device=device) > 0.25).float()
+
+    def run(chunked):
+        config.fused_ce_mode = 3 if chunked else None
+        config.fused_ce_chunk_tokens = 5
+        model.zero_grad(set_to_none=True)
+        loss = model(input_ids, position_ids, attention_mask=None, labels=labels)
+        ((loss * mask).sum() / mask.sum()).backward()
+        grads = {n: p.grad.detach().clone() for n, p in model.named_parameters() if p.grad is not None}
+        return loss.detach(), grads
+
+    ref_loss, ref_grads = run(False)
+    out_loss, out_grads = run(True)
+    assert out_loss.shape == ref_loss.shape == (batch, seq)
+    torch.testing.assert_close(out_loss, ref_loss, rtol=1e-4, atol=1e-4)
+    assert ref_grads.keys() == out_grads.keys()
+    for name, ref in ref_grads.items():
+        torch.testing.assert_close(out_grads[name], ref, rtol=1e-3, atol=1e-5, msg=name)

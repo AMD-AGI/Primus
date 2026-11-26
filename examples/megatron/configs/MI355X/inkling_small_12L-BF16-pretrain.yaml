@@ -74,7 +74,7 @@ modules:
       load: null
       save: null
       disable_last_saving: true
-      ckpt_format: torch
+      ckpt_format: torch_dist
       eval_iters: 0
 
       # turbo off: TE grouped GEMM + alltoall dispatcher
@@ -84,5 +84,4 @@ modules:
       use_turbo_deepep: false
       use_turbo_rms_norm: false
       moe_grouped_gemm: true
-      moe_token_dispatcher_type: alltoall
       moe_permute_fusion: false

@@ -14,18 +14,19 @@ What this patches:
     immediately after construction.
 
 Activation:
-    Export ``SDMA_ALL_GATHER=1`` in the shell before launching any
+    Export ``FSDP_ALL_GATHER_BACKEND=rccl_sdma`` (or the older alias
+    ``SDMA_ALL_GATHER=1``) in the shell before launching any
     torchtitan pretrain (e.g. ``primus-cli direct -- train pretrain
     --config <existing YAML>``). The patch is a no-op otherwise.
 
     The companion hook
     ``runner/helpers/hooks/06_enable_sdma_all_gather.sh`` runs at
-    ``primus-cli`` startup and, when ``SDMA_ALL_GATHER=1``, exports
+    ``primus-cli`` startup and, for either variable, exports
     the standard zero-CTA env (``NCCL_CTA_POLICY=2``,
-    ``NCCL_CUMEM_ENABLE=1``, ...) and the LD_PRELOAD interposer so no
-    YAML or script changes are required to opt in.
-
-    ``SDMA_ALL_GATHER`` is the only knob; there are no sub-options.
+    ``NCCL_CUMEM_ENABLE=1``, ...), ``FSDP_ALL_GATHER_BACKEND=rccl_sdma``
+    and the LD_PRELOAD interposer into the training processes, so no
+    YAML or script changes are required to opt in. Without
+    ``NCCL_CTA_POLICY=2`` RCCL keeps the AllGather on its kernel path.
 
 Requirements:
     - PyTorch >= 2.12 (introduces ``SymmMemAllGather``).
@@ -37,14 +38,39 @@ Requirements:
 """
 
 import os
+import sys
 
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 
 def _sdma_all_gather_enabled(ctx: PatchContext) -> bool:
-    """Single env-driven gate. Triggered only by ``SDMA_ALL_GATHER=1``."""
-    return os.environ.get("SDMA_ALL_GATHER", "0") == "1"
+    """Env-driven gate, shared with hook 06."""
+    return (
+        os.environ.get("FSDP_ALL_GATHER_BACKEND", "") == "rccl_sdma"
+        or os.environ.get("SDMA_ALL_GATHER", "0") == "1"
+    )
+
+
+def _rebind_imported_aliases(orig, wrapped) -> list:
+    """Point every already-imported ``fully_shard`` name at ``wrapped``.
+
+    Rebinding only ``torch.distributed.fsdp.fully_shard`` and
+    ``_fully_shard.fully_shard`` misses every other module that already did
+    ``from ... import fully_shard`` (e.g. the ``torch.distributed.fsdp._fully_shard``
+    package re-export). Calls through those names skip the wrapper, so FSDP's
+    all-gather buffers are never registered RCCL windows and RCCL reports
+    ``AG CE-registered disqualified ... ceRegWindow=0``.
+    """
+    rebound = []
+    for name, mod in list(sys.modules.items()):
+        if mod is not None and getattr(mod, "fully_shard", None) is orig:
+            try:
+                mod.fully_shard = wrapped
+            except (AttributeError, TypeError):
+                continue
+            rebound.append(name)
+    return rebound
 
 
 @register_patch(
@@ -54,9 +80,11 @@ def _sdma_all_gather_enabled(ctx: PatchContext) -> bool:
     description=(
         "Auto-attach SymmMemAllGather to every fully_shard'd module "
         "so FSDP's all-gather uses the SDMA (copy-engine) dispatch "
-        "path. Gated on SDMA_ALL_GATHER=1."
+        "path. Gated on FSDP_ALL_GATHER_BACKEND=rccl_sdma or SDMA_ALL_GATHER=1."
     ),
     condition=_sdma_all_gather_enabled,
+    # Before patches that capture fully_shard (torchtitan.fsdp.weight_tying).
+    priority=10,
 )
 def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
     """
@@ -81,6 +109,11 @@ def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
 
     def _attach_symm_mem_all_gather(fsdp_module) -> None:
         """Switch a fully_shard'd module's AG comm to the SymmMem flavor."""
+        # fully_shard([m1, m2]) returns the list; the modules share one FSDP state.
+        if isinstance(fsdp_module, (list, tuple)):
+            if not fsdp_module:
+                return
+            fsdp_module = fsdp_module[0]
         try:
             state = fsdp_module._get_fsdp_state()
         except Exception as e:
@@ -123,8 +156,8 @@ def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
     @functools.wraps(orig_fully_shard)
     def wrapped_fully_shard(module, *args, **kwargs):
         result = orig_fully_shard(module, *args, **kwargs)
-        # fully_shard mutates `module` in place and returns it; this is
-        # the FSDP-augmented module.
+        # fully_shard mutates `module` in place and returns it (or the list
+        # it was given); this is the FSDP-augmented module.
         _attach_symm_mem_all_gather(result)
         return result
 
@@ -142,20 +175,19 @@ def patch_torchtitan_fsdp_sdma_symm_mem(ctx: PatchContext) -> None:
         except (AttributeError, TypeError):
             pass
 
-    # Patch every alias of fully_shard that torchtitan (or anyone else)
-    # may have already pulled in via `from ... import fully_shard`. We
-    # patch the package re-export AND the inner module's binding; both
-    # are the same function object at this point, and torchtitan
-    # imports happen later (in TorchTitanPretrainTrainer.__init__,
-    # after run_patches('setup') returns).
+    # Patch the package re-export, the inner module's binding, and every
+    # module that already did `from ... import fully_shard`. Modules
+    # imported later pick up the wrapper from the package.
     _fsdp_pkg.fully_shard = wrapped_fully_shard
     if hasattr(_ffs_mod, "fully_shard"):
         _ffs_mod.fully_shard = wrapped_fully_shard
+    rebound = _rebind_imported_aliases(orig_fully_shard, wrapped_fully_shard)
 
     log_rank_0(
         "[Patch:torchtitan.fsdp.sdma_symm_mem_collectives] installed: "
         f"every fully_shard()-d module will use "
-        f"SymmMemAllGather (backend={backend})."
+        f"SymmMemAllGather (backend={backend}); "
+        f"rebound already-imported aliases in {rebound or 'none'}."
     )
 
     # Convenience: stash references for tests / debugging.

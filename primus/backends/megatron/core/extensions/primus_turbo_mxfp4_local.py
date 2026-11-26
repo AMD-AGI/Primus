@@ -68,8 +68,12 @@ def _enable_preshuffle() -> bool:
     (pre Primus-Turbo PR #383) so MXFP4LinearFunction can keep passing a bool
     into its custom ops.
     """
+    # Newer Primus-Turbo returns a BackendChoice(backend, auto_tune) here
+    # rather than a bare BackendType.
+    choice = GlobalBackendManager.get_gemm_backend(PrecisionType.FP4)
     return (
-        GlobalBackendManager.get_gemm_backend(PrecisionType.FP4) == BackendType.AITER
+        getattr(choice, "backend", choice) == BackendType.AITER
+        and not getattr(choice, "auto_tune", False)
         and not GlobalBackendManager.auto_tune_enabled()
     )
 
@@ -128,6 +132,148 @@ def _cdiv(a, b):
     return (a + b - 1) // b
 
 
+# ---------------------------------------------------------------------------
+# Primus-Turbo capability probes.
+#
+# Primus supports images whose Primus-Turbo predates two API changes:
+#   - PR #335 added `padding_align_size` as a positional argument of
+#     quantize_mxfp4{_dual}; before it, the C++ op takes 12 arguments.
+#   - commit 683a7de added the `preshuffled=` kwarg to gemm_fp4_impl; before
+#     it, the AITER backend decides preshuffling globally.
+# rocm/primus:v26.3 predates both, so calling the modern signatures there
+# raises. Both are probed from the registered schema rather than from
+# inspect.signature: gemm_fp4_impl is a torch CustomOpDef whose __call__ is
+# (*args, **kwargs), so a signature probe reports False on every image --
+# including modern ones, where silently dropping `preshuffled` would hand
+# unshuffled operands to a kernel expecting shuffled ones.
+# ---------------------------------------------------------------------------
+
+
+def _schema_argument_names(op) -> Tuple[str, ...]:
+    """Registered argument names of a torch operator, or () if undiscoverable."""
+    overload = getattr(op, "_opoverload", None)
+    if overload is None:
+        overloads = getattr(op, "overloads", None)
+        if callable(overloads):
+            names = overloads()
+            overload = getattr(op, names[0], None) if names else None
+    schema = getattr(overload, "_schema", None)
+    if schema is None:
+        return ()
+    return tuple(arg.name for arg in schema.arguments)
+
+
+_QUANTIZE_MXFP4_DUAL_TAKES_ALIGN = "padding_align_size" in _schema_argument_names(
+    torch.ops.primus_turbo_cpp_extension.quantize_mxfp4_dual
+)
+
+_GEMM_FP4_SUPPORTS_PRESHUFFLE = "preshuffled" in _schema_argument_names(gemm_fp4_impl)
+
+
+def _gemm_fp4(a, a_scale, trans_a, b, b_scale, trans_b, out_dtype, trans_c, preshuffle):
+    """gemm_fp4_impl, forwarding `preshuffled` only where the op accepts it.
+
+    Where it is absent the AITER backend applies its own global preshuffle
+    decision, which `_enable_preshuffle()` mirrors -- so the operand layout
+    and the kernel's expectation still agree.
+    """
+    kwargs = {"granularity": _GRAN_VALUE, "default_backend": _DEFAULT_BACKEND}
+    if _GEMM_FP4_SUPPORTS_PRESHUFFLE:
+        kwargs["preshuffled"] = preshuffle
+    return gemm_fp4_impl(a, a_scale, trans_a, b, b_scale, trans_b, out_dtype, trans_c, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# GEMM shape alignment.
+# ---------------------------------------------------------------------------
+
+# Alignment applied to any axis an FP4 GEMM reduces over. See _aligned().
+MXFP4_REDUCTION_ALIGN = 256
+
+
+def _aligned(d: int, multiple: int = 16) -> int:
+    """Smallest size >= ``d`` that a reduction axis may safely take.
+
+    Three hazards force a reduction axis up to ``MXFP4_REDUCTION_ALIGN``:
+
+    - AITER's FP4 dispatcher rejects ``d % 16 != 0``.
+    - ``quantize_mxfp4_dual`` asserts that its input's last dimension is a
+      multiple of the 32-wide MX block. Callers pass ``multiple=32`` for an axis
+      that is some quantized tensor's last dimension.
+    - A shuffled colwise scale buffer covers ``cdiv(cdiv(d, 32), 8) * 8`` E8M0
+      blocks while the packed FP4 data covers only ``cdiv(d, 128) * 128``. When
+      ``cdiv(d, 128)`` is odd, four blocks per logical row have no backing data.
+      On the Primus-Turbo build that WAN MXFP4 was first trained on, the
+      quantizer left them unwritten and the wgrad GEMM summed whatever the
+      allocator left behind: the gradient norm jumped to ~1e6 and varied run to
+      run. Turbo 0.4.1.dev26 and dev33 write every scale entry (the output is
+      byte-identical over zeroed and 0x7F-filled free memory at 427 and 683
+      blocks) and give bit-identical gradients without this padding; it stays
+      for older builds.
+
+    Rounding to 256 clears all three: it is a multiple of 32, and
+    ``cdiv(256t, 128)`` is ``2t``, so every block is backed. Padding is not free
+    -- it costs a full ``F.pad`` copy of the operand for every GEMM -- so an
+    axis that already violates no rule is returned untouched: ``d`` passes when
+    it is a multiple of ``multiple`` and ``cdiv(d, 128)`` is even, i.e. when
+    ``d % 256`` is 0 or above 128. WAN 1.3B's hidden dims (1536, 4608, 8960)
+    pass. Its token axis is ``micro_batch_size * tokens_per_sample``, so whether
+    it pads depends on the micro-batch size, not on its parity.
+    """
+    if d % multiple == 0 and _cdiv(d, MXFP4_PADDING_ALIGN_SIZE) % 2 == 0:
+        return d
+    return _cdiv(d, MXFP4_REDUCTION_ALIGN) * MXFP4_REDUCTION_ALIGN
+
+
+def _aligned_gemm_dims(m: int, k: int, n: int) -> Tuple[int, int, int]:
+    """Padded ``(M, K, N)`` for the three FP4 GEMMs behind one linear layer.
+
+    Each dim is the reduction axis of exactly one GEMM -- ``K`` for the forward,
+    ``N`` for dgrad, ``M`` for wgrad -- so all three have to clear the
+    dispatcher, not just the token count. ``K`` is the last dimension of the
+    quantized activation and weight and ``N`` that of the quantized gradient,
+    so those two also need the MX block; ``M`` never is a last dimension, so a
+    token count that is only a multiple of 16 is not padded.
+    """
+    dims = (_aligned(m), _aligned(k, MXFP4_BLOCK_SIZE), _aligned(n, MXFP4_BLOCK_SIZE))
+    for label, aligned, multiple in zip(("M", "K", "N"), dims, (16, MXFP4_BLOCK_SIZE, MXFP4_BLOCK_SIZE)):
+        if aligned % multiple:
+            raise RuntimeError(
+                f"MXFP4 reduction axis {label} is misaligned after padding: "
+                f"{aligned} (from M={m}, K={k}, N={n}); it needs {label} % {multiple} == 0."
+            )
+    return dims
+
+
+def _pad2d(t: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    """Zero-pad a 2D tensor to ``[rows, cols]``; identity when already sized.
+
+    Zeros are exact here: a padded index either sits on a reduction axis, where
+    it contributes nothing to the sum, or on an output axis, where it is sliced
+    off before the result leaves this Function.
+    """
+    if t.shape[0] == rows and t.shape[1] == cols:
+        return t
+    return torch.nn.functional.pad(t, (0, cols - t.shape[1], 0, rows - t.shape[0]))
+
+
+# The quantize kernels take 16-bit input only, and the FP4 GEMM backends emit
+# fp16/bf16 only. Diffusion backbones can feed FP32 activations, so clamp on the
+# way in and out while leaving the surrounding activation dtype alone.
+_Q_INPUT_DTYPES = (torch.bfloat16, torch.float16)
+_GEMM_SUPPORTED_OUT_DTYPES = (torch.bfloat16, torch.float16)
+
+
+def _to_quantizable(t: torch.Tensor) -> torch.Tensor:
+    if t.dtype in _Q_INPUT_DTYPES:
+        return t
+    return t.to(torch.bfloat16)
+
+
+def _gemm_out_dtype(dtype: torch.dtype) -> torch.dtype:
+    return dtype if dtype in _GEMM_SUPPORTED_OUT_DTYPES else torch.bfloat16
+
+
 @_custom_op("primus::quantize_mxfp4_dual", mutates_args=(), device_types="cuda")
 def _quantize_mxfp4_dual_op(
     x: torch.Tensor,
@@ -144,10 +290,11 @@ def _quantize_mxfp4_dual_op(
     shuffle_colwise_scale: bool,
     shuffle_colwise: bool,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    align = (padding_align_size,) if _QUANTIZE_MXFP4_DUAL_TAKES_ALIGN else ()
     return torch.ops.primus_turbo_cpp_extension.quantize_mxfp4_dual(
         x,
         out_dtype,
-        padding_align_size,
+        *align,
         rowwise_use_2d_block,
         rowwise_use_sr,
         rowwise_use_rht,
@@ -288,6 +435,103 @@ def _quantize_grad_dual(grad_2d, preshuffle, use_sr=True):
     )
 
 
+# (2d block, stochastic rounding, RHT) per (rowwise, colwise) copy for the
+# bf16-forward mode; sr None takes mxfp4_gradient_stochastic_rounding. RHT on
+# every copy and 1x32 weight blocks is the recipe WAN's bf16-forward runs were
+# measured with. Only the colwise copies of the activation and weight and both
+# gradient copies reach a GEMM; the forward copies are made and dropped.
+_BF16_FWD_RECIPE = {
+    "act": ((False, False, True), (False, False, True)),
+    "w": ((False, False, True), (False, False, True)),
+    "grad": ((False, None, True), (False, None, True)),
+}
+
+
+def _quantize_dual(x, recipe, shuffle, use_sr=False):
+    """quantize_mxfp4_dual with one ``_BF16_FWD_RECIPE`` entry and shuffle flags."""
+    row, col = recipe
+    return _quantize_mxfp4_dual_op(
+        x,
+        _FP4_DTYPE,
+        MXFP4_PADDING_ALIGN_SIZE,
+        row[0],
+        use_sr if row[1] is None else row[1],
+        row[2],
+        col[0],
+        use_sr if col[1] is None else col[1],
+        col[2],
+        *shuffle,
+    )
+
+
+class MXFP4BackwardLinearFunction(torch.autograd.Function):
+    """Linear with a bf16 forward GEMM and MXFP4 dgrad and wgrad.
+
+    The output is the bf16 GEMM of the unquantized operands. The forward also
+    quantizes the padded activation and weight, as MXFP4LinearFunction does, and
+    keeps only the colwise FP4 copies the backward reduces over.
+    """
+
+    @staticmethod
+    def forward(ctx, input, weight, preshuffle, use_gradient_sr):
+        gemm_out_dtype = _gemm_out_dtype(weight.dtype)
+        orig_shape = input.shape
+        input_2d = input.reshape(-1, input.shape[-1])
+        m, k = input_2d.shape
+        n = weight.shape[0]
+        m_a, k_a, n_a = _aligned_gemm_dims(m, k, n)
+
+        _, _, a_t_fp4, a_t_scale = _quantize_dual(
+            _pad2d(_to_quantizable(input_2d), m_a, k_a),
+            _BF16_FWD_RECIPE["act"],
+            (preshuffle, False, preshuffle, preshuffle),
+        )
+        _, _, b_t_fp4, b_t_scale = _quantize_dual(
+            _pad2d(_to_quantizable(weight), n_a, k_a),
+            _BF16_FWD_RECIPE["w"],
+            (preshuffle, preshuffle, preshuffle, preshuffle),
+        )
+        output = torch.nn.functional.linear(input_2d.to(gemm_out_dtype), weight.to(gemm_out_dtype))
+
+        ctx.save_for_backward(a_t_fp4, a_t_scale, b_t_fp4, b_t_scale)
+        ctx.preshuffle = preshuffle
+        ctx.use_gradient_sr = use_gradient_sr
+        ctx.input_dtype = input.dtype
+        ctx.weight_dtype = weight.dtype
+        ctx.orig_shape = orig_shape
+        ctx.m, ctx.k, ctx.n = m, k, n
+        ctx.m_a, ctx.k_a, ctx.n_a = m_a, k_a, n_a
+        return output.reshape(*orig_shape[:-1], n)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_2d = grad_output.contiguous().reshape(-1, grad_output.shape[-1])
+        a_t_fp4, a_t_scale, b_t_fp4, b_t_scale = ctx.saved_tensors
+        preshuffle = ctx.preshuffle
+        gemm_out_dtype = _gemm_out_dtype(ctx.weight_dtype)
+
+        g_fp4, g_scale, g_t_fp4, g_t_scale = _quantize_dual(
+            _pad2d(_to_quantizable(grad_2d), ctx.m_a, ctx.n_a),
+            _BF16_FWD_RECIPE["grad"],
+            (preshuffle, False, preshuffle, False),
+            use_sr=ctx.use_gradient_sr,
+        )
+        grad_input = _gemm_fp4(
+            g_fp4, g_scale, False, b_t_fp4, b_t_scale, True, gemm_out_dtype, False, preshuffle
+        )
+        if ctx.m_a != ctx.m or ctx.k_a != ctx.k:
+            grad_input = grad_input[: ctx.m, : ctx.k]
+        grad_input = grad_input.to(ctx.input_dtype).reshape(ctx.orig_shape)
+
+        grad_weight = _gemm_fp4(
+            g_t_fp4, g_t_scale, False, a_t_fp4, a_t_scale, True, gemm_out_dtype, False, preshuffle
+        )
+        if ctx.n_a != ctx.n or ctx.k_a != ctx.k:
+            grad_weight = grad_weight[: ctx.n, : ctx.k].contiguous()
+        grad_weight = grad_weight.to(ctx.weight_dtype)
+        return grad_input, grad_weight, None, None
+
+
 class MXFP4LinearFunction(torch.autograd.Function):
     """MXFP4 linear (Y = X @ W^T) with MX block-of-32 scaling.
 
@@ -309,27 +553,40 @@ class MXFP4LinearFunction(torch.autograd.Function):
         fp8_backend_value,
         use_gradient_sr,
     ):
-        out_dtype = input.dtype
+        # Emit the parameter (compute) dtype -- typically bf16 under mixed
+        # precision -- rather than the raw activation dtype, since native
+        # linears run under autocast and downstream ops reject FP32.
+        gemm_out_dtype = _gemm_out_dtype(weight.dtype)
         orig_shape = input.shape
         input_2d = input.reshape(-1, input.shape[-1])
 
-        a_fp4, a_scale, a_t_fp4, a_t_scale = _quantize_input_dual(input_2d, preshuffle)
-        b_fp4, b_scale, b_t_fp4, b_t_scale = _quantize_weight_dual(weight, preshuffle)
+        m, k = input_2d.shape
+        n = weight.shape[0]
+        m_a, k_a, n_a = _aligned_gemm_dims(m, k, n)
 
-        output = gemm_fp4_impl(
+        # Quantize padded copies only: the tensors handed to the FP8-hybrid
+        # backward below must stay at their true sizes. _pad2d is the identity
+        # when the axis already clears the dispatcher, which is the usual case.
+        a_fp4, a_scale, a_t_fp4, a_t_scale = _quantize_input_dual(
+            _pad2d(_to_quantizable(input_2d), m_a, k_a), preshuffle
+        )
+        b_fp4, b_scale, b_t_fp4, b_t_scale = _quantize_weight_dual(
+            _pad2d(_to_quantizable(weight), n_a, k_a), preshuffle
+        )
+        output = _gemm_fp4(
             a_fp4,
             a_scale,
             False,
             b_fp4,
             b_scale,
             True,
-            out_dtype,
+            gemm_out_dtype,
             False,
-            granularity=_GRAN_VALUE,
-            default_backend=_DEFAULT_BACKEND,
-            preshuffled=preshuffle,
+            preshuffle,
         )
-        output = output.reshape(*orig_shape[:-1], output.shape[-1])
+        if m_a != m or n_a != n:
+            output = output[:m, :n]
+        output = output.reshape(*orig_shape[:-1], n)
 
         if backward_is_fp8:
             return output, input_2d.view_as(input_2d), weight.view_as(weight)
@@ -362,8 +619,19 @@ class MXFP4LinearFunction(torch.autograd.Function):
         ctx.preshuffle = preshuffle
         ctx.backward_is_fp8 = backward_is_fp8
         ctx.use_gradient_sr = use_gradient_sr
-        ctx.out_dtype = inputs[0].dtype
+        # grad_input must match the forward input dtype (possibly FP32), while
+        # grad_weight must match the parameter dtype (typically bf16).
+        ctx.input_dtype = inputs[0].dtype
+        ctx.weight_dtype = inputs[1].dtype
         ctx.orig_shape = inputs[0].shape
+
+        # True and FP4-aligned GEMM dims. Recomputed here rather than smuggled
+        # through the Function outputs: integer math on static shapes, so it
+        # stays out of the traced region.
+        ctx.m = inputs[0].numel() // inputs[0].shape[-1]
+        ctx.k = inputs[0].shape[-1]
+        ctx.n = inputs[1].shape[0]
+        ctx.m_a, ctx.k_a, ctx.n_a = _aligned_gemm_dims(ctx.m, ctx.k, ctx.n)
 
         if backward_is_fp8:
             _, input_2d_saved, weight_saved = output
@@ -390,10 +658,11 @@ class MXFP4LinearFunction(torch.autograd.Function):
 
         if ctx.backward_is_fp8:
             input_2d, weight = ctx.saved_tensors
+            gemm_out_dtype = _gemm_out_dtype(ctx.weight_dtype)
 
-            grad_fp8, grad_scale_inv = _quantize_fp8_tw(grad_2d, ctx.fp8_bwd_dtype)
-            a_fp8, a_scale_inv = _quantize_fp8_tw(input_2d, ctx.fp8_bwd_dtype)
-            b_fp8, b_scale_inv = _quantize_fp8_tw(weight, ctx.fp8_bwd_dtype)
+            grad_fp8, grad_scale_inv = _quantize_fp8_tw(_to_quantizable(grad_2d), ctx.fp8_bwd_dtype)
+            a_fp8, a_scale_inv = _quantize_fp8_tw(_to_quantizable(input_2d), ctx.fp8_bwd_dtype)
+            b_fp8, b_scale_inv = _quantize_fp8_tw(_to_quantizable(weight), ctx.fp8_bwd_dtype)
 
             grad_input = gemm_fp8_impl(
                 grad_fp8,
@@ -402,11 +671,13 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 b_fp8,
                 b_scale_inv,
                 False,
-                ctx.out_dtype,
+                gemm_out_dtype,
                 False,
                 granularity=ctx.fp8_gran_value,
                 default_backend=ctx.fp8_backend_value,
             )
+            if grad_input.dtype != ctx.input_dtype:
+                grad_input = grad_input.to(ctx.input_dtype)
             grad_input = grad_input.reshape(ctx.orig_shape)
 
             grad_weight = gemm_fp8_impl(
@@ -416,47 +687,59 @@ class MXFP4LinearFunction(torch.autograd.Function):
                 grad_fp8,
                 grad_scale_inv,
                 False,
-                ctx.out_dtype,
+                gemm_out_dtype,
                 True,
                 granularity=ctx.fp8_gran_value,
                 default_backend=ctx.fp8_backend_value,
             )
+            if grad_weight.dtype != ctx.weight_dtype:
+                grad_weight = grad_weight.to(ctx.weight_dtype)
         else:
             a_t_fp4, a_t_scale, b_t_fp4, b_t_scale = ctx.saved_tensors
             preshuffle = ctx.preshuffle
+            gemm_out_dtype = _gemm_out_dtype(ctx.weight_dtype)
 
+            # The saved operands were quantized from padded tensors, so the
+            # gradient has to be padded to match before it can meet them.
             g_fp4, g_scale, g_t_fp4, g_t_scale = _quantize_grad_dual(
-                grad_2d, preshuffle, use_sr=ctx.use_gradient_sr
+                _pad2d(_to_quantizable(grad_2d), ctx.m_a, ctx.n_a),
+                preshuffle,
+                use_sr=ctx.use_gradient_sr,
             )
-
-            grad_input = gemm_fp4_impl(
+            grad_input = _gemm_fp4(
                 g_fp4,
                 g_scale,
                 False,
                 b_t_fp4,
                 b_t_scale,
                 True,
-                ctx.out_dtype,
+                gemm_out_dtype,
                 False,
-                granularity=_GRAN_VALUE,
-                default_backend=_DEFAULT_BACKEND,
-                preshuffled=preshuffle,
+                preshuffle,
             )
+            if ctx.m_a != ctx.m or ctx.k_a != ctx.k:
+                grad_input = grad_input[: ctx.m, : ctx.k]
+            if grad_input.dtype != ctx.input_dtype:
+                grad_input = grad_input.to(ctx.input_dtype)
             grad_input = grad_input.reshape(ctx.orig_shape)
 
-            grad_weight = gemm_fp4_impl(
+            grad_weight = _gemm_fp4(
                 g_t_fp4,
                 g_t_scale,
                 False,
                 a_t_fp4,
                 a_t_scale,
                 True,
-                ctx.out_dtype,
+                gemm_out_dtype,
                 False,
-                granularity=_GRAN_VALUE,
-                default_backend=_DEFAULT_BACKEND,
-                preshuffled=preshuffle,
+                preshuffle,
             )
+            # Slice before any dtype cast so the parameter gradient reaches FSDP
+            # and the optimizer at exactly the weight's shape.
+            if ctx.n_a != ctx.n or ctx.k_a != ctx.k:
+                grad_weight = grad_weight[: ctx.n, : ctx.k].contiguous()
+            if grad_weight.dtype != ctx.weight_dtype:
+                grad_weight = grad_weight.to(ctx.weight_dtype)
 
         return grad_input, grad_weight, None, None, None, None, None, None
 
@@ -464,6 +747,16 @@ class MXFP4LinearFunction(torch.autograd.Function):
 # ---------------------------------------------------------------------------
 # MXFP4-aware parallel linear layers
 # ---------------------------------------------------------------------------
+
+
+def _forward_is_bf16(config) -> bool:
+    """Read ``mxfp4_forward_precision``; the bf16 forward has only an MXFP4 backward."""
+    forward = getattr(config, "mxfp4_forward_precision", "mxfp4")
+    if forward not in ("mxfp4", "bf16"):
+        raise ValueError(f"mxfp4_forward_precision must be 'mxfp4' or 'bf16', got {forward!r}")
+    if forward == "bf16" and getattr(config, "mxfp4_backward_precision", "mxfp4") != "mxfp4":
+        raise ValueError("mxfp4_forward_precision='bf16' needs mxfp4_backward_precision='mxfp4'")
+    return forward == "bf16"
 
 
 class MXFP4ColumnParallelLinear(ColumnParallelLinear):
@@ -494,6 +787,7 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._forward_is_bf16 = _forward_is_bf16(self.config)
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -508,6 +802,10 @@ class MXFP4ColumnParallelLinear(ColumnParallelLinear):
 
     def _forward_impl(self, input, weight, *args, **kwargs):
         bias = kwargs.get("bias", None)
+
+        if self._forward_is_bf16:
+            output = MXFP4BackwardLinearFunction.apply(input, weight, self._preshuffle, self._use_gradient_sr)
+            return output if bias is None else output + bias
 
         result = MXFP4LinearFunction.apply(
             input,
@@ -554,6 +852,7 @@ class MXFP4RowParallelLinear(RowParallelLinear):
         _assert_preshuffle_contract(self.config, self._preshuffle)
         self._backward_is_fp8 = getattr(self.config, "mxfp4_backward_precision", "mxfp4") == "fp8"
         self._use_gradient_sr = getattr(self.config, "mxfp4_gradient_stochastic_rounding", False)
+        self._forward_is_bf16 = _forward_is_bf16(self.config)
 
         if self._backward_is_fp8:
             from primus_turbo.pytorch.core.low_precision import float8_e5m2
@@ -568,6 +867,10 @@ class MXFP4RowParallelLinear(RowParallelLinear):
 
     def _forward_impl(self, input, weight, *args, **kwargs):
         bias = kwargs.get("bias", None)
+
+        if self._forward_is_bf16:
+            output = MXFP4BackwardLinearFunction.apply(input, weight, self._preshuffle, self._use_gradient_sr)
+            return output if bias is None else output + bias
 
         result = MXFP4LinearFunction.apply(
             input,

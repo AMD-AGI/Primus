@@ -9,7 +9,6 @@ from typing import Any, Callable, Iterator, List, Optional, Union
 
 import torch
 from megatron.core import parallel_state
-from megatron.core.enums import ModelType
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.pipeline_parallel.schedules import (
     clear_embedding_activation_buffer,
@@ -71,7 +70,7 @@ class PrimusPipelineParallelLauncher:
 
         set_streams()
 
-    def _init_check_pg_collection(self, model_type, pg_collection: Optional[ProcessGroupCollection] = None):
+    def _init_check_pg_collection(self, pg_collection: Optional[ProcessGroupCollection] = None):
 
         if pg_collection is None:
             tp_group = parallel_state.get_tensor_model_parallel_group()
@@ -90,10 +89,6 @@ class PrimusPipelineParallelLauncher:
                 with_context_parallel=True, partial_data_parallel=False
             )
         else:
-            assert model_type != ModelType.encoder_and_decoder, (
-                "encoder PP stages not yet supported when passing custom process groups. "
-                "support coming soon!"
-            )
             assert hasattr(pg_collection, "tp"), "pg_collection must have a tp_group"
             assert hasattr(pg_collection, "cp"), "pg_collection must have a cp_group"
             assert hasattr(pg_collection, "embd"), (
@@ -212,7 +207,7 @@ class PrimusPipelineParallelLauncher:
             model = [model]
         config = get_model_config(model[0])
         model_type = get_model_type(model[0])
-        pg_collection = self._init_check_pg_collection(model_type, pg_collection)
+        pg_collection = self._init_check_pg_collection(pg_collection)
 
         if config.overlap_p2p_comm and config.batch_p2p_comm:
             raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
@@ -298,7 +293,6 @@ class PrimusPipelineParallelLauncher:
                 node.args["total_num_tokens"] = total_num_tokens
                 node.args["recv_tensor_shapes"] = recv_tensor_shapes
             elif node.func_type in [FuncType.B, FuncType.BW]:
-                node.args["model_type"] = model_type
                 node.args["send_tensor_shapes"] = send_tensor_shapes
             elif node.func_type in [FuncType.RF, FuncType.RB]:
                 node.args["recv_tensor_shapes"] = recv_tensor_shapes

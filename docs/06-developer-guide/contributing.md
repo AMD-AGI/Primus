@@ -133,7 +133,7 @@ The workflow **`.github/workflows/ci.yaml`** defines how changes are validated.
 **Jobs (high level):**
 
 - **`code-lint`:** Ubuntu, Python 3.12—installs `pre-commit` and runs `pre-commit run --all-files --show-diff-on-failure`, so the checks (black, isort, autoflake, shellcheck, and the `pre-commit-hooks` set) follow `.pre-commit-config.yaml` exactly.
-- **`build-docker`:** Builds and pushes Docker images (depends on `code-lint`).
+- **`build-docker`:** Builds and pushes Docker images (depends on `code-lint`). Fork and Dependabot PRs get no repository secrets, so their image is built but not pushed; any other run without the Docker Hub token fails. `run-unittest-torch` uses the built image from the local Docker daemon when it runs on the build host and pulls it otherwise, so a fork PR's GPU tests only run on the build host.
 - **`run-unittest-torch`:** Self-hosted GPU runner—installs dependencies (including Primus-Turbo and AITER as defined in the workflow), runs `bash ./tests/runner/run_all_tests.sh`, `pytest` on `tests/unit_tests/` (with a few deselected tests), then Megatron and TorchTitan trainer tests with `DATA_PATH`, `MASTER_PORT`, `HSA_NO_SCRATCH_RECLAIM=1`, and `HF_TOKEN` where required.
 - **`run-unittest-jax`:** JAX runner—installs `requirements-jax.txt`, runs shell tests and `python ./tests/run_unit_tests.py --jax` with CI-specific environment variables.
 

@@ -582,12 +582,20 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
 
     # ---- mlp -------------------------------------------------------------
     padding_mask = kwargs.get("padding_mask", None)
+    from primus.backends.megatron.core.extensions import router_grad_merge
+
+    # pre_mlp_layernorm_output is consumed only by the MLP; the residual
+    # stream, including the V2 carry, stays outside the gradient join.
+    merge_token = router_grad_merge.begin_fused_scope(
+        layer, pre_mlp_layernorm_output, hidden_states, inference_context, padding_mask
+    )
     try:
         try:
             mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output, padding_mask=padding_mask)
         except TypeError:
             mlp_output_with_bias = layer.mlp(pre_mlp_layernorm_output)
     finally:
+        router_grad_merge.end_fused_scope(merge_token)
         if fc1_skip is not None:
             fc1_skip._skip_fused_norm = False
             fc1_skip._prequant_x = None

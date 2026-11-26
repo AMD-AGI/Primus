@@ -6,9 +6,6 @@ as `model_type: inkling`. The numerical reference is the official
 transformers `models/inkling` code (commit `263c5eb9`); Miles is the design
 reference. Multi-token prediction, vision and audio are not included.
 
-How the single-GPU parity tests are run, and their last results, are in
-[tests/unit_tests/backends/megatron/inkling/README.md](../../../../../../tests/unit_tests/backends/megatron/inkling/README.md).
-
 ## The model
 
 | | Inkling-Small | Inkling (Large) |
@@ -44,8 +41,11 @@ a Megatron GPT layer:
 | `primus/backends/megatron/core/models/inkling/` | `InklingModel`, the config class (`InklingTransformerConfig`, per-layer geometry), layer specs, builders, and the release ↔ Megatron weight mapping |
 | `primus/backends/megatron/core/transformer/inkling/` | Attention (eager and FlexAttention backends), ShortConv, router, MoE layer and shared experts, dense MLP, decoder layer |
 | `primus/backends/megatron/patches/inkling_muon_qkv_patches.py` | Per-layer q/k/v split for Megatron's Muon (see [Muon](#muon)) |
-| `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L` and `inkling_large_6L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
-| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml` | Single-node pretraining recipes for the Small and Large proxies (EP 8, AdamW, mock data); they differ only in the model |
+| `primus/configs/models/megatron/inkling_*.yaml` | Presets: `inkling_small`, `inkling_large`, the proxies `inkling_small_12L`, `inkling_large_6L` and `inkling_large_20L` (released widths, fewer layers), and `inkling_small_tiny` for tests |
+| `examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml`, `inkling_large_6L-BF16-pretrain.yaml`, `inkling_large_6L-FP8-pretrain.yaml` | Single-node recipes (EP 8, AdamW, mock data) |
+| `examples/megatron/configs/MI355X/inkling_large_6L-BF16-async-ckpt-pretrain.yaml` | The 6L recipe with asynchronous checkpoint saves that resume on rerun (see [Asynchronous saving](#asynchronous-saving)) |
+| `examples/megatron/configs/MI355X/inkling_large_20L-BF16-pretrain.yaml` | Four-node recipe (PP 4 × EP 8) for the 20-layer Large proxy, run on 4 MI355X nodes in BF16 with Turbo off |
+| `examples/megatron/configs/MI355X/inkling_small-BF16-pretrain.yaml`, `inkling_small-FP8-pretrain.yaml`, `inkling_large-BF16-pretrain.yaml`, `inkling_large-FP8-pretrain.yaml` | Multi-node recipes run on MI355X nodes: the full Small model (PP 4 × EP 8) on 4 nodes with Turbo, in BF16 and in FP8 tensorwise, and the full 66-layer Large model (PP 16 × EP 8) on 16 nodes with Turbo, in BF16 and in FP8 tensorwise with Turbo's GEMMs off |
 | `tools/checkpoint_conversion/convert_inkling_hf_megatron.py` | Hugging Face → Megatron checkpoint converter |
 | `tests/unit_tests/backends/megatron/inkling/` | Unit tests, the transformers reference harness, and the 8-GPU parallel check |
 
@@ -69,40 +69,181 @@ merges and splits:
 `inkling_hf_mapping.py` owns these conversions in both directions; the
 converter and the tests both use it.
 
-## Running
+## Reproducing the single-node results
 
-Pretraining on one MI355X node with mock data and AdamW, on the 12-layer Small
-proxy or the 6-layer Large proxy:
+Needs one node with 8 MI355X GPUs, Docker and internet access, and the
+`rocm/primus:v26.9` image (torch 2.16.0a0+rocm10.2, Transformer Engine
+2.20.0.dev0, Primus-Turbo 0.6.1.dev4). Mock data needs no Hugging Face token.
+
+**1. Clone Primus** on the host, with its Megatron-LM submodule. The image's
+own `/workspace/Primus` is an older copy, so mount your clone instead.
 
 ```bash
-export PYTHONDONTWRITEBYTECODE=1
-./runner/primus-cli direct -- train pretrain \
-    --config examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml
-./runner/primus-cli direct -- train pretrain \
-    --config examples/megatron/configs/MI355X/inkling_large_6L-BF16-pretrain.yaml
+cd $HOME
+git clone https://github.com/AMD-AGI/Primus.git Primus-inkling
+cd Primus-inkling
+git submodule update --init third_party/Megatron-LM
 ```
 
-The recipes take these environment overrides:
+**2. Start the container** on the GPU node and open a shell in your clone.
+Stay root: as a normal user, aiter's GPU probe fails.
+
+```bash
+docker run -d --name primus_v26.9 \
+    --device /dev/dri --device /dev/kfd --network host --ipc host \
+    --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
+    --shm-size 64G -v $HOME:$HOME \
+    rocm/primus:v26.9 sleep infinity
+docker exec -it -w $HOME/Primus-inkling primus_v26.9 bash
+```
+
+**3. Run the recipes** inside the container:
+
+```bash
+export PYTHONDONTWRITEBYTECODE=1            # no root-owned __pycache__ in your clone
+export PRIMUS_WORKSPACE=/tmp/inkling_out
+export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 # Muon needs Emerging-Optimizers; the image lacks it
+CFG=examples/megatron/configs/MI355X
+SMALL=$CFG/inkling_small_12L-BF16-pretrain.yaml
+LARGE=$CFG/inkling_large_6L-BF16-pretrain.yaml
+LARGE_FP8=$CFG/inkling_large_6L-FP8-pretrain.yaml
+LOGS=/tmp/inkling_logs; mkdir -p $LOGS
+MUON="--use_distributed_optimizer false --overlap_param_gather false --muon_extra_scale_factor 1.0"
+train() { log=$1; shift; ./runner/primus-cli direct --log_file $LOGS/$log.log -- train pretrain "$@"; }
+
+train small_adamw --config $SMALL
+train small_muon  --config $SMALL --optimizer muon --overlap_grad_reduce false $MUON
+train large_bf16  --config $LARGE
+train large_fp8   --config $LARGE_FP8
+PRIMUS_TURBO=false train large_bf16_te   --config $LARGE
+PRIMUS_TURBO=false train large_muon      --config $LARGE --optimizer muon --overlap_grad_reduce false $MUON
+PRIMUS_TURBO=false train large_dist_muon --config $LARGE --optimizer dist_muon --overlap_grad_reduce true $MUON
+```
+
+Each run is 50 steps of 64 × 4096 tokens (EP 8 × DP 8, flex attention, random
+initialisation) and takes 4–5 minutes. The first run in a fresh container
+spends a few more minutes compiling, and the first FP8 run several more
+autotuning Turbo's FP8 kernels.
+
+**4. Read the results.** Step 50 carries the loss, the NaN and skipped-step
+counts and `hip mem usage`; the step time is the median over steps 20–50:
+
+```bash
+for log in $LOGS/*.log; do
+  last=$(grep -a 'iteration  *50/' $log | tail -1)
+  loss=$(grep -oE 'lm loss: [0-9.E+]+' <<<"$last")
+  nan=$(grep -oE 'nan iterations: +[0-9]+' <<<"$last")
+  mem=$(grep -oE 'usage_ratio: [0-9.]+GB' <<<"$last" | cut -d' ' -f2)
+  ms=$(grep -aoE 'iteration +([2-4][0-9]|50)/.*per iteration \(ms\): [0-9.]+' $log \
+    | grep -oE '[0-9.]+$' | sort -n | awk '{a[NR]=$1} END {print a[int((NR+1)/2)]}')
+  echo "$(basename $log .log): $loss, $nan, median $ms ms, hip mem $mem"
+done
+```
+
+Results on Nov 4, 2026 (no NaN or skipped steps in any run):
+
+| Run | Recipe | Loss at step 50 | Step time | `hip mem usage` |
+| --- | --- | --- | --- | --- |
+| `small_adamw` | Small 12L (67.5B), Turbo off | 5.762 | 3.59 s | 208 GB |
+| `small_muon` | Small 12L, `muon` | 5.846 | 4.49 s | 203 GB |
+| `large_bf16` | Large 6L (62.6B), Turbo on | 5.747 | 3.26 s | 201 GB |
+| `large_fp8` | Large 6L, Turbo on, FP8 tensorwise | 5.702 | 2.99 s | 222 GB |
+| `large_bf16_te` | Large 6L, Turbo off | 5.747 | 3.31 s | 204 GB |
+| `large_muon` | Large 6L, Turbo off, `muon` | 5.901 | 4.53 s | 216 GB |
+| `large_dist_muon` | Large 6L, Turbo off, `dist_muon` | 5.902 | 4.26 s | 183 GB |
+
+Step times vary by up to 4% between repeats of the same run. Mock data is
+random tokens, so these numbers measure throughput and stability, not quality.
+
+## Recipe options
+
+The single-node recipes take these environment overrides; other Megatron
+arguments can be appended after `--config` (later ones win).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
+| `PRIMUS_TURBO` | `true` (Large recipes) | `false` turns off every Turbo kernel in the Large recipes; the single-node Small recipe always runs without Turbo |
 | `PRIMUS_MODEL` | `inkling_small_12L` or `inkling_large_6L` | Model preset |
-| `PRIMUS_INKLING_ATTN` | `flex` | `flex` or `eager` (dense bias; slower, about 2x the step time and more memory) |
+| `PRIMUS_INKLING_ATTN` | `flex` | `flex` or `eager` (dense bias; about 2× the step time and more memory) |
 | `PRIMUS_TRAIN_ITERS` | `50` | Training steps; must be more than the 5 warmup steps |
 | `PRIMUS_SEQ_LENGTH`, `PRIMUS_GBS`, `PRIMUS_MBS`, `PRIMUS_EP` | 4096, 64, 1, 8 | Sequence length, global and micro batch, expert parallelism |
 
-Other Megatron arguments can be appended after `--config` (for example
-`--optimizer muon`); later ones win.
+### Primus-Turbo
 
-With `mock_data: true` Primus replaces the tokenizer with `NullTokenizer`;
-`vocab_size: 200057` plus its end-of-document token gives the 200,058 real
-Inkling tokens. Mock data is random tokens, so use it for throughput only.
+The single-node Large recipes and the multi-node recipes turn on Turbo grouped
+GEMM, RMSNorm, DeepEP and GEMM, except Large FP8, which turns on only RMSNorm
+and DeepEP and keeps TE's FP8 GEMMs (its header gives the cost of switching).
+The 12-layer Small and 20-layer Large proxies run without Turbo.
+Inkling keeps its own attention core, so `use_turbo_attention` stays off.
 
-Real data needs the real tokenizer, with an end-of-document token set. The
-released tokenizer defines no eos, bos or pad token, so loaded from
-`thinkingmachines/Inkling-Small` it gives Megatron no end-of-document id.
-Tokenize with `<|endoftext|>` (id 199999) as the separator; this also saves a
-copy of the tokenizer with that token as its `eos_token`:
+- In BF16, Turbo's GEMM and TE's linears call the same hipBLASLt kernels, so
+  the 1.5% gain over Turbo off comes from DeepEP. The LM head stays Megatron's
+  `ColumnParallelLinear`.
+- DeepEP needs fp32 router probabilities (`moe_router_dtype: fp32`, set by the
+  presets) and switches the dispatcher to `flex` itself.
+  `turbo_deepep_num_cu: 64` is about 1% faster than the default 32.
+  `moe_permute_fusion` and `turbo_sync_free_moe_stage: 2` change nothing;
+  `turbo_sync_free_moe_stage: 3` and `use_turbo_fused_act_with_probs` are
+  slower, so the recipe leaves them off. `moe_use_fused_router_with_aux_score`
+  has no effect, because Inkling's router replaces Megatron's routing.
+- Turbo grouped GEMM trains each expert linear as one stacked 3-D `weights`
+  tensor, exposing the per-expert `weight{e}` as views of it. Muon does not
+  orthogonalize 3-D weights, so Primus rejects Muon with Turbo grouped GEMM
+  (unless `primus_turbo` isn't installed or the model has no MoE layers);
+  run Muon with `PRIMUS_TURBO=false`. Checkpoints hold only the per-expert
+  `weight{e}` (`torch_dist` always; `torch` ones written without Turbo), and
+  loading them fills the stacked tensor, so checkpoints move freely between
+  Turbo and non-Turbo runs.
+
+### FP8
+
+`inkling_large_6L-FP8-pretrain.yaml` is the Large recipe with FP8 tensorwise
+GEMMs. It needs Primus-Turbo 0.6 or later (`rocm/primus:v26.9`): the FP8
+grouped GEMM in Turbo 0.5 (`rocm/primus:v26.8`) fails on Inkling's expert
+shapes. The LM head stays in BF16, as in Megatron's GPT model.
+
+Other recipes, measured the same way on `rocm/primus:v26.9`:
+
+- TE's FP8 without Turbo (`PRIMUS_TURBO=false`): 3.23 s per step.
+- FP8 blockwise: 3.29 s, no faster than BF16.
+- MXFP8 (`fp8: e4m3`, `fp8_recipe: mxfp8`, `NVTE_ROCM_ENABLE_MXFP8=1`): 3.00 s,
+  as fast as tensorwise but with about 17 minutes of first-step autotuning.
+- Adding `turbo_fused_grouped_gemm`, `use_turbo_fused_act_with_probs` and
+  `moe_permute_fusion`: about 5 s.
+
+Every FP8 run ends about 0.045 (tensorwise) or 0.03 (blockwise, MXFP8) below
+BF16 at step 50, starting from step 3, whether the FP8 GEMMs are TE's or
+Turbo's. Qwen3-30B-A3B with the same settings ends at the same loss in BF16
+and FP8, so the gap comes from Inkling's layers in FP8; its cause is not known
+yet.
+
+### Muon
+
+Megatron's Muon (Newton–Schulz on 2-D weights, Adam for the rest) runs on both
+sizes, with the flags in `$MUON` above.
+
+- Megatron splits `linear_qkv` into q, k and v using one shape for the whole
+  model, but the sliding and global layers of Inkling Large have different KV
+  group counts (16 and 8), so the stock split fails. The
+  `megatron.optimizer.inkling_muon_qkv` patch gives each `linear_qkv` weight
+  its own layer's split. Small has 8 groups on both, so it is unaffected.
+- On Muon: `linear_qkv`, `linear_rel`, `linear_proj`, `rel_proj`, dense and
+  expert MLP weights, shared experts, and the router's `weight` and
+  `shared_weight`. On Adam: embedding, LM head, ShortConvs (3-D), norms and
+  `global_scale`.
+- `dist_muon` with `--overlap_param_gather true` fails at the second step when
+  every expert lives on one rank (EP = number of GPUs): Megatron's layer-wise
+  optimizer leaves the expert buckets' sizes unset. Keep parameter-gather
+  overlap off for now.
+
+## Training on real data
+
+Mock data replaces the tokenizer with `NullTokenizer`; `vocab_size: 200057`
+plus its end-of-document token gives the 200,058 real Inkling tokens. Real
+data needs the real tokenizer with an end-of-document token. The released
+tokenizer defines no eos, bos or pad token, so tokenize with `<|endoftext|>`
+(id 199999) as the separator; this also saves a copy of the tokenizer with that
+token as its `eos_token`:
 
 ```bash
 python tools/convergence_test/prepare_dataset.py --model inkling_small.yaml \
@@ -120,94 +261,9 @@ Then train from that directory instead of mock data:
 ```
 
 Megatron then reports the 200,058-token vocabulary (padded to 200,064) and
-end-of-document id 199999, the id that ends every document in the data.
+end-of-document id 199999.
 
-### Reproducing the proxy runs
-
-Needs one node with 8 MI355X GPUs, Docker and internet access. Training uses
-only what the `rocm/primus:v26.8` image ships (torch 2.14.0+rocm10.1,
-TE 2.17.1, transformers 5.10.0): nothing in the training path imports
-transformers, and mock data needs no Hugging Face token. The pinned
-transformers build (`263c5eb9`) is only for the reference tests.
-
-On the host, clone the branch with its Megatron-LM submodule. The image's own
-`/workspace/Primus` has no Inkling code.
-
-```bash
-cd $HOME
-git clone -b feat/inkling-megatron https://github.com/AMD-AGI/Primus.git Primus-inkling
-cd Primus-inkling
-git submodule update --init third_party/Megatron-LM
-```
-
-Start the container on the GPU node and open a shell in it. Stay root:
-as a normal user, aiter's GPU probe fails.
-
-```bash
-docker run -d --name primus_v26.8 \
-    --device /dev/dri --device /dev/kfd --network host --ipc host \
-    --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
-    --privileged --shm-size 64G -v $HOME:$HOME \
-    rocm/primus:v26.8 sleep infinity
-docker exec -it primus_v26.8 bash
-```
-
-Inside the container:
-
-```bash
-cd $HOME/Primus-inkling
-export PYTHONDONTWRITEBYTECODE=1        # no root-owned __pycache__ in the checkout
-export PRIMUS_WORKSPACE=/tmp/inkling_out
-SMALL=examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml
-LARGE=examples/megatron/configs/MI355X/inkling_large_6L-BF16-pretrain.yaml
-LOGS=$HOME/inkling_logs; mkdir -p $LOGS
-MUON="--use_distributed_optimizer false --overlap_param_gather false --muon_extra_scale_factor 1.0"
-
-# Small 12-layer proxy (67.5B)
-./runner/primus-cli direct --log_file $LOGS/small_adamw.log -- train pretrain --config $SMALL
-PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
-./runner/primus-cli direct --log_file $LOGS/small_muon.log -- train pretrain --config $SMALL \
-    --optimizer muon --overlap_grad_reduce false $MUON
-
-# Large 6-layer proxy (62.6B)
-./runner/primus-cli direct --log_file $LOGS/large_adamw.log -- train pretrain --config $LARGE
-PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
-./runner/primus-cli direct --log_file $LOGS/large_muon.log -- train pretrain --config $LARGE \
-    --optimizer muon --overlap_grad_reduce false $MUON
-PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1 \
-./runner/primus-cli direct --log_file $LOGS/large_dist_muon.log -- train pretrain --config $LARGE \
-    --optimizer dist_muon --overlap_grad_reduce true $MUON
-```
-
-`PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1` makes the launcher install the pinned
-Emerging-Optimizers, which Megatron's Muon needs and the image doesn't ship.
-Each run is 50 steps of 64 × 4096 tokens with EP 8 × DP 8, flex attention,
-bf16, random initialisation and Primus-Turbo off; it takes 4–5 minutes after
-the first flex compilation. Read step 50 with
-`grep -a "iteration  *50/" $LOGS/<run>.log | tail -1`.
-
-Results on Oct 19, 2026 (no NaN or skipped steps in any run):
-
-| Run | Loss at step 50 | Step time | `hip mem usage` |
-| --- | --- | --- | --- |
-| Small, AdamW | 5.762 | 3.55 s | 206 GB |
-| Small, `muon` | 5.846 | 4.47 s | 201 GB |
-| Large, AdamW | 5.747 | 3.29 s | 202 GB |
-| Large, `muon` | 5.902 | 4.51 s | 213 GB |
-| Large, `dist_muon` | 5.902 | 4.27 s | 167 GB |
-
-### Parallelism
-
-- **Expert and data parallelism** are used by the recipe and are covered by the
-  8-GPU parallel check.
-- **Pipeline parallelism**, with or without virtual (interleaved) stages, is
-  covered by the 8-GPU parallel check. It has not been used for a training
-  run yet.
-- **Tensor parallelism** has not been run. **Sequence parallelism** and
-  **context parallelism** are rejected: the output ShortConvs would need a
-  3-token halo exchange across ranks, which isn't written.
-
-### Converting a released checkpoint
+## Converting a released checkpoint
 
 ```bash
 python tools/checkpoint_conversion/convert_inkling_hf_megatron.py \
@@ -218,47 +274,131 @@ python tools/checkpoint_conversion/convert_inkling_hf_megatron.py \
 
 The embedding and LM head are resized to the vocabulary that training builds:
 the 200,058 real tokens rounded up to a multiple of
-`make_vocab_size_divisible_by` × TP, which is 200,064 with the defaults (128 × 1).
-If the training run uses other values, pass the same ones with
-`--make-vocab-size-divisible-by` and `--tensor-model-parallel-size`, or set
-`--target-vocab-size` directly; otherwise loading fails on the embedding and
-LM-head shapes.
+`make_vocab_size_divisible_by` × TP, which is 200,064 with the defaults (128 × 1;
+Inkling trains only at TP 1, so the converter refuses other TP values).
+If the training run uses another `make_vocab_size_divisible_by`, pass it with
+`--make-vocab-size-divisible-by`, or set `--target-vocab-size` directly;
+otherwise loading fails on the embedding and LM-head shapes.
 
-`--dry-run` maps every tensor from the safetensors headers alone and writes
-nothing. Both modes need one visible GPU (Transformer Engine layers will not
-build without one), but the model is built on the meta device, so no GPU memory
-is allocated. The output is a single-rank (TP = PP = EP = 1) `torch` checkpoint; load
-it with `--load <output> --ckpt-format torch --finetune --no-load-optim
---no-load-rng`. A resharded `torch_dist` checkpoint for multi-node runs is not
-written yet.
-
-### Muon
-
-Megatron's Muon (Newton–Schulz on 2-D weights, Adam for the rest) runs on
-both sizes:
+The output is a `torch_dist` checkpoint in `<output>/release`. Megatron
+reshards it on load, so any layout (PP, virtual stages, EP, DP, with or without
+Turbo) can start from it:
 
 ```bash
-export PRIMUS_INSTALL_EMERGING_OPTIMIZERS=1   # the v26.8 image doesn't ship Emerging-Optimizers
-./runner/primus-cli direct -- train pretrain \
-    --config examples/megatron/configs/MI355X/inkling_small_12L-BF16-pretrain.yaml \
-    --optimizer dist_muon --muon_extra_scale_factor 1.0 \
-    --use_distributed_optimizer false \
-    --overlap_grad_reduce true --overlap_param_gather false
+--load /data/inkling_small_megatron --ckpt_format torch_dist --finetune --no_load_optim --no_load_rng
 ```
 
-- Megatron splits `linear_qkv` into q, k and v using one shape for the whole
-  model, but the sliding and global layers of Inkling Large have different KV
-  group counts (16 and 8), so the stock split fails. The
-  `megatron.optimizer.inkling_muon_qkv` patch gives each `linear_qkv` weight
-  its own layer's split. Small has 8 groups on both, so it is unaffected.
-- On Muon: `linear_qkv`, `linear_rel`, `linear_proj`, `rel_proj`, dense and
-  expert MLP weights, shared experts, and the router's `weight` and
-  `shared_weight`. On Adam: embedding, LM head, ShortConvs (3-D), norms and
-  `global_scale`.
-- `dist_muon` with `--overlap_param_gather true` fails at the second step when
-  every expert lives on one rank (EP = number of GPUs): Megatron's layer-wise
-  optimizer leaves the expert buckets' sizes unset. Keep parameter-gather
-  overlap off for now.
+`--ckpt-format torch` writes the older single-rank (TP = PP = EP = 1) file
+instead, which only a single-rank run can load. `--dry-run` maps every tensor
+from the safetensors headers alone and writes nothing. Every mode needs one
+visible GPU (Transformer Engine layers will not build without one), but the
+model is built on the meta device, so no GPU memory is allocated. The converted
+weights sit in host memory until they are written: 2 bytes per parameter in
+bf16.
+
+## Saving and resuming
+
+The recipes save `torch_dist` checkpoints (`ckpt_format: torch_dist`); set
+`save` and `save_interval` to write them and `load` to resume. Primus writes
+them under `<workspace>/<work_group>/<user_name>/<exp_name>/checkpoints`
+whatever path `save` names. Megatron keys
+every tensor by its global layer and expert number, so a run can resume under a
+different PP, EP or DP size, or with Turbo switched on or off; for the optimizer
+state, see below.
+
+### Optimizer state: `dist_ckpt_optim_fully_reshardable`
+
+**This is off in every Inkling recipe.** No recipe or preset sets it, so it
+comes from `trainer_base.yaml` as `null`, which is Megatron's default `False`.
+The recipes use the distributed optimizer, which then saves its state (fp32
+master weights and Adam moments) as `dp_reshardable`: each rank's slice of the
+optimizer's flat buffers, as laid out in memory. That save is fast, but those
+buffers depend on the parallel layout and on which expert layers are built, so
+**with the default, a resume may change only the DP size.**
+
+To resume with the optimizer state under any of these changes, **the run that
+saves** must set, under the recipe's `overrides`:
+
+```yaml
+      dist_ckpt_optim_fully_reshardable: true
+```
+
+- a different PP or EP size;
+- Turbo grouped GEMM (`use_turbo_grouped_gemm`) switched on or off: Turbo
+  trains each expert linear as one stacked tensor and TE as one tensor per
+  expert, so the optimizer buffers are laid out differently even at the same
+  PP and EP.
+
+It cannot be added at resume time: the format is fixed when the checkpoint is
+written. It stores one optimizer tensor per model parameter, under the
+parameter's global key, so any layout can load it; the save gathers the
+buffers across DP ranks and is slower and uses more memory than the default.
+The model weights reshard either way, so a run that does not load the optimizer
+state (`--no-load-optim`, as when starting from a converted checkpoint) does not
+need it. All the PP, EP and Turbo-switch resumes below were saved with it set.
+
+On Nov 9, 2026 (`rocm/primus:v26.9`, one node), the 6L recipe on a 4-layer
+model (`PRIMUS_MODEL=inkling_small_tiny --num_layers 4 --moe_layer_freq
+"([0]*1+[1]*3)"`, Turbo on, EP 8) saved at step 10 of 20 and was resumed three
+ways:
+
+| Resume | Steps 13–20 vs. the uninterrupted run |
+| --- | --- |
+| Same layout | identical |
+| PP 2 × EP 4, Turbo on | within 6e-4 |
+| PP 2 × EP 4, Turbo off | within 6e-4 |
+
+The PP 2 runs differ only by summation order. With the same layout, step 11 is
+identical too. Step 12's logged loss differs in every resume (by 3e-3 with the
+same layout), yet steps 13–20 then match exactly, so the training state is
+unchanged and only that logged value differs: Megatron does not reset its loss
+accumulator after the first logged step of a run, so the resumed run logs the
+mean of steps 11 and 12.
+
+### Asynchronous saving
+
+`inkling_large_6L-BF16-async-ckpt-pretrain.yaml` is the 6L recipe with
+background saves. Training pauses only while each rank copies its shard to host
+memory; the write to disk runs in a persistent worker. It sets:
+
+```yaml
+      async_save: true
+      use_persistent_ckpt_worker: true    # without it Megatron turns async_save off for torch_dist
+      async_strategy: mcore               # the default, nvrx, needs nvidia-resiliency-ext
+      save: <workspace>/<work_group>/<user_name>/<exp_name>/checkpoints
+      load: <same directory>              # a rerun of the same command resumes
+      exit_on_missing_checkpoint: false   # the first run starts from scratch
+      disable_last_saving: false
+      save_interval: ${PRIMUS_SAVE_INTERVAL:25}
+```
+
+Each checkpoint of the 6L model (weights and distributed-optimizer state) is
+about 820 GB, so set `PRIMUS_WORKSPACE` to a large local disk:
+
+```bash
+export PRIMUS_WORKSPACE=/mnt/m2m_nobackup/$USER
+./runner/primus-cli direct -- train pretrain \
+  --config examples/megatron/configs/MI355X/inkling_large_6L-BF16-async-ckpt-pretrain.yaml
+```
+
+On Nov 16, 2026 (`rocm/primus:v26.9`, one node), a save at step 10 paused
+training for about 1 minute, against 14 minutes with a synchronous save; the
+background write finished during the next 10 steps without slowing them. A run
+stopped at step 10 (`PRIMUS_EXIT_INTERVAL=10`) and then rerun with the same
+command resumed from step 10 and saved again at step 20.
+
+## Parallelism
+
+- **Expert and data parallelism** are used by the single-node recipes and are
+  covered by the 8-GPU parallel check.
+- **Pipeline parallelism**, with or without virtual (interleaved) stages, is
+  covered by the 8-GPU parallel check. The multi-node recipes run PP 4 for
+  Small and the 20-layer Large proxy on 4 nodes and PP 16 for Large on 16
+  nodes.
+- **Tensor, sequence and context parallelism** are rejected. With TP, MoE needs
+  sequence parallelism, and the output ShortConvs would then need a 3-token
+  halo exchange across ranks, which isn't written; their checkpoint entries
+  would also need to be TP-sharded.
 
 ## Testing
 
@@ -272,11 +412,12 @@ HIP_VISIBLE_DEVICES=0 PYTHONPATH=/tmp/eo:/tmp/inkling_ref/site \
 The tests that compare against transformers skip unless the pinned
 transformers build is on `PYTHONPATH`, and the Muon tests skip without
 Emerging-Optimizers. Installing both, and fetching the real Inkling-Small
-layers for the real-weight test, are described in the tests README. With the reference, the fp32 tiny model must match its logits and loss
-to 1e-5, and every gradient to 1e-5 of that tensor's largest value. That is
-checked on both attention backends, and on the released layers 0–5 of
-Inkling-Small. bf16 must stay as close to the fp32 reference as transformers'
-own bf16 run is.
+layers for the real-weight test, are described in
+[the tests README](../../../../../../tests/unit_tests/backends/megatron/inkling/README.md).
+With the reference, the fp32 tiny model must match its logits and loss to
+1e-5, and every gradient to 1e-5 of that tensor's largest value, on both
+attention backends and on the released layers 0–5 of Inkling-Small. bf16 must
+stay as close to the fp32 reference as transformers' own bf16 run is.
 
 ### 8 GPUs: parallel layouts against the reference
 
@@ -317,7 +458,10 @@ TP stays at 1 in every layout. The script exits non-zero if any layout fails.
   for sequences of 128 tokens or fewer, and that kernel rejects the block mask.
   It hits the 96-token unit tests in some orders. Training lengths are
   unaffected.
-- No `sharded_state_dict` yet, so distributed checkpoint save and restore are
-  untested. No Inkling FLOPs formula, so logged TFLOP/s use the GPT formula.
+- No Inkling FLOPs formula, so logged TFLOP/s use the GPT formula.
+- Checkpoint save and resume have been run on one node only, on a 4-layer
+  model; the four-node recipes have not saved or resumed yet.
 - Expert load balance and the bias update have not been verified with
   per-expert load logging.
+- FP8 lowers the loss by about 0.045 at 50 steps for reasons not yet known
+  (see [FP8](#fp8)).

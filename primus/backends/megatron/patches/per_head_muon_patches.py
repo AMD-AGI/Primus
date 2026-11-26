@@ -12,21 +12,20 @@ parameter-selection rule and the resolved ambiguities. This module only wires it
 Three things are patched, all inside one registered patch:
 
 1. ``TensorParallelMuon.orthogonalize`` — the per-head branch itself
-   (``muon.py`` is upstream's documented override point).
+   (``emerging_optimizers.py`` is upstream's documented override point).
 2. ``TensorParallelMuon.__init__`` — records the Newton-Schulz kwargs on the instance.
    They are otherwise captured only in the ``scaled_orthogonalize_fn`` closure
-   (``muon.py``) and never stored, and ``coefficient_type`` in particular is not
+   (``emerging_optimizers.py``) and never stored, and ``coefficient_type`` in particular is not
    exposed on ``OptimizerConfig`` at all, so the batched implementation has no other
    honest source for them.
-3. ``get_megatron_muon_optimizer`` — wrapped to tag the selected parameters *before*
+3. ``get_megatron_optimizer`` — wrapped to tag the selected parameters *before*
    the optimizer is built and to copy the tags onto the fp32 master weights *after*.
    It is patched in **both** binding locations, because
-   ``megatron/training/training.py`` does
-   ``from megatron.core.optimizer.muon import get_megatron_muon_optimizer`` at module
-   scope, so rebinding only the defining module would have no effect on the call at
-   ``training.py``. Same two-location treatment as ``optimizer_patches.py``.
+   ``megatron/training/training.py`` imports it from ``megatron.core.optimizer`` at
+   module scope, so rebinding only the defining module would have no effect on the
+   call at ``training.py``. Same two-location treatment as ``optimizer_patches.py``.
 
-Why patch rather than replace ``get_megatron_muon_optimizer`` wholesale: everything
+Why patch rather than replace ``get_megatron_optimizer`` wholesale: everything
 else in that function — master weights, the chained AdamW for non-2-D parameters, the
 expert-parallel split, ``LayerWiseDistributedOptimizer`` — is orthogonal to per-head
 blocking and must not fork.
@@ -41,8 +40,8 @@ _LOG_PREFIX = "[Patch:megatron.optimizer.per_head_muon]"
 def _muon_selected(args) -> bool:
     """Whether this job actually runs Muon.
 
-    ``args.optimizer`` and not ``config.optimizer``: ``get_megatron_muon_optimizer``
-    overwrites the latter with ``'adam'`` on entry (``muon.py``).
+    ``args.optimizer`` and not ``config.optimizer``: the optimizer factory may
+    overwrite the latter on entry.
     """
     return "muon" in str(getattr(args, "optimizer", "") or "")
 
@@ -99,12 +98,8 @@ def patch_per_head_muon(ctx: PatchContext):
         log_rank_0(f"{_LOG_PREFIX} muon_per_head is off; not installing")
         return
 
-    import megatron.core.optimizer.muon as muon_module
-
-    try:
-        from megatron.core.optimizer.muon import TensorParallelMuon
-    except ImportError:  # moved in Megatron-core 0.19
-        from megatron.core.optimizer.emerging_optimizers import TensorParallelMuon
+    import megatron.core.optimizer as optimizer_module
+    from megatron.core.optimizer.emerging_optimizers import TensorParallelMuon
 
     if per_head_config.impl == "batched":
         # Fail here rather than on the first optimizer step: the batched path needs a
@@ -128,7 +123,7 @@ def patch_per_head_muon(ctx: PatchContext):
     def patched_init(self, *init_args, **init_kwargs):
         original_init(self, *init_args, **init_kwargs)
         # bind_partial + apply_defaults so a positional call or an omitted kwarg
-        # still yields the same value the closure in muon.py captured.
+        # still yields the same value the closure in emerging_optimizers.py captured.
         bound = init_signature.bind_partial(self, *init_args, **init_kwargs)
         bound.apply_defaults()
         self._primus_muon_ns_kwargs = {
@@ -142,9 +137,9 @@ def patch_per_head_muon(ctx: PatchContext):
     TensorParallelMuon.__init__ = patched_init
 
     # ---- 3. tag the parameters around the factory ---------------------------
-    original_factory = muon_module.get_megatron_muon_optimizer
+    original_factory = optimizer_module.get_megatron_optimizer
 
-    def patched_get_megatron_muon_optimizer(config, model_chunks, *f_args, **f_kwargs):
+    def patched_get_megatron_optimizer(config, model_chunks, *f_args, **f_kwargs):
         total_selected = 0
         rules: dict = {}
         skipped: list = []
@@ -192,11 +187,9 @@ def patch_per_head_muon(ctx: PatchContext):
             )
         return optimizer
 
-    patched_get_megatron_muon_optimizer._primus_original = original_factory
+    patched_get_megatron_optimizer._primus_original = original_factory
 
-    patched = 0
-    muon_module.get_megatron_muon_optimizer = patched_get_megatron_muon_optimizer
-    patched += 1
+    optimizer_module.get_megatron_optimizer = patched_get_megatron_optimizer
     try:
         from megatron.training import training as megatron_training
     except ImportError as exc:
@@ -206,15 +199,13 @@ def patch_per_head_muon(ctx: PatchContext):
         # silently not apply there).
         raise RuntimeError(
             f"{_LOG_PREFIX} could not import megatron.training.training to patch the "
-            "module-scope get_megatron_muon_optimizer binding. This indicates a broken "
+            "module-scope get_megatron_optimizer binding. This indicates a broken "
             "megatron installation."
         ) from exc
 
-    if hasattr(megatron_training, "get_megatron_muon_optimizer"):
-        megatron_training.get_megatron_muon_optimizer = patched_get_megatron_muon_optimizer
-        patched += 1
+    megatron_training.get_megatron_optimizer = patched_get_megatron_optimizer
 
     log_rank_0(
-        f"{_LOG_PREFIX} wrapped get_megatron_muon_optimizer in {patched} location(s); "
-        f"config={per_head_config}"
+        f"{_LOG_PREFIX} wrapped get_megatron_optimizer in megatron.core.optimizer and "
+        f"megatron.training.training; config={per_head_config}"
     )

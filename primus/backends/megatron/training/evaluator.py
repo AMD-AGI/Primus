@@ -70,10 +70,12 @@ def primus_evaluate(
     eval_batch_size = getattr(args, "eval_global_batch_size", None) or args.global_batch_size
     eval_micro_batch_size = getattr(args, "eval_micro_batch_size", None) or args.micro_batch_size
     eval_num_microbatches = eval_batch_size // (eval_micro_batch_size * args.data_parallel_size)
-    forward_backward_func = get_forward_backward_func()
-    if args.enable_cuda_graph and args.cuda_graph_scope == "full_iteration":
+    forward_backward_func = get_forward_backward_func(schedule_pg_collection=pg_collection)
+    if args.cuda_graph_impl == "full_iteration":
         forward_backward_func = FullCudaGraphWrapper(
-            forward_backward_func, cuda_graph_warmup_steps=args.cuda_graph_warmup_steps
+            forward_backward_func,
+            cuda_graph_warmup_steps=args.cuda_graph_warmup_steps,
+            use_single_mempool=config.cuda_graph_use_single_mempool,
         )
 
     if eval_iters is None:

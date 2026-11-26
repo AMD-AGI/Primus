@@ -1,8 +1,10 @@
 # Primus Perf Batch Runner
 
 Batch-runs Primus training benchmarks across Megatron, Megatron-Bridge,
-TorchTitan, MaxText and MaxDiffusion, plus the diffusion and DLRM benchmarks
-of [`diffusion_bench/`](./diffusion_bench/), and extracts the results into
+TorchTitan, MaxText, MaxDiffusion, the in-tree diffusion backend (the
+AMDiffusionBenchmark workloads) and the recommendation backend (DLRMv4, the
+MLPerf `dlrmv4` model), plus the DLRM benchmarks of
+[`diffusion_bench/`](./diffusion_bench/), and extracts the results into
 `results.csv` / `results.json`, which record not just the throughput but the
 settings that produced it and, for a run that failed, why.
 
@@ -225,16 +227,129 @@ partway, mark the ones that finished and re-run.
 Setting both `CONFIG_DIR` and `CONFIG_FILE` is an error. Missing paths and
 duplicate entries are reported before anything launches.
 
+### Diffusion (`diffusion`)
+
+The AMDiffusionBenchmark workloads — FLUX.1-dev, SDXL, Mochi 1,
+HunyuanVideo and Wan 2.1 I2V — run on Primus' own diffusion backend, from
+the catalog's `diffusion` entries
+(`examples/diffusion/configs/<GPU>/benchmark_*-posttrain.yaml`, launched
+with `train posttrain`), like any other catalog config:
+
+```bash
+GPU=MI355X BACKEND=diffusion DOCKER_IMAGE=rocm/primus:v26.9 \
+RESULT_DIR=~/primus-bench/mi355x-v26.9 bash tools/perf/run_batch.sh
+```
+
+- **Batch size and length** come from the config: `training.local_batch_size`
+  (the `MBS`, per GPU; 16 / 12 / 4 / 3 / 1 on MI355X, 10 / 20 / 1 / 1 / 1 on
+  MI300X and MI325X) and `training.steps` (100, SDXL 200). They are written
+  as `${LOCAL_BATCH_SIZE:16}` and `${MAX_STEPS:100}`; the runner shows the
+  value the run will use, which `EXTRA_ENV="LOCAL_BATCH_SIZE=8"` changes (a
+  plain export does not reach the container). `GBS` is `MBS` × the GPUs ÷
+  `parallelism.sp_size`.
+- **`TRAIN_STEPS` is not applied**: the step count is part of the benchmark,
+  and the throughput leaves out the first five steps, as AMDiffusionBenchmark
+  does (the first one includes MIOpen's solver search).
+- **Model downloads.** The backend's prepare hook downloads each model's
+  checkpoints, encoders and dataset before training (tens of GB per model;
+  FLUX.1-dev is a gated repository, so `HF_TOKEN` must have access to it).
+  It keeps them in `PRIMUS_HF_HOME`, which the runner sets to
+  `DIFFUSION_HF_CACHE` (default `$PRIMUS_HF_HOME` if set, else
+  `<DATA_PATH or checkout/data>/huggingface_diffusion`) and mounts into the
+  container when needed, so only the first run of a model downloads it.
+  The download counts against that run's `MAX_RUN_SECONDS` and its elapsed
+  time (not its throughput), and a large file can download for minutes
+  without a new log line: raise `MAX_IDLE_SECONDS` on a slow network.
+- Single node only: `run_batch_multinode.sh` refuses the diffusion configs.
+
+### Recommendation (`recommendation`)
+
+DLRMv4, the HSTU ranker of MLPerf Training `dlrmv4`, runs on Primus'
+recommendation backend from the catalog's `recommendation` entries
+(`examples/recommendation/configs/<GPU>/dlrm_v4-*-pretrain.yaml`). It measures
+throughput, not time to train: no periodic eval, MLPerf logging off, and a
+fixed number of steps.
+
+| GPU | Config | Kernels and precision | Batch per GPU | Samples/s, TFLOP/s per GPU |
+|---|---|---|---|---|
+| MI355X | `dlrm_v4-FP8-pretrain.yaml` | The MLPerf recipe's: FlyDSL attention, bf16 with FP8 (and MXFP6) HSTU GEMMs | 1024 | 8379, 1011 |
+| MI355X | `dlrm_v4-BF16-pretrain.yaml` | Triton attention, bf16 (as MI300X / MI325X) | 1024 | 2025, 340 |
+| MI325X | `dlrm_v4-BF16-pretrain.yaml` | Triton attention, bf16 | 1024 | 1207, 203 |
+| MI300X | `dlrm_v4-BF16-pretrain.yaml` | Triton attention, bf16 | 512 (1024 runs out of its 192 GB) | 1052, 178 |
+
+(`rocm/primus:v26.9`, 200 steps, through `run_batch.sh`.) The recipe's FlyDSL attention and FP8 /
+MXFP6 paths are gfx950-only and stop a run on gfx942, so the BF16 configs turn
+them off in their `env:` block, together with the targets-only last HSTU layer
+(it needs a gfx950-only LayerNorm dropout kernel; the last layer then runs at
+full length), and the MI300X / MI325X ones lower the embedding placement cap
+(`hbm_cap_gb`) below the trainer's 260 GB. The BF16 configs compare the GPUs
+on the same model and settings; the FP8 one measures the MLPerf recipe. The
+trainer's Triton kernel configurations are tuned on MI350X (see the
+[DLRMv4 guide](../../docs/04-technical-guides/recommendation/dlrm_v4/README.md#mi300x-and-mi325x-bf16)).
+
+```bash
+GPU=MI355X BACKEND=recommendation DOCKER_IMAGE=rocm/primus:v26.9 \
+RESULT_DIR=~/primus-bench/mi355x-v26.9 bash tools/perf/run_batch.sh
+```
+
+- **Synthetic data.** The MLPerf dataset is 227 GB. Instead, the trainer
+  generates a small dataset in its layout (`synthetic_data: true`,
+  [`synthetic_data.py`](../../primus/backends/recommendation/dlrm_v4/synthetic_data.py))
+  and reads it with the unchanged yambda-5b data loader. Its users are drawn
+  from the statistics of a steady-state day of the real data (window 200):
+  sequence lengths, anchors per user, the share of each event type, and items
+  replayed from per-user artist libraries. Tokens per batch, users per batch
+  and unique items, artists and albums per batch are within a few percent of
+  the real day's, and so is the throughput: with the FP8 config on MI355X
+  (`rocm/primus:v26.9`), two 200-step runs gave 8397 (`primus-cli direct`) and
+  8379 (the table's row, through `run_batch.sh`) samples/s and 1013 and 1011
+  TFLOP/s per GPU against 8454 and 1017 on the real day (harmonic means over
+  steps 31-200; see the config's header for how to time a real-data run). The
+  dataset is generated once per run shape (GPU count, batch size and number of
+  steps), in about 20 s, under `$DATA_PATH/dlrm_v4_synthetic` (11 GB for 200
+  steps of 8 x 1024 samples; another length gets its own, larger or smaller
+  copy), and later runs of that shape reuse it.
+- **Length.** 200 steps (`num_train_batches`, `${NUM_TRAIN_BATCHES:200}`;
+  `EXTRA_ENV="NUM_TRAIN_BATCHES=..."` changes it, and the data is generated
+  for that length). `TRAIN_STEPS` is not applied: the length is part of the
+  benchmark. Each run in a fresh container spends about 3 minutes on kernel
+  builds and compiles up to step 10. The 200 steps then take about 25 s on
+  MI355X (FP8, 120 ms per step) and about 3 minutes on MI325X / MI300X (bf16,
+  850 / 480 ms per step), so a run takes about 4 to 4.5 minutes on MI355X and
+  6 minutes on MI325X / MI300X. The throughput leaves out the first 20 steps
+  (and, as for every backend, at least the first three logged steps: steps up
+  to 30 at the config's `METRIC_LOG_FREQ` of 10). Repetitions differ by about
+  0.1%.
+- **Results.** Samples/s per GPU, and two TFLOP/s per GPU, both from the
+  trainer's perf lines (means over the eight ranks' lines of a step, then the
+  harmonic mean over steps): TFLOP/s counts the FLOPs of each batch's
+  sequences as they are (`tflops_real`; their average length is about 52% of
+  the 4096-token maximum); nominal TFLOP/s prices every sample at the full
+  4096 tokens (`tflops_algo`, the yardstick of the trainer's MFU, which it puts
+  above 100% on MI355X). See "Extracting results".
+- **Image.** The image needs the trainer's stack (`rocm/primus:v26.9` or the PyTorch CI
+  image); the backend's install hook adds `polars-u64-idx`, `gin-config`, the
+  MLPerf logging package and FlyDSL 0.2.4 at the first launch in a container,
+  so it needs network access to PyPI and GitHub.
+- Single node only: `run_batch_multinode.sh` refuses the recommendation configs.
+  The MLPerf benchmark itself (time to the AUC target, 1 to 4 nodes) is
+  [examples/mlperf/dlrm_v4](../../examples/mlperf/dlrm_v4/README.md).
+
 ### Diffusion and DLRM (`diffusion_dlrm`)
 
 `diffusion_dlrm` is a backend outside the catalog. Adding it to `BACKEND`
 runs [`diffusion_bench/run_benchmarks.sh`](./diffusion_bench/) once per
-repetition (`NUM_REPS`), after every other config of the batch, for the diffusion models (FLUX.1-dev, SDXL,
-Mochi, HunyuanVideo, Wan 2.1) and DLRM precisions its config enables. So
-everything a `rocm/primus` image can run is one command:
+repetition (`NUM_REPS`), after every other config of the batch, for the DLRM
+precisions its config enables, and the AMDiffusionBenchmark diffusion models
+when they are enabled there. Its default config runs DLRM only, as the
+diffusion models run through the `diffusion` backend above; set
+`diffusion.enabled: true` in a copy (`DIFFUSION_DLRM_CONFIG`) to run them
+with AMDiffusionBenchmark too, e.g. to compare the two (the runner warns when
+a batch runs them both ways). So everything a `rocm/primus` image can run is
+one command:
 
 ```bash
-GPU=MI355X BACKEND=megatron,torchtitan,megatron_bridge,diffusion_dlrm \
+GPU=MI355X BACKEND=megatron,torchtitan,megatron_bridge,diffusion,diffusion_dlrm \
 DOCKER_IMAGE=rocm/primus:v26.8 RESULT_DIR=~/primus-bench/mi355x-v26.8 \
 bash tools/perf/run_batch.sh
 ```
@@ -246,9 +361,9 @@ bash tools/perf/run_batch.sh
   the shared file. The runner passes it `DOCKER_IMAGE`, the GPU type (`GPU`
   MI300X/MI308X/MI325X → `mi300`, MI350X/MI355X → `mi355`, otherwise read
   from the GPU's gfx942 / gfx950 architecture), its container label,
-  `EXTRA_ENV`, and `TRAIN_STEPS` as every diffusion model's `num_iterations`
-  (DLRM keeps its own length). `HF_TOKEN` reaches it through the
-  environment, never a command line. The runner's own Primus defaults
+  and `EXTRA_ENV`. `TRAIN_STEPS` is not applied: every model keeps the
+  `num_iterations` of that config, and DLRM its own length. `HF_TOKEN`
+  reaches it through the environment, never a command line. The runner's own Primus defaults
   (`HSA_NO_SCRATCH_RECLAIM` and the two `*_ATOMIC_FP32` settings) are not
   applied, so the numbers match a standalone diffusion_bench run. `GPU`
   need not be a catalog key when `diffusion_dlrm` is the only backend.
@@ -269,9 +384,12 @@ bash tools/perf/run_batch.sh
   summary lists each step's outcome, and `results.csv` gets a row per model
   (see "Extracting results"). The run counts as failed when any step did,
   the setup and download steps included, even if every model then ran.
-- **Image.** `DOCKER_IMAGE` must contain `/workspace/AMDiffusionBenchmark`
-  and `/workspace/DLRMBenchmark`, as `rocm/primus` images do; this is checked
-  before the batch starts.
+- **Image.** `DOCKER_IMAGE` must contain `/workspace/DLRMBenchmark`, and
+  `/workspace/AMDiffusionBenchmark` too when diffusion models are enabled in
+  the config; this is checked before the batch starts. `rocm/primus` images
+  ship both; the Primus CI image ships DLRMBenchmark only.
+  diffusion_bench starts its containers without docker's `--privileged`
+  (`privileged: true` in its config turns it back on).
 - Catalog mode, single node only. With `CONFIG_DIR`, `BACKEND` is ignored and
   so is `diffusion_dlrm` (the runner warns); `run_batch_multinode.sh` refuses
   it. It also needs `PRIMUS_MODE=container`, since diffusion_bench starts its
@@ -283,7 +401,7 @@ bash tools/perf/run_batch.sh
 |---|---|---|
 | `HF_TOKEN` | — | **Required.** Never defaulted, so it cannot be baked into a shared script. |
 | `DOCKER_IMAGE` | — | **Required.** Which build to benchmark; a stale default would silently measure the wrong one. |
-| `BACKEND` | — | **Required.** Comma-separated backends, e.g. `megatron,torchtitan`; `diffusion_dlrm` adds the diffusion and DLRM benchmarks. |
+| `BACKEND` | — | **Required.** Comma-separated backends, e.g. `megatron,torchtitan`; `diffusion_dlrm` adds diffusion_bench's DLRM (and, when enabled there, AMDiffusionBenchmark) benchmarks. |
 | `GPU` | auto-detected | Catalog top-level key, e.g. `MI325X`. Read from `amd-smi` or `rocm-smi` when unset. |
 | `DRY_RUN` | `0` | `1` prints the plan and exits. |
 | `MAX_RUN_SECONDS` | `3600` | Stop a run still going after this long. `0` = no limit. |
@@ -292,6 +410,7 @@ bash tools/perf/run_batch.sh
 | `GPU_BUSY_MIB` | `2048` | A GPU with more memory in use than this counts as busy. |
 | `GPU_BUSY_WAIT_SECONDS` | `60` | How long to wait for busy GPUs to free up before refusing. |
 | `ALLOW_BUSY_GPUS` | `0` | `1` runs even when the GPUs are busy. |
+| `FAILING_RANK_OUTPUT` | `1` | `0` does not copy the failing rank's own log into the log of a failed run (see "Time limits and failure reasons"). |
 | `EXTRACT` | `1` | `0` skips refreshing `results.csv` / `results.json` at the end of a batch. |
 | `REPORT` | `1` | `0` skips writing `report.xlsx` at the end of a batch (see "Excel report"); `EXTRACT=0` skips it too. |
 | `PULL_IMAGE` | `0` | `1` (or `true` / `yes`) pulls `DOCKER_IMAGE` on every node before the batch even if the tag is present. |
@@ -299,11 +418,15 @@ bash tools/perf/run_batch.sh
 | `CONFIG_FILE` | `tools/perf/configs.yaml` | Catalog to read. |
 | `CONFIG_DIR` | — | Switches to directory mode. |
 | `NUM_REPS` | `1` | Repetitions per config. |
-| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. |
+| `TRAIN_STEPS` | whatever the YAML says | Caps training length when set. Not applied to `megatron_bridge`, whose configs keep their own `train_iters` (their learning-rate warmup and decay are sized to it, and a run no longer than the warmup fails Megatron's `lr_warmup_steps < lr_decay_steps` check), nor to `diffusion`, whose `training.steps` is part of the benchmark, nor to `recommendation`, whose `num_train_batches` is part of the benchmark (its synthetic data is generated for it), nor to `diffusion_dlrm`, which keeps diffusion_bench's `num_iterations`. A Megatron config for which it is not longer than the warmup is not run (see "Before each run"). |
+| `CHECK_TRAIN_STEPS` | `1` | `0` runs a Megatron config even when `TRAIN_STEPS` is not longer than its warmup. |
 | `EXTRA_ENV` | — | Space-separated `KEY=VALUE` pairs forwarded into the container as `--env`. See below. |
+| `DATA_PATH` | `<checkout>/data` | Where Primus keeps its Hugging Face downloads (models, datasets). Set it to keep them out of the checkout; the runner creates it, mounts it and passes it into the container. See below. |
 | `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME` | auto (single node); `eno0` (multi-node) | RCCL/Gloo bootstrap NIC. Set even for 1-node 8-GPU; must not be `docker0`. See below. |
 | `NNODES`, `GPUS_PER_NODE` | `1`, `8` | Cluster topology. |
+| `PRIMUS_CLI_CONFIG` | `tools/perf/primus-cli.yaml` | primus-cli's configuration; empty for primus-cli's own (`~/.primus.yaml`, else `runner/.primus.yaml`). See "primus-cli's configuration". |
 | `PRIMUS_MODE` | `container` / `slurm srun` | Launcher mode. |
+| `DIFFUSION_HF_CACHE` | `$PRIMUS_HF_HOME`, else `<DATA_PATH>/huggingface_diffusion` | Where `diffusion` configs keep their model downloads (see "Diffusion"). |
 | `DIFFUSION_DLRM_CONFIG` | `tools/perf/diffusion_bench/config.yaml` | diffusion_bench config for `diffusion_dlrm`. |
 | `DIFFUSION_DLRM_HF_CACHE` | `hf_cache_dir` of that config | Hugging Face cache for the diffusion models. |
 
@@ -319,7 +442,7 @@ Training runs on one of two images, and each carries only one framework stack:
 So `BACKEND=megatron,torchtitan` and `BACKEND=maxtext,maxdiffusion` are the
 two valid groupings. Mixing across the split — `BACKEND=megatron,maxtext` —
 cannot work whichever image you pick, because half the runs have no framework
-to execute. `megatron_bridge` and `diffusion_dlrm` go with the PyTorch side,
+to execute. `megatron_bridge`, `diffusion`, `recommendation` and `diffusion_dlrm` go with the PyTorch side,
 on an image that carries them, such as `rocm/primus:v26.8`.
 
 This is why `BACKEND` is required rather than defaulting to every backend
@@ -350,8 +473,8 @@ EXTRA_ENV="DEBUG_HIP_DYNAMIC_QUEUES=0 GPU_MAX_HW_QUEUES=2" bash tools/perf/run_b
 does not necessarily reach the training container. primus-cli forwards only
 two categories:
 
-- names listed in [runner/.primus.yaml](../../runner/.primus.yaml) under
-  `container.options.env` (`HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_IS_V3_ATOMIC_FP32`,
+- names listed in its configuration ([`primus-cli.yaml`](./primus-cli.yaml), see
+  below) under `container.options.env` (`HSA_NO_SCRATCH_RECLAIM`, `NVTE_CK_IS_V3_ATOMIC_FP32`,
   `GPU_MAX_HW_QUEUES`, `REBUILD_BNXT`, and about 40 more), and
 - anything matching the prefixes `PRIMUS_`, `NCCL_`, `RCCL_`, `GLOO_`,
   `IONIC_`, `HIPBLASLT_`.
@@ -375,8 +498,72 @@ because these are guaranteed to have reached the container, while the others
 were merely present on the host.
 
 The alternative — adding a name to `container.options.env` in
-`runner/.primus.yaml` — is the right move when a variable should always be
-forwarded for everyone, rather than for one batch.
+`runner/.primus.yaml` and `primus-cli.yaml` — is the right move when a
+variable should always be forwarded for everyone, rather than for one batch.
+
+### primus-cli's configuration (`PRIMUS_CLI_CONFIG`)
+
+The runners launch `primus-cli --config tools/perf/primus-cli.yaml`. That file
+is [runner/.primus.yaml](../../runner/.primus.yaml) with these changes: the
+training container starts without docker's `--privileged` and
+`CAP_SYS_ADMIN`, which some clusters' docker refuses (Crusoe's authorization
+plugin rejects both), and with `IPC_LOCK`, the part of `--privileged` that RDMA
+memory registration uses on multi-node runs. The GPUs need only the
+`/dev/kfd`, `/dev/dri` and `/dev/infiniband` devices it already lists. It
+also forwards `DATA_PATH`, so an exported `DATA_PATH` reaches the container.
+
+`PRIMUS_CLI_CONFIG=<file>` uses another configuration, and
+`PRIMUS_CLI_CONFIG=` (empty) leaves the choice to primus-cli, as before:
+`~/.primus.yaml` if it exists, otherwise `runner/.primus.yaml`. The batch
+configuration records which one ran (`# CLI config : ...`), and the launch
+command in every run banner shows it.
+
+### Where downloads go (`DATA_PATH`)
+
+Primus downloads Hugging Face models and datasets into
+`$DATA_PATH/huggingface` (its `HF_HOME`). Unset, `DATA_PATH` is
+`<checkout>/data`, which fills a home directory with a quota quickly: the
+Qwen3-32B checkpoint the `megatron_bridge` configs load is 62 GB. Point it
+somewhere bigger:
+
+```bash
+DATA_PATH=/tmp/primus-data bash tools/perf/run_batch.sh
+```
+
+The container sees only the checkout, and only `primus-cli.yaml` (not
+`runner/.primus.yaml`) forwards `DATA_PATH`, so the runner adds `--volume $DATA_PATH:$DATA_PATH` and
+`--env DATA_PATH=$DATA_PATH` to every training launch (`diffusion` configs
+keep their models in `DIFFUSION_HF_CACHE`, below `DATA_PATH` by default;
+`diffusion_dlrm` runs keep their own container and cache,
+`DIFFUSION_DLRM_HF_CACHE`). It leaves the
+mount out when the path is inside the checkout or already a volume of the
+config file primus-cli loads (`PRIMUS_CLI_CONFIG`), since docker refuses the
+same mount twice. Before the
+first run it creates the directory on every node, so it belongs to you
+rather than to root, and the batch configuration records the free space:
+
+```
+# DATA_PATH    : /tmp/primus-data (4.4T free on node-1; mounted by the runner)
+```
+
+On a multi-node batch the path is the same on every node. A node-local path
+(`/tmp/...`) means each node downloads its own copy; a shared filesystem
+downloads once, provided root can write there (the container runs as root,
+so the files it writes are owned by root). Run logs stay in the checkout
+(`PRIMUS_WORKSPACE`, `output/` by default); they are small.
+
+A `DATA_PATH` that `EXTRA_ENV` sets is passed in as before but not mounted:
+mount it yourself, as a volume in `.primus.yaml`. Setting it both ways is
+refused unless the two agree. A `DATA_PATH` exported in your shell for some
+other reason now takes effect too: in container mode primus-cli used to drop
+it.
+
+Some small files stay in `<checkout>/data` regardless:
+`runner/helpers/hooks/train/pretrain/prepare_experiment.sh` hands the
+pre-train hooks `./data/` rather than `DATA_PATH`, so their pip cache,
+torchtitan's tokenizer files and any dataset they build (none in the catalog:
+its Megatron configs use mock data and its MaxText and MaxDiffusion configs
+synthetic data) land there. Their downloads through `HF_HOME` do not.
 
 ### RCCL socket interface (single node included)
 
@@ -418,10 +605,23 @@ export NCCL_DEBUG=WARN                  # optional: confirm UniqueId / bootstrap
 
 ### Multi-node extras
 
-Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG` and `FAIL_PATTERN`
-for its retry loop: an attempt whose output matches `FAIL_PATTERN`, or that
-hits one of the run limits below, is stopped and retried.
-`run_batch_multinode.sh` defaults `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`
+Multi-node additionally honours `MAX_ATTEMPTS_PER_CONFIG` (default 6) and
+`FAIL_PATTERN` for its retry loop: an attempt whose output matches
+`FAIL_PATTERN`, or that hits one of the run limits below, is stopped and
+retried. A config that has not succeeded yet is not retried after a failure
+that would recur, so it does not spend all its attempts on it: a
+`python_error` during setup whose exception, as the traceback that stopped
+the run shows it, comes from the config or the code (`AssertionError`,
+`ValueError`, `KeyError`, `TypeError`, `AttributeError`, `IndexError`,
+`ZeroDivisionError`, `NotImplementedError`, `ModuleNotFoundError`, or an
+omegaconf, hydra or yaml error), a `nic_error`, or a second `oom` in a row
+(see "Extracting results"). A `RuntimeError`, `OSError`, `ImportError` or
+distributed error during setup is still retried, as a port, rendezvous,
+network or file system hiccup raises those too, and so is any error whose
+message mentions a connection, a timeout or an unavailable service. The summary then
+says `not retried: another attempt would fail the same way`, and the
+config's `GAVE UP` line `(not retried: the failure would recur)`.
+`RETRY_ALL_FAILURES=1` retries those too. `run_batch_multinode.sh` defaults `NCCL_SOCKET_IFNAME` / `GLOO_SOCKET_IFNAME`
 to `eno0` (Fremont); override them the same way on any other site. The
 single-node `docker0` failure above applies here too if the wrong NIC is
 pinned.
@@ -460,11 +660,29 @@ batch and leaves the remaining runs unstarted.
   another job, its GPUs count too. When nothing is readable the check is
   recorded as "not checked" and does not block.
 - **NCCL interface usable.** See the socket interface section above.
+- **Diffusion model cache ready**, when a `diffusion` config is selected:
+  `DIFFUSION_HF_CACHE` is created (so it belongs to you rather than to root)
+  and the batch configuration records it with its free space
+  (`# Diffusion HF : <path> (<free> free; mounted by the runner)`).
 - **diffusion_dlrm ready**, when selected. Its config is validated before
   anything else (exit 2 on a bad key or model name), the image must carry
   the benchmark repos it needs, and the Hugging Face cache must be writable.
 
 The result of the GPU check is recorded in every run's banner (`GPU check`).
+
+Before each config, its `TRAIN_STEPS` is checked against its learning-rate
+schedule. With `lr_decay_iters` unset, Megatron decays over `train_iters`
+and asserts `lr_warmup_steps < lr_decay_steps`, so a `TRAIN_STEPS` no longer
+than `lr_warmup_iters` fails during setup: the catalog's Megatron configs
+warm up for 2 iterations, and a config that does not set it gets Primus's
+default of 40. Such a config is not launched. It still gets a log for each
+repetition, with exit code 2 and the failure reason `not_run: TRAIN_STEPS=10
+is not more than lr_warmup_iters=40, ...`, and the summary a `[NOT RUN]`
+line; `DRY_RUN=1` shows it too. Each value comes from the config's
+overrides, else from its module config (`primus/configs/modules/...`); a
+schedule set by `lr_warmup_fraction` or by samples is not checked.
+`CHECK_TRAIN_STEPS=0` runs such a config anyway. A config whose launch
+command cannot be built gets a `not_run` log the same way.
 
 ## Time limits and failure reasons
 
@@ -491,6 +709,50 @@ Every log ends with a footer that says why the run ended:
 out each step itself) and, when some of its steps failed, the category
 `steps`, e.g. `steps: 2 of 8 diffusion_bench steps not successful:
 diffusion_hunyuan-video_bs3 oom, dlrm_FP32 timeout`.
+
+The run output only has local rank 0's console (and, multi-node, the last
+local rank of the last node's), so when another rank fails first, its error
+is not there. When torchrun's summary names that rank (`Root Cause (first
+observed failure)`), the runner copies its ERROR records from this run out
+of Primus's own per-rank log,
+`<workspace>/<team>/<user>/<exp>/logs/<module>/rank-<N>/error.log`, into the
+log, between the run output and the footer:
+
+```
+########################## Begin Failing Rank Output ###########################
+# Failing rank     : 2 (local rank 2) on node-1.cluster.local, exit code 1
+# Source           : .../output/amd/root/llama3.1_8B-pretrain/logs/pre_trainer/rank-2/error.log (its ERROR records from this run)
+[20261022 18:52:27][root/amd][pre_trainer][ip-localhost][rank-2/8][ERROR]    [---traceback.py:1050] : Traceback (most recent call last):
+...
+########################### End Failing Rank Output ############################
+```
+
+The workspace is the config's `workspace` as the container saw it, with
+`EXTRA_ENV` and the runner's `PRIMUS_*` variables (`PRIMUS_WORKSPACE`, say)
+applied, and the experiment is the run's own. Primus appends every run of an
+experiment to the same files, so only records stamped after the run started
+are copied. When that rank logged no ERROR record, the section has the last
+lines of its `debug.log` instead (a native crash, for one, leaves no Python
+error), which are not read as the cause; when no log of that rank was
+written during the run, it says where it looked. The records are the last
+200 lines at most. Multi-node, each node looks for the file. This usually
+takes under a second, and at most two minutes (three multi-node).
+`FAILING_RANK_OUTPUT=0` turns it off.
+
+The batch summary gives each failed run's cause under its `[FAIL]` line,
+as `results.csv` will have it (unless it only repeats the `[FAIL]` line, as
+for a timeout):
+
+```
+[20:22:04] [run 1/2] megatron/pretrain/.../fail_gbs_assert [7891462e] MBS=4 GBS=130 steps=10 ...
+                    [FAIL] exit: launcher exited with code 1 exit=1 elapsed=36s
+                           cause: python_error at setup: AssertionError: global batch size (130) is not divisible by ...
+```
+
+`python3 tools/perf/extract_results.py --verdict <log>` prints the same for
+one log: its `status`, `failure_reason`, `failed_at`, `from_traceback`
+(`yes` when the detail is the exception a traceback shows stopping the run)
+and `failure_detail`, separated by `\x1f`.
 
 Exit codes of both runners:
 
@@ -705,14 +967,16 @@ files keep working:
 | `parser_version` | Bumped when columns change. |
 | `image_id`, `container_rocm_version`, `container_hip_version` | Exact image and the user-space ROCm/HIP inside it. |
 | `cpu_governor`, `numa_balancing`, `transparent_hugepages`, `iommu`, `amdgpu_version` | Host settings of the node that ran the batch. |
-| `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). |
+| `rec_per_s`, `rec_per_s_cv` | DLRM recommendations/s and its std/mean, as DLRMBenchmark reports them (iterations/s × its per-GPU `BATCH_SIZE`). DLRMv4 (`recommendation`) rows report samples/s instead (`hmean_samples_per_gpu`). |
 | `step_log` | For `diffusion` / `dlrm` rows, the diffusion_bench step log, relative to the result directory; empty for a step that never ran. |
 | `system_description` | The one-line platform description (see "Provenance"). |
 | `host_check` | Multi-node: whether every node reported the same platform. |
 | `server`, `bios`, `os`, `kernel`, `kernel_cmdline` | Server vendor and model, BIOS version (date, vendor), OS, kernel and its command line. |
 | `cpu_model`, `cpu_topology`, `cpu_frequency`, `cpu_idle`, `host_memory` | CPU model; sockets, cores, threads and NUMA nodes; frequency driver, boost, max clock and EPP; idle states; usable and installed memory and DIMMs. |
 | `gpu_vram`, `gpu_power_cap`, `gpu_partition`, `gpu_clocks`, `gpu_vbios`, `gpu_driver`, `rdma_nics` | Per-GPU memory, power cap, compute/memory partition, perf level and max clock, VBIOS, the host GPU driver release, and the active RDMA ports. |
-| `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). |
+| `hmean_nominal_tflops`, `throughput_note` | Megatron-Bridge post-training without packed sequences: its `MODEL_TFLOP/s/GPU` estimate, kept under this name instead of `hmean_tflops`, and why (see below). DLRMv4: its `tflops_algo` (every sample at the full sequence length), next to `hmean_tflops`. |
+| `failed_at` | For a training run that failed, was interrupted or is incomplete: `setup` when it logged no training step, otherwise `after step N`, the last step it logged, numbered as the backend numbers them (MaxText from 0). Empty for `no_metrics`, which finished. Empty for `diffusion_dlrm` runs and their `diffusion` / `dlrm` rows. |
+| `failing_rank`, `failing_host` | The rank torchrun named as the first to fail, and its node, when the log has its section (see "Time limits and failure reasons"). |
 
 Megatron-Bridge's `MODEL_TFLOP/s/GPU` is an estimate, not a measurement:
 global batch × `seq_length` × the FLOPs of one training token, divided by the
@@ -734,8 +998,25 @@ batch size and `seq_length`). LoRA's estimate also counts the weight gradients i
 frozen base weights never compute, so treat a packed LoRA run's TFLOP/s as
 an upper bound.
 
+A `diffusion` config run through primus-cli is a row like any other, with
+backend `diffusion`: samples/s and TFLOP/s per GPU are the harmonic means
+over the steps after the first five (AMDiffusionBenchmark's warmup, not the
+learning-rate schedule's `warmup_steps`), and the memory is the backend's
+peak in GB. `tps_per_gpu` and `seq_len` stay empty.
+
+A `recommendation` (DLRMv4) config is a row with backend `recommendation`.
+Every rank prints its own perf line every `METRIC_LOG_FREQ` steps, covering
+the steps since the previous one; a step's values are the means over its
+lines, and the row's the harmonic means over the steps after the first 20
+(at least three logged steps). `hmean_samples_per_gpu` is samples (one
+candidate each) per second per GPU, `hmean_tflops` the trainer's
+`tflops_real/gpu` and `hmean_nominal_tflops` its `tflops_algo/gpu`, which
+`throughput_note` explains (see "Recommendation"). No memory is logged;
+`tps_per_gpu` and `seq_len` stay empty.
+
 A `diffusion_dlrm` log becomes one row per diffusion model and DLRM
-precision, with backend `diffusion` or `dlrm`. Those numbers come from
+precision, with backend `diffusion` or `dlrm` (a diffusion row of this kind
+has a `step_log`). Those numbers come from
 diffusion_bench's own parser, so they match its `summary.md`: TFLOP/s and
 samples/s per GPU are AMDiffusionBenchmark's averages, not this tool's
 harmonic means, and `micro_batch_size` is the batch size per GPU (DLRM's
@@ -758,18 +1039,50 @@ backend `diffusion_dlrm`. When the config gives DLRM its own image
 (`dlrm.image`), the DLRM rows name that image and leave the main image's
 container versions empty.
 
+The rules below live in [`failure.py`](./failure.py).
+
 `failure_reason` takes the runner's verdict from the footer when it is
-definitive (`timeout`, `idle`, `interrupted`, and `steps` for a
-`diffusion_dlrm` run with no step rows). Otherwise the run output is
-searched, in this order, for `nic_error` (no usable socket interface), `oom`,
-`gpu_contended` (out of memory while this process held less than half the
-GPU, i.e. another process had it), `segfault`, `nccl_error` and
-`python_error` (the exception at the end of the first traceback, other than
-torchrun's `ChildFailedError`). Primus's own `[Patch]` log lines are ignored.
-Failing that it is `killed` (SIGKILL with no error in the log, e.g. the host
-OOM killer), `signal`, `fail_pattern`, `exit`, or `unknown`; a failed run
-always has a reason. `incomplete` rows only get one when the output shows a
-cause.
+definitive (`timeout`, `idle`, `interrupted`, `not_run` for a config the
+runner did not launch, and `steps` for a `diffusion_dlrm` run with no step
+rows). Otherwise the run output is
+searched, in this order, for `nic_error` (no usable socket interface), `oom`
+(including RCCL's `Failed to CUDA calloc 536870912 bytes`, which PyTorch
+reports as an "unhandled cuda error", unless the output shows the GPU had
+faulted first), `gpu_contended` (out of memory while
+this process held less than half the GPU, i.e. another process had it),
+`segfault`, `nccl_error` and `python_error`.
+
+The detail of `nccl_error` and `python_error` is the exception that stopped
+the run, when the output has one (an NCCL one for `nccl_error`): the root of
+the traceback chain printed just before Primus's `[Primus] Error:` line, or
+of the last chain. That is back along `raise ... from` to the original
+error, past Primus's `RuntimeError: Training execution failed` and torchrun's
+`ChildFailedError`; a chain that ends in `KeyboardInterrupt` or `SystemExit`
+does not count. A bare exception gets the location it was raised at, and a
+bare `AssertionError` the failed assert too, e.g.
+`AssertionError: assert self.lr_warmup_steps < self.lr_decay_steps
+(optimizer_param_scheduler.py:74)`. Otherwise the detail is the first NCCL
+line, or an exception line. An NCCL error's detail ends with the
+`Last error:` that PyTorch quotes from NCCL, which says what failed, with
+PyTorch's source location dropped to make room:
+`torch.distributed.DistBackendError: NCCL error: unhandled system error,
+NCCL version 2.27.7 | Last error: Call to ibv_modify_qp failed with 110
+Connection timed out, on dev rdma4:1, ...`. Primus's own `[Patch]` messages are ignored,
+along with the traceback a patch logs when it is skipped for a missing
+dependency.
+
+Failing all that, the reason is `killed` (SIGKILL with no error in the log,
+e.g. the host OOM killer), `signal`, `fail_pattern`, `exit`, or `unknown`; a
+failed run always has a reason. `incomplete` rows only get one when the
+output shows a cause. A training run that exited 0 without logging a
+training step is `failed` with `no_metrics`, even though the batch summary
+shows it as passed.
+
+When the log has the failing rank's own records (see "Time limits and
+failure reasons"), they are searched first, and `failing_rank` and
+`failing_host` say which rank that was. Without them the detail is local
+rank 0's view of the failure, as the PyTorch backends' console shows no
+other rank (but the last local rank of the last node, multi-node).
 
 Logs written before these fields existed simply leave the columns empty.
 Older logs still get a `status` and a `failure_reason`: from their exit code
@@ -791,7 +1104,7 @@ than `results.csv`:
 |---|---|
 | Overview | One column per batch: outcome (with the errors of a refused batch), timing, image (tag, digest, ID), container ROCm/HIP and Torch, Primus commit and submodule pins, the platform (system description, GPU model, nodes and GPUs, server, BIOS, CPU, memory, GPU settings, host GPU driver, NICs, OS), host settings, run settings (reps, `TRAIN_STEPS`, limits, the `diffusion_dlrm` config), and run counts (planned, started, failed, not started). With `--baseline`, each baseline's image, commit and batches. |
 | Performance | One row per unique backend, model, precision, config hash, sequence length, MBS, GBS, nodes, GPUs and image ID, with runs ok / total and the means over the successful runs of TFLOP/s per GPU and throughput (per GPU, and for all GPUs), with its unit: tokens/s, samples/s, frames/s or recommendations/s. Megatron-Bridge post-training without packed sequences shows nominal TFLOP/s instead of TFLOP/s, in its own column (see "Extracting results"). Also the step counts run, run-to-run CV, GPU memory and minutes per run. |
-| Runs | Every run, with its status, failure reason and detail, throughput note, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
+| Runs | Every run, with its status, failure reason, where it failed and the detail, throughput note, image, result directory and a link to its log: the table to build your own PivotTable on (Insert > PivotTable). |
 | Chart | TFLOP/s per GPU for each config (and the baseline). |
 
 - **Averages.** A config's numbers are the arithmetic mean over its

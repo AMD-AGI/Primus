@@ -17,22 +17,21 @@ def resolve_rope_theta(config: Any) -> float:
     """Return RoPE base (theta) from a HuggingFace config.
 
     transformers 4.x exposes ``rope_theta`` on the config directly.
-    transformers 5.x moved the value into ``default_theta`` / ``rope_parameters``.
+    transformers 5.x moved the value into ``rope_parameters``; ``default_theta``
+    is the class default (e.g. 10000), not the checkpoint value, so it is only a fallback.
     """
-    default_theta = getattr(config, "default_theta", None)
-    if default_theta is not None:
-        return default_theta
-
     rope_parameters = getattr(config, "rope_parameters", None)
     if rope_parameters is not None:
         if isinstance(rope_parameters, dict):
             theta = rope_parameters.get("rope_theta")
-            if theta is not None:
-                return theta
         else:
             theta = getattr(rope_parameters, "rope_theta", None)
-            if theta is not None:
-                return theta
+        if theta is not None:
+            return theta
+
+    default_theta = getattr(config, "default_theta", None)
+    if default_theta is not None:
+        return default_theta
 
     raise AttributeError(
         f"{type(config).__name__} has no rope_theta, default_theta, " f"or rope_parameters['rope_theta']"

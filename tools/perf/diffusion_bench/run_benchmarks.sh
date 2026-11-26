@@ -87,6 +87,9 @@ start_container() {
     for env in ${ENVS[@]+"${ENVS[@]}"}; do
         extra+=(-e "$env")
     done
+    # Not by default: the benchmarks need only the GPU devices, and some
+    # clusters' docker refuses --privileged (and CAP_SYS_ADMIN).
+    (( PRIVILEGED )) && extra+=(--privileged)
     local hf_mount="$HF_CACHE_DIR:$HF_MOUNT_TARGET"
     if (( HF_READONLY )); then
         hf_mount+=":ro"
@@ -95,7 +98,7 @@ start_container() {
     # --rm: a container stopped from outside (e.g. by the perf batch runner's
     # cleanup) is removed too, rather than left behind stopped.
     docker run -d --rm --name "$CONTAINER" \
-        --privileged --network host --ipc host \
+        --network host --ipc host \
         --device /dev/dri --device /dev/kfd \
         --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
         --group-add video --ulimit memlock=-1:-1 \

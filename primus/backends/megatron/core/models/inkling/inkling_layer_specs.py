@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
-from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+from megatron.core.extensions import transformer_engine_spec_provider
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.mlp import MLPSubmodules
 from megatron.core.transformer.moe.experts import TEGroupedMLP
@@ -59,9 +59,17 @@ from primus.backends.megatron.core.transformer.inkling.moe import (
 )
 from primus.backends.megatron.core.transformer.inkling.router import InklingTopKRouter
 
+if TYPE_CHECKING:
+    from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+
 logger = logging.getLogger(__name__)
 
 __all__ = ["get_inkling_decoder_block_spec", "get_inkling_layer_spec"]
+
+
+def _spec_provider() -> TESpecProvider:
+    # Looked up per call: the Primus-Turbo patch swaps the class after this module is imported.
+    return transformer_engine_spec_provider.TESpecProvider()
 
 
 def _attention_spec(backend: TESpecProvider) -> ModuleSpec:
@@ -93,22 +101,29 @@ def _dense_mlp_spec(backend: TESpecProvider):
 
 
 def _moe_spec(config: InklingTransformerConfig, backend: TESpecProvider) -> ModuleSpec:
-    experts = backend.grouped_mlp_modules(bool(config.moe_grouped_gemm))
-    if isinstance(experts, functools.partial):  # Megatron-core 0.19+ return an ExpertsBuilder
-        expert_module, expert_submodules = experts.func, experts.keywords.get("submodules")
-    else:
+    grouped_gemm = bool(config.moe_grouped_gemm)
+    experts = backend.grouped_mlp_modules(grouped_gemm)
+    if isinstance(experts, tuple):
         expert_module, expert_submodules = experts
+    elif isinstance(experts, functools.partial):  # Megatron-core 0.19+ return an ExpertsBuilder
+        expert_module, expert_submodules = experts.func, experts.keywords.get("submodules")
+    else:  # PrimusTurboSpecProvider on Megatron-core 0.19+: an opaque ExpertsBuilder
+        expert_module, expert_submodules = backend._grouped_mlp_module_and_submodules(grouped_gemm)
     if expert_module is TEGroupedMLP:
-        expert_module = InklingGroupedMLP
+        expert_spec = ModuleSpec(module=InklingGroupedMLP, submodules=expert_submodules)
     elif config.inkling_fp32_activations:
         raise NotImplementedError(
             "inkling_fp32_activations needs TE grouped experts (moe_grouped_gemm: true, "
             f"use_turbo_grouped_gemm: false), got {expert_module.__name__}"
         )
+    elif isinstance(experts, (tuple, functools.partial)):
+        expert_spec = ModuleSpec(module=expert_module, submodules=expert_submodules)
+    else:
+        expert_spec = experts
     return ModuleSpec(
         module=InklingMoELayer,
         submodules=MoESubmodules(
-            experts=ModuleSpec(module=expert_module, submodules=expert_submodules),
+            experts=expert_spec,
             shared_experts=ModuleSpec(
                 module=InklingSharedExperts,
                 submodules=MLPSubmodules(
@@ -123,7 +138,7 @@ def _moe_spec(config: InklingTransformerConfig, backend: TESpecProvider) -> Modu
 
 def get_inkling_layer_spec(config: InklingTransformerConfig, *, is_moe: bool) -> ModuleSpec:
     """One decoder layer. Attention geometry is resolved per layer from ``layer_number``."""
-    backend = TESpecProvider()
+    backend = _spec_provider()
     norm = backend.layer_norm(rms_norm=True)
     return ModuleSpec(
         module=InklingTransformerLayer,
@@ -165,7 +180,7 @@ def get_inkling_decoder_block_spec(
     layer_specs: List[ModuleSpec] = [get_inkling_layer_spec(config, is_moe=bool(moe[i])) for i in layers]
     assert layer_specs, "Inkling requires non-empty stage layer specs"
     logger.info(
-        "[Primus:Inkling] layers %d-%d: attention=%s mlp=%s",
+        "[Primus:inkling] layers %d-%d: attention=%s mlp=%s",
         layers.start,
         layers.stop - 1,
         "".join("S" if config.is_sliding_layer(i) else "G" for i in layers),
@@ -173,5 +188,5 @@ def get_inkling_decoder_block_spec(
     )
     return TransformerBlockSubmodules(
         layer_specs=layer_specs,
-        layer_norm=TESpecProvider().layer_norm(rms_norm=True),
+        layer_norm=_spec_provider().layer_norm(rms_norm=True),
     )

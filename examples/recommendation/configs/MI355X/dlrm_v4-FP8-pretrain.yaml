@@ -1,0 +1,49 @@
+# DLRMv4 (HSTU ranker, the MLPerf Training dlrmv4 model) throughput benchmark on
+# one MI355X node: the MLPerf recipe's model, kernels and precision (bf16 with FP8
+# HSTU GEMMs) and global batch (1024 per GPU), on synthetic data with the
+# statistics of a steady-state yambda-5b day (no dataset download). It trains a
+# fixed number of steps and logs samples/s and TFLOP/s every METRIC_LOG_FREQ
+# steps; it does not measure convergence (no periodic eval, MLPerf logging off).
+# The first ~10 steps compile kernels and calibrate FP8 scales: leave them out.
+#
+# To time a run on the real dataset instead: DLRM_SYNTHETIC_DATA=false
+# DLRM_DATA_PATH=<the staged yambda-5b data> and START_TS=<a daily window>, e.g. 200,
+# the day the synthetic data is modeled on.
+# For the MLPerf benchmark itself, see examples/mlperf/dlrm_v4.
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:dlrm_v4-FP8-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# As the MLPerf recipe on one node: the HIP default of 4 hardware queues over
+# Primus' runner default of 2 (see examples/mlperf/dlrm_v4/README.md).
+# DL_PIN_PREWARM=0: the loaders' pinned-memory pools grow during the first steps
+# instead of before them, so a node with less than 512 GiB free per NUMA node
+# can run it too; those steps are not measured.
+env:
+  GPU_MAX_HW_QUEUES: "4"
+  DL_PIN_PREWARM: "0"
+
+modules:
+  pre_trainer:
+    framework: recommendation
+    config: pre_trainer.yaml
+    model: dlrm_v4_hstu_yambda_5b.yaml
+    overrides:
+      synthetic_data: ${DLRM_SYNTHETIC_DATA:true}
+      data_path: ${DLRM_DATA_PATH:}
+      start_ts: ${START_TS:}
+
+      batch_size: ${BATCH_SIZE:1024}
+      num_train_ts: 1
+      num_train_batches: ${NUM_TRAIN_BATCHES:200}
+      num_eval_batches: 1
+      metric_log_freq: ${METRIC_LOG_FREQ:10}
+
+      # no periodic eval and no early stop: only the final (one-batch) eval runs
+      eval_every_data_pct: 0
+      auc_threshold: 1.0
+
+      mlperf_logging: false
+      clear_caches: false
+      warm_cache_after_run_start: false
