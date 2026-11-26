@@ -1,0 +1,36 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# DeepSeek-V3 MoE proxy pretraining in MXFP8 on 1 node of 4x MI455X (gfx1250):
+# the precision sibling of deepseek_v3-BF16-pretrain.yaml (same shape and
+# settings; see its header).
+#
+# MXFP8 is E4M3 data with one E8M0 scale per 32 values along each GEMM's
+# reduction dimension. Primus-Turbo quantizes, and it has to be one with the
+# gfx1250 MXFP8 GEMMs. TransformerEngine's MXFP8 recipe does not run on
+# gfx1250, so its autocast stays off and every other module runs BF16, the LM
+# head included.
+#   - MLA and shared-expert linears: MXFP8.
+#   - Routed experts on the grouped GEMMs (MegaMoE off, as at EP 1): MXFP8.
+#   - Routed experts in MegaMoE (EP 2 to 8, so the 4-GPU run): BF16 unless
+#     turbo_mega_moe_precision is mxfp8.
+# examples/megatron/models/deepseek-v3/README.md has a command per expert path.
+###############################################################################
+
+extends:
+  - deepseek_v3-BF16-pretrain.yaml
+
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-MXFP8-pretrain}
+
+modules:
+  pre_trainer:
+    overrides:
+      fp8: e4m3
+      fp8_recipe: mxfp8
+      # the MLA and shared-expert linears on Primus-Turbo's GEMMs, which quantize
+      use_turbo_gemm: true
+      # the expert groups reach the grouped GEMMs as they are, without TransformerEngine's zero-padding
+      turbo_grouped_gemm_without_padding: true
