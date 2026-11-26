@@ -3,9 +3,13 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+from __future__ import annotations
+
 import gc
+import inspect
 import os
 from contextlib import contextmanager, nullcontext
+from dataclasses import replace
 from functools import lru_cache
 from typing import Callable, Iterable, List, Optional, Tuple, Union
 
@@ -13,17 +17,31 @@ import primus_turbo.pytorch as primus_turbo_torch
 import torch
 import torch.distributed as dist
 import transformer_engine as te
+from megatron.core.dist_checkpointing.mapping import ShardedTensorFactory
 from megatron.core.enums import Fp4Recipe, Fp8Recipe
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
     TEGroupedLinear,
     TELayerNormColumnParallelLinear,
     TELinear,
-    TEQuantizationParams,
-    TEQuantizationRecipe,
     TERowParallelLinear,
     condition_init_method,
 )
+
+try:
+    from megatron.core.extensions.transformer_engine import (
+        TEQuantizationParams,
+        TEQuantizationRecipe,
+    )
+except ImportError:
+
+    class TEQuantizationParams:  # Bridge Megatron-LM has no TE quantization config types
+        pass
+
+    class TEQuantizationRecipe:
+        pass
+
+
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -38,6 +56,23 @@ from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_pg_size
+
+try:
+    from megatron.core.transformer.utils import (
+        is_layer_window_attention as _is_layer_window_attention,
+    )
+except ImportError:  # Megatron-core without per-layer window patterns
+
+    def _is_layer_window_attention(window_size, window_attn_skip_freq, layer_number):
+        if not window_size:
+            return False
+        if window_attn_skip_freq is None:
+            return True
+        if isinstance(window_attn_skip_freq, int):
+            return layer_number % window_attn_skip_freq != 0
+        return bool(window_attn_skip_freq[layer_number - 1])
+
+
 from megatron.training.global_vars import get_args
 
 # QuantizedTensor / QuantizedTensorPair are only used in the FP8/FP4 weight
@@ -66,7 +101,6 @@ try:
 except (ImportError, ModuleNotFoundError):
     create_quantized_weight = None
 
-from primus_turbo.common.constants import ENV_GEMM_BACKEND, ENV_GROUPED_GEMM_BACKEND
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
     Float8QuantConfig,
@@ -99,6 +133,7 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import warning_rank_0
 
 _dummy_wgrads = {}
@@ -221,12 +256,22 @@ def _bridge_activation_grad(
     return PrimusTurboQuantizedTensorPair(data=rowwise, data_t=colwise)
 
 
+try:
+    # Primus-Turbo since AMD-AGI/Primus-Turbo#605 caches each environment variable at its first
+    # read; set_env() writes os.environ and drops that cached value
+    from primus_turbo.common.envs import set_env as _set_turbo_env
+except ImportError:  # older Primus-Turbo reads os.environ at every dispatch
+
+    def _set_turbo_env(name: str, value: str) -> None:
+        os.environ[name] = value
+
+
 @lru_cache(maxsize=1)
 def _apply_turbo_gemm_backend_env() -> None:
     """Publish ``turbo_gemm_backend`` into the env var Primus-Turbo dispatches on."""
     backend = getattr(get_args(), "turbo_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GEMM_BACKEND] = backend
+        _set_turbo_env("PRIMUS_TURBO_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo gemm backend is set to {backend}")
 
 
@@ -235,24 +280,84 @@ def _apply_turbo_grouped_gemm_backend_env() -> None:
     """Publish ``turbo_grouped_gemm_backend``; see :func:`_apply_turbo_gemm_backend_env`."""
     backend = getattr(get_args(), "turbo_grouped_gemm_backend", "default")
     if backend != "default":
-        os.environ[ENV_GROUPED_GEMM_BACKEND] = backend
+        _set_turbo_env("PRIMUS_TURBO_GROUPED_GEMM_BACKEND", backend)
         warning_rank_0(f"Primus-Turbo grouped gemm backend is set to {backend}")
 
 
-@lru_cache(maxsize=1)
 def _is_gfx1250() -> bool:
-    """Return True iff the local GPU is a gfx1250 device.
+    """Return True iff the local GPU is a gfx1250 device (:func:`primus.core.utils.gpu_arch.is_gfx1250`).
 
     Used to route ``main_grad`` accumulation through the single-launch Triton
     in-place add (:func:`inplace_add_triton_`) only on gfx1250, keeping Torch's
     ``add_`` on every other architecture.
     """
-    if not torch.cuda.is_available():
+    return is_gfx1250()
+
+
+# The BF16 variable-K (wgrad) backends with a beta = 1 epilogue; CK has none, FlyDSL see below.
+_BF16_WGRAD_ACCUM_BACKENDS = ("TRITON", "HIPBLASLT")
+
+
+def _flydsl_bf16_wgrad_can_accumulate(main_grad: Optional[torch.Tensor]) -> bool:
+    """FlyDSL's BF16 variable-K wgrad adds into ``main_grad`` on gfx1250 only, into an fp32 buffer of whole
+    256 x 256 output tiles, from the Primus-Turbo build that exports its accumulate gate."""
+    if not (_is_gfx1250() and isinstance(main_grad, torch.Tensor) and main_grad.dtype == torch.float32):
+        return False
+    if main_grad.dim() < 2 or main_grad.shape[-2] % 256 or main_grad.shape[-1] % 256:
         return False
     try:
-        return "gfx1250" in torch.cuda.get_device_properties(0).gcnArchName
-    except Exception:
+        from primus_turbo.flydsl.grouped_gemm.grouped_gemm_bf16_kernel_gfx1250 import (  # noqa: F401
+            grouped_gemm_bf16_variable_k_accum_supported,
+        )
+    except ImportError:
         return False
+    return True
+
+
+def _grouped_wgrad_accum_fusion(config) -> bool:
+    """``turbo_grouped_gemm_wgrad_accum_fusion``, where null follows ``gradient_accumulation_fusion``."""
+    try:
+        flag = getattr(get_args(), "turbo_grouped_gemm_wgrad_accum_fusion", None)
+    except AssertionError:  # Megatron's args are not initialized (e.g. a unit test)
+        flag = None
+    return bool(getattr(config, "gradient_accumulation_fusion", False) if flag is None else flag)
+
+
+def _bf16_grouped_wgrad_can_accumulate(main_grad: Optional[torch.Tensor] = None) -> bool:
+    """Whether Primus-Turbo's BF16 grouped-GEMM wgrad can add into ``main_grad``.
+
+    Asks Turbo's backend manager, which reads ``turbo_grouped_gemm_backend`` from the env var it is
+    published to (and any in-code setting) the way Turbo's dispatch does. Not cached: the setting
+    can change after the model is built.
+
+    - No backend set: the dispatcher picks one that can accumulate.
+    - A pinned backend: only those in ``_BF16_WGRAD_ACCUM_BACKENDS`` can, and FlyDSL where
+      :func:`_flydsl_bf16_wgrad_can_accumulate` admits ``main_grad``; Turbo raises rather than fall back
+      from a pinned backend.
+    - Auto-tune, per op or global: older Primus-Turbo builds tune the accumulating wgrad on
+      ``main_grad`` itself, or reuse a backend tuned for an overwriting wgrad of the same shapes,
+      and Primus cannot tell the builds apart.
+    """
+    try:
+        from primus_turbo.pytorch.core.backend import (
+            GlobalBackendManager,
+            PrecisionType,
+        )
+
+        choice = GlobalBackendManager.get_grouped_gemm_backend(PrecisionType.BF16_FP16_FP32)
+        global_auto_tune = GlobalBackendManager.auto_tune_enabled()
+    except (ImportError, AttributeError, TypeError):
+        # an older Primus-Turbo without per-precision backend choices: it pins nothing that cannot
+        # accumulate, so the fusion stays as gradient_accumulation_fusion set it
+        return True
+    if global_auto_tune or getattr(choice, "auto_tune", False):
+        return False
+    # an older Primus-Turbo returns the BackendType itself
+    backend = getattr(choice, "backend", choice)
+    name = getattr(backend, "name", None)
+    if name == "FLYDSL":
+        return _flydsl_bf16_wgrad_can_accumulate(main_grad)
+    return backend is None or name in _BF16_WGRAD_ACCUM_BACKENDS
 
 
 def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
@@ -363,12 +468,13 @@ def _bridge_weight_grad(
     return x, PrimusTurboQuantizedTensorPair(data=quantized_weight, data_t=quantized_weight_trans)
 
 
-def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
+def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor, grouped: bool = False) -> Optional[str]:
     """Resolve the fused weight-gradient accumulation pattern for ``weight``.
 
     Fusion has the wgrad GEMM accumulate straight into ``weight.main_grad`` through a
     beta=1 epilogue, replacing the separate elementwise add the framework would run
-    over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``.
+    over the whole gradient buffer. It is driven by ``gradient_accumulation_fusion``, and for the
+    grouped-GEMM experts (``grouped``) by ``turbo_grouped_gemm_wgrad_accum_fusion``.
 
     Only the BF16/FP16 GEMMs, the FP8 current-scaling (tensorwise) ones, and
     non-preshuffled MXFP4 GEMMs (FlyDSL ``gemm_fp4_accum_impl``) carry that
@@ -380,7 +486,12 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     forwarded onto the buffer by :func:`_bridge_weight_grad`, which also stands its own
     accumulation down so the two never both write ``main_grad``.
     """
-    if not getattr(config, "gradient_accumulation_fusion", False):
+    enabled = (
+        _grouped_wgrad_accum_fusion(config)
+        if grouped
+        else getattr(config, "gradient_accumulation_fusion", False)
+    )
+    if not enabled:
         return None
 
     turbo_fp4_enabled = PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
@@ -422,11 +533,66 @@ def _fuse_wgrad_accum_pattern(config, weight: torch.Tensor) -> Optional[str]:
     return "megatron"
 
 
+try:
+    from primus_turbo.pytorch.ops.grouped_mlp_fp8 import (
+        _FP8_PAD_ALIGN as _TURBO_FP8_PAD_ALIGN,
+    )
+except (ImportError, ModuleNotFoundError):
+    _TURBO_FP8_PAD_ALIGN = 128
+
+# Padding Turbo's FP8 ops apply when they quantize a bf16 weight themselves. A
+# pre-quantized (cached) weight goes to the kernel as-is, so the multi-micro-batch
+# cache must be stored in the same layout, or its K no longer matches the padded
+# activation (GPT-OSS hidden 2880 vs 2944). Keyed by (op, weight role, granularity);
+# a missing key means the op does not pad that weight and the cache stays unpadded.
+#
+# Keep this in sync with the pad_align_last / pad_align_penultimate arguments that
+# Turbo passes to QuantizedTensor.quantize for bf16 weights in
+# primus_turbo/pytorch/ops/grouped_mlp_fp8.py (w1 -> "fc1", w2 -> "fc2") and
+# primus_turbo/pytorch/ops/grouped_gemm_fp8.py (b). Update it when a Turbo bump
+# changes those arguments, the alignment, or adds padding to another granularity
+# (e.g. MX_BLOCKWISE); a stale entry shows up as Turbo's "K mismatch" assertion
+# with several micro-batches only.
+_TURBO_FP8_WEIGHT_PAD = {
+    ("grouped_mlp", "fc1", ScalingGranularity.TENSORWISE): {"pad_align_last": _TURBO_FP8_PAD_ALIGN},
+    ("grouped_mlp", "fc2", ScalingGranularity.TENSORWISE): {
+        "pad_align_last": _TURBO_FP8_PAD_ALIGN,
+        "pad_align_penultimate": _TURBO_FP8_PAD_ALIGN,
+    },
+    ("grouped_gemm", "b", ScalingGranularity.TENSORWISE): {
+        "pad_align_last": _TURBO_FP8_PAD_ALIGN,
+        "pad_align_penultimate": _TURBO_FP8_PAD_ALIGN,
+    },
+}
+_PAD_ARG_DIM = {"pad_align_last": -1, "pad_align_penultimate": -2}
+
+
+@lru_cache(maxsize=1)
+def _turbo_quantize_supports_padding() -> bool:
+    # Turbo builds without these arguments do not pad weights in their ops either.
+    return PrimusTurboQuantizedTensor is not None and "pad_align_last" in (
+        inspect.signature(PrimusTurboQuantizedTensor.quantize).parameters
+    )
+
+
+def _turbo_fp8_weight_pad(op: str, role: str, granularity, weight_shape) -> dict:
+    """Pad arguments for caching a weight of ``op``'s ``role`` (see _TURBO_FP8_WEIGHT_PAD).
+
+    Dims that are already aligned are dropped, so aligned models keep the unpadded
+    ``create_quantized_weight`` cache unchanged.
+    """
+    if not _turbo_quantize_supports_padding():
+        return {}
+    spec = _TURBO_FP8_WEIGHT_PAD.get((op, role, granularity), {})
+    return {arg: align for arg, align in spec.items() if weight_shape[_PAD_ARG_DIM[arg]] % align}
+
+
 def _maybe_create_quantized_weight_buffers(
     weight: torch.Tensor,
     dest_dtype: torch.dtype,
     quant_config: "PrimusTurboQuantConfig",
     disable_parameter_transpose_cache: bool,
+    weight_pad: Optional[dict] = None,
 ):
     """Quantize ``weight`` into a rowwise buffer plus an optional transposed
     (colwise) buffer, returning ``(rowwise, colwise_or_None)``.
@@ -435,9 +601,30 @@ def _maybe_create_quantized_weight_buffers(
     scaling recipe from the quant config and handles per-granularity transpose.
     Falls back to a manual rowwise/colwise quantize on older primus_turbo builds
     that do not export ``create_quantized_weight`` yet.
+
+    ``weight_pad`` (from :func:`_turbo_fp8_weight_pad`, TENSORWISE only) stores the
+    buffers zero-padded the way the consuming Turbo op pads weights it quantizes.
     """
     quant_config_internal = quant_config.data()
     need_weight_transpose_cache = not disable_parameter_transpose_cache
+
+    if weight_pad:
+        assert (
+            quant_config_internal.granularity == ScalingGranularity.TENSORWISE
+        ), f"padded weight cache only supports TENSORWISE, got {quant_config_internal.granularity}"
+        quantized_weight_rowwise = PrimusTurboQuantizedTensor.quantize(
+            weight,
+            dest_dtype=dest_dtype,
+            granularity=quant_config_internal.granularity,
+            block_size=quant_config_internal.block_size,
+            scaling_recipe=ScalingRecipe(),
+            axis=-1,
+            **weight_pad,
+        )
+        quantized_weight_colwise = (
+            quantized_weight_rowwise.transpose(-2, -1) if need_weight_transpose_cache else None
+        )
+        return quantized_weight_rowwise, quantized_weight_colwise
 
     if create_quantized_weight is not None:
         return create_quantized_weight(
@@ -1011,7 +1198,18 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             # enable ring attention
             self.attn_kwargs["ring_group"] = dist.new_group(ranks=[dist.get_rank()])
 
-        assert config.window_size is None, "primus_turbo does not support sliding window attention"
+        # Sliding window from the config (e.g. Muse Spark: window_size + per-layer
+        # window_attn_skip_freq), with Megatron's rule for which layers take it, as
+        # TEDotProductAttention does. Turbo takes a causal window (left, 0).
+        self.layer_window_size = None
+        if config.window_size is not None and _is_layer_window_attention(
+            config.window_size, config.window_attn_skip_freq, layer_number
+        ):
+            assert (
+                tuple(config.window_size)[1] == 0
+            ), f"primus_turbo supports a causal sliding window (left, 0), got {config.window_size}"
+            assert config.context_parallel_size == 1, "primus_turbo sliding window needs CP 1"
+            self.layer_window_size = tuple(int(w) for w in config.window_size)
         # Check version
 
         kv_channels = (
@@ -1089,7 +1287,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
         sink_tensor = None
-        window_size = (-1, -1)
+        window_size = self.layer_window_size or (-1, -1)
 
         use_sink_attn = self.use_sink_attention and self.sinks is not None
 
@@ -1186,6 +1384,7 @@ class PrimusTurboLinear(TELinear):
         is_expert: bool = False,
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1206,6 +1405,7 @@ class PrimusTurboLinear(TELinear):
             is_expert=is_expert,
             symmetric_ar_type=symmetric_ar_type,
             tp_group=tp_group,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -1393,6 +1593,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         if not input_is_parallel:
             raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
@@ -1414,6 +1615,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -1603,6 +1805,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1623,6 +1826,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
             stride=stride,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -1829,6 +2033,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_gemm_backend_env()
 
@@ -1849,6 +2054,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
             tp_comm_buffer_name=tp_comm_buffer_name,
             tp_group=tp_group,
             stride=stride,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2103,6 +2309,8 @@ def _make_primus_turbo_norm_te_column_parallel_linear():
             tp_comm_buffer_name: Optional[str] = None,
             tp_group: Optional[torch.distributed.ProcessGroup] = None,
             stride: int = 1,
+            name: Optional[str] = None,  # passed by Megatron-core >= 0.19
+            pg_collection: Optional[ProcessGroupCollection] = None,  # passed by Megatron-LM main
         ):
             super().__init__()
             self.config = config
@@ -2129,6 +2337,8 @@ def _make_primus_turbo_norm_te_column_parallel_linear():
                 skip_weight_param_allocation=skip_weight_param_allocation,
                 tp_comm_buffer_name=tp_comm_buffer_name,
                 tp_group=tp_group,
+                **({"name": name} if name is not None else {}),
+                **({"pg_collection": pg_collection} if pg_collection is not None else {}),
             )
 
         def finish_init(self, quantization_config):
@@ -2248,6 +2458,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         is_expert: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         _apply_turbo_grouped_gemm_backend_env()
 
@@ -2267,6 +2478,7 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2338,7 +2550,59 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         self._ensure_weight_views()
         return super().state_dict(*args, **kwargs)
 
-    def prepare_weights(self, x: torch.Tensor):
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """Accept the stacked ``weights`` alone (torch_dist) or the per-expert ``weight{i}`` alone
+        (TE grouped linears); ``weight{i}`` are views of ``weights``, so either fills both."""
+        self._ensure_weight_views()
+        stacked = f"{prefix}weights"
+        views = [f"{prefix}weight{i}" for i in range(self.num_gemms)]
+        has_stacked = stacked in state_dict
+        has_views = all(key in state_dict for key in views)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+        if has_views and not has_stacked and stacked in missing_keys:
+            missing_keys.remove(stacked)
+        if has_stacked and not has_views:
+            missing_keys[:] = [key for key in missing_keys if key not in views]
+
+    def _sharded_state_dict_grouped(self, tp_axis_map, prefix="", sharded_offsets=(), metadata=None):
+        """TE's per-expert checkpoint tensors, written from the stacked ``weights``.
+
+        The distributed optimizer looks up every trained parameter in the model's sharded
+        state dict, so ``weights`` replaces its ``weight{i}`` views there, as a factory that
+        builds TE's per-expert tensors (same keys and expert offsets) and stacks them on load.
+        """
+        # With singleton_local_shards, TE gives every expert its own key, which build() below would
+        # collapse onto one; Megatron's training saves always use False.
+        assert not (metadata or {}).get(
+            "singleton_local_shards"
+        ), "Turbo grouped weights support only singleton_local_shards=False"
+        sharded = super()._sharded_state_dict_grouped(tp_axis_map, prefix, sharded_offsets, metadata)
+        experts = [sharded.pop(f"{prefix}weight{i}") for i in range(self.num_gemms)]
+
+        def build(key, data, replica_id, flattened_range):
+            assert flattened_range is None, (
+                "Turbo grouped weights don't support the distributed optimizer's flattened "
+                "(fully_sharded_model_space) checkpoint format; use dist_ckpt_optim_fully_reshardable "
+                "or the default dp_reshardable format"
+            )
+            return {
+                i: replace(expert, key=key, data=data[i], dtype=data.dtype, replica_id=replica_id)
+                for i, expert in enumerate(experts)
+            }
+
+        def merge(loaded):
+            return torch.stack([loaded[i] for i in range(len(experts))])
+
+        sharded[f"{prefix}weights"] = ShardedTensorFactory(
+            experts[0].key, self.weights, build, merge, replica_id=experts[0].replica_id
+        )
+        return sharded
+
+    def prepare_weights(self, x: torch.Tensor, turbo_op: str = "grouped_gemm", weight_role: str = "b"):
         """Resolve the weight operand for grouped GEMM / fused grouped MLP.
 
         Owns ``is_first_microbatch``: first-microbatch quantized-weight cache,
@@ -2346,12 +2610,16 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
         still sees ``main_grad`` on the real ``self.weights`` Parameter.
         Returns ``(x, weight, fuse_wgrad_accum_pattern)`` where ``weight`` is
         either that Parameter or a :class:`PrimusTurboQuantizedTensorPair`.
+
+        ``turbo_op`` / ``weight_role`` name the Turbo op and operand that consume
+        the weight; the FP8 cache is stored in that op's layout (see
+        ``_TURBO_FP8_WEIGHT_PAD``).
         """
         self._ensure_weight_views()
         weights = self.weights
         is_first_microbatch = self.is_first_microbatch
         self.is_first_microbatch = False
-        fuse_wgrad_accum_pattern = _fuse_wgrad_accum_pattern(self.config, weights)
+        fuse_wgrad_accum_pattern = _fuse_wgrad_accum_pattern(self.config, weights, grouped=True)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -2367,6 +2635,9 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                     quant_config,
                     disable_parameter_transpose_cache=self.disable_parameter_transpose_cache
                     or quant_config.current_scaling(),
+                    weight_pad=_turbo_fp8_weight_pad(
+                        turbo_op, weight_role, quant_config.data().granularity, weights.shape
+                    ),
                 )
             x, quantized_weights = _bridge_weight_grad(
                 x,
@@ -2408,6 +2679,9 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             )
             return x, quantized_weights, fuse_wgrad_accum_pattern
 
+        # Where the BF16 wgrad backend cannot add into main_grad, these weights keep DDP's separate add.
+        if fuse_wgrad_accum_pattern is not None and not _bf16_grouped_wgrad_can_accumulate(weights.main_grad):
+            fuse_wgrad_accum_pattern = None
         return x, weights, fuse_wgrad_accum_pattern
 
     def forward(self, x: torch.Tensor, m_splits: torch.Tensor):
@@ -2483,6 +2757,7 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -2496,6 +2771,7 @@ class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2528,6 +2804,7 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        name: Optional[str] = None,  # passed by Megatron-core 0.19+
     ):
         super().__init__(
             num_gemms=num_gemms,
@@ -2541,6 +2818,7 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
             pg_collection=pg_collection,
+            **({"name": name} if name is not None else {}),
         )
 
         tp_size = get_pg_size(self._tp_group)
@@ -2659,9 +2937,16 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         return _get_fp8_dtype(fmt, True), _get_fp8_dtype(fmt, False)
 
     def dispatch_preprocess(
-        self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        routing_map: torch.Tensor,
+        probs: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
     ):
         """Initializes routing metadata and prepares tensors for fused dispatch.
+
+        ``padding_mask`` is what Megatron-LM main passes to flex dispatchers. Upstream only
+        consumes it on the HybridEP backend; DeepEP ignores it, and so does this dispatcher.
 
         This method reshapes input tensors and processes routing information into a
         unified format, where the routing map is expanded to cover the TPxEP communication domain,
@@ -2676,8 +2961,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             A tuple of reshaped hidden states and token probabilities.
         """
         self.hidden_shape = hidden_states.shape
-        # view as [num_tokens, hidden_size]
-        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        # view as [num_tokens, hidden]; hidden is moe_latent_size when the latent projections are active
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         num_tokens = hidden_states.shape[0]
 
         # when force_load_balancing with type "even", we use round-robin token_indices

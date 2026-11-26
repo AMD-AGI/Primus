@@ -6,7 +6,7 @@
 
 """Tests for the MiniMax-M3 MSA indexer-loss logging patch.
 
-The patch reaches into ``track_moe_metrics``, which every MoE model calls, so
+The patch reaches into ``MoEMetricsTracker.report``, which every MoE model calls, so
 the gating tests matter most: it must install only for an MSA run with the loss
 on -- including when the preset leaves the coefficient to the config default.
 """
@@ -57,13 +57,13 @@ def test_patch_only_installs_for_msa_with_the_loss_on(args, expected, why):
 def _recorder():
     seen = {}
 
-    def fake_track_moe_metrics(*args, track_names=None, **kwargs):
+    def fake_report(*args, track_names=None, **kwargs):
         seen["args"] = args
         seen["track_names"] = track_names
         seen["kwargs"] = kwargs
         return "sentinel"
 
-    return fake_track_moe_metrics, seen
+    return fake_report, seen
 
 
 def test_wrapper_appends_the_key_to_an_explicit_list():
@@ -113,11 +113,25 @@ def test_loss_name_matches_the_attention_module():
 
 def test_patch_skips_when_already_installed(monkeypatch):
     pytest.importorskip("megatron")
-    import megatron.training.training as training_module
+    from megatron.core.transformer.moe.moe_logging import MoEMetricsTracker
 
     fake, _ = _recorder()
     already = mod._make_tracked_with_indexer_loss(fake)
-    monkeypatch.setattr(training_module, "track_moe_metrics", already, raising=False)
+    monkeypatch.setattr(MoEMetricsTracker, "report", already)
 
     mod.patch_minimax_m3_indexer_loss_logging(_Ctx(minimax_sparse_attention=True))
-    assert training_module.track_moe_metrics is already
+    assert MoEMetricsTracker.report is already
+
+
+def test_patch_wraps_report_once(monkeypatch):
+    pytest.importorskip("megatron")
+    from megatron.core.transformer.moe.moe_logging import MoEMetricsTracker
+
+    original = MoEMetricsTracker.report
+    monkeypatch.setattr(MoEMetricsTracker, "report", original)
+
+    mod.patch_minimax_m3_indexer_loss_logging(_Ctx(minimax_sparse_attention=True))
+    wrapped = MoEMetricsTracker.report
+    assert wrapped is not original
+    mod.patch_minimax_m3_indexer_loss_logging(_Ctx(minimax_sparse_attention=True))
+    assert MoEMetricsTracker.report is wrapped

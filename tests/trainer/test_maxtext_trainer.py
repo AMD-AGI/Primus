@@ -278,7 +278,8 @@ class TestMaxTextTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "dpsk_v2_16B-FP8",
-            exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-pretrain.yaml",
+            # The dropless default (Primus-Turbo grouped GEMM) does not combine with MaxText quantization.
+            exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-token_dropping-pretrain.yaml",
             extra_args=[
                 "--override_model.base_num_decoder_layers",
                 "4",

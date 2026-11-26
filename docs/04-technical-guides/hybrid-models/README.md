@@ -77,6 +77,8 @@ Recurrent mixer (Mamba2, KDA, or GDN) interleaved with MLA attention and SwiGLU 
 
 Bridge SFT (Mamba hybrids): `examples/megatron_bridge/configs/MI300X/zebra_mamba_{1B,3B,8B}_hybrid_sft_posttrain.yaml`
 
+The hybrid layers read their FLA switches (`use_fla_fused_rmsnorm`, `use_fla_fused_gated_norm`, `use_fla_short_conv`, `fla_mla_attn`) from Megatron-LM's global args. Megatron-Bridge does not set those args, so under Bridge the switches keep their defaults: the FLA kernels stay off, and MLA still moves to the direct flash-attn path on its own when the installed flash-attn is newer than Transformer Engine supports.
+
 ### Pretrain configs on MI300X (hybrid + pure)
 
 | Config | Model | Recurrent Type | Seq Length | Params | Tokenizer |
@@ -388,6 +390,28 @@ To quickly verify the model runs without real data, the 3B and 8B configs come w
 | `save_interval` | Checkpoint save frequency | 1000 |
 | `auto_continue_train` | Auto-resume from last checkpoint on crash | `true` / `false` |
 | `hybrid_attention_ratio` | Fraction of attention layers (0.0 = pure recurrent) | 0.0, 0.25 |
+
+---
+
+### Stability: decoupled-RoPE MLA (`qk_clip` + QK-Norm)
+
+Decoupled-RoPE MLA hybrids (`qk_pos_emb_head_dim > 0`) can diverge as the rotary q/k grow — the attention logits and deep residual explode (a finite blow-up that never `NaN`s). The NoPE arm is unaffected. Two stabilizers, both **off by default**:
+
+| Flag / env var | Default | Purpose |
+|---|---|---|
+| `mla_rope_qk_norm` / `PRIMUS_MLA_ROPE_QK_NORM=1` | `false` / `0` | **The fix** ([#1176](https://github.com/AMD-AGI/Primus/pull/1176)): parameter-free unit-RMS on the decoupled-RoPE q/k before RoPE, capping the rotary logit contribution that bypasses `q_layernorm`/`kv_layernorm` and escapes `qk_clip` (which rescales per-head q/k weights but never the shared rotary key from `linear_kv_down_proj`). Env var needs no config-schema change; parameter-free so checkpoints resume unchanged. Applies only to the non-fused, non-cached RoPE path: it skips itself (with a log line) on non-MLA models, when RoPE fusion is in effect (`apply_rope_fusion` with `position_embedding_type: rope`; the hybrid configs' inherited `apply_rope_fusion: true` is dropped by Megatron for `position_embedding_type: none`), when `cache_mla_latents` or `mla_use_nope` (Kimi K3's default) is set, or when `qk_pos_emb_head_dim` is 0. |
+| `qk_clip` | `false` | MuonClip safety net: rescale a head's q/k weights when its max logit exceeds the threshold. |
+| `qk_clip_threshold` | `100` | Max-logit ceiling that triggers clipping; set just above the healthy per-step max. |
+| `qk_clip_alpha` | `0.5` | Rescale split (q × `eta^alpha`, k × `eta^(1-alpha)`); in (0, 1). |
+| `log_max_attention_logit` | `false` | Log per-step max logit (implied by `qk_clip`); use it to pick the threshold. |
+
+```yaml
+mla_rope_qk_norm: true      # or: export PRIMUS_MLA_ROPE_QK_NORM=1
+qk_clip: true
+qk_clip_threshold: 100      # QK-Norm keeps the healthy max logit around 65; without it, use a much higher ceiling
+qk_clip_alpha: 0.5
+log_max_attention_logit: true
+```
 
 ---
 

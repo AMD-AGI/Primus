@@ -20,6 +20,7 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+import torch
 import torch.nn.functional as F
 
 pytest.importorskip("megatron")
@@ -98,7 +99,35 @@ def test_forward_anchors_match_upstream():
 def test_fused_forward_rechecks_lora_wrapper():
     # PEFT swaps linear_fc2 for a wrapper after __init__, so the __init__-time
     # decision cannot be trusted at call time.
-    assert "hasattr(self.linear_fc2, 'weight')" in patch_mod._FWD_FUSED_NEW
+    assert "hasattr(self.linear_fc2, 'weight')" in patch_mod._fwd_fused_new("        ")
+
+
+class _NestedGlu:
+    """The ``glu()`` anchor one level deeper than in older Megatron, as on Megatron-LM main."""
+
+    def forward(self, intermediate_parallel, flag):
+        if flag:
+            if flag > 1:
+                intermediate_parallel = intermediate_parallel * 3
+            else:
+                intermediate_parallel = glu(intermediate_parallel)  # noqa: F821
+        return intermediate_parallel
+
+
+def test_forward_rewrite_follows_anchor_depth():
+    """A hard-coded indent turned the rewrite into a SyntaxError on Megatron-LM main."""
+    indent = patch_mod.anchor_indent(_NestedGlu.forward, patch_mod._FORWARD_ORI)
+    assert indent == " " * 16
+
+    patch_method_source_multi(
+        _NestedGlu, "forward", [(patch_mod._FORWARD_ORI, patch_mod._forward_new(indent))]
+    )
+    holder = _NestedGlu()
+    holder._use_fla_swiglu = True
+    holder._fla_swiglu_fn = lambda x_glu, x_linear: x_glu + x_linear
+
+    out = holder.forward(torch.tensor([1.0, 2.0]), flag=1)
+    assert out.tolist() == [3.0]
 
 
 def test_install_patch_rewrites_both_methods(pristine_mlp, monkeypatch):
@@ -190,6 +219,7 @@ def test_plain_swiglu_accepts_plain_config():
         # activation through the TE module slot.
         ({"use_te_activation_func": True}, "TE module slot"),
         ({"activation_func_clamp_value": 7.0}, "activation_func_clamp_value is set"),
+        ({"activation_func_tanh_clamp_scale": 1.0}, "activation_func_tanh_clamp_scale is set"),
         ({"glu_linear_offset": 1}, "glu_linear_offset is non-zero"),
     ],
 )

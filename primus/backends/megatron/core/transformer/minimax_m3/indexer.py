@@ -26,11 +26,11 @@ matmul.
 """
 
 import copy
+import functools
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import torch
-from megatron.core.models.common.embeddings.rope_utils import _apply_rotary_pos_emb_bshd
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
@@ -38,6 +38,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
     MSATransformerConfig,
 )
+from primus.backends.megatron.core.transformer.minimax_m3.rope import RopeTables
 
 
 @dataclass
@@ -126,22 +127,25 @@ class MinimaxM3Indexer(MegatronModule):
 
             self.fused_select = fused_select_blocks
 
-    def _project(self, hidden_states: torch.Tensor, linear, norm, num_heads: int) -> torch.Tensor:
-        """``[sq, b, h]`` -> normalised ``[sq, b, num_heads, index_head_dim]``."""
+    def _project(self, hidden_states: torch.Tensor, linear, num_heads: int) -> torch.Tensor:
+        """``[sq, b, h]`` -> un-normalised ``[sq, b, num_heads, index_head_dim]``."""
         out = linear(hidden_states)
         if isinstance(out, tuple):  # Megatron linears return (output, bias)
             out = out[0]
         sq, b = out.shape[0], out.shape[1]
-        return norm(out.view(sq, b, num_heads, self.index_head_dim))
+        return out.view(sq, b, num_heads, self.index_head_dim)
 
     def forward(
-        self, hidden_states: torch.Tensor, rotary_pos_emb: Optional[torch.Tensor]
+        self,
+        hidden_states: torch.Tensor,
+        rotary_pos_emb: Optional[Union[torch.Tensor, RopeTables]],
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[object]]:
         """Select KV blocks for every query.
 
         Args:
             hidden_states: ``[sq, b, h]``, the attention module's input.
-            rotary_pos_emb: rope freqs ``[sq, 1, 1, rotary_dim]``, or None.
+            rotary_pos_emb: rope freqs ``[sq, 1, 1, rotary_dim]``, the attention's
+                :class:`RopeTables` of them, or None.
 
         Returns:
             ``block_indices`` ``[b, n_index, sq, topk]`` (int64, ``-1`` padding
@@ -150,22 +154,38 @@ class MinimaxM3Indexer(MegatronModule):
             loss consumes, and the flydsl backend's ``BlockPlan`` of the
             selection for the attention backward to reuse (None otherwise).
         """
-        index_q = self._project(
-            hidden_states, self.linear_index_q, self.index_q_layernorm, self.index_n_heads
-        )
-        index_k = self._project(hidden_states, self.linear_index_k, self.index_k_layernorm, 1)
-
+        rope = None
         if rotary_pos_emb is not None:
-            # Partial rope: freqs cover the first rotary_dim of index_head_dim and
-            # the tail passes through, which is the reference's
-            # `cos[..., :head_dim]` slice. Called unfused on purpose -- a
-            # reference implementation should not depend on apply_rope_fusion.
-            index_q = _apply_rotary_pos_emb_bshd(
-                index_q, rotary_pos_emb, rotary_interleaved=self.config.rotary_interleaved
+            rope = rotary_pos_emb if isinstance(rotary_pos_emb, RopeTables) else RopeTables(rotary_pos_emb)
+        index_q = self._project(hidden_states, self.linear_index_q, self.index_n_heads)
+        index_k = self._project(hidden_states, self.linear_index_k, 1)
+        interleaved = self.config.rotary_interleaved
+        fused = False
+        if self.config.msa_fused_qk_norm_rope:
+            # imported only when switched on: the eager backend needs no Triton
+            from primus.backends.megatron.core.transformer.minimax_m3 import (
+                qk_norm_rope,
             )
-            index_k = _apply_rotary_pos_emb_bshd(
-                index_k, rotary_pos_emb, rotary_interleaved=self.config.rotary_interleaved
-            )
+
+            # msa_fused_zero_centered_gamma: the kernels form a zero-centered norm's 1 + w themselves
+            zc = bool(getattr(self.config, "msa_fused_zero_centered_gamma", False))
+            fused = qk_norm_rope.norm_rope_ok(
+                index_q, self.index_q_layernorm, rope, interleaved, zc
+            ) and qk_norm_rope.norm_rope_ok(index_k, self.index_k_layernorm, rope, interleaved, zc)
+        if fused:
+            # norm + rope in one pass each way, bitwise (qk_norm_rope.py)
+            index_q = qk_norm_rope.norm_rope(index_q, self.index_q_layernorm, rope, zc)
+            index_k = qk_norm_rope.norm_rope(index_k, self.index_k_layernorm, rope, zc)
+        else:
+            index_q = self.index_q_layernorm(index_q)
+            index_k = self.index_k_layernorm(index_k)
+            if rope is not None:
+                # Partial rope: freqs cover the first rotary_dim of index_head_dim and
+                # the tail passes through, which is the reference's
+                # `cos[..., :head_dim]` slice. RopeTables, not apply_rope_fusion -- a
+                # reference implementation should not depend on apply_rope_fusion.
+                index_q = rope.apply(index_q, interleaved)
+                index_k = rope.apply(index_k, interleaved)
 
         if self.fused_select is not None:
             # [sq, b, n, d] straight in: the kernel never forms the [b, n, sq, sk] scores.
@@ -222,19 +242,32 @@ class MinimaxM3Indexer(MegatronModule):
         the block-sparse kernel reads the returned slots sequentially and would
         double-count a repeat.
         """
-        q_block = torch.arange(sq, device=device) // self.block_size  # [sq]
-
-        forced = []
-        if self.local_blocks > 0:
-            offsets = torch.arange(self.local_blocks, device=device)
-            forced.append((q_block.view(sq, 1) - offsets.view(1, -1)).clamp(min=0))
-        if self.init_blocks > 0:
-            leading = torch.arange(min(self.init_blocks, n_blocks), device=device)
-            # Never force a block the query cannot see anyway.
-            forced.append(torch.minimum(leading.view(1, -1).expand(sq, -1), q_block.view(sq, 1)))
-        if not forced:
+        index = _forced_blocks(sq, n_blocks, self.block_size, self.local_blocks, self.init_blocks, device)
+        if index is None:
             return block_scores
-
-        index = torch.cat(forced, dim=-1)  # [sq, forced]
         index = index.view(1, 1, sq, -1).expand(block_scores.shape[0], block_scores.shape[1], -1, -1)
         return block_scores.scatter(-1, index, float("inf"))
+
+
+@functools.lru_cache(maxsize=16)
+def _forced_blocks(
+    sq: int, n_blocks: int, block_size: int, local_blocks: int, init_blocks: int, device: torch.device
+) -> Optional[torch.Tensor]:
+    """``[sq, forced]`` ids of the blocks every query must keep, or None if there are none.
+
+    Cached: they depend on the shapes only, and building them is half a dozen
+    kernel launches per MSA layer otherwise.
+    """
+    q_block = torch.arange(sq, device=device) // block_size  # [sq]
+
+    forced = []
+    if local_blocks > 0:
+        offsets = torch.arange(local_blocks, device=device)
+        forced.append((q_block.view(sq, 1) - offsets.view(1, -1)).clamp(min=0))
+    if init_blocks > 0:
+        leading = torch.arange(min(init_blocks, n_blocks), device=device)
+        # Never force a block the query cannot see anyway.
+        forced.append(torch.minimum(leading.view(1, -1).expand(sq, -1), q_block.view(sq, 1)))
+    if not forced:
+        return None
+    return torch.cat(forced, dim=-1)

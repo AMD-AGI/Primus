@@ -92,6 +92,9 @@ def patch_torch_fsdp(ctx: PatchContext):
     clip_grads_module.get_data_parallel_group_if_dtensor = _get_data_parallel_group_if_dtensor
     if hasattr(training_utils, "get_data_parallel_group_if_dtensor"):
         training_utils.get_data_parallel_group_if_dtensor = _get_data_parallel_group_if_dtensor
+    from megatron.training.utils import common_utils as training_common_utils
+
+    training_common_utils.get_data_parallel_group_if_dtensor = _get_data_parallel_group_if_dtensor
     log_rank_0(
         "[Patch:megatron.fsdp.torch_fsdp2]   Patched get_data_parallel_group_if_dtensor "
         "for 2D HSDP mesh support"

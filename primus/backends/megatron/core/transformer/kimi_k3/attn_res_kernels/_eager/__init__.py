@@ -9,7 +9,8 @@
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._eager.reference import (
     accum_dtype,
     eager_attn_res_mix,
+    eager_attn_res_mix_bcast,
     fused_score_weight,
 )
 
-__all__ = ["eager_attn_res_mix", "fused_score_weight", "accum_dtype"]
+__all__ = ["eager_attn_res_mix", "eager_attn_res_mix_bcast", "fused_score_weight", "accum_dtype"]

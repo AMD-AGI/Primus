@@ -88,6 +88,7 @@ gradient_accumulation_fusion: false
 | `fp4_recipe` | `"mxfp4"` for this guide | Default in [`primus/configs/modules/megatron/trainer_base.yaml`](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/modules/megatron/trainer_base.yaml) is `nvfp4`; the MXFP4 config overrides it. |
 | `mxfp4_backward_precision` | `"mxfp4"` or `"fp8"` | Exhaustive set (checked by branch in [`primus_turbo_mxfp4_local.py`](https://github.com/AMD-AGI/Primus/blob/main/primus/backends/megatron/core/extensions/primus_turbo_mxfp4_local.py)). `"fp8"` uses E5M2 with tensorwise HipBLASLt for backward. |
 | `mxfp4_gradient_stochastic_rounding` | `true` / `false` | Optional. Enables SR on FP4 gradient quantization. |
+| `mxfp4_forward_precision` | `"mxfp4"` or `"bf16"` | `"bf16"` runs the forward GEMM in bf16 and keeps the MXFP4 dgrad / wgrad; needs `mxfp4_backward_precision: "mxfp4"`. Only the WAN trainer forwards it so far (see `wan2.1_t2v_1.3b_pretrain_pusa_local_spec_mxfp4_bwd.yaml`); Flux runs ignore it. |
 
 ---
 

@@ -8,7 +8,7 @@ vocab_size: 201088  # openai/gpt-oss-120b (the tokenizer above is a stand-in)
 # model
 num_layers: 36
 hidden_size: 2880
-ffn_hidden_size: 10944
+ffn_hidden_size: 2880
 num_attention_heads: 64
 
 # GQA
@@ -19,16 +19,23 @@ kv_channels: 64
 group_query_attention: true
 num_query_groups: 8
 
+# rotary
+rotary_base: 150000
+
 # moe
 moe_layer_freq: 1
 num_experts: 128
 moe_router_topk: 4
 moe_ffn_hidden_size: 2880 # moe_intermediate_size
-moe_shared_expert_intermediate_size: 2880 # num_shared_experts * moe_ffn_hidden_size
+moe_shared_expert_intermediate_size: null # gpt-oss has no shared expert
+moe_shared_expert_overlap: false
+moe_router_pre_softmax: false
+moe_router_load_balancing_type: none
+moe_aux_loss_coeff: 0.0
 
 
 # device limited routing
 expert_model_parallel_size: 8
 moe_router_num_groups: null # int
 moe_router_group_topk: null # int
-moe_router_topk_scaling_factor: 1.0 # float
+moe_router_topk_scaling_factor: null # float

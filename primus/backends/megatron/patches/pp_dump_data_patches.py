@@ -27,14 +27,14 @@ from primus.core.utils.module_utils import log_rank_0
 def _make_wrapped_get_forward_backward_func(original_get_forward_backward_func):
     """Wrap get_forward_backward_func to add schedule_wrapper when dump_pp_data."""
 
-    def wrapped_get_forward_backward_func():
+    def wrapped_get_forward_backward_func(*args, **kwargs):
         from megatron.training import get_args as get_megatron_args
 
         import primus.backends.megatron.core.pipeline_parallel.pp_visualizer as utils
 
-        func = original_get_forward_backward_func()
-        args = get_megatron_args()
-        if getattr(args, "dump_pp_data", False):
+        func = original_get_forward_backward_func(*args, **kwargs)
+        megatron_args = get_megatron_args()
+        if getattr(megatron_args, "dump_pp_data", False):
             func = utils.schedule_wrapper(func)
             func._pp_dump_schedule_wrapped = True  # noqa: B010
         return func

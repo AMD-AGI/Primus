@@ -15,11 +15,430 @@ Every version below was read out of the published image itself. From v26.4 on, t
 
 ---
 
-## Highlights for v26.8
+## Highlights for v26.10
+
+**Both images are now on ROCm 10.3 nightlies.** `rocm/primus` moves from a ROCm 10.2 nightly to a 10.3 one (`10.3.0a20261111`), with a PyTorch 2.16 pre-release built for it and a Transformer Engine 2.21 development build, still built from source. On the Primus side it moves Megatron-LM to `core_v0.19.2` and adds DLRMv4 on a new `recommendation` backend, the AMDiffusionBenchmark workloads on Primus's own diffusion backend, and the Inkling model. It also adds MiniMax-M3.1-Flash recipes for MI355X and new WAN and AutoModel diffusion training paths, which this release's QA did not cover. `rocm/jax-training:maxtext` stays on JAX 0.12.0 and the ROCm 10.3 nightly line, rebuilt on a newer nightly (`10.3.0a20261109`) with a Transformer Engine 2.21 development build tagged for that same nightly. It moves MaxText to `release/v26.10` and **adds Primus-Turbo for JAX**, which together make dropless MoE recipes the default for Qwen3-30B-A3B, DeepSeek-V2-16B, and Gemma4-26B. The two images were built from different commits on `release/v26.10`, `b66e63e1` and `31128a29`—see [Primus source for v26.10](#primus-source-for-v2610).
+
+### Both families
+
+- **The `tools/perf` runners no longer need privileged containers.** Containers start without `--privileged` and `CAP_SYS_ADMIN`, so the runners work on clusters whose docker refuses both. Note the behavior change: perf runs use `tools/perf/primus-cli.yaml` and no longer load `~/.primus.yaml`; set `PRIMUS_CLI_CONFIG=~/.primus.yaml` to keep using it ([#1442](https://github.com/AMD-AGI/Primus/pull/1442)).
+- **The pretrain prepare step honors `DATA_PATH`.** It used `./data/` unless `--data_path` was passed, ignoring the `DATA_PATH` environment variable that the docs use; `--data_path` still takes precedence, and a relative value resolves against the launch directory ([#1414](https://github.com/AMD-AGI/Primus/pull/1414)).
+
+### `rocm/primus` — Megatron-LM and TorchTitan
+
+#### Changes you might need to act on
+
+- **Megatron-LM moves to `core_v0.19.2`**, with Primus ported to it ([#1321](https://github.com/AMD-AGI/Primus/pull/1321), [#1370](https://github.com/AMD-AGI/Primus/pull/1370)). Three keys in `trainer_base.yaml` take Megatron 0.19's names (`use_gloo_process_groups`, `fp4_param_gather`, `muon_nesterov`), `scatter_gather_tensors_in_pipeline` and `tiktoken_special_tokens` are gone, and Muon on this Megatron needs Emerging-Optimizers v0.3.1, which the Muon install hook now installs, replacing an older copy ([#1388](https://github.com/AMD-AGI/Primus/pull/1388)). Update local configs that set the old keys.
+- **Megatron uses a Triton fused AdamW by default** (`use_triton_fused_adam: true`). It falls back to Transformer Engine's `FusedAdam` for every path it does not implement and keeps the same checkpoint state layout; set the flag to `false` to keep `FusedAdam` ([#1190](https://github.com/AMD-AGI/Primus/pull/1190)).
+- **The GPT-OSS presets match the published architecture.** `gpt_oss_20B` and `gpt_oss_120B` no longer add a shared expert that GPT-OSS does not have, and take the MLPerf GPT-OSS recipe's RoPE base and router settings (no load-balancing loss). Every GPT-OSS example now trains a different model than in v26.9, and its reported TFLOP/s per GPU drops because the shared expert's FLOPs are no longer counted; compare with older runs by tokens/s ([#1381](https://github.com/AMD-AGI/Primus/pull/1381)).
+- **Native Hugging Face → Megatron conversion writes `torch_dist` by default**, so one conversion loads at any TP, PP, or EP; experiments that set `ckpt_format: torch` still get the legacy layout. The default output directory now names the format, so the first run after upgrading converts once more ([#1406](https://github.com/AMD-AGI/Primus/pull/1406)).
+- **The AutoModel backend is renamed `automodel`** (from `nemo_automodel`, which still works with a deprecation warning), and the newer AutoModel it pins renames config keys: `optim.learning_rate` is now `optimizer.lr`, `optim.optimizer.*` is `optimizer.*`, and `step_scheduler.log_every` is `step_scheduler.log_remote_every_steps`. AutoModel rejects the old keys at startup, so update out-of-tree configs ([#1314](https://github.com/AMD-AGI/Primus/pull/1314)).
+
+#### New features
+
+- **DLRMv4 on a new `recommendation` backend** (`framework: recommendation`): the HSTU ranker of MLPerf Training `dlrmv4`, trained on Yambda-5b, with MI355X MLPerf recipes for 1, 2, and 4 nodes ([#1435](https://github.com/AMD-AGI/Primus/pull/1435)). A `synthetic_data: true` option trains on generated data in the real dataset's layout, with no dataset download, and BF16 configs for MI300X, MI325X, and MI355X plus an FP8 config for MI355X go into the `tools/perf` catalog ([#1499](https://github.com/AMD-AGI/Primus/pull/1499)). See the [DLRMv4 guide](../04-technical-guides/recommendation/dlrm_v4/README.md).
+- **The AMDiffusionBenchmark workloads run on Primus's diffusion backend:** FLUX.1-dev, SDXL, Mochi-1, HunyuanVideo, and Wan 2.1 image-to-video, each with `benchmark_*-posttrain.yaml` recipes for MI300X, MI325X, and MI355X ([#1341](https://github.com/AMD-AGI/Primus/pull/1341), [#1344](https://github.com/AMD-AGI/Primus/pull/1344), [#1379](https://github.com/AMD-AGI/Primus/pull/1379), [#1391](https://github.com/AMD-AGI/Primus/pull/1391)). The recipes skip the final model save, which nothing reads; set `SAVE_STRATEGY=dit_only` to keep it ([#1459](https://github.com/AMD-AGI/Primus/pull/1459)).
+- **Inkling** (`model_type: inkling`), the text backbone of Thinking Machines' Inkling-Small and Inkling, on the Megatron backend ([#1256](https://github.com/AMD-AGI/Primus/pull/1256)), with Primus-Turbo grouped GEMM, GEMM, DeepEP, and RMSNorm and BF16 and FP8 recipes for the 6-layer Large proxy on MI355X ([#1388](https://github.com/AMD-AGI/Primus/pull/1388)). Inkling now saves, resumes, and converts `torch_dist` checkpoints; tensor parallelism is rejected at startup ([#1487](https://github.com/AMD-AGI/Primus/pull/1487)). Multi-node recipes run the full Inkling-Small on 4 nodes and the full 66-layer Inkling on 16 nodes, each in BF16 and FP8 ([#1485](https://github.com/AMD-AGI/Primus/pull/1485)); they are not covered by this release's QA, which ran the 6-layer proxy.
+- **MiniMax-M3.1-Flash on MI355X:** BF16 and FP8 recipes for the new `minimax_m3.1_flash` preset, which keeps MiniMax-M3's shapes and runs MiniMax Sparse Attention in all 60 layers, plus an 8-layer single-node BF16 proxy ([#1418](https://github.com/AMD-AGI/Primus/pull/1418)). Not covered by this release's QA.
+- **WAN 2.1 / 2.2 video DiT training on Megatron-Core:** the WAN video diffusion transformer on the Megatron backend, trained from pre-encoded latents, with three MI355X WAN 2.1 text-to-video 1.3B recipes (Transformer Engine, Primus-Turbo local spec, and MXFP4 backward) and a Hugging Face → Primus checkpoint converter. Tensor, pipeline, and context parallelism are fixed at 1, and WAN 2.2 A14B trains as one job per expert ([#1132](https://github.com/AMD-AGI/Primus/pull/1132)). Not covered by this release's QA.
+- **AutoModel diffusion training paths:** FLUX.1 (`dev` and `schnell`) and Wan 2.2 training with synthetic-data presets ([#1322](https://github.com/AMD-AGI/Primus/pull/1322)); Ideogram-4 text-to-image training with var-len attention, an encoded-data cache, ZeRO-1, and context parallelism ([#1324](https://github.com/AMD-AGI/Primus/pull/1324)); Megatron-FSDP for the diffusion recipe ([#1401](https://github.com/AMD-AGI/Primus/pull/1401)); and opt-in Primus-Turbo attention and FP8 / MXFP4 linear swaps ([#1323](https://github.com/AMD-AGI/Primus/pull/1323)), with Turbo attention now also under context parallelism ([#1420](https://github.com/AMD-AGI/Primus/pull/1420)). MI355X examples are under `examples/automodel/configs/MI355X/diffusion/`. Not covered by this release's QA.
+- **Turbo grouped-GEMM MoE checkpoints reshard.** Every MoE model with `use_turbo_grouped_gemm` now writes its experts to `torch_dist` checkpoints in Transformer Engine's per-expert layout, so a run can resume at a different PP or EP with a fully reshardable optimizer state, and checkpoints load in either direction between Turbo and Transformer Engine experts ([#1487](https://github.com/AMD-AGI/Primus/pull/1487)).
+- **SpecForge online training on a single node** (`specforge_online.single_node`), with capture now through SGLang's capture plugin ([#1421](https://github.com/AMD-AGI/Primus/pull/1421), [#1392](https://github.com/AMD-AGI/Primus/pull/1392)).
+- **Opt-in QK-Norm on MLA's rotary component** (`mla_rope_qk_norm`), which stops a divergence seen in KDA/MLA hybrids; it adds no parameters, so existing checkpoints resume unchanged ([#1176](https://github.com/AMD-AGI/Primus/pull/1176)).
+
+#### Performance
+
+- **ZAYA1-8B runs faster.** New kernel paths (flash attention and compiled convolutions for CCA, compiled norm and MoE chains, sort-based dispatch, and Primus-Turbo grouped-GEMM experts) are off by default and turned on in the MI355X and MI325X BF16 and FP8 recipes ([#1500](https://github.com/AMD-AGI/Primus/pull/1500), [#1501](https://github.com/AMD-AGI/Primus/pull/1501)). The MI325X GPT-OSS-20B recipes take the MI300X tuning ([#1354](https://github.com/AMD-AGI/Primus/pull/1354)).
+- **Shorter Megatron launches.** The patch step no longer builds apex extensions a run does not use, and the `filelock` debug lines are gone from the logs ([#1273](https://github.com/AMD-AGI/Primus/pull/1273)).
+- **No graph break in `RowParallelLinear` under `torch.compile`**, from a deprecation warning Dynamo could not trace; set `PRIMUS_TP_GROUP_TRACE_FIX=0` to restore it ([#1169](https://github.com/AMD-AGI/Primus/pull/1169)).
+- **Opt-in MoE and MXFP4 work:** `moe_router_grad_merge` folds the router's input gradient into the experts' in one kernel ([#1372](https://github.com/AMD-AGI/Primus/pull/1372)), and de-oscillation state views align with the MXFP4 quantization tiles ([#1371](https://github.com/AMD-AGI/Primus/pull/1371)).
+
+#### Bug fixes
+
+- **Supervised fine-tuning without sequence packing now trains on the response tokens.** The loss mask was one position off: the first response token was never a target, and the token after the response was, so models with a dedicated pad token learned to emit it after every answer. The unpacked path now also appends a supervised EOS, so every tokenizer learns to stop ([#1404](https://github.com/AMD-AGI/Primus/pull/1404)).
+- **Megatron Bridge:** with transformers 5.x, models such as Qwen3 were built with the configuration class's default RoPE base instead of the checkpoint's; they now use the checkpoint's ([#1297](https://github.com/AMD-AGI/Primus/pull/1297)). Packed SFT of text-only models with `pad_to_max_length: false` no longer fails at the first step ([#1298](https://github.com/AMD-AGI/Primus/pull/1298)).
+- **`fp8_recipe: delayed` runs no longer crash early.** Prefetched batches could be overwritten while still in use, which faulted in the first backward pass ([#1281](https://github.com/AMD-AGI/Primus/pull/1281)), and middle pipeline stages failed at iteration 1 with TP 1 and PP 3 or more ([#1336](https://github.com/AMD-AGI/Primus/pull/1336)).
+- **Muon with Primus-Turbo grouped-GEMM experts is rejected at startup.** Muon only orthogonalizes 2-D weights, so the stacked expert weights were silently trained with Adam ([#1388](https://github.com/AMD-AGI/Primus/pull/1388)).
+- **Flux sensitive layers stay out of FP8 and MXFP4.** `sensitive_layers_enabled` did not keep the first and last layers in bf16 on the Transformer Engine spec, nor under FP8 on the local spec. Configs it cannot honor on the Transformer Engine spec are now rejected ([#1204](https://github.com/AMD-AGI/Primus/pull/1204)).
+- Smaller fixes: Megatron and Megatron Bridge import on PyTorch builds that no longer export `torch.jit.script` ([#1457](https://github.com/AMD-AGI/Primus/pull/1457)); the MI355X Zebra-Llama MLA recipes run MLA attention through Transformer Engine ([#1470](https://github.com/AMD-AGI/Primus/pull/1470)); the masked flow-matching loss is averaged over elements ([#1200](https://github.com/AMD-AGI/Primus/pull/1200)); Primus imports newer Primus-Turbo builds from a `TURBO_DIR` checkout ([#1382](https://github.com/AMD-AGI/Primus/pull/1382)); and the Zebra-Llama Hugging Face converter wrapper points at a KDA checkpoint ([#1262](https://github.com/AMD-AGI/Primus/pull/1262)).
+
+### `rocm/jax-training:maxtext` — MaxText
+
+- **Dropless MoE recipes are the default for Qwen3-30B-A3B, DeepSeek-V2-16B, and Gemma4-26B** on MI300X, MI325X, and MI355X. They drop no tokens and run the expert matmuls on the Primus-Turbo grouped GEMM: hipBLASLt on MI300X and MI325X, FlyDSL on MI355X, where the FP8 recipes quantize the grouped GEMM to per-tensor FP8. They are faster than the token-dropping recipes they replace, which stay available as `<model>-bf16-token_dropping-pretrain.yaml` (and `<model>-fp8-token_dropping-pretrain.yaml` on MI355X). The Mixtral and `nanoo_fp8` recipes are unchanged. Scripts that name `<model>-bf16-pretrain.yaml` now run the dropless recipe, so results are not comparable with v26.9 runs of the same file name ([#1450](https://github.com/AMD-AGI/Primus/pull/1450)).
+- **The dropless recipes raise XLA's first-collective timeout.** They set `--xla_gpu_first_collective_call_terminate_timeout_seconds=900`, because on the current XLA the first collective of a run can start more than 40 s late on one GPU and the default limit then aborts the run. Keep the flag in configs derived from them ([#1450](https://github.com/AMD-AGI/Primus/pull/1450)).
+- **MaxText moves to `release/v26.10`** (`2fb48f50`): 12 ROCm commits on the same upstream base as v26.9, adding the Primus-Turbo grouped GEMM path for MoE (CK, hipBLASLt, and FlyDSL backends, optional per-tensor FP8), ring-of-experts support for it, and saving the router's top-k ids across rematerialization. The new config keys `use_turbo_grouped_gemm` (default `false`), `turbo_grouped_gemm_backend` (default `ck`), and `turbo_grouped_gemm_quant` (default `bf16`) are additive; no key is removed or renamed ([#1443](https://github.com/AMD-AGI/Primus/pull/1443)).
+- **The MI325X Llama-2 7B and 70B `nanoo_fp8` recipes no longer run out of memory** at the first training step: their per-device batch sizes drop from 18 to 17 and from 22 to 20 ([#1453](https://github.com/AMD-AGI/Primus/pull/1453)).
+
+---
+
+## v26.10 (current)
+
+Both v26.10 images are now released. `rocm/jax-training:maxtext-v26.10` came first and `rocm/primus:v26.10` followed; they were built from different commits on `release/v26.10`—see [Primus source for v26.10](#primus-source-for-v2610).
+
+### `rocm/primus:v26.10`
+
+Megatron-LM, TorchTitan, and Megatron Bridge backends.
+
+| | |
+| --- | --- |
+| Image ID | `3a39815f485e` |
+| Built | 2026-11-23 |
+| Size | 61 GB |
+| Manifest | `a1bf6505efa1eab3b7b6ab3334bd12d31b0c44e6` |
+| Dockerfile | [`Dockerfile.primus-v26.10`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.10) |
+
+| Software component | Version |
+| ------------------ | ------- |
+| ROCm | 10.3.0a20261111 |
+| Python | 3.12.3 |
+| PyTorch | 2.16.0a0+rocm10.3.0a20261111 |
+| Transformer Engine | 2.21.0.dev0+b5c00f432 |
+| Flash Attention | 2.8.4 |
+| hipBLASLt | 1.5.0-2d3b6e98 |
+| Triton | 3.9.0+gitb7ddcf86.rocm10.3.0a20261111 |
+| RCCL | 2.32.3 |
+| torchvision | 0.30.0a0+rocm10.3.0a20261111 |
+| torchaudio | 2.11.0a0+rocm10.3.0a20261111 |
+| APEX | 1.16.0a0+rocm10.3.0a20261123 |
+| AITER | 0.1.29 |
+| Primus-Turbo | 0.6.1.dev27 |
+| torchao | 0.15.0+gite9c7bead9 |
+| FBGEMM | 2026.11.23 |
+| mamba-ssm / causal-conv1d / grouped_gemm | 2.3.1 / 1.5.0.post8 / 1.1.4 |
+| transformers / datasets | 5.10.0 / 5.0.1 |
+| NumPy | 2.5.5 |
+
+> **Both images are now on ROCm 10.3 nightlies, and not the same one.** `rocm/primus:v26.10` takes ROCm `10.3.0a20261111` from `nightly.repo.amd.com`, where v26.9 used the 10.2 nightly `10.2.0a20261020`; PyTorch, torchvision, torchaudio, and Triton are the matching pre-release builds from the nightly PyTorch index, on the same base versions as in v26.9 (Triton from a different commit). `rocm/jax-training:maxtext-v26.10` takes ROCm `10.3.0a20261109`. hipBLASLt differs between the two images as a result; RCCL is 2.32.3 in both.
+
+> **Transformer Engine is still built from source, now a 2.21 development build.** It comes from `ROCm/TransformerEngine` at `b5c00f43` (it reports `2.21.0.dev0+b5c00f432`). Flash Attention is the same `ROCm/flash-attention` fork commit as in v26.9 (tag `v2.8.4.1-cktile`, reported as `2.8.4`), rebuilt for ROCm 10.3.
+
+> **The MI355X Zebra-Llama MLA recipes run MLA attention through Transformer Engine.** On gfx950, the backward pass of this image's Flash Attention build is much slower for those layers than v26.9's, so `zebra_llama_mamba_1B`, `zebra_llama_mamba_3B`, `zebra_llama_mamba_8B`, and `zebra_llama_kda_1B` on MI355X set `PRIMUS_FLA_MLA_ATTN: "0"` in their `env:` block, which overrides the image's `PRIMUS_FLA_MLA_ATTN=1` ([#1470](https://github.com/AMD-AGI/Primus/pull/1470)). MI300X and MI325X are not affected. Keep the setting in configs derived from those recipes. Likewise, SDXL runs its unmasked bf16 attention on PyTorch SDPA instead of aiter, whose attention backward in this image is slow for SDXL's shapes on gfx950 ([#1477](https://github.com/AMD-AGI/Primus/pull/1477)).
+
+> **The APEX row reads ahead of the image's ROCm.** The Dockerfile installs `apex` unpinned from the nightly PyTorch index, which resolved to `1.16.0a0+rocm10.3.0a20261123`, a build against a later ROCm 10.3 nightly than the image's `10.3.0a20261111`.
+
+> **`/workspace/AMDiffusionBenchmark` is no longer in the image.** The five AMDiffusionBenchmark workloads (FLUX.1-dev, SDXL, Mochi-1, HunyuanVideo, Wan 2.1 I2V) now run on Primus's own diffusion backend from the `examples/diffusion/configs/<GPU>/benchmark_*-posttrain.yaml` recipes. `/workspace/DLRMBenchmark` is still there.
+
+> **The image carries Primus at its build commit.** `/workspace/Primus` is at `b66e63e1` and `/workspace/Primus-Turbo` at `9ad9d38d`. A `release/v26.10` checkout is still the recommended way to run it—see [Primus source for v26.10](#primus-source-for-v2610).
+
+### `rocm/jax-training:maxtext-v26.10`
+
+MaxText (JAX) backend.
+
+| | |
+| --- | --- |
+| Image ID | `cba61cee9442` |
+| Built | 2026-11-16 |
+| Size | 56.2 GB |
+| Manifest | `1e84cb0e419c65707cf7fca5454161ccf8fa4b07` |
+| Dockerfile | [`Dockerfile.jax-v26.10`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.10) |
+
+| Software component | Version |
+| ------------------ | ------- |
+| ROCm | 10.3.0a20261109 |
+| Python | 3.12.3 |
+| JAX / jaxlib | 0.12.0 |
+| jax-rocm10-pjrt / jax-rocm10-plugin | 0.12.0+rocm10.3.0a20261109 |
+| Transformer Engine | 2.21.0.dev0+rocm10.3.0a20261109.4c7ed18 |
+| hipBLASLt | 1.5.0-60b43a5a |
+| RCCL | 2.32.3 |
+| Flax | 0.12.10 |
+| TensorFlow | 2.21.0 |
+| Optax / Orbax / Grain / tensorstore | 0.2.9 / 0.12.11 / 0.2.18 / 0.1.86 |
+| MaxText | 2fb48f50 |
+| transformers / datasets | 4.57.3 / 5.0.1 |
+| NumPy | 2.5.5 |
+
+> **A newer build of the same ROCm nightly line, and Transformer Engine now matches it.** The image takes ROCm `10.3.0a20261109`, where v26.9 used `10.3.0a20261026`; the JAX plugin pair is rebuilt for it and JAX stays at 0.12.0. Transformer Engine moves to a 2.21 development build from the ROCm frameworks staging index, tagged for the image's own nightly (`rocm10.3.0a20261109`), where v26.9's 2.19 build was tagged for an older 10.2 nightly.
+
+> **`rocm/jax-training:maxtext-v26.10` adds Primus-Turbo for JAX.** `/workspace/Primus-Turbo` (`fe9229ef`) is built for gfx942 and gfx950 with its grouped GEMM backends: hipBLASLt on MI300X and MI325X (with CK as the fallback), and FlyDSL or hipBLASLt on MI355X, with FlyDSL 0.3.4.1 installed for it. With MaxText `release/v26.10` this is what the new default dropless MoE recipes need. It is installed from source and reports its version as `0.0.0`.
+
+> **The image carries Primus at its build commit.** `/workspace/Primus` is at `31128a29`, next to MaxText at `/workspace/maxtext` (`2fb48f50`, `release/v26.10`, also set as `MAXTEXT_PATH`) and MaxDiffusion at `/workspace/maxdiffusion` (`68e06965`, as in v26.9). A `release/v26.10` checkout is still the recommended way to run it—see [Primus source for v26.10](#primus-source-for-v2610).
+
+> **Note:** `transformers` is 4.57.3 in the MaxText image because the published tag includes the MaxDiffusion stage, which pins transformers back to 4.x for Flax CLIP / T5. The build-time manifest records 5.17.0, captured before that stage runs; 4.57.3 is what you actually get (`huggingface-hub` 0.36.2 and `tokenizers` 0.22.2 move back with it). The same stage pins `datasets` to 5.0.1, a release that still accepts that `huggingface-hub`; the manifest records 4.8.5.
+
+> **Primus enables Shardy by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy guide for JAX users](https://openxla.org/shardy/getting_started_jax).
+
+### Primus source for v26.10
+
+Use the **`release/v26.10`** branch for both images:
+
+```bash
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
+cd Primus
+git checkout release/v26.10
+git submodule update --init --recursive
+```
+
+| | |
+| --- | --- |
+| Build commit | `b66e63e1` (2026-11-19) for `rocm/primus:v26.10`, `31128a29` (2026-11-16) for `rocm/jax-training:maxtext-v26.10`, both on `release/v26.10` |
+| Branch tip | `582f042d` (2026-11-20) |
+| Megatron-LM | `4b4acac9` |
+| TorchTitan | `73a0e697` |
+| Megatron Bridge | `9577b128` |
+| MaxText | `2fb48f50` |
+| Emerging-Optimizers | `1f29ffd2` |
+| HummingbirdXT | `ed7b7bd0` |
+| HunyuanWorld-Mirror | `c61300e4` |
+
+The pins are the same at both build commits. Since v26.9, MaxText moved to `release/v26.10` ([#1443](https://github.com/AMD-AGI/Primus/pull/1443)), Megatron-LM to `core_v0.19.2` ([#1321](https://github.com/AMD-AGI/Primus/pull/1321)), Emerging-Optimizers to v0.3.1, which Muon needs on that Megatron-LM ([#1388](https://github.com/AMD-AGI/Primus/pull/1388)), and AutoModel (`third_party/Automodel`, now `d7ada67a`) to a newer commit; TorchTitan, Megatron Bridge, HummingbirdXT, and HunyuanWorld-Mirror are on the same commits.
+
+> **Use a `release/v26.10` checkout rather than the copy baked into either image.**
+>
+> - `rocm/primus:v26.10` was built from `b66e63e1` and `rocm/jax-training:maxtext-v26.10` from `31128a29`; each carries its own build commit at `/workspace/Primus`.
+> - The commits between `31128a29` and `b66e63e1` are PyTorch-family changes only: among them Inkling multi-node recipes and checkpointing, MLA attention through Transformer Engine in the MI355X Zebra-Llama recipes, SDPA attention for SDXL, the ZAYA1-8B speedups, and the DLRMv4 synthetic-data benchmarks.
+> - `release/v26.10` has moved since the PyTorch build: it is now at `582f042d` (2026-11-20), which adds a fix to the `tools/perf` runner: batch sizes written as `${VAR:default}` are resolved, and log names stay filename-safe ([#1510](https://github.com/AMD-AGI/Primus/pull/1510)). The branch checkout includes it; the in-image copies do not.
+> - The MaxText recipes were validated on `rocm/jax-training:maxtext-v26.10` from a `release/v26.10` checkout at `bc8ffa4b`, which differs from that image's build commit only in PyTorch-family changes.
+> - The MaxText image's `/workspace/maxtext` (`2fb48f50`) matches the branch's `third_party/maxtext`.
+
+### Changes since v26.9
+
+`rocm/primus`:
+
+| Component | v26.9 | v26.10 |
+| --------- | ----- | ----- |
+| ROCm | 10.2.0a20261020 | 10.3.0a20261111 |
+| PyTorch | 2.16.0a0+rocm10.2.0a20261020 | 2.16.0a0+rocm10.3.0a20261111 |
+| Transformer Engine | 2.20.0.dev0+023639b51 | 2.21.0.dev0+b5c00f432 |
+| hipBLASLt | 1.5.0-cb261897 | 1.5.0-2d3b6e98 |
+| Triton | 3.9.0+gitfc8d31a5.rocm10.2.0a20261020 | 3.9.0+gitb7ddcf86.rocm10.3.0a20261111 |
+| torchvision | 0.30.0a0+rocm10.2.0a20261020 | 0.30.0a0+rocm10.3.0a20261111 |
+| torchaudio | 2.11.0a0+rocm10.2.0a20261020 | 2.11.0a0+rocm10.3.0a20261111 |
+| APEX | 1.16.0a0+rocm10.3.0a20261029 | 1.16.0a0+rocm10.3.0a20261123 |
+| AITER | 0.1.27 | 0.1.29 |
+| Primus-Turbo | 0.6.1.dev4 | 0.6.1.dev27 |
+| FBGEMM | 2026.10.30 | 2026.11.23 |
+| NumPy | 2.5.4 | 2.5.5 |
+| Image size | 60.5 GB | 61 GB |
+
+`rocm/jax-training:maxtext`:
+
+| Component | v26.9 | v26.10 |
+| --------- | ----- | ----- |
+| ROCm | 10.3.0a20261026 | 10.3.0a20261109 |
+| jax-rocm10-pjrt / jax-rocm10-plugin | 0.12.0+rocm10.3.0a20261026 | 0.12.0+rocm10.3.0a20261109 |
+| Transformer Engine | 2.19.0.dev0+rocm10.2.0a20261002.bfe94fb | 2.21.0.dev0+rocm10.3.0a20261109.4c7ed18 |
+| hipBLASLt | 1.5.0-565c4c74 | 1.5.0-60b43a5a |
+| Optax / Orbax / Grain / tensorstore | 0.2.8 / 0.12.8 / 0.2.18 / 0.1.86 | 0.2.9 / 0.12.11 / 0.2.18 / 0.1.86 |
+| MaxText | 8d1d43c0 | 2fb48f50 |
+| transformers / datasets | 4.57.3 / 4.8.5 | 4.57.3 / 5.0.1 |
+| NumPy | 2.5.4 | 2.5.5 |
+| Image size | 50.0 GB | 56.2 GB |
+
+---
+
+## v26.9
+
+### Highlights for v26.9
+
+**Both families move to ROCm nightlies.** `rocm/primus` moves from the ROCm 10.1.0 release to a ROCm 10.2 nightly (`10.2.0a20261020`), with a PyTorch 2.16 pre-release and a Transformer Engine 2.20 development build, still built from source. `rocm/jax-training:maxtext` moves to a ROCm 10.3 nightly (`10.3.0a20261026`) with JAX 0.12.0, a Transformer Engine 2.19 development build, and MaxText `release/v26.9`, and **ships a copy of Primus again**. Both images were built from the same Primus commit, `db1a4160` on `release/v26.9`—see [Primus source for v26.9](#primus-source-for-v269).
+
+#### Both families
+
+- **A convergence test for Megatron and MaxText.** `tools/convergence_test/` builds a dataset from a real corpus, lints the config for settings that silently spoil a convergence run (mock or synthetic data, forced load balancing, vocab mismatches), trains through the normal `primus-cli` path, plots the loss, and gates it against a previous release's baseline ([#1229](https://github.com/AMD-AGI/Primus/pull/1229)). It ships Llama-3.2-1B, Llama-2-7B, and Mixtral-8x7B recipes for both backends, plus a MaxText Llama-2-7B FP8 recipe for MI355X ([#1261](https://github.com/AMD-AGI/Primus/pull/1261)).
+- **The `tools/perf` batch runner is ready for unattended runs.** Each run is bounded by `MAX_RUN_SECONDS` (default 1 h) and `MAX_IDLE_SECONDS` (default 20 min); busy GPUs and bad network interfaces are refused up front; failures are classified with the log line that shows them; every result records the image, host, and platform it came from; diffusion and DLRM benchmarks join the batch; and results go into an Excel report that can compare against a baseline ([#1260](https://github.com/AMD-AGI/Primus/pull/1260), [#1266](https://github.com/AMD-AGI/Primus/pull/1266), [#1299](https://github.com/AMD-AGI/Primus/pull/1299)). Two misreported throughput values are fixed: TorchTitan values printed with a thousands separator, and Megatron-Bridge's post-training estimate. Note the behavior changes: single-node runs now time out, output files have fixed names, and the runners exit non-zero when any run fails.
+- **Release benchmark suites in the auto-benchmark menu.** One choice detects the GPU and runs the whole Primus suite (Megatron, Megatron Bridge, TorchTitan) or JAX suite (MaxText, MaxDiffusion), recording the image digest, Primus commit, and submodule pins with every result ([#1251](https://github.com/AMD-AGI/Primus/pull/1251)).
+- **A preset `HIP_VISIBLE_DEVICES` is kept.** The runner used to overwrite it with `0..GPUS_PER_NODE-1`, so on a shared node a job could land on another user's GPU; it now keeps your selection and warns when its count differs from `GPUS_PER_NODE` ([#1237](https://github.com/AMD-AGI/Primus/pull/1237)).
+
+#### `rocm/primus`: Megatron-LM and TorchTitan
+
+##### Changes you might need to act on
+
+- **Mock-data runs use the model's real vocabulary.** Megatron mock data used to size every model for a 131,072-token vocabulary; each model config now sets its real `vocab_size`, so embeddings, output layer, and logits have their true size. Mock-data throughput and memory are therefore not comparable with earlier releases ([#1249](https://github.com/AMD-AGI/Primus/pull/1249)).
+- **Megatron-only example material moved under `examples/megatron/`.** For example `examples/deepseek-v4/` is now `examples/megatron/models/deepseek-v4/`, and `examples/moe_package/` is now `examples/megatron/guides/moe_package/`; `examples/mlperf/` and `examples/hardware_configs/` stay where they were. Update scripts that name the old paths ([#1130](https://github.com/AMD-AGI/Primus/pull/1130)).
+- **Some environment switches are now config keys, and the old variables do nothing.** `PRIMUS_FUSED_QK_RMSNORM_ROPE` is replaced by `use_turbo_fused_qk_rmsnorm_rope` ([#1247](https://github.com/AMD-AGI/Primus/pull/1247)); `PRIMUS_TURBO_CROSS_ENTROPY` and `PRIMUS_TURBO_CE_OVERWRITE_INPUT` by `use_turbo_cross_entropy` and `turbo_ce_overwrite_input` ([#1245](https://github.com/AMD-AGI/Primus/pull/1245)); the MoE gather-quantization variables by `moe_permute_quant_fusion`, `moe_backward_permute_quant_fusion`, and `moe_skip_identity_sort` ([#1241](https://github.com/AMD-AGI/Primus/pull/1241)).
+- **Transformer Engine fused cross entropy reuses the logits buffer by default** (`te_ce_overwrite_input: true`), so after the loss backward the logits tensor holds its gradient. Set it to `false` when the same logits feed anything else in the step, such as a distillation or auxiliary loss, metrics, or hooks ([#1287](https://github.com/AMD-AGI/Primus/pull/1287)).
+- **TorchTitan uses a Triton fused AdamW by default** (`optimizer.use_triton_fused_adam: true`). Checkpoints stay interchangeable with `torch.optim.AdamW`; set the flag to `false` to go back to it. Reading `optimizer.state` directly between steps now shows stale `step` values ([#1233](https://github.com/AMD-AGI/Primus/pull/1233)).
+- **Turbo grouped GEMM expects expandable segments.** Primus warns when `use_turbo_grouped_gemm` is on without `expandable_segments:True`, and a runner hook stops the launch when `expandable_segments:True` is requested but not in effect on the PyTorch build ([#1257](https://github.com/AMD-AGI/Primus/pull/1257)).
+
+##### New features
+
+- **GLM-5.3-Flash** (`model_type: glm5_next`): KDA linear attention, DSA sparse attention, and manifold-constrained hyper-connections with a 288-expert MoE, an MI355X BF16 recipe, and online loading of the released Hugging Face checkpoint for any TP / EP / PP layout ([#1230](https://github.com/AMD-AGI/Primus/pull/1230)). Packed sequences now run under context parallelism ([#1265](https://github.com/AMD-AGI/Primus/pull/1265)) and text-only checkpoint exports load ([#1254](https://github.com/AMD-AGI/Primus/pull/1254)). Training was validated on an 8-layer proxy; the full 45-layer model was checked forward-only against SGLang, and its DSA indexer is frozen.
+- **ZAYA1-8B FP8 recipes** for MI300X, MI325X, and MI355X (`fp8: hybrid`, tensorwise scaling, accurate from a cold start) and an MI325X BF16 recipe ([#1269](https://github.com/AMD-AGI/Primus/pull/1269)); the MI355X micro-batch sizes now fill that GPU's memory ([#1279](https://github.com/AMD-AGI/Primus/pull/1279)).
+- **HunyuanWorld-Mirror post-training**, stage 1 (geometry heads) and stage 2 (Gaussian head), with MI355X configs launched through `train posttrain`. The upstream trainer is the new `third_party/HunyuanWorld-Mirror-rocm` submodule; Primus applies ROCm fixes at runtime ([#1242](https://github.com/AMD-AGI/Primus/pull/1242)).
+- **MiniMax-M3 on MegaMoE.** The fused MegaMoE expert layer accepts MiniMax-M3's `swigluoai` activation and matches the DeepEP path's loss ([#1243](https://github.com/AMD-AGI/Primus/pull/1243)).
+- **Opt-in fusions:** Primus-Turbo fused cross entropy for TP1 training ([#1245](https://github.com/AMD-AGI/Primus/pull/1245)); FlyDSL Q/K RMSNorm + RoPE and residual RMSNorm + MXFP4 QKV fusions for GPT-OSS ([#1208](https://github.com/AMD-AGI/Primus/pull/1208)), with the fused Q/K RMSNorm + RoPE now also covering head dimension 128 ([#1247](https://github.com/AMD-AGI/Primus/pull/1247)); and gradient reduce-scatter on the GPU's copy engines (`MEGATRON_GRAD_REDUCE_BACKEND=rccl_sdma`, which needs an RCCL build with CE ReduceScatter) ([#1207](https://github.com/AMD-AGI/Primus/pull/1207)).
+- **gfx1250 FP8 hybrid LoRA SFT proxies** for Llama-2-70B, Qwen2.5-72B, and Qwen3-235B-A22B on one GPU ([#1248](https://github.com/AMD-AGI/Primus/pull/1248)).
+
+##### Performance
+
+- **Optimizer and MoE kernel work, opt-in:** gradient clipping and BF16 Adam moments fused into the Adam update ([#1219](https://github.com/AMD-AGI/Primus/pull/1219)), fused MXFP4 weight de-oscillation ([#1222](https://github.com/AMD-AGI/Primus/pull/1222)), BF16 router backward GEMMs (`moe_router_bwd_bf16`, [#1240](https://github.com/AMD-AGI/Primus/pull/1240)), and MoE gathers folded into Primus-Turbo MXFP4 quantization ([#1241](https://github.com/AMD-AGI/Primus/pull/1241)).
+- **Qwen3-30B-A3B FP8 on MI355X** moves to Primus-Turbo tensorwise FP8 with the Turbo grouped-MLP, activation, and permute fusions ([#1247](https://github.com/AMD-AGI/Primus/pull/1247)).
+- **Tuned configs:** MI355X GPT-OSS-20B, DeepSeek-V2-Lite, Llama 70B, Qwen, Mixtral, and TorchTitan Llama recipes ([#1218](https://github.com/AMD-AGI/Primus/pull/1218), [#1252](https://github.com/AMD-AGI/Primus/pull/1252), [#1349](https://github.com/AMD-AGI/Primus/pull/1349)); MI300X GPT-OSS-20B and Llama 70B ([#1307](https://github.com/AMD-AGI/Primus/pull/1307), [#1332](https://github.com/AMD-AGI/Primus/pull/1332), [#1304](https://github.com/AMD-AGI/Primus/pull/1304)); MI325X Llama 70B and ZAYA1-8B ([#1318](https://github.com/AMD-AGI/Primus/pull/1318)). Two of these change more than speed: MI355X DeepSeek-V2-Lite BF16 now uses MLA, the model's real attention, and MI355X GPT-OSS-20B FP8 trains with global batch 96 instead of 80 ([#1252](https://github.com/AMD-AGI/Primus/pull/1252)).
+
+##### Bug fixes
+
+- **Stale expert weights with the fused grouped MLP.** With `turbo_fused_grouped_gemm` and `overlap_param_gather`, the fused op skipped the hooks that wait for the expert-weight all-gather, so whenever expert data parallelism exceeded one it read partly stale weights: no error and no NaN, just a drifting loss ([#1252](https://github.com/AMD-AGI/Primus/pull/1252)).
+- **Forced "even" routing under DeepEP.** With DeepEP on, most routed slots received weight 0 and the MoE output collapsed toward the shared expert; the router now does the remap itself ([#1243](https://github.com/AMD-AGI/Primus/pull/1243)).
+- **MoE recipes no longer force the DeepEP cheap fence.** v26.8 recipes set `PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE=0`, which could corrupt DeepEP dispatch-backward rows; the variable is removed from the 13 MI355X and MI325X recipes that set it ([#1236](https://github.com/AMD-AGI/Primus/pull/1236)).
+- **MoE models no longer hang on hosts with an amdgpu DRM interface older than 3.64.** A runner hook detects such hosts and keeps HIP memory pools off virtual-memory mappings ([#1302](https://github.com/AMD-AGI/Primus/pull/1302)).
+- **DeepSeek-V4 hyper-connections** contract on the same axis as the inference kernels; the old convention drifted from SGLang by more with every layer ([#1040](https://github.com/AMD-AGI/Primus/pull/1040)).
+- **TorchTitan:** DeepSeek blocks are compiled inside their activation-checkpoint wrappers, so with full checkpointing the MoE block no longer runs eagerly ([#1320](https://github.com/AMD-AGI/Primus/pull/1320)); and the Primus-Turbo attention converter applies only when both `enable_primus_turbo` and `use_turbo_attention` are on, fixing a `TypeError` on the first forward otherwise ([#1234](https://github.com/AMD-AGI/Primus/pull/1234)).
+- Smaller fixes: the Turbo FP8 weight cache is stored in the operator's padded layout ([#1333](https://github.com/AMD-AGI/Primus/pull/1333)), and `enable_turbo_attention_float8` no longer fails on its first call ([#1247](https://github.com/AMD-AGI/Primus/pull/1247)).
+
+#### `rocm/jax-training:maxtext`: MaxText
+
+- **The image ships Primus again.** `/workspace/Primus` is at `db1a4160`, the commit the image was built from; a `release/v26.9` checkout is still recommended—see [Primus source for v26.9](#primus-source-for-v269).
+- **MaxText moves to `release/v26.9`** (`8d1d43c0`), carrying the same ROCm patches as v26.8 on newer upstream. Upstream drops the `retry_when_tokens_dropped` config key, so remove it from any local config, and renames the `cosmos3-*-reasoner` model configs to `weaver-max` / `weaver-mini` ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)).
+- **XLA autotuning defaults to level 3.** At Primus's previous default, level 4, the autotuner's correctness checks intermittently aborted compilation of the train step on GPU 0; level 3 keeps autotuning and drops only those checks. Set `XLA_GPU_AUTOTUNE_LEVEL=4` to restore the old default ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)).
+- **Transformer Engine's per-call `return_max_logit` warning is silenced.** It was printed on every backward attention call, per layer, per GPU, and per step; Primus now passes the same fallback value TE was using, so numerics are unchanged ([#1316](https://github.com/AMD-AGI/Primus/pull/1316)).
+- **MaxText runs on real data no longer stop before the first step.** Grain data-loader workers read absl flags that Primus had left unparsed, and MaxText reported the error as a graceful stop: zero steps trained, exit status 0. Synthetic-data runs, including the benchmark configs, were not affected ([#1229](https://github.com/AMD-AGI/Primus/pull/1229)).
+- **Recipe fixes:** the MI300X Wan2.1-1.3B and MI355X Mixtral-8x7B FP8 out-of-memory errors are fixed, and FLUX.1-dev is retuned on MI300X and MI355X ([#1338](https://github.com/AMD-AGI/Primus/pull/1338), [#1349](https://github.com/AMD-AGI/Primus/pull/1349)).
+- **Primus Projection gains a MaxText/JAX backend** ([#1232](https://github.com/AMD-AGI/Primus/pull/1232)). Its benchmark path has so far been verified on CPU only.
+
+### `rocm/primus:v26.9`
+
+Megatron-LM, TorchTitan, and Megatron Bridge backends.
+
+| | |
+| --- | --- |
+| Image ID | `cd678296ff5b` |
+| Built | 2026-10-30 |
+| Size | 60.5 GB |
+| Manifest | `8c8b5b3d977cfd4f746ba6cdd96731a894995bc0` |
+| Dockerfile | [`Dockerfile.primus-v26.9`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.9) |
+
+| Software component | Version |
+| ------------------ | ------- |
+| ROCm | 10.2.0a20261020 |
+| Python | 3.12.3 |
+| PyTorch | 2.16.0a0+rocm10.2.0a20261020 |
+| Transformer Engine | 2.20.0.dev0+023639b51 |
+| Flash Attention | 2.8.4 |
+| hipBLASLt | 1.5.0-cb261897 |
+| Triton | 3.9.0+gitfc8d31a5.rocm10.2.0a20261020 |
+| RCCL | 2.32.3 |
+| torchvision | 0.30.0a0+rocm10.2.0a20261020 |
+| torchaudio | 2.11.0a0+rocm10.2.0a20261020 |
+| APEX | 1.16.0a0+rocm10.3.0a20261029 |
+| AITER | 0.1.27 |
+| Primus-Turbo | 0.6.1.dev4 |
+| torchao | 0.15.0+gite9c7bead9 |
+| FBGEMM | 2026.10.30 |
+| mamba-ssm / causal-conv1d / grouped_gemm | 2.3.1 / 1.5.0.post8 / 1.1.4 |
+| transformers / datasets | 5.10.0 / 5.0.1 |
+| NumPy | 2.5.4 |
+
+> **Both families run on ROCm nightlies this release, and not the same one.** `rocm/primus:v26.9` takes ROCm `10.2.0a20261020` from `nightly.repo.amd.com`, where v26.8 used the 10.1.0 release from `stable.repo.amd.com`; PyTorch, torchvision, and torchaudio are the matching pre-release builds from the nightly PyTorch index. `rocm/jax-training:maxtext-v26.9` takes ROCm `10.3.0a20261026`. hipBLASLt differs between the two images as a result; RCCL is 2.32.3 in both.
+
+> **Transformer Engine is still built from source.** It comes from `ROCm/TransformerEngine` at `023639b5` (it reports `2.20.0.dev0+023639b51`). Flash Attention is unchanged: the `ROCm/flash-attention` fork at tag `v2.8.4.1-cktile`, reported as `2.8.4`.
+
+> **The APEX row reads ahead of the image's ROCm.** The Dockerfile installs `apex` unpinned from the nightly PyTorch index, which resolved to `1.16.0a0+rocm10.3.0a20261029`, a build against a ROCm 10.3 nightly, on this ROCm 10.2 image.
+
+### `rocm/jax-training:maxtext-v26.9`
+
+MaxText (JAX) backend.
+
+| | |
+| --- | --- |
+| Image ID | `2b6f7537faff` |
+| Built | 2026-10-30 |
+| Size | 50.0 GB |
+| Manifest | `aa44dbf5a9a7edc0fc76694adc624023df6c50e7` |
+| Dockerfile | [`Dockerfile.jax-v26.9`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.9) |
+
+| Software component | Version |
+| ------------------ | ------- |
+| ROCm | 10.3.0a20261026 |
+| Python | 3.12.3 |
+| JAX / jaxlib | 0.12.0 |
+| jax-rocm10-pjrt / jax-rocm10-plugin | 0.12.0+rocm10.3.0a20261026 |
+| Transformer Engine | 2.19.0.dev0+rocm10.2.0a20261002.bfe94fb |
+| hipBLASLt | 1.5.0-565c4c74 |
+| RCCL | 2.32.3 |
+| Flax | 0.12.10 |
+| TensorFlow | 2.21.0 |
+| Optax / Orbax / Grain / tensorstore | 0.2.8 / 0.12.8 / 0.2.18 / 0.1.86 |
+| MaxText | 8d1d43c0 |
+| transformers / datasets | 4.57.3 / 4.8.5 |
+| NumPy | 2.5.4 |
+
+> **`rocm/jax-training:maxtext-v26.9` contains Primus again.** v26.8 shipped without it; this image has `/workspace/Primus` at `db1a4160`, the commit both images were built from, next to MaxText at `/workspace/maxtext` (`8d1d43c0`) and MaxDiffusion at `/workspace/maxdiffusion` (`68e06965`). A `release/v26.9` checkout is still the recommended way to run it—see [Primus source for v26.9](#primus-source-for-v269).
+
+> **Transformer Engine is a development build against an older nightly.** TE `2.19.0.dev0` comes from the ROCm frameworks staging index and is tagged `rocm10.2.0a20261002`, while the image's ROCm and its JAX plugin pair are `10.3.0a20261026`.
+
+> **Note:** `transformers` is 4.57.3 in the MaxText image because the published tag includes the MaxDiffusion stage, which pins transformers back to 4.x for Flax CLIP / T5. The build-time manifest records 5.17.0, captured before that stage runs; 4.57.3 is what you actually get (`huggingface-hub` 0.36.2 and `tokenizers` 0.22.2 move back with it). The PyTorch image is on 5.10.0.
+
+> **Primus enables Shardy by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy guide for JAX users](https://openxla.org/shardy/getting_started_jax).
+
+### Primus source for v26.9
+
+Use the **`release/v26.9`** branch for both images:
+
+```bash
+git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
+cd Primus
+git checkout release/v26.9
+git submodule update --init --recursive
+```
+
+| | |
+| --- | --- |
+| Build commit | `db1a4160` (2026-10-30), on `release/v26.9` |
+| Branch tip | `93dd9201` (2026-10-31) |
+| Megatron-LM | `d3528a21` |
+| TorchTitan | `73a0e697` |
+| Megatron Bridge | `9577b128` |
+| MaxText | `8d1d43c0` |
+| Emerging-Optimizers | `93d9eb3a` |
+| HummingbirdXT | `ed7b7bd0` |
+| HunyuanWorld-Mirror | `c61300e4` |
+
+MaxText moved to `release/v26.9` and HunyuanWorld-Mirror (`third_party/HunyuanWorld-Mirror-rocm`) is new since v26.8; Megatron-LM, TorchTitan, Megatron Bridge, Emerging-Optimizers, and HummingbirdXT are on the same commits.
+
+> **Use a `release/v26.9` checkout rather than anything baked into the images.**
+>
+> - `rocm/primus:v26.9` and `rocm/jax-training:maxtext-v26.9` were both built from `db1a4160`, and both carry that commit at `/workspace/Primus`.
+> - `release/v26.9` has moved since the build: it is now at `93dd9201` (2026-10-31), which adds MI325X GPT-OSS-20B and ZAYA1-8B recipe tuning ([#1355](https://github.com/AMD-AGI/Primus/pull/1355)). The branch checkout includes it; the in-image copy does not.
+> - The MaxText image's `/workspace/maxtext` (`8d1d43c0`) matches the branch's `third_party/maxtext`.
+
+### Changes since v26.8
+
+`rocm/primus`:
+
+| Component | v26.8 | v26.9 |
+| --------- | ----- | ----- |
+| ROCm | 10.1.0 | 10.2.0a20261020 |
+| PyTorch | 2.14.0+rocm10.1.0 | 2.16.0a0+rocm10.2.0a20261020 |
+| Transformer Engine | 2.17.1+130099ce4 | 2.20.0.dev0+023639b51 |
+| hipBLASLt | 1.4.1-39d8d603 | 1.5.0-cb261897 |
+| Triton | 3.8.0+git669b31ac.rocm10.1.0 | 3.9.0+gitfc8d31a5.rocm10.2.0a20261020 |
+| RCCL | 2.30.7 | 2.32.3 |
+| torchvision | 0.29.0a0+rocm10.1.0 | 0.30.0a0+rocm10.2.0a20261020 |
+| torchaudio | 2.11.0+rocm10.1.0 | 2.11.0a0+rocm10.2.0a20261020 |
+| APEX | 1.14.0+rocm10.1.0 | 1.16.0a0+rocm10.3.0a20261029 |
+| AITER | 0.1.22.post1 | 0.1.27 |
+| Primus-Turbo | 0.5.1.dev7 | 0.6.1.dev4 |
+| FBGEMM | 2026.10.8 | 2026.10.30 |
+| transformers / datasets | 5.10.0 / 3.6.0 | 5.10.0 / 5.0.1 |
+| NumPy | 2.5.3 | 2.5.4 |
+| Image size | 56.4 GB | 60.5 GB |
+
+`rocm/jax-training:maxtext`:
+
+| Component | v26.8 | v26.9 |
+| --------- | ----- | ----- |
+| ROCm | 10.2.0a20260923 | 10.3.0a20261026 |
+| JAX / jaxlib | 0.11.1 | 0.12.0 |
+| jax-rocm10-pjrt / jax-rocm10-plugin | 0.11.1+rocm10.2.0a20260923 | 0.12.0+rocm10.3.0a20261026 |
+| Transformer Engine | 2.18.0.dev0+rocm10.2.0a20260929.03afd8f | 2.19.0.dev0+rocm10.2.0a20261002.bfe94fb |
+| hipBLASLt | 1.5.0-9bb8b541 | 1.5.0-565c4c74 |
+| RCCL | 2.31.2 | 2.32.3 |
+| Flax | 0.12.9 | 0.12.10 |
+| Optax / Orbax / Grain / tensorstore | 0.2.8 / 0.12.6 / 0.2.18 / 0.1.85 | 0.2.8 / 0.12.8 / 0.2.18 / 0.1.86 |
+| MaxText | 07c240fa | 8d1d43c0 |
+| NumPy | 2.5.3 | 2.5.4 |
+| Image size | 43.9 GB | 50.0 GB |
+
+---
+
+## v26.8
+
+### Highlights for v26.8
 
 **The two families split on ROCm.** `rocm/primus` moves to the ROCm 10.1.0 release with PyTorch 2.14, and builds Transformer Engine and Flash Attention from source again. `rocm/jax-training:maxtext` moves to a ROCm 10.2 nightly (`10.2.0a20260923`) with JAX 0.11.1 and a Transformer Engine 2.18 development build, and **no longer ships a copy of Primus**: run it with a `release/v26.8` checkout, which `primus-cli container` mounts for you. Bare-metal installs changed accordingly — see [Bare-metal installation](./bare-metal-installation.md) and the [JAX guide](./bare-metal-installation-jax.md).
 
-### Both families
+#### Both families
 
 - **The `examples/run_*` launchers are retired** in favour of `./primus-cli` ([#999](https://github.com/AMD-AGI/Primus/pull/999)). Callers that relied on the `EXP` / `NNODES` / `DATA_PATH` contract can use `runner/helpers/launch/slurm_pretrain.sh`. The Kubernetes submission client (`examples/run_k8s_pretrain.sh`) is removed, and the dataset-split seed flag is renamed `--split_seed` so Megatron's `--seed` stays the training RNG.
 - **Scientific-notation CLI overrides are parsed as numbers.** `--lr 1e-5` and similar used to reach the config as a string ([#1112](https://github.com/AMD-AGI/Primus/pull/1112)).
@@ -27,13 +446,13 @@ Every version below was read out of the published image itself. From v26.4 on, t
 - **Primus Projection gains a TorchTitan backend** ([#1202](https://github.com/AMD-AGI/Primus/pull/1202)).
 - **New tooling:** a non-interactive batch benchmark runner and result extractor for every backend, in single-node and Slurm modes (`tools/perf`, [#1173](https://github.com/AMD-AGI/Primus/pull/1173)).
 
-### `rocm/primus` — Megatron-LM and TorchTitan
+#### `rocm/primus`: Megatron-LM and TorchTitan
 
-#### Changes you may need to act on
+##### Changes you might need to act on
 
 - **Hybrid configs are named `zebra_*` again.** v26.7 shipped them as `hylo_*`; v26.8 restores the Zebra-Llama name (for example `hylo_llama_mamba_8B_BF16-pretrain.yaml` is now `zebra_llama_mamba_8B_BF16-pretrain.yaml`, and the `HyloLlama*` classes are `ZebraLlama*`). Update any local config or script that names the old files ([#1167](https://github.com/AMD-AGI/Primus/pull/1167)).
 
-#### New features
+##### New features
 
 - **ZAYA1-8B** Megatron pretraining, with MI300X and MI355X mock-data configs. This ships on `release/v26.8` from [#1199](https://github.com/AMD-AGI/Primus/pull/1199), which is not yet merged to `main`.
 - **MiniMax-M3 (text tower)** with MiniMax Sparse Attention, in a reference PyTorch backend and a gfx950 FlyDSL backend. On an 8-layer proxy on 8× MI355X the FlyDSL backend runs at 380 TFLOP/s/GPU, twice as fast as the reference backend with an identical loss curve ([#1197](https://github.com/AMD-AGI/Primus/pull/1197)).
@@ -46,13 +465,13 @@ Every version below was read out of the published image itself. From v26.4 on, t
 - **New recipes:** Qwen3-30B-A3B and Qwen2.5-72B MXFP4 pretraining on MI355X ([#1119](https://github.com/AMD-AGI/Primus/pull/1119)), Llama-3.1-8B BF16 LoRA-SFT on MI355X ([#1113](https://github.com/AMD-AGI/Primus/pull/1113)), and native LoRA-SFT proxies for gfx1250 ([#1155](https://github.com/AMD-AGI/Primus/pull/1155)).
 - **SpecForge backend** for speculative-decoding draft training, offline ([#1139](https://github.com/AMD-AGI/Primus/pull/1139)) and online with Mooncake + SGLang ([#1191](https://github.com/AMD-AGI/Primus/pull/1191)). It runs on its own ROCm runtime image; see the [SpecForge guide](../04-technical-guides/specforge/introduction.md).
 
-#### Performance
+##### Performance
 
 - **Fewer gradient-buffer clears and an isolated gradient reduce-scatter.** Slices that Primus-Turbo's expert WGRAD fully overwrites are no longer zeroed first, and the reduce-scatter runs on a dedicated RCCL group ([#1186](https://github.com/AMD-AGI/Primus/pull/1186)).
 - **Cheaper MXFP4 de-oscillation**, now quantized on the same scale grid as the forward pass ([#1184](https://github.com/AMD-AGI/Primus/pull/1184)).
 - **Tuned configs:** MI355X pretraining ([#1218](https://github.com/AMD-AGI/Primus/pull/1218)), and MI325X 70B/72B and MoE recipes ([#1227](https://github.com/AMD-AGI/Primus/pull/1227)).
 
-#### Bug fixes
+##### Bug fixes
 
 - **Silent gradient corruption from a Triton buffer-store miscompile.** Affected kernels are now detected and recompiled with buffer ops disabled, and TorchTitan restores eager precision semantics under `torch.compile` ([#962](https://github.com/AMD-AGI/Primus/pull/962)).
 - **DeepSeek-V4 reported TFLOPs 3.63× too high** at the V4-Flash shape. Reporting only; training math is unchanged ([#1158](https://github.com/AMD-AGI/Primus/pull/1158)).
@@ -62,16 +481,12 @@ Every version below was read out of the published image itself. From v26.4 on, t
 - **MI350X gets its own GPU env file**, so `PRIMUS_GPU_MODEL=MI350X` no longer silently skips the gfx950 WarpSpeed setting and NaNs ([#1178](https://github.com/AMD-AGI/Primus/pull/1178)); the MXFP4 Transformer Engine settings move into the recipes' `env:` blocks so `primus-cli` launches pick them up ([#1179](https://github.com/AMD-AGI/Primus/pull/1179)); and `primus-cli` now applies the FLA Triton autotune patch that prevents hybrid-model hangs ([#1181](https://github.com/AMD-AGI/Primus/pull/1181)). All three were also backported to `release/v26.7`.
 - Smaller fixes: the Flux validation loss is no longer rescaled in place ([#1079](https://github.com/AMD-AGI/Primus/pull/1079)), and Transformer Engine's `requantize_data` no longer raises `UnboundLocalError` ([#1108](https://github.com/AMD-AGI/Primus/pull/1108)).
 
-### `rocm/jax-training:maxtext` — MaxText
+#### `rocm/jax-training:maxtext`: MaxText
 
 - **The image ships no Primus.** Use `release/v26.8` — see [Primus source for v26.8](#primus-source-for-v268).
 - **MaxText moves to `release/v26.8`** (`07c240fa`, about 290 upstream commits). Upstream removed the Linen modules and with them the `pure_nnx_decoder` config key, which MaxText now rejects; the three MI325X `nanoo_fp8` configs that still set it are fixed. Drop the key from any local config ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
 - **Three performance regressions on JAX 0.11.1 fixed with Primus-managed defaults:** CUB radix sort is disabled for MoE top-k (about 0.8 s/step on DeepSeek-V2-16B), stream priority is honoured again so collectives overlap compute, and dynamic-slice fusion is disabled (about 10% on Llama-2-7B FP8). They need a `release/v26.8` checkout, and can be overridden per config ([#1228](https://github.com/AMD-AGI/Primus/pull/1228)).
 - **`XLA_FLAGS` precedence fixed.** A config's own `XLA_FLAGS` now beats the managed defaults instead of being silently overridden, and `XLA_FLAGS_APPEND` adds flags without replacing them ([#1054](https://github.com/AMD-AGI/Primus/pull/1054)).
-
----
-
-## v26.8 (current)
 
 ### `rocm/primus:v26.8`
 
@@ -142,7 +557,7 @@ MaxText (JAX) backend.
 
 > **Note:** `transformers` is 4.57.3 in the MaxText image because the published tag includes the MaxDiffusion stage, which pins transformers back to 4.x for Flax CLIP / T5. The build-time manifest records 5.16.1, captured before that stage runs; 4.57.3 is what you actually get. The PyTorch image is on 5.10.0.
 
-> **JAX 0.11.1 uses Shardy, and Primus enables it by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
+> **JAX 0.11.1 uses Shardy, and Primus enables it by default** (`shardy: true` in its MaxText module config). Leave it on. See the [Shardy guide for JAX users](https://openxla.org/shardy/getting_started_jax).
 
 ### Primus source for v26.8
 
@@ -210,315 +625,6 @@ Only the MaxText pin moved since v26.7; Megatron-LM, TorchTitan and Megatron Bri
 
 ---
 
-## v26.7
-
-### Highlights for v26.7
-
-**ROCm 10.0.0.** Both image families move off the ROCm 7.x line. This is the defining change of the release and it reaches everything: PyTorch, Transformer Engine, Triton, torchvision/torchaudio and APEX are all rebuilt against it, and the JAX plugin pair is renamed `jax-rocm10-pjrt` / `jax-rocm10-plugin`. If you install bare metal, note that the wheel indexes moved too — see [Bare-metal installation](./bare-metal-installation.md).
-
-Beyond that, the backend work in this release is weighted towards the PyTorch
-family; MaxText picks up the ROCm 10 stack plus config tuning rather than new
-capability.
-
-#### Both families
-
-- **gfx1250 multi-GPU enablement.** Primus recognises gfx1250 by ISA rather than by MI number and ships an arch env file for it, so `primus-cli` applies real settings instead of falling through to `Detected GPU model: unknown` ([#1043](https://github.com/AMD-AGI/Primus/pull/1043)).
-- **`primus-cli` honours an explicit flag** whose value happens to equal the parser default ([#1002](https://github.com/AMD-AGI/Primus/pull/1002)).
-- **`*_SOCKET_IFNAME` no longer falls back to an IP address** ([#1063](https://github.com/AMD-AGI/Primus/pull/1063)).
-- **The `primus` wheel builds again.** The `mlperf-logging` / `mlperf-common` VCS pins moved to an optional `mlperf` extra, because Hatchling 1.32 rejects PEP 508 direct references in `project.dependencies` ([#1061](https://github.com/AMD-AGI/Primus/pull/1061)).
-
-#### `rocm/primus` — Megatron-LM and TorchTitan
-
-##### New features
-
-- **DeepSeek-V4 on gfx942 at long context.** V4 upstream targeted gfx950 and in practice only ran at `seq_length=4096`; it now trains on MI308X/CDNA3 with context parallelism at 128k, full model ([#1047](https://github.com/AMD-AGI/Primus/pull/1047)).
-- **Packed-sequence (THD) SFT for DeepSeek-V4** — many samples per window delimited by `cu_seqlens`, with attention isolated so no query sees another sample; full model at 4k and 128k across three nodes ([#1062](https://github.com/AMD-AGI/Primus/pull/1062)).
-- **DLRM-v4 (TorchRec/HSTU) projection workload** with first-principles MI350X calibration ([#1059](https://github.com/AMD-AGI/Primus/pull/1059)).
-- **MLPerf Llama 3.1 8B launcher** and refreshed MI355X benchmark configs ([#1012](https://github.com/AMD-AGI/Primus/pull/1012)).
-
-##### Performance
-
-- **Fused SwiGLU + fc2** (opt-in, via FLA `swiglu_linear`) removes one FFN-wide saved tensor per MLP layer by recomputing the activation in the backward pass ([#1051](https://github.com/AMD-AGI/Primus/pull/1051)).
-- **Fused cross-entropy no longer copies the full logits tensor** ([#1049](https://github.com/AMD-AGI/Primus/pull/1049)).
-- **DeepSeek-V4 indexer distillation loss** is fused and enabled ([#992](https://github.com/AMD-AGI/Primus/pull/992)).
-- **Tuned configs:** GDN/KDA 1B on MI355X for higher occupancy ([#1080](https://github.com/AMD-AGI/Primus/pull/1080)), and MI355X Llama 3.1 8B / GPT-OSS 20B defaults ([#1045](https://github.com/AMD-AGI/Primus/pull/1045)).
-
-##### Bug fixes
-
-- **Weight gradients were dropped after the first microbatch** on Turbo's non-fused `_bridge_weight_grad` path, which gated accumulation on `grad_added_to_main_grad`. Any run using gradient accumulation on that path was training on partial gradients ([#1046](https://github.com/AMD-AGI/Primus/pull/1046)).
-- **Out-of-bounds top-k index** in the V4 DSA forward kernel is now bounded ([#1044](https://github.com/AMD-AGI/Primus/pull/1044)).
-- **`fused_softcap` stays finite** on saturation-range logits ([#1057](https://github.com/AMD-AGI/Primus/pull/1057)).
-- **KDA fused `in_proj` is padded** past the hipBLASLt bf16 dead zone ([#1050](https://github.com/AMD-AGI/Primus/pull/1050)).
-- **Pipeline warmup is clamped** for short batches ([#1032](https://github.com/AMD-AGI/Primus/pull/1032)).
-- **TorchTitan Turbo grouped-GEMM config renamed** ([#1041](https://github.com/AMD-AGI/Primus/pull/1041)). Update any local config that sets the old key.
-
-#### `rocm/jax-training:maxtext` — MaxText
-
-No new MaxText capability this release; the change is the ROCm 10.0.0 stack itself,
-plus config tuning:
-
-- **MI300X batch-size tuning** across the MaxText recipes ([#1020](https://github.com/AMD-AGI/Primus/pull/1020)).
-- **`gemma4_26B-fp8` retuned** and the `pure_nnx_decoder` fp8 workaround dropped, now that it is no longer needed ([#1019](https://github.com/AMD-AGI/Primus/pull/1019)).
-
-### `rocm/primus:v26.7`
-
-Megatron-LM, TorchTitan, and Megatron Bridge backends.
-
-| | |
-| --- | --- |
-| Image ID | `68b7eb7d4db9` |
-| Built | 2026-09-09 |
-| Size | 53.8 GB |
-| Manifest | `db0de753f37d6a6b782bc836b2be54d8ae362258` |
-| Dockerfile | [`Dockerfile.primus-v26.7`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.7) |
-
-| Software component | Version |
-| ------------------ | ------- |
-| ROCm | 10.0.0 |
-| Python | 3.12.3 |
-| PyTorch | 2.12.0+rocm10.0.0 |
-| Transformer Engine | 2.17.0+rocm10.0.0 |
-| Flash Attention | 2.8.1 |
-| hipBLASLt | 1.4.1-8d1ae90e |
-| Triton | 3.8.0+git4cff872c.rocm10.0.0 |
-| RCCL | 2.30.4 |
-| torchvision | 0.27.0+rocm10.0.0 |
-| torchaudio | 2.11.0+rocm10.0.0 |
-| APEX | 1.13.0+rocm10.0.0 |
-| AITER | 0.1.14.post1 |
-| Primus-Turbo | 0.4.1.dev33 |
-| torchao | 0.15.0+gite9c7bead9 |
-| FBGEMM | 2026.9.9 |
-| mamba-ssm / causal-conv1d / grouped_gemm | 2.3.1 / 1.5.0.post8 / 1.1.4 |
-| transformers / datasets | 5.10.0 / 3.6.0 |
-| NumPy | 2.5.3 |
-
-### `rocm/jax-training:maxtext-v26.7`
-
-MaxText (JAX) backend.
-
-| | |
-| --- | --- |
-| Image ID | `b5117e775594` |
-| Built | 2026-09-09 |
-| Size | 43.7 GB |
-| Manifest | `8da24470ccb3b16c60ddb6f8dfc1a1526bc2a408` |
-| Dockerfile | [`Dockerfile.jax-v26.7`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.7) |
-
-| Software component | Version |
-| ------------------ | ------- |
-| ROCm | 10.0.0 |
-| Python | 3.12.3 |
-| JAX / jaxlib | 0.11.0 |
-| jax-rocm10-pjrt / jax-rocm10-plugin | 0.11.0+rocm10.0.0 |
-| Transformer Engine | 2.17.0+rocm10.0.0 |
-| hipBLASLt | 1.4.1-8d1ae90e |
-| RCCL | 2.30.4 |
-| Flax | 0.12.8 |
-| TensorFlow | 2.21.0 |
-| Optax / Orbax / Grain / tensorstore | 0.2.8 / 0.12.4 / 0.2.18 / 0.1.85 |
-| MaxText | b3c53763 |
-| transformers / datasets | 4.57.3 / 4.8.5 |
-| NumPy | 2.5.3 |
-
-> **ROCm 10.0.0 changes where the wheels come from.** Both families now install ROCm core from `stable.repo.amd.com/rocm/core/whl-next`, with PyTorch, Transformer Engine and the JAX plugin on sibling indexes. The `rocm.nightlies.amd.com/whl-multi-arch` index used through v26.6 does not carry these wheels. Transformer Engine also ships as three distributions (`transformer_engine`, `transformer_engine_rocm10`, and the torch or jax flavour) where v26.6 had two.
-
-> **RCCL is no longer rebuilt.** v26.6 overrode the SDK's RCCL with a `rocm-systems` build; v26.7 uses RCCL 2.30.4 as shipped in the ROCm 10.0.0 SDK. The version is unchanged, the provenance is not.
-
-> **Two rows in the delta table need reading carefully.** APEX appears to go *backwards*, from `1.15.0a0+rocm10.1.0a20260822` to `1.13.0+rocm10.0.0`: v26.6 pulled a `rocm10.1` nightly onto a ROCm 7.15 base, whereas v26.7 uses the APEX built against its own ROCm 10.0.0. And the JAX plugin row is labelled with the v26.7 spelling on both sides — the v26.6 value `0.11.0.post1` shipped as `jax-rocm7-pjrt` / `jax-rocm7-plugin`, before the rename.
-
-> **Note:** `transformers` is 4.57.3 in the MaxText image because the published tag includes the MaxDiffusion stage, which pins transformers back to 4.x for Flax CLIP / T5. The build-time manifest records 5.14.1, captured before that stage runs; 4.57.3 is what you actually get. The PyTorch image is on 5.10.0.
-
-> **JAX 0.11.0 still requires Shardy.** Set `shardy=True` during the training run. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
-
-### Primus source for v26.7
-
-Use the **`release/v26.7`** branch for both images:
-
-```bash
-git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
-cd Primus
-git checkout release/v26.7
-git submodule update --init --recursive
-```
-
-| | |
-| --- | --- |
-| Branch tip | `2631e68d` (2026-09-02), which is also the `v26.7.0` tag |
-| Megatron-LM | `d3528a21` |
-| TorchTitan | `73a0e697` |
-| Megatron Bridge | `9577b128` |
-| MaxText | `b3c53763` |
-| Emerging-Optimizers | `93d9eb3a` |
-| HummingbirdXT | `ed7b7bd0` |
-
-> **Prefer a `release/v26.7` checkout over the Primus copy baked into the images.**
->
-> - `rocm/primus:v26.7` was built from `2631e68d`, which is the current `release/v26.7` tip, so the in-image `/workspace/Primus` currently matches. Cloning the branch still keeps you current if later commits land on it.
-> - `rocm/jax-training:maxtext-v26.7` was built from `main` at `e7968675` (2026-09-09), because its Dockerfile pins `PRIMUS_BRANCH=main` rather than a commit. Use `release/v26.7` anyway, so you get the Primus recipes the release was validated against rather than whatever `main` held on the build day. Its bundled `third_party/maxtext` matches `/workspace/maxtext` (`b3c53763`).
-
-### Changes since v26.6
-
-`rocm/primus`:
-
-| Component | v26.6 | v26.7 |
-| --------- | ----- | ----- |
-| ROCm | 7.15.0a20260727 | 10.0.0 |
-| PyTorch | 2.12.0+rocm7.15.0a20260727 | 2.12.0+rocm10.0.0 |
-| Transformer Engine | 2.17.0+rocm7.15.0a20260727.e028a6c | 2.17.0+rocm10.0.0 |
-| hipBLASLt | 1.4.1-bbb68174 | 1.4.1-8d1ae90e |
-| Triton | 3.8.0+git4cff872c.rocm7.15.0a20260727 | 3.8.0+git4cff872c.rocm10.0.0 |
-| torchvision | 0.27.0+rocm7.15.0a20260727 | 0.27.0+rocm10.0.0 |
-| torchaudio | 2.11.0+rocm7.15.0a20260728 | 2.11.0+rocm10.0.0 |
-| APEX | 1.15.0a0+rocm10.1.0a20260822 | 1.13.0+rocm10.0.0 |
-| Primus-Turbo | 0.4.1.dev26 | 0.4.1.dev33 |
-| FBGEMM | 2026.8.25 | 2026.9.9 |
-| transformers / datasets | 5.5.0 / 3.6.0 | 5.10.0 / 3.6.0 |
-| NumPy | 2.5.2 | 2.5.3 |
-| Image size | 54.0 GB | 53.8 GB |
-
-`rocm/jax-training:maxtext`:
-
-| Component | v26.6 | v26.7 |
-| --------- | ----- | ----- |
-| ROCm | 7.14.0 | 10.0.0 |
-| jax-rocm10-pjrt / jax-rocm10-plugin | 0.11.0.post1 | 0.11.0+rocm10.0.0 |
-| Transformer Engine | 2.17.0+rocm7.14.0.50a84ad | 2.17.0+rocm10.0.0 |
-| hipBLASLt | 1.4.1-cd957402 | 1.4.1-8d1ae90e |
-| MaxText | b47d74bf | b3c53763 |
-| NumPy | 2.5.2 | 2.5.3 |
-| Image size | 42.6 GB | 43.7 GB |
-
----
-
-## v26.6
-
-### `rocm/primus:v26.6`
-
-Megatron-LM, TorchTitan, and Megatron Bridge backends.
-
-| | |
-| --- | --- |
-| Image ID | `4fcb3f210dc6` |
-| Built | 2026-08-25 |
-| Size | 54.0 GB |
-| Manifest | `f756f2279d8ab57b6549bcbd50d249755b69a407` |
-| Dockerfile | [`Dockerfile.primus-v26.6`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.primus-v26.6) |
-
-| Software component | Version |
-| ------------------ | ------- |
-| ROCm | 7.15.0 (`rocm-sdk` 7.15.0a20260727) |
-| Python | 3.12.3 |
-| PyTorch | 2.12.0+rocm7.15.0a20260727 |
-| Transformer Engine | 2.17.0+rocm7.15.0a20260727.e028a6c |
-| Flash Attention | 2.8.1 |
-| hipBLASLt | 1.4.1-bbb68174 |
-| Triton | 3.8.0+git4cff872c.rocm7.15.0a20260727 |
-| RCCL | 2.30.4 |
-| torchvision | 0.27.0+rocm7.15.0a20260727 |
-| torchaudio | 2.11.0+rocm7.15.0a20260728 |
-| APEX | 1.15.0a0+rocm10.1.0a20260822 |
-| AITER | 0.1.14.post1 |
-| Primus-Turbo | 0.4.1.dev26 |
-| torchao | 0.15.0+gite9c7bead9 |
-| FBGEMM | 2026.8.25 |
-| mamba-ssm / causal-conv1d / grouped_gemm | 2.3.1 / 1.5.0.post8 / 1.1.4 |
-| transformers / datasets | 5.5.0 / 3.6.0 |
-| NumPy | 2.5.2 |
-
-### `rocm/jax-training:maxtext-v26.6`
-
-MaxText (JAX) backend. The published tag is the MaxDiffusion-combined image (`/workspace/maxdiffusion` at `68e06965`); MaxText remains at `/workspace/maxtext`.
-
-| | |
-| --- | --- |
-| Image ID | `a71d8dbb045e` |
-| Built | 2026-08-28 |
-| Size | 42.6 GB |
-| Manifest | `31a3a21d0a37cbd0b5de0342535f65d557ff77ba` |
-| Dockerfile | [`Dockerfile.jax-v26.6`](https://github.com/AMD-AGI/Primus/blob/main/.github/workflows/docker-release/Dockerfile.jax-v26.6) |
-
-| Software component | Version |
-| ------------------ | ------- |
-| ROCm | 7.14.0 |
-| Python | 3.12.3 |
-| JAX / jaxlib | 0.11.0 |
-| jax-rocm7-pjrt / jax-rocm7-plugin | 0.11.0.post1 |
-| Transformer Engine | 2.17.0+rocm7.14.0.50a84ad |
-| hipBLASLt | 1.4.1-cd957402 |
-| RCCL | 2.30.4 (built from rocm-systems `9e5e4084`) |
-| Flax | 0.12.8 |
-| TensorFlow | 2.21.0 (CPU-only, rebuilt from the ROCm fork) |
-| Optax / Orbax / Grain / tensorstore | 0.2.8 / 0.12.4 / 0.2.18 / 0.1.85 |
-| MaxText | `b47d74bf` (`release/v26.6`) |
-| transformers / datasets | 4.57.3 / 4.8.5 |
-| NumPy | 2.5.2 |
-
-> **Note:** `transformers` is 4.57.3 because the published image includes the MaxDiffusion stage, which pins transformers back to 4.x (Flax CLIP / T5). That is a step down from v26.5 (`5.9.0`). Transformer Engine is tagged `rocm7.14.0` and matches the image ROCm, unlike v26.5 where the TE wheel was a `rocm7.15` build on ROCm 7.14.0.
-
-### Primus source for v26.6
-
-Use the **`release/v26.6`** branch for both images:
-
-```bash
-git clone --recurse-submodules https://github.com/AMD-AGI/Primus.git
-cd Primus
-git checkout release/v26.6
-git submodule update --init --recursive
-```
-
-| | |
-| --- | --- |
-| Branch tip | `2aa05ead` (2026-08-25) |
-| Megatron-LM | `d3528a21` |
-| TorchTitan | `73a0e697` |
-| Megatron Bridge | `9577b128` |
-| MaxText | `b47d74bf` |
-| Emerging-Optimizers | `93d9eb3a` |
-| HummingbirdXT | `ed7b7bd0` |
-
-> **Prefer a `release/v26.6` checkout over the Primus copy baked into the images.**
->
-> - `rocm/primus:v26.6` was built from `2aa05ead` (2026-08-25), which is the current `release/v26.6` tip, so the in-image `/workspace/Primus` currently matches. Cloning the branch still keeps you current if later commits land on it.
-> - `rocm/jax-training:maxtext-v26.6` was built from `main` at `4d2f7a74` (2026-08-28), because its Dockerfile pins `PRIMUS_BRANCH=main` rather than a commit. Unlike v26.5, its bundled `third_party/maxtext` **does** match `/workspace/maxtext` (`b47d74bf`). Use `release/v26.6` for MaxText training so you get the Primus recipes validated against this image rather than whatever `main` was on the build day.
-
-### Changes since v26.5
-
-`rocm/primus`:
-
-| Component | v26.5 | v26.6 |
-| --------- | ----- | ----- |
-| ROCm nightly | 7.15.0a20260720 | 7.15.0a20260727 |
-| PyTorch | 2.12.0+rocm7.15.0a20260720 | 2.12.0+rocm7.15.0a20260727 |
-| Transformer Engine | 2.15.0.dev0+rocm7.15.0a20260716.a07e607 | 2.17.0+rocm7.15.0a20260727.e028a6c |
-| Flash Attention | 2.8.3 | 2.8.1 |
-| Triton | 3.7.1+git0263a6a6 | 3.8.0+git4cff872c |
-| hipBLASLt | 1.4.1-1aa46415 | 1.4.1-bbb68174 |
-| Primus-Turbo | 0.3.2.dev48 | 0.4.1.dev26 |
-| APEX | 1.14.0a0+rocm7.15.0a20260721 | 1.15.0a0+rocm10.1.0a20260822 |
-| transformers | 4.55.0 | 5.5.0 |
-| FBGEMM | 2026.7.22 | 2026.8.25 |
-| NumPy | 2.5.1 | 2.5.2 |
-| Image size | 54.7 GB | 54.0 GB |
-
-`rocm/jax-training:maxtext`:
-
-| Component | v26.5 | v26.6 |
-| --------- | ----- | ----- |
-| JAX / jaxlib | 0.10.0 | 0.11.0 |
-| jax-rocm7-pjrt / jax-rocm7-plugin | 0.10.0+rocm7.14.0 | 0.11.0.post1 |
-| Transformer Engine | 2.15.0.dev0+rocm7.15.0a20260707.72d01a0 | 2.17.0+rocm7.14.0.50a84ad |
-| Flax | 0.12.2 | 0.12.8 |
-| Orbax / Grain / tensorstore | 0.11.39 / 0.2.16 / 0.1.82 | 0.12.4 / 0.2.18 / 0.1.85 |
-| MaxText | `a7c6c7e5` | `b47d74bf` |
-| transformers | 5.9.0 | 4.57.3 |
-| NumPy | 2.0.2 | 2.5.2 |
-| Image size | 45.7 GB | 42.6 GB |
-
-> **JAX 0.11.0 still requires Shardy.** Set `shardy=True` during the training run on v26.6. See the [Shardy migration guide](https://docs.jax.dev/en/latest/shardy_jax_migration.html).
-
----
-
 ## Earlier releases
 
 Headline versions only. Read [the in-image manifest](#verifying-the-stack-in-an-image) for the full stack of any image below — except `v26.2` and `v26.1`, which predate the manifest (use `pip list` there).
@@ -527,11 +633,15 @@ The three MaxText v26.3.x images ship an identical software stack; they differ o
 
 | Image | Python | ROCm | Framework | Transformer Engine | RCCL |
 | ----- | ------ | ---- | --------- | ------------------ | ---- |
+| `rocm/primus:v26.7` | 3.12.3 | 10.0.0 | PyTorch 2.12.0+rocm10.0.0 | 2.17.0+rocm10.0.0 | 2.30.4 |
+| `rocm/primus:v26.6` | 3.12.3 | 7.15.0 | PyTorch 2.12.0+rocm7.15.0a20260727 | 2.17.0+rocm7.15.0a20260727.e028a6c | 2.30.4 |
 | `rocm/primus:v26.5` | 3.12.3 | 7.15.0 | PyTorch 2.12.0+rocm7.15.0a20260720 | 2.15.0.dev0+rocm7.15.0a20260716.a07e607 | 2.30.4 |
 | `rocm/primus:v26.4` | 3.12.3 | 7.14.0 | PyTorch 2.12.0+rocm7.14.0a20260608 | 2.14.0.dev0+e6ede467 | 2.29.7 |
 | `rocm/primus:v26.3` | 3.12.3 | 7.2.1 | PyTorch 2.10.0+git94c6e04 | 2.12.0.dev0+40434cf6 | 2.27.7 |
 | `rocm/primus:v26.2` | 3.12.3 | 7.2.0 | PyTorch 2.10.0a0+git449b176 | 2.8.0.dev0+51f74fa7 | 2.27.7 |
 | `rocm/primus:v26.1` | 3.10.12 | 7.1.0 | PyTorch 2.10.0.dev20251112+rocm7.1 | 2.6.0.dev0+f141f34b | 2.27.7 |
+| `rocm/jax-training:maxtext-v26.7` | 3.12.3 | 10.0.0 | JAX 0.11.0 | 2.17.0+rocm10.0.0 | 2.30.4 |
+| `rocm/jax-training:maxtext-v26.6` | 3.12.3 | 7.14.0 | JAX 0.11.0 | 2.17.0+rocm7.14.0.50a84ad | 2.30.4 |
 | `rocm/jax-training:maxtext-v26.5` | 3.12.3 | 7.14.0 | JAX 0.10.0 | 2.15.0.dev0+rocm7.15.0a20260707.72d01a0 | 2.30.4 |
 | `rocm/jax-training:maxtext-v26.4` | 3.12.3 | 7.14.0 | JAX 0.9.1 | 2.12.0.dev0+635d7c08 | 2.28.9 |
 | `rocm/jax-training:maxtext-v26.3.2` | 3.12.3 | 7.2.1 | JAX 0.8.2 | 2.8.0.dev0+9b312832 | 2.27.7 |
@@ -554,13 +664,13 @@ Images from v26.3 onward ship a manifest at `/workspace/.manifest/` recording ex
 | `docker-build-recipe.txt` | the Dockerfile the image was built from (named `Dockerfile` in `rocm/primus` images before v26.8 and in `rocm/jax-training:maxtext` images before v26.6) |
 
 ```bash
-docker run --rm --entrypoint bash rocm/primus:v26.8 -c 'cat /workspace/.manifest/requirements.txt'
+docker run --rm --entrypoint bash rocm/primus:v26.9 -c 'cat /workspace/.manifest/requirements.txt'
 ```
 
 Native library versions are not pip packages; read them from the ROCm headers:
 
 ```bash
-docker run --rm --entrypoint bash rocm/primus:v26.8 -c '
+docker run --rm --entrypoint bash rocm/primus:v26.9 -c '
   grep -E "HIPBLASLT_VERSION_(MAJOR|MINOR|PATCH|TWEAK)" $(find $ROCM_PATH /opt/rocm -name hipblaslt-version.h 2>/dev/null | head -1)
   grep -E "define NCCL_(MAJOR|MINOR|PATCH)"              $(find $ROCM_PATH /opt/rocm -name rccl.h            2>/dev/null | head -1)'
 ```

@@ -215,6 +215,11 @@ class TuningSearchSignature(dspy.Signature):
           Per-axis legal sets. Configurations outside these are auto-rejected.
       get_architecture() -> JSON
           Model fields (num_layers, hidden_size, num_experts, topk, …).
+      get_op_coverage() -> JSON
+          Ops of this model the projection did not model and what op
+          bring-up did (registered model / acknowledged / context pack only).
+          Check it once: trials scored before an op was registered priced it
+          with a stand-in and are not comparable with later ones.
       get_cluster() -> JSON
           Target cluster (num_nodes, gpus_per_node, gpu_arch, hbm_capacity_gb).
       get_budget_status() -> JSON

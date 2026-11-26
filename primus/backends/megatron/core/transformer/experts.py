@@ -14,7 +14,15 @@ from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_r
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
-from megatron.core.transformer.moe.experts import TEGroupedMLP, TEGroupedMLPSubmodules
+from megatron.core.transformer.moe.experts import TEGroupedMLP
+
+try:
+    from megatron.core.transformer.moe.experts import TEGroupedMLPSubmodules
+except ImportError:  # renamed in Megatron-core 0.17
+    from megatron.core.transformer.moe.experts import (
+        GroupedMLPSubmodules as TEGroupedMLPSubmodules,
+    )
+
 from megatron.core.transformer.moe.moe_utils import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
@@ -23,6 +31,22 @@ from megatron.training.global_vars import get_args
 from primus.core.utils.module_utils import warning_rank_0
 
 _TURBO_FUSED_GROUPED_GEMM_FALLBACK_WARNED = False
+
+
+def _use_fused_clamped_geglu(mlp, x: torch.Tensor) -> bool:
+    """Whether the eager clamped quick-GEGLU (``swigluoai``) runs as the bitwise Triton kernel
+    (``fused_clamped_geglu``)."""
+    cfg = mlp.config
+    if not (
+        getattr(get_args(), "fused_clamped_geglu", False)
+        and mlp.activation_func is quick_gelu
+        and getattr(cfg, "activation_func_clamp_value", None) is not None
+        and getattr(cfg, "moe_mlp_glu_interleave_size", None) is None
+    ):
+        return False
+    from primus.backends.megatron.core.fusions.fused_clamped_geglu import eligible
+
+    return eligible(x.shape, x.dtype, x.device, cfg.activation_func_clamp_value, cfg.glu_linear_offset)
 
 
 def is_turbo_fused_grouped_mlp_supported() -> Tuple[bool, Optional[str]]:
@@ -56,6 +80,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
         config: TransformerConfig,
         submodules: TEGroupedMLPSubmodules,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        **kwargs,  # e.g. name= on Megatron-core 0.19+
     ):
         args = get_args()
 
@@ -64,6 +89,7 @@ class PrimusGroupedMLP(TEGroupedMLP):
             config,
             submodules,
             pg_collection,
+            **kwargs,
         )
 
         # NOTE: use_turbo_fused_act_with_probs is prioritized over use_te_activation_func and bias_activation_fusion
@@ -116,6 +142,12 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Applies bias and activation function to the output of linear_fc1.
         """
         if self.config.use_te_activation_func:
+            if (
+                bias_parallel is None
+                and permuted_probs is not None
+                and getattr(self.activation_func, "fuses_probs", False)
+            ):
+                return self.activation_func.forward_with_probs(intermediate_parallel, permuted_probs)
             if bias_parallel is not None:
                 intermediate_parallel = intermediate_parallel + bias_parallel
             intermediate_parallel = self.activation_func(intermediate_parallel)
@@ -152,7 +184,17 @@ class PrimusGroupedMLP(TEGroupedMLP):
             assert bias_parallel is None, "Bias is not supported with fused weighted squared relu."
             intermediate_parallel = weighted_squared_relu_impl(intermediate_parallel, permuted_probs)
         else:
-            if self.config.gated_linear_unit:
+            if self.config.gated_linear_unit and _use_fused_clamped_geglu(self, intermediate_parallel):
+                from primus.backends.megatron.core.fusions.fused_clamped_geglu import (
+                    fused_clamped_quick_geglu,
+                )
+
+                intermediate_parallel = fused_clamped_quick_geglu(
+                    intermediate_parallel,
+                    self.config.activation_func_clamp_value,
+                    self.config.glu_linear_offset,
+                )
+            elif self.config.gated_linear_unit:
 
                 def glu(x):
                     x_glu, x_linear = torch.chunk(x, 2, dim=-1)
@@ -164,9 +206,15 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 intermediate_parallel = glu(intermediate_parallel)
             else:
                 intermediate_parallel = self.activation_func(intermediate_parallel)
-            original_dtype = intermediate_parallel.dtype
-            intermediate_parallel = intermediate_parallel * permuted_probs
-            intermediate_parallel = intermediate_parallel.to(original_dtype)
+            if getattr(get_args(), "fused_probs_mul", False):
+                from primus.backends.megatron.core.fusions.probs_mul import probs_mul
+
+                # (act * probs).to(act.dtype), one pass each way, bitwise (probs_mul.py)
+                intermediate_parallel = probs_mul(intermediate_parallel, permuted_probs)
+            else:
+                original_dtype = intermediate_parallel.dtype
+                intermediate_parallel = intermediate_parallel * permuted_probs
+                intermediate_parallel = intermediate_parallel.to(original_dtype)
         return intermediate_parallel
 
     def bias_act_func_with_mask(
@@ -233,8 +281,8 @@ class PrimusGroupedMLP(TEGroupedMLP):
 
         _run_module_forward_pre_hooks(self.linear_fc1, (x,))
         _run_module_forward_pre_hooks(self.linear_fc2, (x,))
-        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x)
-        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x)
+        x, w1, fuse_w1_grad_accum = self.linear_fc1.prepare_weights(x, "grouped_mlp", "fc1")
+        x, w2, fuse_w2_grad_accum = self.linear_fc2.prepare_weights(x, "grouped_mlp", "fc2")
         assert fuse_w1_grad_accum == fuse_w2_grad_accum, (
             "fc1 and fc2 resolved different fuse_wgrad_accum_pattern values: "
             f"fc1={fuse_w1_grad_accum!r}, fc2={fuse_w2_grad_accum!r}"
@@ -382,27 +430,30 @@ class PrimusGroupedMLP(TEGroupedMLP):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        with off_interface(
+        expert_fc1_manager = off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
-        ) as permuted_local_hidden_states:
+        )
+        with expert_fc1_manager as permuted_local_hidden_states:
             fc1_output, bias_parallel = apply_module(self.linear_fc1)(
                 permuted_local_hidden_states, tokens_per_expert
             )
         if self.offload_expert_fc1:
-            fc1_output = off_interface.group_commit(
+            fc1_output = expert_fc1_manager.group_offload(
                 fc1_output,
-                name="expert_fc1",
                 forced_released_tensors=[permuted_local_hidden_states],
+                delay_offload=self.config.delay_offload_until_cuda_graph,
             )
+
+        moe_act_manager = off_interface(self.offload_moe_act, fc1_output, "moe_act")
 
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
-            with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
+            with moe_act_manager as fc1_output:
                 bias_act_output = self.activation_checkpoint.checkpoint(
                     self.bias_act_func_with_mask, fc1_output, bias_parallel, permuted_probs, tokens_per_expert
                 )
         else:
-            with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
+            with moe_act_manager as fc1_output:
                 # Honor use_turbo_fused_act_with_probs independently of activation
                 # recomputation. The helper falls back to bias_act_func when disabled.
                 bias_act_output = self.bias_act_func_with_mask(
@@ -418,7 +469,11 @@ class PrimusGroupedMLP(TEGroupedMLP):
         # Delay the offload of the moe act until after the linear_fc2 has been computed
         # to make sure the fc1_output is reloaded to GPU before recomputing moe_act.
         if self.offload_moe_act:
-            output = off_interface.group_commit(output, name="moe_act", forced_released_tensors=[fc1_output])
+            output = moe_act_manager.group_offload(
+                output,
+                forced_released_tensors=[fc1_output],
+                delay_offload=self.config.delay_offload_until_cuda_graph,
+            )
         output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output

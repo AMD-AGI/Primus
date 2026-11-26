@@ -1,0 +1,38 @@
+# Dataset Configuration for Pre-encoded WAN Video Data
+#
+# Place this file at <dataset>/.nv-meta/dataset.yaml of an Energon WebDataset
+# holding WAN VAE latents and UMT5 text features, then index it:
+#   energon prepare /path/to/wan_dataset --num-workers 8
+#
+# WAN uses its own subflavor rather than the image path's `preencoded`: its
+# shards carry different keys (no pooled embedding, 4-D video latents), and
+# only EncodedWanTaskEncoder, which WanPretrainTrainer installs, registers a
+# cooker for `wan_preencoded`. Primus has no WAN encoding tool yet, so the
+# shards are produced offline.
+
+__module__: megatron.energon
+__class__: CrudeWebdataset
+
+subflavors:
+  encoding: wan_preencoded
+
+# ============================================================================
+# Expected WebDataset Format
+# ============================================================================
+#
+# Each sample in the tar files contains:
+#   - __key__: unique identifier (e.g., "sample_000001")
+#   - latents.pth: WAN VAE video latents [C, T, H, W]. Training applies no
+#     scale or shift, so store them as the DiT should see them; to match
+#     pretrained WAN weights that means normalized with the VAE's per-channel
+#     latents_mean / latents_std, as the diffusers WAN pipelines do.
+#   - encoder_hidden_states.pth: UMT5 text features [S_txt, D_txt]
+#   - caption.txt: caption, inline or as a path to a sidecar file (optional)
+#
+# Every sample in a batch must share one latent shape; batches are stacked.
+#
+# Use in a training config:
+#   overrides:
+#     data_path: /path/to/wan_dataset
+#
+# See examples/megatron/configs/MI355X/diffusion/wan2.1_t2v_1.3b_pretrain_pusa_*.yaml.

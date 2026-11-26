@@ -45,7 +45,6 @@ SEARCH_ROOTS = (
     "docs",
     "tools/installation",
     "tools/installation-jax",
-    "tools/release_docs/announcements",
     "skills",
 )
 EXTRA_FILES = ("README.md",)

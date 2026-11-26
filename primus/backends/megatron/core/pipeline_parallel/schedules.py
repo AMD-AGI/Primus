@@ -20,7 +20,7 @@ from primus.backends.megatron.core.pipeline_parallel.primuspipe.pipeline_launche
 )
 
 
-def get_forward_backward_func_zbpp():
+def get_forward_backward_func_zbpp(pp_size=None, vp_size=None, schedule_pg_collection=None):
     """Retrieves the appropriate forward_backward function given the
     configuration of parallel_state.
 
@@ -117,5 +117,7 @@ def get_forward_backward_func_zbpp():
     return forward_backward_func
 
 
-def get_primus_pipeline_parallel_fwd_backward_func():
+def get_primus_pipeline_parallel_fwd_backward_func(pp_size=None, vp_size=None, schedule_pg_collection=None):
+    # The arguments mirror Megatron's get_forward_backward_func (Megatron-core 0.19+ pass
+    # schedule_pg_collection); the Primus schedules read parallel_state instead.
     return PrimusPipelineParallelLauncher().run

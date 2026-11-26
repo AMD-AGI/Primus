@@ -669,7 +669,7 @@ def patch_k3_args_moe_latent_size(ctx: PatchContext):
 
     **The model was never affected**; this patch only fixes reporting. Verified
     on a live launcher run, not inferred: the builder's own
-    ``[Primus:Kimi-K3] latent MoE width`` line shows
+    ``[Primus:kimi_k3] latent MoE width`` line shows
     ``config.moe_latent_size=512, args.moe_latent_size=None`` with
     ``built.fc1_latent_proj=(…, (512, 1024))`` — i.e. the weights are the
     configured width even while the args copy is ``None``.
@@ -898,7 +898,9 @@ def _make_k3_num_floating_point_operations(original_fn):
     for comparison.
     """
 
-    def wrapped(args, batch_size):
+    # *extra/**extra_kwargs: Megatron-core 0.19+ pass per-batch sequence statistics; the
+    # K3 formula is dense-sequence and ignores them.
+    def wrapped(args, batch_size, *extra, **extra_kwargs):
         total_flops, breakdown = compute_kimi_k3_flops(args, batch_size)
 
         global _BREAKDOWN_LOGGED

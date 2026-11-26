@@ -1,0 +1,6 @@
+# Installed with --no-deps on top of rocm/primus: the image's torch, FBGEMM,
+# torchrec, Triton and FlyDSL are the stack the recipe runs on, and must not be
+# replaced by a resolver.
+# 64-bit row index: yambda-5b has more than 2^32 rows; stock polars overflows silently.
+polars-u64-idx==1.33.1
+gin-config==0.5.0

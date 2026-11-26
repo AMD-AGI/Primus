@@ -41,6 +41,8 @@ from megatron.core.utils import (
     make_viewless_tensor,
 )
 
+from primus.backends.megatron.core.utils import get_megatron_arg
+
 
 @dataclass
 class HybridStackSubmodules:
@@ -194,9 +196,7 @@ class HybridStack(MegatronModule):
                     assert False, "unexpected layer_type"
             self.layers.append(layer)
 
-        from megatron.training import get_args as _get_args
-
-        self._fuse_prenorm = getattr(_get_args(), "use_fla_fused_rmsnorm", False)
+        self._fuse_prenorm = get_megatron_arg("use_fla_fused_rmsnorm", False)
         if self._fuse_prenorm:
             from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import (
                 GatedDeltaNetLayer,

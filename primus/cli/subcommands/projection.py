@@ -24,6 +24,7 @@ def _benchmarkable_frameworks() -> frozenset:
 
 def _experiment_framework(args) -> str:
     """Return the framework the experiment YAML names, defaulting to megatron."""
+    from primus.backends.backend_aliases import resolve_backend_alias
     from primus.core.utils import yaml_utils
 
     try:
@@ -33,7 +34,7 @@ def _experiment_framework(args) -> str:
             module = getattr(modules, module_name, None)
             framework = getattr(module, "framework", None) if module is not None else None
             if framework:
-                return str(framework).lower().strip()
+                return resolve_backend_alias(str(framework).lower().strip())
     except Exception:
         # The launchers parse the config properly a moment later and will report
         # anything wrong with it; this read only picks the backend path.
@@ -59,6 +60,27 @@ def run(args, overrides):
     Entry point for the 'projection' subcommand.
     """
     framework = _experiment_framework(args)
+
+    if args.suite == "both" and (
+        (getattr(args, "projection_bound", None) or "expected") == "ceiling"
+        or getattr(args, "headroom", False)
+    ):
+        # The both suite benchmarks, and the ceiling only splits simulated layer times.
+        raise ValueError(
+            "--bound ceiling / --headroom need `projection performance --profiling-mode simulate`"
+        )
+    if args.suite == "performance":
+        from primus.core.projection.ceiling import parse_levers
+
+        parse_levers(getattr(args, "ceiling_levers", None))
+
+    if getattr(args, "op_bringup", "off") != "off":
+        # The projection agent adds models for the ops this workload needs and
+        # the projection does not price yet; the run below then picks them up.
+        from primus.agents.projection_agent.cli import agent_from_args
+
+        agent = agent_from_args(args, gpu_arch=getattr(args, "gpu_arch", None))
+        agent.ensure_ops(args.config)
 
     if args.suite == "memory":
         # Benchmark / both modes need the backend on the import path
@@ -286,6 +308,21 @@ def _add_perf_compute_baseline_arg(parser):
     )
 
 
+def _add_hw_calibration_arg(parser):
+    parser.add_argument(
+        "--skip-hw-calibration",
+        action="store_true",
+        default=False,
+        help=(
+            "Benchmark mode measures each bench GPU's effective compute clock "
+            "(back-calculated from the workload's largest GEMMs) and its STREAM "
+            "memory bandwidth before the layer benchmark, and stores both in the "
+            "bench artifact. This flag skips that step (a few seconds per GPU). "
+            "Equivalent to PRIMUS_BENCH_SKIP_HW_CALIB=1."
+        ),
+    )
+
+
 def _add_topology_args(parser):
     """``--target-nodes`` / ``--benchmark-gpus`` — shared between memory and perf."""
     parser.add_argument(
@@ -383,6 +420,20 @@ def _add_performance_args(parser):
             "Example: --gpu-clock-mhz 1500\n"
         ),
     )
+    parser.add_argument(
+        "--hbm-bandwidth-gbps",
+        type=float,
+        required=False,
+        default=None,
+        help=(
+            "Override the HBM bandwidth (GB/s) the memory-bound terms are priced at.\n"
+            "Peak-referenced: the profilers still apply their own sustained fractions.\n"
+            "Benchmark mode otherwise uses the bench GPUs' STREAM result, derated\n"
+            "(PRIMUS_HBM_STREAM_DERATE, default 0.72); simulation mode uses the\n"
+            "--gpu-arch profile peak. Can also be set via PRIMUS_HBM_BANDWIDTH_GBPS.\n"
+            "The benchmark-mode report prints the value to reuse here.\n"
+        ),
+    )
     _add_pipeline_schedule_algorithm_arg(parser)
     # Projection-specific overrides.
     parser.add_argument(
@@ -445,6 +496,46 @@ def _add_performance_args(parser):
         default=False,
         help=_argparse.SUPPRESS,
     )
+    _add_ceiling_args(parser)
+
+
+def _add_ceiling_args(parser):
+    parser.add_argument(
+        "--bound",
+        dest="projection_bound",
+        type=str,
+        default="expected",
+        choices=["expected", "ceiling"],
+        help=(
+            "Projection bound (simulate mode only):\n"
+            "  expected - what today's stack achieves (default)\n"
+            "  ceiling  - same deployment with --ceiling-levers at their physical best;\n"
+            "             kernels stay Origami's. A measurement above it is a modelling gap.\n"
+        ),
+    )
+    parser.add_argument(
+        "--ceiling-levers",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated levers the ceiling removes (default: all):\n"
+            "  overlap - TP/A2A/grad-reduce/FSDP comm hidden behind compute, PP sends free\n"
+            "  fusion  - norm/residual, MoE permute/activation/quant, mixer gate passes fused\n"
+            "  launch  - zero kernel-launch latency and pipeline bubbles\n"
+        ),
+    )
+    parser.add_argument(
+        "--headroom",
+        action="store_true",
+        default=False,
+        help="Also print expected vs ceiling with each lever's gain and a stacked waterfall.",
+    )
+    parser.add_argument(
+        "--headroom-measured",
+        type=float,
+        default=None,
+        help="Measured tokens/s/GPU to place against the expected and ceiling bounds in the headroom report.",
+    )
 
 
 def register_subcommand(subparsers):
@@ -490,6 +581,7 @@ def register_subcommand(subparsers):
     add_pretrain_parser(memory)
     _add_memory_args(memory)
     _add_topology_args(memory)
+    _add_hw_calibration_arg(memory)
     _add_save_benchmark_arg(memory)
     _add_load_benchmark_arg(memory, include_compute_baseline_alias=True)
 
@@ -500,6 +592,7 @@ def register_subcommand(subparsers):
     add_pretrain_parser(performance)
     _add_topology_args(performance)
     _add_performance_args(performance)
+    _add_hw_calibration_arg(performance)
     _add_save_benchmark_arg(performance)
     # ``--load-benchmark`` skips the bench entirely and runs the perf
     # projection from a saved artifact (timing + reduction info come from
@@ -520,6 +613,7 @@ def register_subcommand(subparsers):
     add_pretrain_parser(both)
     _add_topology_args(both)
     _add_performance_args(both)
+    _add_hw_calibration_arg(both)
     # `both` always runs perf-bench + benchmark-anchored memory projection;
     # --memory-mode is meaningless here, so we only expose the safety
     # margin from the memory side.
@@ -529,6 +623,11 @@ def register_subcommand(subparsers):
     # it should NOT be a memory-load alias here because the orchestrator
     # always runs a fresh bench.
     _add_perf_compute_baseline_arg(both)
+
+    from primus.agents.projection_agent.cli import add_op_bringup_args
+
+    for suite in (memory, performance, both):
+        add_op_bringup_args(suite, default="off")
 
     parser.set_defaults(func=run)
     return parser

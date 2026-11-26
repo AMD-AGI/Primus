@@ -29,31 +29,46 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         """
         log_rank_0("Setting up Megatron model only (no training loop)...")
 
+        import inspect
+
         from megatron.core.enums import ModelType
         from megatron.training.initialize import initialize_megatron
         from megatron.training.training import setup_model_and_optimizer
 
         from primus.core.utils.import_utils import get_model_provider
 
-        # Determine model type (gpt or mamba) from backend_args
         model_type = getattr(self.backend_args, "model_type", "gpt")
         log_rank_0(f"-detected model_type: {model_type}")
 
         # parse_args was patched in setup() to return backend_args, so
         # initialize_megatron consumes the Primus-configured arguments (same as
         # the front of megatron's pretrain()).
-        initialize_megatron(args_defaults={"tokenizer_type": "GPT2BPETokenizer"})
+        uses_run_config = "args_defaults" not in inspect.signature(initialize_megatron).parameters
+        if uses_run_config:  # Megatron-core 0.19+: the caller parses args, as pretrain() does
+            from megatron.core.process_groups_config import ProcessGroupCollection
 
-        # Get model provider with correct model_type (reuse the core runtime helper)
-        if model_type != "gpt":
-            model_provider = get_model_provider(model_type=model_type)
+            from primus.backends.megatron.training.run_config import build_run_config
+
+            run_config = build_run_config()
+            initialize_megatron()
         else:
-            model_provider = get_model_provider()
+            initialize_megatron(args_defaults={"tokenizer_type": "GPT2BPETokenizer"})
+
+        model_provider = get_model_provider(model_type=model_type)
         log_rank_0(f"-model_provider: {model_provider}")
 
-        model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
-            model_provider, ModelType.encoder_or_decoder, checkpointing_context={}
-        )
+        if uses_run_config:
+            model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
+                ModelType.encoder_or_decoder,
+                model_provider_func=model_provider,
+                checkpointing_context={},
+                cfg_container=run_config,
+                pg_collection=ProcessGroupCollection.use_mpu_process_groups(),
+            )
+        else:
+            model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
+                model_provider, ModelType.encoder_or_decoder, checkpointing_context={}
+            )
         self.model = model
         self.optimizer = optimizer
         self.opt_param_scheduler = opt_param_scheduler
@@ -125,6 +140,36 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         provider.is_distributed = True  # Always True to match Megatron's behavior
         return provider
 
+    def _get_training_components(self, model_type):
+        """``(forward_step, train_valid_test_datasets_provider)`` for ``model_type``.
+
+        Families that train like GPT go through the overridable methods so
+        subclasses (e.g. diffusion/Flux) can plug in their own; the rest import
+        both from the upstream entrypoint their registry entry names.
+        """
+        from primus.backends.megatron.core.models.registry import (
+            GPT_TRAINING,
+            get_model_family,
+        )
+
+        family = get_model_family(model_type)
+        if family.training == GPT_TRAINING:
+            return self.get_forward_step(), self.get_datasets_provider()
+
+        entrypoint = family.training_entrypoint()
+        log_rank_0(f"Using forward_step and datasets provider from {entrypoint.__name__}")
+        provider = entrypoint.train_valid_test_datasets_provider
+        # Every upstream pretrain entrypoint sets `is_distributed = True` inside
+        # `if __name__ == "__main__":` (pretrain_gpt.py:333), which never runs when
+        # Primus imports it. Left absent, `training.py:3474-3477` admits only TP
+        # rank 0 into dataset construction while `blended_megatron_dataset_builder.py:448-452`
+        # still expects every other rank at its `torch.distributed.barrier()`, so at
+        # TP > 1 training deadlocks before iteration 1. get_datasets_provider() sets it
+        # for the GPT path; DiffusionPretrainTrainer overrides that method and may
+        # legitimately leave it False (dataset_provider.py:55).
+        provider.is_distributed = True
+        return entrypoint.forward_step, provider
+
     def train(self):
         """Execute Megatron pre-training."""
         log_rank_0("Executing Megatron pretrain...")
@@ -136,77 +181,10 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
         from primus.core.utils.import_utils import get_model_provider
 
-        # Determine model type (gpt / mamba / deepseek_v4 / kimi_k3 / glm5_next / zaya1 / diffusion)
-        # from backend_args
         model_type = getattr(self.backend_args, "model_type", "gpt")
         log_rank_0(f"-detected model_type: {model_type}")
 
-        # Import the appropriate training components based on model_type.
-        # DeepSeek-V4 and Kimi K3 are causal-LM with the same data shape as
-        # GPT, so we reuse pretrain_gpt's forward_step + dataset provider;
-        # only the model_provider itself is model-family-specific.
-        #
-        # Each of the branches below imports a provider *function* from an
-        # upstream pretrain entrypoint, and every one of those entrypoints sets
-        # `is_distributed = True` on it from inside `if __name__ == "__main__":`
-        # (pretrain_gpt.py:333). Primus imports the function and calls pretrain()
-        # programmatically, so that line never runs and the attribute is absent.
-        # Left absent, `training.py:3474-3477` admits only TP rank 0 into dataset
-        # construction, while `blended_megatron_dataset_builder.py:448-452` still
-        # expects every non-building rank to enter and execute the matching
-        # `torch.distributed.barrier()`. At TP > 1 the other TP ranks never arrive:
-        # rank 0 blocks in the builder's barrier while they run ahead to
-        # `training.py:3520`'s `broadcast(flags, 0)`, and training deadlocks before
-        # iteration 1. Invisible at TP == 1, where every rank *is* TP rank 0.
-        # Restoring the flag is therefore mandatory, and is a no-op at TP == 1.
-        # Do NOT hoist this past the `else` branch: DiffusionPretrainTrainer
-        # overrides get_datasets_provider() and sets `is_distributed` from its own
-        # data provider, where False is a legitimate choice (dataset_provider.py:55).
-        if model_type == "mamba":
-            from pretrain_mamba import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using Mamba model provider and training components")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "deepseek_v4":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using DeepSeek-V4 model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "kimi_k3":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using Kimi-K3 model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "glm5_next":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using GLM5-Next model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        elif model_type == "zaya1":
-            from pretrain_gpt import (  # type: ignore
-                forward_step,
-                train_valid_test_datasets_provider,
-            )
-
-            log_rank_0("Using ZAYA1 model provider; reusing pretrain_gpt forward_step + datasets")
-            train_valid_test_datasets_provider.is_distributed = True
-        else:
-            # Use overridable methods so subclasses (e.g. diffusion/Flux) can plug in their own
-            # forward_step / dataset_provider. Defaults pull from pretrain_gpt.
-            forward_step = self.get_forward_step()
-            train_valid_test_datasets_provider = self.get_datasets_provider()
+        forward_step, train_valid_test_datasets_provider = self._get_training_components(model_type)
 
         # Handle Megatron version differences (v0.12.0 vs newer with inprocess_restart)
         wrapped_pretrain = pretrain
@@ -228,14 +206,10 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         if "store" in sig.parameters:
             kwargs["store"] = store
 
-        # Resolve model_provider: prefer subclass-provided attribute (e.g. diffusion/Flux),
-        # else fall back to registry-based lookup with model_type for mamba/gpt.
+        # Prefer a subclass-provided model_provider (e.g. diffusion/Flux).
         model_provider = getattr(self, "model_provider", None)
         if model_provider is None:
-            if model_type != "gpt":
-                model_provider = get_model_provider(model_type=model_type)
-            else:
-                model_provider = get_model_provider()
+            model_provider = get_model_provider(model_type=model_type)
         log_rank_0(f"-model_provider: {model_provider}")
 
         # Patch Megatron's get_forward_backward_func to support dump_pp_data
@@ -266,14 +240,29 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         if hasattr(mt_training, "get_forward_backward_func"):
             mt_training.get_forward_backward_func = patched_get_forward_backward_func
 
+        from primus.backends.megatron.training.run_config import (
+            build_run_config,
+            uses_cfg_container_api,
+        )
+
         try:
-            wrapped_pretrain(
-                train_valid_test_datasets_provider,
-                model_provider,
-                ModelType.encoder_or_decoder,
-                forward_step,
-                **kwargs,
-            )
+            if uses_cfg_container_api(pretrain):
+                wrapped_pretrain(
+                    build_run_config(),
+                    train_valid_test_datasets_provider,
+                    ModelType.encoder_or_decoder,
+                    forward_step,
+                    model_provider=model_provider,
+                    **kwargs,
+                )
+            else:
+                wrapped_pretrain(
+                    train_valid_test_datasets_provider,
+                    model_provider,
+                    ModelType.encoder_or_decoder,
+                    forward_step,
+                    **kwargs,
+                )
             log_rank_0("[MegatronPretrainTrainer] pretrain() completed successfully")
         except Exception as e:
             log_rank_0(f"[MegatronPretrainTrainer] ERROR in pretrain(): {type(e).__name__}: {e}")

@@ -1,0 +1,21 @@
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+#
+# Inkling-Small 12-layer proxy for single-node experiments: every per-tensor
+# width is the released value; only the depth shrinks to 12 layers (2 dense +
+# 10 MoE). Layers 5 and 11 are global, the rest slide, so both attention types
+# and both MLP types are exercised at production widths.
+#
+# PARAMETER COUNT (from the checkpoint headers): 67.5 B -- 10 MoE layers x
+# 256 experts x 25 M (3 x 4096 x 2048) = 64.4 B routed, plus embed + head
+# (0.8 B each), attention and the two dense layers. At EP=8 that is ~8 B
+# routed parameters per GPU.
+###############################################################################
+extends:
+  - inkling_small.yaml
+
+num_layers: 12
+moe_layer_freq: "([0]*2+[1]*10)"

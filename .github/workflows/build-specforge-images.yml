@@ -1,0 +1,112 @@
+name: Build SpecForge Images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - .github/workflows/build-specforge-images.yml
+      - examples/specforge/**
+      - primus/**
+      - runner/**
+      - primus_cli.py
+      - pyproject.toml
+      - LICENSE
+      - README.md
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/workflows/build-specforge-images.yml
+      - examples/specforge/**
+      - primus/**
+      - runner/**
+      - primus_cli.py
+      - pyproject.toml
+      - LICENSE
+      - README.md
+
+permissions:
+  contents: read
+
+concurrency:
+  group: specforge-images-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_REPOSITORY: docker.io/tasimage/primus-specforge
+
+jobs:
+  build:
+    # Match the main CI image build: drafts wait until ready for review.
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: build-docker
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [mi30x, mi35x]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Build image and run GPU-free image checks
+        id: build
+        env:
+          VARIANT: ${{ matrix.variant }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper=examples/specforge/docker/build.py
+          version_tag="$(python3 "$helper" "$VARIANT" --field version_tag)"
+          base_image="$(python3 "$helper" "$VARIANT" --field base_image)"
+          tag="$version_tag"
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            tag="pr-${PR_NUMBER}-${version_tag}"
+          elif [[ "$GITHUB_REF" != "refs/heads/main" && "$GITHUB_REF" != refs/tags/* ]]; then
+            # Manual feature-branch builds must not overwrite main/release tags.
+            tag="sha-${GITHUB_SHA:0:12}-${version_tag}"
+          fi
+          python3 "$helper" "$VARIANT" --build --tag "${IMAGE_REPOSITORY}:${tag}" --revision "$GITHUB_SHA"
+          image_id="$(docker image inspect -f '{{.Id}}' "${IMAGE_REPOSITORY}:${tag}")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          mkdir -p image-metadata
+          printf 'variant=%s\nbase_image=%s\nrevision=%s\nimage=%s:%s\nimage_id=%s\n' \
+            "$VARIANT" "$base_image" "$GITHUB_SHA" "$IMAGE_REPOSITORY" "$tag" "$image_id" \
+            > "image-metadata/${VARIANT}.txt"
+          python3 "$helper" "$VARIANT" > "image-metadata/${VARIANT}.json"
+      - name: Publish image
+        # Never expose registry credentials to fork or Dependabot PRs.
+        if: >-
+          github.actor != 'dependabot[bot]' &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          PRIMUS_DOCKER_HUB_TOKEN: ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          IMAGE_TAG: ${{ steps.build.outputs.tag }}
+          VARIANT: ${{ matrix.variant }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$PRIMUS_DOCKER_HUB_TOKEN" ]]; then
+            echo "::error::PRIMUS_DOCKER_HUB_TOKEN is required to publish SpecForge images."
+            exit 1
+          fi
+          # Keep registry credentials out of the shared Docker config and build.
+          export DOCKER_CONFIG
+          DOCKER_CONFIG="$(mktemp -d "${HOME}/docker-push-auth-specforge-XXXXXX")"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$PRIMUS_DOCKER_HUB_TOKEN" | docker login -u tasimage --password-stdin
+          docker push "${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+          digest_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "${IMAGE_REPOSITORY}:${IMAGE_TAG}")"
+          printf 'published_image=%s\n' "$digest_ref" >> "image-metadata/${VARIANT}.txt"
+          printf '### SpecForge %s\n\nPublished `%s`\n' "$VARIANT" "$digest_ref" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload image metadata
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: specforge-image-${{ matrix.variant }}
+          path: image-metadata/
+          if-no-files-found: warn
+          retention-days: 14

@@ -64,7 +64,9 @@
 #           the rocm-smi product name.
 #   BACKEND picks second-level keys, comma-separated. Required, because each
 #           training image carries only one framework stack:
-#             primus_the_rock_ci_* (PyTorch) -> megatron, torchtitan
+#             primus_the_rock_ci_* (PyTorch) -> megatron, torchtitan,
+#                                               megatron_bridge, diffusion,
+#                                               recommendation
 #             jax_the_rock_ci_*    (JAX)     -> maxtext, maxdiffusion
 #           Those are the two valid groupings; megatron,maxtext cannot work on
 #           either image, so there is no safe "run them all" default.
@@ -74,6 +76,12 @@
 #     MI355X (gfx950) -- a hardware difference, not oversight.
 #   * MaxText llama3_70B and llama3.3_70B run FP8 only on MI355X; examples/
 #     has no nanoo_fp8 configs for them on MI300X / MI325X.
+#   * diffusion runs single-node only (run_batch.sh), with each GPU's own
+#     configs; its batch sizes differ between gfx942 and gfx950.
+#   * recommendation (DLRMv4) runs the MLPerf recipe's FP8 / FlyDSL kernels on
+#     MI355X only (gfx950-only); every GPU runs a BF16 config with Triton
+#     attention, MI300X at half the batch (512 per GPU) to fit its memory.
+#     Single node (run_batch.sh), on synthetic data.
 #   * MaxDiffusion has no MI325X directory upstream, so MI325X runs the
 #     MI300X configs; the copies in the v26.7 result directory are
 #     byte-identical to them.
@@ -85,6 +93,7 @@
 MI300X:
   megatron:
     - examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/deepseek_v2_lite-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/gpt_oss_20B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
@@ -94,6 +103,7 @@ MI300X:
     - examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen2.5_7B-FP8-pretrain.yaml
     - examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
@@ -107,6 +117,8 @@ MI300X:
     - examples/megatron/configs/MI300X/kda_1B_BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/zebra_llama_gdn_1B_BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/zaya1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI300X/zaya1_8B-FP8-pretrain.yaml
 
   torchtitan:
     - examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml
@@ -118,6 +130,20 @@ MI300X:
   megatron_bridge:
     - examples/megatron_bridge/configs/MI300X/qwen3_32b_lora_posttrain.yaml
     - examples/megatron_bridge/configs/MI300X/qwen3_32b_sft_posttrain.yaml
+
+  # AMDiffusionBenchmark workloads on the in-tree diffusion backend
+  # (`train posttrain`). TRAIN_STEPS does not apply to them: their
+  # training.steps is part of the benchmark.
+  diffusion:
+    - examples/diffusion/configs/MI300X/benchmark_flux_dev-posttrain.yaml
+    - examples/diffusion/configs/MI300X/benchmark_sdxl-posttrain.yaml
+    - examples/diffusion/configs/MI300X/benchmark_mochi_1-posttrain.yaml
+    - examples/diffusion/configs/MI300X/benchmark_hunyuan_video-posttrain.yaml
+    - examples/diffusion/configs/MI300X/benchmark_wan2_1_i2v-posttrain.yaml
+
+  # bf16: the FP8 / FlyDSL kernels of the MI355X config are gfx950-only
+  recommendation:
+    - examples/recommendation/configs/MI300X/dlrm_v4-BF16-pretrain.yaml
 
   maxtext:
     - examples/maxtext/configs/MI300X/deepseek_v2_16B-bf16-pretrain.yaml
@@ -153,6 +179,7 @@ MI300X:
 MI325X:
   megatron:
     - examples/megatron/configs/MI325X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/deepseek_v2_lite-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/gpt_oss_20B-BF16-pretrain.yaml
     - examples/megatron/configs/MI325X/gpt_oss_20B-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/llama3.1_8B-BF16-pretrain.yaml
@@ -162,6 +189,7 @@ MI325X:
     - examples/megatron/configs/MI325X/llama3.3_70B-BF16-pretrain.yaml
     - examples/megatron/configs/MI325X/llama3.3_70B-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/qwen2.5_7B-BF16-pretrain.yaml
     - examples/megatron/configs/MI325X/qwen2.5_7B-FP8-pretrain.yaml
     - examples/megatron/configs/MI325X/qwen2.5_72B-BF16-pretrain.yaml
@@ -175,6 +203,8 @@ MI325X:
     - examples/megatron/configs/MI300X/kda_1B_BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/zebra_llama_gdn_1B_BF16-pretrain.yaml
     - examples/megatron/configs/MI300X/zebra_llama_kda_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/zaya1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI325X/zaya1_8B-FP8-pretrain.yaml
 
   torchtitan:
     - examples/torchtitan/configs/MI325X/deepseek_v3_16b-BF16-pretrain.yaml
@@ -186,6 +216,17 @@ MI325X:
   megatron_bridge:
     - examples/megatron_bridge/configs/MI300X/qwen3_32b_lora_posttrain.yaml
     - examples/megatron_bridge/configs/MI300X/qwen3_32b_sft_posttrain.yaml
+
+  diffusion:
+    - examples/diffusion/configs/MI325X/benchmark_flux_dev-posttrain.yaml
+    - examples/diffusion/configs/MI325X/benchmark_sdxl-posttrain.yaml
+    - examples/diffusion/configs/MI325X/benchmark_mochi_1-posttrain.yaml
+    - examples/diffusion/configs/MI325X/benchmark_hunyuan_video-posttrain.yaml
+    - examples/diffusion/configs/MI325X/benchmark_wan2_1_i2v-posttrain.yaml
+
+  # bf16: the FP8 / FlyDSL kernels of the MI355X config are gfx950-only
+  recommendation:
+    - examples/recommendation/configs/MI325X/dlrm_v4-BF16-pretrain.yaml
 
   maxtext:
     - examples/maxtext/configs/MI325X/deepseek_v2_16B-bf16-pretrain.yaml
@@ -222,6 +263,7 @@ MI325X:
 MI355X:
   megatron:
     - examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/deepseek_v2_lite-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/gpt_oss_20B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/gpt_oss_20B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
@@ -233,6 +275,7 @@ MI355X:
     - examples/megatron/configs/MI355X/llama3.3_70B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/llama3.3_70B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen2.5_7B-BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen2.5_7B-FP8-pretrain.yaml
     - examples/megatron/configs/MI355X/qwen2.5_72B-BF16-pretrain.yaml
@@ -246,6 +289,10 @@ MI355X:
     - examples/megatron/configs/MI355X/kda_1B_BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/zebra_llama_gdn_1B_BF16-pretrain.yaml
     - examples/megatron/configs/MI355X/zebra_llama_kda_1B_BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/zaya1_8B-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/zaya1_8B-FP8-pretrain.yaml
+    - examples/megatron/configs/MI355X/inkling_large_6L-BF16-pretrain.yaml
+    - examples/megatron/configs/MI355X/inkling_large_6L-FP8-pretrain.yaml
 
   torchtitan:
     - examples/torchtitan/configs/MI355X/deepseek_v3_16b-BF16-pretrain.yaml
@@ -257,6 +304,18 @@ MI355X:
   megatron_bridge:
     - examples/megatron_bridge/configs/MI355X/qwen3_32b_lora_posttrain.yaml
     - examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
+
+  diffusion:
+    - examples/diffusion/configs/MI355X/benchmark_flux_dev-posttrain.yaml
+    - examples/diffusion/configs/MI355X/benchmark_sdxl-posttrain.yaml
+    - examples/diffusion/configs/MI355X/benchmark_mochi_1-posttrain.yaml
+    - examples/diffusion/configs/MI355X/benchmark_hunyuan_video-posttrain.yaml
+    - examples/diffusion/configs/MI355X/benchmark_wan2_1_i2v-posttrain.yaml
+
+  # FP8: the MLPerf recipe's kernels; BF16: the kernel set of MI300X / MI325X
+  recommendation:
+    - examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml
+    - examples/recommendation/configs/MI355X/dlrm_v4-BF16-pretrain.yaml
 
   # MI355X (gfx950) has native FP8, so the FP8 variants are named `fp8` here
   # where MI300X / MI325X (gfx942) use `nanoo_fp8`.

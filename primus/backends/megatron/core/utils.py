@@ -9,7 +9,65 @@ from typing import Any, List
 import torch
 from megatron.core import parallel_state
 
-from primus.core.utils.module_utils import log_rank_0
+from primus.core.utils.module_utils import log_rank_0, warning_rank_0
+
+
+def get_megatron_arg(name: str, default: Any = None) -> Any:
+    """Return ``name`` from Megatron-LM's global args, or ``default`` when those args are not set up.
+
+    Megatron-Bridge builds and trains models without initializing Megatron-LM's global args, so model
+    code that reads optional switches from them has to tolerate their absence.
+    """
+    try:
+        from megatron.training import get_args
+
+        return getattr(get_args(), name, default)
+    except (ImportError, AssertionError):
+        return default
+
+
+def mtp_on_this_rank_compat(config, vp_stage, pg_collection=None) -> bool:
+    """``mtp_on_this_rank`` for the model's own config, across Megatron versions.
+
+    Megatron-core 0.19+ take the layout and sizes instead of the config.
+    """
+    import inspect
+
+    from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank
+
+    params = inspect.signature(mtp_on_this_rank).parameters
+    if next(iter(params)) == "config":
+        return mtp_on_this_rank(config, ignore_virtual=False, vp_stage=vp_stage)
+    kwargs = {}
+    # Megatron-LM main only.
+    if "pp_group" in params:
+        kwargs["pp_group"] = getattr(pg_collection, "pp", None)
+    if "vp_size" in params:
+        kwargs["vp_size"] = config.virtual_pipeline_model_parallel_size
+    return mtp_on_this_rank(
+        layout=config.pipeline_model_parallel_layout,
+        mtp_num_layers=config.mtp_num_layers,
+        ignore_virtual=False,
+        vp_stage=vp_stage,
+        **kwargs,
+    )
+
+
+def process_mtp_loss_compat(*, runtime_gather_output=None, tp_group=None, **kwargs):
+    """``process_mtp_loss`` across Megatron versions.
+
+    Megatron-LM main dropped ``runtime_gather_output``; ``tp_group`` is newer than the pin.
+    """
+    import inspect
+
+    from megatron.core.transformer.multi_token_prediction import process_mtp_loss
+
+    params = inspect.signature(process_mtp_loss).parameters
+    if "runtime_gather_output" in params:
+        kwargs["runtime_gather_output"] = runtime_gather_output
+    if "tp_group" in params:
+        kwargs["tp_group"] = tp_group
+    return process_mtp_loss(**kwargs)
 
 
 @lru_cache
@@ -39,6 +97,64 @@ def shard_batch_on_this_cp_rank(sharder, batch):
     return batch
 
 
+def _compile_errors() -> tuple:
+    """Exception types meaning torch.compile could not compile a function, as opposed to the function failing.
+
+    TorchDynamoException covers Inductor's errors. Hitting the recompile limit
+    under fullgraph=True raises a plain Exception, named by torch version.
+    """
+    import torch._dynamo.exc as dynamo_exc
+
+    names = ("TorchDynamoException", "FailOnRecompileLimitHit", "FailOnCacheLimitHit")
+    return tuple(cls for cls in (getattr(dynamo_exc, name, None) for name in names) if cls is not None)
+
+
+def _first_line(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text.splitlines()[0][:500] if text else ''}"
+
+
+def maybe_compile(fn, dynamic: bool = False):
+    """``fn`` under torch.compile (fullgraph), or ``fn`` itself once it fails to compile.
+
+    Compilation happens at the first call. When a compiled call fails to compile
+    (a Dynamo or Inductor error, including hitting the recompile limit), the
+    failure is logged once and ``fn`` runs eagerly from then on. Any other
+    error, such as running out of memory, propagates. ``compiled_ok()`` on the
+    result says whether the compiled path is still in use.
+    """
+    if not hasattr(torch, "compile"):
+        return fn
+    name = f"{fn.__module__}.{fn.__qualname__}"
+    try:
+        # emulate_precision_casts keeps the function's explicit casts to a lower
+        # precision as rounding points, as eager runs them. Inductor can still
+        # reorder reductions, so results match eager to rounding error, not bit
+        # for bit.
+        compiled = torch.compile(
+            fn, dynamic=dynamic, fullgraph=True, options={"emulate_precision_casts": True}
+        )
+        compile_errors = _compile_errors()
+    except Exception as exc:  # pragma: no cover - depends on the image
+        warning_rank_0(f"torch.compile is unavailable for {name}, running it eagerly: {_first_line(exc)}")
+        return fn
+    state = {"ok": True}
+
+    def wrapper(*args, **kwargs):
+        if state["ok"]:
+            try:
+                return compiled(*args, **kwargs)
+            except compile_errors as exc:
+                state["ok"] = False
+                warning_rank_0(
+                    f"torch.compile of {name} failed, running it eagerly from now on: {_first_line(exc)}"
+                )
+        return fn(*args, **kwargs)
+
+    wrapper.compiled_ok = lambda: state["ok"]
+    return wrapper
+
+
 def apply_torch_compile_if_enabled(model: List[Any], args: Any) -> None:
     """
     Apply torch.compile to model AFTER distributed wrapping and config setup.
@@ -55,7 +171,10 @@ def apply_torch_compile_if_enabled(model: List[Any], args: Any) -> None:
     Raises:
         Exception: If compilation fails, exception is raised (not caught)
     """
-    from megatron.training.utils import unwrap_model
+    try:
+        from megatron.training.utils import unwrap_model
+    except ImportError:  # moved to megatron.core.utils in Megatron-core 0.19
+        from megatron.core.utils import unwrap_model
 
     # Check if compilation is enabled
     if not getattr(args, "enable_torch_compile", False):

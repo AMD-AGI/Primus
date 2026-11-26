@@ -56,17 +56,30 @@ def patch_validate_args(ctx: PatchContext):
 # ---------------------------------------------------------------------------
 
 
+def _validate_args_source() -> str:
+    """Source of the current ``_primus_original_validate_args``.
+
+    ``inspect.getsource`` cannot read a function recompiled by ``exec``, so each
+    rewrite keeps its source on the function for the next one to build on.
+    """
+    import megatron.training.arguments as megatron_args
+
+    original = megatron_args._primus_original_validate_args
+    return getattr(original, "_primus_source", None) or inspect.getsource(original)
+
+
 def _patch_validate_args_source(ori_code: str, new_code: str) -> None:
     """Replace a code fragment in the original ``validate_args`` source and
     store the recompiled function back."""
     import megatron.training.arguments as megatron_args
 
     original = megatron_args._primus_original_validate_args
-    source = inspect.getsource(original)
-    modified_source = source.replace(ori_code, new_code)
+    modified_source = _validate_args_source().replace(ori_code, new_code)
     namespace = {}
     exec(modified_source, original.__globals__, namespace)  # noqa: S102
-    megatron_args._primus_original_validate_args = namespace[original.__name__]
+    patched = namespace[original.__name__]
+    patched._primus_source = modified_source
+    megatron_args._primus_original_validate_args = patched
 
 
 @register_patch(
@@ -117,3 +130,56 @@ def patch_validate_args_fp4(ctx: PatchContext):
         "[Patch:megatron.validate_args.fp4_te_version] "
         "Patched validate_args to suppress FP4 TE version check"
     )
+
+
+def _te_cross_entropy_has_fp32_grad() -> bool:
+    """Whether TE's fused cross entropy keeps the input gradient in FP32 (TE PR #3193).
+
+    The fix renames ``cross_entropy_backward``'s first parameter from ``_input`` to
+    ``grad_input``; ROCm TE builds report versions that do not track when it landed.
+    """
+    try:
+        from transformer_engine.pytorch.triton import cross_entropy as te_triton_ce
+    except ImportError:
+        return False
+    return next(iter(inspect.signature(te_triton_ce.cross_entropy_backward).parameters), None) == "grad_input"
+
+
+@register_patch(
+    "megatron.validate_args.te_cross_entropy_version",
+    backend="megatron",
+    phase="before_train",
+    description="Keep TE cross-entropy fusion without TE's FP32-gradient fix, as on the pinned Megatron",
+    condition=lambda ctx: getattr(get_args(ctx), "cross_entropy_loss_fusion", False)
+    and getattr(get_args(ctx), "cross_entropy_fusion_impl", None) == "te",
+)
+def patch_validate_args_te_cross_entropy(ctx: PatchContext):
+    """
+    Megatron-core 0.17-0.19 reject ``cross_entropy_fusion_impl='te'`` and Megatron-LM main
+    rejects it below TE 2.19 (TE PR #3193: BF16 input gradient). ROCm TE versions do not
+    track the fix, and the native fusion runs out of memory on Llama-3.1-70B (TP1, seq 8192),
+    so drop the check and keep the kernel the pinned Megatron runs.
+    """
+    source = _validate_args_source()
+    for ori_code, new_code in (
+        ('and not is_te_min_version("2.19.0")', "and False"),
+        ("args.cross_entropy_loss_fusion and args.cross_entropy_fusion_impl == 'te'\n", "False\n"),
+    ):
+        if ori_code in source:
+            _patch_validate_args_source(ori_code, new_code)
+            log_rank_0(
+                "[Patch:megatron.validate_args.te_cross_entropy_version] "
+                "Removed the validate_args check that rejects TE fused cross entropy"
+            )
+            break
+    else:
+        log_rank_0(
+            "[Patch:megatron.validate_args.te_cross_entropy_version] "
+            "validate_args has no TE fused cross entropy check; nothing to remove"
+        )
+    if not _te_cross_entropy_has_fp32_grad():
+        log_rank_0(
+            "[Patch:megatron.validate_args.te_cross_entropy_version] WARNING: "
+            "TE fused cross entropy lacks the FP32-gradient fix (TE PR #3193); keeping it as on "
+            "the pinned Megatron. TE 2.19+ or ROCm TE IFU-release_v2.18 have the fix."
+        )

@@ -106,6 +106,15 @@ export HSA_NO_SCRATCH_RECLAIM=1
 2. **Simulate** pipeline scheduling, data parallelism, and communication using analytical models.
 3. **Project** iteration time and tokens/s to a **target** node count when you specify one.
 
+### Hardware calibration (benchmark mode)
+
+Before the layer benchmark, each bench GPU measures its compute clock and memory bandwidth. Both are printed and saved in the bench artifact.
+
+- **Compute clock.** The workload's largest GEMMs are timed in the workload's precision (bf16, fp8, or native MXFP8/MXFP4 where the GPU supports it, else fp8) once SCLK has settled. The effective clock is the one at which Origami's predicted time matches the measured time; MX GEMMs, which Origami does not model, use the live SCLK. Use the printed `--gpu-clock-mhz` to simulate at that clock.
+- **Memory bandwidth.** STREAM (copy/scale/add/triad on 1 GiB arrays) runs once MCLK has settled, and the best kernel gives the sustained bandwidth. This is derated by 0.72, based on measurements on the earlier generation (MI325X), and the projection's memory-bound terms use the result instead of the spec peak.
+
+Opt out with `--skip-hw-calibration`. Override the bandwidth with `--hbm-bandwidth-gbps`.
+
 ### Projecting to a specific node count
 
 ```bash
@@ -116,6 +125,25 @@ export HSA_NO_SCRATCH_RECLAIM=1
 ```
 
 If `--target-nodes` is omitted, the tool defaults to the **minimum** number of nodes implied by your parallelism configuration (TP, PP, EP, CP, GPUs per node).
+
+### Expected and ceiling bounds (simulate mode)
+
+The default projection is the *expected* bound: what today's software stack achieves. `--bound ceiling` projects the same deployment with the software levers at their physical best, while GEMM and attention kernels stay Origami's and the SDPA simulator's:
+
+- **overlap**: TP all-reduce, MoE all-to-all, gradient reduce and FSDP traffic are hidden behind compute, limited only by the compute available to hide them. Pipeline point-to-point sends cost nothing.
+- **fusion**: element-wise passes (norm and residual, MoE permute and unpermute, activation, expert quantize and dequantize, a hybrid mixer's gates and norms) are fused into neighbouring kernels.
+- **launch**: zero kernel-launch latency and a bubble-free pipeline (the busiest stage's compute over all microbatches).
+
+A measured throughput above the ceiling means the model is missing something. `--headroom` prints both bounds, each lever's gain on its own, and a waterfall that stacks the levers biggest first. `--headroom-measured` adds a measured tokens/s/GPU to that report.
+
+```bash
+./runner/primus-cli direct --script primus/cli/main.py -- \
+  projection performance \
+  --config examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml \
+  --profiling-mode simulate --gpu-arch mi355x --headroom
+```
+
+Both options need `--profiling-mode simulate` without `--load-benchmark`, because measured layer times cannot be split into the terms the ceiling removes.
 
 ### Parallelism overrides (environment)
 
@@ -164,12 +192,18 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 | `--gemm-backend` | GEMM simulation backend when profiling is simulated (`origami`). |
 | `--gpu-arch` | Target architecture for simulation (for example `mi300x`, `gfx942`, `mi355x`, `gfx950`); can use `PRIMUS_GPU_ARCH`. |
 | `--gpu-clock-mhz` | Override GPU clock in MHz for simulation; can use `PRIMUS_GPU_CLOCK_MHZ`. |
+| `--hbm-bandwidth-gbps` | Override the peak-equivalent HBM bandwidth (GB/s) for memory-bound terms; takes precedence over the benchmark-mode STREAM calibration and the `--gpu-arch` profile. Can use `PRIMUS_HBM_BANDWIDTH_GBPS`. |
+| `--skip-hw-calibration` | Skip the benchmark-mode compute-clock and STREAM-bandwidth calibration (also `PRIMUS_BENCH_SKIP_HW_CALIB=1`). Accepted by `memory`, `performance`, and `both`. |
 | `--pipeline-schedule-algorithm` | Pipeline simulation scheduler (`auto`, zero-bubble variants, or `all` for comparison). |
 | `--enable-zero-bubble` | Enable zero-bubble pipeline scheduling for projection. |
 | `--enable-deepep` | Enable DeepEP overlap modeling. |
 | `--sync-free-stage` | Override Sync-Free MoE stage (`0` off; stages `1`-`3` enable additional modeling assumptions). |
 | `--num-virtual-stages-per-pipeline-rank` | Override virtual pipeline stage count for projection. |
 | `--micro-batch-size`, `--global-batch-size` | Override batch sizes for projection without editing the YAML. |
+| `--bound` | `expected` (default) or `ceiling`; simulate mode only. See [Expected and ceiling bounds](#expected-and-ceiling-bounds-simulate-mode). |
+| `--ceiling-levers` | Comma-separated levers the ceiling removes: `overlap`, `fusion`, `launch` (default: all). |
+| `--headroom` | Also print expected vs ceiling, each lever's gain, and a stacked waterfall. |
+| `--headroom-measured` | Measured tokens/s/GPU to place against both bounds in the headroom report. |
 
 ---
 

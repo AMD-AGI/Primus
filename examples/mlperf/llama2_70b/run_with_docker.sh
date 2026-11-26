@@ -13,7 +13,7 @@
 # Quick start:
 #   export DATADIR=/data/mlperf_llama2
 #   export LOGDIR=/data/mlperf_llama2/results
-#   export CONT=rocm/primus:v26.5
+#   export CONT=rocm/primus:v26.9
 #   export DGXSYSTEM=MI355X_1x8x1
 #   bash examples/mlperf/llama2_70b/run_with_docker.sh
 #
@@ -22,6 +22,9 @@
 #
 # Quiet MLPerf submission logging (:::MLLOG + timing only):
 #   SUBMISSION_QUIET=1 bash examples/mlperf/llama2_70b/run_with_docker.sh
+#
+# Host runtime tunables before each trial (cpupower, THP, drop_caches; see runtime_tunables.sh):
+#   RUN_RUNTIME_TUNABLES=1 bash examples/mlperf/llama2_70b/run_with_docker.sh
 
 set -euo pipefail
 
@@ -30,7 +33,7 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 
 # Defaults (override via env or INTERACTIVE prompts)
 : "${DGXSYSTEM:=MI355X_1x8x1}"
-: "${CONT:=rocm/primus:v26.5}"
+: "${CONT:=rocm/primus:v26.9}"
 : "${DATADIR:=${HOME}/data/mlperf_llama2}"
 : "${LOGDIR:=${DATADIR}/results}"
 : "${NEXP:=1}"
@@ -39,11 +42,11 @@ PRIMUS_HOST="${PRIMUS_HOST:-$(cd "${SCRIPT_DIR}/../../.." && pwd)}"
 : "${CHECK_COMPLIANCE:=0}"
 : "${MLPERF_RULESET:=6.1.0}"
 : "${MLPERF_LOGGING_REF:=6.1.0-rc2}"
-: "${MLPERF_COMMON_REF:=7771aeabc8b91402e95cb7a33f447d9d9941361f}"
+: "${MLPERF_COMMON_REF:=b708a19e8bd8cb33305c72db2487c366d36ddd03}"
 : "${DATESTAMP:=$(date +'%y%m%d%H%M%S')}"
 : "${INTERACTIVE:=0}"
 : "${SUBMISSION_QUIET:=0}"
-: "${RUN_RUNTIME_TUNABLES:=1}"
+: "${RUN_RUNTIME_TUNABLES:=0}"
 
 # Map DGXSYSTEM (e.g. MI355X_1x8x1) -> PRIMUS_GPU_MODEL for primus-env when rocm-smi is unavailable in Docker.
 if [[ -z "${PRIMUS_GPU_MODEL:-}" && "${DGXSYSTEM}" =~ ^(MI[0-9]+[A-Z]*) ]]; then
@@ -215,6 +218,56 @@ fi
 sleep 3
 docker exec "${_cont_name}" true
 
+# --uts=host makes the container see the host kernel. RCCL turns cuMem off
+# when that release is older than 6.8, even if amdgpu supports cuMem (a RHEL
+# 5.14 uname is one example). Preload the shim only then, or when the user
+# sets FAKE_UNAME_RELEASE / LUX_FAKE_KERNEL. A 6.8+ report is left unchanged.
+_kernel_release_needs_fake_uname() {
+    local rel="$1" major rest minor
+    major="${rel%%.*}"
+    rest="${rel#*.}"
+    minor="${rest%%.*}"
+    major="${major%%[^0-9]*}"
+    minor="${minor%%[^0-9]*}"
+    if [[ -z "${major}" || -z "${minor}" ]]; then
+        return 0
+    fi
+    if (( major > 6 || (major == 6 && minor >= 8) )); then
+        return 1
+    fi
+    return 0
+}
+
+_resolve_fake_uname_release() {
+    if [[ -n "${FAKE_UNAME_RELEASE:-}" ]]; then
+        printf '%s' "${FAKE_UNAME_RELEASE}"
+        return 0
+    fi
+    if [[ -n "${LUX_FAKE_KERNEL:-}" ]]; then
+        printf '%s' "${LUX_FAKE_KERNEL}"
+        return 0
+    fi
+    if _kernel_release_needs_fake_uname "$(uname -r)"; then
+        printf '%s' "6.8.0"
+        return 0
+    fi
+    return 1
+}
+
+_fake_release=""
+if _fake_release="$(_resolve_fake_uname_release)"; then
+    _fakeuname_so="/tmp/libfakeuname.so"
+    docker exec "${_cont_name}" gcc -shared -fPIC -O2 -o "${_fakeuname_so}" \
+        "${_code_mount}/libfakeuname.c" -ldl
+    _base_exec_env+=(
+        "--env=FAKE_UNAME_RELEASE=${_fake_release}"
+        "--env=LD_PRELOAD=${_fakeuname_so}${LD_PRELOAD:+:${LD_PRELOAD}}"
+    )
+    echo "[INFO] cuMem uname shim: ${_fakeuname_so} (FAKE_UNAME_RELEASE=${_fake_release})"
+else
+    echo "[INFO] Reported kernel $(uname -r) is 6.8 or newer; leaving uname unchanged."
+fi
+
 # Editable Primus from the host mount, plus the exact MLPerf logging stack used by this ruleset.
 _setup_env=("${_base_exec_env[@]}")
 docker exec "${_setup_env[@]}" "${_cont_name}" bash -lc "
@@ -225,6 +278,7 @@ echo '[INFO] Installing pinned MLPerf Logging package.'
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/mlcommons/logging.git@${MLPERF_LOGGING_REF}'
 echo '[INFO] Installing pinned AMD MLPerf common package.'
+pip uninstall -q -y primus-mllog 2>/dev/null || true
 pip install -q --upgrade --force-reinstall --no-deps \
     'git+https://github.com/AMD-AGI/mlperf-common.git@${MLPERF_COMMON_REF}'
 echo '[INFO] Container Primus editable install complete.'
@@ -251,7 +305,17 @@ for _experiment_index in $(seq 1 "${NEXP}"); do
         fi
     fi
 
-    _run_env=("${_base_exec_env[@]}" --env="SEED=${RANDOM}")
+    # SEED=<n> from the host: the same seed for every trial (default: random per trial).
+    # Drop SEED captured while sourcing the config (name-only --env=SEED, or a
+    # random value from that source) so this assignment is the one that lands.
+    _run_env=()
+    for _env in "${_base_exec_env[@]}"; do
+        case "${_env}" in
+            --env=SEED|--env=SEED=*) continue ;;
+        esac
+        _run_env+=("${_env}")
+    done
+    _run_env+=("--env=SEED=${SEED:-${RANDOM}}")
 
     set +e
     docker exec "${_run_env[@]}" "${_cont_name}" bash -lc "${_run_cmd}" \

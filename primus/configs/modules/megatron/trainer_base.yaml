@@ -63,7 +63,7 @@ inference_rng_tracker: false
 # fp4
 fp4: null
 fp4_recipe: nvfp4
-fp4_param: false
+fp4_param_gather: false
 
 first_last_layers_bf16: false
 num_layers_at_start_in_bf16: 1
@@ -106,7 +106,7 @@ muon_scale_mode: "spectral"
 muon_fp32_matmul_prec: "medium"
 muon_num_ns_steps: 5
 muon_tp_mode: "blockwise"
-muon_use_nesterov: false
+muon_nesterov: false
 muon_split_qkv: true
 muon_momentum: 0.95
 
@@ -172,7 +172,6 @@ overlap_grad_reduce: false
 overlap_param_gather: false
 overlap_param_gather_with_optimizer_step: false
 align_param_gather: true
-scatter_gather_tensors_in_pipeline: true
 use_ring_exchange_p2p: false
 local_rank: null
 lazy_mpu_init: null
@@ -307,7 +306,7 @@ profile_step_end: 12
 profile_step_start: 10
 iterations_to_skip: null
 result_rejected_tracker_filename: null
-enable_gloo_process_groups: true
+use_gloo_process_groups: true
 record_memory_history: false
 memory_snapshot_path: snapshot.pickle # str
 
@@ -372,6 +371,13 @@ main_grads_dtype: fp32 # str: fp32, bf16
 main_params_dtype: fp32 # str: fp32, bf16
 exp_avg_dtype: fp32 # 'fp32', 'fp16', 'fp8'
 exp_avg_sq_dtype: fp32 # 'fp32', 'fp16', 'fp8'
+
+# Triton AdamW with a device-sized grid instead of TE FusedAdam. Matters for TE
+# builds on the generic multi_tensor_apply launcher (capped at 320 workgroups per
+# launch); ROCm TE builds with the custom Adam kernel are already uncapped.
+# Falls back to TE for precision-aware / capturable / FP8 paths. Set false to
+# keep TE FusedAdam.
+use_triton_fused_adam: true
 
 # vision
 vision_pretraining: false

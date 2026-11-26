@@ -36,6 +36,16 @@ class SyntheticDatasetProvider(DatasetProvider):
               params:
                 num_samples: 1000
                 image_size: 512
+
+    Or, to pick a default dataset by model family (e.g. for WAN video):
+        modules:
+          pre_trainer:
+            mock_data: true
+            mock_dataset:
+              family: wan
+              params:
+                num_samples: 512
+                num_frames: 21
     """
 
     DEFAULT_DATASETS = {
@@ -43,6 +53,8 @@ class SyntheticDatasetProvider(DatasetProvider):
         "flux_onthefly": "primus.backends.megatron.data.synthetic.MockFluxDataset",
         "flux_schnell": "primus.backends.megatron.data.synthetic.PreGeneratedMockFluxSchnellDataset",
         "flux_schnell_onthefly": "primus.backends.megatron.data.synthetic.MockFluxSchnellDataset",
+        "wan": "primus.backends.megatron.data.synthetic.PreGeneratedMockWanDataset",
+        "wan_onthefly": "primus.backends.megatron.data.synthetic.MockWanDataset",
     }
 
     def __init__(self, dataset_config: Optional[Dict[str, Any]] = None, model_type: str = "flux"):
@@ -59,24 +71,26 @@ class SyntheticDatasetProvider(DatasetProvider):
                         # ... other dataset params
                     }
                 }
-            model_type: Model type for default dataset selection ('flux', etc.)
-                Used when dataset_config['class'] is not specified.
+            model_type: Model type for default dataset selection ('flux', 'wan', etc.)
+                Used when dataset_config['class'] is not specified. A 'family' key
+                in dataset_config takes precedence, since the trainer collapses the
+                generic 'diffusion_model' model_type to 'flux'.
         """
         self.dataset_config = dataset_config or {}
-        self.model_type = model_type
+        self.model_type = self.dataset_config.get("family") or model_type
 
         # Determine dataset class to use
         dataset_class_from_config = self.dataset_config.get("class")
 
         # If class is None or not specified, use default for model_type
         if dataset_class_from_config is None or dataset_class_from_config == "null":
-            self.dataset_class_path = self.DEFAULT_DATASETS.get(model_type)
+            self.dataset_class_path = self.DEFAULT_DATASETS.get(self.model_type)
         else:
             self.dataset_class_path = dataset_class_from_config
 
         if not self.dataset_class_path:
             raise ValueError(
-                f"No default dataset for model_type='{model_type}'. "
+                f"No default dataset for model_type='{self.model_type}'. "
                 f"Available types: {list(self.DEFAULT_DATASETS.keys())}. "
                 f"Or specify dataset_config['class'] explicitly."
             )

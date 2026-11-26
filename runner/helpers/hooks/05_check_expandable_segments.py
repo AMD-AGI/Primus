@@ -17,11 +17,18 @@
 # the effective allocator setting and fails (exit 1) unless expandable segments
 # are actually enabled.
 #
+# It also fails when a first expandable allocation does not finish: ROCm 10.x on
+# a host amdgpu driver older than DRM 3.64 blocks forever mapping the segment
+# (ROCm/rocm-systems#9820), which would otherwise hang training silently.
+#
 
 import os
+import subprocess
 import sys
 
 ALLOC_CONF_ENVS = ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF")
+ALLOC_PROBE_TIMEOUT_S = 60
+ALLOC_PROBE = "import torch; torch.empty(1, device='cuda'); torch.cuda.synchronize()"
 
 
 def _config_path(argv):
@@ -104,6 +111,30 @@ def main(argv):
             "remove expandable_segments:True."
         )
         return 1
+
+    # In a child process: a hung virtual-memory map cannot be interrupted in-process.
+    try:
+        subprocess.run(
+            [sys.executable, "-c", ALLOC_PROBE],
+            timeout=ALLOC_PROBE_TIMEOUT_S,
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"[ERROR] [expandable_segments] An expandable-segment allocation did not finish within "
+            f"{ALLOC_PROBE_TIMEOUT_S}s ({settings_str}, {torch_ver}). The ROCm runtime waits on a GEM_VA "
+            "timeline that host amdgpu drivers older than DRM 3.64 never signal (ROCm/rocm-systems#9820), "
+            "so training would hang. Remove expandable_segments:True or upgrade the host amdgpu driver."
+        )
+        return 1
+    except subprocess.CalledProcessError as exc:
+        stderr_lines = exc.stderr.decode(errors="replace").strip().splitlines()
+        reason = stderr_lines[-1] if stderr_lines else "no output"
+        print(
+            f"[WARN] [expandable_segments] Expandable-segment allocation probe failed "
+            f"(exit {exc.returncode}: {reason}); skipping it."
+        )
 
     print(f"[INFO] [expandable_segments] Expandable segments verified ({settings_str}, {torch_ver}).")
     return 0

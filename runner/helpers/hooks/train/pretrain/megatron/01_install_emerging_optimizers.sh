@@ -36,16 +36,17 @@ case "${PRIMUS_INSTALL_EMERGING_OPTIMIZERS:-0}" in
     ;;
 esac
 
-# Pinned to match the third_party/Emerging-Optimizers submodule and the
-# Megatron-LM muon.py integration (which passes ``use_nesterov`` to
-# OrthogonalizedOptimizer). The older 06ff4c68 pin used the pre-rename
-# ``nesterov`` kwarg and is incompatible with the current Megatron muon.py.
-EO_COMMIT="${PRIMUS_EMERGING_OPTIMIZERS_COMMIT:-93d9eb3a6c899b50de73992826451fba3ab6adfb}"
+# Pinned to match the third_party/Emerging-Optimizers submodule (v0.3.1).
+# Megatron-core 0.19 imports ``emerging_optimizers.scalar_optimizers.Lion``,
+# which v0.2.0 (93d9eb3a) does not have.
+EO_COMMIT="${PRIMUS_EMERGING_OPTIMIZERS_COMMIT:-1f29ffd2acbf047f3dd3efdd8e9469d9305a8f77}"
 EO_URL="git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@${EO_COMMIT}"
 
 PY="${PYTHON:-python3}"
 
-if "${PY}" -c "import emerging_optimizers" >/dev/null 2>&1; then
+# Megatron-core 0.19 needs Lion; an older install (v0.2.0) imports but lacks it.
+EO_CHECK="from emerging_optimizers.scalar_optimizers import Lion"
+if "${PY}" -c "${EO_CHECK}" >/dev/null 2>&1; then
   echo "[install_eo] emerging_optimizers already importable; skipping install."
   exit 0
 fi
@@ -55,7 +56,7 @@ echo "[install_eo] Installing emerging_optimizers from ${EO_URL} ..."
 # container); avoid pulling an incompatible torch/transitive set.
 "${PY}" -m pip install --no-cache-dir --no-deps "${EO_URL}"
 
-if "${PY}" -c "import emerging_optimizers as e; print('[install_eo] installed', getattr(e,'__version__','?'))"; then
+if "${PY}" -c "${EO_CHECK}; import emerging_optimizers as e; print('[install_eo] installed', getattr(e,'__version__','?'))"; then
   echo "[install_eo] OK"
 else
   echo "[install_eo] ERROR: emerging_optimizers still not importable after install" >&2

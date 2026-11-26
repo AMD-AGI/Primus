@@ -51,7 +51,7 @@ def align_visible_devices(env=None) -> Optional[tuple]:
     describes what the job actually allocated.
 
     Train tolerates that, but capture imports SGLang, which imports vLLM, whose
-    ROCm platform module refuses the disagreement at import time (job 99815)::
+    ROCm platform module refuses the disagreement at import time::
 
         File "vllm/platforms/rocm.py", line 80, in <module>
             assert val == cuda_val
@@ -222,7 +222,7 @@ class SpecForgePretrainTrainer(BaseTrainer):
             os.chdir(self.workdir)
 
         if specforge_mode(self.backend_args) == "capture":
-            log_rank_0("Handing off to SpecForge capture (prepare_hidden_states.py).")
+            log_rank_0("Starting offline capture (SpecForge preparation with Primus plugin transport).")
             completed = subprocess.run(self.argv, check=False)
             if completed.returncode != 0:
                 raise SystemExit(completed.returncode)

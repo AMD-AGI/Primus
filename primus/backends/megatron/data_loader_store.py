@@ -15,27 +15,86 @@ pre-fetch batches (optionally on a dedicated H2D stream).
 import collections
 
 import torch
-from megatron.core.utils import StragglerDetector
-from megatron.training import get_args, get_timers
-from megatron.training.utils import (
+from megatron.core import mpu
+from megatron.core.parallel_state import get_context_parallel_group
+from megatron.core.transformer.multi_token_prediction import (
+    mtp_on_this_rank as mtp_on_this_rank_func,
+)
+from megatron.core.utils import (
+    StragglerDetector,
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
-    is_first_or_last_pipeline_stage,
 )
+from megatron.training import get_args, get_timers
+from megatron.training.arguments import core_transformer_config_from_args
+from megatron.training.utils import is_first_or_last_pipeline_stage
 
 stimer = StragglerDetector()
 
 mb_batch = None
 
+# The tensors pretrain_gpt.get_batch moves to the GPU before broadcasting.
+_DEVICE_KEYS = (
+    "attention_mask",
+    "cu_seqlens",
+    "cu_seqlens_padded",
+    "labels",
+    "loss_mask",
+    "position_ids",
+    "tokens",
+)
+
+
+def _mtp_on_this_rank(vp_stage):
+    config = core_transformer_config_from_args(get_args())
+    return mtp_on_this_rank_func(
+        layout=config.pipeline_model_parallel_layout,
+        mtp_num_layers=config.mtp_num_layers,
+        ignore_virtual=False,
+        vp_stage=vp_stage,
+    )
+
+
+def _get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank):
+    """TP rank 0 reads the next batch and broadcasts it, as pretrain_gpt.get_batch does."""
+    args = get_args()
+    tp_rank = mpu.get_tensor_model_parallel_rank()
+
+    batch = {}
+    if tp_rank == 0:
+        batch = next(data_iterator)
+        for key in _DEVICE_KEYS:
+            value = batch.get(key)
+            batch[key] = value.cuda(non_blocking=True) if value is not None else None
+
+    return get_batch_on_this_tp_rank(
+        batch,
+        broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(),
+        broadcast_group=mpu.get_tensor_model_parallel_group(),
+        has_cu_seqlens=False,
+        is_hybrid_cp=False,
+        create_attention_mask_in_dataloader=args.create_attention_mask_in_dataloader,
+        cp_size=args.context_parallel_size,
+        tp_rank=tp_rank,
+        micro_batch_size=args.micro_batch_size,
+        seq_length=args.seq_length,
+        mtp_on_this_rank=mtp_on_this_rank,
+        pipeline_model_parallel_size=args.pipeline_model_parallel_size,
+        is_pipeline_first_stage=mpu.is_pipeline_first_stage(),
+        is_pipeline_last_stage=mpu.is_pipeline_last_stage(),
+    )
+
 
 def get_batch_func(data_iterator, vp_stage=None):
     # TODO: this is pretty hacky, find a better way
-    if not is_first_or_last_pipeline_stage(vp_stage):
+    # A middle stage that runs MTP layers embeds the input tokens, so it needs the batch too.
+    mtp_on_this_rank = _mtp_on_this_rank(vp_stage)
+    if not is_first_or_last_pipeline_stage(vp_stage) and not mtp_on_this_rank:
         return None, None, None, None, None
 
     # assert data_iterator is not None, f"data_iterator is None vp_stage: {vp_stage}"
     # get batches based on the TP rank you are on
-    batch = get_batch_on_this_tp_rank(data_iterator)
+    batch = _get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank)
 
     # slice batch along sequence dimension for context parallelism
     args = get_args()
@@ -50,7 +109,7 @@ def get_batch_func(data_iterator, vp_stage=None):
         seq_split_idx = get_seq_split_idx() or 0
         if seq_split_idx == 0:
             # get batches based on the TP rank you are on
-            mb_batch = get_batch_on_this_tp_rank(data_iterator)
+            mb_batch = _get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank)
             assert (
                 mb_batch["attention_mask"] is None
             ), "attention_mask should be None, please enable --no-create-attention-mask-in-dataloader"
@@ -80,7 +139,7 @@ def get_batch_func(data_iterator, vp_stage=None):
         sharder = produce_attention_sharder(args.cp_comm_type)
         batch = shard_batch_on_this_cp_rank(sharder, batch)
     else:
-        batch = get_batch_on_this_cp_rank(batch)
+        batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=False, cp_group=get_context_parallel_group())
 
     # Return a stable, explicitly-ordered 5-tuple so both this path and the
     # early not-first/last-stage return path have the same shape/type. The keys

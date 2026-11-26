@@ -54,6 +54,7 @@ from typing import Dict, Optional
 from primus.core.projection.simulation_backends.base import (
     SDPASimulationBackend,
     SimulationResult,
+    hbm_bandwidth_override_gbps,
 )
 
 # =========================================================================
@@ -360,7 +361,8 @@ class SDPASimulator(SDPASimulationBackend):
     # ------------------------------------------------------------------
     @property
     def hbm_bandwidth_gbps(self) -> float:
-        return self._hw.hbm_bandwidth_gbps
+        override = hbm_bandwidth_override_gbps()
+        return override if override is not None else self._hw.hbm_bandwidth_gbps
 
     @property
     def peak_tflops_bf16(self) -> float:
@@ -535,6 +537,27 @@ class SDPASimulator(SDPASimulationBackend):
             "fp16": self._hw.peak_tflops_fp16,
         }.get(dtype, self._hw.peak_tflops_bf16)
         return tf * 1e12
+
+    def simulate_fused_tiles(self, per_workgroup_gemms, n_workgroups: int, dtype: str = "bf16") -> float:
+        """Time (ms) of a fused kernel given one workgroup's GEMM program.
+
+        The FAv3 construction generalised: each ``(m, n, k)`` matmul a
+        workgroup runs is priced on the 1-CU backend and the per-workgroup
+        times add (the matmuls run back to back inside the tile).  The
+        ``ceil(n_workgroups / N_CU)`` waves a CU works through are folded into
+        ``m`` rather than multiplied in: a 1-CU GEMM carries a fixed cost of a
+        few microseconds, which a 256-row FAv3 tile amortises but a 64-row
+        chunk tile does not, and a fused kernel pays it once, not per wave.
+        Used by op models for fused kernels that are not softmax attention
+        (chunked recurrences, scans).
+        """
+        assert self._tile_gemm is not None
+        n_cu = getattr(self, "_tile_units", None) or self._hw.n_cu
+        waves = math.ceil(max(1, int(n_workgroups)) / n_cu)
+        return sum(
+            self._tile_gemm.simulate_gemm(m=int(m) * waves, n=int(n), k=int(k), dtype=dtype).forward_time_ms
+            for m, n, k in per_workgroup_gemms
+        )
 
     # ------------------------------------------------------------------
     # Tile-level simulation (primary mode — requires Origami)

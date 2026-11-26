@@ -1,3 +1,10 @@
+# Single-node training (8 GPUs):
+#   GPUS_PER_NODE=8 ./primus-cli direct --numa -- train pretrain \
+#     --config examples/megatron/configs/MI325X/zaya1_8B-FP8-pretrain.yaml
+# --numa binds each rank's CPUs and memory to its GPU's NUMA node with
+# numactl, which made FP8 steps faster on MI355X. It is a launcher option, not a config key.
+# Same ZAYA1 compute paths as the MI355X recipe.
+
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:zaya1-fp8-pretrain}
@@ -9,6 +16,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # per-shape cost.
 env:
   NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+  PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
 
 modules:
   pre_trainer:
@@ -26,16 +34,28 @@ modules:
 
       # 30-step mock-data run for one 8-GPU node (DP=8). FP8 keeps BF16 master
       # weights and adds cached FP8 weight copies, so it fits fewer samples
-      # than BF16. micro_batch_size 184 is the largest multiple of 8 that
-      # completes on MI325X with rocm/primus:v26.8: it peaks at 245 of 256 GB
-      # per GPU, and 192 runs out of memory. On fewer GPUs, lower
-      # micro_batch_size or num_layers (keep it even). Do not edit the model
-      # yaml to shrink the architecture.
+      # than BF16. micro_batch_size 264 is the largest multiple of 8 that
+      # completes the run, including the end-of-training evaluation, on MI325X
+      # (8 x 256 GiB) with the compute paths below. On the internal CI image
+      # unifiedtrainingdockers.azurecr.io/utd/ci:primus_ci_b06d0c1_20261116
+      # (PyTorch 2.16.0a0+rocm10.3.0a20261111, Transformer Engine
+      # 2.21.0.dev0+b5c00f432, Primus-Turbo 0.6.1.dev27) it peaks at about 239
+      # GiB allocated, 245 GiB reserved and 253 GiB at the device; 272 runs out
+      # of memory. It also fits on rocm/primus:v26.9 (PyTorch
+      # 2.16.0a0+rocm10.2.0a20261020, Transformer Engine 2.20.0.dev0+023639b51,
+      # Primus-Turbo 0.6.1.dev4), with 253 GiB at the device. That leaves about
+      # 2.5 GiB of device headroom, measured on those two images only. If
+      # another image, Primus-Turbo or Transformer Engine build, or other
+      # GPU-memory users run out of memory at evaluation, lower micro_batch_size
+      # in steps of 8 (global_batch_size is 8 times it). History: 184 since
+      # #1269 (about 202 GiB). Throughput at 264 is not comparable with earlier
+      # runs at 184. On fewer GPUs, lower micro_batch_size or num_layers (keep
+      # it even). Do not edit the model yaml to shrink the architecture.
       train_iters: 30
-      micro_batch_size: 184
+      micro_batch_size: 264
       # One micro batch per GPU per step at DP=8.
       # Must be divisible by micro_batch_size * data_parallel_size.
-      global_batch_size: 1472
+      global_batch_size: 2112
       seq_length: 128
       max_position_embeddings: 4096
 
@@ -61,9 +81,28 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
+      # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
+      # elementwise chains, and CCA's convolutions as GEMMs.
+      # zaya_router_defer_ar stays off: it gained under 1% on MI355X. The ZAYA1
+      # chunked cross-entropy (zaya_chunked_ce) stays off too: it rounds each
+      # chunk's output-layer weight gradient to bf16 before summing, below
+      # Megatron's own fp32 cross-entropy.
+      zaya_attn_flash: true
+      zaya_fuse_norm: true
+      zaya_fuse_cca: true
+      zaya_conv_gemm: true
+      zaya_fuse_moe: true
+      zaya_sort_dispatch: true
+
       # Synthetic tokens. The mock-data patch forces NullTokenizer and
       # clears these paths; vocab_size stays 262272 from zaya1.yaml.
       mock_data: true
+      # No attention mask from the dataloader. With reset_attention_mask false
+      # it would be plain causal, which ZAYA1's attention applies without one,
+      # and the model would check it on the GPU and wait on the host for the
+      # answer every forward.
+      create_attention_mask_in_dataloader: false
       train_data_path: null
       valid_data_path: null
       test_data_path: null
@@ -82,6 +121,8 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
+      # Off: Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet, so with
+      # FP8 the experts stay split.
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_gemm: false
