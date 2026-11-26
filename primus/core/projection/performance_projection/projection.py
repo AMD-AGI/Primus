@@ -604,11 +604,15 @@ def calculate_collective_communication_time(
     expert_mlp_params = 3 * hidden_size * moe_ffn  # per expert
     moe_replicated_params = hidden_size * num_experts
     # Shared experts are replicated (synced over the full DP group like attention).
-    moe_replicated_params += 3 * hidden_size * (getattr(model_config, "moe_shared_expert_intermediate_size", 0) or 0)
+    moe_replicated_params += (
+        3 * hidden_size * (getattr(model_config, "moe_shared_expert_intermediate_size", 0) or 0)
+    )
 
     # Non-expert params are replicated across EP; expert params are partitioned by EP
     non_expert_params = (
-        num_layers * attn_params + num_dense_layers * dense_mlp_params + num_moe_layers * moe_replicated_params
+        num_layers * attn_params
+        + num_dense_layers * dense_mlp_params
+        + num_moe_layers * moe_replicated_params
     )
     expert_total_params = num_moe_layers * num_experts * expert_mlp_params
     # Per-GPU: non-expert (full copy) + expert (sharded by EP)
@@ -697,7 +701,9 @@ def calculate_collective_communication_time(
             ar_time_dp = cm.allreduce(coll_args, grad_size, dp, groups=["dp"])
             breakdown["gradient_allreduce"] = ar_time_dp / 1000  # Convert to ms
             message_info["non_expert_ar_ms_per_param"] = ar_time_dp / 1000 / max(1, grad_size // grad_bytes)
-            message_info["expert_ar_ms_per_param"] = 0.0 if moe_sharded else message_info["non_expert_ar_ms_per_param"]
+            message_info["expert_ar_ms_per_param"] = (
+                0.0 if moe_sharded else message_info["non_expert_ar_ms_per_param"]
+            )
             message_info["gradient_allreduce_size"] = grad_size
             message_info["gradient_allreduce_size_mb"] = grad_size / (1024 * 1024)
             message_info["moe_ar_no_overlap"] = False
@@ -2709,7 +2715,9 @@ def _chunk_grad_buckets(
         b += times["output_bwd"]
         f -= times["output_fwd"]
     for _ in range(layers):
-        tensors.append((b, b + times["layer_bwd"], f - times["layer_fwd"], f, sizes["dense"], sizes["expert"]))
+        tensors.append(
+            (b, b + times["layer_bwd"], f - times["layer_fwd"], f, sizes["dense"], sizes["expert"])
+        )
         b += times["layer_bwd"]
         f -= times["layer_fwd"]
     if has_embedding:
@@ -2725,11 +2733,20 @@ def _chunk_grad_buckets(
             acc += t[idx]
             fwd_use = t[2] if fwd_use is None else min(fwd_use, t[2])
             if bucket_size and acc >= bucket_size:
-                buckets.append((t[1] / bwd_total, fwd_use / fwd_total, acc if idx == 4 else 0.0, acc if idx == 5 else 0.0))
+                buckets.append(
+                    (
+                        t[1] / bwd_total,
+                        fwd_use / fwd_total,
+                        acc if idx == 4 else 0.0,
+                        acc if idx == 5 else 0.0,
+                    )
+                )
                 acc, fwd_use = 0.0, None
         if acc > 0:
             last = [t for t in tensors if t[idx] > 0][-1]
-            buckets.append((last[1] / bwd_total, fwd_use / fwd_total, acc if idx == 4 else 0.0, acc if idx == 5 else 0.0))
+            buckets.append(
+                (last[1] / bwd_total, fwd_use / fwd_total, acc if idx == 4 else 0.0, acc if idx == 5 else 0.0)
+            )
     return buckets
 
 
@@ -2776,7 +2793,9 @@ def _exposed_overlapped_grad_sync_ms(
     # groups inside one node use the bandwidths measured on the benchmark node.
     reduce_share = 0.5 if use_dist_opt else 1.0
     cost = {}
-    measured = profiling_results.get("_dp_reduce_scatter_benchmark") if isinstance(profiling_results, dict) else None
+    measured = (
+        profiling_results.get("_dp_reduce_scatter_benchmark") if isinstance(profiling_results, dict) else None
+    )
     expert_dp = max(1, dp * cp // ep)
     for kind, group, span, ar_per_param in (
         ("dense", dp, tp * cp * dp, message_info.get("non_expert_ar_ms_per_param", 0.0)),
@@ -2897,9 +2916,13 @@ def _mix_attention_window_variants(profiling_results, training_config) -> None:
             data[phase] += mixed - attn[phase]
             attn[phase] = mixed
         attn["window_mix"] = windowed
-    if seen and int(os.getenv("RANK", "0")) == 0 and any(
-        isinstance(d, dict) and (d.get("attention") or {}).get("window_mix") is not None
-        for d in profiling_results.values()
+    if (
+        seen
+        and int(os.getenv("RANK", "0")) == 0
+        and any(
+            isinstance(d, dict) and (d.get("attention") or {}).get("window_mix") is not None
+            for d in profiling_results.values()
+        )
     ):
         print(
             f"[Primus:Performance Projection] Attention: windowed/full variants weighted "
@@ -5684,7 +5707,9 @@ def _launch_projection(args, overrides):
             gpu_arch=getattr(args, "gpu_arch", None),
         )
         if is_rank_0:
-            print(f"[Primus:Performance Projection] PP stage-to-stage transfer: {p2p_time_ms:.3f} ms per send")
+            print(
+                f"[Primus:Performance Projection] PP stage-to-stage transfer: {p2p_time_ms:.3f} ms per send"
+            )
         pipeline_simulation_time_ms = _run_pipeline_simulation(
             training_config,
             profiling_results,
