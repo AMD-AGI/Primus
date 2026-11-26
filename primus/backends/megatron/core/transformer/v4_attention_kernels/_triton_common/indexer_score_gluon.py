@@ -15,7 +15,7 @@ Replaces, in the forward pass only, the current default chain
 
 with one kernel that never materialises ``dot``:
 
-* grid = (cdiv(S, BM) * cdiv(P, BN), B), 8 waves per CTA, BM = BN = 128;
+* grid = (cdiv(S, BM) * cdiv(P, BN), B), 8 waves per CTA, BM = 64, BN = 128, two CTAs per CU;
 * the k tile ``[BN, D]`` is TDM-loaded once into a partitioned LDS buffer and
   then kept in registers as the WMMA B operand for all heads;
 * the per-head q tile ``[BM, D]`` (rows s, columns h*D:(h+1)*D of the
@@ -23,7 +23,8 @@ with one kernel that never materialises ``dot``:
   distance NQ-1);
 * per head: ``acc = q_h @ k^T`` (WMMA, fp32), rounded to bf16 exactly like
   the einsum output that the post kernel reads, then
-  ``out += w[s, h] * relu(acc)`` in fp32;
+  ``out += w[s, h] * relu(acc)`` in fp32 (with ``w_scale``, ``w[s, h]`` is first scaled and rounded
+  to w's dtype as the torch multiply ``w_i * score_scale`` would);
 * epilogue: ``out = where((p + 1) * ratio - 1 <= s + q_offset, out, -inf)``
   stored as ``out_dtype``. Tiles that are fully masked skip the head loop
   (no TDM traffic, no WMMA) and store -inf only.
@@ -59,9 +60,10 @@ except Exception:  # pragma: no cover - depends on the installed Triton
 
 
 NUM_WARPS = 8
-_DEF_BM = 128
+_DEF_BM = 64
 _DEF_BN = 128
 _DEF_NQ = 3
+_WPE = 4  # waves per EU: 2 CTAs per CU
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +87,7 @@ if _HAS_GLUON_CDNA5:
     def _indexer_score_fwd_gluon_kernel(
         q_ptr,  # [B*S, H*D]  bf16/fp16, row-major contiguous
         k_ptr,  # [B*P, D]
-        w_ptr,  # [B*S, H]    any float dtype (already scaled by score_scale)
+        w_ptr,  # [B*S, H] rows at W_STRIDE elements, any float dtype
         out_ptr,  # [B*S, P]  out dtype
         dot_ptr,  # [B*S, H, P] q.k in q dtype (only written when WRITE_DOT)
         S,
@@ -93,6 +95,8 @@ if _HAS_GLUON_CDNA5:
         QROWS,  # B*S
         KROWS,  # B*P
         q_offset,
+        W_STRIDE,  # row stride of w; w may be a column slice of a wider projection output
+        W_SCALE,  # fp32 score scale, applied when HAS_SCALE
         n_tiles_p,
         n_tiles,
         H: ttgl.constexpr,
@@ -104,6 +108,7 @@ if _HAS_GLUON_CDNA5:
         ROUND_DOT: ttgl.constexpr,
         NUM_XCDS: ttgl.constexpr,
         WRITE_DOT: ttgl.constexpr,
+        HAS_SCALE: ttgl.constexpr,
         SHARED_Q: ttgl.constexpr,
         SHARED_K: ttgl.constexpr,
         WMMA: ttgl.constexpr,
@@ -157,7 +162,7 @@ if _HAS_GLUON_CDNA5:
         row_ok = rows < S
         # Rows past S (last s tile) read row S-1's weights instead of masking: no
         # exec-mask branches in the loop, and those rows are never stored.
-        w_row_ptr = w_ptr + (b * S + ttgl.minimum(rows, S - 1)).to(ttgl.int64) * H
+        w_row_ptr = w_ptr + (b * S + ttgl.minimum(rows, S - 1)).to(ttgl.int64) * W_STRIDE
 
         out = ttgl.zeros((BM, BN), dtype=ttgl.float32, layout=WMMA)
         zero = ttgl.zeros((BM, BN), dtype=ttgl.float32, layout=WMMA)
@@ -173,6 +178,8 @@ if _HAS_GLUON_CDNA5:
             hn = min(h + NQ - 1, H - 1)  # clamped refill keeps the wait count uniform
             _tdm.async_load(q_desc, [q_row, hn * D], q_buf.index((h + NQ - 1) % NQ))
             w_h = w_nxt.to(ttgl.float32)
+            if HAS_SCALE:  # = torch's ``w * scale`` on the w tensor: fp32 multiply, rounded to w's dtype
+                w_h = (w_h * W_SCALE).to(w_ptr.type.element_ty).to(ttgl.float32)
             w_nxt = ttgl.load(w_row_ptr + min(h + 1, H - 1))
             a = q_buf.index(h % NQ).load(layout=DOT_A)
             acc = ttgl.amd.cdna5.wmma(a, kb, zero)
@@ -239,6 +246,8 @@ def launch_args(
     round_dot=True,
     num_xcds=None,
     write_dot=False,
+    w_stride=None,
+    w_scale=None,
 ):
     """Grid + scalar/constexpr kwargs (shared by the runtime launch and compile-only checks)."""
     shared_q, shared_k, wmma = _layouts(BM, BN, D)
@@ -251,6 +260,8 @@ def launch_args(
         QROWS=B * S,
         KROWS=B * P,
         q_offset=int(q_offset),
+        W_STRIDE=H if w_stride is None else int(w_stride),
+        W_SCALE=1.0 if w_scale is None else float(w_scale),
         n_tiles_p=n_tiles_p,
         n_tiles=n_tiles,
         H=H,
@@ -262,6 +273,7 @@ def launch_args(
         ROUND_DOT=bool(round_dot),
         NUM_XCDS=_num_xcds() if num_xcds is None else num_xcds,
         WRITE_DOT=bool(write_dot),
+        HAS_SCALE=w_scale is not None,
         SHARED_Q=shared_q,
         SHARED_K=shared_k,
         WMMA=wmma,
@@ -284,24 +296,40 @@ def indexer_score_fwd_gluon(
     q_offset: int = 0,
     round_dot: bool = True,
     write_dot: bool = False,
+    w_scale: Optional[float] = None,
 ):
     """Launch the fused kernel. q_i [B,S,H,D], k_icomp [B,P,D], w_i [B,S,H] -> scores [B,S,P].
 
     write_dot=True also returns ``dot [B,S,H,P]`` (q dtype, zeros in causally dead tiles),
     i.e. the tensor the einsum would have produced, for the existing tail backward.
+    ``w_scale`` scores each head with ``w_i * w_scale`` (see :func:`indexer_score_gluon`).
     """
     B, S, H, D = q_i.shape
     P = k_icomp.shape[1]
     q = q_i.contiguous()
     k = k_icomp.contiguous()
-    w = w_i.contiguous()
+    # w may be a column slice of the fused w_dq_w output: unit column stride, rows at a fixed stride, read in place
+    w = w_i if (w_i.stride(2) == 1 and (B == 1 or w_i.stride(0) == S * w_i.stride(1))) else w_i.contiguous()
     out = torch.empty((B, S, P), dtype=out_dtype, device=q.device)
     dot = torch.empty((B, S, H, P), dtype=q.dtype, device=q.device) if write_dot else out
     BM, BN, NQ = _tile_cfg()
     grid, kw = launch_args(
-        B, S, P, H, D, compress_ratio, q_offset, BM=BM, BN=BN, NQ=NQ, round_dot=round_dot, write_dot=write_dot
+        B,
+        S,
+        P,
+        H,
+        D,
+        compress_ratio,
+        q_offset,
+        BM=BM,
+        BN=BN,
+        NQ=NQ,
+        round_dot=round_dot,
+        write_dot=write_dot,
+        w_stride=w.stride(1),
+        w_scale=w_scale,
     )
-    _indexer_score_fwd_gluon_kernel[grid](q, k, w, out, dot, **kw, num_warps=NUM_WARPS, waves_per_eu=2)
+    _indexer_score_fwd_gluon_kernel[grid](q, k, w, out, dot, **kw, num_warps=NUM_WARPS, waves_per_eu=_WPE)
     return (out, dot) if write_dot else out
 
 
@@ -398,11 +426,13 @@ def _save_dot_enabled() -> bool:
 
 class IndexerScoreGluonFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, q_i, k_icomp, w_i, compress_ratio: int, out_dtype: torch.dtype, q_offset: int):  # type: ignore
+    def forward(
+        ctx, q_i, k_icomp, w_i, compress_ratio: int, out_dtype: torch.dtype, q_offset: int, w_scale=None
+    ):  # type: ignore
+        need_grad = any(ctx.needs_input_grad[:3])
         q = q_i.contiguous()
         k = k_icomp.contiguous()
-        w = w_i.contiguous()
-        need_grad = any(ctx.needs_input_grad[:3])
+        w = w_i.contiguous() if (need_grad or not q.is_cuda) else w_i
         save_dot = need_grad and _save_dot_enabled()
         if q.is_cuda:
             res = indexer_score_fwd_gluon(
@@ -413,6 +443,7 @@ class IndexerScoreGluonFn(torch.autograd.Function):
                 out_dtype=out_dtype,
                 q_offset=q_offset,
                 write_dot=save_dot,
+                w_scale=w_scale,
             )
         else:
             res = indexer_score_fwd_tiled_reference(
@@ -445,7 +476,7 @@ class IndexerScoreGluonFn(torch.autograd.Function):
             d_dot, d_w = _post_bwd(dot, w, d_scores.contiguous(), ctx.compress_ratio, ctx.q_offset)
             dq = torch.einsum("bshp,bpd->bshd", d_dot, k) if need_q else None
             dk = torch.einsum("bshp,bshd->bpd", d_dot, q) if need_k else None
-            return dq, dk, (d_w if need_w else None), None, None, None
+            return dq, dk, (d_w if need_w else None), None, None, None, None
         q, k, w = ctx.saved_tensors
         with torch.enable_grad():
             q_ = q.detach().requires_grad_(need_q)
@@ -457,7 +488,7 @@ class IndexerScoreGluonFn(torch.autograd.Function):
         it = iter(grads)
         dq = next(it) if need_q else None
         dk = next(it) if need_k else None
-        return dq, dk, (d_w if need_w else None), None, None, None
+        return dq, dk, (d_w if need_w else None), None, None, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -494,10 +525,27 @@ def is_gluon_kernel_supported(q_i: torch.Tensor, k_icomp: torch.Tensor, w_i: tor
 
 
 def indexer_score_gluon(
-    q_i, k_icomp, w_i, *, compress_ratio: int, out_dtype: torch.dtype, q_offset: Optional[int] = 0
+    q_i,
+    k_icomp,
+    w_i,
+    *,
+    compress_ratio: int,
+    out_dtype: torch.dtype,
+    q_offset: Optional[int] = 0,
+    w_scale: Optional[float] = None,
 ) -> torch.Tensor:
-    """Masked indexer scores ``[B, S, P]`` (``-inf`` where causally masked)."""
-    return IndexerScoreGluonFn.apply(q_i, k_icomp, w_i, int(compress_ratio), out_dtype, int(q_offset or 0))
+    """Masked indexer scores ``[B, S, P]`` (``-inf`` where causally masked).
+
+    ``w_scale``: score each head with ``w_i * w_scale`` (rounded to ``w_i``'s dtype, the bytes of the torch multiply)
+    without materialising the product; w_i is read in place when it is a row-strided column slice."""
+    if w_scale is not None and (
+        not q_i.is_cuda
+        or (torch.is_grad_enabled() and (q_i.requires_grad or k_icomp.requires_grad or w_i.requires_grad))
+    ):
+        w_i, w_scale = w_i * w_scale, None  # autograd / CPU reference: the plain (tracked) torch multiply
+    return IndexerScoreGluonFn.apply(
+        q_i, k_icomp, w_i, int(compress_ratio), out_dtype, int(q_offset or 0), w_scale
+    )
 
 
 __all__ = [

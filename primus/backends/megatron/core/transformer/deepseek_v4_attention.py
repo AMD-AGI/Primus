@@ -1882,7 +1882,14 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
                 pool_kv = build_global_pool(pool_kv, cp_group)
             return pool_kv
         if cp_group is None:
-            pooled = self.compressor(hidden)  # [B, P, head_dim]
+            rope = self._compress_rope_tables(hidden)
+            if rope is None:
+                pooled = self.compressor(hidden)  # [B, P, head_dim]
+            else:
+                # the compressor may apply the RoPE below inside its pool + kv_norm op (comp_fused)
+                pooled, roped = self.compressor(hidden, rope=rope)
+                if roped:
+                    return pooled
         else:
             # ---- context parallel ------------------------------------------------
             # Each rank compresses only its own rows, then the pools are all-gathered
@@ -1926,21 +1933,44 @@ class DeepseekV4Attention(KeepInFp32Mixin, MLASelfAttention):
         # for prefill and indexes ``start_pos + 1 - ratio`` for decode -- both
         # land on the window's first token. Positions stay deterministic, so the
         # cached table is still reused every forward.
-        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
-
-        if mb_rope_tbl():  # memoised contiguous cast table (same bytes, no per-call copies)
-            cos, sin = self.rope.compress_rope.forward_arange_cast(
-                P, device, pooled.dtype, self.rotary_dim // 2, stride=self.compress_ratio
-            )
-        else:
-            cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
-        cos = cos[..., : self.rotary_dim // 2]
-        sin = sin[..., : self.rotary_dim // 2]
+        cos, sin = self._compress_rope_cos_sin(P, device, pooled.dtype)
         cos = cos.unsqueeze(0).expand(B, -1, -1)
         sin = sin.unsqueeze(0).expand(B, -1, -1)
         pool_kv = pooled.unsqueeze(2)  # [B, P, 1, head_dim]
         pool_kv = apply_interleaved_partial_rope(pool_kv, cos, sin, rotary_dim=self.rotary_dim)
         return pool_kv.squeeze(2)  # [B, P, head_dim]
+
+    def _compress_rope_cos_sin(self, P: int, device, dtype):
+        """cos / sin ``[P, rotary_dim // 2]`` of the compress-base RoPE (pool slot ``s`` at token ``s * ratio``)."""
+        from primus.backends.megatron.core.transformer.dual_rope import mb_rope_tbl
+
+        if mb_rope_tbl():  # memoised contiguous cast table (same bytes, no per-call copies)
+            cos, sin = self.rope.compress_rope.forward_arange_cast(
+                P, device, dtype, self.rotary_dim // 2, stride=self.compress_ratio
+            )
+        else:
+            cos, sin = self.rope.compress_rope.forward_arange(P, device, stride=self.compress_ratio)
+        return cos[..., : self.rotary_dim // 2], sin[..., : self.rotary_dim // 2]
+
+    def _compress_rope_tables(self, hidden: torch.Tensor):
+        """``(cos, sin, rotary_dim)`` for the compressor's fused pool + kv_norm + RoPE op: ``[B * P, rotary_dim // 2]``
+        tables in the activation dtype (the values the RoPE kernel reads), or None where that op cannot apply.
+        """
+        if self.rotary_dim <= 0 or self.compress_ratio <= 0 or self.compressor is None:
+            return None
+        if not (hidden.is_cuda and hidden.dtype == torch.bfloat16 and hidden.dim() == 3):
+            return None
+        B, S = hidden.shape[0], hidden.shape[1]
+        if S % self.compress_ratio:
+            return None
+        P = S // self.compress_ratio
+        rh = self.rotary_dim // 2
+        cos, sin = self._compress_rope_cos_sin(P, hidden.device, hidden.dtype)
+        cos, sin = (
+            t.unsqueeze(0).expand(B, -1, -1).reshape(B * P, rh).to(hidden.dtype).contiguous()
+            for t in (cos, sin)
+        )
+        return cos, sin, self.rotary_dim
 
     def _pool_or_overlap(self, hidden: torch.Tensor, cu_seqlens=None) -> torch.Tensor:
         """The compressed pool: the one forward() issued on a side stream (PRIMUS_OVERLAP), or built now."""

@@ -702,11 +702,6 @@ class Indexer(nn.Module):
         # basis the reference scores in.
         q_i = self._rotate_queries(q_i, position_ids) if q_g2 is None else q_g2
 
-        # Score temperature (see ``self.score_scale``). Applied on ``w_i``
-        # because every scoring branch below multiplies by it before summing
-        # over heads, so all of them inherit the scale from one place.
-        w_i = w_i * self.score_scale
-
         # 3) Score I_{t,s} = Σ_h w_i[t,h] * ReLU(q_i[t,h] · k_icomp[s])
         #    q_i [B,S,H,Hd] · k_icomp[B,P,Hd] → relu[B,S,H,P]; w_i[B,S,H,1] → sum over H
         # 4) Causal mask + (effective topk capped at P).
@@ -729,6 +724,28 @@ class Indexer(nn.Module):
         if self.use_fp8_qk and not _indexer_fp4_enabled():
             q_i = fake_quantize_fp8_e4m3(q_i)
             k_icomp_2d = fake_quantize_fp8_e4m3(k_icomp_2d)
+
+        # Score temperature (see ``self.score_scale``). Applied on ``w_i``
+        # because every scoring branch below multiplies by it before summing
+        # over heads, so all of them inherit the scale from one place. The
+        # one-shot Gluon scorer without autograd (frozen indexer) applies it
+        # in-kernel with the same rounding instead: one elementwise launch less.
+        chunk = _indexer_topk_chunk()
+        w_scale = None
+        if (
+            cu_seqlens is None
+            and not (chunk > 0 and P > chunk)
+            and not _indexer_fp4_enabled()
+            and _indexer_gluon_enabled()
+            and _indexer_gluon_supported(q_i, k_icomp_2d, w_i)
+            and not (
+                torch.is_grad_enabled()
+                and (q_i.requires_grad or k_icomp_2d.requires_grad or w_i.requires_grad)
+            )
+        ):
+            w_scale = self.score_scale
+        else:
+            w_i = w_i * self.score_scale
 
         def _scores_for(k2d: torch.Tensor, p_off: int) -> torch.Tensor:
             """Masked scores ``[B, S, Pc]`` for pool columns ``[p_off, p_off + Pc)``.
@@ -770,8 +787,7 @@ class Indexer(nn.Module):
         # S_local=131072 / P=262144 it is 64 GiB per rank, while torch.topk's own extra
         # peak is only 0.75 GiB -- the tensor, not the selection, is the problem.
         # Chunking over P keeps a running top-K and never materialises the full row:
-        # peak drops to [B, S, chunk] + [B, S, K].
-        chunk = _indexer_topk_chunk()
+        # peak drops to [B, S, chunk] + [B, S, K] (``chunk`` from _indexer_topk_chunk above).
         # `cu_seqlens is None` is load-bearing, not defensive: this block bakes in the
         # CONTIGUOUS causal mask (a scalar origin plus the q_offset shift), so on packed
         # input it would score every query against the whole pack's pool instead of its
@@ -883,6 +899,7 @@ class Indexer(nn.Module):
                 compress_ratio=self.compress_ratio,
                 out_dtype=hidden.dtype,
                 q_offset=self._cp_query_offset(S),
+                w_scale=w_scale,
             )
         elif _indexer_triton_full_enabled() and _indexer_triton_full_supported(q_i, k_icomp_2d, w_i):
             scores = indexer_score_triton(

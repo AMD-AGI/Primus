@@ -179,3 +179,71 @@ def test_launch_dsink_writes_main_grad(adapter, monkeypatch, cr):
         assert len(calls) == n, "the sink gradient did not go through dsink_main_grad"
         err = _rel(sk.main_grad, n * ref)
         assert err < 2e-2, f"main_grad after {n} backward(s): rel L2 {err:.3e}"
+
+
+def _run_csa_side_stream(adapter, data, side):
+    """CSA forward / backward with a CSADkvHolder (PRIMUS_OVERLAP CSA_BWD): the backward leaves the dKV gathers on
+    ``side`` and the latent's consumer waits in CSADkvJoin, as in DeepseekV4Attention."""
+    from primus.backends.megatron.core.transformer.v4_attention_kernels import (
+        v4_sparse_mla_adapter as smla,
+    )
+
+    csa, _ = adapter
+    q, k, pool, sink, do, topk_idxs, _ = data
+    qq, kk, pp = (t.clone().requires_grad_(True) for t in (q, k, pool))
+    sk = sink.clone().requires_grad_(True)
+    holder = smla.CSADkvHolder(side)
+    kj = smla.CSADkvJoin.apply(kk, holder)
+    smla._CSA_DKV_SLOT[0] = holder
+    try:
+        out = csa(
+            qq,
+            kj,
+            None,
+            pp,
+            topk_idxs=topk_idxs,
+            sink=sk,
+            swa_window=W,
+            attn_dropout=0.0,
+            training=True,
+            scale=D**-0.5,
+            k_is_latent=True,
+        )
+    finally:
+        smla._CSA_DKV_SLOT[0] = None
+    out.backward(do)
+    torch.cuda.synchronize()
+    assert holder.event is None and holder.keep is None, "the join did not release the dKV side work"
+    return [out.detach(), qq.grad, kk.grad, pp.grad, sk.grad]
+
+
+@pytest.mark.parametrize("contiguous_dpool", [True, False], ids=["dpool_out", "strided_copy"])
+def test_csa_dkv_side_stream_dpool(adapter, monkeypatch, contiguous_dpool):
+    """The CSA backward with its dKV gathers on a side stream takes the contiguous [P, D] dpool that Turbo writes
+    next to dkv (``dpool_out``) instead of copying the pool rows out of dkv (the path of a Turbo without that
+    kwarg). Both are byte-equal to the plain backward."""
+    from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_v2 import (
+        _turbo_gfx1250 as tg,
+    )
+
+    torch.manual_seed(0)
+    monkeypatch.setenv("PRIMUS_DSA_GFX1250_TURBO", "1")
+    monkeypatch.setenv("PRIMUS_V4_BAND_KERNELS", "1")
+    if not tg._bwd_takes_dkv_stream():
+        pytest.skip("Primus-Turbo without the dkv_stream kwarg")
+    if not contiguous_dpool:
+        monkeypatch.setattr(tg, "_bwd_takes_dpool_out", lambda: False)
+    elif not tg._bwd_takes_dpool_out():
+        pytest.skip("Primus-Turbo without the dpool_out kwarg")
+    seen = []
+    orig = tg._dkv_side_kwargs
+    monkeypatch.setattr(tg, "_dkv_side_kwargs", lambda: (lambda kw: seen.append(sorted(kw)) or kw)(orig()))
+    data = _inputs(4)
+    ref = _run(adapter, 4, data)
+    assert seen == [[]], "the plain backward must not get the side-stream kwargs"
+    seen.clear()
+    got = _run_csa_side_stream(adapter, data, torch.cuda.Stream())
+    want = ["dkv_keep", "dkv_stream"] + (["dpool_out"] if contiguous_dpool else [])
+    assert seen == [sorted(want)], f"side-stream kwargs {seen}"
+    for n, a, b in zip(_names(4), ref, got):
+        assert torch.equal(a, b), f"{n}: side-stream backward differs from the plain backward"
