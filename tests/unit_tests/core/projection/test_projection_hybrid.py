@@ -85,17 +85,51 @@ def test_mixer_defaults_follow_megatron():
     assert hybrid_mixer._shapes(mamba, 1)[3] == "ssd"
 
 
-def _mi325x_backend():
-    try:
-        from primus.core.projection.simulation_backends.factory import (
-            get_gemm_simulation_backend,
-        )
+# Origami's MI325X bf16 GEMM times (ms) for every (m, n, k) the benchmark cases
+# issue. Replayed rather than simulated live: GEMM predictions shift between
+# origami builds, and the benchmark margins are tighter than that drift.
+_MI325X_GEMM_MS = {
+    (128, 4096, 65536): 0.1117,
+    (1024, 2048, 114688): 0.6621,
+    (2048, 3104, 114688): 2.9603,
+    (2048, 8480, 65536): 2.5167,
+    (2048, 9280, 65536): 2.5079,
+    (3072, 14384, 32768): 3.1360,
+    (4096, 2048, 65536): 1.6768,
+    (4096, 18496, 16384): 2.2821,
+    (6144, 3072, 32768): 1.2517,
+    (8192, 4096, 16384): 1.1331,
+    (16384, 4096, 8192): 1.1076,
+    (16384, 4096, 18496): 2.4750,
+    (16384, 8192, 4096): 1.0125,
+    (16384, 18496, 4096): 2.3288,
+    (32768, 3072, 6144): 1.2888,
+    (32768, 3072, 14384): 2.9875,
+    (32768, 6144, 3072): 1.2032,
+    (32768, 14384, 3072): 2.6516,
+    (65536, 128, 4096): 0.1173,
+    (65536, 2048, 4096): 1.0125,
+    (65536, 2048, 8480): 2.0723,
+    (65536, 2048, 9280): 2.2535,
+    (65536, 4096, 128): 0.1222,
+    (65536, 4096, 2048): 1.0399,
+    (65536, 8480, 2048): 2.1953,
+    (65536, 9280, 2048): 2.4113,
+    (114688, 1024, 2048): 0.4484,
+    (114688, 2048, 1024): 0.4718,
+    (114688, 2048, 3104): 1.3437,
+    (114688, 3104, 2048): 1.5594,
+}
 
-        backend = get_gemm_simulation_backend(gpu_arch="mi325x")
-    except Exception as exc:  # pragma: no cover - origami not installed
-        backend = None
-        pytest.skip(f"MI325X GEMM backend unavailable: {exc}")
-    return backend
+
+class _MI325XBackend(_FlopsBackend):
+    """Recorded MI325X GEMM times; 6 TB/s HBM; MI325X vector peak."""
+
+    hbm_bandwidth_gbps = 6000.0
+
+    def simulate_gemm(self, m, n, k, dtype):
+        assert dtype == "bf16"
+        return SimpleNamespace(forward_time_ms=_MI325X_GEMM_MS[(m, n, k)])
 
 
 # Per-layer MI325X benchmark times (fwd, bwd ms) of the ``M`` layers, which
@@ -128,7 +162,7 @@ _MEASURED = [
 def test_mixer_matches_mi325x_benchmarks(mc, batch, fwd_ms, bwd_ms):
     from primus.core.projection.module_profilers.moe_mlp import _ACTIVATION_BW_FRACTION
 
-    be = _mi325x_backend()
+    be = _MI325XBackend()
     tokens = batch * SEQ
     fwd, bwd = mixer_time_ms(mc, tokens, be)
     pass_ms = tokens * mc.hidden_size * 2 / (be.hbm_bandwidth_gbps * _ACTIVATION_BW_FRACTION * 1e6)
