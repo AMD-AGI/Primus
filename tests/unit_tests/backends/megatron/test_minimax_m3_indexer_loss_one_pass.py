@@ -15,7 +15,6 @@ The first group runs on the CPU: it checks the kernels' arithmetic as written in
 (``emulate`` / ``emulate_backward``, the walk-order formulation and the hand-written backward
 chain) against the eager loss and autograd. The second group needs a GPU and runs the kernels."""
 
-import os
 from types import SimpleNamespace
 
 import pytest
@@ -179,37 +178,27 @@ def test_not_eligible_off_gpu_or_with_other_dtypes():
     assert O.one_pass_indexer_loss(slot, lse, scores, table, None, COEFF, reference=None) is None
 
 
-def _fake_attention(**config):
-    defaults = dict(msa_indexer_loss_one_pass=True, msa_fused_indexer_loss=True, msa_exact_numerics=False)
+def _fake_attention(gfx1250=True, **config):
+    defaults = dict(msa_fused_indexer_loss=True, msa_exact_numerics=False)
     defaults.update(config)
-    return SimpleNamespace(config=SimpleNamespace(**defaults))
+    return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=gfx1250)
 
 
-def test_switch_defaults_off_and_exact_numerics_turns_it_off():
+def test_on_with_the_fused_loss_and_exact_numerics_turns_it_off():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_indexer_loss_one_pass"].default is False
+    assert "msa_indexer_loss_one_pass" not in MSATransformerConfig.__dataclass_fields__
     assert "msa_indexer_loss_one_pass" in attention._MSA_RELAXED
     A = attention.MinimaxSparseAttention
     assert A._loss_one_pass(_fake_attention()) is True
-    # msa_exact_numerics reproduces the reference losses: off, whatever the switch says
+    # msa_exact_numerics reproduces the reference losses
     assert A._loss_one_pass(_fake_attention(msa_exact_numerics=True)) is False
-    assert A._loss_one_pass(_fake_attention(msa_indexer_loss_one_pass=False)) is False
     # it stands in for the fused loss's Triton path: nothing without that switch
     assert A._loss_one_pass(_fake_attention(msa_fused_indexer_loss=False)) is False
-
-
-def test_yaml_default_false_and_on_in_the_mi455x_example():
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    preset = open(os.path.join(root, "primus/configs/models/megatron/minimax_m3.yaml")).read()
-    example = open(
-        os.path.join(root, "examples/megatron/configs/MI455X/minimax_m3-BF16-pretrain.yaml")
-    ).read()
-    assert "\nmsa_indexer_loss_one_pass: false\n" in preset
-    assert "      msa_indexer_loss_one_pass: true\n" in example
+    assert A._loss_one_pass(_fake_attention(gfx1250=False)) is False
 
 
 # --------------------------------------------------------------------------- GPU: the kernels

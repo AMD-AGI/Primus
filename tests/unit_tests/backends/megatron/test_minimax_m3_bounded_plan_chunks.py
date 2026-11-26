@@ -5,7 +5,7 @@
 ###############################################################################
 
 """``msa_bounded_plan_chunks`` (relaxed numerics): the BlockPlan cut into chunks of a bounded
-size. The rule and the switch on CPU; on gfx1250 the plan's structure (both builders), dK / dV and
+size. The rule and its gating on CPU; on gfx1250 the plan's structure (both builders), dK / dV and
 the index dK on it against FP32 / FP64 references and the reference chunking with explicit
 tolerances, determinism, and the shapes that break kernels (S not a multiple of the block, -1
 padded rows, early queries, hot blocks, B > 1)."""
@@ -33,7 +33,7 @@ needs_gfx1250 = pytest.mark.skipif(
 )
 
 
-# ---------------------------------------------------------------- the rule and the switch (CPU)
+# ---------------------------------------------------------------- the rule and its gating (CPU)
 
 
 def test_chunk_size_rule():
@@ -66,23 +66,22 @@ def test_chunk_size_rule():
     assert bwd.plan_chunk_size(2 * 4 * 131072 * 16, bounded=True) == 2 * 4 * 131072 * 16 // count
 
 
-def test_switch_default_exact_flag_and_group():
+def test_gfx1250_exact_flag_and_group(monkeypatch):
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
-        bounded_plan_chunks_enabled,
-    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import index_select
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_bounded_plan_chunks"].default is False
+    assert "msa_bounded_plan_chunks" not in MSATransformerConfig.__dataclass_fields__
     assert "msa_bounded_plan_chunks" in attention._MSA_RELAXED
-    assert not bounded_plan_chunks_enabled(None)
-    assert not bounded_plan_chunks_enabled(SimpleNamespace())
-    assert bounded_plan_chunks_enabled(SimpleNamespace(msa_bounded_plan_chunks=True))
-    assert not bounded_plan_chunks_enabled(
-        SimpleNamespace(msa_bounded_plan_chunks=True, msa_exact_numerics=True)
-    )
+    monkeypatch.setattr(index_select, "_on_gfx1250", lambda: True)
+    assert index_select.bounded_plan_chunks_enabled(None)
+    assert index_select.bounded_plan_chunks_enabled(SimpleNamespace(msa_exact_numerics=False))
+    assert not index_select.bounded_plan_chunks_enabled(SimpleNamespace(msa_exact_numerics=True))
+    # other GPUs keep the reference chunking
+    monkeypatch.setattr(index_select, "_on_gfx1250", lambda: False)
+    assert not index_select.bounded_plan_chunks_enabled(SimpleNamespace(msa_exact_numerics=False))
 
 
 @needs_gfx1250

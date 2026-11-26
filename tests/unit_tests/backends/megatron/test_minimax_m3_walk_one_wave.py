@@ -101,14 +101,14 @@ def test_dispatcher_checks_and_falls_back(monkeypatch):
     assert launched[-1] == (16, 4)
 
 
-def test_switch_defaults_off_and_reaches_the_walk(monkeypatch):
+def test_the_walk_asks_for_one_wave(monkeypatch):
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_walk_one_wave"].default is False
+    assert "msa_walk_one_wave" not in MSATransformerConfig.__dataclass_fields__
     assert "msa_walk_one_wave" in attention._MSA_RELAXED
     assert block_walk._ONE_WAVE_ROWS in (1, 2, 4)
     seen = []
@@ -117,31 +117,14 @@ def test_switch_defaults_off_and_reaches_the_walk(monkeypatch):
     )
 
     def fake(**config):
-        defaults = dict(
-            msa_aligned_block_walk=True,
-            msa_walk_one_wave=True,
-            msa_exact_numerics=False,
-            msa_shared_tile_staging=True,
-        )
+        defaults = dict(msa_exact_numerics=False, msa_shared_tile_staging=True)
         defaults.update(config)
         return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
     idx = torch.zeros(1, 1, 8, 4, dtype=torch.int64)
     A = attention.MinimaxSparseAttention
     A._aligned_walk(fake(), idx, None)
-    A._aligned_walk(fake(msa_walk_one_wave=False), idx, None)
-    assert seen == [True, False]
-    # msa_exact_numerics (and the walk's own switch) turn the walk, and so this option, off
+    assert seen == [True]
+    # msa_exact_numerics turns the walk, and so this option, off
     assert A._aligned_walk(fake(msa_exact_numerics=True), idx, None) is None
-    assert A._aligned_walk(fake(msa_aligned_block_walk=False), idx, None) is None
-    assert seen == [True, False]
-
-
-def test_yaml_default_false_and_on_in_the_mi455x_example():
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    preset = open(os.path.join(root, "primus/configs/models/megatron/minimax_m3.yaml")).read()
-    example = open(
-        os.path.join(root, "examples/megatron/configs/MI455X/minimax_m3-BF16-pretrain.yaml")
-    ).read()
-    assert "\nmsa_walk_one_wave: false\n" in preset
-    assert "      msa_walk_one_wave: true\n" in example
+    assert seen == [True]

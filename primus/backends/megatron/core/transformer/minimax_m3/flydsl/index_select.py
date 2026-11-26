@@ -43,32 +43,43 @@ from primus.core.utils.module_utils import warning_rank_0
 _UNSUPPORTED_WARNED = False
 
 
+def _relaxed_paths(config) -> bool:
+    """Whether the relaxed-numerics paths of the selection may be taken (``attention._MSA_RELAXED``):
+    the gfx1250 kernels, without ``msa_exact_numerics``."""
+    return _on_gfx1250() and not bool(getattr(config, "msa_exact_numerics", False))
+
+
 def index_dk_scatter_enabled(config) -> bool:
-    """``msa_index_dk_scatter`` as the indexer's backward uses it: the switch, unless
-    ``msa_exact_numerics`` is set (relaxed numerics: the chunk partials of ``index_dk`` are
-    summed in another order and from the full fp32 ``g``). Decided before any work; whether
-    the kernel serves the shape and passes its first-call comparison is ``index_dk``'s part."""
-    return bool(getattr(config, "msa_index_dk_scatter", False)) and not bool(
-        getattr(config, "msa_exact_numerics", False)
-    )
+    """``msa_index_dk_scatter`` as the indexer's backward uses it (relaxed numerics: the chunk
+    partials of ``index_dk`` are summed in another order and from the full fp32 ``g``). Decided
+    before any work; whether the kernel serves the shape and passes its first-call comparison is
+    ``index_dk``'s part."""
+    return _relaxed_paths(config)
 
 
 def bounded_plan_chunks_enabled(config) -> bool:
-    """``msa_bounded_plan_chunks`` as the selection builds its :class:`BlockPlan`: the switch,
-    unless ``msa_exact_numerics`` is set (relaxed numerics: the chunk partials of dK / dV and of
-    the index dK are summed over other groups of entries). Decided before any work, from the
-    config alone; the chunk size itself is a function of ``B * Hkv * S * topk``
-    (``msa_token_bwd.plan_chunk_size``)."""
-    return bool(getattr(config, "msa_bounded_plan_chunks", False)) and not bool(
-        getattr(config, "msa_exact_numerics", False)
-    )
+    """``msa_bounded_plan_chunks`` as the selection builds its :class:`BlockPlan` (relaxed
+    numerics: the chunk partials of dK / dV and of the index dK are summed over other groups of
+    entries). Decided before any work; the chunk size itself is a function of
+    ``B * Hkv * S * topk`` (``msa_token_bwd.plan_chunk_size``)."""
+    return _relaxed_paths(config)
+
+
+def _wide_enabled() -> bool:
+    """``msa_select_plan_wide``: the gfx1250 kernels (bit-identical, so not a relaxed path)."""
+    return _on_gfx1250()
+
+
+def _skip_fill_enabled() -> bool:
+    """``msa_select_skip_fill``: the gfx1250 scoring kernel (bit-identical)."""
+    return _on_gfx1250()
 
 
 def _fused_mode(select_from_block_scores, B, H, S, NB):
     """Which form of the fused selection serves this shape, decided from the config and the
     shape before any work: ``"plan"`` (:func:`select_plan.supported`), ``"wide"``
-    (``msa_select_plan_wide`` and :func:`select_plan.wide_supported`) or None (the unfused
-    selection)."""
+    (``msa_select_plan_wide``: :func:`_wide_enabled` and :func:`select_plan.wide_supported`) or
+    None (the unfused selection)."""
     from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
         MinimaxM3Indexer,
     )
@@ -85,7 +96,7 @@ def _fused_mode(select_from_block_scores, B, H, S, NB):
     topk = min(indexer.topk_blocks, NB)
     if select_plan.supported(B, H, S, NB, topk):
         return "plan"
-    wide = bool(getattr(indexer.config, "msa_select_plan_wide", False))
+    wide = _wide_enabled()
     if wide and select_plan.wide_supported(B, H, S, NB, topk):
         return "wide"
     global _UNSUPPORTED_WARNED
@@ -94,11 +105,7 @@ def _fused_mode(select_from_block_scores, B, H, S, NB):
         warning_rank_0(
             f"MSA indexer: fused block selection off for B={B}, H={H}, n_blocks={NB}, topk={topk} "
             "(needs n_blocks <= 64, topk <= 32, B*H*n_blocks <= 1024"
-            + (
-                "; msa_select_plan_wide: topk <= 64, B*H*n_blocks <= 4096"
-                if wide
-                else "; msa_select_plan_wide is off"
-            )
+            + ("; on gfx1250: topk <= 64, B*H*n_blocks <= 4096" if wide else "")
             + "); using the unfused selection."
         )
     return None
@@ -188,8 +195,8 @@ class _FusedSelect(torch.autograd.Function):
     def forward(ctx, q, k, select_from_block_scores, block_size, plan_slot):
         indexer = getattr(select_from_block_scores, "__self__", None)
         config = getattr(indexer, "config", None)
-        # msa_lean_masks: bit-identical scoring and dK kernels, each checked on its first call
-        lean = bool(getattr(config, "msa_lean_masks", False))
+        # msa_lean_masks: bit-identical gfx1250 scoring and dK kernels, each checked on its first call
+        lean = _on_gfx1250()
         ctx.lean = lean
         ctx.dk_scatter = index_dk_scatter_enabled(config)
         ctx.bounded_chunks = bounded = bounded_plan_chunks_enabled(config)
@@ -208,10 +215,7 @@ class _FusedSelect(torch.autograd.Function):
         # and nothing else reads the blocks after a query's own, so the gfx1250 scoring kernel's
         # outputs need no -inf / -1 fill. Exact class: stays on under msa_exact_numerics.
         skip_fill = (
-            mode is not None
-            and bool(getattr(config, "msa_select_skip_fill", False))
-            and _on_gfx1250()
-            and _forced_of(indexer, S, NB, q.device) is not None
+            mode is not None and _skip_fill_enabled() and _forced_of(indexer, S, NB, q.device) is not None
         )
 
         def scored(fill=True):

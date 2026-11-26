@@ -188,24 +188,6 @@ class MSATransformerConfig(TransformerConfig):
     bookkeeping, identical by construction; shapes past select_plan.supported() keep the eager
     path."""
 
-    msa_select_plan_wide: bool = False
-    """flydsl backend with msa_fused_select_plan: shapes past select_plan.supported() (more than
-    64 blocks, i.e. sequences above 8k, or more than 1024 rows of blocks) get the selection
-    bookkeeping from one Triton launch and the BlockPlan from build_block_plan's two FlyDSL
-    passes with two Triton launches for the eager ops around them (select_plan.wide_supported():
-    up to 4096 rows of blocks, topk <= 64). Integer bookkeeping, exact class: the first
-    call for a shape compares every output with the unfused selection's and keeps that one on a
-    mismatch. Not a relaxed-numerics option: msa_exact_numerics leaves it on."""
-
-    msa_select_skip_fill: bool = False
-    """flydsl backend on gfx1250 with msa_fused_select_plan and forced (local / init) blocks: the
-    indexer's scoring kernel gets its two output tables unfilled (no -inf / -1 fill launches).
-    The kernel writes every block up to a query's own; the forced-block boost kernel, which
-    rewrites the score table anyway, writes -inf on the later blocks, and the argmax table is
-    never read there. Same bits, exact class: the first call for a shape runs the selection on
-    poisoned tables and on filled ones and keeps the fills on a mismatch. msa_exact_numerics
-    leaves it on."""
-
     msa_shared_tile_staging: bool = False
     """flydsl backend on gfx1250: the MSA forward and dQ kernels run 4 / 2 adjacent tokens of a KV
     group per workgroup, in lockstep, and stage a K/V tile that several of them select at the same
@@ -214,148 +196,18 @@ class MSATransformerConfig(TransformerConfig):
     one-token-per-workgroup kernels and keeps those on a mismatch. Needs S and the block size to be
     multiples of 4 / 2, else unchanged."""
 
-    msa_lean_masks: bool = False
-    """flydsl backend on gfx1250: the MSA kernels make their masking decisions per step or per lane
-    where a per-element select cannot change the result. The forward, dQ and dK/dV kernels and the
-    indexer's scoring kernel skip the per-key causal compare and select on steps / key blocks
-    whose keys are all visible to the wave's token(s) -- every step outside a token's own block
-    -- behind a wave-uniform scalar branch; the indexer's dK kernel loads the zeros of the WMMA's
-    unused K half from an LDS pad instead of selecting them per element (flydsl/
-    msa_token_fwd_w32.py, msa_token_bwd_w32.py, index_block_max.py). The skipped selects would
-    return their input and the pad holds the same zeros, so the bits are the same; the first call
-    for a shape compares every output bit of each kernel with the kernel without it and keeps
-    that one on a mismatch."""
-
-    msa_aligned_block_walk: bool = False
-    """flydsl backend on gfx1250, with msa_shared_tile_staging: the forward and dQ kernels walk each
-    token's selected blocks in an order aligned with its neighbours' (flydsl/block_walk.py), so
-    the tokens of a workgroup meet a common block at the same step and stage its K/V tiles once.
-    The selection and the terms summed are unchanged; the order of the sums is not (relaxed
-    numerics: o, lse, the slot mass and dq change in the last bits; deterministic).
-    msa_exact_numerics turns it off."""
-
-    msa_dq_from_ds: bool = False
-    """flydsl backend on gfx1250: the MSA backward takes dQ from the dK/dV kernel's dS. That kernel
-    already forms dS = P * (dO V^T - delta) for every (token, selected block) as a bf16 WMMA
-    operand; it also writes it out (4 KB per pair, a transient buffer), and a slim dQ kernel forms
-    dQ = scale * dS K from it: no V staging and no second S / dS computation in the dQ kernel
-    (flydsl/msa_token_bwd_w32.py, build_dq_ds_w32). delta = rowsum(dO * O) comes from one Triton
-    launch. Relaxed numerics: the same terms, with the dK/dV kernel's dS instead of the dQ kernel's
-    own (last-bit differences) and delta summed in another order; deterministic. The first call for
-    a shape compares dq / dk / dv with the reference kernels (tolerance 1e-3) and keeps those
-    otherwise; dS buffers above 16 GiB keep them too. msa_exact_numerics turns it off."""
-
-    msa_owner_carry: bool = False
-    """flydsl backend on gfx1250, with msa_shared_tile_staging: the MSA forward keeps each step's
-    tile owner and block id in its loop state, read once when the step's tiles are issued one
-    iteration earlier, instead of re-reading the workgroup's table entries in the step (flydsl/
-    msa_token_fwd_w32.py, carry_owner). Same operands and arithmetic: the outputs are
-    bit-identical, and the first call for a shape compares every output bit with the kernel
-    without it and keeps that one on a mismatch. It changes an MSA operator kernel, so it is
-    grouped with the relaxed-numerics options: msa_exact_numerics turns it off."""
-
-    msa_index_dk_scatter: bool = False
-    """flydsl backend on gfx1250, relaxed numerics: the indexer backward's dK chunk kernel adds
-    each plan entry's ``g * q_row`` (fp32) into the one winning key row of an fp32 LDS
-    accumulator, entry by entry in plan order, instead of a one-hot masked WMMA product over
-    all the block's keys (flydsl/index_block_max.py, _build_index_dk_scatter_w32; one wave per
-    chunk, no barrier). The chunk partials go through the same fixed-order reduce. The terms
-    are the same; g enters in full fp32 instead of 16 mantissa bits and a key row's terms are
-    added in entry order, so d index k differs in its last bits (deterministic). The first
-    call for a shape runs the kernel twice and the reference kernel once on that call's
-    inputs: identical bits between the two runs and partials within 1e-4 of the reference's
-    largest partial, else the reference kernel stays. Used only for sparse_index_dim 128 (4
-    elements per lane) and a power-of-two top-k, the one form that was compiled and run on the
-    device (index_dk_scatter_supported and the dispatcher in index_dk); any other shape keeps the
-    reference kernel. msa_exact_numerics turns it off."""
-
-    msa_bounded_plan_chunks: bool = False
-    """flydsl backend, relaxed numerics: the BlockPlan that the dK/dV kernel and the indexer
-    backward's dK walk is cut into chunks of ceil(B * Hkv * S * topk / 4096) entries kept within
-    [256, 384], instead of max(64, ceil(B * Hkv * S * topk / 2048)) (flydsl/msa_token_bwd.py,
-    plan_chunk_size; the same rule in the fused selection plan and in build_block_plan). A chunk
-    is one workgroup: the reference rule gives 128-entry chunks at S 4096, where the fixed part
-    of a workgroup (K/V prologue, pipeline fill, 131 KB of FP32 partials and their reduce) is
-    paid too often, and 1024-entry chunks at S 32768, where the longest rows end late (a
-    workgroup takes its steps one after another). Never more than 8192 chunks plus one per
-    row: larger tables get ceil(entries / 8192) per chunk. The constants are not functions of
-    the shape. Same entries, same order inside a row; the FP32 chunk partials are summed over
-    other groups of entries, so dk, dv and d index k differ in their last bits (deterministic:
-    the chunking is a pure function of the table). msa_exact_numerics turns it off."""
-
-    msa_ds_chunk_store: bool = False
-    """flydsl backend on gfx1250, with msa_dq_from_ds: the dK/dV kernel writes its dS records
-    through one buffer descriptor per workgroup (the (batch, KV head) slice of the dS buffer, with
-    a per-lane record offset) instead of one descriptor per record, with the entry ids carried in
-    the loop state next to their tokens (flydsl/msa_token_bwd_w32.py, ds_chunk_store). The same
-    bytes go to the same records, so dq / dk / dv are bit-identical to msa_dq_from_ds without it.
-    Used while a slice (S * topk records of 4 KB) is at most 2 GiB (32-bit offsets); larger shapes
-    keep the per-record stores. Part of the msa_dq_from_ds path: its first-call comparison runs
-    with it, and msa_exact_numerics turns it off."""
-
-    msa_dq_early_issue: bool = False
-    """flydsl backend on gfx1250, with msa_dq_from_ds: the slim dQ kernel issues the Tensor Data
-    Mover copies of step j+1 before it waits for those of step j, so two steps' copies are in
-    flight at a time in the same 2-stage LDS ring (flydsl/msa_token_bwd_w32.py, early_issue; two
-    workgroup barriers per step instead of one, a count-based wait). Same tiles, arithmetic and
-    order: dq is bit-identical, and the first call for a shape compares every bit of dq with the
-    kernel without it and keeps that one on a mismatch. Part of the msa_dq_from_ds path, so
-    msa_exact_numerics turns it off."""
-
-    msa_dkdv_two_token_steps: bool = False
-    """flydsl backend on gfx1250, sparse_block_size 128: the backward's dK/dV kernel takes two
-    tokens per step instead of four (flydsl/msa_token_bwd_w32.py, tokens_per_step): four of the
-    eight waves issue a Tensor Data Mover tile per step, the Q / dO stage ring is half as large
-    and a chunk of the block plan takes twice the steps. Same entries, accumulators and order,
-    so dk / dv (and the dS records of msa_dq_from_ds) are bit-identical; the first call for a
-    shape compares every bit of the fp32 chunk partials and of dS with the four-token kernel and
-    keeps that one on a mismatch. Eligibility is the kernel family and the block size, not S, B
-    or the selection. It changes a kernel of the MSA operator, so msa_exact_numerics turns it
-    off."""
-
-    msa_two_tile_slots: bool = False
-    """flydsl backend on gfx1250, with msa_owner_carry (and msa_shared_tile_staging): the MSA
-    forward keeps two LDS tile slots per wave, one for K and one for V, instead of a 2-stage ring
-    of both. A step reads its K tile first and its V tile last, so the step's V is copied while
-    the step works on K and the next step's K while it works on V, each after a workgroup barrier
-    (flydsl/msa_token_fwd_w32.py, two_tile_slots). A workgroup then takes 68 KB of LDS instead of
-    140 KB, and four workgroups instead of two fit a compute unit's 320 KB. Same tiles, arithmetic
-    and order: the outputs are bit-identical, and the first call for a shape compares every output
-    bit with the kernel without it and keeps that one on a mismatch. An MSA operator kernel
-    option: msa_exact_numerics turns it off."""
-
-    msa_walk_one_wave: bool = False
-    """flydsl backend on gfx1250, with msa_aligned_block_walk: the walk's Triton kernel is launched
-    with one wave per program (2 token groups each) instead of four waves (16 groups), so its
-    K x K compares and ranks are not exchanged between waves through LDS and workgroup barriers
-    (flydsl/block_walk.py). The same integer kernel: the walk table and slots are identical (the
-    first table of a shape is compared with the PyTorch reference; a mismatch keeps the four-wave
-    launch), so every output keeps its bits. An option of the aligned walk, which
-    msa_exact_numerics turns off."""
-
-    msa_indexer_loss_one_pass: bool = False
-    """flydsl backend, with msa_fused_indexer_loss: the slot mass and the sparse indexer KL of an
-    MSA layer come from one Triton kernel (it reads the forward's slot_lse / lse, the block table
-    and the block scores and writes each row's KL), and their backward from one more
-    (indexer_loss_one_pass.py), instead of three ATen launches for the slot mass, the walk-order
-    scatter and the bit-exact fused loss's kernels and ATen reductions. The loss is the same
-    block-level KL over the selected blocks; relaxed numerics: a row's sums, exp and log are
-    Triton's, and with msa_aligned_block_walk a row is summed in walk order (deterministic). The
-    first call for a shape runs it twice and compares it with the path it replaces (loss within
-    5e-7, block-score gradient within 2e-5, identical bits between the two runs) and keeps that
-    path otherwise. msa_exact_numerics turns it off."""
-
     msa_exact_numerics: bool = False
-    """Keep the options of the MSA operator kernels off, whatever their own switches say, so a run
-    reproduces the reference flydsl kernels' losses bit for bit (for regression checks). The group
-    is attention._MSA_RELAXED: the five relaxed-numerics options, whose arithmetic is not
-    bit-identical to the reference kernels (msa_aligned_block_walk, msa_dq_from_ds,
-    msa_index_dk_scatter, msa_indexer_loss_one_pass, msa_bounded_plan_chunks), and the
-    bit-preserving options that are
-    built on them or change the same kernels (msa_owner_carry, msa_ds_chunk_store,
-    msa_dq_early_issue, msa_two_tile_slots, msa_walk_one_wave, msa_dkdv_two_token_steps). Each of them, or the option it
-    is a part of, tests this flag before any work; the Triton fusions and msa_shared_tile_staging
-    / msa_lean_masks, which are bit-identical and part of the reference state, ignore it."""
+    """flydsl backend on gfx1250: keep the MSA operator on the reference kernels' arithmetic, so a
+    run reproduces their losses bit for bit (for regression checks). Without it the operator also
+    takes the kernel paths of attention._MSA_RELAXED wherever a shape is eligible: five are
+    relaxed numerics, not bit-identical to the reference kernels (the aligned block walk, dQ from
+    the dK/dV kernel's dS, the index dK scatter, the one-pass indexer loss, the bounded plan
+    chunks), and the others keep the bits of the path they sit on or change the same kernels (the
+    forward's owner carry and two tile slots, the dS chunk store, the dQ kernel's early issue,
+    the one-wave walk, the two-token dK/dV steps). Each path is decided before any work and
+    checked on its first call for a shape (attention.py lists them). The bit-identical paths --
+    the Triton fusions, msa_shared_tile_staging, the lean masks and the wide / unfilled block
+    selection -- ignore this flag. Other GPUs never take these paths."""
 
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not

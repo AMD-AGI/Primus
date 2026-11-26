@@ -185,17 +185,12 @@ def test_two_tile_slots_lds_fits_four_workgroups():
 
 
 def _fake_attention(**config):
-    defaults = dict(
-        msa_owner_carry=True,
-        msa_two_tile_slots=True,
-        msa_shared_tile_staging=True,
-        msa_exact_numerics=False,
-    )
+    defaults = dict(msa_shared_tile_staging=True, msa_exact_numerics=False)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_switch_defaults_off_and_exact_numerics_turns_it_off():
+def test_on_with_owner_carry_and_exact_numerics_turns_it_off():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -204,15 +199,12 @@ def test_switch_defaults_off_and_exact_numerics_turns_it_off():
         MinimaxSparseAttention,
     )
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_two_tile_slots"].default is False
+    assert "msa_two_tile_slots" not in MSATransformerConfig.__dataclass_fields__
     assert "msa_two_tile_slots" in attention._MSA_RELAXED
     A = MinimaxSparseAttention
     assert A._owner_carry(_fake_attention()) == {"owner_carry": True, "two_tile_slots": True}
-    # msa_exact_numerics reproduces the reference kernels: off, whatever the switches say
+    # msa_exact_numerics reproduces the reference kernels: off with the carry kernel
     assert A._owner_carry(_fake_attention(msa_exact_numerics=True)) == {}
-    assert A._owner_carry(_fake_attention(msa_two_tile_slots=False)) == {"owner_carry": True}
-    # a layout of the carry kernel: nothing without it
-    assert A._owner_carry(_fake_attention(msa_owner_carry=False)) == {}
     assert A._owner_carry(_fake_attention(msa_shared_tile_staging=False)) == {}
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False

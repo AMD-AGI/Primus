@@ -9,7 +9,8 @@ blocks, and the indexer's scoring kernel without its fill launches.
 
 Both are exact class: every output (block table, boosted scores, winning keys, dead mask, the
 BlockPlan) must equal the unfused selection's bit for bit, and so must the gradients that go
-back through it.
+back through it. Neither has a switch (gfx1250 takes them); the tests turn them on and off
+through ``index_select._wide_enabled`` / ``_skip_fill_enabled``.
 """
 
 from types import SimpleNamespace
@@ -165,7 +166,7 @@ def test_boost_causal_ignores_the_unwritten_blocks(B, H, S, block, local_blocks,
     assert torch.equal(select_plan.boost_forced(raw, forced, causal_block=0), ref)
 
 
-def _indexer(topk, block, local_blocks, init_blocks, **switches):
+def _indexer(topk, block, local_blocks, init_blocks, exact=False):
     """A MinimaxM3Indexer with the attributes its selection reads, without the projections."""
     from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
         MinimaxM3Indexer,
@@ -173,10 +174,18 @@ def _indexer(topk, block, local_blocks, init_blocks, **switches):
 
     ix = MinimaxM3Indexer.__new__(MinimaxM3Indexer)
     torch.nn.Module.__init__(ix)
-    ix.config = SimpleNamespace(msa_fused_select_plan=True, msa_lean_masks=True, **switches)
+    ix.config = SimpleNamespace(msa_fused_select_plan=True, msa_exact_numerics=exact)
     ix.block_size, ix.topk_blocks = block, topk
     ix.local_blocks, ix.init_blocks = local_blocks, init_blocks
     return ix
+
+
+def _paths(monkeypatch, wide, skip_fill):
+    """Take (or not) the wide plan and the unfilled scoring tables; the latter is a gfx1250 path."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import index_select
+
+    monkeypatch.setattr(index_select, "_wide_enabled", lambda: wide)
+    monkeypatch.setattr(index_select, "_skip_fill_enabled", lambda: skip_fill and "gfx1250" in _gcn_arch())
 
 
 def _qk(S, B, H, seed, hot):
@@ -253,34 +262,36 @@ def test_fused_select_bitwise_with_wide_plan_and_skip_fill(
 
     monkeypatch.setattr(index_select, "index_block_max", spy)
     monkeypatch.setattr(bitwise_check, "_results", dict(bitwise_check._results))
+    # the same index dK kernel and plan chunking on both sides (bounded: the reference is then the
+    # unfused selection with build_block_plan's bounded chunks; that path is relaxed, these two are
+    # not)
+    monkeypatch.setattr(index_select, "index_dk_scatter_enabled", lambda config: False)
+    monkeypatch.setattr(index_select, "bounded_plan_chunks_enabled", lambda config: bounded)
 
-    # bounded: msa_bounded_plan_chunks on both sides (the reference is then the unfused selection
-    # with build_block_plan's bounded chunks; the option itself is relaxed, these two are not)
-    base = dict(msa_bounded_plan_chunks=True) if bounded else {}
-    ref = _step(_indexer(topk, 128, local_blocks, init_blocks, **base), q, k)
+    _paths(monkeypatch, wide=False, skip_fill=False)
+    ref = _step(_indexer(topk, 128, local_blocks, init_blocks), q, k)
     assert fills and all(f is True for f in fills)
 
-    for switches in (
-        dict(msa_select_plan_wide=True),
-        dict(msa_select_skip_fill=True),
-        dict(msa_select_plan_wide=True, msa_select_skip_fill=True),
-        # exact class: msa_exact_numerics does not turn them off, and need not
-        dict(msa_select_plan_wide=True, msa_select_skip_fill=True, msa_exact_numerics=True),
+    for wide, skip_fill, exact in (
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+        # bit-identical: msa_exact_numerics does not turn them off, and need not
+        (True, True, True),
     ):
-        if switches.get("msa_exact_numerics") and bounded:
-            continue  # msa_exact_numerics turns the bounded chunks off: another reference
-        ix = _indexer(topk, 128, local_blocks, init_blocks, **base, **switches)
+        _paths(monkeypatch, wide, skip_fill)
+        ix = _indexer(topk, 128, local_blocks, init_blocks, exact=exact)
         first = _step(ix, q, k)  # the call that runs the self-checks
         del fills[:]
         second = _step(ix, q, k)
         key = (S, B, H, NB, 128, min(topk, NB), bounded)
-        if switches.get("msa_select_plan_wide") and wide_shape:
+        if wide and wide_shape:
             require_bitwise(
                 bitwise_check._results.get(("msa_select_plan_wide", key), False),
                 f"msa_select_plan_wide {key}",
             )
-        fused = not wide_shape or switches.get("msa_select_plan_wide")
-        if switches.get("msa_select_skip_fill") and fused and "gfx1250" in _gcn_arch():
+        fused = not wide_shape or wide
+        if skip_fill and fused and "gfx1250" in _gcn_arch():
             require_bitwise(
                 bitwise_check._results.get(("msa_select_skip_fill", key), False),
                 f"msa_select_skip_fill {key}",
@@ -307,9 +318,11 @@ def test_skip_fill_needs_forced_blocks(monkeypatch):
 
     monkeypatch.setattr(index_select, "index_block_max", spy)
     q, k = _qk(1000, 1, 4, seed=1, hot=False)
+    _paths(monkeypatch, wide=False, skip_fill=False)
     ref = _step(_indexer(4, 128, 0, 0), q, k)
     del fills[:]
-    got = _step(_indexer(4, 128, 0, 0, msa_select_plan_wide=True, msa_select_skip_fill=True), q, k)
+    _paths(monkeypatch, wide=True, skip_fill=True)
+    got = _step(_indexer(4, 128, 0, 0), q, k)
     assert fills == [True]
     assert all(torch.equal(a, b) for a, b in zip(got, ref))
 

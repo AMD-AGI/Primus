@@ -21,7 +21,7 @@ the block table and the block scores and writes each row's KL (a row = one (batc
 token)); ``klrow.mean() * coeff`` stays ordinary autograd. One backward kernel takes the row
 gradient to the gradient of ``block_scores``.
 
-Same computation, as task rules require: the KL is block-level over the selected blocks, the
+Same computation: the KL is block-level over the selected blocks, the
 target is the attention mass of each selected block (mean over the group's heads of
 ``exp(slot_lse - lse)``, L1-normalised with the 1e-10 clamp), the prediction is the indexer's
 softmax over the selected blocks with the forced ``+inf`` clamped to the row's largest finite
@@ -43,7 +43,7 @@ workgroup barrier, no wait on another wave and no loop; their grids come from th
 The first call for a shape runs this path twice and the path it replaces once, on the call's own
 inputs, and keeps the replaced path unless both runs give the same bits and the loss and the
 block-score gradient are within ``_LOSS_RTOL`` / ``_GRAD_RTOL`` of it (:func:`_checked`).
-``msa_exact_numerics`` turns the option off (``attention._MSA_RELAXED``).
+A gfx1250 path of ``attention._MSA_RELAXED``: ``msa_exact_numerics`` turns it off.
 """
 
 from __future__ import annotations

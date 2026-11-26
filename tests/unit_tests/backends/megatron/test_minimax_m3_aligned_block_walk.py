@@ -258,12 +258,12 @@ def test_attention_with_the_aligned_walk_matches_fp32(S, B, Hkv, topk, kind):
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_aligned_block_walk=True, msa_exact_numerics=False, msa_shared_tile_staging=True)
+    defaults = dict(msa_exact_numerics=False, msa_shared_tile_staging=True)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_switches_turn_the_walk_off():
+def test_exact_numerics_and_the_shared_staging_decide_the_walk():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -271,7 +271,7 @@ def test_switches_turn_the_walk_off():
         MinimaxSparseAttention,
     )
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_aligned_block_walk"].default is False
+    assert "msa_aligned_block_walk" not in MSATransformerConfig.__dataclass_fields__
     table = _table(1, 2, 512, 8, "local")
     walk = MinimaxSparseAttention._aligned_walk(_fake_attention(), table.to(torch.int64), None)
     assert walk is not None and torch.equal(table.gather(-1, walk[1]), walk[0])
@@ -280,7 +280,6 @@ def test_switches_turn_the_walk_off():
     assert torch.equal(walk2[0], walk[0])
     for off in (
         {"msa_exact_numerics": True},  # reproduces the reference kernels bit for bit
-        {"msa_aligned_block_walk": False},
         {"msa_shared_tile_staging": False},  # nothing shares a tile: no reason to permute
     ):
         assert (

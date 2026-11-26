@@ -96,63 +96,12 @@ msa_shared_rope_tables: false
 msa_fused_zero_centered_gamma: false
 msa_fused_indexer_input_norm: false
 msa_fused_select_plan: false
-# with msa_fused_select_plan: the fused selection bookkeeping and BlockPlan past 64 blocks (16k,
-# 32k, 64k; the eager ops around the plan's two FlyDSL passes fused); bit-identical, checked on first use.
-msa_select_plan_wide: false
-# gfx1250, with msa_fused_select_plan: no -inf / -1 fill launches before the indexer's scoring
-# kernel (the boost kernel writes the -inf of the blocks after a query's own); bit-identical,
-# checked on first use.
-msa_select_skip_fill: false
 # gfx1250 flydsl kernels: adjacent tokens share a workgroup and one staging of each K/V tile they
 # have in common; bit-identical, checked on first use (MSATransformerConfig).
 msa_shared_tile_staging: false
-# gfx1250 flydsl kernels: masks decided per step / per lane where a per-element select cannot
-# change the result (fully visible steps skip the causal compare); bit-identical, checked on
-# first use (MSATransformerConfig).
-msa_lean_masks: false
-# gfx1250 flydsl kernels with msa_shared_tile_staging: walk each token's selected blocks in an
-# order aligned with its neighbours', so shared blocks are staged once per workgroup. Relaxed
-# numerics (the sums run in another order); msa_exact_numerics turns it off.
-msa_aligned_block_walk: false
-# gfx1250 flydsl kernels: dQ from the dK/dV kernel's dS (a slim dQ kernel, no V staging, no second
-# S / dS computation). Relaxed numerics; msa_exact_numerics turns it off.
-msa_dq_from_ds: false
-# gfx1250 flydsl MSA forward with msa_shared_tile_staging: the step's tile owner rides in the loop
-# state instead of being re-read from the table. Bit-identical outputs, checked on first use; an
-# MSA operator kernel option, so msa_exact_numerics turns it off.
-msa_owner_carry: false
-# gfx1250 flydsl kernels, relaxed numerics: the indexer backward's dK adds each entry's g * q row
-# into its winning key row (one wave per plan chunk) instead of a one-hot masked WMMA product;
-# msa_exact_numerics turns it off.
-msa_index_dk_scatter: false
-# flydsl kernels, relaxed numerics: the backward's BlockPlan in chunks of 256 to 384 entries (one
-# workgroup of the dK/dV and index dK kernels each) instead of entries / 2048; msa_exact_numerics
-# turns it off.
-msa_bounded_plan_chunks: false
-# gfx1250 flydsl kernels with msa_dq_from_ds: the dK/dV kernel stores dS through one buffer
-# descriptor per workgroup instead of one per record (same bytes); msa_exact_numerics turns it off.
-msa_ds_chunk_store: false
-# gfx1250 flydsl kernels with msa_dq_from_ds: the slim dQ kernel issues a step's copies before it
-# waits for the previous step's (two in flight). Bit-identical dq, checked on first use;
-# msa_exact_numerics turns it off.
-msa_dq_early_issue: false
-# gfx1250 flydsl MSA backward, block size 128: the dK/dV kernel takes two tokens per step instead
-# of four (half the stage ring). Bit-identical dk / dv, checked on first use; msa_exact_numerics
-# turns it off.
-msa_dkdv_two_token_steps: false
-# gfx1250 flydsl MSA forward with msa_owner_carry: two LDS tile slots per wave instead of four, so
-# four workgroups instead of two fit a compute unit. Bit-identical outputs, checked on first use;
-# msa_exact_numerics turns it off.
-msa_two_tile_slots: false
-# with msa_aligned_block_walk: the walk kernel runs one wave per program (no workgroup barriers);
-# the same integer table. Off with the walk under msa_exact_numerics.
-msa_walk_one_wave: false
-# flydsl backend with msa_fused_indexer_loss: slot mass + sparse indexer KL in one Triton kernel,
-# their backward in one more. Relaxed numerics (Triton row sums, exp, log); msa_exact_numerics
-# turns it off.
-msa_indexer_loss_one_pass: false
-# true: the MSA operator kernel options above from msa_aligned_block_walk on stay off (the relaxed-
-# numerics ones and the bit-preserving ones built on them): the reference flydsl kernels' bits
+# The other gfx1250 flydsl kernel paths have no switch: each is taken where a shape is eligible
+# and checked on its first call (attention.py lists them). Some are relaxed numerics (last-bit
+# differences, deterministic); true keeps those off, for the reference kernels' bits.
 msa_exact_numerics: false
 
 # MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared

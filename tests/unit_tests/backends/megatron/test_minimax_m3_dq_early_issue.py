@@ -182,14 +182,12 @@ def test_dq_early_issue_self_check_passes(require_bitwise):
 
 
 def _fake_attention(**config):
-    defaults = dict(
-        msa_dq_from_ds=True, msa_ds_chunk_store=True, msa_dq_early_issue=True, msa_exact_numerics=False
-    )
+    defaults = dict(msa_exact_numerics=False)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_switch_defaults_off_and_exact_numerics_turns_it_off():
+def test_on_with_dq_from_ds_and_exact_numerics_turns_it_off():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -198,17 +196,13 @@ def test_switch_defaults_off_and_exact_numerics_turns_it_off():
         MinimaxSparseAttention,
     )
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_dq_early_issue"].default is False
+    assert "msa_dq_early_issue" not in MSATransformerConfig.__dataclass_fields__
     assert "msa_dq_early_issue" in attention._MSA_RELAXED
     A = MinimaxSparseAttention
     on = {"dq_from_ds": True, "ds_chunk_store": True, "dq_early_issue": True}
     assert A._dq_from_ds(_fake_attention(), None) == on
-    # msa_exact_numerics reproduces the reference kernels: off, whatever the switches say
+    # msa_exact_numerics reproduces the reference kernels: the whole dq_from_ds path is off
     assert A._dq_from_ds(_fake_attention(msa_exact_numerics=True), None) == {}
-    off = {"dq_from_ds": True, "ds_chunk_store": True}
-    assert A._dq_from_ds(_fake_attention(msa_dq_early_issue=False), None) == off
-    # part of the dq_from_ds path: nothing without it
-    assert A._dq_from_ds(_fake_attention(msa_dq_from_ds=False), None) == {}
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False
     assert A._dq_from_ds(other_gpu, None) == {}

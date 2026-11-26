@@ -238,12 +238,12 @@ def test_lockstep_kernel_refuses_a_sequence_it_does_not_divide(monkeypatch):
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_dq_from_ds=True, msa_exact_numerics=False)
+    defaults = dict(msa_exact_numerics=False)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_switches_turn_it_off():
+def test_exact_numerics_turns_it_off():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -251,16 +251,14 @@ def test_switches_turn_it_off():
         MinimaxSparseAttention,
     )
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_dq_from_ds"].default is False
-    assert MinimaxSparseAttention._dq_from_ds(_fake_attention(), None) == {
-        "dq_from_ds": True
-    }  # msa_ds_chunk_store unset
+    assert "msa_dq_from_ds" not in MSATransformerConfig.__dataclass_fields__
+    kwargs = MinimaxSparseAttention._dq_from_ds(_fake_attention(), None)
+    assert kwargs["dq_from_ds"] is True and "walk_slots" not in kwargs
     slots = torch.zeros(1, 1, 4, 4, dtype=torch.int64)
     kwargs = MinimaxSparseAttention._dq_from_ds(_fake_attention(), (None, slots))
     assert kwargs["dq_from_ds"] is True and kwargs["walk_slots"].dtype == torch.int32
     # msa_exact_numerics reproduces the reference kernels bit for bit
     assert MinimaxSparseAttention._dq_from_ds(_fake_attention(msa_exact_numerics=True), None) == {}
-    assert MinimaxSparseAttention._dq_from_ds(_fake_attention(msa_dq_from_ds=False), None) == {}
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False
     assert MinimaxSparseAttention._dq_from_ds(other_gpu, None) == {}

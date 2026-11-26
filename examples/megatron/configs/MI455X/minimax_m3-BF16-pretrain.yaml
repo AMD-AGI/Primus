@@ -75,36 +75,8 @@ modules:
       msa_fused_zero_centered_gamma: true
       msa_fused_indexer_input_norm: true
       msa_fused_select_plan: true
-      # the same selection plan past 64 blocks (above 8k tokens); no fill launches before the scoring kernel
-      msa_select_plan_wide: true
-      msa_select_skip_fill: true
       # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens
       msa_shared_tile_staging: true
-      # gfx1250 MSA and indexer kernels: no per-element mask selects where they cannot change the result
-      msa_lean_masks: true
-      # relaxed numerics (off under msa_exact_numerics): neighbouring tokens walk their common
-      # blocks at the same step, so the shared staging above finds them
-      msa_aligned_block_walk: true
-      # relaxed numerics: the indexer backward's dK as a per-entry scatter into the winning key row
-      msa_index_dk_scatter: true
-      # relaxed numerics: the backward's block plan in chunks of 256 to 384 entries (dK/dV, index dK)
-      msa_bounded_plan_chunks: true
-      # relaxed numerics: dQ from the dK/dV kernel's dS (4 KB of transient buffer per token and block)
-      msa_dq_from_ds: true
-      # MSA operator kernels, same bits, fewer scalar loads / descriptors per step (off under
-      # msa_exact_numerics): the forward carries its tile owner; dS stored through one descriptor
-      msa_owner_carry: true
-      msa_ds_chunk_store: true
-      # same class: the slim dQ kernel keeps two steps' copies in flight
-      msa_dq_early_issue: true
-      # same class: the dK/dV kernel takes two tokens per step instead of four
-      msa_dkdv_two_token_steps: true
-      # same class: the forward keeps two LDS tile slots per wave (four workgroups per compute unit)
-      msa_two_tile_slots: true
-      # same table, the aligned walk's kernel with one wave per program
-      msa_walk_one_wave: true
-      # relaxed numerics: slot mass and indexer KL in one Triton kernel, their backward in one
-      msa_indexer_loss_one_pass: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
       # EP must divide both 128 and the data-parallel size.

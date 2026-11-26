@@ -137,15 +137,9 @@ and the experts), `fused_probs_mul` (the experts' routing-probs multiply), `defe
 scale of the BF16 gradients, which TE's `multi_tensor_scale_tensor` runs at a fifth of the memory
 bandwidth), `embedding_rows_grad` (the word-embedding gradient is added into the gradient buffer for
 the rows the micro-batch touches, not as a dense vocabulary-sized tensor), and around the MSA attention
-`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan` (with
-`msa_select_plan_wide` for more than 64 blocks, i.e. above 8k tokens, and `msa_select_skip_fill`, which
-drops the two fill launches before the indexer's scoring kernel), and inside the gfx1250
-MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens per
-workgroup and stage a K/V tile they share once) and `msa_lean_masks` (the forward, dQ and dK/dV
-kernels and the indexer's scoring kernel skip the per-key causal compare and select on steps whose
-keys are all visible, which is every step outside a token's own block, and the indexer's dK kernel
-reads the zeros of its WMMA's unused half from a pad instead of selecting them per element; the
-skipped selects would return their input), and two launch cuts, `msa_shared_rope_tables` (the
+`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the
+gfx1250 MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens
+per workgroup and stage a K/V tile they share once), and two launch cuts, `msa_shared_rope_tables` (the
 cos / sin RoPE tables are kept per rotary `freqs` tensor, not recomputed in every layer call) and
 `msa_fused_indexer_loss_scatter` (the indexer-loss backward writes the block-score gradient from
 its last kernel, without the zero fill, clamp and `scatter_add_`; rows of up to 64 blocks, i.e.
@@ -170,20 +164,27 @@ parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs wh
 the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
-off; apart from `msa_shared_tile_staging`, `msa_lean_masks`, `msa_aligned_block_walk`,
-`msa_dq_from_ds`, `msa_owner_carry`, `msa_ds_chunk_store`, `msa_dq_early_issue`, `msa_two_tile_slots`,
-`msa_walk_one_wave`, `msa_dkdv_two_token_steps`, `msa_indexer_loss_one_pass`, `msa_index_dk_scatter` and `msa_bounded_plan_chunks` the
-FlyDSL MSA kernels have
-no switch other than `PRIMUS_MSA_BACKEND=eager`.
+off; apart from `msa_shared_tile_staging` and `msa_exact_numerics` (below) the FlyDSL MSA kernels
+have no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
-**Relaxed-numerics MSA options.** Five options are not bit-identical to the reference FlyDSL
-kernels: `msa_aligned_block_walk`, `msa_dq_from_ds`, `msa_indexer_loss_one_pass`,
+**gfx1250 MSA kernel paths.** On gfx1250 the FlyDSL backend takes the following paths wherever a
+shape is eligible, without a switch (other GPUs never take them); each is decided before any work,
+compared with the path it replaces on its first call for a shape, and named in the log as below.
+Three are bit-identical and always on: `msa_lean_masks` (the forward, dQ and dK/dV kernels and the
+indexer's scoring kernel skip the per-key causal compare and select on steps whose keys are all
+visible, which is every step outside a token's own block, and the indexer's dK kernel reads the
+zeros of its WMMA's unused half from a pad instead of selecting them per element; the skipped
+selects would return their input), and with `msa_fused_select_plan`, `msa_select_plan_wide` (the
+fused selection for more than 64 blocks, i.e. above 8k tokens) and `msa_select_skip_fill` (no fill
+launches before the indexer's scoring kernel). Five are not bit-identical to the reference FlyDSL
+kernels (relaxed numerics): `msa_aligned_block_walk`, `msa_dq_from_ds`, `msa_indexer_loss_one_pass`,
 `msa_index_dk_scatter` and `msa_bounded_plan_chunks` (the backward's block plan in chunks of 256 to 384
-entries: other groups of the same FP32 terms in dk, dv and d index k). The other options of the group (`msa_owner_carry`, `msa_ds_chunk_store`,
-`msa_dq_early_issue`, `msa_two_tile_slots`, `msa_walk_one_wave`, `msa_dkdv_two_token_steps`: the
-backward's dK/dV kernel with two tokens per step instead of four, block size 128, first call for a
-shape compared bit for bit with the four-token kernel) keep every bit of the path they sit
-on and are only switched off together with them. With `msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
+entries: other groups of the same FP32 terms in dk, dv and d index k). The others (`msa_owner_carry`,
+`msa_ds_chunk_store`, `msa_dq_early_issue`, `msa_two_tile_slots`, `msa_walk_one_wave`,
+`msa_dkdv_two_token_steps`: the backward's dK/dV kernel with two tokens per step instead of four,
+block size 128, first call for a shape compared bit for bit with the four-token kernel) keep every
+bit of the path they sit on and go off together with the relaxed ones. With
+`msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
 with the token's neighbours (groups of four consecutive tokens; a block that an earlier token of
 the group selected is visited at that token's step), so the tokens of a workgroup meet a common
 block at the same step and `msa_shared_tile_staging` copies its K/V tiles once. The block selection
@@ -196,8 +197,8 @@ it also writes it to a transient buffer (4 KB per token and block: 1.1 GB per la
 `dQ = scale * dS K` from it, without staging V or computing `S` and `dS` a second time. The terms
 are the same; `dS` is the dK/dV kernel's instead of the dQ kernel's own and `delta` is summed in
 another order, so `dq`, `dk` and `dv` differ in their last bits (deterministic; the first call for
-a shape compares the two paths). Further options change MSA operator kernels without changing
-a bit, and are switched off with the relaxed ones: `msa_owner_carry` (the forward keeps each
+a shape compares the two paths). Further paths change MSA operator kernels without changing
+a bit, and go off with the relaxed ones: `msa_owner_carry` (the forward keeps each
 step's tile owner in its loop state instead of re-reading the table; the first call for a shape
 compares every output bit) and `msa_ds_chunk_store` (with `msa_dq_from_ds`, the dK/dV kernel
 writes `dS` through one buffer descriptor per workgroup instead of one per record, while a
@@ -225,8 +226,8 @@ one-hot masked WMMA product over all 128 keys of a block, by a scatter: each pla
 `g * q` row is added in fp32 to its one winning key row, in plan order, one wave per chunk; the
 same fixed-order reduce follows. `d index k` differs in its last bits (deterministic; the first
 call for a shape compares the two kernels' partials and two runs of the new one).
-`--msa_exact_numerics True` turns these options, and any other
-option of this kind, off and reproduces the reference kernels' losses bit for bit.
+`--msa_exact_numerics True` turns the relaxed paths and those that go with them off and reproduces
+the reference kernels' losses bit for bit; the three bit-identical paths stay on.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a

@@ -136,35 +136,32 @@ def _emulate_scatter(table, g, keys, q, chunk=64):
 # ---------------------------------------------------------------- any machine (CPU)
 
 
-def test_switch_defaults_off_and_exact_numerics_turns_it_off():
+def test_on_by_default_and_exact_numerics_turns_it_off(monkeypatch):
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
-        index_dk_scatter_enabled,
-    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import index_select
 
-    assert MSATransformerConfig.__dataclass_fields__["msa_index_dk_scatter"].default is False
+    assert "msa_index_dk_scatter" not in MSATransformerConfig.__dataclass_fields__
     assert "msa_index_dk_scatter" in attention._MSA_RELAXED
-    cfg = lambda **kw: SimpleNamespace(**kw)  # noqa: E731
-    assert index_dk_scatter_enabled(cfg(msa_index_dk_scatter=True, msa_exact_numerics=False)) is True
-    assert index_dk_scatter_enabled(cfg(msa_index_dk_scatter=True)) is True
-    # msa_exact_numerics reproduces the reference kernels: off, whatever the switch says
-    assert index_dk_scatter_enabled(cfg(msa_index_dk_scatter=True, msa_exact_numerics=True)) is False
-    assert index_dk_scatter_enabled(cfg(msa_index_dk_scatter=False, msa_exact_numerics=False)) is False
-    assert index_dk_scatter_enabled(cfg()) is False
-    assert index_dk_scatter_enabled(None) is False
+    monkeypatch.setattr(index_select, "_on_gfx1250", lambda: True)
+    assert index_select.index_dk_scatter_enabled(SimpleNamespace(msa_exact_numerics=False)) is True
+    assert index_select.index_dk_scatter_enabled(None) is True
+    # msa_exact_numerics reproduces the reference kernels
+    assert index_select.index_dk_scatter_enabled(SimpleNamespace(msa_exact_numerics=True)) is False
+    monkeypatch.setattr(index_select, "_on_gfx1250", lambda: False)
+    assert index_select.index_dk_scatter_enabled(SimpleNamespace(msa_exact_numerics=False)) is False
 
 
-def test_switch_is_on_in_the_mi455x_example_and_off_in_the_model_config():
+def test_the_configs_carry_no_switch():
     import yaml
 
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
     model = yaml.safe_load(open(os.path.join(root, "primus/configs/models/megatron/minimax_m3.yaml")))
-    assert model["msa_index_dk_scatter"] is False
+    assert "msa_index_dk_scatter" not in model and model["msa_exact_numerics"] is False
     text = open(os.path.join(root, "examples/megatron/configs/MI455X/minimax_m3-BF16-pretrain.yaml")).read()
-    assert "msa_index_dk_scatter: true" in text
+    assert "msa_index_dk_scatter" not in text
 
 
 def test_supported_shapes():
@@ -316,7 +313,7 @@ def test_dispatcher_decides_once_and_falls_back():
 
 @needs_gfx1250
 def test_indexer_backward_uses_it_and_exact_numerics_does_not(monkeypatch):
-    """Through ``_FusedSelect``: the switch reaches ``index_dk``; ``msa_exact_numerics`` wins."""
+    """Through ``_FusedSelect``: the path reaches ``index_dk``; ``msa_exact_numerics`` turns it off."""
     import primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select as sel
 
     seen = []
@@ -332,13 +329,13 @@ def test_indexer_backward_uses_it_and_exact_numerics_does_not(monkeypatch):
     for exact, want in ((False, True), (True, False)):
         q = torch.randn(S, B, H, D, device="cuda", dtype=torch.bfloat16, generator=gen).requires_grad_(True)
         k = torch.randn(S, B, 1, D, device="cuda", dtype=torch.bfloat16, generator=gen).requires_grad_(True)
-        config = SimpleNamespace(msa_index_dk_scatter=True, msa_exact_numerics=exact, msa_lean_masks=True)
+        config = SimpleNamespace(msa_exact_numerics=exact)
 
         def select(raw, b, _cfg=config):
             vals, idx = raw.topk(4, dim=-1)
             return idx.masked_fill(vals == float("-inf"), -1), raw
 
-        select.__self__ = SimpleNamespace(config=config)  # what _FusedSelect reads the switches from
+        select.__self__ = SimpleNamespace(config=config)  # what _FusedSelect reads the config from
         bi, scores, _plan_ = sel.fused_select_blocks(q, k, select, BLOCK)
         picked = scores.gather(-1, bi.clamp_min(0)).masked_fill(bi < 0, 0.0)
         picked.sum().backward()
