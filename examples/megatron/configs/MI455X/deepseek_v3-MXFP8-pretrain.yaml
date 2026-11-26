@@ -14,9 +14,8 @@
 # gfx1250, so its autocast stays off and every other module runs BF16, the LM
 # head included.
 #   - MLA and shared-expert linears: MXFP8.
-#   - Routed experts on the grouped GEMMs (MegaMoE off, as at EP 1): MXFP8.
-#   - Routed experts in MegaMoE (EP 2 to 8, so the 4-GPU run): BF16 unless
-#     turbo_mega_moe_precision is mxfp8.
+#   - Routed experts: MXFP8, in MegaMoE (EP 2 to 8, so the 4-GPU run) and on
+#     the grouped GEMMs (MegaMoE off, as at EP 1).
 # examples/megatron/models/deepseek-v3/README.md has a command per expert path.
 ###############################################################################
 
@@ -34,3 +33,5 @@ modules:
       use_turbo_gemm: true
       # the expert groups reach the grouped GEMMs as they are, without TransformerEngine's zero-padding
       turbo_grouped_gemm_without_padding: true
+      # MegaMoE's routed experts (read only with MegaMoE on); bf16 keeps them BF16
+      turbo_mega_moe_precision: mxfp8

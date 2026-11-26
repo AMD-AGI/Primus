@@ -73,10 +73,11 @@ weights too: their wgrads accumulate straight into `main_grad`.
 (`fp8: e4m3`, `fp8_recipe: mxfp8`: E4M3 data, one E8M0 scale per 32 values along each GEMM's reduction
 dimension), quantized by Primus-Turbo; TransformerEngine's autocast stays off on gfx1250 and the LM head
 stays BF16. It needs a Primus-Turbo with the gfx1250 MXFP8 GEMMs, through `TURBO_DIR` until the default
-image has one, and so does `--turbo_mega_moe_precision mxfp8` on MI455X. On the 4-GPU defaults it quantizes
-the MLA and shared-expert linears, and the routed experts stay BF16 in MegaMoE. The routed experts in MXFP8:
+image has one. It quantizes the MLA and shared-expert linears and the routed experts:
 
-- MegaMoE (EP 2 to 8): add `--turbo_mega_moe_precision mxfp8`.
+- MegaMoE (EP 2 to 8, so the 4-GPU defaults): the yaml's `turbo_mega_moe_precision: mxfp8`;
+  `--turbo_mega_moe_precision bf16` keeps the routed experts BF16. MXFP8 MegaMoE has not been run on more
+  than one GPU yet.
 - Grouped GEMMs: `USE_TURBO_MEGA_MOE=False`; `--turbo_fused_grouped_gemm True` runs them as the fused MXFP8
   grouped MLP.
 - One GPU: the 1-GPU variant with the fused grouped MLP, and the MoE permute fused into the experts'
