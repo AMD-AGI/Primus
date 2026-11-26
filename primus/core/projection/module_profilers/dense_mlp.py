@@ -103,6 +103,7 @@ class DenseMLPProfiler(BaseModuleProfiler):
                 self._cached_results = benchmark_layer(
                     self.module,
                     ishapes,
+                    transformer_config=getattr(self.module, "config", None),
                     forward_kwargs=fkwargs,
                 )
             self._cache_key = cache_key
