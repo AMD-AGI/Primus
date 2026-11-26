@@ -10,7 +10,7 @@
 # launch (before torchrun starts).
 #
 # Why: an image's RCCL can lack a feature a recipe needs -- for example the
-# copy-engine ReduceScatter that rocm/primus:v26.9's RCCL 2.32.3 does not have.
+# copy-engine ReduceScatter that rocm/primus:v26.10's RCCL 2.32.3 does not have.
 # Rebuilding RCCL at launch avoids rebuilding the image.
 #
 # Controlled by PRIMUS_RCCL_REF (a full 40-character rocm-systems commit). If

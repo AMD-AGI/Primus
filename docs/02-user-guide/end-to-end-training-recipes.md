@@ -71,7 +71,7 @@ export NVTE_CK_IS_V3_ATOMIC_FP32=1
 
 ### Choosing the Docker image
 
-For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.9`, set in `runner/.primus.yaml`. JAX MaxText has its own separate image family, `rocm/jax-training:maxtext-…`, which is **not** the default—pass it explicitly in container and Slurm modes.
+For **container** and **Slurm** modes (direct mode runs in whatever environment you launched it from), the default image is `rocm/primus:v26.10`, set in `runner/.primus.yaml`. JAX MaxText has its own separate image family, `rocm/jax-training:maxtext-…`, which is **not** the default—pass it explicitly in container and Slurm modes.
 
 The image is picked in priority order: `DOCKER_IMAGE` environment variable > `--image` CLI argument > config file. See [Selecting the container image](../01-getting-started/quickstart.md#selecting-the-container-image) for a full explanation, and [Configuration system](configuration-system.md) for configuration loading.
 
@@ -99,7 +99,7 @@ Container mode mounts this checkout into the container, so this is the code that
 `primus-cli container` pulls the image on first use, so this is only needed if you want to warm the cache:
 
 ```bash
-docker pull rocm/primus:v26.9                  # Megatron-LM, TorchTitan, Megatron Bridge
+docker pull rocm/primus:v26.10                  # Megatron-LM, TorchTitan, Megatron Bridge
 docker pull rocm/jax-training:maxtext-v26.10    # JAX MaxText
 ```
 
@@ -116,7 +116,7 @@ docker run -it \
     --security-opt seccomp=unconfined --privileged \
     -v $PWD:$PWD -w $PWD --shm-size 128G \
     --name primus_training_env \
-    rocm/primus:v26.9
+    rocm/primus:v26.10
 ```
 
 Re-enter it later with `docker start primus_training_env && docker exec -it primus_training_env bash`. Inside, use `primus-cli direct`. Remember to re-export `HF_TOKEN` and any architecture or `NCCL_*` variables, since a manual `docker run` does not forward them.

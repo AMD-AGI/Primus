@@ -38,7 +38,8 @@ For the full and up-to-date model matrix, see [Supported Models](./docs/06-devel
 
 ## 🆕 What's New
 
-- **[2026/11/19]** Primus **v26.10** JAX training image: `rocm/jax-training:maxtext-v26.10` (JAX 0.12.0 on a ROCm 10.3 nightly, MaxText `release/v26.10`), with dropless MoE recipes on the Primus-Turbo grouped GEMM as the default for Qwen3-30B-A3B, DeepSeek-V2-16B, and Gemma4-26B; `rocm/primus:v26.10` follows ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v2610))
+- **[2026/11/23]** Primus **v26.10** PyTorch training image: `rocm/primus:v26.10` (PyTorch 2.16 pre-release on a ROCm 10.3 nightly, Megatron-LM `core_v0.19.2`), plus DLRMv4 on a new `recommendation` backend and Inkling on Megatron-LM ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v2610))
+- **[2026/11/19]** Primus **v26.10** JAX training image: `rocm/jax-training:maxtext-v26.10` (JAX 0.12.0 on a ROCm 10.3 nightly, MaxText `release/v26.10`), with dropless MoE recipes on the Primus-Turbo grouped GEMM as the default for Qwen3-30B-A3B, DeepSeek-V2-16B, and Gemma4-26B ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v2610))
 - **[2026/11/03]** Primus **v26.9** training images: `rocm/primus:v26.9` (PyTorch 2.16 pre-release on a ROCm 10.2 nightly) and `rocm/jax-training:maxtext-v26.9` (JAX 0.12.0 on a ROCm 10.3 nightly), plus GLM-5.3-Flash and HunyuanWorld-Mirror post-training ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v269))
 - **[2026/10/08]** Primus **v26.8** training images: `rocm/primus:v26.8` (**ROCm 10.1.0**, PyTorch 2.14) and `rocm/jax-training:maxtext-v26.8` (JAX 0.11.1 on a ROCm 10.2 nightly), plus ZAYA1-8B and MiniMax-M3 on Megatron-LM ([release notes](./docs/01-getting-started/release-notes.md#highlights-for-v268))
 - **[2026/09/16]** Primus **v26.7** training images: `rocm/primus:v26.7` and `rocm/jax-training:maxtext-v26.7` — **ROCm 10.0.0** across both families, plus DeepSeek-V4 on gfx942 with 128k context parallelism ([release notes](./docs/01-getting-started/release-notes.md#earlier-releases))
@@ -117,7 +118,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
 
     ```bash
     # For Megatron-LM and TorchTitan backends
-    docker pull rocm/primus:v26.9
+    docker pull rocm/primus:v26.10
     # For MaxText backend
     docker pull rocm/jax-training:maxtext-v26.10
     ```
@@ -139,7 +140,7 @@ primus-cli deps sync --dir ~/.cache/Primus/third_party
     # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
     #       you typically need to pass HF_TOKEN into the container.
     # Run in the Primus repository root directory
-    ./primus-cli container --image rocm/primus:v26.9 \
+    ./primus-cli container --image rocm/primus:v26.10 \
       --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
@@ -168,7 +169,7 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/02-user-gu
 2. **Run training in container using pip-installed Primus**
 
     ```bash
-    primus-cli container --image rocm/primus:v26.9 \
+    primus-cli container --image rocm/primus:v26.10 \
     --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
     --volume /path/to/your/data:/data  -- --log_file /data/run.log \
     -- train pretrain --config /data/your/config.yaml

@@ -46,6 +46,10 @@ class ModelParallelConfig:
     main_grads_dtype: str = "fp32"  # fp32 | bf16 | fp16
     exp_avg_dtype: str = "fp32"  # 1st moment dtype (fp32 | bf16 | fp16)
     exp_avg_sq_dtype: str = "fp32"  # 2nd moment dtype (fp32 | bf16 | fp16)
+    # DDP gradient-sync layout (Megatron DistributedDataParallelConfig inputs).
+    grad_reduce_in_bf16: bool = False
+    ddp_num_buckets: Optional[int] = None
+    ddp_bucket_size: Optional[int] = None
 
 
 @dataclass
@@ -93,6 +97,22 @@ class ModelConfig:
     num_experts: int = 0
     moe_ffn_hidden_size: int = 0
     moe_pattern: list = None
+    # Hybrid (Mamba/GDN/KDA + attention) stacks: the full model's layer symbols.
+    hybrid_layer_types: list = None
+    # Sequence mixer of the hybrid ``M`` layers ("gdn", "kda" or "mamba") and its
+    # dimensions; None falls back to Megatron's defaults (see hybrid_mixer.py).
+    hybrid_mixer: str = None
+    linear_conv_kernel_dim: int = None
+    linear_key_head_dim: int = None
+    linear_value_head_dim: int = None
+    linear_num_key_heads: int = None
+    linear_num_value_heads: int = None
+    mamba_state_dim: int = None
+    mamba_head_dim: int = None
+    mamba_num_groups: int = None
+    mamba_expand: int = None
+    # FLA fused cross-entropy of hybrid models (0 off; None = Primus's default, 1).
+    fused_ce_mode: int = None
     moe_router_topk: int = 0
     moe_shared_expert_intermediate_size: int = 0
     # Optimizer (Muon adds Newton-Schulz orthogonalization compute on 2D weights)
@@ -284,6 +304,11 @@ class ModelConfig:
     dlrm_glue_bytes_per_token: float = 0.0
     dlrm_glue_hbm_fraction: float = 0.6  # streaming efficiency for the glue traffic
 
+    # Every other scalar / list key of the source args. A new op's parameters
+    # are not fields here, and op models (primus.core.projection.op_models)
+    # read them from this instead of having them dropped.
+    extra_args: dict = None
+
 
 @dataclass
 class TrainingConfig:
@@ -321,6 +346,105 @@ def update_config_from_args(config, args):
     return config
 
 
+def _megatron_effective_vpp(args) -> int:
+    """Virtual pipeline size Megatron actually runs with (``validate_args``).
+
+    Megatron derives VPP from ``pipeline_model_parallel_layout``,
+    ``num_layers_per_virtual_pipeline_stage`` or
+    ``num_virtual_stages_per_pipeline_rank`` and otherwise resets
+    ``virtual_pipeline_model_parallel_size`` to None, i.e. a bare
+    ``virtual_pipeline_model_parallel_size`` runs the non-interleaved schedule.
+    """
+    pp = args.pipeline_model_parallel_size
+    requested = getattr(args, "virtual_pipeline_model_parallel_size", None)
+    layout = getattr(args, "pipeline_model_parallel_layout", None)
+    layers_per_vstage = getattr(args, "num_layers_per_virtual_pipeline_stage", None)
+    vstages = getattr(args, "num_virtual_stages_per_pipeline_rank", None)
+    if layout:
+        try:
+            from megatron.core.transformer.pipeline_parallel_layer_layout import (
+                PipelineParallelLayerLayout,
+            )
+
+            return max(1, PipelineParallelLayerLayout.get_num_stages_from_str(layout) // pp)
+        except ImportError:
+            return requested or 1
+    if vstages is not None:
+        return vstages
+    if layers_per_vstage is not None:
+        num_layers = args.num_layers
+        num_layers += bool(getattr(args, "account_for_embedding_in_pipeline_split", False))
+        num_layers += bool(getattr(args, "account_for_loss_in_pipeline_split", False))
+        return num_layers // pp // layers_per_vstage
+    if getattr(args, "hybrid_layer_pattern", None) is not None:
+        return requested or 1
+    if (requested or 1) > 1 and int(os.getenv("RANK", "0")) == 0:
+        print(
+            f"[Primus:Projection] virtual_pipeline_model_parallel_size={requested} is ignored by "
+            "Megatron without num_virtual_stages_per_pipeline_rank, "
+            "num_layers_per_virtual_pipeline_stage or pipeline_model_parallel_layout; "
+            "projecting the non-interleaved schedule."
+        )
+    return 1
+
+
+def megatron_backend_derive_default_args(args):
+    """Defaults for Megatron-LM configs, with Megatron's own VPP resolution."""
+    args.virtual_pipeline_model_parallel_size = _megatron_effective_vpp(args)
+    args.num_layers_per_virtual_pipeline_stage = None
+    return megatron_derive_default_args(args)
+
+
+def _extra_model_args(args, model_config) -> dict:
+    """Scalar / list args that are not ``ModelConfig`` fields (op-model inputs)."""
+    known = {f.name for f in fields(model_config)}
+    raw = args if isinstance(args, dict) else getattr(args, "__dict__", {})
+    out = {}
+    for key, val in raw.items():
+        if key.startswith("_") or key in known:
+            continue
+        if val is None or isinstance(val, (bool, int, float, str)):
+            out[key] = val
+        elif isinstance(val, (list, tuple)) and all(isinstance(x, (bool, int, float, str)) for x in val):
+            out[key] = list(val)
+    return out
+
+
+def hybrid_layer_pattern(args) -> Optional[str]:
+    """The decoder part of a hybrid stack's explicit layer pattern, if it has one."""
+    pattern = getattr(args, "hybrid_layer_pattern", None) or getattr(args, "hybrid_override_pattern", None)
+    if not pattern:
+        return None
+    return str(pattern).split("/")[0].replace("|", "")
+
+
+def allocate_hybrid_layers(num_layers: int, attention_ratio: float) -> list:
+    """Layer symbols Primus's HybridStack.allocate_layers builds from a ratio.
+
+    Every mixer (``*`` attention or ``M`` Mamba/GDN/KDA) is followed by an MLP
+    (``-``), so the stack holds ``num_layers // 2`` mixer/MLP pairs.
+    """
+    pairs = num_layers // 2
+    num_attention = int(pairs * attention_ratio)
+    num_mamba = pairs - num_attention
+    if num_attention == 0:
+        return ["M", "-"] * pairs
+    if attention_ratio <= 0.5:
+        block = ["*", "-"] + ["M", "-"] * (num_mamba // num_attention)
+        return block * num_attention + ["M", "-"] * (num_mamba % num_attention)
+    return ["*", "-"] * (num_attention - num_mamba) + ["*", "-", "M", "-"] * num_mamba
+
+
+def hybrid_layer_types(args) -> Optional[list]:
+    """Symbols of every decoder layer of a hybrid model, or None for a plain transformer."""
+    pattern = hybrid_layer_pattern(args)
+    if pattern is not None:
+        return list(pattern)
+    if not getattr(args, "is_hybrid_model", False):
+        return None
+    return allocate_hybrid_layers(args.num_layers, getattr(args, "hybrid_attention_ratio", 0.0) or 0.0)
+
+
 def megatron_derive_default_args(args):
     world_size = int(os.getenv("NNODES", "1")) * int(os.getenv("GPUS_PER_NODE", "8"))
     if args.kv_channels is None:
@@ -347,6 +471,11 @@ def megatron_derive_default_args(args):
         )
 
     args.share_embeddings_and_output_weights = not args.untie_embeddings_and_output_weights
+    args.hybrid_layer_types = hybrid_layer_types(args)
+    if args.hybrid_layer_types is not None:
+        from primus.core.projection.module_profilers.hybrid_mixer import mixer_kind
+
+        args.hybrid_mixer = mixer_kind(getattr(args, "spec", None), getattr(args, "hybrid_mixer", None))
 
     if args.num_experts is None:
         args.moe_pattern = [0] * args.num_layers
@@ -393,9 +522,17 @@ def megatron_derive_default_args(args):
     args.sequence_length = args.seq_length
     args.context_model_parallel_size = args.context_parallel_size
 
-    # Use model's vocab size if set, otherwise default to 100352
+    # Pad the model's vocab the way Megatron does (_vocab_size_with_padding); the
+    # fixed default only applies when the config carries no vocab_size at all.
     if not hasattr(args, "padded_vocab_size") or args.padded_vocab_size is None:
-        args.padded_vocab_size = 100352
+        vocab_size = getattr(args, "vocab_size", None)
+        if vocab_size:
+            multiple = (getattr(args, "make_vocab_size_divisible_by", None) or 128) * (
+                getattr(args, "tensor_model_parallel_size", None) or 1
+            )
+            args.padded_vocab_size = -(-int(vocab_size) // multiple) * multiple
+        else:
+            args.padded_vocab_size = 100352
 
     return args
 
@@ -449,8 +586,13 @@ def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
     args = resolve_config_adapter(fw)(args)
 
     model_config = update_config_from_args(ModelConfig(), args)
+    model_config.extra_args = _extra_model_args(args, model_config)
     runtime_config = update_config_from_args(RuntimeConfig(), args)
     model_parallel_config = update_config_from_args(ModelParallelConfig(), args)
+
+    from primus.core.projection.op_models.coverage import report_model_coverage
+
+    report_model_coverage(model_config)
 
     training_config = TrainingConfig(
         model_config=model_config,

@@ -37,6 +37,16 @@ class LossProfiler(BaseModuleProfiler):
         super().__init__(config, sub_profilers)
         self._gemm_backend = None
 
+    def fla_fused(self) -> bool:
+        """Whether hybrid training's FLA FusedLinearCrossEntropy owns the output head.
+
+        It runs the output GEMM, softmax and all logit/weight gradients chunk by
+        chunk inside the forward pass: one pass over the logits, nothing left
+        for backward and no full logits tensor kept alive.
+        """
+        mc = self.config.model_config
+        return getattr(mc, "hybrid_layer_types", None) is not None and getattr(mc, "fused_ce_mode", None) != 0
+
     def set_gemm_backend(self, backend):
         self._gemm_backend = backend
 
@@ -47,7 +57,7 @@ class LossProfiler(BaseModuleProfiler):
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         mc = self.config.model_config
-        if getattr(mc, "cross_entropy_loss_fusion", False):
+        if getattr(mc, "cross_entropy_loss_fusion", False) or self.fla_fused():
             return 0
         tp = self.config.model_parallel_config.tensor_model_parallel_size
         cp = self.config.model_parallel_config.context_model_parallel_size
@@ -80,6 +90,8 @@ class LossProfiler(BaseModuleProfiler):
         tensor_bytes = tokens * vocab_per_rank * bytes_per_el
 
         fwd_ms = 3.0 * tensor_bytes / (eff_bw * 1e6)
+        if self.fla_fused():
+            return fwd_ms, 0.0
         bwd_ms = 3.0 * tensor_bytes / (eff_bw * 1e6)
         return fwd_ms, bwd_ms
 
@@ -91,8 +103,55 @@ class LossProfiler(BaseModuleProfiler):
         _, bwd = self._loss_time_ms(batch_size, seq_len)
         return bwd
 
+    def benchmark_loss(self, loss_owner, vocab_per_rank: int, batch_size: int, seq_len: int) -> None:
+        """Time the model's own ``compute_language_model_loss`` fwd + bwd.
+
+        "Fused" cross-entropy still runs as separate kernels after the output
+        GEMM (softmax statistics over the vocab, then the logits gradient), so
+        it is measured rather than assumed free; whichever loss backend the run
+        installs (Megatron fused CE, Primus-Turbo CE) is what gets timed.
+        """
+        import torch
+
+        from primus.core.projection.module_profilers.utils import _bench_iter_count
+
+        cp = self.config.model_parallel_config.context_model_parallel_size
+        s = seq_len // cp
+
+        def _measure():
+            logits = torch.randn(s, batch_size, vocab_per_rank, device="cuda", dtype=torch.bfloat16)
+            labels = torch.randint(0, vocab_per_rank, (batch_size, s), device="cuda")
+            ev = [torch.cuda.Event(enable_timing=True) for _ in range(3)]
+
+            def step(timed):
+                x = logits.detach().requires_grad_(True)
+                if timed:
+                    ev[0].record()
+                loss = loss_owner.compute_language_model_loss(labels, x)
+                if timed:
+                    ev[1].record()
+                loss.backward(torch.ones_like(loss))
+                if timed:
+                    ev[2].record()
+
+            num_warmup, num_iters = _bench_iter_count(3, 10)
+            for _ in range(num_warmup):
+                step(False)
+            fwd = bwd = 0.0
+            for _ in range(num_iters):
+                step(True)
+                torch.cuda.synchronize()
+                fwd += ev[0].elapsed_time(ev[1])
+                bwd += ev[1].elapsed_time(ev[2])
+            return fwd / num_iters, bwd / num_iters
+
+        self._measured = _measure()
+        torch.cuda.empty_cache()
+
     def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
-        return self.estimated_forward_time(batch_size, seq_len)
+        measured = getattr(self, "_measured", None)
+        return measured[0] if measured else self.estimated_forward_time(batch_size, seq_len)
 
     def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
-        return self.estimated_backward_time(batch_size, seq_len)
+        measured = getattr(self, "_measured", None)
+        return measured[1] if measured else self.estimated_backward_time(batch_size, seq_len)
