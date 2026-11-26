@@ -60,7 +60,9 @@ CASES = [
 def test_backward_two_token_steps(E_force, require_bitwise, S, B, Hkv, topk, kind, aligned, path):
     """dq / dk / dv with two tokens per step: bit-identical to the four-token kernel on the same
     path (three runs), and within that path's tolerances against the FP32 reference."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd,
+    )
 
     q, k, v, dout, table = E._inputs(S, B, Hkv, topk, kind)
     walk = E._walk(table, aligned)
@@ -91,8 +93,9 @@ def E_force(monkeypatch):
 @pytest.mark.parametrize("bounded", [False, True])
 def test_two_token_steps_under_both_chunk_rules(E_force, require_bitwise, bounded):
     """Chunks of the reference rule and of ``msa_bounded_plan_chunks`` (other trip counts)."""
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd
-
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd,
+    )
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
         msa_token_fwd_wave32,
     )
@@ -116,7 +119,9 @@ def test_two_token_steps_dispatcher_checks_once_and_falls_back(monkeypatch):
     """The dispatcher takes the option only after a bit-identical first call, per shape, and
     asks nothing where the option is not eligible."""
     from primus.backends.megatron.core.fusions import bitwise_check
-    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import msa_token_bwd
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd,
+    )
 
     q, k, v, dout, table = H._inputs(1024, 1, 2, 4, "local")
     calls = []
@@ -170,7 +175,9 @@ def test_switch_defaults_off_and_exact_numerics_turns_it_off():
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
-    from primus.backends.megatron.core.transformer.minimax_m3.attention import MinimaxSparseAttention
+    from primus.backends.megatron.core.transformer.minimax_m3.attention import (
+        MinimaxSparseAttention,
+    )
 
     assert MSATransformerConfig.__dataclass_fields__["msa_dkdv_two_token_steps"].default is False
     assert "msa_dkdv_two_token_steps" in attention._MSA_RELAXED

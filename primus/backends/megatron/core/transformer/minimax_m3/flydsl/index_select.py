@@ -27,7 +27,6 @@ sort of its own.
 import functools
 
 import torch
-
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl import select_plan
