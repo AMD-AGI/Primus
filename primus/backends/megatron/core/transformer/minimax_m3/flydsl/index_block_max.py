@@ -674,7 +674,7 @@ def _build_index_dk_scatter_w32(
     ahead: bool = False,
     unroll: int = SCATTER_UNROLL,
 ):
-    """``msa_index_dk_scatter`` (gfx1250, relaxed numerics): pass 1 of ``index_dk`` as a scatter.
+    """``msa_index_dk_scatter`` (gfx1250): pass 1 of ``index_dk`` as a scatter.
 
     Same interface, plan and workspace as :func:`build_index_dk`: one workgroup per plan chunk
     writes that chunk's fp32 ``[block_size, D]`` partial, :func:`build_index_dk_reduce` sums the
@@ -693,7 +693,7 @@ def _build_index_dk_scatter_w32(
     ``-1``) leaves the accumulator untouched (a select, not ``+ 0 * q``: a non-finite Q row of a
     dead entry cannot reach the result).
 
-    Numerics (relaxed class): the same terms as the reference kernel, but ``g`` enters in full fp32
+    Numerics: the same terms as the reference kernel, but ``g`` enters in full fp32
     (the reference feeds it to the bf16 WMMA as a high and a low half, 16 mantissa bits) and the
     terms of a key row are added one by one in entry order instead of in the WMMA's order.
     Deterministic: one wave owns a chunk and adds in program order; no other wave reads or writes
@@ -1283,7 +1283,7 @@ def _dk_scatter_checked(key, run_scatter, run_reference, ws) -> bool:
         ok, reason = False, f"{type(e).__name__}: {e}"
     _DK_SCATTER_OK[key] = ok
     if ok:
-        log_rank_0(f"[msa_index_dk_scatter {key}] relaxed numerics, deterministic ({reason}); in use")
+        log_rank_0(f"[msa_index_dk_scatter {key}] deterministic, sums in another order ({reason}); in use")
     else:
         warning_rank_all(f"[msa_index_dk_scatter {key}] keeping the reference kernel ({reason})")
     return ok
@@ -1297,7 +1297,7 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
     first call for a shape compares every bit of the chunk partials with the kernel without it
     and keeps that kernel on a mismatch.
 
-    ``scatter`` (gfx1250, ``msa_index_dk_scatter``, relaxed numerics): the chunk partials come
+    ``scatter`` (gfx1250, ``msa_index_dk_scatter``, sums in another order): the chunk partials come
     from :func:`_build_index_dk_scatter_w32` (each entry added to its winning key row) when the
     shape is supported and the first call's comparison with the kernel above passes
     (:func:`_dk_scatter_checked`); the reduce is unchanged.

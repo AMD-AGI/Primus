@@ -43,30 +43,24 @@ from primus.core.utils.module_utils import warning_rank_0
 _UNSUPPORTED_WARNED = False
 
 
-def _relaxed_paths(config) -> bool:
-    """Whether the relaxed-numerics paths of the selection may be taken (``attention._MSA_RELAXED``):
-    the gfx1250 kernels, without ``msa_exact_numerics``."""
-    return _on_gfx1250() and not bool(getattr(config, "msa_exact_numerics", False))
-
-
-def index_dk_scatter_enabled(config) -> bool:
-    """``msa_index_dk_scatter`` as the indexer's backward uses it (relaxed numerics: the chunk
+def index_dk_scatter_enabled() -> bool:
+    """``msa_index_dk_scatter`` as the indexer's backward uses it: the gfx1250 kernels (the chunk
     partials of ``index_dk`` are summed in another order and from the full fp32 ``g``). Decided
     before any work; whether the kernel serves the shape and passes its first-call comparison is
     ``index_dk``'s part."""
-    return _relaxed_paths(config)
+    return _on_gfx1250()
 
 
-def bounded_plan_chunks_enabled(config) -> bool:
-    """``msa_bounded_plan_chunks`` as the selection builds its :class:`BlockPlan` (relaxed
-    numerics: the chunk partials of dK / dV and of the index dK are summed over other groups of
+def bounded_plan_chunks_enabled() -> bool:
+    """``msa_bounded_plan_chunks`` as the selection builds its :class:`BlockPlan`: the gfx1250
+    kernels (the chunk partials of dK / dV and of the index dK are summed over other groups of
     entries). Decided before any work; the chunk size itself is a function of
     ``B * Hkv * S * topk`` (``msa_token_bwd.plan_chunk_size``)."""
-    return _relaxed_paths(config)
+    return _on_gfx1250()
 
 
 def _wide_enabled() -> bool:
-    """``msa_select_plan_wide``: the gfx1250 kernels (bit-identical, so not a relaxed path)."""
+    """``msa_select_plan_wide``: the gfx1250 kernels (bit-identical)."""
     return _on_gfx1250()
 
 
@@ -194,12 +188,11 @@ class _FusedSelect(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, select_from_block_scores, block_size, plan_slot):
         indexer = getattr(select_from_block_scores, "__self__", None)
-        config = getattr(indexer, "config", None)
         # msa_lean_masks: bit-identical gfx1250 scoring and dK kernels, each checked on its first call
         lean = _on_gfx1250()
         ctx.lean = lean
-        ctx.dk_scatter = index_dk_scatter_enabled(config)
-        ctx.bounded_chunks = bounded = bounded_plan_chunks_enabled(config)
+        ctx.dk_scatter = index_dk_scatter_enabled()
+        ctx.bounded_chunks = bounded = bounded_plan_chunks_enabled()
         ctx.set_materialize_grads(False)
         ctx.block_size = block_size
         want_plan = bool(plan_slot) and plan_slot[0] is True  # fused_select_blocks: grad was on
@@ -213,7 +206,7 @@ class _FusedSelect(torch.autograd.Function):
         shape_key = (S, B, H, NB, block_size, min(indexer.topk_blocks, NB), bounded) if mode else None
         # msa_select_skip_fill: with forced blocks the boost kernel rewrites the whole score table
         # and nothing else reads the blocks after a query's own, so the gfx1250 scoring kernel's
-        # outputs need no -inf / -1 fill. Exact class: stays on under msa_exact_numerics.
+        # outputs need no -inf / -1 fill (bit-identical).
         skip_fill = (
             mode is not None and _skip_fill_enabled() and _forced_of(indexer, S, NB, q.device) is not None
         )
@@ -316,8 +309,6 @@ def fused_select_blocks(q, k, select_from_block_scores, block_size):
         return block_indices, block_scores, plan
     plan = None
     if torch.is_grad_enabled():
-        indexer = getattr(select_from_block_scores, "__self__", None)
-        bounded = bounded_plan_chunks_enabled(getattr(indexer, "config", None))
-        plan = build_block_plan(block_indices, block_size, bounded)
+        plan = build_block_plan(block_indices, block_size, bounded_plan_chunks_enabled())
         plan_slot.append(plan)
     return block_indices, block_scores, plan

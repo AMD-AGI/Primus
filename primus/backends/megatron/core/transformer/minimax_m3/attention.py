@@ -77,9 +77,10 @@ _MSA_FUSIONS = (
 )
 # Kernel paths of the flydsl backend on gfx1250, taken wherever a shape is eligible (no switch;
 # other GPUs never take them). Each is decided before any work, and its first call for a shape
-# compares it with the path it replaces and keeps that one on a mismatch (bitwise_check).
+# compares it with the path it replaces and keeps that one on a mismatch (bitwise_check). All are
+# deterministic: no atomics, fixed summation orders.
 #
-# Bit-identical; msa_exact_numerics leaves them on:
+# Bit-identical to the path they replace:
 #   msa_lean_masks: the forward, dQ, dK/dV and indexer scoring kernels skip the per-key causal
 #     select on steps whose keys are all visible (a wave-uniform branch), and the index dK
 #     kernel takes the WMMA's unused K half from an LDS pad of zeros (msa_token_fwd_w32.py,
@@ -90,49 +91,43 @@ _MSA_FUSIONS = (
 #   msa_select_skip_fill: with msa_fused_select_plan and forced blocks, the scoring kernel's
 #     output tables are left unfilled; the forced-block boost writes -inf after each query's
 #     own block, and nothing reads the argmax there (index_select.py).
-#
-# _MSA_RELAXED, which msa_exact_numerics turns off. Relaxed numerics (last-bit differences,
-# deterministic):
+#   msa_owner_carry / msa_two_tile_slots: with msa_shared_tile_staging, the forward carries each
+#     step's tile owner in its loop state and keeps one LDS slot for K and one for V (68 KB of
+#     LDS instead of 140 KB) (msa_token_fwd_w32.py).
+#   msa_walk_one_wave: the aligned walk's Triton kernel with one wave per program.
+#   msa_dkdv_two_token_steps: the dK/dV kernel takes two tokens per step instead of four.
+# The same terms summed in another order, so the last bits differ from the replaced path's:
 #   msa_aligned_block_walk: with msa_shared_tile_staging, the forward and dQ kernels walk a
 #     token's blocks in an order aligned with its neighbours', so a workgroup stages a common
-#     block's tiles once; sums run in another order (flydsl/block_walk.py).
-#   msa_dq_from_ds: the dK/dV kernel writes its bf16 dS and a slim kernel forms dQ = scale * dS K
-#     (build_dq_ds_w32); checked within 1e-3, dS buffers above 16 GiB keep the reference.
+#     block's tiles once (flydsl/block_walk.py).
 #   msa_index_dk_scatter: the index dK chunk kernel adds each entry's fp32 g * q_row to its
 #     winning key row (_build_index_dk_scatter_w32); sparse_index_dim 128, power-of-two top-k.
 #   msa_indexer_loss_one_pass: with msa_fused_indexer_loss, the slot mass and indexer KL and
 #     their backward in one Triton kernel each (indexer_loss_one_pass.py).
 #   msa_bounded_plan_chunks: BlockPlan chunks of 256-384 entries (msa_token_bwd.plan_chunk_size),
 #     so dK/dV and index dK partials are summed over other groups of entries.
-# Same bits as the path they sit on, but they change those kernels:
-#   msa_owner_carry / msa_two_tile_slots: with msa_shared_tile_staging, the forward carries each
-#     step's tile owner in its loop state and keeps one LDS slot for K and one for V (68 KB of
-#     LDS instead of 140 KB) (msa_token_fwd_w32.py).
-#   msa_ds_chunk_store / msa_dq_early_issue: on the msa_dq_from_ds path, one dS buffer
-#     descriptor per workgroup (slices up to 2 GiB) and the dQ kernel's next-step copies issued
-#     before it waits for the current ones (msa_token_bwd_w32.py).
-#   msa_walk_one_wave: the aligned walk's Triton kernel with one wave per program.
-#   msa_dkdv_two_token_steps: the dK/dV kernel takes two tokens per step instead of four.
-_MSA_RELAXED = (
-    "msa_aligned_block_walk",
-    "msa_dq_from_ds",
+_MSA_GFX1250_PATHS = (
+    "msa_lean_masks",
+    "msa_select_plan_wide",
+    "msa_select_skip_fill",
     "msa_owner_carry",
-    "msa_ds_chunk_store",
-    "msa_index_dk_scatter",
-    "msa_dq_early_issue",
     "msa_two_tile_slots",
     "msa_walk_one_wave",
+    "msa_dkdv_two_token_steps",
+    "msa_aligned_block_walk",
+    "msa_index_dk_scatter",
     "msa_indexer_loss_one_pass",
     "msa_bounded_plan_chunks",
-    "msa_dkdv_two_token_steps",
 )
+# Taken only with msa_bwd_store_ds (MSATransformerConfig, default true):
+#   msa_dq_from_ds: the dK/dV kernel writes its bf16 dS to a workspace and a slim kernel forms
+#     dQ = scale * dS K (build_dq_ds_w32); checked within 1e-3, workspaces above 16 GiB keep the
+#     recomputing dQ kernel. Last bits differ (dS and delta are summed in another order).
+#   msa_ds_chunk_store / msa_dq_early_issue: bit-identical on that path: one dS buffer descriptor
+#     per workgroup (slices up to 2 GiB) and the dQ kernel's next-step copies issued before it
+#     waits for the current ones (msa_token_bwd_w32.py).
+_MSA_STORE_DS_PATHS = ("msa_dq_from_ds", "msa_ds_chunk_store", "msa_dq_early_issue")
 _FUSIONS_LOGGED = False
-
-
-def _relaxed_paths(attn) -> bool:
-    """Whether the kernel paths of _MSA_RELAXED may be taken: the gfx1250 kernels, without
-    msa_exact_numerics."""
-    return attn._gfx1250 and not getattr(attn.config, "msa_exact_numerics", False)
 
 
 def _log_fusions_once(config, gfx1250: bool) -> None:
@@ -144,13 +139,11 @@ def _log_fusions_once(config, gfx1250: bool) -> None:
     log_rank_0(f"MinimaxSparseAttention ({config.msa_backend}): Triton fusions {', '.join(on) or 'off'}")
     if config.msa_backend == "flydsl" and gfx1250:
         shared = "on" if getattr(config, "msa_shared_tile_staging", False) else "off"
-        if getattr(config, "msa_exact_numerics", False):
-            relaxed = "off (msa_exact_numerics)"
-        else:
-            relaxed = "on where eligible: " + ", ".join(_MSA_RELAXED)
+        store_ds = "on" if getattr(config, "msa_bwd_store_ds", True) else "off"
         log_rank_0(
             f"MinimaxSparseAttention (flydsl, gfx1250): msa_shared_tile_staging {shared}; "
-            f"relaxed-numerics kernel paths {relaxed}"
+            f"msa_bwd_store_ds {store_ds} ({', '.join(_MSA_STORE_DS_PATHS)}); kernel paths where "
+            f"eligible: {', '.join(_MSA_GFX1250_PATHS)}"
         )
 
 
@@ -313,10 +306,9 @@ class MinimaxSparseAttention(SelfAttention):
 
     def _aligned_walk(self, block_indices: torch.Tensor, block_plan: Optional[object]):
         """``msa_aligned_block_walk`` (with ``msa_walk_one_wave``): ``(walk_table, slots)`` of
-        flydsl/block_walk.py, or None when :func:`_relaxed_paths` is false,
-        ``msa_shared_tile_staging`` is off (nothing would share a tile) or the shape is not
-        eligible. Decided before any work."""
-        if not _relaxed_paths(self) or not getattr(self.config, "msa_shared_tile_staging", False):
+        flydsl/block_walk.py, or None off gfx1250, when ``msa_shared_tile_staging`` is off
+        (nothing would share a tile) or when the shape is not eligible. Decided before any work."""
+        if not self._gfx1250 or not getattr(self.config, "msa_shared_tile_staging", False):
             return None
         # imported here: the eager backend needs no Triton
         from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
@@ -329,10 +321,11 @@ class MinimaxSparseAttention(SelfAttention):
         return block_walk.aligned_block_walk(table, self.block_size, one_wave=True)
 
     def _dq_from_ds(self, walk) -> dict:
-        """``msa_dq_from_ds`` (with ``msa_ds_chunk_store`` and ``msa_dq_early_issue``): the keyword
-        arguments that turn it on for the MSA backward, or none when :func:`_relaxed_paths` is
-        false. With an aligned walk the backward also needs the walk's slots as int32."""
-        if not _relaxed_paths(self):
+        """``msa_bwd_store_ds`` (``msa_dq_from_ds`` with ``msa_ds_chunk_store`` and
+        ``msa_dq_early_issue``): the keyword arguments that turn it on for the MSA backward, or
+        none off gfx1250 or with ``msa_bwd_store_ds`` False. With an aligned walk the backward also
+        needs the walk's slots as int32."""
+        if not self._gfx1250 or not getattr(self.config, "msa_bwd_store_ds", True):
             return {}
         kwargs = {"dq_from_ds": True, "ds_chunk_store": True, "dq_early_issue": True}
         if walk is not None:
@@ -341,22 +334,22 @@ class MinimaxSparseAttention(SelfAttention):
 
     def _owner_carry(self) -> dict:
         """``msa_owner_carry`` (with ``msa_two_tile_slots``): the keyword arguments that turn it on
-        for the MSA forward, or none when :func:`_relaxed_paths` is false or
-        ``msa_shared_tile_staging`` is off (no tile owner to carry)."""
-        if not _relaxed_paths(self) or not getattr(self.config, "msa_shared_tile_staging", False):
+        for the MSA forward, or none off gfx1250 or when ``msa_shared_tile_staging`` is off (no
+        tile owner to carry)."""
+        if not self._gfx1250 or not getattr(self.config, "msa_shared_tile_staging", False):
             return {}
         return {"owner_carry": True, "two_tile_slots": True}
 
     def _dkdv_two_token_steps(self) -> dict:
         """``msa_dkdv_two_token_steps``: the keyword argument that turns it on for the MSA
-        backward, or none when :func:`_relaxed_paths` is false."""
-        return {"dkdv_two_token_steps": True} if _relaxed_paths(self) else {}
+        backward, or none off gfx1250."""
+        return {"dkdv_two_token_steps": True} if self._gfx1250 else {}
 
     def _loss_one_pass(self) -> bool:
         """``msa_indexer_loss_one_pass``: whether ``msa_core`` asks the one-pass kernels for the
-        indexer loss. It stands in for the Triton path of ``msa_fused_indexer_loss`` and needs
-        that switch, and :func:`_relaxed_paths`."""
-        return bool(_relaxed_paths(self) and getattr(self.config, "msa_fused_indexer_loss", False))
+        indexer loss. It stands in for the Triton path of ``msa_fused_indexer_loss``, so it needs
+        that switch, and gfx1250."""
+        return bool(self._gfx1250 and getattr(self.config, "msa_fused_indexer_loss", False))
 
     def msa_core(
         self,
@@ -412,7 +405,7 @@ class MinimaxSparseAttention(SelfAttention):
                 return loss_fn(slot_mass, scores, block_indices, self.indexer_loss_coeff, fold_scatter=True)
             return loss_fn(slot_mass, scores, block_indices, self.indexer_loss_coeff)
 
-        # msa_indexer_loss_one_pass (relaxed numerics): eligibility is decided before any work
+        # msa_indexer_loss_one_pass (sums in another order): eligibility is decided before any work
         if self._loss_one_pass():
             from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_one_pass import (
                 one_pass_indexer_loss,

@@ -299,12 +299,12 @@ def test_dispatchers_check_once_per_shape_and_fall_back(monkeypatch):
         bitwise_check._results.update(saved)
 
 
-def test_no_switch_and_outside_the_relaxed_group():
-    """Bit-identical: no config switch, and msa_exact_numerics leaves it on."""
+def test_no_switch():
+    """Bit-identical: no config switch, a gfx1250 path the log names."""
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
 
     assert "msa_lean_masks" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_lean_masks" not in attention._MSA_RELAXED
+    assert "msa_lean_masks" in attention._MSA_GFX1250_PATHS

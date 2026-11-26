@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""``msa_aligned_block_walk`` (relaxed numerics): the permuted block table of
+"""``msa_aligned_block_walk`` (sums in another order): the permuted block table of
 ``flydsl/block_walk.py`` and the MSA forward / backward that walk it, against the PyTorch
 reference of the permutation and an FP32 reference of the attention, with explicit tolerances."""
 
@@ -258,12 +258,12 @@ def test_attention_with_the_aligned_walk_matches_fp32(S, B, Hkv, topk, kind):
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_exact_numerics=False, msa_shared_tile_staging=True)
+    defaults = dict(msa_shared_tile_staging=True)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_exact_numerics_and_the_shared_staging_decide_the_walk():
+def test_the_shared_staging_decides_the_walk():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -278,13 +278,9 @@ def test_exact_numerics_and_the_shared_staging_decide_the_walk():
     plan = SimpleNamespace(table=table)
     walk2 = MinimaxSparseAttention._aligned_walk(_fake_attention(), table.to(torch.int64), plan)
     assert torch.equal(walk2[0], walk[0])
-    for off in (
-        {"msa_exact_numerics": True},  # reproduces the reference kernels bit for bit
-        {"msa_shared_tile_staging": False},  # nothing shares a tile: no reason to permute
-    ):
-        assert (
-            MinimaxSparseAttention._aligned_walk(_fake_attention(**off), table.to(torch.int64), None) is None
-        )
+    # nothing shares a tile: no reason to permute
+    off = _fake_attention(msa_shared_tile_staging=False)
+    assert MinimaxSparseAttention._aligned_walk(off, table.to(torch.int64), None) is None
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False
     assert MinimaxSparseAttention._aligned_walk(other_gpu, table.to(torch.int64), None) is None

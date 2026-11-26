@@ -196,18 +196,15 @@ class MSATransformerConfig(TransformerConfig):
     one-token-per-workgroup kernels and keeps those on a mismatch. Needs S and the block size to be
     multiples of 4 / 2, else unchanged."""
 
-    msa_exact_numerics: bool = False
-    """flydsl backend on gfx1250: keep the MSA operator on the reference kernels' arithmetic, so a
-    run reproduces their losses bit for bit (for regression checks). Without it the operator also
-    takes the kernel paths of attention._MSA_RELAXED wherever a shape is eligible: five are
-    relaxed numerics, not bit-identical to the reference kernels (the aligned block walk, dQ from
-    the dK/dV kernel's dS, the index dK scatter, the one-pass indexer loss, the bounded plan
-    chunks), and the others keep the bits of the path they sit on or change the same kernels (the
-    forward's owner carry and two tile slots, the dS chunk store, the dQ kernel's early issue,
-    the one-wave walk, the two-token dK/dV steps). Each path is decided before any work and
-    checked on its first call for a shape (attention.py lists them). The bit-identical paths --
-    the Triton fusions, msa_shared_tile_staging, the lean masks and the wide / unfilled block
-    selection -- ignore this flag. Other GPUs never take these paths."""
+    msa_bwd_store_ds: bool = True
+    """flydsl backend on gfx1250: the MSA backward's dK/dV kernel also writes its BF16 dS to a
+    workspace, and a slim kernel forms dQ = scale * dS K from it instead of computing S and dS a
+    second time (attention._MSA_STORE_DS_PATHS). The workspace is 4 KB per token, KV head and
+    selected block (B * Hkv * S * topk * 4 KB: 1.1 GB per layer call at S 4096, 8.6 GB at S 32768,
+    MBS 1), held from the dK/dV kernel to the dQ kernel; shapes above 16 GiB keep the
+    recomputing dQ kernel. Deterministic; dq / dk / dv differ from the recomputing path in their
+    last bits (the same terms in another order), and the first call for a shape compares the two.
+    False: no workspace, the dQ kernel recomputes. Other GPUs never take this path."""
 
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not

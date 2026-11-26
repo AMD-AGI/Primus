@@ -7,7 +7,7 @@
 """``msa_select_plan_wide`` and ``msa_select_skip_fill``: the fused block selection past 64
 blocks, and the indexer's scoring kernel without its fill launches.
 
-Both are exact class: every output (block table, boosted scores, winning keys, dead mask, the
+Both are bit-identical: every output (block table, boosted scores, winning keys, dead mask, the
 BlockPlan) must equal the unfused selection's bit for bit, and so must the gradients that go
 back through it. Neither has a switch (gfx1250 takes them); the tests turn them on and off
 through ``index_select._wide_enabled`` / ``_skip_fill_enabled``.
@@ -166,7 +166,7 @@ def test_boost_causal_ignores_the_unwritten_blocks(B, H, S, block, local_blocks,
     assert torch.equal(select_plan.boost_forced(raw, forced, causal_block=0), ref)
 
 
-def _indexer(topk, block, local_blocks, init_blocks, exact=False):
+def _indexer(topk, block, local_blocks, init_blocks):
     """A MinimaxM3Indexer with the attributes its selection reads, without the projections."""
     from primus.backends.megatron.core.transformer.minimax_m3.indexer import (
         MinimaxM3Indexer,
@@ -174,7 +174,7 @@ def _indexer(topk, block, local_blocks, init_blocks, exact=False):
 
     ix = MinimaxM3Indexer.__new__(MinimaxM3Indexer)
     torch.nn.Module.__init__(ix)
-    ix.config = SimpleNamespace(msa_fused_select_plan=True, msa_exact_numerics=exact)
+    ix.config = SimpleNamespace(msa_fused_select_plan=True)
     ix.block_size, ix.topk_blocks = block, topk
     ix.local_blocks, ix.init_blocks = local_blocks, init_blocks
     return ix
@@ -263,24 +263,18 @@ def test_fused_select_bitwise_with_wide_plan_and_skip_fill(
     monkeypatch.setattr(index_select, "index_block_max", spy)
     monkeypatch.setattr(bitwise_check, "_results", dict(bitwise_check._results))
     # the same index dK kernel and plan chunking on both sides (bounded: the reference is then the
-    # unfused selection with build_block_plan's bounded chunks; that path is relaxed, these two are
-    # not)
-    monkeypatch.setattr(index_select, "index_dk_scatter_enabled", lambda config: False)
-    monkeypatch.setattr(index_select, "bounded_plan_chunks_enabled", lambda config: bounded)
+    # unfused selection with build_block_plan's bounded chunks; that chunking sums in another
+    # order, these two paths keep every bit)
+    monkeypatch.setattr(index_select, "index_dk_scatter_enabled", lambda: False)
+    monkeypatch.setattr(index_select, "bounded_plan_chunks_enabled", lambda: bounded)
 
     _paths(monkeypatch, wide=False, skip_fill=False)
     ref = _step(_indexer(topk, 128, local_blocks, init_blocks), q, k)
     assert fills and all(f is True for f in fills)
 
-    for wide, skip_fill, exact in (
-        (True, False, False),
-        (False, True, False),
-        (True, True, False),
-        # bit-identical: msa_exact_numerics does not turn them off, and need not
-        (True, True, True),
-    ):
+    for wide, skip_fill in ((True, False), (False, True), (True, True)):
         _paths(monkeypatch, wide, skip_fill)
-        ix = _indexer(topk, 128, local_blocks, init_blocks, exact=exact)
+        ix = _indexer(topk, 128, local_blocks, init_blocks)
         first = _step(ix, q, k)  # the call that runs the self-checks
         del fills[:]
         second = _step(ix, q, k)

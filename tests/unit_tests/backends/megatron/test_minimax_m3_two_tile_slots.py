@@ -6,9 +6,9 @@
 
 """``msa_two_tile_slots``: the gfx1250 MSA forward (lockstep layout with ``msa_owner_carry``) with
 two LDS tile slots per wave instead of four. An MSA operator kernel option that keeps every bit:
-tested as a relaxed-class option (FP32 reference with explicit tolerances, repeated-run identity,
-the shapes that break kernels) and, more strictly, bit for bit against the kernel without it
-(``require_bitwise``)."""
+tested like the paths that sum in another order (FP32 reference with explicit tolerances,
+repeated-run identity, the shapes that break kernels) and, more strictly, bit for bit against the
+kernel without it (``require_bitwise``)."""
 
 import importlib.util
 import os
@@ -185,12 +185,12 @@ def test_two_tile_slots_lds_fits_four_workgroups():
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_shared_tile_staging=True, msa_exact_numerics=False)
+    defaults = dict(msa_shared_tile_staging=True)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_on_with_owner_carry_and_exact_numerics_turns_it_off():
+def test_on_with_owner_carry():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -200,11 +200,10 @@ def test_on_with_owner_carry_and_exact_numerics_turns_it_off():
     )
 
     assert "msa_two_tile_slots" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_two_tile_slots" in attention._MSA_RELAXED
+    assert "msa_two_tile_slots" in attention._MSA_GFX1250_PATHS
     A = MinimaxSparseAttention
     assert A._owner_carry(_fake_attention()) == {"owner_carry": True, "two_tile_slots": True}
-    # msa_exact_numerics reproduces the reference kernels: off with the carry kernel
-    assert A._owner_carry(_fake_attention(msa_exact_numerics=True)) == {}
+    # off with the carry kernel
     assert A._owner_carry(_fake_attention(msa_shared_tile_staging=False)) == {}
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False

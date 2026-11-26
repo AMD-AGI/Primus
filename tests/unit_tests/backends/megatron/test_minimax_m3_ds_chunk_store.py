@@ -5,9 +5,10 @@
 ###############################################################################
 
 """``msa_ds_chunk_store``: the dK/dV kernel's dS stores of ``msa_dq_from_ds`` through one buffer
-descriptor per workgroup. An MSA operator kernel option that keeps every bit: tested as a
-relaxed-class option (FP32 reference with explicit tolerances, repeated-run identity, the shapes
-that break kernels) and, more strictly, bit for bit against ``msa_dq_from_ds`` without it."""
+descriptor per workgroup. An MSA operator kernel option that keeps every bit: tested like the
+paths that sum in another order (FP32 reference with explicit tolerances, repeated-run identity,
+the shapes that break kernels) and, more strictly, bit for bit against ``msa_dq_from_ds`` without
+it."""
 
 import importlib.util
 import os
@@ -119,12 +120,12 @@ def test_ds_chunk_store_keeps_per_record_stores_for_large_slices(monkeypatch):
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_exact_numerics=False)
+    defaults = dict(msa_bwd_store_ds=True)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_on_with_dq_from_ds_and_exact_numerics_turns_it_off():
+def test_on_with_dq_from_ds_and_off_without_store_ds():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -134,11 +135,11 @@ def test_on_with_dq_from_ds_and_exact_numerics_turns_it_off():
     )
 
     assert "msa_ds_chunk_store" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_ds_chunk_store" in attention._MSA_RELAXED
+    assert "msa_ds_chunk_store" in attention._MSA_STORE_DS_PATHS
     A = MinimaxSparseAttention
     assert A._dq_from_ds(_fake_attention(), None)["ds_chunk_store"] is True
-    # msa_exact_numerics reproduces the reference kernels: the whole dq_from_ds path is off
-    assert A._dq_from_ds(_fake_attention(msa_exact_numerics=True), None) == {}
+    # msa_bwd_store_ds=False: the whole dq_from_ds path is off
+    assert A._dq_from_ds(_fake_attention(msa_bwd_store_ds=False), None) == {}
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False
     assert A._dq_from_ds(other_gpu, None) == {}

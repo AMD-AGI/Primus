@@ -43,7 +43,7 @@ workgroup barrier, no wait on another wave and no loop; their grids come from th
 The first call for a shape runs this path twice and the path it replaces once, on the call's own
 inputs, and keeps the replaced path unless both runs give the same bits and the loss and the
 block-score gradient are within ``_LOSS_RTOL`` / ``_GRAD_RTOL`` of it (:func:`_checked`).
-A gfx1250 path of ``attention._MSA_RELAXED``: ``msa_exact_numerics`` turns it off.
+A gfx1250 path of ``attention._MSA_GFX1250_PATHS``, taken with ``msa_fused_indexer_loss``.
 """
 
 from __future__ import annotations
@@ -366,11 +366,10 @@ def _checked(key: Hashable, run: Callable, reference: Callable, block_scores) ->
         ok, reason = False, f"{type(e).__name__}: {e}"
     _decided[key] = ok
     if ok:
-        log_rank_0(f"[msa_indexer_loss_one_pass {key}] relaxed-numerics path checked: {reason}; in use")
+        log_rank_0(f"[msa_indexer_loss_one_pass {key}] checked: {reason}; in use")
     else:
         warning_rank_all(
-            f"[msa_indexer_loss_one_pass {key}] relaxed-numerics path rejected: {reason}; keeping "
-            "the path it replaces"
+            f"[msa_indexer_loss_one_pass {key}] rejected: {reason}; keeping the path it replaces"
         )
     return ok
 

@@ -5,9 +5,9 @@
 ###############################################################################
 
 """``msa_owner_carry``: the gfx1250 MSA forward with each step's tile owner carried in the loop
-state. An MSA operator kernel option that keeps every bit: tested as a relaxed-class option (FP32
-reference with explicit tolerances, repeated-run identity, the shapes that break kernels) and,
-more strictly, bit for bit against the kernel without it."""
+state. An MSA operator kernel option that keeps every bit: tested like the paths that sum in
+another order (FP32 reference with explicit tolerances, repeated-run identity, the shapes that
+break kernels) and, more strictly, bit for bit against the kernel without it."""
 
 import importlib.util
 import os
@@ -128,12 +128,12 @@ def test_owner_carry_dispatcher_checks_once_and_falls_back(monkeypatch):
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_shared_tile_staging=True, msa_exact_numerics=False)
+    defaults = dict(msa_shared_tile_staging=True)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_on_by_default_and_exact_numerics_turns_it_off():
+def test_on_with_the_shared_staging_on_gfx1250():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -143,11 +143,9 @@ def test_on_by_default_and_exact_numerics_turns_it_off():
     )
 
     assert "msa_owner_carry" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_owner_carry" in attention._MSA_RELAXED
+    assert "msa_owner_carry" in attention._MSA_GFX1250_PATHS
     A = MinimaxSparseAttention
     assert A._owner_carry(_fake_attention())["owner_carry"] is True
-    # msa_exact_numerics reproduces the reference kernels
-    assert A._owner_carry(_fake_attention(msa_exact_numerics=True)) == {}
     # no tile owner to carry without the shared staging
     assert A._owner_carry(_fake_attention(msa_shared_tile_staging=False)) == {}
     other_gpu = _fake_attention()

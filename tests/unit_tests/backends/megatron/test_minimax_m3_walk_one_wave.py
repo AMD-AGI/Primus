@@ -109,7 +109,7 @@ def test_the_walk_asks_for_one_wave(monkeypatch):
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
 
     assert "msa_walk_one_wave" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_walk_one_wave" in attention._MSA_RELAXED
+    assert "msa_walk_one_wave" in attention._MSA_GFX1250_PATHS
     assert block_walk._ONE_WAVE_ROWS in (1, 2, 4)
     seen = []
     monkeypatch.setattr(
@@ -117,7 +117,7 @@ def test_the_walk_asks_for_one_wave(monkeypatch):
     )
 
     def fake(**config):
-        defaults = dict(msa_exact_numerics=False, msa_shared_tile_staging=True)
+        defaults = dict(msa_shared_tile_staging=True)
         defaults.update(config)
         return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
@@ -125,6 +125,6 @@ def test_the_walk_asks_for_one_wave(monkeypatch):
     A = attention.MinimaxSparseAttention
     A._aligned_walk(fake(), idx, None)
     assert seen == [True]
-    # msa_exact_numerics turns the walk, and so this option, off
-    assert A._aligned_walk(fake(msa_exact_numerics=True), idx, None) is None
+    # no walk without the shared staging, so no walk kernel either
+    assert A._aligned_walk(fake(msa_shared_tile_staging=False), idx, None) is None
     assert seen == [True]

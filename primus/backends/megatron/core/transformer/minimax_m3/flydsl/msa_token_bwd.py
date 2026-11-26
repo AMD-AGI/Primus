@@ -1101,7 +1101,7 @@ def build_block_plan(
 ) -> BlockPlan:
     """:class:`BlockPlan` for a ``[B, Hkv, S, topk]`` block table (-1 padded).
 
-    ``bounded_chunks`` (``msa_bounded_plan_chunks``, relaxed numerics): the chunk size of
+    ``bounded_chunks`` (``msa_bounded_plan_chunks``): the chunk size of
     :func:`plan_chunk_size` with ``bounded``. The entries and their order are the same; the FP32
     partials of dK / dV and of the index dK are summed over other groups of them."""
     n_blocks = -(-block_table.shape[2] // block_size)
@@ -1221,7 +1221,7 @@ def msa_token_bwd(
             ``shared_tiles``: the first call for a shape compares every bit of ``dq`` and ``delta``
             with the kernel without it and keeps that kernel on a mismatch.
 
-        dq_from_ds: gfx1250 only (``msa_dq_from_ds``, relaxed numerics): the dK/dV kernel also
+        dq_from_ds: gfx1250 only (``msa_dq_from_ds``, ``msa_bwd_store_ds``): the dK/dV kernel also
             writes its bf16 ``dS`` operand per (token, selected block) and a slim dQ kernel
             (``build_dq_ds_w32``) forms ``dQ = scale * dS K`` from it, instead of the dQ kernel
             staging V and recomputing ``S`` and ``dS`` itself; ``delta`` comes from one Triton

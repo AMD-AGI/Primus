@@ -5,10 +5,11 @@
 ###############################################################################
 
 """``msa_dkdv_two_token_steps``: the gfx1250 dK/dV kernel with two tokens per step instead of
-four. An MSA operator kernel option that keeps every bit: tested as a relaxed-class option (FP32
-reference with explicit tolerances, repeated-run identity, the shapes that break kernels) and,
-more strictly, bit for bit against the four-token kernel (``require_bitwise``), on the reference
-dQ path and on the ``msa_dq_from_ds`` path (whose dS records the kernel also writes)."""
+four. An MSA operator kernel option that keeps every bit: tested like the paths that sum in
+another order (FP32 reference with explicit tolerances, repeated-run identity, the shapes that
+break kernels) and, more strictly, bit for bit against the four-token kernel (``require_bitwise``),
+on the recomputing dQ path and on the ``msa_dq_from_ds`` path (whose dS records the kernel also
+writes)."""
 
 import importlib.util
 import os
@@ -165,12 +166,10 @@ def test_two_token_steps_self_check_passes(require_bitwise):
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_exact_numerics=False)
-    defaults.update(config)
-    return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
+    return SimpleNamespace(config=SimpleNamespace(**config), _gfx1250=True, block_size=BLOCK)
 
 
-def test_on_by_default_and_exact_numerics_turns_it_off():
+def test_on_on_gfx1250_whatever_msa_bwd_store_ds_says():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -180,11 +179,11 @@ def test_on_by_default_and_exact_numerics_turns_it_off():
     )
 
     assert "msa_dkdv_two_token_steps" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_dkdv_two_token_steps" in attention._MSA_RELAXED
+    assert "msa_dkdv_two_token_steps" in attention._MSA_GFX1250_PATHS
     A = MinimaxSparseAttention
     assert A._dkdv_two_token_steps(_fake_attention()) == {"dkdv_two_token_steps": True}
-    # msa_exact_numerics reproduces the reference kernels
-    assert A._dkdv_two_token_steps(_fake_attention(msa_exact_numerics=True)) == {}
+    # the dK/dV kernel serves both dQ paths
+    assert A._dkdv_two_token_steps(_fake_attention(msa_bwd_store_ds=False)) == {"dkdv_two_token_steps": True}
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False
     assert A._dkdv_two_token_steps(other_gpu) == {}

@@ -4,16 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""``msa_index_dk_scatter`` (relaxed numerics): the indexer backward's dK chunk kernel as a
+"""``msa_index_dk_scatter`` (sums in another order): the indexer backward's dK chunk kernel as a
 per-entry scatter into the winning key row, against an fp64 dense reference with explicit
 tolerances, against the one-hot WMMA kernel it replaces (at most 1.25 x its error + 1e-6), and
-for determinism; plus the switch, ``msa_exact_numerics`` and the dispatcher's first-call decision.
+for determinism; plus the gating (gfx1250) and the dispatcher's first-call decision.
 
-The tests of the kernel itself need gfx1250 (they skip elsewhere); the switch tests and the
+The tests of the kernel itself need gfx1250 (they skip elsewhere); the gating tests and the
 plain-PyTorch emulation of the scatter order run on any machine."""
 
 import os
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -136,7 +135,7 @@ def _emulate_scatter(table, g, keys, q, chunk=64):
 # ---------------------------------------------------------------- any machine (CPU)
 
 
-def test_on_by_default_and_exact_numerics_turns_it_off(monkeypatch):
+def test_on_gfx1250_without_a_switch(monkeypatch):
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -144,14 +143,11 @@ def test_on_by_default_and_exact_numerics_turns_it_off(monkeypatch):
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import index_select
 
     assert "msa_index_dk_scatter" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_index_dk_scatter" in attention._MSA_RELAXED
+    assert "msa_index_dk_scatter" in attention._MSA_GFX1250_PATHS
     monkeypatch.setattr(index_select, "_on_gfx1250", lambda: True)
-    assert index_select.index_dk_scatter_enabled(SimpleNamespace(msa_exact_numerics=False)) is True
-    assert index_select.index_dk_scatter_enabled(None) is True
-    # msa_exact_numerics reproduces the reference kernels
-    assert index_select.index_dk_scatter_enabled(SimpleNamespace(msa_exact_numerics=True)) is False
+    assert index_select.index_dk_scatter_enabled() is True
     monkeypatch.setattr(index_select, "_on_gfx1250", lambda: False)
-    assert index_select.index_dk_scatter_enabled(SimpleNamespace(msa_exact_numerics=False)) is False
+    assert index_select.index_dk_scatter_enabled() is False
 
 
 def test_the_configs_carry_no_switch():
@@ -159,7 +155,7 @@ def test_the_configs_carry_no_switch():
 
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
     model = yaml.safe_load(open(os.path.join(root, "primus/configs/models/megatron/minimax_m3.yaml")))
-    assert "msa_index_dk_scatter" not in model and model["msa_exact_numerics"] is False
+    assert "msa_index_dk_scatter" not in model and model["msa_bwd_store_ds"] is True
     text = open(os.path.join(root, "examples/megatron/configs/MI455X/minimax_m3-BF16-pretrain.yaml")).read()
     assert "msa_index_dk_scatter" not in text
 
@@ -312,8 +308,8 @@ def test_dispatcher_decides_once_and_falls_back():
 
 
 @needs_gfx1250
-def test_indexer_backward_uses_it_and_exact_numerics_does_not(monkeypatch):
-    """Through ``_FusedSelect``: the path reaches ``index_dk``; ``msa_exact_numerics`` turns it off."""
+def test_indexer_backward_uses_it(monkeypatch):
+    """Through ``_FusedSelect``: the path reaches ``index_dk``."""
     import primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select as sel
 
     seen = []
@@ -326,17 +322,14 @@ def test_indexer_backward_uses_it_and_exact_numerics_does_not(monkeypatch):
     monkeypatch.setattr(sel, "index_dk", spy)
     S, B, H = 1024, 1, 4
     gen = torch.Generator(device="cuda").manual_seed(1)
-    for exact, want in ((False, True), (True, False)):
-        q = torch.randn(S, B, H, D, device="cuda", dtype=torch.bfloat16, generator=gen).requires_grad_(True)
-        k = torch.randn(S, B, 1, D, device="cuda", dtype=torch.bfloat16, generator=gen).requires_grad_(True)
-        config = SimpleNamespace(msa_exact_numerics=exact)
+    q = torch.randn(S, B, H, D, device="cuda", dtype=torch.bfloat16, generator=gen).requires_grad_(True)
+    k = torch.randn(S, B, 1, D, device="cuda", dtype=torch.bfloat16, generator=gen).requires_grad_(True)
 
-        def select(raw, b, _cfg=config):
-            vals, idx = raw.topk(4, dim=-1)
-            return idx.masked_fill(vals == float("-inf"), -1), raw
+    def select(raw, b):
+        vals, idx = raw.topk(4, dim=-1)
+        return idx.masked_fill(vals == float("-inf"), -1), raw
 
-        select.__self__ = SimpleNamespace(config=config)  # what _FusedSelect reads the config from
-        bi, scores, _plan_ = sel.fused_select_blocks(q, k, select, BLOCK)
-        picked = scores.gather(-1, bi.clamp_min(0)).masked_fill(bi < 0, 0.0)
-        picked.sum().backward()
-        assert seen[-1] is want
+    bi, scores, _plan_ = sel.fused_select_blocks(q, k, select, BLOCK)
+    picked = scores.gather(-1, bi.clamp_min(0)).masked_fill(bi < 0, 0.0)
+    picked.sum().backward()
+    assert seen and seen[-1] is True

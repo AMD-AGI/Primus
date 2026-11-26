@@ -164,70 +164,65 @@ parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs wh
 the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
-off; apart from `msa_shared_tile_staging` and `msa_exact_numerics` (below) the FlyDSL MSA kernels
+off; apart from `msa_shared_tile_staging` and `msa_bwd_store_ds` (below) the FlyDSL MSA kernels
 have no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
 **gfx1250 MSA kernel paths.** On gfx1250 the FlyDSL backend takes the following paths wherever a
-shape is eligible, without a switch (other GPUs never take them); each is decided before any work,
-compared with the path it replaces on its first call for a shape, and named in the log as below.
-Three are bit-identical and always on: `msa_lean_masks` (the forward, dQ and dK/dV kernels and the
+shape is eligible (other GPUs never take them); each is decided before any work, compared with the
+path it replaces on its first call for a shape, and named in the log as below. All are
+deterministic: no atomics, fixed summation orders. Only `msa_bwd_store_ds` has a switch.
+
+Bit-identical to the path they replace: `msa_lean_masks` (the forward, dQ and dK/dV kernels and the
 indexer's scoring kernel skip the per-key causal compare and select on steps whose keys are all
 visible, which is every step outside a token's own block, and the indexer's dK kernel reads the
 zeros of its WMMA's unused half from a pad instead of selecting them per element; the skipped
-selects would return their input), and with `msa_fused_select_plan`, `msa_select_plan_wide` (the
+selects would return their input); with `msa_fused_select_plan`, `msa_select_plan_wide` (the
 fused selection for more than 64 blocks, i.e. above 8k tokens) and `msa_select_skip_fill` (no fill
-launches before the indexer's scoring kernel). Five are not bit-identical to the reference FlyDSL
-kernels (relaxed numerics): `msa_aligned_block_walk`, `msa_dq_from_ds`, `msa_indexer_loss_one_pass`,
-`msa_index_dk_scatter` and `msa_bounded_plan_chunks` (the backward's block plan in chunks of 256 to 384
-entries: other groups of the same FP32 terms in dk, dv and d index k). The others (`msa_owner_carry`,
-`msa_ds_chunk_store`, `msa_dq_early_issue`, `msa_two_tile_slots`, `msa_walk_one_wave`,
-`msa_dkdv_two_token_steps`: the backward's dK/dV kernel with two tokens per step instead of four,
-block size 128, first call for a shape compared bit for bit with the four-token kernel) keep every
-bit of the path they sit on and go off together with the relaxed ones. With
-`msa_aligned_block_walk` the forward and dQ kernels walk each token's selected blocks in an order aligned
-with the token's neighbours (groups of four consecutive tokens; a block that an earlier token of
-the group selected is visited at that token's step), so the tokens of a workgroup meet a common
-block at the same step and `msa_shared_tile_staging` copies its K/V tiles once. The block selection
-and the terms of every sum are unchanged; the order of the sums over a token's blocks is not, so
-`o`, the attention mass per slot and `dq` differ in their last bits (same error against an FP32
-reference; deterministic). `msa_dq_from_ds` takes dQ from the dK/dV kernel: that kernel
-already forms `dS = P * (dO V^T - delta)` for every token and selected block as a BF16 operand, so
-it also writes it to a transient buffer (4 KB per token and block: 1.1 GB per layer call at 4k,
-8.6 GB at 32k; shapes above 16 GiB keep the reference kernels) and a slim dQ kernel forms
-`dQ = scale * dS K` from it, without staging V or computing `S` and `dS` a second time. The terms
-are the same; `dS` is the dK/dV kernel's instead of the dQ kernel's own and `delta` is summed in
-another order, so `dq`, `dk` and `dv` differ in their last bits (deterministic; the first call for
-a shape compares the two paths). Further paths change MSA operator kernels without changing
-a bit, and go off with the relaxed ones: `msa_owner_carry` (the forward keeps each
-step's tile owner in its loop state instead of re-reading the table; the first call for a shape
-compares every output bit) and `msa_ds_chunk_store` (with `msa_dq_from_ds`, the dK/dV kernel
+launches before the indexer's scoring kernel); with `msa_shared_tile_staging`, `msa_owner_carry`
+(the forward keeps each step's tile owner in its loop state instead of re-reading the table) and
+`msa_two_tile_slots` (the forward keeps one K and one V tile slot per wave instead of two of each:
+a step's V tile is copied while the step works on K, the next step's K tile while it works on V;
+a workgroup then takes 68 KB instead of 140 KB of LDS and four instead of two fit a compute unit);
+`msa_walk_one_wave` (the aligned walk's Triton kernel with one wave per program, which removes the
+workgroup barriers of its cross-wave reductions; the table it writes is the same integers); and
+`msa_dkdv_two_token_steps` (the backward's dK/dV kernel with two tokens per step instead of four,
+block size 128).
+
+The same terms summed in another order, so the last bits differ from the path they replace (same
+error against an FP32 reference): with `msa_shared_tile_staging`, `msa_aligned_block_walk` (the
+forward and dQ kernels walk each token's selected blocks in an order aligned with the token's
+neighbours: groups of four consecutive tokens, a block that an earlier token of the group selected
+is visited at that token's step, so the tokens of a workgroup meet a common block at the same step
+and `msa_shared_tile_staging` copies its K/V tiles once; the block selection and the terms of every
+sum are unchanged, the order of the sums over a token's blocks is not, so `o`, the attention mass
+per slot and `dq` differ in their last bits); with `msa_fused_indexer_loss`,
+`msa_indexer_loss_one_pass` (the slot mass and the sparse indexer KL of a layer in one Triton kernel
+and their backward in one more, instead of about fourteen small launches forward and six backward;
+the same block-level KL, with the row sums, `exp` and `log` taken by Triton and, under
+`msa_aligned_block_walk`, in walk order; the first call for a shape requires the loss within 5e-7,
+the gradient within 2e-5 and two identical runs); `msa_index_dk_scatter` (the indexer backward's dK
+chunk kernel, a one-hot masked WMMA product over all 128 keys of a block, becomes a scatter: each
+plan entry's `g * q` row is added in fp32 to its one winning key row, in plan order, one wave per
+chunk, and the same fixed-order reduce follows; only for an index dimension of 128 and a
+power-of-two top-k, the form that was compiled and run on the device, other shapes keep the WMMA
+kernel); and `msa_bounded_plan_chunks` (the backward's block plan in chunks of 256 to 384 entries:
+other groups of the same FP32 terms in dk, dv and d index k).
+
+`msa_bwd_store_ds` (default true) stores the backward's `dS` instead of recomputing it
+(`msa_dq_from_ds`): the dK/dV kernel already forms `dS = P * (dO V^T - delta)` for every token and
+selected block as a BF16 operand, so it also writes it to a transient workspace (4 KB per token, KV
+head and selected block: 1.1 GB per layer call at 4k, 8.6 GB at 32k; shapes above 16 GiB keep the
+recomputing kernel) and a slim dQ kernel forms `dQ = scale * dS K` from it, without staging V or
+computing `S` and `dS` a second time. The terms are the same; `dS` is the dK/dV kernel's instead
+of the dQ kernel's own and `delta` is summed in another order, so `dq`, `dk` and `dv` differ in
+their last bits. Two bit-identical paths come with it: `msa_ds_chunk_store` (the dK/dV kernel
 writes `dS` through one buffer descriptor per workgroup instead of one per record, while a
-(batch, KV head) slice of the buffer is at most 2 GiB, i.e. up to S 32768 at top-k 16),
-`msa_dq_early_issue` (with `msa_dq_from_ds`, the slim dQ kernel issues the copies of the next
-step before it waits for those of the current one, so two steps' copies are in flight; the first
-call for a shape compares every bit of `dq`) and `msa_two_tile_slots` (with `msa_owner_carry`,
-the forward keeps one K and one V tile slot per wave instead of two of each: a step's V tile is
-copied while the step works on K, the next step's K tile while it works on V; a workgroup then
-takes 68 KB instead of 140 KB of LDS and four instead of two fit a compute unit; the first call
-for a shape compares every output bit).
-`msa_walk_one_wave` launches the aligned walk's Triton kernel with one wave per program, which
-removes the workgroup barriers of its cross-wave reductions; the table it writes is the same
-integers (checked against the PyTorch reference on the first table of a shape).
-`msa_indexer_loss_one_pass` (with `msa_fused_indexer_loss`) computes the slot mass and the sparse
-indexer KL of a layer in one Triton kernel and their backward in one more, instead of about
-fourteen small launches forward and six backward; the loss is the same block-level KL, with the
-row sums, `exp` and `log` taken by Triton and, under `msa_aligned_block_walk`, in walk order
-(relaxed numerics, deterministic; the first call for a shape compares it with the bit-exact path:
-loss within 5e-7, gradient within 2e-5, two runs identical).
-`msa_index_dk_scatter` (relaxed numerics; used only for an index dimension of 128 and a power-of-two
-top-k, the form that was compiled and run on the device, other shapes keep the WMMA kernel)
-replaces the indexer backward's dK chunk kernel, a
-one-hot masked WMMA product over all 128 keys of a block, by a scatter: each plan entry's
-`g * q` row is added in fp32 to its one winning key row, in plan order, one wave per chunk; the
-same fixed-order reduce follows. `d index k` differs in its last bits (deterministic; the first
-call for a shape compares the two kernels' partials and two runs of the new one).
-`--msa_exact_numerics True` turns the relaxed paths and those that go with them off and reproduces
-the reference kernels' losses bit for bit; the three bit-identical paths stay on.
+(batch, KV head) slice of the workspace is at most 2 GiB, i.e. up to S 32768 at top-k 16) and
+`msa_dq_early_issue` (the slim dQ kernel issues the copies of the next step before it waits for
+those of the current one, so two steps' copies are in flight). `--msa_bwd_store_ds False` keeps
+the dQ kernel that recomputes `S` and `dS`, with no workspace; on the M3.1-Flash 1-GPU proxy (S
+4096, MBS 1, GBS 8) the step then takes 356.8 ms instead of 351.4 ms with the same peak memory, and
+one MSA layer at S 32768 (selection, forward and backward) 12.31 ms instead of 10.37 ms.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a

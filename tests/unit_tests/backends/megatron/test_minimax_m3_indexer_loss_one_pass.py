@@ -5,11 +5,12 @@
 ###############################################################################
 
 """``msa_indexer_loss_one_pass``: slot mass + sparse indexer KL in one Triton kernel, the backward
-in one more. Relaxed class: compared with the eager reference (``slot_mass_from_slot_lse`` +
-``compute_sparse_indexer_loss``) under explicit tolerances, repeated-run identity, the shapes that
-break kernels (S not a multiple of the block, ``-1`` padded rows, early queries with fewer than
-topk blocks and rows whose blocks are all forced, hot blocks, B > 1, rows wider than the folded
-scatter), the first-call check and its fallback, the switch and ``msa_exact_numerics``.
+in one more. The sums run in another order: compared with the eager reference
+(``slot_mass_from_slot_lse`` + ``compute_sparse_indexer_loss``) under explicit tolerances,
+repeated-run identity, the shapes that break kernels (S not a multiple of the block, ``-1`` padded
+rows, early queries with fewer than topk blocks and rows whose blocks are all forced, hot blocks,
+B > 1, rows wider than the folded scatter), the first-call check and its fallback, and the gating
+(gfx1250, ``msa_fused_indexer_loss``).
 
 The first group runs on the CPU: it checks the kernels' arithmetic as written in plain PyTorch
 (``emulate`` / ``emulate_backward``, the walk-order formulation and the hand-written backward
@@ -179,23 +180,21 @@ def test_not_eligible_off_gpu_or_with_other_dtypes():
 
 
 def _fake_attention(gfx1250=True, **config):
-    defaults = dict(msa_fused_indexer_loss=True, msa_exact_numerics=False)
+    defaults = dict(msa_fused_indexer_loss=True)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=gfx1250)
 
 
-def test_on_with_the_fused_loss_and_exact_numerics_turns_it_off():
+def test_on_with_the_fused_loss_on_gfx1250():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
     from primus.backends.megatron.core.transformer.minimax_m3 import attention
 
     assert "msa_indexer_loss_one_pass" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_indexer_loss_one_pass" in attention._MSA_RELAXED
+    assert "msa_indexer_loss_one_pass" in attention._MSA_GFX1250_PATHS
     A = attention.MinimaxSparseAttention
     assert A._loss_one_pass(_fake_attention()) is True
-    # msa_exact_numerics reproduces the reference losses
-    assert A._loss_one_pass(_fake_attention(msa_exact_numerics=True)) is False
     # it stands in for the fused loss's Triton path: nothing without that switch
     assert A._loss_one_pass(_fake_attention(msa_fused_indexer_loss=False)) is False
     assert A._loss_one_pass(_fake_attention(gfx1250=False)) is False

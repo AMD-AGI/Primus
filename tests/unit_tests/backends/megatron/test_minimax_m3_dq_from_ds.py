@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""``msa_dq_from_ds`` (relaxed numerics): the MSA backward with dQ taken from the dK/dV kernel's dS
+"""``msa_dq_from_ds`` (``msa_bwd_store_ds``): the MSA backward with dQ taken from the dK/dV kernel's dS
 (``build_dq_ds_w32``) against a dense FP32 reference and the reference kernels, with explicit
 tolerances; determinism; the dispatcher's first-call comparison and its fallbacks."""
 
@@ -238,27 +238,30 @@ def test_lockstep_kernel_refuses_a_sequence_it_does_not_divide(monkeypatch):
 
 
 def _fake_attention(**config):
-    defaults = dict(msa_exact_numerics=False)
+    defaults = dict(msa_bwd_store_ds=True)
     defaults.update(config)
     return SimpleNamespace(config=SimpleNamespace(**defaults), _gfx1250=True, block_size=BLOCK)
 
 
-def test_exact_numerics_turns_it_off():
+def test_on_by_default_and_off_without_store_ds():
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
+    from primus.backends.megatron.core.transformer.minimax_m3 import attention
     from primus.backends.megatron.core.transformer.minimax_m3.attention import (
         MinimaxSparseAttention,
     )
 
     assert "msa_dq_from_ds" not in MSATransformerConfig.__dataclass_fields__
+    assert MSATransformerConfig.__dataclass_fields__["msa_bwd_store_ds"].default is True
+    assert "msa_dq_from_ds" in attention._MSA_STORE_DS_PATHS
     kwargs = MinimaxSparseAttention._dq_from_ds(_fake_attention(), None)
     assert kwargs["dq_from_ds"] is True and "walk_slots" not in kwargs
     slots = torch.zeros(1, 1, 4, 4, dtype=torch.int64)
     kwargs = MinimaxSparseAttention._dq_from_ds(_fake_attention(), (None, slots))
     assert kwargs["dq_from_ds"] is True and kwargs["walk_slots"].dtype == torch.int32
-    # msa_exact_numerics reproduces the reference kernels bit for bit
-    assert MinimaxSparseAttention._dq_from_ds(_fake_attention(msa_exact_numerics=True), None) == {}
+    # msa_bwd_store_ds=False: no workspace, the dQ kernel recomputes S and dS
+    assert MinimaxSparseAttention._dq_from_ds(_fake_attention(msa_bwd_store_ds=False), None) == {}
     other_gpu = _fake_attention()
     other_gpu._gfx1250 = False
     assert MinimaxSparseAttention._dq_from_ds(other_gpu, None) == {}

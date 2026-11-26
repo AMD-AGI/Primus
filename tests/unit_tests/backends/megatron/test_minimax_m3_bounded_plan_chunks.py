@@ -4,13 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""``msa_bounded_plan_chunks`` (relaxed numerics): the BlockPlan cut into chunks of a bounded
+"""``msa_bounded_plan_chunks`` (sums in another order): the BlockPlan cut into chunks of a bounded
 size. The rule and its gating on CPU; on gfx1250 the plan's structure (both builders), dK / dV and
 the index dK on it against FP32 / FP64 references and the reference chunking with explicit
 tolerances, determinism, and the shapes that break kernels (S not a multiple of the block, -1
 padded rows, early queries, hot blocks, B > 1)."""
 
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -66,7 +65,7 @@ def test_chunk_size_rule():
     assert bwd.plan_chunk_size(2 * 4 * 131072 * 16, bounded=True) == 2 * 4 * 131072 * 16 // count
 
 
-def test_gfx1250_exact_flag_and_group(monkeypatch):
+def test_on_gfx1250_without_a_switch(monkeypatch):
     from primus.backends.megatron.core.models.minimax_m3.minimax_m3_transformer_config import (
         MSATransformerConfig,
     )
@@ -74,14 +73,12 @@ def test_gfx1250_exact_flag_and_group(monkeypatch):
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import index_select
 
     assert "msa_bounded_plan_chunks" not in MSATransformerConfig.__dataclass_fields__
-    assert "msa_bounded_plan_chunks" in attention._MSA_RELAXED
+    assert "msa_bounded_plan_chunks" in attention._MSA_GFX1250_PATHS
     monkeypatch.setattr(index_select, "_on_gfx1250", lambda: True)
-    assert index_select.bounded_plan_chunks_enabled(None)
-    assert index_select.bounded_plan_chunks_enabled(SimpleNamespace(msa_exact_numerics=False))
-    assert not index_select.bounded_plan_chunks_enabled(SimpleNamespace(msa_exact_numerics=True))
+    assert index_select.bounded_plan_chunks_enabled()
     # other GPUs keep the reference chunking
     monkeypatch.setattr(index_select, "_on_gfx1250", lambda: False)
-    assert not index_select.bounded_plan_chunks_enabled(SimpleNamespace(msa_exact_numerics=False))
+    assert not index_select.bounded_plan_chunks_enabled()
 
 
 @needs_gfx1250

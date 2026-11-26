@@ -127,7 +127,7 @@ def msa_attention(
     ``slot_lse`` then comes back in that order too. ``plan`` stays the plan of ``block_table``
     (dK/dV walks blocks, not rows).
 
-    ``dq_from_ds`` (``msa_dq_from_ds``, relaxed numerics; ``msa_token_bwd``): the backward takes dQ
+    ``dq_from_ds`` (``msa_dq_from_ds``, ``msa_bwd_store_ds``; ``msa_token_bwd``): the backward takes dQ
     from the dK/dV kernel's dS. With a ``walk_table`` it needs ``walk_slots``, the int32 slot of
     each walk position in ``block_table``; without them the backward keeps the reference dQ kernel.
 
