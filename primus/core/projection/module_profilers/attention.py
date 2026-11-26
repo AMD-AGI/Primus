@@ -19,6 +19,35 @@ from primus.core.projection.training_config import gemm_dtype_from_config
 from .utils import benchmark_layer
 
 
+def _swa_keys_per_query(seq_len: int, window: int) -> float:
+    """Mean keys a causal query sees in a sliding window of ``window`` keys.
+
+    The band is constant-width once ``t >= window``; only the first
+    ``window`` queries see fewer.  ``window <= 0`` means dense causal.
+    """
+    if window <= 0 or window >= seq_len:
+        return (seq_len + 1) / 2.0
+    return window - window * (window - 1) / (2.0 * seq_len)
+
+
+def _pool_keys_per_query(seq_len: int, cr: int) -> float:
+    """Mean compressed-pool entries visible to a causal query: E[floor((t+1)/cr)]."""
+    q = seq_len // cr
+    total = cr * q * (q - 1) / 2.0 + q * (seq_len - q * cr + 1)
+    return total / seq_len
+
+
+def _csa_fill_ratio(seq_len: int, cr: int, k_cap: int) -> float:
+    """Mean fraction of the ``k_cap`` top-K slots that hold a valid entry.
+
+    Causality caps query ``t`` at ``t / cr`` pool entries, so early queries
+    fill fewer than ``k_cap`` slots.
+    """
+    if seq_len >= cr * k_cap:
+        return 1.0 - (cr * k_cap) / (2.0 * seq_len)
+    return seq_len / (2.0 * cr * k_cap)
+
+
 class AttentionProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
@@ -409,9 +438,39 @@ class AttentionProfiler(BaseModuleProfiler):
             proj_fwd = 0.0
         proj_bwd = 2.0 * proj_fwd
 
-        # ---- attn.core : FAv3 SDPA with cr-aware visible KV ----
+        # ---- attn.core : sparse-MLA core over the valid keys per query ----
+        # Each query attends to a window band (full width once t >= swa) plus,
+        # for cr>0, the compressed pool (HCA) or its causally-filled top-K
+        # (CSA).  The per-token sparse-MLA model replaces the dense FAv3 core;
+        # PRIMUS_ATTN_V4_CORE=fav3 restores the FAv3 pricing for A/B.
         core_fwd = core_bwd = 0.0
-        if self._sdpa_backend is not None:
+        use_sparse_core = os.getenv("PRIMUS_ATTN_V4_CORE", "sparse_mla").lower() != "fav3" and hasattr(
+            self._sdpa_backend, "simulate_sparse_mla"
+        )
+        if self._sdpa_backend is not None and use_sparse_core:
+            if cr == 0:
+                keys = _swa_keys_per_query(seq_len, swa)
+            elif cr == 4:
+                csa_pool = max(1, -(-seq_len // cr))
+                k_cap = min(index_topk or csa_pool, csa_pool)
+                keys = _swa_keys_per_query(seq_len, swa) + k_cap * _csa_fill_ratio(seq_len, cr, k_cap)
+            elif cr > 0:
+                keys = _swa_keys_per_query(seq_len, swa) + _pool_keys_per_query(seq_len, cr)
+            else:
+                keys = (seq_len + 1) / 2.0
+            block_h = int(os.getenv("PRIMUS_ATTN_SPARSE_BLOCK_H", "128"))
+            sd = self._sdpa_backend.simulate_sparse_mla(
+                batch_size=batch_size,
+                num_heads=heads,
+                seq_len=seq_len,
+                head_dim=hd,
+                keys_per_query=min(keys, float(seq_len)),
+                dtype="bf16",
+                heads_per_workgroup=block_h,
+            )
+            core_fwd, core_bwd = sd.forward_time_ms, sd.backward_time_ms
+        elif self._sdpa_backend is not None:
+            # Legacy dense-FAv3 pricing (PRIMUS_ATTN_V4_CORE=fav3).
             # Split visible KV into the SWA local band (constant ~swa keys per
             # query) and the sparse pool/top-K (triangular over the causal past).
             #   cr 0 = dense+SWA, 128 = HCA (SWA + seq/128 pool), 4 = CSA (SWA + top-K).
@@ -519,10 +578,7 @@ class AttentionProfiler(BaseModuleProfiler):
         if cr == 4:
             pool_len = max(1, -(-seq_len // cr))
             k_cap = min(index_topk or pool_len, pool_len)
-            if seq_len >= cr * k_cap:
-                avail = 1.0 - (cr * k_cap) / (2.0 * seq_len)
-            else:
-                avail = seq_len / (2.0 * cr * k_cap)
+            avail = _csa_fill_ratio(seq_len, cr, k_cap)
             # CP shards the query axis; TP does NOT shard the single shared KV
             # latent (pool + top-K indices are head-agnostic -> replicated).
             gather_tokens = batch_size * max(1, seq_len // cp_size)
