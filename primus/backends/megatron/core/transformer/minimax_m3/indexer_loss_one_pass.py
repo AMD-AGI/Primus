@@ -5,7 +5,7 @@
 ###############################################################################
 
 """``msa_indexer_loss_one_pass``: the flydsl backend's slot mass and sparse indexer KL in one
-Triton kernel, and their backward in one. Relaxed numerics.
+Triton kernel, and their backward in one. The same terms summed in another order.
 
 What it replaces (``attention.msa_core`` with ``want_loss``), per MSA layer call:
 

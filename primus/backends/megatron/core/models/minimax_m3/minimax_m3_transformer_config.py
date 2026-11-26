@@ -158,7 +158,10 @@ class MSATransformerConfig(TransformerConfig):
 
     msa_fused_indexer_loss: bool = False
     """The sparse indexer loss in a few Triton launches (indexer_loss_fused.py). Bit-identical to
-    compute_sparse_indexer_loss, checked on first use."""
+    compute_sparse_indexer_loss, checked on first use. With the flydsl backend on gfx1250 the loss
+    and its backward take one Triton kernel each instead (msa_indexer_loss_one_pass,
+    indexer_loss_one_pass.py): the same terms summed in another order, checked on the first call
+    for a shape against this path within stated tolerances."""
 
     msa_fused_indexer_loss_scatter: bool = False
     """With msa_fused_indexer_loss: the loss backward writes the gradient of block_scores row by
@@ -186,7 +189,9 @@ class MSATransformerConfig(TransformerConfig):
     """flydsl backend: the indexer's block selection and the backward's BlockPlan in a few Triton
     launches (flydsl/select_plan.py) instead of the eager ops and build_block_plan. Integer
     bookkeeping, identical by construction; shapes past select_plan.supported() keep the eager
-    path."""
+    path, except on gfx1250, where those up to select_plan.wide_supported() take the fused
+    selection and build_block_plan's FlyDSL passes (msa_select_plan_wide, bit-identical, checked
+    on the first call for a shape)."""
 
     msa_shared_tile_staging: bool = False
     """flydsl backend on gfx1250: the MSA forward and dQ kernels run 4 / 2 adjacent tokens of a KV
@@ -194,7 +199,9 @@ class MSATransformerConfig(TransformerConfig):
     step once (flydsl/msa_token_fwd_w32.py, msa_token_bwd_w32.py). Each token keeps its own step
     order and arithmetic; the first call for a shape compares every output bit with the
     one-token-per-workgroup kernels and keeps those on a mismatch. Needs S and the block size to be
-    multiples of 4 / 2, else unchanged."""
+    multiples of 4 / 2, else unchanged. It also brings in msa_aligned_block_walk: the forward and
+    dQ kernels walk a token's blocks in an order aligned with its neighbours', so that a block they
+    share is staged once; the same terms summed in another order (flydsl/block_walk.py)."""
 
     msa_bwd_store_ds: bool = True
     """flydsl backend on gfx1250: the MSA backward's dK/dV kernel also writes its BF16 dS to a
@@ -202,8 +209,10 @@ class MSATransformerConfig(TransformerConfig):
     second time (attention._MSA_STORE_DS_PATHS). The workspace is 4 KB per token, KV head and
     selected block (B * Hkv * S * topk * 4 KB: 1.1 GB per layer call at S 4096, 8.6 GB at S 32768,
     MBS 1), held from the dK/dV kernel to the dQ kernel; shapes above 16 GiB keep the
-    recomputing dQ kernel. Deterministic; dq / dk / dv differ from the recomputing path in their
-    last bits (the same terms in another order), and the first call for a shape compares the two.
+    recomputing dQ kernel (logged once). The slim dQ kernel runs 4 adjacent tokens per workgroup
+    wherever S and the block size allow, whatever msa_shared_tile_staging says. Deterministic;
+    dq / dk / dv differ from the recomputing path in their last bits (the same terms in another
+    order), and the first call for a shape compares the two (two identical runs, within 1e-3).
     False: no workspace, the dQ kernel recomputes. Other GPUs never take this path."""
 
     sparse_indexer_loss_coeff: float = 1.0e-2

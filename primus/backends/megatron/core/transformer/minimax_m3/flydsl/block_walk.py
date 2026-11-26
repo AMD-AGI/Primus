@@ -29,7 +29,7 @@ and ``slots`` (the original slot of each position), which maps the forward's per
 ``slot_lse`` / slot mass back to the indexer's slot order. Everything else (the BlockPlan, dK/dV,
 the indexer loss and its backward) keeps the original table.
 
-Relaxed numerics: the kernels then add a token's blocks in another order, so ``o``, ``lse``, the
+Numerics: the kernels then add a token's blocks in another order, so ``o``, ``lse``, the
 slot mass and ``dq`` differ from the score-order walk in the last bits (the same kernels, the same
 set of terms). Deterministic: the permutation is a pure integer function of the table. The Triton
 kernel is compared with the PyTorch reference below on the first table of every shape

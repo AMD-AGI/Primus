@@ -225,7 +225,7 @@ E2E = [
 
 @pytest.mark.parametrize("S, B, Hkv, topk, kind", E2E)
 def test_attention_with_the_aligned_walk_matches_fp32(S, B, Hkv, topk, kind):
-    """Relaxed numerics: every output and gradient within an explicit tolerance of the FP32
+    """Sums in another order: every output and gradient within an explicit tolerance of the FP32
     reference and no further from it than 1.25 x the score-order walk (plus 1e-6); two runs give
     the same bits."""
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk

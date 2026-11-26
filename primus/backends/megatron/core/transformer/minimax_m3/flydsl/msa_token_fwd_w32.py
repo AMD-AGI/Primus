@@ -611,13 +611,13 @@ def msa_token_fwd_wave32(
 ):
     """Wave32 MSA forward. Same tensors as ``msa_token_fwd``; ``waves`` is ignored.
 
-    ``two_tile_slots`` (config ``msa_two_tile_slots``, with ``owner_carry``): the lockstep kernel
+    ``two_tile_slots`` (``msa_two_tile_slots``, with ``owner_carry``): the lockstep kernel
     with two LDS tile slots per wave instead of four (``build_fwd_wave32``), so four workgroups
     instead of two fit a compute unit. Same tiles and arithmetic; the first call for a shape
     compares every bit of ``o``, ``lse`` and ``slot_lse`` with the kernel without it and keeps that
     one on a mismatch.
 
-    ``step_mask_skip`` (config ``msa_lean_masks``) builds the kernel whose fully visible steps
+    ``step_mask_skip`` (``msa_lean_masks``) builds the kernel whose fully visible steps
     skip the causal compare and select (``build_fwd_wave32``). The first call for a shape runs the
     kernel with and without it on that call's tensors and compares every bit of ``o``, ``lse`` and
     ``slot_lse`` (``bitwise_check``); on a mismatch, or a FlyDSL whose build of the branch fails,

@@ -656,7 +656,6 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
 
 
 SCATTER_UNROLL = 8  # plan entries per loop step: their loads are in flight together
-SCATTER_AHEAD = False  # load the next step's entry ids one step ahead (timing variant, same bits)
 
 
 def index_dk_scatter_supported(index_dim: int, block_size: int) -> bool:
@@ -671,7 +670,6 @@ def _build_index_dk_scatter_w32(
     index_dim: int,
     topk: int,
     block_size: int,
-    ahead: bool = False,
     unroll: int = SCATTER_UNROLL,
 ):
     """``msa_index_dk_scatter`` (gfx1250): pass 1 of ``index_dk`` as a scatter.
@@ -687,8 +685,7 @@ def _build_index_dk_scatter_w32(
         acc[key - block * block_size, :] += g * q[token, b, h, :]          (fp32)
 
     in plan order, ``unroll`` entries per loop step (their entry, gradient, key and Q-row loads are
-    issued together, the LDS updates follow in entry order; ``ahead`` loads the next step's entry
-    ids before the step's updates -- same arithmetic and order, a build variant for timing). An entry that carries no
+    issued together, the LDS updates follow in entry order). An entry that carries no
     gradient into this block (past the chunk's end, or a key outside the block: the dead slots'
     ``-1``) leaves the accumulator untouched (a select, not ``+ 0 * q``: a non-finite Q row of a
     dead entry cannot reach the result).
@@ -785,20 +782,13 @@ def _build_index_dk_scatter_w32(
                 out.append(load_i32(ent_rsrc, fx.Index(fx.Int32(rc))))
             return out
 
-        if const_expr(ahead):
-            # loop state: the step's U entry ids (loaded one step ahead) and a trip counter
-            init = load_entries(e_begin) + [fx.Int32(0)]
-        else:
-            # a loop carrying one value hands it back unwrapped, so it carries two counters
-            init = [fx.Int32(0), fx.Int32(0)]
+        # a loop carrying one value hands it back unwrapped, so it carries two counters
+        init = [fx.Int32(0), fx.Int32(0)]
         for r0, it in range(fx.Index(e_begin), fx.Index(e_end), fx.Index(U), init=init):
             r0_i32 = fx.Int32(r0)
-            if const_expr(ahead):
-                ents = [fx.Index(fx.Int32(it[i])) for i in range_constexpr(U)]
-            else:
-                # the step's U entry ids first, then every load that depends on them, so that each
-                # group is in flight together (two load latencies per step, not two per entry)
-                ents = [fx.Index(x) for x in load_entries(r0_i32)]
+            # the step's U entry ids first, then every load that depends on them, so that each
+            # group is in flight together (two load latencies per step, not two per entry)
+            ents = [fx.Index(x) for x in load_entries(r0_i32)]
             lives = [ArithValue(r0_i32 + fx.Int32(i) < e_end) for i in range_constexpr(U)]
             hits, rows, gvs, qfs = [], [], [], []
             # every load that depends on the entry ids, in flight together
@@ -817,11 +807,7 @@ def _build_index_dk_scatter_w32(
                 rows.append(fx.Int32(hit.select(_raw(kv - key0), _raw(fx.Int32(0)))))
                 gvs.append(gv)
                 qfs.append(Vec(arith.ExtFOp(vf, _raw(qv)).result))
-            if const_expr(ahead):
-                # the next step's entry ids, issued before this step's updates
-                state = load_entries(r0_i32 + fx.Int32(U)) + [fx.Int32(it[U]) + fx.Int32(1)]
-            else:
-                state = [fx.Int32(it[0]) + fx.Int32(1), fx.Int32(it[1])]
+            state = [fx.Int32(it[0]) + fx.Int32(1), fx.Int32(it[1])]
             # the updates, strictly in entry order (two entries of a step may win the same key)
             for i in range_constexpr(U):
                 at = fx.Index(rows[i]) * fx.Index(DI) + col
@@ -1360,7 +1346,7 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
         key = (H, DI, topk, block_size, "scatter")
         fn = _DK_CACHE.get(key)
         if fn is None:
-            fn = _build_index_dk_scatter_w32(H, DI, topk, block_size, ahead=SCATTER_AHEAD).compile(*args)
+            fn = _build_index_dk_scatter_w32(H, DI, topk, block_size).compile(*args)
             _DK_CACHE[key] = fn
         fn(*args)
         return (ws_out,)

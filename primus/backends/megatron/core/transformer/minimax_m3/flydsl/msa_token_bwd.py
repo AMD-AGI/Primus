@@ -1139,6 +1139,25 @@ def _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots) -> bool:
     return True
 
 
+_DS_NOT_TAKEN_LOGGED: set = set()
+
+
+def _log_ds_not_taken(B, Hkv, S, topk, block_size, walk_slots) -> None:
+    """Once per shape: why ``_ds_eligible`` keeps the dQ kernel that recomputes S and dS."""
+    key = (S, B, Hkv, topk, block_size, walk_slots is not None)
+    if key in _DS_NOT_TAKEN_LOGGED:
+        return
+    _DS_NOT_TAKEN_LOGGED.add(key)
+    from primus.core.utils.module_utils import log_rank_0
+
+    size = B * Hkv * S * topk * block_size * HPW * 2
+    if size > _DS_MAX_BYTES:
+        why = f"its dS buffer would take {size / 2**30:.1f} GiB (limit {_DS_MAX_BYTES / 2**30:.0f} GiB)"
+    else:
+        why = "the walk's slot table is not the int32 table's twin"
+    log_rank_0(f"[msa_dq_from_ds {key}] not taken: {why}; the dQ kernel recomputes S and dS")
+
+
 # msa_dkdv_two_token_steps: the gfx1250 dK/dV kernel's 4-token step needs 8 waves of 16 keys
 # (sparse_block_size 128); the 2-token layout is offered for exactly that kernel
 _TWO_TOKEN_STEP_BLOCK = 128
@@ -1153,24 +1172,31 @@ def dkdv_two_token_steps_eligible(block_size: int, w32: bool) -> bool:
 
 
 def _ds_first_call(key, args, kwargs, walk_slots):
-    """Both paths on the first call's tensors: use ``dq_from_ds`` for this shape only if its
-    ``dq``, ``dk`` and ``dv`` are finite and within ``_DS_CHECK_TOL`` of the reference kernels'.
-    Returns the gradients of the path that is kept. A GPU fault is raised, any other error keeps
-    the reference kernels."""
+    """Both paths on the first call's tensors: use ``dq_from_ds`` for this shape only if two of
+    its runs give the same bits and its ``dq``, ``dk`` and ``dv`` are finite and within
+    ``_DS_CHECK_TOL`` of the reference kernels'. Returns the gradients of the path that is kept.
+    Nothing is decided while the reference gradients are all zero (nothing to compare). A GPU
+    fault is raised, any other error keeps the reference kernels."""
     from primus.backends.megatron.core.fusions import bitwise_check
     from primus.core.utils.module_utils import log_rank_0, warning_rank_all
 
     want = msa_token_bwd(*args, **kwargs)
+    norms = [w.double().norm() for w in want]
+    if not any(bool(n) for n in norms):
+        return want
     ok, why, got = False, "", None
     try:
         got = msa_token_bwd(*args, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
-        errs = []
-        for g, w in zip(got, want):
-            gd, wd = g.double(), w.double()
-            errs.append(((gd - wd).norm() / wd.norm().clamp_min(1e-30)).item())
+        again = msa_token_bwd(*args, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
+        same = all(bitwise_check.same_bits(g, a) for g, a in zip(got, again))
+        errs = [
+            ((g.double() - w.double()).norm() / n.clamp_min(1e-30)).item()
+            for g, w, n in zip(got, want, norms)
+        ]
         finite = all(bool(torch.isfinite(g.float()).all()) for g in got)
-        ok = finite and all(e <= _DS_CHECK_TOL for e in errs)
+        ok = same and finite and all(e <= _DS_CHECK_TOL for e in errs)
         why = "relative difference dq / dk / dv " + " / ".join(f"{e:.2e}" for e in errs)
+        why += f", two runs identical: {same}"
     except Exception as e:  # noqa: BLE001 - any failure but a GPU fault keeps the reference kernels
         if bitwise_check._device_error(e):
             raise
@@ -1228,9 +1254,10 @@ def msa_token_bwd(
             launch. Same terms, the ``dS`` of the dK/dV kernel instead of the dQ kernel's own (they
             differ in the last bit of ``S``) and ``delta`` summed in another order. Deterministic:
             every ``dS`` record is written by exactly one workgroup. The first call for a shape
-            runs both paths on that call's tensors and keeps the reference kernels unless ``dq``,
-            ``dk`` and ``dv`` agree within ``_DS_CHECK_TOL`` (and are finite). Shapes whose ``dS``
-            buffer would exceed ``_DS_MAX_BYTES`` keep the reference kernels.
+            runs both paths on that call's tensors and keeps the reference kernels unless two runs
+            of ``dq_from_ds`` give the same bits and its ``dq``, ``dk`` and ``dv`` agree within
+            ``_DS_CHECK_TOL`` (and are finite). Shapes whose ``dS`` buffer would exceed
+            ``_DS_MAX_BYTES`` keep the reference kernels (logged once per shape).
         ds_chunk_store: with ``dq_from_ds`` (``msa_ds_chunk_store``): the same ``dS`` bytes and the same
             arithmetic: the dK/dV kernel stores ``dS`` through one buffer descriptor per
             workgroup instead of one per record (``build_dkdv_w32``), only while a (batch, KV
@@ -1273,7 +1300,10 @@ def msa_token_bwd(
     # msa_dq_from_ds: eligibility first (gfx1250, a dS buffer that fits), then one comparison of
     # the two paths per shape; "force" is that comparison's own call
     use_ds = False
-    if dq_from_ds and w32 and _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots):
+    ds_ok = bool(dq_from_ds) and w32 and _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots)
+    if dq_from_ds and w32 and not ds_ok:
+        _log_ds_not_taken(B, Hkv, S, topk, block_size, walk_slots)
+    if ds_ok:
         if dq_from_ds == "force":
             use_ds = True
         else:
@@ -1384,24 +1414,11 @@ def msa_token_bwd(
 
     def run_kv(skip, ws_out, ds_out=None, two=False):
         emit = ds_out is not None
-        kv_args = (
-            q,
-            k,
-            v,
-            dout,
-            lse,
-            delta,
-            plan.chunks,
-            plan.entries,
-            ws_out,
-            ds_out if emit else torch.empty(16, dtype=torch.bfloat16, device=q.device),
-            int(S),
-            int(B),
-            int(n_blocks),
-            int(plan.entries.numel()),
-            int(n_chunks),
-            stream,
-        )
+        kv_args = (q, k, v, dout, lse, delta, plan.chunks, plan.entries, ws_out)
+        if w32:
+            # build_dkdv_w32 takes a DS operand (written only with emit_ds); build_dkdv has none
+            kv_args += (ds_out if emit else torch.empty(16, dtype=torch.bfloat16, device=q.device),)
+        kv_args += (int(S), int(B), int(n_blocks), int(plan.entries.numel()), int(n_chunks), stream)
         kv_key = (Hkv, block_size, float(softmax_scale), topk)
         if skip:
             kv_key = ("step_mask_skip",) + kv_key
@@ -1464,9 +1481,16 @@ def msa_token_bwd(
         def run_kv_probe(two_tokens):
             # the variant this call is about to use (lean masks, dS stores), on this call's tensors:
             # the fp32 chunk partials and, with msa_dq_from_ds, every dS record (zeroed first: the
-            # kernels write the live records only)
-            ds_probe = torch.zeros_like(ds) if use_ds else None
-            return run_kv(skip, torch.empty_like(ws), ds_probe, two=two_tokens)
+            # kernels write the live records only). The four-token probe writes into ws and ds
+            # themselves, which the launch below rewrites, so the check holds one extra copy of
+            # each; compared as integers (every bit, without same_bits' NaN masks and copies).
+            ws_probe = torch.empty_like(ws) if two_tokens else ws
+            ds_probe = None
+            if use_ds:
+                ds_probe = torch.empty_like(ds) if two_tokens else ds
+                ds_probe.zero_()
+            got = run_kv(skip, ws_probe, ds_probe, two=two_tokens)
+            return [got[0].view(torch.int32)] + ([got[1].view(torch.int16)] if use_ds else [])
 
         two = bitwise_check.passed(
             "msa_dkdv_two_token_steps dK/dV",

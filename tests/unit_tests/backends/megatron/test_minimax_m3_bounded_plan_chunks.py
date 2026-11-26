@@ -232,7 +232,7 @@ def _backward(q, k, v, dout, table, bounded, **kwargs):
 @needs_gfx1250
 @pytest.mark.parametrize("S, B, Hkv, topk, kind, from_ds", BWD_CASES)
 def test_dk_dv_match_fp32_and_the_reference_chunking(S, B, Hkv, topk, kind, from_ds):
-    """Relaxed numerics: dk and dv within an explicit tolerance of the FP32 reference, no further
+    """Sums in another order: dk and dv within an explicit tolerance of the FP32 reference, no further
     from it than 1.25 x the reference chunking (plus 1e-6), within 1e-3 of the reference chunking,
     bit-identical between two runs; dq does not depend on the chunking at all."""
     from .test_minimax_m3_dq_from_ds import _fp32_reference, _inputs, _rel

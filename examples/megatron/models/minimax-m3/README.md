@@ -149,7 +149,11 @@ separate `weight + 1` launches) and `msa_fused_indexer_input_norm` (the indexer'
 FP32 `rms_norm` of the residual stream cast back to BF16, as one Triton launch in ATen's reduction
 order instead of five launches). Each one compares
 itself with the path it replaces on its first call and keeps that path, with a warning in the log,
-if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).
+if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade). On gfx1250,
+`msa_fused_indexer_loss` and `msa_shared_tile_staging` also bring in kernel paths that sum the same
+terms in another order (`msa_indexer_loss_one_pass` and `msa_aligned_block_walk`, below), so there
+no setting reproduces the bits of the reference FlyDSL kernels; the unit tests compare every path
+with the one it replaces.
 `grad_accum_group` is off in the yaml (0). Set to 4, the gradient buffer takes the gradients of four
 micro-batches in one pass, with the same additions and roundings in the same order, and holds up to
 three extra BF16 gradients per parameter of the rank: on the 4-layer proxy at GBS 8, 358.4 -> 343.4 ms
@@ -168,9 +172,13 @@ off; apart from `msa_shared_tile_staging` and `msa_bwd_store_ds` (below) the Fly
 have no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
 **gfx1250 MSA kernel paths.** On gfx1250 the FlyDSL backend takes the following paths wherever a
-shape is eligible (other GPUs never take them); each is decided before any work, compared with the
-path it replaces on its first call for a shape, and named in the log as below. All are
-deterministic: no atomics, fixed summation orders. Only `msa_bwd_store_ds` has a switch.
+shape is eligible (other GPUs never take them); each is decided before any work and named in the
+log as below. All but two are compared with the path they replace on their first call for a shape
+(bit for bit, or within stated tolerances and over two identical runs for the paths that sum in
+another order), and the run keeps that path on a mismatch; `msa_bounded_plan_chunks` (an integer
+rule for the plan's chunk sizes) and `msa_ds_chunk_store` (a store inside `msa_dq_from_ds`'s
+comparison) rely on the unit tests. All are deterministic: no atomics, fixed summation orders.
+Only `msa_bwd_store_ds` has a switch.
 
 Bit-identical to the path they replace: `msa_lean_masks` (the forward, dQ and dK/dV kernels and the
 indexer's scoring kernel skip the per-key causal compare and select on steps whose keys are all
@@ -197,7 +205,7 @@ and `msa_shared_tile_staging` copies its K/V tiles once; the block selection and
 sum are unchanged, the order of the sums over a token's blocks is not, so `o`, the attention mass
 per slot and `dq` differ in their last bits); with `msa_fused_indexer_loss`,
 `msa_indexer_loss_one_pass` (the slot mass and the sparse indexer KL of a layer in one Triton kernel
-and their backward in one more, instead of about fourteen small launches forward and six backward;
+and their backward in one more, instead of about 15 small launches forward and 6 backward;
 the same block-level KL, with the row sums, `exp` and `log` taken by Triton and, under
 `msa_aligned_block_walk`, in walk order; the first call for a shape requires the loss within 5e-7,
 the gradient within 2e-5 and two identical runs); `msa_index_dk_scatter` (the indexer backward's dK
@@ -212,8 +220,9 @@ other groups of the same FP32 terms in dk, dv and d index k).
 (`msa_dq_from_ds`): the dK/dV kernel already forms `dS = P * (dO V^T - delta)` for every token and
 selected block as a BF16 operand, so it also writes it to a transient workspace (4 KB per token, KV
 head and selected block: 1.1 GB per layer call at 4k, 8.6 GB at 32k; shapes above 16 GiB keep the
-recomputing kernel) and a slim dQ kernel forms `dQ = scale * dS K` from it, without staging V or
-computing `S` and `dS` a second time. The terms are the same; `dS` is the dK/dV kernel's instead
+recomputing kernel and say so once in the log) and a slim dQ kernel forms `dQ = scale * dS K` from
+it, without staging V or computing `S` and `dS` a second time; it runs four adjacent tokens per
+workgroup wherever S allows, whatever `msa_shared_tile_staging` says. The terms are the same; `dS` is the dK/dV kernel's instead
 of the dQ kernel's own and `delta` is summed in another order, so `dq`, `dk` and `dv` differ in
 their last bits. Two bit-identical paths come with it: `msa_ds_chunk_store` (the dK/dV kernel
 writes `dS` through one buffer descriptor per workgroup instead of one per record, while a

@@ -77,8 +77,11 @@ _MSA_FUSIONS = (
 )
 # Kernel paths of the flydsl backend on gfx1250, taken wherever a shape is eligible (no switch;
 # other GPUs never take them). Each is decided before any work, and its first call for a shape
-# compares it with the path it replaces and keeps that one on a mismatch (bitwise_check). All are
-# deterministic: no atomics, fixed summation orders.
+# compares it with the path it replaces (bitwise_check, or stated tolerances and two identical
+# runs for those that sum in another order) and keeps that one on a mismatch; only
+# msa_bounded_plan_chunks (an integer rule for the plan's chunk sizes) and msa_ds_chunk_store
+# (inside msa_dq_from_ds's comparison) rely on the unit tests alone. All are deterministic: no
+# atomics, fixed summation orders.
 #
 # Bit-identical to the path they replace:
 #   msa_lean_masks: the forward, dQ, dK/dV and indexer scoring kernels skip the per-key causal

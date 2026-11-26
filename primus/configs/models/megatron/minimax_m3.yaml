@@ -97,12 +97,13 @@ msa_fused_zero_centered_gamma: false
 msa_fused_indexer_input_norm: false
 msa_fused_select_plan: false
 # gfx1250 flydsl kernels: adjacent tokens share a workgroup and one staging of each K/V tile they
-# have in common; bit-identical, checked on first use (MSATransformerConfig).
+# have in common; bit-identical, checked on first use. It also brings in the aligned block walk,
+# which sums the same terms in another order (MSATransformerConfig).
 msa_shared_tile_staging: false
 # gfx1250 flydsl backward: the dK/dV kernel also writes its dS to a workspace (B * Hkv * S * topk
 # * 4 KB per layer call, transient) and dQ is formed from it instead of recomputing S and dS;
 # false: no workspace (MSATransformerConfig). The other gfx1250 flydsl kernel paths have no
-# switch: each is taken where a shape is eligible and checked on its first call (attention.py).
+# switch: each is taken where a shape is eligible (attention.py).
 msa_bwd_store_ds: true
 
 # MoE - layers 1-3 dense, layers 4-60 MoE; 128 routed experts + 1 shared

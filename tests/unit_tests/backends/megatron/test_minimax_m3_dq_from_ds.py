@@ -149,7 +149,7 @@ CASES = [
 
 @pytest.mark.parametrize("S, B, Hkv, topk, kind, aligned", CASES)
 def test_backward_matches_fp32_and_the_reference_kernels(S, B, Hkv, topk, kind, aligned):
-    """Relaxed numerics: dq, dk and dv within an explicit tolerance of the FP32 reference, no
+    """Sums in another order: dq, dk and dv within an explicit tolerance of the FP32 reference, no
     further from it than 1.25 x the reference kernels (plus 1e-6), within 1e-3 of the reference
     kernels, and bit-identical between two runs."""
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
@@ -212,6 +212,13 @@ def test_dispatcher_decides_once_per_shape_and_falls_back(monkeypatch):
             assert all(torch.equal(a, b) for a, b in zip(got, want))
         assert list(bwd._DS_OK.values()) == [False]
 
+        # all-zero gradients: nothing to compare, nothing decided, reference kernels
+        bwd._DS_OK.clear()
+        monkeypatch.setattr(bwd, "_DS_CHECK_TOL", 1e-3)
+        zero = _backward(q, k, v, torch.zeros_like(dout), table, dq_from_ds=True)
+        assert all(not t.any() for t in zero)
+        assert bwd._DS_OK == {}
+
         # a dS buffer over the limit: not eligible, nothing decided, reference kernels
         bwd._DS_OK.clear()
         monkeypatch.setattr(bwd, "_DS_MAX_BYTES", 1024)
@@ -235,6 +242,69 @@ def test_lockstep_kernel_refuses_a_sequence_it_does_not_divide(monkeypatch):
     monkeypatch.setattr(msa_token_bwd_w32, "dq_ds_tokens_per_wg", lambda S, block: 4)  # a broken helper
     with pytest.raises(ValueError, match="msa_dq_from_ds dQ"):
         _backward(q, k, v, dout, table, dq_from_ds="force")
+
+
+def test_other_gpus_pass_the_arguments_their_kernels_declare(monkeypatch):
+    """On other GPUs (``build_dq`` / ``build_dkdv``, no DS operand) the backward launches each kernel
+    with exactly the arguments its launcher declares, whatever gfx1250 options the caller passes.
+    The kernels are not compiled: fakes record the arguments the backward would compile with."""
+    import inspect
+
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd as bwd,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
+        msa_token_fwd_wave32,
+    )
+
+    Hkv, topk, scale = 2, 4, D**-0.5
+    q, k, v, dout, table = _inputs(512, 1, Hkv, topk, "local")
+    plan = bwd.build_block_plan(table, BLOCK)
+    out, lse = msa_token_fwd_wave32(q, k, v, table, None, BLOCK, False, shared_tiles=True)
+    declared = {
+        "dq": len(inspect.signature(bwd.build_dq(Hkv, topk, BLOCK, scale)).parameters),
+        "dkdv": len(inspect.signature(bwd.build_dkdv(Hkv, BLOCK, scale, topk)).parameters),
+    }
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    class _Fake:
+        def __init__(self, name):
+            self.name = name
+
+        def compile(self, *args):
+            seen[self.name] = len(args)
+            if self.name == "dkdv":
+                raise _Stop
+            return lambda *a: None
+
+    monkeypatch.setattr(bwd, "get_hip_arch", lambda: "gfx950")
+    monkeypatch.setattr(bwd, "build_dq", lambda *a, **kw: _Fake("dq"))
+    monkeypatch.setattr(bwd, "build_dkdv", lambda *a, **kw: _Fake("dkdv"))
+    monkeypatch.setattr(bwd, "_DQ_CACHE", {})  # keyed without the arch
+    monkeypatch.setattr(bwd, "_DKDV_CACHE", {})
+    with pytest.raises(_Stop):
+        bwd.msa_token_bwd(
+            dout,
+            q,
+            k,
+            v,
+            out,
+            lse,
+            table,
+            None,
+            BLOCK,
+            plan=plan,
+            shared_tiles=True,
+            step_mask_skip=True,
+            dq_from_ds=True,
+            ds_chunk_store=True,
+            dq_early_issue=True,
+            dkdv_two_token_steps=True,
+        )
+    assert seen == declared
 
 
 def _fake_attention(**config):
