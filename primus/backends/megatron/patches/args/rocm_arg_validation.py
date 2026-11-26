@@ -19,6 +19,7 @@ import os
 import torch
 
 from primus.core.utils import logger
+from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import log_rank_0, warning_rank_0
 
 # Environment variables read by the PyTorch caching allocator.
@@ -282,6 +283,41 @@ def validate_moe_routing_replay(args) -> None:
 _MOE_REPLICA_PRIMUS_PIPELINES = ("1f1b", "1f1b-interleaved", "zero-bubble", "zbv-formatted")
 
 
+def _flydsl_replica_max_groups():
+    """The group cap of Primus-Turbo's FlyDSL wgrad for weight segments, or None if this build's FlyDSL grouped
+    GEMM takes no weight segments."""
+    try:
+        from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl import (  # noqa: F401
+            GroupedGEMMSegmentsFlyDSLBackend,
+            GroupedGEMMVariableKSegmentsFlyDSLBackend,
+        )
+    except ImportError:
+        return None
+    return GroupedGEMMVariableKSegmentsFlyDSLBackend.MAX_G
+
+
+def _validate_moe_replica_flydsl(option: str, groups: int) -> None:
+    """``turbo_grouped_gemm_backend`` pins FlyDSL for BF16: every pass of the experts and their replica slots
+    must run on it, since Primus-Turbo raises rather than fall back from a pinned backend."""
+    if not is_gfx1250():
+        raise ValueError(
+            f"{option} with a FlyDSL BF16 grouped GEMM needs gfx1250 (only its kernels take weight segments); "
+            "use turbo_grouped_gemm_backend default or triton."
+        )
+    max_groups = _flydsl_replica_max_groups()
+    if max_groups is None:
+        raise ValueError(
+            f"{option} with a FlyDSL BF16 grouped GEMM needs a Primus-Turbo whose FlyDSL grouped GEMM takes weight "
+            "segments; update Primus-Turbo or use turbo_grouped_gemm_backend default or triton."
+        )
+    if groups > max_groups:
+        raise ValueError(
+            f"{option} with a FlyDSL BF16 grouped GEMM runs num_experts / expert_model_parallel_size + "
+            f"moe_replica_slots = {groups} groups per GPU, more than the {max_groups} its wgrad takes; raise "
+            "expert_model_parallel_size, lower moe_replica_slots, or use turbo_grouped_gemm_backend default or triton."
+        )
+
+
 def validate_moe_replica(args) -> None:
     """Dynamic expert replication (``moe_replica_planner``): BF16 Turbo DeepEP and Turbo grouped GEMM, TP 1.
 
@@ -331,9 +367,12 @@ def validate_moe_replica(args) -> None:
             f"expert_model_parallel_size = {num_experts // ep}, got {slots}."
         )
     backend = getattr(args, "turbo_grouped_gemm_backend", "default")
-    if _bf16_grouped_gemm_backend(backend) not in ("default", "triton"):
+    bf16_backend = _bf16_grouped_gemm_backend(backend)
+    if bf16_backend == "flydsl":
+        _validate_moe_replica_flydsl(option, num_experts // ep + slots)
+    elif bf16_backend not in ("default", "triton"):
         raise ValueError(
-            f"{option} runs the experts and their replicas in one Triton grouped GEMM; "
+            f"{option} runs the experts and their replicas in one Triton (or, on gfx1250, FlyDSL) grouped GEMM; "
             f"turbo_grouped_gemm_backend={backend} picks another BF16 backend, use default or triton for BF16."
         )
 
