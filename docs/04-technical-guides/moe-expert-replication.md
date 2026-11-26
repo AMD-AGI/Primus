@@ -178,7 +178,7 @@ The router still computes its scores; Megatron's routing replay picks the record
 - Planning copies the routed counts to the host (once per step with `per_step`, every micro-batch with `per_microbatch`), which stalls the host while the EP communication overlap would run ahead.
 - Not with MegaMoE, tensor parallelism, FP8 / FP4 experts or token dropping.
 - The step ends in the backward of the tokens each MoE layer's dispatcher takes (the layer's input), so in training that input must require a gradient: with every parameter before the MoE layers frozen, replication raises an error.
-- MI455X (FlyDSL DeepEP and grouped GEMM) is not covered; the segmented GEMM interface leaves room for it.
+- MI455X with a FlyDSL BF16 grouped GEMM takes at most 64 local experts plus slots per GPU (the FlyDSL wgrad's group cap), so EP2 runs of a 128-expert model replicate on `default` / `triton` only.
 
 ## References
 
