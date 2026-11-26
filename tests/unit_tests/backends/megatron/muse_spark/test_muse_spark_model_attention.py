@@ -250,7 +250,8 @@ def test_output_gate_is_per_head_rms_then_sigmoid_gate(dtype):
     normed = _ref_rms(x.view(sq, b, nh, hn), eps).to(dtype).view(sq, b, nh * hn)
     want = (normed * torch.sigmoid(gate.float())).to(dtype)
     assert got.dtype == dtype and got.shape == x.shape
-    torch.testing.assert_close(got, want, rtol=0, atol=0)
+    # Same fp32 math, but the CPU kernels can round the last bit differently between the two.
+    torch.testing.assert_close(got, want)
 
     whole_row = (_ref_rms(x, eps).to(dtype) * torch.sigmoid(gate.float())).to(dtype)
     assert not torch.allclose(got.float(), whole_row.float(), atol=1e-3)  # per head, not per row

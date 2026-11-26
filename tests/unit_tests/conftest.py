@@ -7,7 +7,9 @@
 
 
 import builtins
+import functools
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -16,6 +18,21 @@ import pytest
 # Captured before anything imports primus, so the guard below can always restore
 # the real print even if something rebinds it during collection.
 _PRISTINE_PRINT = builtins.print
+
+# Each xdist worker gets its own GPU; this runs before tests/conftest.py's
+# pytest_configure first touches HIP.
+_XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER")
+if _XDIST_WORKER:
+    os.environ["HIP_VISIBLE_DEVICES"] = str(
+        int(_XDIST_WORKER[2:]) % int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", 8))
+    )
+
+# A test module that starts processes, opens a process group or reaches past one
+# GPU runs in the --dist-only pass, not one per xdist worker.
+_MULTI_PROCESS = re.compile(
+    r"torchrun|torch\.distributed\.run|mp\.spawn|multiprocessing|subprocess|MultiProcessTestCase"
+    r"|init_process_group|device_count\(\)|cuda:[1-9]|MASTER_PORT"
+)
 
 
 def pytest_addoption(parser):
@@ -27,6 +44,12 @@ def pytest_addoption(parser):
             "run tests marked with @pytest.mark.slow (e.g. plan-4 release-tier "
             "shape gates at head_dim=512). Default: skip slow tests."
         ),
+    )
+    parser.addoption(
+        "--dist-only",
+        action="store_true",
+        default=False,
+        help="run only the multi-process tests, which xdist workers skip",
     )
 
 
@@ -77,7 +100,21 @@ def _restore_builtin_print():
         builtins.print = _PRISTINE_PRINT
 
 
+@functools.lru_cache(maxsize=None)
+def _is_multi_process(path):
+    return bool(_MULTI_PROCESS.search(Path(path).read_text(errors="replace")))
+
+
 def pytest_collection_modifyitems(config, items):
+    # xdist workers take the single-process tests and --dist-only the rest, so
+    # the two passes together report every test once.
+    if _XDIST_WORKER or config.getoption("--dist-only", default=False):
+        kept, dropped = [], []
+        for item in items:
+            (kept if _is_multi_process(str(item.path)) != bool(_XDIST_WORKER) else dropped).append(item)
+        config.hook.pytest_deselected(items=dropped)
+        items[:] = kept
+
     # If the user explicitly opts in via --run-slow or '-m slow', run slow tests.
     if config.getoption("--run-slow", default=False):
         return
