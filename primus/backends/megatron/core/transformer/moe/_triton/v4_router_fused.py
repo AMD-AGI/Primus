@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Fused skinny router kernels for the V4 routers (``[N, H] x [E, H]^T``, E = 32).
+"""Fused skinny router kernels for the V4 routers (``[N, H] x [E, H]^T``, E = 16 .. 256).
 
 Replaces ``F.linear(x.float(), w.float())`` + score fn + bias + ``topk`` (hipBLASLt MT32x32x16 fp32
 GEMMs plus fp32 casts of x and dx) with three Triton kernels that only use bf16 WMMA:
@@ -169,29 +169,34 @@ def _router_dgrad_kernel(
     W_SPLIT: tl.constexpr,
     BETA: tl.constexpr,
     EMU: tl.constexpr,
+    EK: tl.constexpr = 0,
 ):
     pm = tl.program_id(0)
     pn = tl.program_id(1)
     rm = pm * BM + tl.arange(0, BM)
     rn = pn * BN + tl.arange(0, BN)
-    re = tl.arange(0, E)
     mrow = rm < N
-    dl = tl.load(DL + rm[:, None] * E + re[None, :], mask=mrow[:, None], other=0.0)  # [BM, E] fp32
-    d0, d1, d2 = _split3(dl)
-    w = tl.load(W + re[:, None] * H + rn[None, :]).to(tl.float32)  # [E, BN]
-    # products d_i w_j with i + j <= 2, smallest first: ~fp32 dgrad, then one rounding to x's dtype
+    # E in chunks of EK (one chunk for E <= 64: the original single-shot order); products d_i w_j with
+    # i + j <= 2, smallest first into lo, d0 w0 into hi: ~fp32 dgrad, then one rounding to x's dtype
     lo = tl.zeros([BM, BN], dtype=tl.float32)
-    if W_SPLIT == 3:
-        w0, w1, w2 = _split3(w)
-        lo = _mma(d0, w2, lo, EMU)
-        lo = _mma(d1, w1, lo, EMU)
-        lo = _mma(d2, w0, lo, EMU)
-        lo = _mma(d0, w1, lo, EMU)
-    else:
-        w0 = w.to(tl.bfloat16)
-        lo = _mma(d2, w0, lo, EMU)
-    lo = _mma(d1, w0, lo, EMU)
-    acc = _mma(d0, w0, tl.zeros([BM, BN], dtype=tl.float32), EMU) + lo
+    hi = tl.zeros([BM, BN], dtype=tl.float32)
+    for e0 in tl.static_range(0, E, EK):
+        re = e0 + tl.arange(0, EK)
+        dl = tl.load(DL + rm[:, None] * E + re[None, :], mask=mrow[:, None], other=0.0)  # [BM, EK] fp32
+        d0, d1, d2 = _split3(dl)
+        w = tl.load(W + re[:, None] * H + rn[None, :]).to(tl.float32)  # [EK, BN]
+        if W_SPLIT == 3:
+            w0, w1, w2 = _split3(w)
+            lo = _mma(d0, w2, lo, EMU)
+            lo = _mma(d1, w1, lo, EMU)
+            lo = _mma(d2, w0, lo, EMU)
+            lo = _mma(d0, w1, lo, EMU)
+        else:
+            w0 = w.to(tl.bfloat16)
+            lo = _mma(d2, w0, lo, EMU)
+        lo = _mma(d1, w0, lo, EMU)
+        hi = _mma(d0, w0, hi, EMU)
+    acc = hi + lo
     dxp = DX + rm[:, None].to(tl.int64) * H + rn[None, :]
     if BETA:
         acc += tl.load(dxp, mask=mrow[:, None], other=0.0).to(tl.float32)
@@ -252,6 +257,15 @@ def _split_reduce_kernel(
 
 FWD_BM, FWD_BK = 16, 128
 DG_BM, DG_BN = 64, 128
+DG_EK = 64  # dgrad contraction chunk over E (E <= 64: one chunk, the original single-shot kernel)
+DG_LARGE_E = (128, 128, 8)  # (BM, BN, num_warps) for E > 64 (MI455X: 47 us at E=256, N=H=4096)
+
+
+def _dg_cfg(E):
+    cfg = os.environ.get("PRIMUS_V4_ROUTER_DG_CFG", "")  # "BM,BN,WARPS" override for E > 64 (tuning)
+    if E > 64:
+        return tuple(int(v) for v in cfg.split(",")) if cfg else DG_LARGE_E
+    return DG_BM, DG_BN, 4
 WG_BN, WG_BK, WG_SPLIT = 128, 64, 8
 
 
@@ -313,19 +327,21 @@ def router_dgrad(dl, w, dx=None, dtype=torch.bfloat16):
     beta = dx is not None
     if dx is None:
         dx = torch.empty(N, H, dtype=dtype, device=dl.device)
-    _router_dgrad_kernel[(triton.cdiv(N, DG_BM), H // DG_BN)](
+    bm, bn, nw = _dg_cfg(E)
+    _router_dgrad_kernel[(triton.cdiv(N, bm), H // bn)](
         dl,
         w,
         dx,
         N,
         H,
         E=E,
-        BM=DG_BM,
-        BN=DG_BN,
+        BM=bm,
+        BN=bn,
         W_SPLIT=_w_split(w),
         BETA=beta,
         EMU=_interpreting(),
-        num_warps=4,
+        EK=min(E, DG_EK),
+        num_warps=nw,
     )
     return dx
 
@@ -389,7 +405,7 @@ def router_fused_supported(x, w, topk=0):
         and w.dtype in (torch.float32, torch.bfloat16)
         and x.is_contiguous()
         and w.is_contiguous()
-        and E in (16, 32, 64)
+        and E in (16, 32, 64, 128, 256)
         and x.shape[1] % 128 == 0
         and 0 <= topk <= E
     )

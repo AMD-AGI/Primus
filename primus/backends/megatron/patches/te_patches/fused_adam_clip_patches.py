@@ -595,6 +595,7 @@ def _prepare_bf16_writeback(distributed_optimizer, fused_adam_type) -> None:
                 # parameter), so 128x128 tiles can be formed inside the optimizer.
                 cache = fp8blk_weight_cache.attach(model_param)
                 cache.ready = False
+                cache.optimizer_managed = True  # refresh_unmanaged() leaves it to the tile Adam kernel
                 dp_group = getattr(distributed_optimizer.buffers[gbuf_index], "data_parallel_group", None)
                 if _optb_dense_skip_bf16_enabled() and dp_group is not None and dp_group.size() == 1:
                     # Turbo lookup() runs this hook on a cache miss, before reading the BF16 weight

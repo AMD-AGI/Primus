@@ -331,7 +331,7 @@ class MegaMoEFP8Experts(MegaMoEExperts):
 
 class MegaMoEFP8BlockExperts(MegaMoEExperts):
     """FP8 with the DeepSeek-V3/V4 recipe: E4M3, power-of-two (UE8M0) scales per 1x128 activation tile and
-    128x128 weight block (``turbo_mega_moe_precision=fp8_block``, gfx1250, EP=1).
+    128x128 weight block (``turbo_mega_moe_precision=fp8_block``, gfx1250; EP>1 through fused_mega_moe_fp8blk_ep).
 
     The quantized weights live in fixed per-weight buffers that ``refresh_fp8blk_weights()`` rewrites once per
     optimizer step (the megatron.turbo.mega_moe_fp8blk_weights patch hooks it after ``train_step``), so the
@@ -341,9 +341,8 @@ class MegaMoEFP8BlockExperts(MegaMoEExperts):
 
     def __init__(self, config, experts_per_rank, hidden_size, intermediate_size, ep_group) -> None:
         super().__init__(config, experts_per_rank, hidden_size, intermediate_size, ep_group)
-        assert (
-            ep_group is None or ep_group.size() == 1
-        ), "turbo_mega_moe_precision=fp8_block runs the EP=1 stages only (EP>1 dispatch/combine: bf16/mxfp8)"
+        # EP>1: Turbo's fused_mega_moe_fp8blk_ep (FP8 dispatch, BF16 combine over the EP group)
+        self._ep = ep_group if ep_group is not None and ep_group.size() > 1 else None
         assert not config.add_bias_linear, "fp8_block MegaMoE experts take no expert biases"
         self._caches = None
 
@@ -362,6 +361,22 @@ class MegaMoEFP8BlockExperts(MegaMoEExperts):
         w2, _ = self.fc2_weight()
         if self._caches is None or self._caches[0].weight is not w1 or self._caches[1].weight is not w2:
             self._caches = (FP8BlockWeightCache(w1), FP8BlockWeightCache(w2))
+        if self._ep is not None:
+            from primus_turbo.pytorch.ops.moe.fused_mega_moe_fp8blk_ep import fused_mega_moe_fp8blk_ep
+
+            assert routing is None and add_join is None, "EP>1 fp8_block MegaMoE takes no precomputed routing"
+            y = fused_mega_moe_fp8blk_ep(
+                x,
+                topk_idx,
+                topk_weights,
+                w1,
+                w2,
+                *self._caches,
+                self._ep,
+                activation=self.activation,
+                accumulate_wgrad=self.wgrad_accum_pattern is not None,
+            )
+            return y if add is None else y + add
         return fused_mega_moe_fp8blk(
             x,
             topk_idx,

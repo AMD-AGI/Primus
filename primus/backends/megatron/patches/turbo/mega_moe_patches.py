@@ -149,10 +149,20 @@ def patch_mega_moe_fp8blk_weights(ctx: PatchContext):
 
     _original_train_step = megatron_training.train_step
 
+    try:  # dense block-FP8 weight caches the optimizer cannot fill (weights split across a ZeRO DP group)
+        from primus_turbo.pytorch.core.fp8blk_weight_cache import refresh_unmanaged
+    except ImportError:
+        refresh_unmanaged = None
+
     @functools.wraps(_original_train_step)
     def _patched_train_step(*args, **kwargs):
         result = _original_train_step(*args, **kwargs)
         refresh_fp8blk_weights()
+        if refresh_unmanaged is not None:
+            n = refresh_unmanaged()
+            if n and not getattr(_patched_train_step, "_logged", False):
+                _patched_train_step._logged = True
+                log_rank_0(f"[Patch:megatron.turbo.mega_moe_fp8blk_weights] refreshed {n} dense block-FP8 weight caches")
         return result
 
     megatron_training.train_step = _patched_train_step

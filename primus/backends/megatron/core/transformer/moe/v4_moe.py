@@ -797,6 +797,8 @@ class DeepseekV4MoE(MegatronModule):
         router = self.router if self.use_hash_router else self.learned_router
         if router is None or router.score_function != "sqrtsoftplus" or not hidden.is_cuda:
             return None
+        if router.weight.shape[0] > 64:  # the compact / persist route kernels hold whole-E tiles
+            return None
         flat = hidden.reshape(-1, self.hidden_size)
         if not (is_fused_router_enabled() and router_fused_supported(flat, router.weight, router.topk)):
             return None

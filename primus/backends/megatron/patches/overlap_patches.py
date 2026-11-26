@@ -67,6 +67,12 @@ def patch_overlap_join(ctx: PatchContext) -> None:
         if not train_step._checked:
             train_step._checked = True
             a = get_args()
+            multi = os.environ.get("PRIMUS_OVERLAP_MULTI", "0") == "1"
+            if multi and getattr(a, "overlap_grad_reduce", False):
+                # a bucket reduce-scatter launched from a backward hook would read main_grad before the join
+                for k in overlap._FLAGS:
+                    overlap._FLAGS[k] = 0
+                log_rank_0("[Patch:overlap] PRIMUS_OVERLAP_MULTI needs overlap_grad_reduce off -> serial path")
             if getattr(a, "check_for_nan_in_loss_and_grad", False) or getattr(
                 a, "check_for_large_grads", False
             ):

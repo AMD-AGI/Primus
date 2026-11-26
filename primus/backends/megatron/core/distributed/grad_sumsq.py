@@ -39,7 +39,14 @@ def grad_sumsq(x: torch.Tensor, nprog: int = 4096, block: int = 2048) -> torch.T
         part = torch.empty((nprog,), dtype=torch.float32, device=x.device)
         _sumsq_partial_kernel[(nprog,)](x, n, part, BLOCK=block, NPROG=nprog)
         return part.sum()
-    return x.float().pow(2).sum()
+    # >= 2^31 elements (e.g. a 6.4G-element expert gradient buffer): the kernel's int32 indexing in 1G-element
+    # slices instead of an fp32 copy of the whole buffer (x.float().pow(2).sum())
+    step = 1 << 30
+    acc = None
+    for lo in range(0, n, step):
+        v = grad_sumsq(x[lo : lo + step], nprog, block)
+        acc = v if acc is None else acc + v
+    return acc
 
 
 # ---- (PRIMUS_MB_GNORM=1): every bucket range of the step in two launches ----
