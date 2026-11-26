@@ -89,3 +89,36 @@ def patch_fp8_block_scaling_support(ctx: PatchContext):
     log_rank_0("[Patch:transformer_engine.pytorch.fp8] Overriding check_fp8_block_scaling_support")
 
     fp8.check_fp8_block_scaling_support = check_fp8_block_scaling_support
+
+
+@register_patch(
+    "megatron.turbo.first_microbatch_flag",
+    backend="megatron",
+    phase="before_train",
+    description="Reset is_first_microbatch on every module each step even without Megatron's own fp8 recipe",
+    condition=is_primus_turbo_can_patch,
+)
+def patch_first_microbatch_flag(ctx: PatchContext):
+    """Megatron's ``set_is_first_microbatch()`` only resets the flag when its own fp8 / fp4 recipe is on. The
+    Primus-Turbo block / MX FP8 and FP4 recipes run with ``args.fp8 = None``, so the Turbo Linear / GroupedLinear
+    modules never saw a first micro-batch after the first step: with several micro-batches per step they kept the
+    QuantizedTensorPair weight buffers quantized at step 1 and every later forward / dgrad used those stale
+    weights. Reset the flag whenever Megatron itself does not."""
+    from megatron.core.transformer.module import MegatronModule
+
+    orig = MegatronModule.set_is_first_microbatch
+    if getattr(orig, "_primus_turbo_first_mb", False):
+        return
+
+    def set_is_first_microbatch(self):
+        orig(self)
+        mods = getattr(self, "_primus_first_mb_modules", None)
+        if mods is None:
+            mods = [m for m in self.modules() if hasattr(m, "is_first_microbatch")]
+            self._primus_first_mb_modules = mods
+        for m in mods:
+            m.is_first_microbatch = True
+
+    set_is_first_microbatch._primus_turbo_first_mb = True
+    MegatronModule.set_is_first_microbatch = set_is_first_microbatch
+    log_rank_0("[Patch:megatron.turbo.first_microbatch_flag] is_first_microbatch reset every step for Turbo modules")
