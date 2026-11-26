@@ -8,7 +8,7 @@ Design discussion and the alternatives considered: [AMD-AGI/Primus#1502](https:/
 
 ## Prerequisites
 
-- MoE layers on Primus-Turbo: the DeepEP token dispatcher (`use_turbo_deepep: true`) and the Turbo grouped GEMM (`use_turbo_grouped_gemm: true`, `moe_grouped_gemm: true`), `turbo_grouped_gemm_backend` `default` or `triton`.
+- MoE layers on Primus-Turbo: the DeepEP token dispatcher (`use_turbo_deepep: true`) and the Turbo grouped GEMM (`use_turbo_grouped_gemm: true`, `moe_grouped_gemm: true`), `turbo_grouped_gemm_backend` `default` or `triton`; on MI455X (gfx1250) also `flydsl` (`bf16:flydsl`), which needs a Primus-Turbo whose FlyDSL grouped GEMM takes weight segments and at most 64 local experts plus slots per GPU (its wgrad's group cap: a pinned backend does not fall back to Triton).
 - A Primus-Turbo whose `grouped_gemm` takes the weights as a list of segments ([AMD-AGI/Primus-Turbo#675](https://github.com/AMD-AGI/Primus-Turbo/pull/675)). With an older Primus-Turbo, enabling replication raises an error at startup; rebuild Primus-Turbo from a commit that has it (the Primus CI image is built from the commit pinned as `PRIMUS_TURBO_COMMIT` in `.github/workflows/ci.yaml`).
 - BF16 experts, tensor and expert tensor parallel size 1, no token dropping. Pipeline parallelism, also interleaved (virtual stages), and the EP communication overlap (`overlap_moe_expert_parallel_comm`, with Megatron's schedules) work with both placements ([Pipeline parallelism](#pipeline-parallelism)).
 

@@ -248,6 +248,31 @@ def test_moe_replica_bf16_backend(backend, ok):
             validate_moe_replica(args)
 
 
+@pytest.mark.parametrize(
+    ("gfx1250", "max_groups", "overrides", "match"),
+    [
+        # 256 experts over EP 8 = 32 local experts, plus the slots
+        (True, 64, {}, None),
+        (True, 64, {"moe_replica_slots": 32}, None),
+        (True, 64, {"moe_replica_slots": 33}, "65 groups per GPU, more than the 64"),
+        (True, 64, {"expert_model_parallel_size": 2, "moe_replica_slots": 1}, "129 groups per GPU"),
+        (False, 64, {}, "needs gfx1250"),
+        (True, None, {}, "takes weight segments"),
+    ],
+)
+def test_moe_replica_flydsl_backend(monkeypatch, gfx1250, max_groups, overrides, match):
+    """A FlyDSL BF16 pin runs every pass on FlyDSL (Turbo does not fall back from a pinned backend): gfx1250, a Turbo
+    whose FlyDSL grouped GEMM takes segments, and no more groups per GPU than its wgrad takes."""
+    monkeypatch.setattr(rocm_arg_validation, "is_gfx1250", lambda: gfx1250)
+    monkeypatch.setattr(rocm_arg_validation, "_flydsl_replica_max_groups", lambda: max_groups)
+    args = _replica_args(turbo_grouped_gemm_backend="bf16:flydsl", **overrides)
+    if match is None:
+        validate_moe_replica(args)
+    else:
+        with pytest.raises(ValueError, match=match):
+            validate_moe_replica(args)
+
+
 def _dsv3_replica_args(**overrides):
     # DeepSeek-V3: 3 dense layers and 58 MoE layers, hidden 7168, expert FFN 2048 with SwiGLU, BF16 main_grad
     values = dict(
