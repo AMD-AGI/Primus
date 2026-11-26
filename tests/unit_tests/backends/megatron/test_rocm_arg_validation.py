@@ -85,9 +85,44 @@ def test_turbo_grouped_gemm_without_padding_rejects_unsupported_config(overrides
         validate_turbo_grouped_gemm_without_padding(_no_padding_args(**overrides))
 
 
-@pytest.mark.parametrize("schedule", ["static", "work_steal"])
-def test_turbo_grouped_gemm_schedule_accepts_turbo_schedules(schedule):
-    validate_turbo_grouped_gemm_schedule(SimpleNamespace(turbo_grouped_gemm_schedule=schedule))
+def _schedule_args(**overrides):
+    values = {
+        "turbo_grouped_gemm_schedule": "work_steal",
+        "enable_primus_turbo": True,
+        "use_turbo_grouped_gemm": True,
+        "turbo_grouped_gemm_backend": "default",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"turbo_grouped_gemm_backend": "triton"},
+        {"turbo_grouped_gemm_backend": "bf16:ck,fp8:hipblaslt"},
+        {"turbo_grouped_gemm_backend": "autotune"},
+        # static needs nothing
+        {"turbo_grouped_gemm_schedule": "static", "use_turbo_grouped_gemm": False},
+    ],
+)
+def test_turbo_grouped_gemm_schedule_accepts_turbo_schedules(overrides):
+    validate_turbo_grouped_gemm_schedule(_schedule_args(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"enable_primus_turbo": False}, "requires enable_primus_turbo=True"),
+        ({"use_turbo_grouped_gemm": False}, "requires use_turbo_grouped_gemm=True"),
+        ({"turbo_grouped_gemm_backend": "hipblaslt"}, "picks hipblaslt for BF16"),
+        ({"turbo_grouped_gemm_backend": "fp8:ck,bf16:hipblaslt"}, "picks hipblaslt for BF16"),
+    ],
+)
+def test_turbo_grouped_gemm_schedule_rejects_where_work_steal_cannot_run(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        validate_turbo_grouped_gemm_schedule(_schedule_args(**overrides))
 
 
 def test_turbo_grouped_gemm_schedule_defaults_to_static():
