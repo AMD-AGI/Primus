@@ -438,6 +438,8 @@ class ReplicaSlots:
         table, version = target if target is not None else s.slot_target
         if self.version == version:
             return
+        # with the EP communication overlap a backward's restore can follow a forward's push still in flight
+        self.finish_push()
         self.finish_return()
         held = self.held if self.storage.claim(self) else self._empty_table()
         # a slot that held an expert and now holds another one or none: its gradients go back first. Decided from

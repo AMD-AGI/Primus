@@ -14,7 +14,10 @@ layer without replicas, with the transfers synchronous or overlapped and with th
 first micro-batch has replicas, the slot gradients it left must still reach the owners. With a minimum gain no plan
 reaches, replication is on but no micro-batch has replicas: the experts must then run the same grouped GEMM call as
 without replication (own weights, ``L`` groups). In pipeline order (three micro-batches, F0 F1 B0 F2 B1 B2) each
-backward runs after a later forward planned other slots, which the backward must restore. Wrapped in Megatron's DDP
+backward runs after a later forward planned other slots, which the backward must restore; the same holds piece by
+piece in the order of Megatron's EP communication overlap (route + preprocess, dispatch, experts, combine, each run
+on its own as the overlap schedule does), where only the asynchronous transfers push the next micro-batch's slots
+before the restore. Wrapped in Megatron's DDP
 with overlap_grad_reduce (expert data parallel size 1 and 2, and as the pipeline schedules reduce), the reduced expert
 gradients must include the replica gradients.
 """
@@ -283,6 +286,138 @@ def test_replica_segments_need_bf16(monkeypatch):
 @pytest.mark.parametrize("case", list(CASES))
 def test_moe_layer_with_replicas_matches_without(tmp_path, case):
     mp.spawn(_worker, args=(str(tmp_path / "pg_init"), case), nprocs=WORLD, join=True)
+
+
+class _Node:
+    """One piece of Megatron's EP-overlap split path (fine_grained_callables.py): its inputs are detached at the
+    node boundary and its backward is run on its own, returning the gradients of its inputs."""
+
+    def __init__(self, fn):
+        self.fn = fn
+
+    def forward(self, *inputs):
+        self.inputs = [t.detach().requires_grad_(t.requires_grad) for t in inputs]
+        out = self.fn(*self.inputs)
+        self.outputs = out if isinstance(out, tuple) else (out,)
+        return self.outputs
+
+    def backward(self, *grads):
+        pairs = [(o, g) for o, g in zip(self.outputs, grads) if o.requires_grad and g is not None]
+        torch.autograd.backward([o for o, _ in pairs], [g for _, g in pairs])
+        return tuple(t.grad for t in self.inputs)
+
+
+def _split_nodes(layer):
+    """pre_dispatch (route + preprocess), dispatch, mlp (routed experts), combine, as the EP overlap calls them."""
+    comm = layer.token_dispatcher._comm_manager
+
+    def pre(x):
+        probs, routing_map = layer.route(x)
+        return layer.preprocess(x, probs, routing_map)
+
+    def dispatch(tokens, probs):
+        comm.token_probs = probs
+        return layer.dispatch(tokens, probs)
+
+    def mlp(tokens, probs):
+        comm.dispatched_probs = probs
+        return layer.routed_experts_compute(tokens, probs)[0]
+
+    def combine(out):
+        return layer.postprocess(layer.combine(out), None)
+
+    return [_Node(f) for f in (pre, dispatch, mlp, combine)]
+
+
+# name -> replica arguments; two micro-batches whose hot experts sit on different ranks
+SPLIT_CASES = {
+    "per_microbatch_async": {"moe_replica_async_comm": True},
+    "per_microbatch": {},
+    "per_step_async": {"moe_replica_placement": "per_step", "moe_replica_async_comm": True},
+}
+
+
+def _split_worker(rank: int, init_file: str, case: str):
+    """The layer with and without replicas run piece by piece in the order of Megatron's EP communication overlap
+    (``model_chunk_schedule_plan.py`` ``run``): all of micro-batch 0's forward, then its backward interleaved with
+    micro-batch 1's forward (combine_bwd 0, pre_dispatch_fwd 1, mlp_bwd 0, dispatch_fwd 1, dispatch_bwd 0, mlp_fwd 1,
+    pre_dispatch_bwd 0, combine_fwd 1), then micro-batch 1's backward; on one stream."""
+    from megatron.core import parallel_state as ps
+
+    from primus.backends.megatron.core.transformer.moe.replica import scheduler as sch
+
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", init_method=f"file://{init_file}", rank=rank, world_size=WORLD)
+    try:
+        ps.initialize_model_parallel(expert_model_parallel_size=WORLD)
+        torch.manual_seed(0)
+        ref = _moe_layer(None)
+        rep = _moe_layer("ultraep", **SPLIT_CASES[case])
+        rep.load_state_dict(ref.state_dict())
+        sch.attach(rep)
+        sch._num_microbatches = lambda: 2
+        _skew_router(ref, rep)
+        gen = torch.Generator().manual_seed(1 + rank)
+        inputs = [
+            (torch.randn(TOKENS, 1, HIDDEN, generator=gen) + sign).cuda().to(torch.bfloat16)
+            for sign in (1.0, -1.0)
+        ]
+        grads = [torch.randn(TOKENS, 1, HIDDEN, generator=gen).cuda().to(torch.bfloat16) for _ in inputs]
+        sched = rep.token_dispatcher.replica
+        targets = []
+
+        def step(layer):
+            for linear in (layer.experts.linear_fc1, layer.experts.linear_fc2):
+                linear.weights.grad = torch.zeros_like(linear.weights)
+            nodes = [_split_nodes(layer) for _ in inputs]
+            xs = [x.clone().requires_grad_() for x in inputs]
+            fwd = {}  # (micro-batch, piece) -> outputs
+            bwd = {}  # (micro-batch, piece) -> input gradients
+
+            def f(mb, i):
+                args = (xs[mb],) if i == 0 else fwd[mb, i - 1]
+                fwd[mb, i] = nodes[mb][i].forward(*args)
+                if i == 0 and layer is rep:
+                    targets.append(sched.slot_target)
+
+            def b(mb, i):
+                g = (grads[mb],) if i == 3 else bwd[mb, i + 1]
+                bwd[mb, i] = nodes[mb][i].backward(*g)
+
+            for i in range(4):
+                f(0, i)
+            for run, piece in ((b, 3), (f, 0), (b, 2), (f, 1), (b, 1), (f, 2), (b, 0), (f, 3)):
+                run(0 if run is b else 1, piece)
+            for i in reversed(range(4)):
+                b(1, i)
+            outs = [fwd[mb, 3][0].detach() for mb in range(2)]
+            dxs = [bwd[mb, 0][0] for mb in range(2)]
+            wgrads = [layer.experts.linear_fc1.weights.grad, layer.experts.linear_fc2.weights.grad]
+            return outs, dxs, wgrads
+
+        want, got = step(ref), step(rep)
+        assert sched.new_step and sched.mb_in_step == 0, "the step did not end in the last backward"
+        assert sched.plan.num_replicas() > 0, "the skewed routing must build replicas"
+        if "per_microbatch" in case:
+            # micro-batch 1 plans other slots before micro-batch 0's backward; with async_comm its forward pushes them
+            # then (in pre_dispatch), so micro-batch 0's expert backward must restore its own
+            assert not torch.equal(targets[0][0], targets[1][0]), targets
+
+        def rel(a, b):
+            return ((a.float() - b.float()).abs().max() / b.float().abs().max().clamp_min(1e-6)).item()
+
+        for name, a, b in zip(("output", "input grad", "weight grad"), got, want):
+            for i, (x, y) in enumerate(zip(a, b)):
+                assert rel(x, y) <= TOL, (name, i, rel(x, y))
+        for linear in (rep.experts.linear_fc1, rep.experts.linear_fc2):
+            assert not bool(linear._replica_slots.main_grad.any()), "slot gradients left after the step"
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("case", list(SPLIT_CASES))
+def test_ep_overlap_split_path_with_replicas_matches_without(tmp_path, case):
+    mp.spawn(_split_worker, args=(str(tmp_path / "pg_init"), case), nprocs=WORLD, join=True)
 
 
 def _ddp_worker(rank: int, init_file: str, world: int, ep: int, aligned: bool):

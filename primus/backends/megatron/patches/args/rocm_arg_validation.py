@@ -350,8 +350,6 @@ def validate_moe_replica(args) -> None:
         "turbo_fused_grouped_gemm": "replicas run on the BF16 grouped GEMM only",
         "fp8": "replicas run on the BF16 grouped GEMM only",
         "fp4": "replicas run on the BF16 grouped GEMM only",
-        "overlap_moe_expert_parallel_comm": "it interleaves two micro-batches inside a layer on separate streams, "
-        "which the replica transfers are not ordered for",
         "delay_wgrad_compute": "the replica gradients are returned with the weight gradients",
         "use_megatron_fsdp": "the replica gradients go into the owners' DDP main_grad",
         "use_torch_fsdp2": "the replica gradients go into the owners' DDP main_grad",
@@ -369,6 +367,13 @@ def validate_moe_replica(args) -> None:
         raise ValueError(
             f"{option} is verified with the patch_primus_pipeline schedules "
             f"{', '.join(_MOE_REPLICA_PRIMUS_PIPELINES)}, got pp_algorithm={algorithm}."
+        )
+    ep_overlap = getattr(args, "overlap_moe_expert_parallel_comm", False)
+    if getattr(args, "patch_primus_pipeline", False) and ep_overlap:
+        raise ValueError(
+            f"{option} is not verified with the patch_primus_pipeline schedules and overlap_moe_expert_parallel_comm "
+            "together (their combined forward-backward steps); the EP communication overlap is verified with "
+            "Megatron's own schedules."
         )
     if (getattr(args, "mlp_chunks_for_training", None) or 1) > 1:
         raise ValueError(

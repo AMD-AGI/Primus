@@ -337,6 +337,8 @@ def test_moe_replica_off_is_noop():
         {"pipeline_model_parallel_size": 2, "moe_replica_placement": "per_microbatch"},
         {"pipeline_model_parallel_size": 2, "num_layers_per_virtual_pipeline_stage": 1},
         {"pipeline_model_parallel_size": 2, "patch_primus_pipeline": True, "pp_algorithm": "zero-bubble"},
+        # the end of the step and the slot restores sit on the split path of the EP communication overlap
+        {"overlap_moe_expert_parallel_comm": True},
     ],
 )
 def test_moe_replica_accepts_supported(overrides):
@@ -362,12 +364,15 @@ def test_moe_replica_accepts_supported(overrides):
         ({"use_turbo_mega_moe": True}, "use_turbo_mega_moe"),
         ({"fp8": "e4m3"}, "does not support fp8"),
         ({"turbo_fused_grouped_gemm": True}, "turbo_fused_grouped_gemm"),
-        ({"overlap_moe_expert_parallel_comm": True}, "overlap_moe_expert_parallel_comm"),
         ({"delay_wgrad_compute": True}, "delay_wgrad_compute"),
         ({"use_torch_fsdp2": True}, "use_torch_fsdp2"),
         ({"moe_router_grad_merge": True}, "moe_router_grad_merge"),
         ({"patch_zero_bubble": True}, "patch_zero_bubble"),
         ({"patch_primus_pipeline": True, "pp_algorithm": "v-half"}, "pp_algorithm=v-half"),
+        (
+            {"patch_primus_pipeline": True, "pp_algorithm": "1f1b", "overlap_moe_expert_parallel_comm": True},
+            "patch_primus_pipeline schedules and overlap_moe_expert_parallel_comm",
+        ),
         ({"mlp_chunks_for_training": 2}, "mlp_chunks_for_training > 1"),
         ({"num_microbatches_with_partial_activation_checkpoints": 2}, "partial_activation_checkpoints"),
         ({"moe_expert_capacity_factor": 1.0}, "token dropping"),

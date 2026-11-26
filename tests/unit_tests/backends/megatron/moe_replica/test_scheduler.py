@@ -157,6 +157,20 @@ class WaitRecordingTransport(RecordingTransport):
         return _Pending()
 
 
+class PushWaitRecordingTransport(RecordingTransport):
+    """Also records when a weight push is waited for."""
+
+    def push_weights(self, own, storage, held, table):
+        super().push_weights(own, storage, held, table)
+        calls = self.calls
+
+        class _Pending(sch.Pending):
+            def wait(self):
+                calls.append(("wait_push",))
+
+        return _Pending()
+
+
 def slots_with_table(table, grad_dtype=torch.float32, transport_cls=RecordingTransport):
     transport = transport_cls()
     sched = SimpleNamespace(
@@ -192,6 +206,15 @@ def test_slots_push_only_changed_experts_and_return_before_reassigning():
         ("return", [[2, 3], [0, 1]]),
         ("push", [[2, 3], [0, 1]], [[2, 3], [0, 3]]),
     ]
+
+
+def test_a_new_push_waits_for_the_one_in_flight():
+    # EP communication overlap: a forward posts its push without waiting (async_comm), and a backward's restore of
+    # the same layer pushes another table into the same slots before that forward's experts waited for theirs
+    slots, _, transport = slots_with_table([[2, -1], [0, 1]], transport_cls=PushWaitRecordingTransport)
+    slots.start_sync()
+    slots.sync((torch.tensor([[2, -1], [0, 3]]), 2))
+    assert [c[0] for c in transport.calls] == ["push", "wait_push", "return", "push", "wait_push"]
 
 
 def test_slots_return_before_a_slot_is_emptied():
