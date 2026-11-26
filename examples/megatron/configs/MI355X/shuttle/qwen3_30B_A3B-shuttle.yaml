@@ -99,7 +99,7 @@ modules:
       turbo_mega_ulysses_impl: ${PRIMUS_MEGA_ULYSSES_IMPL:fused}
       turbo_mega_ulysses_seq_chunk: ${PRIMUS_MEGA_ULYSSES_SEQ_CHUNK:256}
       use_turbo_mega_moe: ${PRIMUS_MEGA_MOE:false}
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: ${PRIMUS_TURBO_GG:false}
       use_turbo_rms_norm: false # bug
 
       # deepep

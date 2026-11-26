@@ -104,7 +104,7 @@ modules:
 
       enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_grouped_gemm: ${PRIMUS_TURBO_GG:false}
       use_turbo_rms_norm: true
 
       # deepep
