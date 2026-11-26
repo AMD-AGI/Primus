@@ -4,10 +4,12 @@
  * See LICENSE for license information.
  ******************************************************************************/
 
-/* Container-only uname shim. Lux reports a RHEL 5.14 kernel, and RCCL turns
- * cuMem off for any Linux older than 6.8 even when amdgpu supports it.
- * Preload this and set LUX_FAKE_KERNEL=6.8.0-lux so RCCL enables cuMem and
- * the copy-engine collectives run. The host utsname is left unchanged.
+/* Container-only uname shim. RCCL turns cuMem off when uname reports a
+ * kernel older than 6.8, even when amdgpu supports cuMem. Some hosts report
+ * an older kernel than the driver supports (a RHEL 5.14 uname is one
+ * example). Preload this and set FAKE_UNAME_RELEASE=6.8.0 so RCCL enables
+ * cuMem and the copy-engine collectives run. LUX_FAKE_KERNEL is still
+ * accepted. The host utsname is left unchanged.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -27,7 +29,10 @@ int uname(struct utsname *buf) {
     if (rc != 0 || buf == NULL) {
         return rc;
     }
-    fake = getenv("LUX_FAKE_KERNEL");
+    fake = getenv("FAKE_UNAME_RELEASE");
+    if (fake == NULL || fake[0] == '\0') {
+        fake = getenv("LUX_FAKE_KERNEL");
+    }
     if (fake != NULL && fake[0] != '\0') {
         memset(buf->release, 0, sizeof(buf->release));
         strncpy(buf->release, fake, sizeof(buf->release) - 1);

@@ -402,7 +402,7 @@ class KimiDeltaAttention(MegatronModule):
                 _rank0 = True
             if _rank0:
                 logger.info(
-                    "[Primus:Kimi-K3] KDA backend resolved: chunk_kernel=%s conv=%s (via %s)",
+                    "[Primus:kimi_k3] KDA backend resolved: chunk_kernel=%s conv=%s (via %s)",
                     self.backend_name,
                     _conv,
                     _src,

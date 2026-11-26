@@ -1,0 +1,59 @@
+# DLRMv4 (HSTU ranker, the MLPerf Training dlrmv4 model) throughput benchmark on
+# one MI325X node (gfx942), in bf16, on synthetic data with the statistics of a
+# steady-state yambda-5b day (no dataset download). The model and data are those
+# of examples/recommendation/configs/MI355X/dlrm_v4-FP8-pretrain.yaml; the kernels
+# are not: the MLPerf recipe's FlyDSL attention and FP8 / MXFP6 paths are
+# gfx950-only and stop the run elsewhere, so this config runs the Triton
+# attention and bf16 GEMMs (the fused HIP kernels that need gfx950 turn
+# themselves off). It trains a fixed number of steps and logs samples/s and
+# TFLOP/s every METRIC_LOG_FREQ steps; it does not measure convergence. The
+# first ~10 steps compile kernels: leave them out.
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:dlrm_v4-BF16-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# gfx942: Triton attention, every FP8 path off (each is armed separately in the
+# trainer's gin file; FP8 backward without FP8 forward is refused at startup),
+# and the full last HSTU layer: its targets-only variant needs the separated-RNG
+# LayerNorm dropout kernel, which the trainer uses on gfx950 only.
+# GPU_MAX_HW_QUEUES and DL_PIN_PREWARM as in the MI355X config.
+env:
+  HSTU_ATTN_FWD: "triton"
+  HSTU_ATTN_BWD: "triton"
+  TRITON_HSTU_LAST_LAYER_TARGETS_ONLY: "0"
+  DLRM_HSTU_FP8_FWD: "0"
+  DLRM_HSTU_FP8_BWD: "0"
+  DLRM_HSTU_FP8_BWD_UVQK: "0"
+  DLRM_HSTU_FP8_PREPROC_L2: "0"
+  DLRM_HSTU_FP8_FWD_MXFP6: "0"
+  DLRM_HSTU_FP8_BWD_OUTPROJ_MXFP6: "0"
+  GPU_MAX_HW_QUEUES: "4"
+  DL_PIN_PREWARM: "0"
+
+modules:
+  pre_trainer:
+    framework: recommendation
+    config: pre_trainer.yaml
+    model: dlrm_v4_hstu_yambda_5b.yaml
+    overrides:
+      synthetic_data: ${DLRM_SYNTHETIC_DATA:true}
+      data_path: ${DLRM_DATA_PATH:}
+      start_ts: ${START_TS:}
+
+      batch_size: ${BATCH_SIZE:1024}
+      # embedding placement cap per GPU: the trainer's 260 GB is sized for the
+      # 288 GB MI355X; MI325X has 256 GB
+      hbm_cap_gb: 230
+      num_train_ts: 1
+      num_train_batches: ${NUM_TRAIN_BATCHES:200}
+      num_eval_batches: 1
+      metric_log_freq: ${METRIC_LOG_FREQ:10}
+
+      # no periodic eval and no early stop: only the final (one-batch) eval runs
+      eval_every_data_pct: 0
+      auc_threshold: 1.0
+
+      mlperf_logging: false
+      clear_caches: false
+      warm_cache_after_run_start: false

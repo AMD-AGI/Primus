@@ -4,7 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import contextlib
 import copy
+import io
 import json
 import math
 import os
@@ -20,11 +22,22 @@ import yaml
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection import kernel_report, param_counts
 from primus.core.projection.bench_harness import get_bench_runner, resolve_model_adapter
+from primus.core.projection.ceiling import (
+    active_levers,
+    at_ceiling,
+    ceiling_levers,
+    check_simulate_only,
+    format_headroom,
+    headroom,
+    parse_levers,
+)
 from primus.core.projection.config_validation import (
     assert_recompute_pipeline_compat,
     recompute_is_enabled,
 )
 from primus.core.projection.frameworks import framework_of, normalize_primus_config
+from primus.core.projection.hardware_calibration import SKIP_ENV as _HW_CALIB_SKIP_ENV
+from primus.core.projection.hardware_calibration import TAG as _HW_TAG
 from primus.core.projection.memory_capture import MemoryBenchmarkRecorder, format_bytes
 from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.module_profilers.collective_args import get_default_args
@@ -36,6 +49,12 @@ from primus.core.projection.module_profilers.language_model import (
 from primus.core.projection.module_profilers.optimizer import OptimizerProfiler
 from primus.core.projection.performance_projection.simulator import (
     SchedulerSimulationRunner,
+)
+from primus.core.projection.simulation_backends.base import (
+    HBM_BANDWIDTH_ENV,
+    set_calibrated_hbm_bandwidth,
+    set_hbm_bandwidth_override,
+    user_hbm_bandwidth_gbps,
 )
 from primus.core.projection.simulation_backends.factory import (
     get_gemm_simulation_backend,
@@ -861,7 +880,7 @@ def calculate_collective_communication_time(
             ag_multiplier = message_info.get("fsdp_ag_multiplier", 1.0)
 
             # Legacy ceiling (used when compute_time_ms not provided)
-            FSDP_OVERLAP_LEGACY = 0.93
+            FSDP_OVERLAP_LEGACY = 1.0 if at_ceiling("overlap") else 0.93
 
             if compute_time_ms is not None and num_layers > 0 and compute_time_ms > 0:
                 # Physics-based per-layer overlap:
@@ -889,6 +908,8 @@ def calculate_collective_communication_time(
                 AG_FWD_CEILING = 0.95
                 AG_RECOMPUTE_CEILING = 0.93
                 RS_CEILING = 0.92
+                if at_ceiling("overlap"):
+                    AG_FWD_CEILING = AG_RECOMPUTE_CEILING = RS_CEILING = 1.0
 
                 def _overlap(comm_ms, compute_ms, ceiling):
                     if comm_ms <= 0 or compute_ms <= 0:
@@ -1191,11 +1212,12 @@ def _limit_hybrid_layers_for_projection(module_config) -> bool:
     full = hybrid_layer_types(module_config)
     if full is None:
         return False
+    if not full:
+        raise ValueError("hybrid model has no decoder layers: check hybrid_layer_pattern / num_layers")
     kinds = set(full)
-    if os.environ.get("PRIMUS_PROJ_MAX_LAYERS") is not None:
-        cap = int(os.environ["PRIMUS_PROJ_MAX_LAYERS"])
-    else:
-        cap = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
+    shortest = next(n for n in range(1, len(full) + 1) if set(full[:n]) == kinds)
+    # A smaller explicit cap would drop layer kinds the projection must price.
+    cap = max(shortest, int(os.environ.get("PRIMUS_PROJ_MAX_LAYERS") or 0))
     pattern = hybrid_layer_pattern(module_config)
     if getattr(module_config, "model_type", None) == "zaya1":
         if getattr(module_config, "zaya_layers", None):
@@ -1231,6 +1253,10 @@ def _limit_layers_for_projection(module_config):
     has_moe = getattr(module_config, "num_experts", None)
     has_moe = has_moe is not None and module_config.num_experts > 0
     original_layers = getattr(module_config, "num_layers", 1) or 1
+    # Op models that run on a share of the layers (hybrid linear attention)
+    # need the full count after the stack is trimmed below.
+    if not getattr(module_config, "projection_full_num_layers", None):
+        module_config.projection_full_num_layers = original_layers
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
 
@@ -1572,7 +1598,7 @@ def _estimate_pp_communication_overhead(training_config, pp_size, hardware_confi
     Returns:
         float: Estimated PP communication time in ms per iteration
     """
-    if pp_size <= 1:
+    if pp_size <= 1 or at_ceiling("overlap"):
         return 0.0
 
     mp_config = training_config.model_parallel_config
@@ -1632,6 +1658,8 @@ def _get_deepep_overlap_efficiency(model_config):
     eliminate CPU synchronisation stalls and use fully-async dispatch,
     yielding higher overlap efficiencies.
     """
+    if at_ceiling("overlap"):
+        return 1.0
     sync_free_stage = getattr(model_config, "turbo_sync_free_moe_stage", 0)
     if sync_free_stage >= 3:
         return 0.85
@@ -3317,6 +3345,95 @@ def _optimizer_step_elems(dense_params, expert_params, dp, expert_dp, distribute
     return dense_params / max(1, dp) + expert_params / max(1, expert_dp)
 
 
+def _run_hardware_calibration(training_config, framework, rank, args):
+    """Measure this rank's effective compute clock and STREAM bandwidth.
+
+    Returns ``None`` when calibration is skipped -- decided identically on
+    every rank, since the payload is later gathered collectively -- and an
+    ``{"error": ...}`` payload when it fails, so a failing rank still joins
+    the gather.
+    """
+    from primus.core.projection.hardware_calibration import (
+        calibration_skip_reason,
+        run_hardware_calibration,
+    )
+
+    reason = calibration_skip_reason(args)
+    if reason is None and get_bench_runner(framework) is not None:
+        # JAX backends own the device through XLA; torch must not touch it.
+        reason = f"{framework} is not benchmarked through torch"
+    if reason is not None:
+        if rank == 0:
+            print(f"{_HW_TAG} Skipping compute-clock / memory-bandwidth calibration ({reason})")
+        return None
+
+    if rank == 0:
+        print(f"{_HW_TAG} Measuring effective compute clock (workload GEMMs) and STREAM bandwidth...")
+    try:
+        return run_hardware_calibration(training_config)
+    except Exception as exc:
+        print(f"{_HW_TAG} WARNING: rank {rank} calibration failed: {type(exc).__name__}: {exc}")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _apply_calibrated_hbm_bandwidth(hw_calibration, rank):
+    """Price the projection's memory-bound terms at the bench GPUs' measured bandwidth.
+
+    Uses the derated STREAM result (see ``hardware_calibration.stream_bandwidth``)
+    unless ``--hbm-bandwidth-gbps`` / ``PRIMUS_HBM_BANDWIDTH_GBPS`` already set
+    one.  Every rank holds the same gathered per-rank list, so all ranks pick
+    the same value.
+    """
+    from primus.core.projection.hardware_calibration import (
+        calibrated_model_hbm_bandwidth_gbps,
+    )
+
+    try:
+        gbps = calibrated_model_hbm_bandwidth_gbps(hw_calibration)
+    except ValueError as exc:
+        if rank == 0:
+            print(f"{_HW_TAG} WARNING: not using the calibrated HBM bandwidth: {exc}")
+        return
+    if gbps is None:
+        return
+    existing = user_hbm_bandwidth_gbps()
+    if existing is not None:
+        if rank == 0:
+            print(
+                f"{_HW_TAG} Keeping HBM bandwidth override {existing:.0f} GB/s "
+                f"(--hbm-bandwidth-gbps / {HBM_BANDWIDTH_ENV}); calibrated value was {gbps:.0f} GB/s"
+            )
+        return
+    set_calibrated_hbm_bandwidth(gbps)
+    if rank == 0:
+        print(
+            f"{_HW_TAG} Memory-bound terms use the calibrated HBM bandwidth "
+            f"{gbps:.0f} GB/s (peak-equivalent, slowest bench GPU)"
+        )
+
+
+def _apply_loaded_calibration(saved_calibration, args, is_rank_0):
+    """``--load-benchmark``: report the artifact's calibration and reuse its bandwidth.
+
+    The bandwidth is re-derived with the current derate; ``--skip-hw-calibration``
+    or ``PRIMUS_BENCH_SKIP_HW_CALIB=1`` keep the arch-profile bandwidth instead.
+    """
+    if not saved_calibration:
+        return
+    if is_rank_0:
+        from primus.core.projection.hardware_calibration import (
+            format_calibration_report,
+        )
+
+        print(f"{_HW_TAG} Calibration recorded with the loaded bench:")
+        print(format_calibration_report(saved_calibration))
+    if os.environ.get(_HW_CALIB_SKIP_ENV, "0") == "1" or getattr(args, "skip_hw_calibration", False):
+        if is_rank_0:
+            print(f"{_HW_TAG} Not reusing the recorded HBM bandwidth (calibration skipped)")
+        return
+    _apply_calibrated_hbm_bandwidth(saved_calibration, 0 if is_rank_0 else 1)
+
+
 def _benchmark_optimizer_step(trainer, rank, num_warmup=2, num_iters=5):
     """Measure a real ``optimizer.step()`` on silicon (benchmark mode).
 
@@ -3460,6 +3577,11 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
 
+    # Runs before the first memory snapshot: the GPU is idle, has memory to
+    # spare, and the calibration's buffers are freed (and peak stats reset)
+    # before the recorder starts tracking the high-water mark.
+    hw_calibration = _run_hardware_calibration(training_config, framework_of(module_config), rank, args)
+
     # Memory benchmark recorder: snapshots per-rank GPU memory at key phases
     # so the memory-projection extrapolator can predict target-cluster peak.
     # Snapshots are rank-0-only (see MemoryBenchmarkRecorder).
@@ -3537,6 +3659,18 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
     # at the bench config.  This is the "static" memory anchor — what every
     # rank pays before any forward pass.
     mem_recorder.snapshot("post_setup")
+
+    from primus.core.projection.hardware_calibration import (
+        format_calibration_report,
+        gather_rank_summaries,
+    )
+
+    # Collective: every rank joins, even one that skipped calibration.
+    gather_rank_summaries(hw_calibration)
+    if hw_calibration is not None:
+        if rank == 0:
+            print(format_calibration_report(hw_calibration))
+        _apply_calibrated_hbm_bandwidth(hw_calibration, rank)
 
     print("[Primus:Performance Projection] Building model profiler...")
     model_profiler_spec = get_language_model_profiler_spec(training_config)
@@ -3657,6 +3791,8 @@ def _run_layer_benchmark(primus_config, unknown_overrides, reduction_info=None, 
         ddp_collectives = _benchmark_ddp_collectives(trainer, rank)
         if ddp_collectives:
             profiling_results["_dp_reduce_scatter_benchmark"] = ddp_collectives
+    if hw_calibration is not None:
+        profiling_results["_hardware_calibration"] = hw_calibration
 
     # Attach the memory benchmark payload to the profiling results dict so
     # _save_profiling_results / _load_profiling_results can persist it
@@ -4079,6 +4215,31 @@ def _print_scheduler_comparison(all_results, training_config):
     print("=" * 100 + "\n")
 
 
+def _bubble_free_step_time_ms(training_config, profiling_results) -> Optional[float]:
+    """Pipeline step with zero bubbles: the busiest stage's compute over all microbatches.
+
+    Stage imbalance is kept (it is a property of the layer split, not of the
+    schedule), so this is what any schedule converges to as bubbles vanish.
+    """
+    chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
+    if not chunk_time_matrix:
+        return None
+    micro_batches = _compute_micro_batches(
+        training_config.runtime_config, training_config.model_parallel_config
+    )
+    stage_ms = [
+        sum(c.get("fwd", 0.0) + c.get("bwd", 0.0) + c.get("wgrad", 0.0) for c in rank_chunks)
+        for rank_chunks in chunk_time_matrix
+    ]
+    step_ms = max(stage_ms) * micro_batches
+    if int(os.getenv("RANK", "0")) == 0:
+        print(
+            f"[Primus:Performance Projection] Ceiling (launch): bubble-free pipeline step "
+            f"{step_ms:.2f} ms (busiest stage {max(stage_ms):.2f} ms x {micro_batches} microbatches)"
+        )
+    return step_ms
+
+
 def _run_pipeline_simulation(
     training_config,
     profiling_results,
@@ -4105,6 +4266,9 @@ def _run_pipeline_simulation(
     Returns:
         float: Step time in ms from pipeline simulation, or None if simulation failed
     """
+    if at_ceiling("launch"):
+        return _bubble_free_step_time_ms(training_config, profiling_results)
+
     is_compare_mode = scheduler_algorithm == "all"
     run_seaailab_ilp = scheduler_algorithm in ("seaailab-ilp", "all")
 
@@ -4459,17 +4623,36 @@ def _run_multinode_projection(
         )
         target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
 
-        if overlap_grad_reduce:
-            grad_ar_per_iteration_ms = _exposed_overlapped_grad_sync_ms(
-                training_config,
-                target_message_info,
-                dp_target,
-                profiling_results,
-                projected_compute_time_ms,
-                time_includes_all_microbatches,
-            )
-            ddp_contention_ms = _megatron_ddp_overlap_contention_ms(
-                training_config, target_message_info, dp_target, profiling_results
+        if overlap_grad_reduce or at_ceiling("overlap"):
+            if at_ceiling("overlap"):
+                # Ceiling: bucketed grad sync runs under the fwd+bwd compute of every
+                # microbatch; only the part that does not fit the window stays exposed.
+                rt_cfg = getattr(training_config, "runtime_config", None)
+                gbs = getattr(rt_cfg, "global_batch_size", None) or 1
+                mbs = getattr(rt_cfg, "micro_batch_size", None) or 1
+                target_microbatches = max(1, gbs // (mbs * dp_target))
+                if time_includes_all_microbatches:
+                    overlap_window = projected_compute_time_ms
+                else:
+                    overlap_window = projected_compute_time_ms * target_microbatches
+                use_dist_opt = getattr(mp_config, "use_distributed_optimizer", False)
+                effective_ar = target_grad_ar * (0.5 if use_dist_opt else 1.0)
+                grad_ar_per_iteration_ms = max(0.0, effective_ar - overlap_window)
+            else:
+                grad_ar_per_iteration_ms = _exposed_overlapped_grad_sync_ms(
+                    training_config,
+                    target_message_info,
+                    dp_target,
+                    profiling_results,
+                    projected_compute_time_ms,
+                    time_includes_all_microbatches,
+                )
+            ddp_contention_ms = (
+                0.0
+                if at_ceiling("overlap")
+                else _megatron_ddp_overlap_contention_ms(
+                    training_config, target_message_info, dp_target, profiling_results
+                )
             )
             if ddp_contention_ms > 0 and is_rank_0:
                 print(f"  [Grad sync] backward slowed by the overlapped reduce: +{ddp_contention_ms:.1f} ms")
@@ -4479,7 +4662,7 @@ def _run_multinode_projection(
         param_ag = target_message_info.get("param_allgather_ms", 0.0)
         if getattr(mp_config, "overlap_param_gather", False):
             # Overlaps the next forward, with the same imperfect hiding as the gradient reduce.
-            param_ag_per_iteration_ms = 0.20 * param_ag
+            param_ag_per_iteration_ms = 0.0 if at_ceiling("overlap") else 0.20 * param_ag
         else:
             param_ag_per_iteration_ms = param_ag
 
@@ -4893,6 +5076,47 @@ def _activate_kernel_ledger(args) -> Optional[kernel_report.Ledger]:
 
 
 def launch_projection_from_cli(args, overrides):
+    """Entry point for ``projection performance``: expected or ceiling bound, plus optional headroom.
+
+    ``--bound ceiling`` projects with ``--ceiling-levers`` at their physical
+    best; ``--headroom`` additionally re-runs the projection per lever (quietly)
+    and prints expected vs. ceiling with a per-lever waterfall.  Returns the
+    multinode result dict (with ``"headroom"`` when requested), or None when no
+    multinode projection ran.
+    """
+    bound = getattr(args, "projection_bound", None) or "expected"
+    levers = parse_levers(getattr(args, "ceiling_levers", None))
+    want_headroom = bool(getattr(args, "headroom", False))
+    if bound == "ceiling" or want_headroom:
+        check_simulate_only(args)
+
+    shown = levers if bound == "ceiling" else ()
+    pristine = (copy.deepcopy(args), list(overrides or [])) if want_headroom else None
+    with ceiling_levers(shown):
+        if bound == "ceiling" and int(os.getenv("RANK", "0")) == 0:
+            print(f"[Primus:Performance Projection] Bound: ceiling ({', '.join(active_levers())})")
+        result = _launch_projection(args, overrides)
+
+    report = None
+    if want_headroom:
+
+        def _project(active):
+            with ceiling_levers(active), contextlib.redirect_stdout(io.StringIO()):
+                return _launch_projection(copy.deepcopy(pristine[0]), list(pristine[1]))
+
+        report = headroom(
+            _project, levers, getattr(args, "headroom_measured", None), known={tuple(shown): result}
+        )
+
+    if report is not None:
+        if int(os.getenv("RANK", "0")) == 0:
+            print(format_headroom(report))
+        if result is not None:
+            result["headroom"] = report
+    return result
+
+
+def _launch_projection(args, overrides):
     """
     Entry point for the 'performance_projection' subcommand.
 
@@ -4915,6 +5139,9 @@ def launch_projection_from_cli(args, overrides):
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         raise FileNotFoundError(f"[Primus:Performance Projection] Config file '{cfg_path}' not found.")
+
+    set_hbm_bandwidth_override(getattr(args, "hbm_bandwidth_gbps", None))
+    set_calibrated_hbm_bandwidth(None)
 
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
@@ -5158,6 +5385,8 @@ def launch_projection_from_cli(args, overrides):
         # profiling_results that downstream code expects.
         from_load_results, _ = _load_profiling_results(load_benchmark_path)
         profiling_results = from_load_results
+        saved_calibration = profiling_results.get("_hardware_calibration")
+        _apply_loaded_calibration(saved_calibration, args, is_rank_0)
         if is_rank_0:
             n_layers = sum(1 for k in profiling_results if isinstance(k, int))
             print(
@@ -5226,7 +5455,7 @@ def launch_projection_from_cli(args, overrides):
     if getattr(args, "profile_only", False):
         if is_rank_0:
             print("[Primus:Performance Projection] --profile-only: exiting after profiling.")
-        return
+        return None
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
@@ -5494,7 +5723,7 @@ def launch_projection_from_cli(args, overrides):
                     # measured compute is already correct for the target.
                     # Only the A2A portion changes (via additive delta).
                     model_cfg = training_config.model_config
-                    use_deepep = getattr(model_cfg, "use_turbo_deepep", False)
+                    use_deepep = getattr(model_cfg, "use_turbo_deepep", False) or at_ceiling("overlap")
 
                     if use_deepep and benchmark_ep != original_ep:
                         DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
@@ -5837,7 +6066,9 @@ def launch_projection_from_cli(args, overrides):
 
                         net_change_total = 0.0
                         total_overlap_per_layer = 0.0
-                        use_deepep = getattr(training_config.model_config, "use_turbo_deepep", False)
+                        use_deepep = getattr(
+                            training_config.model_config, "use_turbo_deepep", False
+                        ) or at_ceiling("overlap")
                         for layer_idx, layer_data in profiling_results.items():
                             if isinstance(layer_data, dict) and layer_data.get("type") == "moe":
                                 mlp_info = layer_data.get("mlp", {})

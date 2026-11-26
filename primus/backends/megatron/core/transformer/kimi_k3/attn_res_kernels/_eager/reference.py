@@ -32,7 +32,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-__all__ = ["accum_dtype", "fused_score_weight", "eager_attn_res_mix"]
+__all__ = ["accum_dtype", "fused_score_weight", "eager_attn_res_mix", "eager_attn_res_mix_bcast"]
 
 
 def accum_dtype(dtype: torch.dtype) -> torch.dtype:
@@ -64,6 +64,28 @@ def fused_score_weight(
     return norm_weight.to(dtype) * proj_weight.squeeze(0).to(dtype)
 
 
+def _attn_res_probs(
+    prefix_sum: Tensor,
+    block_residual: Tensor,
+    norm_weight: Tensor,
+    proj_weight: Tensor,
+    eps: float,
+):
+    """``(probs, v_float)``: the softmax over the candidates, ``[*, num_blocks + 1]``, and the
+    candidates in the compute dtype, ``[*, num_blocks + 1, hidden]``; both eager backends mix them."""
+    # [*, num_blocks + 1, hidden]: the checkpoints, then the stream.
+    v = torch.cat((block_residual, prefix_sum.unsqueeze(-2)), dim=-2)
+    compute_dtype = accum_dtype(v.dtype)
+    v_float = v.to(compute_dtype)
+
+    # RMS-normalise each candidate. This feeds the SCORES ONLY.
+    variance = v_float.pow(2).mean(-1, keepdim=True)
+    k = v_float * torch.rsqrt(variance + eps)
+
+    scores = (k * fused_score_weight(norm_weight, proj_weight, compute_dtype)).sum(-1)
+    return scores.softmax(-1), v_float
+
+
 def eager_attn_res_mix(
     prefix_sum: Tensor,
     block_residual: Tensor,
@@ -85,18 +107,30 @@ def eager_attn_res_mix(
     Returns:
         ``[*, hidden]``, in ``prefix_sum``'s dtype.
     """
-    # [*, num_blocks + 1, hidden]: the checkpoints, then the stream.
-    v = torch.cat((block_residual, prefix_sum.unsqueeze(-2)), dim=-2)
-    compute_dtype = accum_dtype(v.dtype)
-    v_float = v.to(compute_dtype)
-
-    # RMS-normalise each candidate. This feeds the SCORES ONLY.
-    variance = v_float.pow(2).mean(-1, keepdim=True)
-    k = v_float * torch.rsqrt(variance + eps)
-
-    scores = (k * fused_score_weight(norm_weight, proj_weight, compute_dtype)).sum(-1)
-    probs = scores.softmax(-1).unsqueeze(-2)  # [*, 1, num_blocks + 1]
+    probs, v_float = _attn_res_probs(prefix_sum, block_residual, norm_weight, proj_weight, eps)
 
     # Convex combination of the UN-normalised candidates.
-    mixed = torch.matmul(probs, v_float).squeeze(-2)  # [*, hidden]
+    mixed = torch.matmul(probs.unsqueeze(-2), v_float).squeeze(
+        -2
+    )  # [*, 1, C] x [*, C, hidden] -> [*, hidden]
+    return mixed.to(prefix_sum.dtype)
+
+
+def eager_attn_res_mix_bcast(
+    prefix_sum: Tensor,
+    block_residual: Tensor,
+    norm_weight: Tensor,
+    proj_weight: Tensor,
+    eps: float,
+) -> Tensor:
+    """:func:`eager_attn_res_mix` with the convex combination as a broadcast multiply-sum.
+
+    There, ``torch.matmul(probs, v_float)`` is a batched GEMM with batch = tokens, M = 1 and
+    K = num_blocks + 1. On gfx1250 hipBLASLt runs it with fp32 32x32x16 tiles, ~7.5 ms per call at
+    14336 tokens x hidden 7168, forward, recompute and backward alike; as a multiply-sum it is
+    memory-bound. Same arithmetic otherwise; the result differs from the oracle only by fp32
+    rounding of the K-term sum.
+    """
+    probs, v_float = _attn_res_probs(prefix_sum, block_residual, norm_weight, proj_weight, eps)
+    mixed = (probs.unsqueeze(-1) * v_float).sum(-2)  # [*, hidden]
     return mixed.to(prefix_sum.dtype)

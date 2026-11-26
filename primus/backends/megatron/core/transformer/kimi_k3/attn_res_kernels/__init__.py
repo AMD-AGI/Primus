@@ -18,9 +18,14 @@ Backends
     Pure-PyTorch (:mod:`._eager`): :func:`eager_attn_res_mix`. The numerical
     ground truth, always importable, differentiable, and the only backend that
     runs on CPU.
+``eager_bcast``
+    :func:`eager_attn_res_mix_bcast`: ``eager`` with the final convex
+    combination as a broadcast multiply-sum instead of a ``[tokens, 1, C] x
+    [tokens, C, hidden]`` batched GEMM, which hipBLASLt runs with tiny fp32
+    tiles on gfx1250. Equal to ``eager`` up to fp32 rounding.
 ``flydsl``
-    One fused FlyDSL kernel per direction (:mod:`._flydsl_v1`), gfx950 / CDNA4
-    only, loaded LAZILY via :func:`load_flydsl_attn_res_backend`.
+    One fused FlyDSL kernel per direction (:mod:`._flydsl_v1`), gfx950 (CDNA4)
+    and gfx1250 only, loaded LAZILY via :func:`load_flydsl_attn_res_backend`.
 
 Why a kernel at all — the measurement
 -------------------------------------
@@ -47,14 +52,18 @@ checkpoint stores them separately; every backend folds them itself.
 from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._eager import (
     accum_dtype,
     eager_attn_res_mix,
+    eager_attn_res_mix_bcast,
     fused_score_weight,
 )
 
-ATTN_RES_BACKENDS = ("eager", "flydsl")
+ATTN_RES_BACKENDS = ("eager", "eager_bcast", "flydsl")
+
+#: The architectures the FlyDSL backend builds for (its scalar kernels; the vector kernels are gfx1250 only).
+FLYDSL_ATTN_RES_ARCHS = ("gfx950", "gfx1250")
 
 
-def _require_gfx950() -> None:
-    """Raise :class:`ImportError` unless a gfx950 (CDNA4) device is visible.
+def _require_flydsl_arch() -> None:
+    """Raise :class:`ImportError` unless a gfx950 (CDNA4) or gfx1250 device is visible.
 
     Same rationale as ``kda_kernels.__init__._require_gfx950``: the kernel
     builder asserts the arch, but that assert fires at *build* time deep inside
@@ -69,15 +78,15 @@ def _require_gfx950() -> None:
     if not torch.cuda.is_available():
         raise ImportError("no ROCm/CUDA device is visible")
     arch = str(getattr(torch.cuda.get_device_properties(0), "gcnArchName", ""))
-    if not arch.startswith("gfx950"):
-        raise ImportError(f"device arch is {arch!r}, not gfx950 (CDNA4)")
+    if not arch.startswith(FLYDSL_ATTN_RES_ARCHS):
+        raise ImportError(f"device arch is {arch!r}, not gfx950 (CDNA4) or gfx1250")
 
 
 def load_flydsl_attn_res_backend():
     """Lazily import the fused-FlyDSL mixer (:mod:`._flydsl_v1`).
 
     The backend hard-depends on the installed ``flydsl`` pip package and on
-    gfx950 / CDNA4. Deferring the import keeps selecting ``eager`` free of it
+    gfx950 (CDNA4) or gfx1250. Deferring the import keeps selecting ``eager`` free of it
     and keeps ``import ...attn_res_kernels`` working on a build or GPU without
     flydsl.
 
@@ -88,15 +97,15 @@ def load_flydsl_attn_res_backend():
     dependency); it must not be hoisted to module scope.
     """
     try:
-        _require_gfx950()
+        _require_flydsl_arch()
         from primus.backends.megatron.core.transformer.kimi_k3.attn_res_kernels._flydsl_v1 import (
             flydsl_attn_res_mix,
         )
     except ImportError as exc:
         raise ImportError(
             "attn_res_backend = 'flydsl' requires the fused FlyDSL attention-residual "
-            f"kernel (the `flydsl` pip package on gfx950 / CDNA4), which is unavailable: "
-            f"{exc}. Select a different backend (eager)."
+            f"kernel (the `flydsl` pip package on gfx950 / CDNA4 or gfx1250), which is unavailable: "
+            f"{exc}. Select a different backend (eager or eager_bcast)."
         ) from exc
     return flydsl_attn_res_mix
 
@@ -114,6 +123,8 @@ def resolve_attn_res_backend(name: str):
     """
     if name == "eager":
         return eager_attn_res_mix
+    if name == "eager_bcast":
+        return eager_attn_res_mix_bcast
     if name == "flydsl":
         return load_flydsl_attn_res_backend()
     raise ValueError(
@@ -123,9 +134,11 @@ def resolve_attn_res_backend(name: str):
 
 __all__ = [
     "eager_attn_res_mix",
+    "eager_attn_res_mix_bcast",
     "fused_score_weight",
     "accum_dtype",
     "load_flydsl_attn_res_backend",
     "ATTN_RES_BACKENDS",
+    "FLYDSL_ATTN_RES_ARCHS",
     "resolve_attn_res_backend",
 ]

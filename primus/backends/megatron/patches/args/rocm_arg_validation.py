@@ -12,8 +12,9 @@ constraints (deterministic-mode env vars, Turbo FP8/FP4 recipes, sync-free MoE
 auto-config, DeepEP restrictions, ...).
 """
 
-import inspect
+import importlib.util
 import os
+import sys
 
 import torch
 
@@ -32,11 +33,10 @@ def print_rank_last(msg):
     """If distributed is initialized, print only on last rank."""
     log_func = logger.info_with_caller
 
-    caller = inspect.stack()[1]
-    caller_frame = caller.frame
+    caller_frame = sys._getframe(1)
     function_name = caller_frame.f_code.co_name
     module_name = caller_frame.f_globals["__name__"].split(".")[-1]
-    line = caller.lineno
+    line = caller_frame.f_lineno
 
     if torch.distributed.is_initialized():
         if is_last_rank():
@@ -124,6 +124,20 @@ def validate_turbo_grouped_gemm_without_padding(args) -> None:
         raise ValueError(f"{option}=True requires moe_router_padding_for_quantization=False.")
 
 
+def _primus_turbo_installed() -> bool:
+    return importlib.util.find_spec("primus_turbo") is not None
+
+
+def _has_moe_layers(args) -> bool:
+    if not getattr(args, "num_experts", None):
+        return False
+    # Pattern strings are already lists here: the build_args moe_layer_freq patch evaluates them.
+    freq = getattr(args, "moe_layer_freq", 1)
+    if isinstance(freq, int):
+        return freq > 0
+    return any(freq)
+
+
 def validate_turbo_grouped_gemm_with_muon(args) -> None:
     """Muon orthogonalizes only 2-D weights and hands the rest to its scalar optimizer.
 
@@ -132,13 +146,17 @@ def validate_turbo_grouped_gemm_with_muon(args) -> None:
     rejects the resulting expert-parallel Adam groups).
     """
     optimizer = str(getattr(args, "optimizer", ""))
+    if "muon" not in optimizer:
+        return
     turbo_grouped_experts = (
         getattr(args, "enable_primus_turbo", False)
         and getattr(args, "use_turbo_grouped_gemm", False)
         and getattr(args, "moe_grouped_gemm", False)
-        and bool(getattr(args, "num_experts", None))
+        and _has_moe_layers(args)
+        # Without primus_turbo, the spec provider patch is skipped and the experts are TE's.
+        and _primus_turbo_installed()
     )
-    if "muon" in optimizer and turbo_grouped_experts:
+    if turbo_grouped_experts:
         advice = "Set use_turbo_grouped_gemm=false"
         if (getattr(args, "turbo_sync_free_moe_stage", 0) or 0) >= 2:
             advice += " and turbo_sync_free_moe_stage below 2 (stages 2 and 3 require Turbo grouped GEMM)"
