@@ -94,6 +94,7 @@ modules:
       # MegaUlysses; false runs the same model on Megatron's stock a2a CP for comparison
       use_turbo_mega_ulysses: ${PRIMUS_MEGA_ULYSSES:true}
       turbo_mega_ulysses_impl: ${PRIMUS_MEGA_ULYSSES_IMPL:fused}
+      turbo_mega_ulysses_seq_chunk: ${PRIMUS_MEGA_ULYSSES_SEQ_CHUNK:256}
 
       # deepep
       use_turbo_deepep: true

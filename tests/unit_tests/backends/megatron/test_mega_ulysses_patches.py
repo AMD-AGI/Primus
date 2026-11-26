@@ -12,12 +12,15 @@ import torch.nn.functional as F
 
 from primus.backends.megatron.patches.turbo import mega_ulysses_patches
 from primus.backends.megatron.patches.turbo.mega_ulysses_patches import (
+    _ATTN_OPS,
     _GQA_OPS,
     _MLA_OPS,
     _contiguous_cp_split,
     _input_norm,
     _is_turbo_mega_ulysses_can_patch,
+    _local_positions,
     _missing_ops,
+    _striped_cp_split,
 )
 from primus.core.patches import PatchContext
 
@@ -44,6 +47,7 @@ def _ctx(params):
 @pytest.fixture
 def eligible_env(monkeypatch):
     monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    monkeypatch.delenv("GPU_MAX_HW_QUEUES", raising=False)
     monkeypatch.setattr(mega_ulysses_patches, "is_primus_turbo_can_patch", lambda _ctx: True)
     monkeypatch.setattr(mega_ulysses_patches, "_missing_ops", lambda _args: None)
 
@@ -110,6 +114,123 @@ def test_missing_turbo_ops_keep_stock_path(eligible_env, monkeypatch, mla, missi
     assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is expected
 
 
+@pytest.mark.parametrize("hq, hkv", [(32, 4), (64, 4), (32, 8), (64, 8)])
+def test_attn_enabled_when_eligible(eligible_env, hq, hkv):
+    params = _params(
+        turbo_mega_ulysses_impl="attn",
+        micro_batch_size=1,
+        seq_length=32768,
+        group_query_attention=True,
+        num_attention_heads=hq,
+        num_query_groups=hkv,
+    )
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(micro_batch_size=2),
+        dict(turbo_mega_ulysses_seq_chunk=192),
+        dict(turbo_mega_ulysses_seq_chunk=-128),
+        dict(turbo_mega_ulysses_seq_chunk=256, seq_length=1536),
+        dict(group_query_attention=True, num_attention_heads=96, num_query_groups=8),
+        dict(group_query_attention=True, num_attention_heads=48, num_query_groups=8),
+        dict(group_query_attention=True, num_attention_heads=32, num_query_groups=2),
+        dict(group_query_attention=False, num_attention_heads=32),
+    ],
+)
+def test_attn_unsupported_settings_keep_stock_path(eligible_env, overrides):
+    params = _params(turbo_mega_ulysses_impl="attn", micro_batch_size=1, seq_length=32768)
+    for key, val in overrides.items():
+        setattr(params, key, val)
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is False
+
+
+@pytest.mark.parametrize("missing, expected", [(set(), True), ({_ATTN_OPS}, False), ({_GQA_OPS}, True)])
+def test_attn_needs_mega_attn_ops(eligible_env, monkeypatch, missing, expected):
+    monkeypatch.setattr(mega_ulysses_patches, "_missing_ops", _missing_ops)
+    monkeypatch.setattr(
+        mega_ulysses_patches.importlib.util,
+        "find_spec",
+        lambda name: None if name in missing else SimpleNamespace(name=name),
+    )
+    params = _params(turbo_mega_ulysses_impl="attn", micro_batch_size=1, seq_length=32768)
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is expected
+
+
+def _mla_attn_params(**overrides):
+    params = _params(
+        multi_latent_attention=True,
+        q_lora_rank=1536,
+        turbo_mega_ulysses_impl="attn",
+        context_parallel_size=8,
+        micro_batch_size=1,
+        seq_length=32768,
+        num_attention_heads=128,
+        qk_head_dim=128,
+        qk_pos_emb_head_dim=64,
+        v_head_dim=128,
+    )
+    for key, val in overrides.items():
+        setattr(params, key, val)
+    return params
+
+
+@pytest.mark.parametrize("heads, seq_chunk", [(128, None), (64, 256), (64, 512), (128, 0)])
+def test_mla_attn_enabled_when_eligible(eligible_env, heads, seq_chunk):
+    params = _mla_attn_params(num_attention_heads=heads, turbo_mega_ulysses_seq_chunk=seq_chunk)
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(micro_batch_size=2),
+        dict(num_attention_heads=60),
+        dict(qk_head_dim=64),
+        dict(v_head_dim=192),
+        dict(turbo_mega_ulysses_seq_chunk=128),
+        dict(turbo_mega_ulysses_seq_chunk=256, seq_length=4096 + 1024),
+        dict(turbo_mega_ulysses_seq_chunk=0, seq_length=8 * 256 + 8 * 128),
+    ],
+)
+def test_mla_attn_unsupported_settings_keep_stock_path(eligible_env, overrides):
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(_mla_attn_params(**overrides))) is False
+
+
+@pytest.mark.parametrize(
+    "hw_queues, expected", [("4", True), ("8", True), ("2", False), ("1", False), ("", False)]
+)
+@pytest.mark.parametrize("mla", [False, True])
+def test_attn_needs_four_hw_queues(eligible_env, monkeypatch, mla, hw_queues, expected):
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", hw_queues)
+    params = (
+        _mla_attn_params()
+        if mla
+        else _params(turbo_mega_ulysses_impl="attn", micro_batch_size=1, seq_length=32768)
+    )
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is expected
+
+
+@pytest.mark.parametrize("mla", [False, True])
+def test_fused_runs_on_two_hw_queues(eligible_env, monkeypatch, mla):
+    monkeypatch.setenv("GPU_MAX_HW_QUEUES", "2")
+    params = _params(multi_latent_attention=mla, q_lora_rank=1536 if mla else None)
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is True
+
+
+@pytest.mark.parametrize("missing, expected", [(set(), True), ({_ATTN_OPS}, False), ({_MLA_OPS}, True)])
+def test_mla_attn_needs_mega_attn_ops(eligible_env, monkeypatch, missing, expected):
+    monkeypatch.setattr(mega_ulysses_patches, "_missing_ops", _missing_ops)
+    monkeypatch.setattr(
+        mega_ulysses_patches.importlib.util,
+        "find_spec",
+        lambda name: None if name in missing else SimpleNamespace(name=name),
+    )
+    assert _is_turbo_mega_ulysses_can_patch(_ctx(_mla_attn_params())) is expected
+
+
 @pytest.mark.parametrize("mla, impl", [(False, "per_head"), (False, "unfused"), (True, "unfused")])
 def test_invalid_impl_raises(eligible_env, mla, impl):
     params = _params(multi_latent_attention=mla, q_lora_rank=1536, turbo_mega_ulysses_impl=impl)
@@ -141,6 +262,33 @@ def test_contiguous_cp_split(monkeypatch, cp_rank):
     assert out["attention_mask"].shape == (b, 1, s // cp, s)
     assert out["cu_seqlens"] is cu_seqlens
     assert out["x"] is None
+
+
+@pytest.mark.parametrize("cp_rank", [0, 1, 3])
+@pytest.mark.parametrize("seq_chunk", [0, 2, 4])
+def test_striped_cp_split_matches_positions(monkeypatch, cp_rank, seq_chunk):
+    cp, s, b = 4, 32, 1
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: cp)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda _group: cp_rank)
+    tokens = torch.arange(b * s).view(b, s)
+    cu_seqlens = torch.tensor([0, s])
+    batch = {"tokens": tokens, "labels": tokens + 1, "cu_seqlens": cu_seqlens, "x": None}
+
+    out = _striped_cp_split(seq_chunk)(batch, cp_group=None)
+
+    pos = _local_positions(s // cp, cp, cp_rank, seq_chunk, "cpu")
+    torch.testing.assert_close(out["tokens"], tokens[:, pos])
+    torch.testing.assert_close(out["labels"], tokens[:, pos] + 1)
+    assert out["cu_seqlens"] is cu_seqlens
+    assert out["x"] is None
+
+
+def test_striped_positions_cover_the_sequence():
+    cp, s, cs = 4, 64, 4
+    pos = torch.cat([_local_positions(s // cp, cp, r, cs, "cpu") for r in range(cp)])
+    assert sorted(pos.tolist()) == list(range(s))
+    # chunk c of cs tokens lives on rank c % cp
+    assert _local_positions(s // cp, cp, 1, cs, "cpu")[:cs].tolist() == list(range(cs, 2 * cs))
 
 
 def _norm_linear(normalization, zero_centered_gamma=False, skip=False):
