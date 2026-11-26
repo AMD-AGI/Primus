@@ -115,4 +115,4 @@ modules:
       cross_entropy_loss_fusion: true
 
       gradient_accumulation_fusion: true
-      moe_use_legacy_grouped_gemm: true
+      moe_use_legacy_grouped_gemm: ${PRIMUS_LEGACY_GG:true}  # false with PRIMUS_TURBO_GG=true (Primus rejects both)
