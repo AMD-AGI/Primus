@@ -141,7 +141,7 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candid
     # where VPP doesn't divide num_layers/PP.
     vpp_set: list = list(legality.vpp) if legality.vpp else [None]
 
-    def _recompute_layers(pp: int) -> int:
+    def _recompute_layers(pp: int, rec: str | None = None) -> int:
         """Pick a sensible ``recompute_num_layers`` for full-stage recompute.
 
         Resolution order (highest priority first):
@@ -155,8 +155,11 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candid
         """
         layer_id_count = len(arch.recompute_layer_ids or [])
         existing = int(arch.recompute_num_layers or 0)
-        if (arch.recompute_granularity or "") != "full":
+        if (rec or arch.recompute_granularity or "") != "full":
             return layer_id_count or existing
+        if (arch.recompute_granularity or "") != "full":
+            # A full-recompute seed on a workload that ships none: every layer of the stage.
+            existing = 0
         if not arch.num_layers or pp <= 0:
             return layer_id_count or existing or 1
         stage_layers = max(1, arch.num_layers // pp)
@@ -190,7 +193,9 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candid
         explicit value to enable that override for this seed.
         """
         rec = arch.recompute_granularity if recompute is _SENTINEL else recompute
-        rcl = 0 if rec in (None, "none") else _recompute_layers(pp)
+        rcl = 0 if rec in (None, "none") else _recompute_layers(pp, rec)
+        if pp == 1:
+            vpp = None
 
         def _resolve(v, default=None):
             return default if v is _SENTINEL else v
@@ -256,19 +261,23 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candid
     bmbs = baseline.mbs
     bvpp = baseline.vpp
 
+    def _fit_ep(tp: int, pp: int, cp: int) -> int:
+        """The largest legal EP that fits a (TP, PP) layout, kept within a node."""
+        if not arch.is_moe:
+            return 1
+        room = world_size // max(1, tp * pp)
+        fits = [e for e in legality.ep if e <= min(room, cluster.gpus_per_node) and e % cp == 0 and e >= cp]
+        return max(fits) if fits else 1
+
     # Recompute strategies, ordered by expected throughput (fastest first):
     # "none" > "selective" > "full". The memory projection rejects ones that
     # don't fit; this gives the seed phase a chance to find configurations
     # that exploit available HBM headroom (the dominant gap vs published
     # benchmarks where memory headroom is large but the workload yaml ships
     # full-recompute defaults).
-    recompute_strategies: list[str | None]
-    if arch.recompute_granularity in ("full", "selective"):
-        recompute_strategies = ["none", "selective", arch.recompute_granularity]
-    else:
-        recompute_strategies = [arch.recompute_granularity, "none"]
-    seen_rc: set = set()
-    recompute_strategies = [r for r in recompute_strategies if not (r in seen_rc or seen_rc.add(r))]
+    # All three are swept whatever the workload ships: a model that only fits
+    # at MBS=1 without recompute may run faster at a larger MBS with it.
+    recompute_strategies: list[str | None] = ["none", "selective", "full"]
 
     # ── 2. Memory levers at baseline parallelism ──────────────────────────
     # Sweep recompute first: it's the cheapest way to recover throughput
@@ -471,7 +480,7 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candid
                     _make(
                         btp,
                         spp,
-                        bep,
+                        min(bep, _fit_ep(btp, spp, bcp)),
                         bcp,
                         bmbs,
                         1,
@@ -493,7 +502,18 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candid
         if can_try_zbv:
             for sched in ("zbv-formatted", "zbv-greedy-half"):
                 if sched in legality.pp_schedules_by_vpp.get(2, []):
-                    _push(_make(btp, spp, bep, bcp, bmbs, 2, pp_schedule=sched, recompute="none"))
+                    _push(
+                        _make(
+                            btp,
+                            spp,
+                            min(bep, _fit_ep(btp, spp, bcp)),
+                            bcp,
+                            bmbs,
+                            2,
+                            pp_schedule=sched,
+                            recompute="none",
+                        )
+                    )
                     if _full():
                         break
 
@@ -525,6 +545,29 @@ def build_seed_plan(arch: ArchitectureRecord, agent_cfg: AgentConfig, max_candid
                         break
                 if _full():
                     break
+            if _full():
+                break
+
+    # ── 7b. Layout sweep: (TP, PP, EP) × recompute × MBS ─────────────────
+    # Breadth-first over layouts, so a small budget still sees every layout
+    # at the baseline MBS before it spends seeds on MBS variants. EP is fitted
+    # to each layout, since keeping the baseline's EP makes most PP>1 layouts
+    # illegal on one node.
+    layouts: list[tuple[int, int, int]] = []
+    for tp in sorted({v for v in legality.tp if v <= cluster.gpus_per_node}):
+        for pp in sorted({v for v in legality.pp if v <= cluster.gpus_per_node}):
+            lay = (tp, pp, _fit_ep(tp, pp, bcp))
+            if lay != (btp, bp, bep) and lay not in layouts:
+                layouts.append(lay)
+    layouts.sort(key=lambda lay: (lay[0], lay[1]))
+    combos = [(m, rec) for m in (bmbs, max(1, bmbs // 2), 1, bmbs * 2) for rec in recompute_strategies]
+    seen_combo: set = set()
+    combos = [c for c in combos if not (c in seen_combo or seen_combo.add(c))]
+    for mbs, rec in combos:
+        if _full():
+            break
+        for tp, pp, ep in layouts:
+            _push(_make(tp, pp, ep, bcp, mbs, None, recompute=rec))
             if _full():
                 break
 

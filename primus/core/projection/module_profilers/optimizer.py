@@ -7,6 +7,7 @@
 import os
 from typing import Optional
 
+from primus.core.projection import param_counts
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 # Adam mixed-precision memory traffic per parameter:
@@ -64,17 +65,13 @@ class OptimizerProfiler(BaseModuleProfiler):
         Returns:
             Optimizer step time in milliseconds.
         """
-        params_per_gpu = self._count_params_per_gpu()
-
         # --- Distributed optimizer / FSDP sharding ---
+        # Dense parameters shard over the data-parallel group, expert parameters only over the
+        # expert data-parallel group (one rank when expert parallelism fills it).
         mp_config = self.config.model_parallel_config
         use_distributed_optimizer = getattr(mp_config, "use_distributed_optimizer", False)
         use_fsdp = getattr(mp_config, "use_torch_fsdp2", False)
-
-        if use_distributed_optimizer or use_fsdp:
-            params_for_optim = params_per_gpu // max(dp_size, 1)
-        else:
-            params_for_optim = params_per_gpu
+        params_for_optim = param_counts.optimizer_params(self.config, dp_size)
 
         # --- Compute time ---
         total_bytes = params_for_optim * _ADAM_BYTES_PER_PARAM

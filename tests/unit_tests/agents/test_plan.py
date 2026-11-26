@@ -90,3 +90,45 @@ def test_seed_plan_candidates_are_unique():
     plan = build_seed_plan(_arch(), _cfg(), max_candidates=12)
     serialized = [json.dumps(c.as_dict(), sort_keys=True) for c in plan.candidates]
     assert len(serialized) == len(set(serialized))
+
+
+def _gptoss_like(**kw) -> ArchitectureRecord:
+    """A MoE model that ships no recompute and uses all 8 GPUs for EP, like gpt-oss-120B."""
+    return _arch(
+        moe=True,
+        num_layers=36,
+        hidden_size=2880,
+        num_attention_heads=64,
+        num_experts=128,
+        moe_router_topk=4,
+        expert_model_parallel_size=8,
+        micro_batch_size=8,
+        use_turbo_deepep=True,
+        fp8="hybrid",
+        **kw,
+    )
+
+
+def test_seed_plan_has_no_equivalent_duplicates():
+    # No recompute vs "none", and VPP at PP=1, are the same run.
+    from primus.agents.tuning_agent.legality import config_signature
+
+    plan = build_seed_plan(_gptoss_like(), _cfg(), max_candidates=64)
+    sigs = [config_signature(c.as_dict()) for c in plan.candidates]
+    assert len(sigs) == len(set(sigs))
+    assert all(c.vpp is None for c in plan.candidates if c.pp == 1)
+
+
+def test_seed_plan_sweeps_recompute_when_the_workload_ships_none():
+    plan = build_seed_plan(_gptoss_like(), _cfg(), max_candidates=24)
+    full = [c for c in plan.candidates if c.recompute_granularity == "full"]
+    assert {c.recompute_granularity for c in plan.candidates} >= {"selective", "full"}
+    assert full and all(c.recompute_num_layers == 36 // c.pp for c in full)
+
+
+def test_seed_plan_reaches_pipeline_layouts_with_a_fitted_ep():
+    # Keeping EP=8 makes every PP>1 layout illegal on one node.
+    plan = build_seed_plan(_gptoss_like(), _cfg(), max_candidates=64)
+    layouts = {(c.tp, c.pp, c.ep) for c in plan.candidates}
+    assert {(1, 2, 4), (1, 4, 2), (2, 1, 4)} <= layouts
+    assert all(c.tp * c.pp * c.ep <= 8 for c in plan.candidates)
