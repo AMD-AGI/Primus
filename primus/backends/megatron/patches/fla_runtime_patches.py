@@ -50,6 +50,8 @@ knob.
     fused_ce_mode: 1                    # 0 = vanilla Megatron CE
                                         # 1 = chunked FLA fused CE (default)
                                         # 2 = single-shot FLA fused CE
+                                        # 3 = Primus chunked linear CE, also
+                                        #   ZAYA1's (mamba_fused_ce_patches)
     fused_ce_chunks: 32                 # default 32
 
     # --- FLA MLA attention backend -------------------------------------------

@@ -318,6 +318,11 @@ if perf_batch_has_diffusion; then
     echo "[ERROR] the diffusion configs are single-node benchmarks; use run_batch.sh for them." >&2
     exit "$PERF_EXIT_REFUSED"
 fi
+# The DLRMv4 benchmark config (recommendation) is validated on one node only.
+if perf_batch_has_framework recommendation; then
+    echo "[ERROR] the recommendation (DLRMv4) configs are single-node benchmarks; use run_batch.sh for them." >&2
+    exit "$PERF_EXIT_REFUSED"
+fi
 
 # ---------------------------- Helper functions -------------------------------
 

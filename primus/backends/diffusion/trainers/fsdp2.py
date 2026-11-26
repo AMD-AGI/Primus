@@ -91,6 +91,61 @@ else:
             )
 
 
+# FSDP all-gather group ranks -> (zero-CTA RCCL twin of that group, spans more than one node)
+_RCCL_SDMA_GROUPS: dict[tuple[int, ...], tuple[dist.ProcessGroup, bool]] = {}
+_RCCL_SDMA_ALL_GATHER_CLS = None
+
+
+def _prepare_rccl_sdma_groups(fsdp_group: dist.ProcessGroup) -> None:
+    """Create a zero-CTA twin of every FSDP all-gather group. Collective over all ranks.
+
+    RCCL takes its copy-engine all-gather (hierarchical across nodes) only on a
+    zero-CTA communicator over registered buffers. FSDP's own groups come from
+    the device mesh, and torch's nccl2 engine creates mesh subgroup communicators
+    before the group is named, so symm_mem.rendezvous cannot find them. A twin
+    with the same ranks in the same order, on nccl-lazy, creates its communicator
+    on first use, after it is named, and carries the zero-CTA policy itself.
+    """
+    ranks = tuple(dist.get_process_group_ranks(fsdp_group))
+    if ranks in _RCCL_SDMA_GROUPS:
+        return
+    import socket
+
+    entries: list = [None] * dist.get_world_size()
+    dist.all_gather_object(entries, (ranks, socket.gethostname()))
+    host_of_rank = [host for _ranks, host in entries]
+    backend = "nccl-lazy" if dist.is_backend_available("nccl-lazy") else "nccl"
+    for group_ranks in sorted({group_ranks for group_ranks, _host in entries}):
+        options = dist.ProcessGroupNCCL.Options()
+        options.config.cta_policy = dist.ProcessGroupNCCL.NCCL_CTA_POLICY_ZERO
+        group = dist.new_group(
+            list(group_ranks),
+            backend=backend,
+            pg_options=options,
+            group_desc="FLUX_RCCL_SDMA_ALL_GATHER",
+        )
+        spans_nodes = len({host_of_rank[rank] for rank in group_ranks}) > 1
+        _RCCL_SDMA_GROUPS[group_ranks] = (group, spans_nodes)
+
+
+def _rccl_sdma_all_gather(group: dist.ProcessGroup):
+    """SymmMemAllGather that runs on ``group`` instead of the group FSDP passes in."""
+    global _RCCL_SDMA_ALL_GATHER_CLS
+    if _RCCL_SDMA_ALL_GATHER_CLS is None:
+        from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
+            SymmMemAllGather,
+        )
+
+        class _RcclSdmaAllGather(SymmMemAllGather):
+            def __call__(self, output_tensor, input_tensor, group, async_op=False):
+                # FSDP passes its mesh group; self._group has the same ranks in the same order.
+                del group
+                return super().__call__(output_tensor, input_tensor, self._group, async_op)
+
+        _RCCL_SDMA_ALL_GATHER_CLS = _RcclSdmaAllGather
+    return _RCCL_SDMA_ALL_GATHER_CLS(group, "NCCL")
+
+
 def _pin_symm_mem_pools() -> None:
     import ctypes
 
@@ -200,10 +255,6 @@ class FSDP2Trainer(BaseWanTrainer):
         if prefixes and not any(module_name == p or module_name.startswith(p + ".") for p in prefixes):
             return
 
-        from torch.distributed.fsdp._fully_shard._fsdp_collectives import (
-            SymmMemAllGather,
-        )
-
         try:
             state = module._get_fsdp_state()
         except Exception:
@@ -220,17 +271,30 @@ class FSDP2Trainer(BaseWanTrainer):
             return
 
         process_group = groups[0]._all_gather_process_group
+        # FSDP_ALL_GATHER_IMPL: symm (default) = RCCL's copy-engine all-gather on a zero-CTA
+        # twin of the FSDP group, at any node count; copy = HIP IPC copies, one node only.
         impl = os.getenv("FSDP_ALL_GATHER_IMPL", "symm").strip().lower()
+        if impl not in {"copy", "symm"}:
+            raise ValueError(f"FSDP_ALL_GATHER_IMPL must be symm or copy, got {impl!r}")
+        _prepare_rccl_sdma_groups(process_group)
+        sdma_group, spans_nodes = _RCCL_SDMA_GROUPS[tuple(dist.get_process_group_ranks(process_group))]
+        if impl == "copy" and spans_nodes:
+            raise ValueError(
+                "FSDP_ALL_GATHER_IMPL=copy uses HIP IPC, which cannot reach GPUs on other nodes, "
+                f"but the FSDP all-gather group of {type(module).__name__} spans nodes; "
+                "use FSDP_ALL_GATHER_IMPL=symm"
+            )
         try:
             if impl == "copy":
                 module.set_custom_all_gather(_CopyEngineAllGather())
             else:
-                module.set_custom_all_gather(SymmMemAllGather(process_group, "NCCL"))
+                module.set_custom_all_gather(_rccl_sdma_all_gather(sdma_group))
         except (AttributeError, ValueError, AssertionError) as error:
             if self.rank == 0:
                 logger.warning(f"FSDP2/SDMA: failed to attach to {type(module).__name__}: {error}")
             return
         self._sdma_attached = getattr(self, "_sdma_attached", 0) + 1
+        self._sdma_attached_impls = getattr(self, "_sdma_attached_impls", set()) | {impl}
         if self._sdma_attached == 1:
             import atexit
 
@@ -387,8 +451,10 @@ class FSDP2Trainer(BaseWanTrainer):
         )
         self._maybe_attach_sdma_all_gather(wrap_root, "")
         if self.rank == 0 and self._sdma_all_gather_enabled():
+            impls = ",".join(sorted(getattr(self, "_sdma_attached_impls", set()))) or "none"
             logger.info(
-                f"FSDP2/SDMA: SymmMemAllGather attached to {getattr(self, '_sdma_attached', 0)} modules"
+                f"FSDP2/SDMA: copy-engine all-gather ({impls}) attached to "
+                f"{getattr(self, '_sdma_attached', 0)} modules"
             )
         if self.rank == 0:
             logger.info(
