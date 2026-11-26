@@ -1,0 +1,93 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-shuttle}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# The all-gather-KV kernels wait on the peers' kernels; with the runner's 2 hardware queues the
+# overlapped grad reduce-scatter / param all-gather share the attention's queue and deadlock it.
+# turbo_agkv_mode fused / mega run on the flux FlyDSL attention.
+# Shuttle experiment config (Llama3.1-8B, CP8 by default): every CP method via PRIMUS_* switches.
+# Derived from llama3.1_8B-BF16-cp8-agkv-pretrain.yaml; adds the MegaUlysses switches.
+env:
+  GPU_MAX_HW_QUEUES: "8"
+  FLUX_ATTN_FLYDSL: ${SHUTTLE_FLUX_ATTN_FLYDSL}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:llama3.1_8B}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Llama3.1_8B_Pretrain"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      log_interval: 1
+
+      # hyper parameters
+      train_iters: ${PRIMUS_TRAIN_ITERS:20}
+      micro_batch_size: 1
+      global_batch_size: ${PRIMUS_GBS:8}
+      seq_length: ${PRIMUS_SEQ_LENGTH:32768}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:32768}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: ${PRIMUS_CP:8}
+      # p2p / all_gather / a2a; all_gather with use_turbo_attention runs Turbo's all-gather-KV attention
+      cp_comm_type: ${PRIMUS_CP_COMM_TYPE:all_gather}
+      expert_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data; mock data needs no tokenizer files
+      tokenizer_type: ${PRIMUS_TOKENIZER_TYPE:NullTokenizer}
+      vocab_size: 128256
+      mock_data: true
+      # unused by causal flash attention
+      create_attention_mask_in_dataloader: false
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo attention; false runs Transformer Engine's attention with its own CP for comparison
+      enable_primus_turbo: true
+      use_turbo_attention: ${PRIMUS_TURBO_ATTENTION:true}
+      turbo_agkv_mode: ${PRIMUS_TURBO_AGKV_MODE:fused}
+      use_turbo_mega_ulysses: ${PRIMUS_MEGA_ULYSSES:false}
+      turbo_mega_ulysses_impl: ${PRIMUS_MEGA_ULYSSES_IMPL:fused}
+      turbo_mega_ulysses_seq_chunk: ${PRIMUS_MEGA_ULYSSES_SEQ_CHUNK:256}
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
