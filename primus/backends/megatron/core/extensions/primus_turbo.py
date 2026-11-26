@@ -474,6 +474,18 @@ def _bridge_weight_grad(
     return x, PrimusTurboQuantizedTensorPair(data=quantized_weight, data_t=quantized_weight_trans)
 
 
+def _gfx1250_dense_fp8_block(quant_config) -> bool:
+    """gfx1250 dense block-FP8 path: it reads the optimizer-written FP8 weight cache off the parameter itself, so the
+    per-step QuantizedTensorPair of the multi-micro-batch path would only force the slower Triton fallback."""
+    if not quant_config.block_scaling():
+        return False
+    try:
+        from primus_turbo.pytorch.kernels.gemm import gemm_fp8_flydsl_gfx1250_impl
+    except ImportError:
+        return False
+    return gemm_fp8_flydsl_gfx1250_impl.enabled()
+
+
 def _main_grad_first_write(weight) -> bool:
     """PRIMUS_WGRAD_BETA0 first-write policy (Turbo-registered); False (accumulate) when unavailable."""
     try:
@@ -1562,7 +1574,7 @@ class PrimusTurboLinear(TELinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if get_num_microbatches() == 1:
+                if get_num_microbatches() == 1 or _gfx1250_dense_fp8_block(quant_config):
                     out = primus_turbo_torch.ops.gemm_fp8(
                         x,
                         weight,
@@ -1777,7 +1789,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if get_num_microbatches() == 1:
+                if get_num_microbatches() == 1 or _gfx1250_dense_fp8_block(quant_config):
                     out = primus_turbo_torch.ops.gemm_fp8(
                         x,
                         weight,
@@ -1991,7 +2003,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if get_num_microbatches() == 1:
+                if get_num_microbatches() == 1 or _gfx1250_dense_fp8_block(quant_config):
                     out = primus_turbo_torch.ops.gemm_fp8(
                         x,
                         weight,
@@ -2243,7 +2255,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if get_num_microbatches() == 1:
+                if get_num_microbatches() == 1 or _gfx1250_dense_fp8_block(quant_config):
                     out = primus_turbo_torch.ops.gemm_fp8(
                         inp,
                         weight,
