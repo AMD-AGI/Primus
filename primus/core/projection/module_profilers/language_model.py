@@ -761,6 +761,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         # -----------------------------------------------------------------
         embedding_module = None
         output_module = None
+        loss_owner = None
         all_layers = []
 
         if model is not None:
@@ -771,6 +772,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             all_layers = list(parts.layers)
             embedding_module = parts.embedding
             output_module = parts.output_layer
+            loss_owner = getattr(parts, "loss_owner", None)
         elif not is_simulation_mode:
             raise ValueError(
                 "model=None is only allowed when simulation backends are set "
@@ -863,6 +865,15 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     )
 
                 loss_profiler = self.sub_profilers["calc_loss"]
+                if not is_simulation_mode and loss_owner is not None and output_module is not None:
+                    weight = getattr(output_module, "weight", None)
+                    vocab_per_rank = (
+                        int(weight.shape[0])
+                        if weight is not None
+                        else self.config.model_config.padded_vocab_size
+                        // self.config.model_parallel_config.tensor_model_parallel_size
+                    )
+                    loss_profiler.benchmark_loss(loss_owner, vocab_per_rank, batch_size, seq_len)
                 loss_fwd = loss_profiler.measured_forward_time(batch_size, seq_len)
                 loss_bwd = loss_profiler.measured_backward_time(batch_size, seq_len)
                 loss_mem = loss_profiler.estimated_activation_memory(batch_size, seq_len)
@@ -874,6 +885,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 if is_rank_0:
                     if fla_fused:
                         fused_label = "(FLA fused linear CE, grads in fwd)"
+                    elif getattr(loss_profiler, "_measured", None):
+                        fused_label = "(measured)"
                     else:
                         fused_label = "(fused – 0)" if loss_fwd == 0.0 else "(unfused)"
                     print(
@@ -999,6 +1012,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     "forward_time_ms": attn_forward,
                     "backward_time_ms": attn_backward,
                     "activation_memory_bytes": attn_mem,
+                    "window_variants": getattr(attn_profiler, "window_variants", None),
                 },
                 "mlp": {
                     "forward_time_ms": mlp_forward,
