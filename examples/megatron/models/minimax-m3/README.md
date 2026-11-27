@@ -15,7 +15,9 @@ MSA is not Primus-Turbo attention. `msa_backend=flydsl` (the default) runs the k
 On gfx1250 they are the wave32 WMMA kernels (`*_w32.py`); a tree without that port fails at compile
 with `Cannot select: permlane32.swap`. `PRIMUS_MSA_BACKEND=eager` is the plain-PyTorch reference and
 does not need those kernels. The experts use Primus-Turbo's grouped GEMM and RMSNorm uses
-Primus-Turbo. DeepEP stays off by default (see Known issues).
+Primus-Turbo. DeepEP stays off by default (see Known issues). From two expert-parallel ranks on, the
+launcher runs the MoE layers on Primus-Turbo's MegaMoE with gradient accumulation fusion (see MegaMoE
+and gradient accumulation fusion).
 
 The default image is `amdprimus/amdprimus:tas-20261109`,
 `amdprimus/amdprimus@sha256:5e287acb708c936ae3a29771c92ceeb2f17c03d686e9a6cb254a0d974a5346cb`. It is
@@ -36,7 +38,9 @@ except the FlyDSL attention runs, which used a Primus-Turbo checkout through `TU
 that section up to tas-20261109 image used the 4c74631 image. Every run
 outside hipBLASLt tuning before that section used hipBLASLt's own kernels, which
 `HIPBLASLT_TUNING_OVERRIDE_FILE=` restores, and every run before Expert grouped GEMM on FlyDSL used
-Primus-Turbo's Triton grouped GEMM, which `TURBO_GROUPED_GEMM_BACKEND=default` restores.
+Primus-Turbo's Triton grouped GEMM, which `TURBO_GROUPED_GEMM_BACKEND=default` restores. Every
+multi-GPU run before MegaMoE and gradient accumulation fusion used Megatron's all-to-all dispatch
+without the fusion, which `USE_TURBO_MEGA_MOE=False GRADIENT_ACCUMULATION_FUSION=False` restores.
 
 ## Run
 
@@ -47,11 +51,14 @@ HIP_VISIBLE_DEVICES=1 bash examples/megatron/models/minimax-m3/run_minimax_m3_mi
 # The baseline: 4 GPUs, 8 layers, EP4, GBS 32
 GPUS_PER_NODE=4 PRIMUS_TOTAL_LAYERS=8 GBS=32 bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 
+# The same with two samples per micro-batch, the fastest 4-GPU setting measured
+GPUS_PER_NODE=4 PRIMUS_TOTAL_LAYERS=8 GBS=32 MBS=2 bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
+
 # Inside a container
 PRIMUS_LAUNCHER=direct bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 
-# MiniMax-M3.1-Flash (MSA in every layer, see MiniMax-M3.1-Flash), the baseline shape
-EXP=examples/megatron/configs/MI455X/minimax_m3_1_flash-BF16-pretrain.yaml GPUS_PER_NODE=4 PRIMUS_TOTAL_LAYERS=8 GBS=32 \
+# MiniMax-M3.1-Flash (MSA in every layer, see MiniMax-M3.1-Flash), the baseline shape at MBS 2
+EXP=examples/megatron/configs/MI455X/minimax_m3_1_flash-BF16-pretrain.yaml GPUS_PER_NODE=4 PRIMUS_TOTAL_LAYERS=8 GBS=32 MBS=2 \
     bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh
 ```
 
@@ -95,8 +102,15 @@ has; with a FlyDSL that lacks them, building an MSA layer stops with an `ImportE
   on M3.1-Flash, whose recomputation cost 2.7 ms a step on one GPU, where memory is not the limit.
 - MSA: `PRIMUS_MSA_BACKEND`, `flydsl` (default) or `eager`.
 - Experts: `USE_TURBO_GROUPED_GEMM` (default `True`; `False` is TE's grouped GEMM, one hipBLASLt GEMM
-  per expert) and `TURBO_GROUPED_GEMM_BACKEND` (default `bf16:flydsl`; `default` is Triton here, and
-  `--gradient_accumulation_fusion True` needs it). See Expert grouped GEMM on FlyDSL.
+  per expert) and `TURBO_GROUPED_GEMM_BACKEND` (`default` is Triton here, and gradient accumulation
+  fusion needs it; unset, it is `default` with the fusion and `bf16:flydsl` without). See Expert
+  grouped GEMM on FlyDSL.
+- MoE layers on more than one GPU: `USE_TURBO_MEGA_MOE` (`True`, `False`; default `auto`: on with 2 to
+  8 expert-parallel ranks when the Primus-Turbo in use has `primus_turbo/flydsl/mega/gfx1250/`, as
+  the default image's does) and `GRADIENT_ACCUMULATION_FUSION` (`True`, `False`; default `auto`: on
+  with MegaMoE, unless `TURBO_GROUPED_GEMM_BACKEND` names FlyDSL). `--use_turbo_mega_moe` and
+  `--gradient_accumulation_fusion` after the script name override them, and the launcher prints what
+  `auto` became. On one GPU both stay off. See MegaMoE and gradient accumulation fusion.
 - `TURBO_DIR` (default unset: the image's Primus-Turbo): a Primus-Turbo checkout built in place for
   the image, see above. A relative path is taken from the current directory.
 - Dense layers: `USE_TURBO_ATTENTION` runs Primus-Turbo attention in the three dense layers, with
@@ -137,9 +151,9 @@ and the experts), `fused_probs_mul` (the experts' routing-probs multiply), `defe
 scale of the BF16 gradients, which TE's `multi_tensor_scale_tensor` runs at a fifth of the memory
 bandwidth), `embedding_rows_grad` (the word-embedding gradient is added into the gradient buffer for
 the rows the micro-batch touches, not as a dense vocabulary-sized tensor), and around the MSA attention
-`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the gfx1250
-MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens per
-workgroup and stage a K/V tile they share once), and two launch cuts, `msa_shared_rope_tables` (the
+`msa_fused_qk_norm_rope`, `msa_fused_indexer_loss` and `msa_fused_select_plan`, and inside the
+gfx1250 MSA kernels `msa_shared_tile_staging` (the forward and dQ kernels run 4 / 2 adjacent tokens
+per workgroup and stage a K/V tile they share once), and two launch cuts, `msa_shared_rope_tables` (the
 cos / sin RoPE tables are kept per rotary `freqs` tensor, not recomputed in every layer call) and
 `msa_fused_indexer_loss_scatter` (the indexer-loss backward writes the block-score gradient from
 its last kernel, without the zero fill, clamp and `scatter_add_`; rows of up to 64 blocks, i.e.
@@ -149,7 +163,11 @@ separate `weight + 1` launches) and `msa_fused_indexer_input_norm` (the indexer'
 FP32 `rms_norm` of the residual stream cast back to BF16, as one Triton launch in ATen's reduction
 order instead of five launches). Each one compares
 itself with the path it replaces on its first call and keeps that path, with a warning in the log,
-if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade).
+if the bits differ (for example after a torch, Triton, Primus-Turbo or TE upgrade). On gfx1250,
+`msa_fused_indexer_loss` and `msa_shared_tile_staging` also bring in kernel paths that sum the same
+terms in another order (`msa_indexer_loss_one_pass` and `msa_aligned_block_walk`, below), so there
+no setting reproduces the bits of the reference FlyDSL kernels; the unit tests compare every path
+with the one it replaces.
 `grad_accum_group` is off in the yaml (0). Set to 4, the gradient buffer takes the gradients of four
 micro-batches in one pass, with the same additions and roundings in the same order, and holds up to
 three extra BF16 gradients per parameter of the rank: on the 4-layer proxy at GBS 8, 358.4 -> 343.4 ms
@@ -164,8 +182,76 @@ parameter all-gather under `overlap_param_gather` (`embedding_rows_grad` logs wh
 the embedding up again. `turbo_rmsnorm_bwd_config: [4, 2]` pins the kernel config of
 Primus-Turbo's RMSNorm backward, whose step-1 autotune otherwise decides the gradient bits (delete
 that line from the yaml to go back to the autotune). Pass `--<switch> False` to turn one of the others
-off; apart from `msa_shared_tile_staging` the FlyDSL MSA kernels have no switch other than
-`PRIMUS_MSA_BACKEND=eager`.
+off; apart from `msa_shared_tile_staging` and `msa_bwd_store_ds` (below) the FlyDSL MSA kernels
+have no switch other than `PRIMUS_MSA_BACKEND=eager`.
+
+**gfx1250 MSA kernel paths.** On gfx1250 the FlyDSL backend takes the following paths wherever a
+shape is eligible (other GPUs never take them); each is decided before any work and named in the
+log as below. All but two are compared with the path they replace on their first call for a shape,
+and the run keeps that path on a mismatch: the bit-identical ones (and the aligned walk's table)
+bit for bit, on that call's tensors; `msa_dq_from_ds`, `msa_indexer_loss_one_pass` and
+`msa_index_dk_scatter`, which sum in another order, within stated tolerances and over two
+identical runs, on seeded probe inputs of the call's shape, so that every rank and a resumed run
+decide alike (running out of memory in one of these checks stops the run instead of turning the
+path off). `msa_bounded_plan_chunks` (an integer rule for the plan's chunk sizes) and
+`msa_ds_chunk_store` (a store inside `msa_dq_from_ds`'s comparison) rely on the unit tests. All
+are deterministic: no atomics, fixed summation orders. Only `msa_bwd_store_ds` has a switch.
+
+Bit-identical to the path they replace: `msa_lean_masks` (the forward, dQ and dK/dV kernels and the
+indexer's scoring kernel skip the per-key causal compare and select on steps whose keys are all
+visible, which is every step outside a token's own block, and the indexer's dK kernel reads the
+zeros of its WMMA's unused half from a pad instead of selecting them per element; the skipped
+selects would return their input); with `msa_fused_select_plan`, `msa_select_plan_wide` (the
+fused selection for more than 64 blocks, i.e. above 8k tokens) and `msa_select_skip_fill` (no fill
+launches before the indexer's scoring kernel); with `msa_shared_tile_staging`, `msa_owner_carry`
+(the forward keeps each step's tile owner in its loop state instead of re-reading the table) and
+`msa_two_tile_slots` (the forward keeps one K and one V tile slot per wave instead of two of each:
+a step's V tile is copied while the step works on K, the next step's K tile while it works on V;
+a workgroup then takes 68 KB instead of 140 KB of LDS and four instead of two fit a compute unit);
+`msa_walk_one_wave` (the aligned walk's Triton kernel with one wave per program, which removes the
+workgroup barriers of its cross-wave reductions; the table it writes is the same integers); and
+`msa_dkdv_two_token_steps` (the backward's dK/dV kernel with two tokens per step instead of four,
+block size 128).
+
+The same terms summed in another order, so the last bits differ from the path they replace (same
+error against an FP32 reference): with `msa_shared_tile_staging`, `msa_aligned_block_walk` (the
+forward and dQ kernels walk each token's selected blocks in an order aligned with the token's
+neighbours: groups of four consecutive tokens, a block that an earlier token of the group selected
+is visited at that token's step, so the tokens of a workgroup meet a common block at the same step
+and `msa_shared_tile_staging` copies its K/V tiles once; the block selection and the terms of every
+sum are unchanged, the order of the sums over a token's blocks is not, so `o`, the attention mass
+per slot and `dq` differ in their last bits); with `msa_fused_indexer_loss`,
+`msa_indexer_loss_one_pass` (the slot mass and the sparse indexer KL of a layer in one Triton kernel
+and their backward in one more, instead of about 15 small launches forward and 6 backward;
+the same block-level KL, with the row sums, `exp` and `log` taken by Triton and, under
+`msa_aligned_block_walk`, in walk order; its check requires the loss within 5e-7, the gradient
+within 2e-5 and two identical runs); `msa_index_dk_scatter` (the indexer backward's dK
+chunk kernel, a one-hot masked WMMA product over all 128 keys of a block, becomes a scatter: each
+plan entry's `g * q` row is added in fp32 to its one winning key row, in plan order, one wave per
+chunk, and the same fixed-order reduce follows; only for an index dimension of 128 and a
+power-of-two top-k, the form that was compiled and run on the device, other shapes keep the WMMA
+kernel); and `msa_bounded_plan_chunks` (the backward's block plan in chunks of 256 to 384 entries:
+other groups of the same FP32 terms in dk, dv and d index k).
+
+`msa_bwd_store_ds` (default true) stores the backward's `dS` instead of recomputing it
+(`msa_dq_from_ds`): the dK/dV kernel already forms `dS = P * (dO V^T - delta)` for every token and
+selected block as a BF16 operand, so it also writes it to a transient workspace (4 KB per token, KV
+head and selected block: 1.1 GB per layer call at 4k, 8.6 GB at 32k; shapes above 16 GiB keep the
+recomputing kernel and say so once in the log) and a slim dQ kernel forms `dQ = scale * dS K` from
+it, without staging V or computing `S` and `dS` a second time; it runs four adjacent tokens per
+workgroup wherever S allows, whatever `msa_shared_tile_staging` says. The terms are the same; `dS`
+is the dK/dV kernel's instead of the dQ kernel's own and `delta` is summed in another order, so
+`dq`, `dk` and `dv` differ in their last bits. Two bit-identical paths come with it:
+`msa_ds_chunk_store` (the dK/dV kernel writes `dS` through one buffer descriptor per workgroup
+instead of one per record, while a (batch, KV head) slice of the workspace is under 2 GiB, i.e.
+below S 32768 at top-k 16) and `msa_dq_early_issue` (the slim dQ kernel issues the copies of the
+next step before it waits for those of the current one, so two steps' copies are in flight). The
+first call for a shape also runs the checks of the kernel paths: at S 32768 (MBS 1) one MSA layer
+call (selection, forward and backward) then peaks 25.2 GiB above its inputs, against 10.8 GiB on
+later calls. `--msa_bwd_store_ds False` keeps
+the dQ kernel that recomputes `S` and `dS`, with no workspace; on the M3.1-Flash 1-GPU proxy (S
+4096, MBS 1, GBS 8) the step then takes 356.8 ms instead of 351.4 ms with the same peak memory, and
+one MSA layer at S 32768 (selection, forward and backward) 12.31 ms instead of 10.37 ms.
 
 **Output.** The console log is written to `output/<team>/<user>/<exp>/train.log`. From the host,
 training runs as root in the new container, so the files it creates are owned by root. Inside a
@@ -689,6 +775,105 @@ step 1301 ms instead of 1106.
 - RCCL and stream memory time differ by rank as on M3 (RCCL 91–138 ms); they include waiting for the
   other ranks.
 
+## MegaMoE and gradient accumulation fusion
+
+From two expert-parallel ranks on, the launcher turns on Primus-Turbo's MegaMoE
+(`--use_turbo_mega_moe True`, `docs/04-technical-guides/mega-moe.md`) and
+`--gradient_accumulation_fusion True` with it:
+
+- MegaMoE replaces Megatron's all-to-all dispatcher and the grouped GEMM in the MoE layers with FlyDSL
+  kernels that move the tokens between the ranks themselves: dispatch + fc1, the activation, and fc2 +
+  combine. It takes 2 to 8 expert-parallel ranks, BF16, and a Primus-Turbo with
+  `primus_turbo/flydsl/mega/gfx1250/`; `USE_TURBO_MEGA_MOE=auto` checks the first and the last, so one
+  GPU and older images run as before.
+- With the fusion each weight-gradient GEMM adds into `main_grad` instead of a separate `+=`.
+  MegaMoE's weight-gradient kernel accumulates, which the FlyDSL grouped GEMM's does not (Expert
+  grouped GEMM on FlyDSL), and `main_grad` is BF16 in the MI455X configs (Settings), so hipBLASLt
+  keeps its BF16 kernels with beta 1. `GRADIENT_ACCUMULATION_FUSION=auto` follows MegaMoE;
+  `TURBO_GROUPED_GEMM_BACKEND`, which MegaMoE does not use for the experts, then defaults to
+  `default`, and naming FlyDSL there keeps the fusion off (that pair with MegaMoE was not run).
+
+`MBS` stays 1 by default; the fastest setting measured adds `MBS=2` (see Run).
+
+M3.1-Flash and M3 at the baseline shape (EP4, 8 layers, GBS 32) on the four GPUs of a
+fourth shared 4x MI455X node, image tas-20261109 and its Primus-Turbo, inside a container, one run at
+a time on the four otherwise idle GPUs. "Before" is 81e2ed8e0, the tree before this section, with the
+launcher's defaults of the time (all-to-all dispatch, FlyDSL grouped GEMM, no fusion). Every run
+finished 10 iterations with 0 NaN.
+
+| Model | Tree | MBS | MoE layers | ms/iter | Tokens/s/GPU | TFLOP/s/GPU | Memory/GPU | lm loss, iteration 10 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| M3.1-Flash | before | 1 | all-to-all, FlyDSL grouped GEMM | 734.4, 733.2 | 44,618, 44,691 | 1178.4, 1180.3 | 199.72 GB | 8.89776, 8.89776 |
+| M3.1-Flash | before | 2 | all-to-all, FlyDSL grouped GEMM | 672.5 | 48,722 | 1286.8 | 210.11 GB | 8.85600 |
+| M3.1-Flash | this | 1 | `USE_TURBO_MEGA_MOE=False GRADIENT_ACCUMULATION_FUSION=False` | 732.5 | 44,734 | 1181.5 | 199.72 GB | 8.89776 |
+| M3.1-Flash | this | 1 | MegaMoE and fusion (the default) | 667.5 | 49,094 | 1296.6 | 193.67 GB | 8.89757 |
+| M3.1-Flash | this | 2 | MegaMoE and fusion (the default) | 619.9, 620.1 | 52,864, 52,844 | 1396.1, 1395.6 | 199.50 GB | 8.85583, 8.85585 |
+| M3.1-Flash | this | 2 | MegaMoE, fusion and `moe_router_triton_gemm` (now the yaml default) | 601.8, 603.4 | 54,453, 54,306 | 1438.1, 1434.3 | 199.50 GB | 8.85597, 8.85573 |
+| M3.1-Flash | this | 2 | the yaml defaults alone (1bb730cb5, no flag on the command line) | 603.2 | 54,319 | 1434.5 | 199.50 GB | 8.85600 |
+| M3.1-Flash | this | 2 | MegaMoE and fusion, both overlaps (`overlap_grad_reduce`, `overlap_param_gather`) | 667.9 | 49,060 | 1295.7 | 200.52 GB | 8.85585 |
+| M3.1-Flash | this | 1 | `USE_TURBO_MEGA_MOE=False GRADIENT_ACCUMULATION_FUSION=False`, router Triton GEMM | 720.6 | 45,470 | 1200.9 | 199.72 GB | 8.89765 |
+| M3 | before | 1 | all-to-all, FlyDSL grouped GEMM | 738.0 | 44,404 | 1177.4 | 199.82 GB | 8.19548 |
+| M3 | this | 1 | MegaMoE and fusion (the default) | 671.8 | 48,776 | 1293.4 | 193.70 GB | 8.19543 |
+
+- MegaMoE and the fusion take 9.1% off the step at MBS 1 (667.5 against 734.4 ms, with 6 GB less
+  memory) and 7.8% at MBS 2 (619.9 against 672.5 ms, 10.6 GB less); M3 gains 9.0% (671.8 against
+  738.0 ms). At MBS 2 with them the step is 15.6% under the MBS 1 step before: 18.5% more tokens/s
+  per GPU in the same memory.
+- With both switched off this tree repeats the tree before it: the same loss and grad norm at
+  iteration 10 (8.897763, 6.864), at 732.5 ms.
+- MegaMoE's loss differs from all-to-all's in the fourth decimal, and its runs differ from each other
+  as much: the MBS 2 rows end at 8.85573 to 8.85597.
+- `moe_router_triton_gemm` (the FP32 router GEMMs on Primus's Triton kernels, as in the DeepSeek-V3
+  recipe) is now in the MI455X MiniMax-M3 yaml, and so in the M3.1-Flash yaml that extends it. On
+  the MBS 2 default it takes 602.6 ms against 620.0 (two runs each, -2.8%; 603.2 ms when the yaml alone sets it). With MegaMoE and the
+  fusion off, it changes the loss in the fifth decimal (8.897654 against 8.897763) and takes 720.6
+  against 732.5 ms at MBS 1. It was measured on M3.1-Flash only.
+- Two expert-parallel ranks (EP2, 2 GPUs, 4 layers, GBS 16, MBS 1, the baseline shape at half the
+  ranks): 352.5 ms with MegaMoE and the fusion (92,969 tokens/s/GPU, 130.6 GB) against 370.7 ms
+  before (88,401 tokens/s/GPU, 133.4 GB), -4.9%. The lm loss at iteration 10 is 9.964003 against
+  9.963620.
+
+Where the step goes on M3.1-Flash: GPU kernel time of profiled iteration 7 on all four ranks, in ms,
+the mean of the ranks. Profiling makes the three steps 988, 727 and 661 ms.
+
+| Kernels | before, MBS 1 | before, MBS 2 | MegaMoE and fusion, MBS 2 |
+| --- | --- | --- | --- |
+| MSA kernels, q/k norm and RoPE, indexer | 91.6 | 89.5 | 85.2 |
+| hipBLASLt GEMMs | 287.7 | 306.9 | 315.1 |
+| expert GEMMs: FlyDSL grouped GEMM, or MegaMoE's dispatch + fc1, activation and fc2 + combine kernels | 90.1 | 111.5 | 143.6 |
+| router, permute and sort, MegaMoE's dispatch prologue | 79.1 | 37.0 | 19.9 |
+| RCCL all-to-all of the MoE layers | 100.7 | 55.3 | – |
+| RCCL gradient reduce-scatter and parameter all-gather | 16.8 | 16.5 | 16.4 |
+| gradient `+=` into `main_grad` | 42.7 | 22.9 | 0.5 |
+| the rest: optimizer, cross entropy, norms, embedding | 52.6 | 48.6 | 48.2 |
+| total kernel time | 761.2 | 688.1 | 628.9 |
+| kernel launches | 14,565 | 6,173 | 4,753 |
+
+- Under the MoE layers' experts (GEMMs, dispatch and combine, all-to-all, permute) the kernel time
+  goes from 254.3 ms to 193.7 with MBS 2 and to 153.4 with MegaMoE. MegaMoE's GEMM kernels include the
+  transfer between the ranks and the wait for the other ranks, so their 143.6 ms is not GEMM time
+  alone: 222.7 TFLOP in them is 1551 TFLOP/s, against 2472 for the FlyDSL grouped GEMM alone at MBS 1
+  and 1996 at MBS 2.
+- The fusion removes the `+=` kernels (22.9 ms at MBS 2) for 5 ms more in hipBLASLt's backward GEMMs
+  (203.8 against 198.6 ms).
+- MBS 2 halves the launches and the all-to-all time. Its hipBLASLt forward GEMMs are slower, 2087
+  TFLOP/s against 2597 at MBS 1 (about 20 ms a step): the tuning file (hipBLASLt tuning) holds the
+  shapes of a 4096-token micro-batch only, so the 8192-token GEMMs run hipBLASLt's own choice. Not
+  tuned here.
+- The MSA kernels (forward, dK/dV, dQ) take 63.4 ms for 38.8 TFLOP, 612 TFLOP/s, as before.
+
+**Gradient reduce overlap.** With `--overlap_grad_reduce True`, MegaMoE used to stop the training on
+gfx1250 within the first steps, all four GPUs busy and no progress: a rank whose reduce-scatter kernel
+and MegaMoE backward kernel had started in the opposite order to its peers' waited for them and they
+for it. Each MegaMoE backward stage now first finishes the reduce-scatters issued before it
+(`megatron.turbo.mega_moe_grad_reduce_order`, `turbo_mega_moe_ordered_grad_reduce`, on by default on
+gfx1250; see the guide above). With it, `--overlap_grad_reduce True --overlap_param_gather True` ran
+M3.1-Flash at 752.6 ms at MBS 1 for 10 iterations (loss 8.89763), against 667.5 ms without them, and
+667.9 ms at MBS 2, against 620.0. The yaml keeps both off. The runs of the overlap rows were
+run with a debug patch in the container that makes MegaMoE's cross-rank flag wait give up after one
+timeout (500 M cycles) instead of spinning forever, so a hang could not hold the GPUs; a give-up would
+void the run. No wait gave up in these runs (no timeout message in the logs).
+
 ## How the defaults were chosen
 
 On the older bases dad0a081 and a624bb95 (Megatron-LM d3528a21), one GPU unless noted, with TE's
@@ -817,8 +1002,8 @@ Do not run:
 
 - `--turbo_fused_grouped_gemm True` and `--use_turbo_fused_act_with_probs True` assert
   `glu_linear_offset == 0`; M3's `swigluoai` uses 1.0. The second also rules out sync-free stage 3.
-- `--gradient_accumulation_fusion True` with `TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl` (the default):
-  the launcher stops; see Expert grouped GEMM on FlyDSL.
+- `--gradient_accumulation_fusion True` with `TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl` (the default
+  on one GPU): the launcher stops; see Expert grouped GEMM on FlyDSL.
 - `--fp8 e4m3 --fp8_recipe blockwise` and `--fp8_recipe mxfp8` stop at TE's arch check (`Device arch
   gfx94x or gfx95x is required for FP8 block scaling execution.`, `Device arch gfx95x or newer is
   required for MXFP8 execution.`). TE 2.19.0.dev0 leaves gfx1250 as a TODO until its GEMM is available.
@@ -837,7 +1022,9 @@ Do not run:
 - Pipeline parallel. The launcher allows `PRIMUS_PP`, but no PP run has been done. Tensor parallel
   and context parallel are not implemented for MSA.
 - EP8 and more than one node.
-- MegaMoE (see Known issues), and DeepEP beyond one run per model at EP4 on 64 CUs (tas-20261109 image).
+- DeepEP beyond one run per model at EP4 on 64 CUs (tas-20261109 image), and MegaMoE at EP8, where
+  the launcher turns it on as well. At EP2 it is measured on 4 layers only (MegaMoE section).
+- `moe_router_triton_gemm` on the 3-dense-layer M3 experiment, at EP4 and at EP2.
 - A real dataset and real routing. These runs are mock data with uniform routing.
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).
@@ -876,8 +1063,10 @@ Do not run:
 - **MegaMoE.** `--use_turbo_mega_moe True` takes effect only at EP 2 to 8. With tas-20261019's
   Primus-Turbo, its FlyDSL `dispatch_prologue_kernel` does not build for gfx1250 at EP2 (`lld
   invocation failed`, then `All autotune configs failed`) in the first forward. The Primus-Turbo of
-  the 4c74631 image and of the default image has the gfx1250 BF16 MegaMoE kernels (Primus-Turbo #582);
-  they have not been run with M3.
+  the 4c74631 image and of the default image has the gfx1250 BF16 MegaMoE kernels (Primus-Turbo #582),
+  and the launcher uses them from EP2 on (MegaMoE and gradient accumulation fusion). With
+  `overlap_grad_reduce` they need the `megatron.turbo.mega_moe_grad_reduce_order` patch, on by default
+  on gfx1250; without it the training stops making progress within the first steps.
 - **gfx1250 MSA kernels.** `msa_backend=flydsl` on gfx1250 needs the wave32 WMMA port. It does not
   use `v_permlane32_swap`, MFMA, or `ds_read_tr16`. gfx950 still uses the original kernels; only the
   dispatch changed. The kernels address buffers with 32-bit offsets, so each tensor must stay under

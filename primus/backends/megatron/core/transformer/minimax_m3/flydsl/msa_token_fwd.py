@@ -96,6 +96,12 @@ def check_buffer_bytes(**tensors):
         )
 
 
+def kernel_name(base: str, *tags: str) -> str:
+    """Symbol of a kernel in profiles and ISA dumps: ``base`` and the tags of the build options it
+    was built with, joined by ``_`` (empty tags dropped), e.g. ``msa_fwd_w32_wg4_slse_lean``."""
+    return "_".join([base, *(t for t in tags if t)])
+
+
 def build_fwd(
     num_kv_heads: int,
     topk: int,
@@ -181,7 +187,17 @@ def build_fwd(
         sl_off = allocator._align(allocator.ptr, 16)  # per-wave slot_lse staging
         allocator.ptr = allocator._align(sl_off + (NW * HPW * SLS + 1) * 4, 16)
 
-    @flyc.kernel(known_block_size=[NTHREADS, 1, 1])
+    name = kernel_name(
+        "msa_fwd",
+        f"w{NW}" if NW > 1 else "",
+        "slse" if emit_slot_lse else "",
+        "" if remap == "lpt" else f"remap_{remap}",
+        "" if step_keys == 16 else f"sk{step_keys}",
+        "" if k_via_lds else "kglobal",
+        "" if pipeline else "nopipe",
+    )
+
+    @flyc.kernel(known_block_size=[NTHREADS, 1, 1], name=name)
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -774,6 +790,9 @@ def msa_token_fwd(
     block_size=128,
     return_slot_lse=False,
     shared_tiles=False,
+    step_mask_skip=False,
+    owner_carry=False,
+    two_tile_slots=False,
     **config,
 ):
     """MSA forward.
@@ -789,6 +808,11 @@ def msa_token_fwd(
             share of the head's attention.
         shared_tiles: gfx1250 only (``msa_shared_tile_staging``): adjacent tokens share a
             workgroup and one staging of each K/V tile they have in common; same bits.
+        step_mask_skip: gfx1250 only (``msa_lean_masks``): steps whose keys are all visible
+            skip the per-key causal compare and select; same bits.
+        owner_carry, two_tile_slots: gfx1250 only (``msa_owner_carry``,
+            ``msa_two_tile_slots``): the lockstep kernel with the tile owner in its loop state,
+            and with two LDS tile slots per wave instead of four; same bits.
         config: ``build_fwd`` tuning knobs (``step_keys``, ``k_via_lds``, ``remap``,
             ``waves``).
 
@@ -811,6 +835,9 @@ def msa_token_fwd(
             block_size,
             return_slot_lse,
             shared_tiles=shared_tiles,
+            step_mask_skip=step_mask_skip,
+            owner_carry=owner_carry,
+            two_tile_slots=two_tile_slots,
             **config,
         )
     S, B, Hq, Dq = q.shape

@@ -73,10 +73,12 @@ from primus_turbo.flydsl.utils import buffer_ops
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
     HPW,
     KS,
+    MAX_BUFFER_BYTES,
     STRIDE,
     TK,
     D,
     check_buffer_bytes,
+    kernel_name,
 )
 
 _LOG2E = 1.4426950408889634
@@ -152,7 +154,7 @@ def build_dq(num_kv_heads: int, topk: int, block_size: int, scale: float):
     v_off = allocator._align(k_off + NBUF * BUF * 2, 16)
     allocator.ptr = allocator._align(v_off + NBUF * BUF * 2, 16)
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[THREADS, 1, 1], name=kernel_name("msa_bwd_dq"))
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -370,7 +372,9 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float, topk: int, toke
     dl_off = allocator._align(lse_off + THREADS * 4, 16)
     allocator.ptr = allocator._align(dl_off + THREADS * 4, 16)
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(
+        known_block_size=[THREADS, 1, 1], name=kernel_name("msa_bwd_dkdv", "" if TPS == 4 else f"step{TPS}")
+    )
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -632,7 +636,7 @@ def build_dkdv_reduce(num_kv_heads: int, block_size: int):
     SPLIT = NE // SLICE
     assert NE % SLICE == 0
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[THREADS, 1, 1], name=kernel_name("msa_bwd_dkdv_reduce"))
     def k_fn(
         WS: fx.Tensor,
         CHPTR: fx.Tensor,
@@ -748,7 +752,9 @@ def build_inverted_pass(topk: int, nb_cap: int, place: bool):
     cnt_off = allocator._align(tab_off + SUB * topk * 4, 16)
     allocator.ptr = allocator._align(cnt_off + (nb_cap + 1) * 4, 16)
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(
+        known_block_size=[NTH, 1, 1], name=kernel_name("msa_plan_inverted", "place" if place else "count")
+    )
     def k_fn(
         TBL: fx.Tensor,
         RUNS: fx.Tensor,
@@ -940,7 +946,7 @@ def build_chunk_writer():
     ``CHPTR`` and write ``(row, begin, end)``, or zeros past the live chunks."""
     NTH = 256
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(known_block_size=[NTH, 1, 1], name=kernel_name("msa_plan_chunk_rows"))
     def k_fn(
         PTR: fx.Tensor, CHPTR: fx.Tensor, CHUNKS: fx.Tensor, NROWS: fx.Int32, NCH: fx.Int32, SIZE: fx.Int32
     ):
@@ -996,8 +1002,62 @@ def build_chunk_writer():
 _CHUNK_WRITER: list = []
 
 
-def plan_chunks(ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64):
-    """Split every CSR row into equal-sized token chunks, about ``target_chunks`` in all.
+# msa_bounded_plan_chunks: entries per chunk = ceil(capacity / target), kept between the two bounds,
+# and never more than BOUNDED_CHUNK_COUNT chunks (plus one per row)
+BOUNDED_CHUNK_TARGET = 4096
+BOUNDED_CHUNK_MIN = 256
+BOUNDED_CHUNK_MAX = 384
+BOUNDED_CHUNK_COUNT = 8192
+# FP32 dK and dV partials of one chunk (block 128, D 128): the largest per-chunk workspace of the plan's kernels
+BOUNDED_CHUNK_WS_BYTES = 2 * 128 * 128 * 4
+
+
+def plan_chunk_size(
+    max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64, bounded: bool = False
+) -> int:
+    """Entries per chunk of a :class:`BlockPlan` whose table holds ``max_tokens`` entries
+    (``B * Hkv * S * topk``, its capacity).
+
+    The reference rule aims at ``target_chunks`` chunks in all: ``max(min_chunk, ceil(max_tokens /
+    target_chunks))``, 128 entries at S 4096 and 1024 at S 32768 (B 1, 4 KV heads, top-k 16).
+
+    ``bounded`` (``msa_bounded_plan_chunks``): ``ceil(max_tokens / BOUNDED_CHUNK_TARGET)`` kept
+    within ``[BOUNDED_CHUNK_MIN, BOUNDED_CHUNK_MAX]``. A chunk is one workgroup of the dK/dV and
+    index dK kernels, and its size has two costs. Short chunks pay the workgroup's fixed part (the
+    K/V prologue, the pipeline fill, 131 KB of FP32 partials and their reduce) too often; long
+    chunks make a tail, because a workgroup takes its steps one after another and the kernel
+    cannot end before its longest chunk does while the rows of a causal table are very uneven.
+    Past ``BOUNDED_CHUNK_MAX * BOUNDED_CHUNK_COUNT`` entries the size grows again,
+    ``ceil(max_tokens / BOUNDED_CHUNK_COUNT)``, so a plan never has more than that many chunks plus
+    one per row and the kernels' FP32 partial workspace (131 KB per chunk for dK / dV) stays
+    bounded as the reference rule's does. The constants do not depend on the shape, so the rule
+    holds for any S, B and top-k."""
+    if bounded:
+        size = min(BOUNDED_CHUNK_MAX, max(BOUNDED_CHUNK_MIN, -(-max_tokens // BOUNDED_CHUNK_TARGET)))
+        return max(size, -(-max_tokens // BOUNDED_CHUNK_COUNT))
+    return max(min_chunk, -(-max_tokens // target_chunks))
+
+
+def plan_chunk_size_of(
+    n_rows: int, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64, bounded: bool = False
+) -> int:
+    """The chunk size :func:`plan_chunks` uses for a table of ``n_rows`` rows: :func:`plan_chunk_size`,
+    except that a bounded plan whose worst-case chunk count would take the dK / dV partials past
+    the kernels' 32-bit buffer limit falls back to the reference rule. An integer function of the
+    shape, decided before any work; every builder of a :class:`BlockPlan` that can see such row
+    counts (``plan_chunks``, ``select_plan``'s wide plan) takes its size from here."""
+    size = plan_chunk_size(max_tokens, target_chunks, min_chunk, bounded)
+    if bounded and (n_rows + -(-max_tokens // size)) * BOUNDED_CHUNK_WS_BYTES >= MAX_BUFFER_BYTES:
+        # B * Hkv * n_blocks rows of 8192 and more: the reference rule
+        size = plan_chunk_size(max_tokens, target_chunks, min_chunk)
+    return size
+
+
+def plan_chunks(
+    ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, min_chunk: int = 64, bounded: bool = False
+):
+    """Split every CSR row into equal-sized token chunks, about ``target_chunks`` in all
+    (``bounded``: the ``msa_bounded_plan_chunks`` size, see :func:`plan_chunk_size`).
 
     Every row gets at least one chunk, so rows no token selected still write zero
     partials. Sync-free: the chunk size comes from ``max_tokens`` (the table's
@@ -1010,7 +1070,7 @@ def plan_chunks(ptr: torch.Tensor, max_tokens: int, target_chunks: int = 2048, m
     """
     n_rows = ptr.numel() - 1
     assert n_rows < 2**_SEARCH_STEPS
-    size = max(min_chunk, -(-max_tokens // target_chunks))
+    size = plan_chunk_size_of(n_rows, max_tokens, target_chunks, min_chunk, bounded)
     per_row = torch.div(ptr[1:] - ptr[:-1] + (size - 1), size, rounding_mode="floor").clamp_min_(1)
     chunk_ptr = torch.cat([torch.zeros_like(ptr[:1]), torch.cumsum(per_row, 0, dtype=torch.int32)])
 
@@ -1041,21 +1101,204 @@ class BlockPlan(NamedTuple):
     table: Optional[torch.Tensor] = None
 
 
-def build_block_plan(block_table: torch.Tensor, block_size: int = 128) -> BlockPlan:
-    """:class:`BlockPlan` for a ``[B, Hkv, S, topk]`` block table (-1 padded)."""
+def build_block_plan(
+    block_table: torch.Tensor, block_size: int = 128, bounded_chunks: bool = False
+) -> BlockPlan:
+    """:class:`BlockPlan` for a ``[B, Hkv, S, topk]`` block table (-1 padded).
+
+    ``bounded_chunks`` (``msa_bounded_plan_chunks``): the chunk size of
+    :func:`plan_chunk_size` with ``bounded``. The entries and their order are the same; the FP32
+    partials of dK / dV and of the index dK are summed over other groups of them."""
     n_blocks = -(-block_table.shape[2] // block_size)
     ptr, entries = build_inverted_table(block_table, n_blocks)
-    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, entries.numel())
+    chunks, chunk_ptr, n_chunks = plan_chunks(ptr, entries.numel(), bounded=bounded_chunks)
     return BlockPlan(ptr, entries, chunks, chunk_ptr, n_chunks, n_blocks)
+
+
+def probe_block_table(
+    B: int, H: int, S: int, topk: int, block_size: int, device, seed: int = 0
+) -> torch.Tensor:
+    """An int32 ``[B, H, S, topk]`` table like the indexer's selection, for the first-call checks of
+    the paths that sum in another order: each token's own block in slot 0, then up to ``topk - 1``
+    of its earlier blocks drawn from a private generator, ``-1`` past its visible blocks. A
+    function of the shape and ``seed`` only, so every rank and a resumed run check the same table."""
+    n_blocks = -(-S // block_size)
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    scores = torch.rand((B, H, S, n_blocks), generator=gen, device=device)
+    own = (torch.arange(S, device=device) // block_size).view(S, 1)
+    blocks = torch.arange(n_blocks, device=device)
+    scores = scores.masked_fill(blocks > own, -1.0).masked_fill(blocks == own, 2.0)
+    width = min(topk, n_blocks)
+    values, table = scores.topk(width, dim=-1)
+    table = table.masked_fill(values < 0, -1).to(torch.int32)
+    if width < topk:
+        table = torch.nn.functional.pad(table, (0, topk - width), value=-1)
+    return table.contiguous()
 
 
 _DQ_CACHE: dict = {}
 _DKDV_CACHE: dict = {}
 _RED_CACHE: dict = {}
 
+# msa_dq_from_ds: the first-call verdict per shape, the tolerance of that comparison (relative
+# Frobenius error of dq / dk / dv between the two paths; they agree to ~1e-4 when both are right)
+# and the largest dS buffer the path may allocate
+_DS_OK: dict = {}
+_DS_CHECK_TOL = 1.0e-3
+_DS_MAX_BYTES = 16 * 2**30
+# msa_ds_chunk_store: the dK/dV kernel addresses a (batch, KV head) slice of the dS buffer with 32-bit
+# byte offsets through one descriptor, so the slice must stay under MAX_BUFFER_BYTES like every
+# other buffer (a masked lane's store goes to byte 0x7FFFFFFF, which must fall outside it); other
+# slices keep one descriptor per record
+_DS_SLICE_MAX_BYTES = MAX_BUFFER_BYTES
+
+
+def ds_chunk_store_fits(S: int, topk: int, block_size: int) -> bool:
+    """``msa_ds_chunk_store``: whether a (batch, KV head) slice of the dS buffer, ``S * topk``
+    records, is under ``_DS_SLICE_MAX_BYTES`` (S 32768 at top-k 16 is exactly 2 GiB: per-record
+    stores)."""
+    return S * topk * block_size * HPW * 2 < _DS_SLICE_MAX_BYTES
+
+
+def _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots) -> bool:
+    """Shapes ``dq_from_ds`` takes: the dS buffer (4 KB per table entry at block size 128) fits
+    ``_DS_MAX_BYTES``, and the walk's slot table, when there is one, is the int32 table's twin."""
+    if B * Hkv * S * topk * block_size * HPW * 2 > _DS_MAX_BYTES:
+        return False
+    if walk_slots is not None and (
+        walk_slots.shape != block_table.shape
+        or walk_slots.dtype != torch.int32
+        or not walk_slots.is_contiguous()
+    ):
+        return False
+    return True
+
+
+_DS_NOT_TAKEN_LOGGED: set = set()
+
+
+def _log_ds_not_taken(B, Hkv, S, topk, block_size, walk_slots) -> None:
+    """Once per shape: why ``_ds_eligible`` keeps the dQ kernel that recomputes S and dS."""
+    key = (S, B, Hkv, topk, block_size, walk_slots is not None)
+    if key in _DS_NOT_TAKEN_LOGGED:
+        return
+    _DS_NOT_TAKEN_LOGGED.add(key)
+    from primus.core.utils.module_utils import log_rank_0
+
+    size = B * Hkv * S * topk * block_size * HPW * 2
+    if size > _DS_MAX_BYTES:
+        why = f"its dS buffer would take {size / 2**30:.1f} GiB (limit {_DS_MAX_BYTES / 2**30:.0f} GiB)"
+    else:
+        why = "the walk's slot table is not the int32 table's twin"
+    log_rank_0(f"[msa_dq_from_ds {key}] not taken: {why}; the dQ kernel recomputes S and dS")
+
+
+# msa_dkdv_two_token_steps: the gfx1250 dK/dV kernel's 4-token step needs 8 waves of 16 keys
+# (sparse_block_size 128); the 2-token layout is offered for exactly that kernel
+_TWO_TOKEN_STEP_BLOCK = 128
+
+
+def dkdv_two_token_steps_eligible(block_size: int, w32: bool) -> bool:
+    """``msa_dkdv_two_token_steps``: whether the dK/dV kernel with two tokens per step may stand
+    in for the one with four. A rule on the kernel family and the block size alone (the layout
+    is the same at every S, B and selection; a longer table only means more chunks of the same
+    kind), decided before any buffer or kernel is made."""
+    return bool(w32) and int(block_size) == _TWO_TOKEN_STEP_BLOCK
+
+
+def _ds_probe(S, B, Hkv, topk, block_size, softmax_scale, device, with_walk, seed=0):
+    """Probe inputs of one MSA backward call's shape for the ``dq_from_ds`` check: ``(args,
+    plan, walk_slots)`` with ``args`` as ``msa_token_bwd`` takes them. q, k, v and dout as the unit
+    tests draw them (dout scaled by 0.05) from a private generator, a :func:`probe_block_table`
+    with its plan (the selection's chunk rule) and, ``with_walk``, its aligned walk (the PyTorch
+    reference of ``block_walk``); out and lse from the forward over the table the backward walks."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
+        bounded_plan_chunks_enabled,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
+        msa_token_fwd_wave32,
+    )
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    def randn(*shape):
+        return torch.randn(shape, generator=gen, device=device, dtype=torch.bfloat16)
+
+    Hq = HPW * Hkv
+    q, k, v = randn(S, B, Hq, D), randn(S, B, Hkv, D), randn(S, B, Hkv, D)
+    dout = randn(S, B, Hq, D) * 0.05
+    table = probe_block_table(B, Hkv, S, topk, block_size, device, seed)
+    plan = build_block_plan(table, block_size, bounded_plan_chunks_enabled())
+    walk_slots = None
+    if with_walk:
+        table, slots = block_walk._reference(table)
+        walk_slots = slots.to(torch.int32).contiguous()
+    out, lse = msa_token_fwd_wave32(q, k, v, table, softmax_scale, block_size)
+    return (dout, q, k, v, out, lse, table, softmax_scale, block_size), plan, walk_slots
+
+
+def _ds_checked(key, device, kwargs, with_walk) -> bool:
+    """``dq_from_ds`` for the shape of ``key``, decided once on :func:`_ds_probe` inputs of that
+    shape, so that every rank and a resumed run decide alike: kept only if two of its runs give
+    the same bits and its ``dq``, ``dk`` and ``dv`` are finite and within ``_DS_CHECK_TOL`` of the
+    reference kernels'. ``kwargs``: the call's other options (the variant that will be used).
+    Nothing is decided (False, not cached) under graph capture. A GPU fault or running out of
+    memory is raised; any other error keeps the reference kernels."""
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    from primus.backends.megatron.core.fusions import bitwise_check
+    from primus.core.utils.module_utils import log_rank_0, warning_rank_all
+
+    S, B, Hkv, topk, block_size, softmax_scale = key[:6]
+    try:
+        args, plan, walk_slots = _ds_probe(S, B, Hkv, topk, block_size, softmax_scale, device, with_walk)
+        want = msa_token_bwd(*args, plan=plan, **kwargs)
+        got = msa_token_bwd(*args, plan=plan, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
+        again = msa_token_bwd(*args, plan=plan, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
+        same = all(bitwise_check.same_bits(g, a) for g, a in zip(got, again))
+        errs = [
+            ((g.double() - w.double()).norm() / w.double().norm().clamp_min(1e-30)).item()
+            for g, w in zip(got, want)
+        ]
+        finite = all(bool(torch.isfinite(g.float()).all()) for g in got)
+        ok = same and finite and all(e <= _DS_CHECK_TOL for e in errs)
+        why = "relative difference dq / dk / dv " + " / ".join(f"{e:.2e}" for e in errs)
+        why += f", two runs identical: {same}"
+    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault or OOM keeps the reference kernels
+        if bitwise_check._device_error(e) or isinstance(e, torch.cuda.OutOfMemoryError):
+            raise
+        ok, why = False, f"{type(e).__name__}: {e}"
+    _DS_OK[key] = ok
+    if ok:
+        log_rank_0(
+            f"[msa_dq_from_ds {key}] agrees with the reference dQ kernel on probe inputs ({why}); in use"
+        )
+    else:
+        warning_rank_all(f"[msa_dq_from_ds {key}] not used ({why}); keeping the reference dQ kernel")
+    return ok
+
 
 def msa_token_bwd(
-    dout, q, k, v, out, lse, block_table, softmax_scale=None, block_size=128, plan=None, shared_tiles=False
+    dout,
+    q,
+    k,
+    v,
+    out,
+    lse,
+    block_table,
+    softmax_scale=None,
+    block_size=128,
+    plan=None,
+    shared_tiles=False,
+    step_mask_skip=False,
+    dq_from_ds=False,
+    walk_slots=None,
+    ds_chunk_store=False,
+    dq_early_issue=False,
+    dkdv_two_token_steps=False,
 ):
     """Gradients of ``msa_token_fwd``.
 
@@ -1071,6 +1314,43 @@ def msa_token_bwd(
             ``dq`` and ``delta`` (``bitwise_check``); on a mismatch the run keeps one token per
             workgroup.
 
+        step_mask_skip: gfx1250 only (``msa_lean_masks``): the dQ kernel's fully visible steps
+            skip the per-key causal compare and select (``build_dq_w32``). Checked like
+            ``shared_tiles``: the first call for a shape compares every bit of ``dq`` and ``delta``
+            with the kernel without it and keeps that kernel on a mismatch.
+
+        dq_from_ds: gfx1250 only (``msa_dq_from_ds``, ``msa_bwd_store_ds``): the dK/dV kernel also
+            writes its bf16 ``dS`` operand per (token, selected block) and a slim dQ kernel
+            (``build_dq_ds_w32``) forms ``dQ = scale * dS K`` from it, instead of the dQ kernel
+            staging V and recomputing ``S`` and ``dS`` itself; ``delta`` comes from one Triton
+            launch. Same terms, the ``dS`` of the dK/dV kernel instead of the dQ kernel's own (they
+            differ in the last bit of ``S``) and ``delta`` summed in another order. Deterministic:
+            every ``dS`` record is written by exactly one workgroup. The first call for a shape
+            runs both paths on probe inputs of that shape (:func:`_ds_checked`, the same verdict
+            on every rank) and keeps the reference kernels unless two runs of ``dq_from_ds`` give
+            the same bits and its ``dq``, ``dk`` and ``dv`` agree within ``_DS_CHECK_TOL`` (and
+            are finite). Shapes whose ``dS`` buffer would exceed ``_DS_MAX_BYTES`` keep the
+            reference kernels (logged once per shape).
+        ds_chunk_store: with ``dq_from_ds`` (``msa_ds_chunk_store``): the same ``dS`` bytes and the same
+            arithmetic: the dK/dV kernel stores ``dS`` through one buffer descriptor per
+            workgroup instead of one per record (``build_dkdv_w32``), only while a (batch, KV
+            head) slice of the buffer is under ``_DS_SLICE_MAX_BYTES``; larger shapes keep the
+            per-record stores. Bit-identical to ``dq_from_ds`` without it (unit-tested); the
+            first-call comparison of ``dq_from_ds`` runs with it.
+        dq_early_issue: with ``dq_from_ds`` (``msa_dq_early_issue``): the slim dQ kernel issues the
+            next step's copies before it waits for the current step's (``build_dq_ds_w32``,
+            ``early_issue``; lockstep layout only). Same tiles and arithmetic: the first call for a
+            shape compares every bit of ``dq`` with the kernel without it, on that call's ``dS``
+            (``bitwise_check``), and keeps that kernel on a mismatch.
+        walk_slots: with ``dq_from_ds`` and a permuted ``block_table`` (``msa_aligned_block_walk``),
+            the int32 ``[B, Hkv, S, topk]`` slot of each walk position in the table ``plan`` was
+            built from.
+        dkdv_two_token_steps: gfx1250 only (``msa_dkdv_two_token_steps``): the dK/dV kernel takes
+            two tokens per step instead of four (``build_dkdv_w32``, ``tokens_per_step``). Same
+            entries, accumulators and order; the first call for a shape compares every bit of
+            the fp32 chunk partials (and of dS with ``dq_from_ds``) with the four-token kernel
+            and keeps that one on a mismatch.
+
     Returns:
         ``dq`` ``[S, B, Hq, 128]``, ``dk`` and ``dv`` ``[S, B, Hkv, 128]``, bf16.
     """
@@ -1083,9 +1363,46 @@ def msa_token_bwd(
     dout, q, k, v, block_table = (t.contiguous() for t in (dout, q, k, v, block_table))
     lse = lse.contiguous()
     if plan is None:
+        if walk_slots is not None:
+            raise ValueError("walk_slots needs the plan of the table the walk permutes")
         plan = build_block_plan(block_table, block_size)
     n_blocks = plan.n_blocks
     assert n_blocks == -(-S // block_size)
+
+    w32 = "gfx1250" in get_hip_arch()
+    # msa_dq_from_ds: eligibility first (gfx1250, a dS buffer that fits), then one comparison of
+    # the two paths per shape; "force" is that comparison's own call
+    use_ds = False
+    ds_ok = bool(dq_from_ds) and w32 and _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots)
+    if dq_from_ds and w32 and not ds_ok:
+        _log_ds_not_taken(B, Hkv, S, topk, block_size, walk_slots)
+    if ds_ok:
+        if dq_from_ds == "force":
+            use_ds = True
+        else:
+            kwargs = dict(shared_tiles=shared_tiles, step_mask_skip=step_mask_skip)
+            if ds_chunk_store:
+                kwargs["ds_chunk_store"] = True  # the comparison runs the variant that will be used
+            if dq_early_issue:
+                kwargs["dq_early_issue"] = True
+            if dkdv_two_token_steps:
+                kwargs["dkdv_two_token_steps"] = True
+            key = (
+                S,
+                B,
+                Hkv,
+                topk,
+                block_size,
+                float(softmax_scale),
+                walk_slots is not None,
+                bool(ds_chunk_store),
+                bool(dq_early_issue),
+                bool(dkdv_two_token_steps),
+            )
+            decided = _DS_OK.get(key)
+            if decided is None:
+                decided = _ds_checked(key, q.device, kwargs, walk_slots is not None)
+            use_ds = decided
 
     out = out.contiguous()
 
@@ -1095,9 +1412,8 @@ def msa_token_bwd(
     ws = torch.empty((n_chunks, 2, block_size, D), dtype=torch.float32, device=q.device)
     check_buffer_bytes(q=q, k=k, v=v, block_table=block_table, entries=plan.entries, workspace=ws)
     stream = torch.cuda.current_stream()
-    w32 = "gfx1250" in get_hip_arch()
 
-    def run_dq(tpw):
+    def run_dq(tpw, skip=False):
         if tpw > 1 and (S % tpw or block_size % tpw):
             # the lockstep layout's barrier count is workgroup-uniform only for these shapes
             raise ValueError(f"msa_shared_tile_staging dQ: S={S} block_size={block_size}")
@@ -1105,6 +1421,8 @@ def msa_token_bwd(
         delta = torch.empty((S, B, Hq), dtype=torch.float32, device=q.device)  # written by the dq kernel
         dq_args = (q, k, v, dout, out, lse, delta, block_table, dq, int(S), int(B), stream)
         dq_key = (Hkv, topk, block_size, float(softmax_scale), tpw)
+        if skip:
+            dq_key = ("step_mask_skip",) + dq_key  # tokens_per_wg stays the last element
         fn = _DQ_CACHE.get(dq_key)
         if fn is None:
             if w32:
@@ -1112,7 +1430,14 @@ def msa_token_bwd(
                     build_dq_w32,
                 )
 
-                built = build_dq_w32(Hkv, topk, block_size, float(softmax_scale), tokens_per_wg=tpw)
+                built = build_dq_w32(
+                    Hkv,
+                    topk,
+                    block_size,
+                    float(softmax_scale),
+                    tokens_per_wg=tpw,
+                    **({"step_mask_skip": True} if skip else {}),
+                )
             else:
                 built = build_dq(Hkv, topk, block_size, float(softmax_scale))
             fn = built.compile(*dq_args)
@@ -1121,55 +1446,181 @@ def msa_token_bwd(
         return dq, delta
 
     # eligibility first: the shared layout is the gfx1250 kernel's and needs an S / block size it divides
-    tpw = 1
-    if shared_tiles and w32:
-        from primus.backends.megatron.core.fusions import bitwise_check
-        from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
-            dq_tokens_per_wg,
+    if use_ds:
+        # delta first (the dQ kernel no longer makes it); dQ runs after dK/dV
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl.row_dot import (
+            row_dot,
         )
 
-        tpw = dq_tokens_per_wg(int(S), block_size)
-        if tpw > 1 and not bitwise_check.passed(
-            "msa_shared_tile_staging dQ",
-            lambda: run_dq(tpw),
-            lambda: run_dq(1),
-            # everything the kernel is built from or lays its grid out by
-            key=(S, B, Hkv, topk, block_size, float(softmax_scale), tpw),
-        ):
-            tpw = 1
-    dq, delta = run_dq(tpw)
-
-    kv_args = (
-        q,
-        k,
-        v,
-        dout,
-        lse,
-        delta,
-        plan.chunks,
-        plan.entries,
-        ws,
-        int(S),
-        int(B),
-        int(n_blocks),
-        int(plan.entries.numel()),
-        int(n_chunks),
-        stream,
-    )
-    kv_key = (Hkv, block_size, float(softmax_scale), topk)
-    fn = _DKDV_CACHE.get(kv_key)
-    if fn is None:
-        if "gfx1250" in get_hip_arch():
+        delta = row_dot(dout, out)
+        dq = None
+    else:
+        tpw = 1
+        if shared_tiles and w32:
+            from primus.backends.megatron.core.fusions import bitwise_check
             from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
-                build_dkdv_w32,
+                dq_tokens_per_wg,
             )
 
-            built = build_dkdv_w32(Hkv, block_size, float(softmax_scale), topk)
-        else:
-            built = build_dkdv(Hkv, block_size, float(softmax_scale), topk)
-        fn = built.compile(*kv_args)
-        _DKDV_CACHE[kv_key] = fn
-    fn(*kv_args)
+            tpw = dq_tokens_per_wg(int(S), block_size)
+            if tpw > 1 and not bitwise_check.passed(
+                "msa_shared_tile_staging dQ",
+                lambda: run_dq(tpw),
+                lambda: run_dq(1),
+                # everything the kernel is built from or lays its grid out by
+                key=(S, B, Hkv, topk, block_size, float(softmax_scale), tpw),
+            ):
+                tpw = 1
+        skip = False
+        if step_mask_skip and w32:
+            from primus.backends.megatron.core.fusions import bitwise_check
+
+            # msa_lean_masks: decided once per shape, against the same layout without it
+            skip = bitwise_check.passed(
+                "msa_lean_masks dQ",
+                lambda: run_dq(tpw, True),
+                lambda: run_dq(tpw, False),
+                key=(S, B, Hkv, topk, block_size, float(softmax_scale), tpw),
+            )
+        dq, delta = run_dq(tpw, skip)
+
+    def run_kv(skip, ws_out, ds_out=None, two=False):
+        emit = ds_out is not None
+        kv_args = (q, k, v, dout, lse, delta, plan.chunks, plan.entries, ws_out)
+        if w32:
+            # build_dkdv_w32 takes a DS operand (written only with emit_ds); build_dkdv has none
+            kv_args += (ds_out if emit else torch.empty(16, dtype=torch.bfloat16, device=q.device),)
+        kv_args += (int(S), int(B), int(n_blocks), int(plan.entries.numel()), int(n_chunks), stream)
+        kv_key = (Hkv, block_size, float(softmax_scale), topk)
+        if skip:
+            kv_key = ("step_mask_skip",) + kv_key
+        if emit:
+            kv_key = ("emit_ds",) + kv_key
+        chunk_store = emit and bool(ds_chunk_store) and ds_chunk_store_fits(S, topk, block_size)
+        if chunk_store:
+            kv_key = ("ds_chunk_store",) + kv_key
+        if two:
+            kv_key = ("two_token_steps",) + kv_key
+        fn = _DKDV_CACHE.get(kv_key)
+        if fn is None:
+            if w32:
+                from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd_w32 import (
+                    build_dkdv_w32,
+                )
+
+                built = build_dkdv_w32(
+                    Hkv,
+                    block_size,
+                    float(softmax_scale),
+                    topk,
+                    **({"step_mask_skip": True} if skip else {}),
+                    **({"emit_ds": True} if emit else {}),
+                    **({"ds_chunk_store": True} if chunk_store else {}),
+                    **({"tokens_per_step": 2} if two else {}),
+                )
+            else:
+                built = build_dkdv(Hkv, block_size, float(softmax_scale), topk)
+            fn = built.compile(*kv_args)
+            _DKDV_CACHE[kv_key] = fn
+        fn(*kv_args)
+        return (ws_out, ds_out) if emit else (ws_out,)
+
+    skip = False
+    if step_mask_skip and w32:
+        from primus.backends.megatron.core.fusions import bitwise_check
+
+        # the dK/dV kernel's own check: its fp32 chunk partials, bit for bit
+        skip = bitwise_check.passed(
+            "msa_lean_masks dK/dV",
+            lambda: run_kv(True, torch.empty_like(ws)),
+            lambda: run_kv(False, torch.empty_like(ws)),
+            key=(S, B, Hkv, topk, block_size, float(softmax_scale), int(n_chunks)),
+        )
+    ds = None
+    if use_ds:
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+            msa_token_bwd_w32 as _w32,
+        )
+
+        # one [block_size keys, 16 heads] bf16 record per table entry; dK/dV writes the live ones
+        ds = torch.empty((B * Hkv * S * topk, block_size, HPW), dtype=torch.bfloat16, device=q.device)
+    two = False
+    # eligibility first (kernel family, block size), then one comparison per shape and kernel variant
+    if dkdv_two_token_steps and dkdv_two_token_steps_eligible(block_size, w32):
+        from primus.backends.megatron.core.fusions import bitwise_check
+
+        def run_kv_probe(two_tokens):
+            # the variant this call is about to use (lean masks, dS stores), on this call's tensors:
+            # the fp32 chunk partials and, with msa_dq_from_ds, every dS record (zeroed first: the
+            # kernels write the live records only). The four-token probe writes into ws and ds
+            # themselves, which the launch below rewrites, so the check holds one extra copy of
+            # each; compared as integers (every bit, without same_bits' NaN masks and copies).
+            ws_probe = torch.empty_like(ws) if two_tokens else ws
+            ds_probe = None
+            if use_ds:
+                ds_probe = torch.empty_like(ds) if two_tokens else ds
+                ds_probe.zero_()
+            got = run_kv(skip, ws_probe, ds_probe, two=two_tokens)
+            return [got[0].view(torch.int32)] + ([got[1].view(torch.int16)] if use_ds else [])
+
+        two = bitwise_check.passed(
+            "msa_dkdv_two_token_steps dK/dV",
+            lambda: run_kv_probe(True),
+            lambda: run_kv_probe(False),
+            key=(
+                S,
+                B,
+                Hkv,
+                topk,
+                block_size,
+                float(softmax_scale),
+                int(n_chunks),
+                skip,
+                use_ds,
+                bool(ds_chunk_store),
+            ),
+        )
+    run_kv(skip, ws, ds, two=two)
+    if use_ds:
+        tpw2 = _w32.dq_ds_tokens_per_wg(int(S), block_size)
+        if tpw2 > 1 and (S % tpw2 or block_size % tpw2):
+            # the lockstep layout's barrier count is workgroup-uniform only for these shapes
+            raise ValueError(f"msa_dq_from_ds dQ: S={S} block_size={block_size}")
+        slots = walk_slots if walk_slots is not None else block_table  # unused without slots
+
+        def run_dq_ds(early):
+            dq_out = torch.empty_like(q)
+            ds_args = (k, ds, block_table, slots, dq_out, int(S), int(B), stream)
+            ds_key = ("dq_from_ds", walk_slots is not None, Hkv, topk, block_size, float(softmax_scale), tpw2)
+            if early:
+                ds_key = ("early_issue",) + ds_key  # tokens_per_wg stays the last element
+            fn = _DQ_CACHE.get(ds_key)
+            if fn is None:
+                fn = _w32.build_dq_ds_w32(
+                    Hkv,
+                    topk,
+                    block_size,
+                    float(softmax_scale),
+                    tokens_per_wg=tpw2,
+                    with_slots=walk_slots is not None,
+                    **({"early_issue": True} if early else {}),
+                ).compile(*ds_args)
+                _DQ_CACHE[ds_key] = fn
+            fn(*ds_args)
+            return (dq_out,)
+
+        early = False
+        if dq_early_issue and tpw2 > 1:
+            from primus.backends.megatron.core.fusions import bitwise_check
+
+            # msa_dq_early_issue: decided once per shape, on this call's dS, against the kernel without it
+            early = bitwise_check.passed(
+                "msa_dq_early_issue dQ",
+                lambda: run_dq_ds(True),
+                lambda: run_dq_ds(False),
+                key=(S, B, Hkv, topk, block_size, float(softmax_scale), walk_slots is not None, tpw2),
+            )
+        (dq,) = run_dq_ds(early)
 
     red_args = (ws, plan.chunk_ptr, dk, dv, int(S), int(B), int(n_blocks), int(n_chunks), stream)
     red_key = (Hkv, block_size)

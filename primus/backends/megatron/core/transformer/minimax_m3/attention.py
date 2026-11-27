@@ -75,20 +75,80 @@ _MSA_FUSIONS = (
     "msa_fused_zero_centered_gamma",
     "msa_fused_indexer_input_norm",
 )
+# Kernel paths of the flydsl backend on gfx1250, taken wherever a shape is eligible (no switch;
+# other GPUs never take them). Each is decided before any work, and its first call for a shape
+# compares it with the path it replaces (bitwise_check on the call's tensors, or, for those that
+# sum in another order and are checked at run time, stated tolerances and two identical runs on
+# seeded probe inputs of the call's shape, so every rank decides alike) and keeps that one on a
+# mismatch; only
+# msa_bounded_plan_chunks (an integer rule for the plan's chunk sizes) and msa_ds_chunk_store
+# (inside msa_dq_from_ds's comparison) rely on the unit tests alone. All are deterministic: no
+# atomics, fixed summation orders.
+#
+# Bit-identical to the path they replace:
+#   msa_lean_masks: the forward, dQ, dK/dV and indexer scoring kernels skip the per-key causal
+#     select on steps whose keys are all visible (a wave-uniform branch), and the index dK
+#     kernel takes the WMMA's unused K half from an LDS pad of zeros (msa_token_fwd_w32.py,
+#     msa_token_bwd_w32.py, index_block_max.py).
+#   msa_select_plan_wide: with msa_fused_select_plan, shapes past select_plan.supported() (more
+#     than 64 blocks or 1024 rows of blocks, up to select_plan.wide_supported()) get the fused
+#     selection bookkeeping and build_block_plan's FlyDSL passes (flydsl/select_plan.py).
+#   msa_select_skip_fill: with msa_fused_select_plan and forced blocks, the scoring kernel's
+#     output tables are left unfilled; the forced-block boost writes -inf after each query's
+#     own block, and nothing reads the argmax there (index_select.py).
+#   msa_owner_carry / msa_two_tile_slots: with msa_shared_tile_staging, the forward carries each
+#     step's tile owner in its loop state and keeps one LDS slot for K and one for V (68 KB of
+#     LDS instead of 140 KB) (msa_token_fwd_w32.py).
+#   msa_walk_one_wave: the aligned walk's Triton kernel with one wave per program.
+#   msa_dkdv_two_token_steps: the dK/dV kernel takes two tokens per step instead of four.
+# The same terms summed in another order, so the last bits differ from the replaced path's:
+#   msa_aligned_block_walk: with msa_shared_tile_staging, the forward and dQ kernels walk a
+#     token's blocks in an order aligned with its neighbours', so a workgroup stages a common
+#     block's tiles once (flydsl/block_walk.py).
+#   msa_index_dk_scatter: the index dK chunk kernel adds each entry's fp32 g * q_row to its
+#     winning key row (_build_index_dk_scatter_w32); sparse_index_dim 128, power-of-two top-k.
+#   msa_indexer_loss_one_pass: with msa_fused_indexer_loss, the slot mass and indexer KL and
+#     their backward in one Triton kernel each (indexer_loss_one_pass.py).
+#   msa_bounded_plan_chunks: BlockPlan chunks of 256-384 entries (msa_token_bwd.plan_chunk_size),
+#     so dK/dV and index dK partials are summed over other groups of entries.
+_MSA_GFX1250_PATHS = (
+    "msa_lean_masks",
+    "msa_select_plan_wide",
+    "msa_select_skip_fill",
+    "msa_owner_carry",
+    "msa_two_tile_slots",
+    "msa_walk_one_wave",
+    "msa_dkdv_two_token_steps",
+    "msa_aligned_block_walk",
+    "msa_index_dk_scatter",
+    "msa_indexer_loss_one_pass",
+    "msa_bounded_plan_chunks",
+)
+# Taken only with msa_bwd_store_ds (MSATransformerConfig, default true):
+#   msa_dq_from_ds: the dK/dV kernel writes its bf16 dS to a workspace and a slim kernel forms
+#     dQ = scale * dS K (build_dq_ds_w32); checked within 1e-3, workspaces above 16 GiB keep the
+#     recomputing dQ kernel. Last bits differ (dS and delta are summed in another order).
+#   msa_ds_chunk_store / msa_dq_early_issue: bit-identical on that path: one dS buffer descriptor
+#     per workgroup (slices under 2 GiB) and the dQ kernel's next-step copies issued before it
+#     waits for the current ones (msa_token_bwd_w32.py).
+_MSA_STORE_DS_PATHS = ("msa_dq_from_ds", "msa_ds_chunk_store", "msa_dq_early_issue")
 _FUSIONS_LOGGED = False
 
 
-def _log_fusions_once(config) -> None:
+def _log_fusions_once(config, gfx1250: bool) -> None:
     global _FUSIONS_LOGGED
     if _FUSIONS_LOGGED:
         return
     _FUSIONS_LOGGED = True
     on = [name for name in _MSA_FUSIONS if getattr(config, name, False)]
     log_rank_0(f"MinimaxSparseAttention ({config.msa_backend}): Triton fusions {', '.join(on) or 'off'}")
-    if config.msa_backend == "flydsl":
+    if config.msa_backend == "flydsl" and gfx1250:
         shared = "on" if getattr(config, "msa_shared_tile_staging", False) else "off"
+        store_ds = "on" if getattr(config, "msa_bwd_store_ds", True) else "off"
         log_rank_0(
-            f"MinimaxSparseAttention (flydsl): msa_shared_tile_staging {shared} (gfx1250 kernels only)"
+            f"MinimaxSparseAttention (flydsl, gfx1250): msa_shared_tile_staging {shared}; "
+            f"msa_bwd_store_ds {store_ds} ({', '.join(_MSA_STORE_DS_PATHS)}); kernel paths where "
+            f"eligible: {', '.join(_MSA_GFX1250_PATHS)}"
         )
 
 
@@ -179,6 +239,7 @@ class MinimaxSparseAttention(SelfAttention):
             )
 
         self.msa_attention = None
+        self._gfx1250 = False
         if config.msa_backend == "flydsl":
             # Imported here, not at module level: flydsl is not in every build.
             from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_function import (
@@ -187,6 +248,7 @@ class MinimaxSparseAttention(SelfAttention):
             from primus.core.utils.gpu_arch import is_gfx1250
 
             if is_gfx1250():
+                self._gfx1250 = True
                 _require_gfx1250_flydsl()
                 if self.block_size != 128:
                     raise NotImplementedError(
@@ -201,7 +263,7 @@ class MinimaxSparseAttention(SelfAttention):
                     f"{heads_per_group} heads per KV head."
                 )
             self.msa_attention = msa_attention
-        _log_fusions_once(config)
+        _log_fusions_once(config, self._gfx1250)
 
     def _fused_input_norm_weight(self) -> Optional[torch.Tensor]:
         """The input-norm weight fused into ``linear_qkv``, or None when the norm is separate."""
@@ -246,6 +308,127 @@ class MinimaxSparseAttention(SelfAttention):
             x.float(), (x.shape[-1],), weight, self.config.layernorm_epsilon
         )
         return normed.to(x.dtype)
+
+    def _aligned_walk(self, block_indices: torch.Tensor, block_plan: Optional[object]):
+        """``msa_aligned_block_walk`` (with ``msa_walk_one_wave``): ``(walk_table, slots)`` of
+        flydsl/block_walk.py, or None off gfx1250, when ``msa_shared_tile_staging`` is off
+        (nothing would share a tile) or when the shape is not eligible. Decided before any work."""
+        if not self._gfx1250 or not getattr(self.config, "msa_shared_tile_staging", False):
+            return None
+        # imported here: the eager backend needs no Triton
+        from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+            block_walk,
+        )
+
+        table = getattr(block_plan, "table", None) if block_plan is not None else None
+        if table is None or table.shape != block_indices.shape:
+            table = block_indices.to(torch.int32)
+        return block_walk.aligned_block_walk(table, self.block_size, one_wave=True)
+
+    def _dq_from_ds(self, walk) -> dict:
+        """``msa_bwd_store_ds`` (``msa_dq_from_ds`` with ``msa_ds_chunk_store`` and
+        ``msa_dq_early_issue``): the keyword arguments that turn it on for the MSA backward, or
+        none off gfx1250 or with ``msa_bwd_store_ds`` False. With an aligned walk the backward also
+        needs the walk's slots as int32."""
+        if not self._gfx1250 or not getattr(self.config, "msa_bwd_store_ds", True):
+            return {}
+        kwargs = {"dq_from_ds": True, "ds_chunk_store": True, "dq_early_issue": True}
+        if walk is not None:
+            kwargs["walk_slots"] = walk[1].to(torch.int32)
+        return kwargs
+
+    def _owner_carry(self) -> dict:
+        """``msa_owner_carry`` (with ``msa_two_tile_slots``): the keyword arguments that turn it on
+        for the MSA forward, or none off gfx1250 or when ``msa_shared_tile_staging`` is off (no
+        tile owner to carry)."""
+        if not self._gfx1250 or not getattr(self.config, "msa_shared_tile_staging", False):
+            return {}
+        return {"owner_carry": True, "two_tile_slots": True}
+
+    def _dkdv_two_token_steps(self) -> dict:
+        """``msa_dkdv_two_token_steps``: the keyword argument that turns it on for the MSA
+        backward, or none off gfx1250."""
+        return {"dkdv_two_token_steps": True} if self._gfx1250 else {}
+
+    def _loss_one_pass(self) -> bool:
+        """``msa_indexer_loss_one_pass``: whether ``msa_core`` asks the one-pass kernels for the
+        indexer loss. It stands in for the Triton path of ``msa_fused_indexer_loss``, so it needs
+        that switch, and gfx1250."""
+        return bool(self._gfx1250 and getattr(self.config, "msa_fused_indexer_loss", False))
+
+    def msa_core(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        block_indices: torch.Tensor,
+        block_scores: torch.Tensor,
+        block_plan: Optional[object],
+        want_loss: bool,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """flydsl backend: attention over the selected blocks and, with ``want_loss``, the sparse
+        indexer loss.
+
+        Takes ``[sq, b, heads, hn]`` query / key / value and the indexer's outputs; returns
+        ``(core_attn_out [sq, b, np, hn], indexer_loss or None)``.
+        """
+        walk = self._aligned_walk(block_indices, block_plan)
+        outs = self.msa_attention(
+            query,
+            key,
+            value,
+            block_indices,
+            self.softmax_scale,
+            self.block_size,
+            return_slot_lse=want_loss,
+            plan=block_plan,
+            shared_tiles=getattr(self.config, "msa_shared_tile_staging", False),
+            step_mask_skip=self._gfx1250,
+            **({} if walk is None else {"walk_table": walk[0]}),
+            **self._dq_from_ds(walk),
+            **self._owner_carry(),
+            **self._dkdv_two_token_steps(),
+        )
+        if not want_loss:
+            return outs[0], None
+
+        def exact_loss(slot_lse, lse, scores, block_indices, walk):
+            """The loss on the bit-exact path (also the reference of the one-pass path's check)."""
+            slot_mass = slot_mass_from_slot_lse(slot_lse, lse, block_indices.shape[1])
+            if walk is not None:
+                # the kernel's slot_lse is in walk order: position p of a row is the indexer's slot
+                # walk[1][p]. One scatter on the [b, n_index, sq, topk] mass puts it back.
+                slot_mass = torch.empty_like(slot_mass).scatter_(-1, walk[1], slot_mass)
+            if self.config.msa_fused_indexer_loss:
+                # bitwise, in a few Triton launches
+                from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
+                    sparse_indexer_loss as loss_fn,
+                )
+            else:
+                loss_fn = compute_sparse_indexer_loss
+            if self.config.msa_fused_indexer_loss and self.config.msa_fused_indexer_loss_scatter:
+                return loss_fn(slot_mass, scores, block_indices, self.indexer_loss_coeff, fold_scatter=True)
+            return loss_fn(slot_mass, scores, block_indices, self.indexer_loss_coeff)
+
+        # msa_indexer_loss_one_pass (sums in another order): eligibility is decided before any work
+        if self._loss_one_pass():
+            from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_one_pass import (
+                one_pass_indexer_loss,
+            )
+
+            indexer_loss = one_pass_indexer_loss(
+                outs[2],
+                outs[1],
+                block_scores,
+                block_indices,
+                walk,
+                self.indexer_loss_coeff,
+                exact_loss,
+                self.block_size,
+            )
+            if indexer_loss is not None:
+                return outs[0], indexer_loss
+        return outs[0], exact_loss(outs[2], outs[1], block_scores, block_indices, walk)
 
     def forward(
         self,
@@ -330,33 +513,9 @@ class MinimaxSparseAttention(SelfAttention):
                     f"{key.shape[2]}; msa_backend='flydsl' needs one selection per local KV head."
                 )
             # [sq, b, heads, hn] in and out: o needs no permute before linear_proj.
-            outs = self.msa_attention(
-                query,
-                key,
-                value,
-                block_indices,
-                self.softmax_scale,
-                self.block_size,
-                return_slot_lse=want_loss,
-                plan=block_plan,
-                shared_tiles=getattr(self.config, "msa_shared_tile_staging", False),
+            core_attn_out, indexer_loss = self.msa_core(
+                query, key, value, block_indices, block_scores, block_plan, want_loss
             )
-            core_attn_out = outs[0]
-            if want_loss:
-                slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
-                if self.config.msa_fused_indexer_loss:
-                    # bitwise, in a few Triton launches
-                    from primus.backends.megatron.core.transformer.minimax_m3.indexer_loss_fused import (
-                        sparse_indexer_loss as loss_fn,
-                    )
-                else:
-                    loss_fn = compute_sparse_indexer_loss
-                if self.config.msa_fused_indexer_loss and self.config.msa_fused_indexer_loss_scatter:
-                    indexer_loss = loss_fn(
-                        slot_mass, block_scores, block_indices, self.indexer_loss_coeff, fold_scatter=True
-                    )
-                else:
-                    indexer_loss = loss_fn(slot_mass, block_scores, block_indices, self.indexer_loss_coeff)
         else:
             # sbhd -> bhsd for the eager kernel, matching the reference's layout.
             block_keep = build_block_keep(block_indices, key.shape[0], self.block_size)

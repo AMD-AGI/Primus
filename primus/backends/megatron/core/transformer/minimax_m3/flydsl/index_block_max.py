@@ -38,7 +38,7 @@ import torch
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr.utils.arith import _to_raw as _raw
@@ -48,6 +48,9 @@ from primus_turbo.flydsl.utils import buffer_ops
 
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
     _tr16,
+)
+from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+    kernel_name,
 )
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import (
     cat_bf16_16,
@@ -66,7 +69,7 @@ TKEYS = 16  # keys per MFMA tile
 _ROW_EPT = 2
 
 
-def _build_index_block_max_w32(num_heads: int, index_dim: int, block_size: int):
+def _build_index_block_max_w32(num_heads: int, index_dim: int, block_size: int, mask_skip: bool = False):
     """Same contract as ``build_index_block_max``, on the wave32 WMMA layout.
 
     Four waves still cover 64 queries. Each wave is 32 lanes: lanes 0..15 and
@@ -78,6 +81,11 @@ def _build_index_block_max_w32(num_heads: int, index_dim: int, block_size: int):
     queries (blocks past the causal limit are skipped and keep the caller's -inf / -1 fill). The
     blocks' outputs are independent, so this is bitwise a walk over all blocks by one work-group
     per query group, with more work-groups in flight.
+
+    ``mask_skip`` (``msa_lean_masks``): a key block whose last key is at or before the
+    work-group's first query is fully visible to all its queries, so its scores skip the causal
+    compare and select (which would keep them): a work-group-uniform scalar branch inside the
+    existing loop, outside its two barriers; the trip count and the barriers are unchanged.
     """
     elem = fx.BFloat16
     H, DI = num_heads, index_dim
@@ -95,7 +103,10 @@ def _build_index_block_max_w32(num_heads: int, index_dim: int, block_size: int):
     k_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = allocator._align(k_off + block_size * STR * 2, 16)
 
-    @flyc.kernel(known_block_size=[threads, 1, 1])
+    @flyc.kernel(
+        known_block_size=[threads, 1, 1],
+        name=kernel_name("msa_index_block_max_w32", "lean" if mask_skip else ""),
+    )
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -198,38 +209,56 @@ def _build_index_block_max_w32(num_heads: int, index_dim: int, block_size: int):
             gpu.barrier()
 
             key0_i32 = fx.Int32(key0)
-            for h in range_constexpr(H):
-                mx = c_neg_inf
-                am = fx.Int32(-1)
-                for kt in range_constexpr(KT):
-                    acc = Vec.filled(8, 0.0, fx.Float32)
-                    for ks in range_constexpr(KSI):
-                        row = (fx.Index(kt * TKEYS) + lo) * fx.Index(STR) + fx.Index(ks * 32)
-                        row = row + half * fx.Index(16)
-                        a_k = cat_bf16_16(
-                            Vec.load(v8, lds_k, [row]),
-                            Vec.load(v8, lds_k, [row + fx.Index(8)]),
-                        )
-                        acc = wmma_f32_16x16x32_bf16(a_k, q_packs[h][ks], acc)
-                    for i in range_constexpr(8):
-                        key = key0_i32 + fx.Int32(half) * fx.Int32(8) + fx.Int32(kt * TKEYS + i)
-                        ok = ArithValue(
-                            arith.AndIOp(
-                                _raw(ArithValue(key <= t_i32)), _raw(ArithValue(key < fx.Int32(S)))
-                            ).result
-                        )
-                        v = fx.Float32(ok.select(_raw(fx.Float32(_raw(Vec(acc)[i]))), _raw(c_neg_inf)))
-                        gt = ArithValue(v > mx)
-                        mx = fx.Float32(gt.select(_raw(v), _raw(mx)))
-                        am = fx.Int32(gt.select(_raw(key), _raw(am)))
-                mx, am = crossgrp_argmax(mx, am)
-                out = ((b * fx.Index(H) + fx.Index(h)) * Sn + t) * NBn + kb
-                buffer_ops.buffer_store(
-                    mx, bmax_rsrc, out * fx.Index(4), mask=_raw(write_ok), offset_is_bytes=True
-                )
-                buffer_ops.buffer_store(
-                    am, arg_rsrc, out * fx.Index(4), mask=_raw(write_ok), offset_is_bytes=True
-                )
+
+            def score_block(masked):
+                for h in range_constexpr(H):
+                    mx = c_neg_inf
+                    am = fx.Int32(-1)
+                    for kt in range_constexpr(KT):
+                        acc = Vec.filled(8, 0.0, fx.Float32)
+                        for ks in range_constexpr(KSI):
+                            row = (fx.Index(kt * TKEYS) + lo) * fx.Index(STR) + fx.Index(ks * 32)
+                            row = row + half * fx.Index(16)
+                            a_k = cat_bf16_16(
+                                Vec.load(v8, lds_k, [row]),
+                                Vec.load(v8, lds_k, [row + fx.Index(8)]),
+                            )
+                            acc = wmma_f32_16x16x32_bf16(a_k, q_packs[h][ks], acc)
+                        for i in range_constexpr(8):
+                            key = key0_i32 + fx.Int32(half) * fx.Int32(8) + fx.Int32(kt * TKEYS + i)
+                            v = fx.Float32(_raw(Vec(acc)[i]))
+                            if const_expr(masked):
+                                ok = ArithValue(
+                                    arith.AndIOp(
+                                        _raw(ArithValue(key <= t_i32)), _raw(ArithValue(key < fx.Int32(S)))
+                                    ).result
+                                )
+                                v = fx.Float32(ok.select(_raw(v), _raw(c_neg_inf)))
+                            gt = ArithValue(v > mx)
+                            mx = fx.Float32(gt.select(_raw(v), _raw(mx)))
+                            am = fx.Int32(gt.select(_raw(key), _raw(am)))
+                    mx, am = crossgrp_argmax(mx, am)
+                    out = ((b * fx.Index(H) + fx.Index(h)) * Sn + t) * NBn + kb
+                    buffer_ops.buffer_store(
+                        mx, bmax_rsrc, out * fx.Index(4), mask=_raw(write_ok), offset_is_bytes=True
+                    )
+                    buffer_ops.buffer_store(
+                        am, arg_rsrc, out * fx.Index(4), mask=_raw(write_ok), offset_is_bytes=True
+                    )
+
+            if const_expr(mask_skip):
+                # Every key of the block is visible to every query of the work-group (its last
+                # key is at or before the group's first query, hence also below S): the causal
+                # compare and select of each score would keep the score. Work-group-uniform, so
+                # a scalar branch; the scores, the max and the argmax are the same bits.
+                last_key = key0_i32 + fx.Int32(block_size - 1)
+                first_q = fx.Int32(qg * fx.Index(QPG))
+                if last_key <= first_q:
+                    score_block(False)
+                else:
+                    score_block(True)
+            else:
+                score_block(True)
             yield []
 
     @flyc.jit
@@ -268,7 +297,7 @@ def build_index_block_max(num_heads: int, index_dim: int, block_size: int):
     k_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = allocator._align(k_off + block_size * STR * 2, 16)
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[THREADS, 1, 1], name=kernel_name("msa_index_block_max"))
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -432,7 +461,7 @@ def build_index_block_max(num_heads: int, index_dim: int, block_size: int):
     return launch
 
 
-def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: int):
+def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: int, zero_pad: bool = False):
     """Wave32 ``build_index_dk``. One wave owns 16 keys; the two halves split the
     16 entries of a K-tile and the 8 d-rows of each output tile.
 
@@ -440,6 +469,13 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
     16-byte loads instead of 16 single-element loads, and the next tile's Q rows are loaded
     after the staging barrier (gfx1250 drains loads at s_barrier). The operands and the
     summation order are unchanged by the staging, so the result is too.
+
+    ``zero_pad`` (``msa_lean_masks``): the WMMA's K is 32 and a tile has 16 entries, so the lanes
+    of the upper K half must feed zeros as the A operand. Instead of selecting zero into each of
+    the 16 elements they loaded (128 selects per 16 entries), those lanes load 16 zeros from a pad
+    behind the staged Q: one address select per load. The operand is the same exact zeros, for
+    any Q (finite or not), so the result has the same bits. The pad is written before the loop
+    by every lane (the same value) and read only after the loop's first barrier.
     """
     elem = fx.BFloat16
     H, DI = num_heads, index_dim
@@ -457,9 +493,12 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
     stride_t = tt + 8
     allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_index_dk_w32_smem")
     q_off = allocator._align(allocator.ptr, 16)
-    allocator.ptr = allocator._align(q_off + DI * stride_t * 2, 16)
+    # zero_pad: 16 zero elements behind the staged Q
+    allocator.ptr = allocator._align(q_off + (DI * stride_t + (16 if zero_pad else 0)) * 2, 16)
 
-    @flyc.kernel(known_block_size=[threads, 1, 1])
+    @flyc.kernel(
+        known_block_size=[threads, 1, 1], name=kernel_name("msa_index_dk_w32", "lean" if zero_pad else "")
+    )
     def k_fn(
         ENT: fx.Tensor,
         CHUNKS: fx.Tensor,
@@ -473,7 +512,9 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
         NCH: fx.Int32,
     ):
         v8 = Vec.make_type(8, elem)
-        lds_qt = SmemPtr(allocator.get_base(), q_off, elem.ir_type, shape=(DI * stride_t,)).get()
+        lds_qt = SmemPtr(
+            allocator.get_base(), q_off, elem.ir_type, shape=(DI * stride_t + (16 if zero_pad else 0),)
+        ).get()
         tid = fx.Index(gpu.thread_idx.x)
         wave = tid // fx.Index(32)
         lane = tid % fx.Index(32)
@@ -486,6 +527,10 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
         chunk = fx.Index(gpu.block_idx.x)
         c_zero = fx.Float32(0.0)
         c_bf0 = fx.BFloat16(0.0)
+        if const_expr(zero_pad):
+            zero_at = fx.Index(DI * stride_t)
+            Vec.filled(8, 0.0, elem).store(lds_qt, [zero_at])
+            Vec.filled(8, 0.0, elem).store(lds_qt, [zero_at + fx.Index(8)])
 
         n_entries = Bn * fx.Index(H) * Sn * fx.Index(topk)
         entry_bytes = _raw(n_entries * fx.Index(4))
@@ -576,12 +621,16 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
                 for dt in range_constexpr(dti):
                     d_col = fx.Index(dt * 16) + lo
                     at = d_col * fx.Index(stride_t) + fx.Index(sub * tk)
+                    if const_expr(zero_pad):
+                        # upper-K lanes read the zero pad: the same zeros the select below makes
+                        at = fx.Index(fx.Int32(grp0.select(_raw(fx.Int32(at)), _raw(fx.Int32(zero_at)))))
                     lo8 = Vec.load(v8, lds_qt, [at])
                     hi8 = Vec.load(v8, lds_qt, [at + fx.Index(8)])
                     a_elems = [fx.BFloat16(_raw(Vec(lo8)[i])) for i in range_constexpr(8)] + [
                         fx.BFloat16(_raw(Vec(hi8)[i])) for i in range_constexpr(8)
                     ]
-                    a_elems = [fx.BFloat16(grp0.select(_raw(x), _raw(c_bf0))) for x in a_elems]
+                    if const_expr(not zero_pad):
+                        a_elems = [fx.BFloat16(grp0.select(_raw(x), _raw(c_bf0))) for x in a_elems]
                     a_q = Vec.from_elements(a_elems, elem)
                     step = wmma_f32_16x16x32_bf16(a_q, b_hi, acc[dt])
                     new_acc.append(wmma_f32_16x16x32_bf16(a_q, b_lo, step))
@@ -608,6 +657,194 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
             allocator.finalize()
         k_fn(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH).launch(
             grid=(fx.Index(NCH), 1, 1), block=(threads, 1, 1), stream=stream
+        )
+
+    launch.compile = lambda *a: flyc.compile(launch, *a)
+    return launch
+
+
+SCATTER_UNROLL = 8  # plan entries per loop step: their loads are in flight together
+
+
+def index_dk_scatter_supported(index_dim: int, block_size: int) -> bool:
+    """Shapes ``_build_index_dk_scatter_w32`` serves: one wave32 covers a key row with 4 elements
+    per lane (index dim 128, the only width that was compiled and tested on the device; 2 or 8 per
+    lane would lower too but have never run), and the fp32 accumulator of a block fits in LDS."""
+    return index_dim == 128 and 0 < block_size * index_dim * 4 <= 160 * 1024
+
+
+def _build_index_dk_scatter_w32(
+    num_heads: int,
+    index_dim: int,
+    topk: int,
+    block_size: int,
+    unroll: int = SCATTER_UNROLL,
+):
+    """``msa_index_dk_scatter`` (gfx1250): pass 1 of ``index_dk`` as a scatter.
+
+    Same interface, plan and workspace as :func:`build_index_dk`: one workgroup per plan chunk
+    writes that chunk's fp32 ``[block_size, D]`` partial, :func:`build_index_dk_reduce` sums the
+    partials in its fixed order. The partial itself is formed differently. ``build_index_dk``
+    multiplies a one-hot ``[entries, block keys]`` matrix of gradients with the entries' Q rows
+    on the WMMAs: every entry is multiplied into all ``block_size`` key rows although it has one
+    winning key. Here the workgroup is ONE wave (32 lanes = the D columns, ``D / 32`` per lane)
+    with an fp32 ``[block_size, D]`` accumulator in LDS, and each entry does
+
+        acc[key - block * block_size, :] += g * q[token, b, h, :]          (fp32)
+
+    in plan order, ``unroll`` entries per loop step (their entry, gradient, key and Q-row loads are
+    issued together, the LDS updates follow in entry order). An entry that carries no
+    gradient into this block (past the chunk's end, or a key outside the block: the dead slots'
+    ``-1``) leaves the accumulator untouched (a select, not ``+ 0 * q``: a non-finite Q row of a
+    dead entry cannot reach the result).
+
+    Numerics: the same terms as the reference kernel, but ``g`` enters in full fp32
+    (the reference feeds it to the bf16 WMMA as a high and a low half, 16 mantissa bits) and the
+    terms of a key row are added one by one in entry order instead of in the WMMA's order.
+    Deterministic: one wave owns a chunk and adds in program order; no other wave reads or writes
+    its LDS or its workspace rows; no atomics.
+
+    Cannot deadlock: there is no barrier, no wait on another wave and no flag or counter shared
+    between waves anywhere in the kernel (the workgroup is a single wave, so nothing needs one).
+    The only loop walks the chunk's own entries, ``ceil((end - begin) / unroll)`` trips
+    from the read-only chunk table; a wave with more entries simply finishes later. The LDS row
+    index is clamped to the block by the same select that masks the entry, and every buffer
+    access goes through a bounds-checked descriptor (an out-of-range load reads 0).
+    """
+    elem = fx.BFloat16
+    H, DI = num_heads, index_dim
+    assert index_dk_scatter_supported(DI, block_size)
+    EPT = DI // 32  # fp32 elements of a key row per lane
+    U = unroll
+    NACC = block_size * DI
+
+    allocator = SmemAllocator(None, arch=get_hip_arch(), global_sym_name="msa_index_dk_scatter_smem")
+    acc_off = allocator._align(allocator.ptr, 16)
+    allocator.ptr = allocator._align(acc_off + NACC * 4, 16)
+
+    @flyc.kernel(known_block_size=[32, 1, 1], name=kernel_name("msa_index_dk_scatter_w32"))
+    def k_fn(
+        ENT: fx.Tensor,
+        CHUNKS: fx.Tensor,
+        GS: fx.Tensor,
+        KEYS: fx.Tensor,
+        Q: fx.Tensor,
+        WS: fx.Tensor,
+        S: fx.Int32,
+        B: fx.Int32,
+        NB: fx.Int32,
+        NCH: fx.Int32,
+    ):
+        vf = Vec.make_type(EPT, fx.Float32)
+        lds_acc = SmemPtr(allocator.get_base(), acc_off, fx.Float32.ir_type, shape=(NACC,)).get()
+        lane = fx.Index(gpu.thread_idx.x)
+        col = lane * fx.Index(EPT)
+        Sn = fx.Index(S)
+        Bn = fx.Index(B)
+        NBn = fx.Index(NB)
+        chunk = fx.Index(gpu.block_idx.x)
+
+        n_entries = Bn * fx.Index(H) * Sn * fx.Index(topk)
+        entry_bytes = _raw(n_entries * fx.Index(4))
+        ent_rsrc = buffer_ops.create_buffer_resource(ENT, max_size=False, num_records_bytes=entry_bytes)
+        gs_rsrc = buffer_ops.create_buffer_resource(GS, max_size=False, num_records_bytes=entry_bytes)
+        key_rsrc = buffer_ops.create_buffer_resource(KEYS, max_size=False, num_records_bytes=entry_bytes)
+        q_rsrc = buffer_ops.create_buffer_resource(
+            Q, max_size=False, num_records_bytes=_raw(Sn * Bn * fx.Index(H * DI * 2))
+        )
+        ch_rsrc = buffer_ops.create_buffer_resource(
+            CHUNKS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(3 * 4))
+        )
+        ws_rsrc = buffer_ops.create_buffer_resource(
+            WS, max_size=False, num_records_bytes=_raw(fx.Index(NCH) * fx.Index(block_size * DI * 4))
+        )
+
+        def load_i32(rsrc, idx):
+            return fx.Int32(buffer_ops.buffer_load(rsrc, idx, vec_width=1, dtype=fx.Int32))
+
+        row = fx.Index(load_i32(ch_rsrc, chunk * fx.Index(3)))
+        e_begin = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(1))
+        e_end = load_i32(ch_rsrc, chunk * fx.Index(3) + fx.Index(2))
+        bh = row // NBn
+        blk = row % NBn
+        b = bh // fx.Index(H)
+        h = bh % fx.Index(H)
+        key0 = fx.Int32(blk * fx.Index(block_size))  # first key of the block
+        bh_s = fx.Int32(bh * Sn)
+        b_i32 = fx.Int32(b)
+        h_i32 = fx.Int32(h)
+        key_lo = key0 - fx.Int32(1)
+        key_hi = key0 + fx.Int32(block_size)
+
+        # the accumulator starts at zero: each lane clears its columns of every key row
+        zeros = Vec.filled(EPT, 0.0, fx.Float32)
+        for r in range_constexpr(block_size):
+            zeros.store(lds_acc, [fx.Index(r * DI) + col])
+
+        def load_entries(r0_i32):
+            """Entry ids of the step starting at plan position ``r0_i32`` (clamped into the chunk)."""
+            out = []
+            for i in range_constexpr(U):
+                r = r0_i32 + fx.Int32(i)
+                rc = ArithValue(r < e_end).select(_raw(r), _raw(e_end - fx.Int32(1)))
+                out.append(load_i32(ent_rsrc, fx.Index(fx.Int32(rc))))
+            return out
+
+        # a loop carrying one value hands it back unwrapped, so it carries two counters
+        init = [fx.Int32(0), fx.Int32(0)]
+        for r0, it in range(fx.Index(e_begin), fx.Index(e_end), fx.Index(U), init=init):
+            r0_i32 = fx.Int32(r0)
+            # the step's U entry ids first, then every load that depends on them, so that each
+            # group is in flight together (two load latencies per step, not two per entry)
+            ents = [fx.Index(x) for x in load_entries(r0_i32)]
+            lives = [ArithValue(r0_i32 + fx.Int32(i) < e_end) for i in range_constexpr(U)]
+            hits, rows, gvs, qfs = [], [], [], []
+            # every load that depends on the entry ids, in flight together
+            for i in range_constexpr(U):
+                e = ents[i]
+                gv = fx.Float32(buffer_ops.buffer_load(gs_rsrc, e, vec_width=1, dtype=fx.Float32))
+                kv = load_i32(key_rsrc, e)
+                # the entry's Q row. e = ((b * H + h) * S + t) * topk + slot and (b, h) is the chunk's,
+                # so t needs no division by S; 32-bit arithmetic (the entry ids are int32).
+                t = fx.Int32(e) // fx.Int32(topk) - bh_s
+                q_at = ((t * B + b_i32) * fx.Int32(H) + h_i32) * fx.Int32(DI)
+                qv = buffer_ops.buffer_load(q_rsrc, fx.Index(q_at) + col, vec_width=EPT, dtype=elem)
+                in_block = arith.AndIOp(_raw(ArithValue(key_lo < kv)), _raw(ArithValue(kv < key_hi))).result
+                hit = ArithValue(arith.AndIOp(_raw(lives[i]), in_block).result)
+                hits.append(hit)
+                rows.append(fx.Int32(hit.select(_raw(kv - key0), _raw(fx.Int32(0)))))
+                gvs.append(gv)
+                qfs.append(Vec(arith.ExtFOp(vf, _raw(qv)).result))
+            state = [fx.Int32(it[0]) + fx.Int32(1), fx.Int32(it[1])]
+            # the updates, strictly in entry order (two entries of a step may win the same key)
+            for i in range_constexpr(U):
+                at = fx.Index(rows[i]) * fx.Index(DI) + col
+                cur = Vec(Vec.load(vf, lds_acc, [at]))
+                new = []
+                for j in range_constexpr(EPT):
+                    c_j = fx.Float32(_raw(cur[j]))
+                    s_j = c_j + gvs[i] * fx.Float32(_raw(qfs[i][j]))
+                    new.append(fx.Float32(hits[i].select(_raw(s_j), _raw(c_j))))
+                Vec.from_elements(new, fx.Float32).store(lds_acc, [at])
+            yield state
+
+        # the chunk's fp32 partial, [chunk][key in block][d], as build_index_dk writes it
+        for r in range_constexpr(block_size):
+            vals = Vec.load(vf, lds_acc, [fx.Index(r * DI) + col])
+            buffer_ops.buffer_store(
+                _raw(vals),
+                ws_rsrc,
+                ((chunk * fx.Index(block_size) + fx.Index(r)) * fx.Index(DI) + col) * fx.Index(4),
+                offset_is_bytes=True,
+            )
+
+    @flyc.jit
+    def launch(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH, stream):
+        allocator.finalized = False
+        with ir.InsertionPoint(CompilationContext.get_current().gpu_module_body):
+            allocator.finalize()
+        k_fn(ENT, CHUNKS, GS, KEYS, Q, WS, S, B, NB, NCH).launch(
+            grid=(fx.Index(NCH), 1, 1), block=(32, 1, 1), stream=stream
         )
 
     launch.compile = lambda *a: flyc.compile(launch, *a)
@@ -657,7 +894,7 @@ def build_index_dk(num_heads: int, index_dim: int, topk: int, block_size: int):
     q_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = allocator._align(q_off + TT * STR * 2, 16)
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(known_block_size=[NTH, 1, 1], name=kernel_name("msa_index_dk"))
     def k_fn(
         ENT: fx.Tensor,
         CHUNKS: fx.Tensor,
@@ -822,7 +1059,7 @@ def build_index_dk_reduce(num_heads: int, index_dim: int, block_size: int):
     SPLIT = NE // SLICE
     assert NE % SLICE == 0
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(known_block_size=[NTH, 1, 1], name=kernel_name("msa_index_dk_reduce"))
     def k_fn(
         WS: fx.Tensor, CHPTR: fx.Tensor, DK: fx.Tensor, S: fx.Int32, B: fx.Int32, NB: fx.Int32, NCH: fx.Int32
     ):
@@ -912,7 +1149,7 @@ def build_index_dq(num_heads: int, index_dim: int, topk: int):
     THR = DI // EPT
     assert DI % EPT == 0
 
-    @flyc.kernel(known_block_size=[THR, 1, 1])
+    @flyc.kernel(known_block_size=[THR, 1, 1], name=kernel_name("msa_index_dq"))
     def k_fn(G: fx.Tensor, KEYS: fx.Tensor, K: fx.Tensor, DQ: fx.Tensor, S: fx.Int32, B: fx.Int32):
         tid = fx.Index(gpu.thread_idx.x)
         Sn = fx.Index(S)
@@ -1000,8 +1237,130 @@ def index_dq(g, keys, k, num_heads):
     return dq
 
 
-def index_dk(plan, g, keys, q, block_size=128):
+_DK_SCATTER_OK: dict = {}
+# first-call comparison of msa_index_dk_scatter: largest partial difference allowed, as a fraction
+# of the reference kernel's largest partial (the reference rounds g to 16 mantissa bits: 8e-6)
+_DK_SCATTER_TOL = 1e-4
+
+
+def _index_dk_partials(plan, g, keys, q, block_size, kernel, ws_out):
+    """The chunk partials of :func:`index_dk` written to ``ws_out`` by ``kernel``: ``"reference"``
+    (:func:`build_index_dk`, gfx1250's own form there), ``"lean"`` (``_build_index_dk_w32`` with
+    ``zero_pad``) or ``"scatter"`` (``_build_index_dk_scatter_w32``)."""
+    S, B, H, DI = q.shape
+    topk = g.shape[-1]
+    args = (
+        plan.entries,
+        plan.chunks,
+        g.contiguous(),
+        keys.contiguous(),
+        q.contiguous(),
+        ws_out,
+        int(S),
+        int(B),
+        int(plan.n_blocks),
+        int(plan.n_chunks),
+        torch.cuda.current_stream(),
+    )
+    key = (H, DI, topk, block_size) + (() if kernel == "reference" else (kernel,))
+    fn = _DK_CACHE.get(key)
+    if fn is None:
+        if kernel == "lean":
+            fn = _build_index_dk_w32(H, DI, topk, block_size, zero_pad=True).compile(*args)
+        elif kernel == "scatter":
+            fn = _build_index_dk_scatter_w32(H, DI, topk, block_size).compile(*args)
+        else:
+            fn = build_index_dk(H, DI, topk, block_size).compile(*args)
+        _DK_CACHE[key] = fn
+    fn(*args)
+    return (ws_out,)
+
+
+def _dk_scatter_probe(S, B, H, DI, topk, block_size, device, seed=0):
+    """Probe inputs of one :func:`index_dk` call's shape: ``(plan, g, keys, q)``. A
+    ``probe_block_table`` and its plan (the selection's chunk rule); each valid slot's winning key
+    drawn inside its block (at or before the token in the token's own block) and an N(0, 1)
+    gradient, ``-1`` / 0 on the dead slots; N(0, 1) bf16 index queries; all from a private
+    generator."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
+        bounded_plan_chunks_enabled,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        build_block_plan,
+        probe_block_table,
+    )
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    table = probe_block_table(B, H, S, topk, block_size, device, seed)
+    plan = build_block_plan(table, block_size, bounded_plan_chunks_enabled())
+    valid = table >= 0
+    offset = torch.randint(0, block_size, table.shape, generator=gen, device=device, dtype=torch.int32)
+    token = torch.arange(S, device=device, dtype=torch.int32).view(1, 1, S, 1)
+    keys = torch.minimum(table * block_size + offset, token).masked_fill(~valid, -1)
+    g = torch.randn(table.shape, generator=gen, device=device).masked_fill(~valid, 0.0)
+    q = torch.randn((S, B, H, DI), generator=gen, device=device, dtype=torch.bfloat16)
+    return plan, g, keys.contiguous(), q
+
+
+def _dk_scatter_checked(key, reference_kernel, device) -> bool:
+    """Whether the scatter chunk kernel may replace ``reference_kernel`` (see
+    :func:`_index_dk_partials`) for the shape of ``key``: decided once, on :func:`_dk_scatter_probe`
+    inputs of that shape, so that every rank and a resumed run decide alike. Two runs must give the
+    same bits (determinism) and every partial must be within ``_DK_SCATTER_TOL`` of the reference
+    kernel's largest partial (finite and not zero). Nothing is decided (False, not cached) under
+    inference mode or graph capture. A GPU fault or running out of memory is raised; any other
+    error keeps the reference kernel."""
+    if key in _DK_SCATTER_OK:
+        return _DK_SCATTER_OK[key]
+    if torch.is_inference_mode_enabled() or torch.cuda.is_current_stream_capturing():
+        return False
+    from primus.backends.megatron.core.fusions import bitwise_check
+    from primus.core.utils.module_utils import log_rank_0, warning_rank_all
+
+    S, B, H, DI, topk, block_size = key
+    try:
+        plan, g, keys, q = _dk_scatter_probe(S, B, H, DI, topk, block_size, device)
+        ws = torch.empty((plan.n_chunks, block_size, DI), dtype=torch.float32, device=device)
+
+        def run(kernel):
+            return _index_dk_partials(plan, g, keys, q, block_size, kernel, torch.empty_like(ws))[0]
+
+        want = run(reference_kernel)
+        top = want.abs().max()
+        got, again = run("scatter"), run("scatter")
+        same = bitwise_check.same_bits(got, again)
+        err = float((got - want).abs().max() / top)
+        # a NaN err compares False
+        ok = bool(same) and bool(torch.isfinite(top)) and float(top) > 0.0 and err <= _DK_SCATTER_TOL
+        reason = (
+            f"on probe inputs, two runs identical: {bool(same)}; largest partial difference {err:.3e} "
+            "of the largest partial"
+        )
+    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault or OOM keeps the reference kernel
+        if bitwise_check._device_error(e) or isinstance(e, torch.cuda.OutOfMemoryError):
+            raise
+        ok, reason = False, f"{type(e).__name__}: {e}"
+    _DK_SCATTER_OK[key] = ok
+    if ok:
+        log_rank_0(f"[msa_index_dk_scatter {key}] deterministic, sums in another order ({reason}); in use")
+    else:
+        warning_rank_all(f"[msa_index_dk_scatter {key}] keeping the reference kernel ({reason})")
+    return ok
+
+
+def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
     """Deterministic dK of the index keys; see :func:`build_index_dk`.
+
+    ``lean`` (gfx1250, ``msa_lean_masks``): the chunk kernel takes the zeros of the WMMA's unused
+    K half from an LDS pad instead of selecting them per element (``_build_index_dk_w32``). The
+    first call for a shape compares every bit of the chunk partials with the kernel without it
+    and keeps that kernel on a mismatch.
+
+    ``scatter`` (gfx1250, ``msa_index_dk_scatter``, sums in another order): the chunk partials come
+    from :func:`_build_index_dk_scatter_w32` (each entry added to its winning key row) when the
+    shape is supported and the comparison with the kernel above on probe inputs of the shape
+    passes (:func:`_dk_scatter_checked`, once per shape); the reduce is unchanged.
 
     Args:
         plan: the selection's :class:`BlockPlan` (``msa_token_bwd``'s, shared).
@@ -1015,59 +1374,113 @@ def index_dk(plan, g, keys, q, block_size=128):
     """
     S, B, H, DI = q.shape
     topk = g.shape[-1]
+    # eligibility of the scatter kernel, before any work
+    want_scatter = (
+        bool(scatter)
+        and "gfx1250" in get_hip_arch()
+        and index_dk_scatter_supported(DI, block_size)
+        # the kernel divides entry ids by topk; only power-of-two topk (a shift) was compiled and tested
+        and topk > 0
+        and topk & (topk - 1) == 0
+    )
     dk = torch.empty((S, B, DI), dtype=torch.bfloat16, device=q.device)
     ws = torch.empty((plan.n_chunks, block_size, DI), dtype=torch.float32, device=q.device)
     stream = torch.cuda.current_stream()
     nb, nch = int(plan.n_blocks), int(plan.n_chunks)
-    dk_args = (
-        plan.entries,
-        plan.chunks,
-        g.contiguous(),
-        keys.contiguous(),
-        q.contiguous(),
-        ws,
-        int(S),
-        int(B),
-        nb,
-        nch,
-        stream,
-    )
     red_args = (ws, plan.chunk_ptr, dk, int(S), int(B), nb, nch, stream)
-    key = (H, DI, topk, block_size)
-    fns = _DK_CACHE.get(key)
-    if fns is None:
-        fns = (
-            build_index_dk(H, DI, topk, block_size).compile(*dk_args),
-            build_index_dk_reduce(H, DI, block_size).compile(*red_args),
+
+    def run(kernel, ws_out):
+        return _index_dk_partials(plan, g, keys, q, block_size, kernel, ws_out)
+
+    use_lean = False
+    if lean and "gfx1250" in get_hip_arch():
+        from primus.backends.megatron.core.fusions import bitwise_check
+
+        use_lean = bitwise_check.passed(
+            "msa_lean_masks index_dk",
+            lambda: run("lean", torch.empty_like(ws)),
+            lambda: run("reference", torch.empty_like(ws)),
+            key=(S, B, H, DI, topk, block_size, nch),
         )
-        _DK_CACHE[key] = fns
-    fns[0](*dk_args)
-    fns[1](*red_args)
+    chunk_kernel = "lean" if use_lean else "reference"
+    if want_scatter and _dk_scatter_checked((S, B, H, DI, topk, block_size), chunk_kernel, q.device):
+        chunk_kernel = "scatter"
+    run(chunk_kernel, ws)
+    red_key = (H, DI, block_size, "reduce")
+    red = _DK_CACHE.get(red_key)
+    if red is None:
+        red = build_index_dk_reduce(H, DI, block_size).compile(*red_args)
+        _DK_CACHE[red_key] = red
+    red(*red_args)
     return dk
 
 
-def index_block_max(q: torch.Tensor, k: torch.Tensor, block_size: int = 128):
+# index_block_max(fill="poison"): what the outputs hold where the kernel does not write, for the
+# self-check and the tests of msa_select_skip_fill (a reader of those elements would show)
+FILL_POISON_SCORE = float("nan")
+FILL_POISON_KEY = -2
+
+
+def index_block_max(
+    q: torch.Tensor, k: torch.Tensor, block_size: int = 128, mask_skip: bool = False, fill=True
+):
     """Per-block max of ``q . k`` over each query's causal keys.
 
     Args:
         q: ``[S, B, n_index, D]`` bf16; k: ``[S, B, D]`` (or ``[S, B, 1, D]``) bf16.
+        mask_skip: gfx1250 only (``msa_lean_masks``): a key block that every query of a
+            work-group sees in full skips the per-key causal compare and select
+            (``_build_index_block_max_w32``). The first call for a shape compares every bit of
+            both outputs with the kernel without it and keeps that kernel on a mismatch.
+
+        fill: True writes -inf / -1 into both outputs before the kernel, which itself writes
+            every (query, block) with ``block <= query // block_size`` and, depending on the
+            kernel, some of the later blocks of its query group. False (``msa_select_skip_fill``,
+            gfx1250 kernel) leaves the blocks after the query's own unspecified: the caller must
+            not read them (``select_plan.boost_forced(causal_block=...)`` restores -inf there).
+            ``"poison"`` fills with NaN / -2 instead, for checks of such callers.
 
     Returns:
         ``block_max`` fp32 and ``argmax`` int32, both ``[B, n_index, S, n_blocks]``;
-        -inf / -1 on blocks with no visible key.
+        -inf / -1 on blocks with no visible key (with ``fill=True``).
     """
     S, B, H, DI = q.shape
     k = k.reshape(S, B, DI)
     assert q.dtype == torch.bfloat16 and k.dtype == torch.bfloat16
     q, k = q.contiguous(), k.contiguous()
     n_blocks = -(-S // block_size)
-    block_max = torch.full((B, H, S, n_blocks), float("-inf"), dtype=torch.float32, device=q.device)
-    argmax = torch.full((B, H, S, n_blocks), -1, dtype=torch.int32, device=q.device)
-    args = (q, k, block_max, argmax, int(S), int(B), int(n_blocks), torch.cuda.current_stream())
-    key = (H, DI, block_size)
-    fn = _CACHE.get(key)
-    if fn is None:
-        fn = build_index_block_max(H, DI, block_size).compile(*args)
-        _CACHE[key] = fn
-    fn(*args)
-    return block_max, argmax
+
+    def run(skip, fill=True):
+        shape = (B, H, S, n_blocks)
+        if fill is True:
+            block_max = torch.full(shape, float("-inf"), dtype=torch.float32, device=q.device)
+            argmax = torch.full(shape, -1, dtype=torch.int32, device=q.device)
+        elif fill == "poison":
+            block_max = torch.full(shape, FILL_POISON_SCORE, dtype=torch.float32, device=q.device)
+            argmax = torch.full(shape, FILL_POISON_KEY, dtype=torch.int32, device=q.device)
+        else:
+            block_max = torch.empty(shape, dtype=torch.float32, device=q.device)
+            argmax = torch.empty(shape, dtype=torch.int32, device=q.device)
+        args = (q, k, block_max, argmax, int(S), int(B), int(n_blocks), torch.cuda.current_stream())
+        key = (H, DI, block_size, "mask_skip") if skip else (H, DI, block_size)
+        fn = _CACHE.get(key)
+        if fn is None:
+            if skip:
+                fn = _build_index_block_max_w32(H, DI, block_size, mask_skip=True).compile(*args)
+            else:
+                fn = build_index_block_max(H, DI, block_size).compile(*args)
+            _CACHE[key] = fn
+        fn(*args)
+        return block_max, argmax
+
+    skip = False
+    if mask_skip and "gfx1250" in get_hip_arch():
+        from primus.backends.megatron.core.fusions import bitwise_check
+
+        skip = bitwise_check.passed(
+            "msa_lean_masks index_block_max",
+            lambda: run(True),
+            lambda: run(False),
+            key=(S, B, H, DI, block_size),
+        )
+    return run(skip, fill)

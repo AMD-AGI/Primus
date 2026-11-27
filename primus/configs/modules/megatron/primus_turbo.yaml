@@ -107,6 +107,14 @@ turbo_mega_moe_precision: bf16
 # DDP: off under Megatron-FSDP). null follows gradient_accumulation_fusion; true / false set it for
 # the MegaMoE experts alone.
 turbo_mega_moe_wgrad_accum_fusion: null
+# MegaMoE with overlap_grad_reduce (Megatron DDP): each MegaMoE backward stage first waits for the
+# grad reduce-scatters issued before it. Without that the two can deadlock on gfx1250 (MI455X): a
+# stage's kernels keep most of every compute unit's LDS while they wait for the other ranks, so an
+# RCCL kernel cannot run beside them, and whether a rank's GPU starts them before or after a queued
+# reduce-scatter depends on how the runtime shares its hardware queues, which differs between
+# ranks. The wait costs no time. null: on for gfx1250 only; true / false set it for any GPU. No
+# effect with overlap_grad_reduce off.
+turbo_mega_moe_ordered_grad_reduce: null
 
 # ===== MegaUlysses =====
 # Ulysses CP with the QKV / o_proj all-to-alls fused into their GEMMs (GemmA2A / A2AGemm) and, with

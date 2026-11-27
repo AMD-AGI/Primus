@@ -78,6 +78,16 @@ distributed optimizer wants to overlap, both of which are driven at module / par
 
 The split is purely at the Python/autograd level — the kernels are unchanged.
 
+On MI455X (gfx1250) each MegaMoE backward stage first waits for the reduce-scatters issued before
+it (`turbo_mega_moe_ordered_grad_reduce`, on by default there; no effect with `overlap_grad_reduce`
+off). A stage's kernels wait for the other ranks while each of their workgroups keeps 278528 B of its
+compute unit's 320 KiB of LDS, which leaves no room for an RCCL workgroup (85472 B) on that GPU. A
+reduce-scatter still queued when a stage starts can therefore not run beside it, and whether a
+rank's GPU starts the stage or the reduce-scatter first depends on how the runtime shares its
+hardware queues between the streams, which differs from rank to rank: one rank spinning in the stage
+and another one in the reduce-scatter wait for each other forever. The wait costs no time (the two
+cannot share the GPU anyway), and reduce-scatters issued after a stage still overlap the backward.
+
 ## Configuration
 
 Enable the fused MegaMoE layer in the training config:

@@ -65,7 +65,8 @@ modules:
       # flydsl: gfx950 MFMA kernels, or the wave32 WMMA kernels on gfx1250.
       # eager: plain PyTorch, for numerics. flydsl rejects a dataloader mask.
       msa_backend: ${PRIMUS_MSA_BACKEND:flydsl}
-      # Triton fusions around the attention, bit-identical to the eager ops (minimax_m3.yaml)
+      # Triton fusions around the attention, bit-identical to the eager ops; on gfx1250 the indexer
+      # loss takes a one-pass kernel that sums in another order (minimax_m3.yaml)
       msa_fused_qk_norm_rope: true
       msa_fused_indexer_loss: true
       # launch cuts: block_scores gradient written by the loss kernel; RoPE tables kept per freqs tensor
@@ -75,7 +76,8 @@ modules:
       msa_fused_zero_centered_gamma: true
       msa_fused_indexer_input_norm: true
       msa_fused_select_plan: true
-      # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens
+      # gfx1250 MSA forward / dQ: one staging of a K/V tile per workgroup of adjacent tokens, with
+      # the aligned block walk (sums in another order)
       msa_shared_tile_staging: true
 
       # parallel. MSA has no tensor or context parallel, so extra GPUs are EP.
@@ -85,7 +87,9 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:1}
       sequence_parallel: false
       # Overlapping the grad reduce-scatter and param all-gather was 10% slower on one
-      # GPU, 5% on EP2 and 1% on the EP4 8-layer GBS 32 baseline.
+      # GPU, 5% on EP2 and 1% on the EP4 8-layer GBS 32 baseline, and 13% slower there with
+      # MegaMoE (752.6 vs 667.5 ms on M3.1-Flash), which also needs the
+      # megatron.turbo.mega_moe_grad_reduce_order patch to run with it on gfx1250.
       overlap_grad_reduce: false
       overlap_param_gather: false
       use_torch_fsdp2: false
@@ -103,6 +107,8 @@ modules:
       # fp32-output GEMMs on gfx1250. Into the bf16 main_grad it needs an expert grouped GEMM
       # whose wgrad accumulates: FlyDSL's cannot (Primus-Turbo 0.6.1), and the Triton backend,
       # which can, costs more than the fusion saves (406.5 vs 372.1 ms on the proxy above).
+      # MegaMoE's expert wgrad kernel accumulates, so the launcher turns the fusion on together
+      # with MegaMoE from two expert-parallel ranks on (GRADIENT_ACCUMULATION_FUSION, README.md).
       gradient_accumulation_fusion: false
       # The check is a norm over every gradient each step: 5 ms at EP4 with 8 layers.
       check_for_nan_in_loss_and_grad: false
@@ -127,6 +133,10 @@ modules:
       moe_permute_fusion: true
       # BF16 router logits NaN on the first step with 128 experts.
       moe_router_dtype: fp32
+      # The FP32 router GEMMs on Primus's Triton kernels, as in the DeepSeek-V3 recipe. Measured on the
+      # M3.1-Flash proxy at EP4, MBS 2: 602.6 ms against 620.0 (two runs each, -2.8 %), loss within the
+      # run-to-run spread of MegaMoE. Not measured on the 3-dense-layer M3 experiment itself.
+      moe_router_triton_gemm: true
 
       # rope fusion
       enable_experimental: true
