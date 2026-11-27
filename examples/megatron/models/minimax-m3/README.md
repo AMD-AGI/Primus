@@ -795,8 +795,8 @@ From two expert-parallel ranks on, the launcher turns on Primus-Turbo's MegaMoE
 
 `MBS` stays 1 by default; the fastest setting measured adds `MBS=2` (see Run).
 
-M3.1-Flash and M3 at the baseline shape (EP4, 8 layers, GBS 32) on the four GPUs of node D (a
-fourth shared 4x MI455X node), image tas-20261109 and its Primus-Turbo, inside a container, one run at
+M3.1-Flash and M3 at the baseline shape (EP4, 8 layers, GBS 32) on the four GPUs of a
+fourth shared 4x MI455X node, image tas-20261109 and its Primus-Turbo, inside a container, one run at
 a time on the four otherwise idle GPUs. "Before" is 81e2ed8e0, the tree before this section, with the
 launcher's defaults of the time (all-to-all dispatch, FlyDSL grouped GEMM, no fusion). Every run
 finished 10 iterations with 0 NaN.
@@ -807,7 +807,10 @@ finished 10 iterations with 0 NaN.
 | M3.1-Flash | before | 2 | all-to-all, FlyDSL grouped GEMM | 672.5 | 48,722 | 1286.8 | 210.11 GB | 8.85600 |
 | M3.1-Flash | this | 1 | `USE_TURBO_MEGA_MOE=False GRADIENT_ACCUMULATION_FUSION=False` | 732.5 | 44,734 | 1181.5 | 199.72 GB | 8.89776 |
 | M3.1-Flash | this | 1 | MegaMoE and fusion (the default) | 667.5 | 49,094 | 1296.6 | 193.67 GB | 8.89757 |
-| M3.1-Flash | this | 2 | MegaMoE and fusion (the default) | 619.9 | 52,864 | 1396.1 | 199.50 GB | 8.85583 |
+| M3.1-Flash | this | 2 | MegaMoE and fusion (the default) | 619.9, 620.1 | 52,864, 52,844 | 1396.1, 1395.6 | 199.50 GB | 8.85583, 8.85585 |
+| M3.1-Flash | this | 2 | MegaMoE, fusion and `moe_router_triton_gemm` (now the yaml default) | 601.8, 603.4 | 54,453, 54,306 | 1438.1, 1434.3 | 199.50 GB | 8.85597, 8.85573 |
+| M3.1-Flash | this | 2 | MegaMoE and fusion, both overlaps (`overlap_grad_reduce`, `overlap_param_gather`) | 667.9 | 49,060 | 1295.7 | 200.52 GB | 8.85585 |
+| M3.1-Flash | this | 1 | `USE_TURBO_MEGA_MOE=False GRADIENT_ACCUMULATION_FUSION=False`, router Triton GEMM | 720.6 | 45,470 | 1200.9 | 199.72 GB | 8.89765 |
 | M3 | before | 1 | all-to-all, FlyDSL grouped GEMM | 738.0 | 44,404 | 1177.4 | 199.82 GB | 8.19548 |
 | M3 | this | 1 | MegaMoE and fusion (the default) | 671.8 | 48,776 | 1293.4 | 193.70 GB | 8.19543 |
 
@@ -818,7 +821,16 @@ finished 10 iterations with 0 NaN.
 - With both switched off this tree repeats the tree before it: the same loss and grad norm at
   iteration 10 (8.897763, 6.864), at 732.5 ms.
 - MegaMoE's loss differs from all-to-all's in the fourth decimal, and its runs differ from each other
-  as much: the profiled run of the MBS 2 row ended at 8.85593.
+  as much: the MBS 2 rows end at 8.85573 to 8.85597.
+- `moe_router_triton_gemm` (the FP32 router GEMMs on Primus's Triton kernels, as in the DeepSeek-V3
+  recipe) is now in the MI455X MiniMax-M3 yaml, and so in the M3.1-Flash yaml that extends it. On
+  the MBS 2 default it takes 602.6 ms against 620.0 (two runs each, -2.8%). With MegaMoE and the
+  fusion off, it changes the loss in the fifth decimal (8.897654 against 8.897763) and takes 720.6
+  against 732.5 ms at MBS 1. It was measured on M3.1-Flash only.
+- Two expert-parallel ranks (EP2, 2 GPUs, 4 layers, GBS 16, MBS 1, the baseline shape at half the
+  ranks): 352.5 ms with MegaMoE and the fusion (92,969 tokens/s/GPU, 130.6 GB) against 370.7 ms
+  before (88,401 tokens/s/GPU, 133.4 GB), -4.9%. The lm loss at iteration 10 is 9.964003 against
+  9.963620.
 
 Where the step goes on M3.1-Flash: GPU kernel time of profiled iteration 7 on all four ranks, in ms,
 the mean of the ranks. Profiling makes the three steps 988, 727 and 661 ms.
@@ -855,8 +867,11 @@ and MegaMoE backward kernel had started in the opposite order to its peers' wait
 for it. Each MegaMoE backward stage now first finishes the reduce-scatters issued before it
 (`megatron.turbo.mega_moe_grad_reduce_order`, `turbo_mega_moe_ordered_grad_reduce`, on by default on
 gfx1250; see the guide above). With it, `--overlap_grad_reduce True --overlap_param_gather True` ran
-M3.1-Flash at 752.6 ms at MBS 1 for 10 iterations (loss 8.89763), against 667.5 ms without them. The
-yaml keeps both off.
+M3.1-Flash at 752.6 ms at MBS 1 for 10 iterations (loss 8.89763), against 667.5 ms without them, and
+667.9 ms at MBS 2, against 620.0. The yaml keeps both off. The runs of the overlap rows were
+run with a debug patch in the container that makes MegaMoE's cross-rank flag wait give up after one
+timeout (500 M cycles) instead of spinning forever, so a hang could not hold the GPUs; a give-up would
+void the run. No wait gave up in these runs (no timeout message in the logs).
 
 ## How the defaults were chosen
 
@@ -1006,8 +1021,9 @@ Do not run:
 - Pipeline parallel. The launcher allows `PRIMUS_PP`, but no PP run has been done. Tensor parallel
   and context parallel are not implemented for MSA.
 - EP8 and more than one node.
-- DeepEP beyond one run per model at EP4 on 64 CUs (tas-20261109 image), and MegaMoE at EP2 and EP8,
-  where the launcher turns it on as well.
+- DeepEP beyond one run per model at EP4 on 64 CUs (tas-20261109 image), and MegaMoE at EP8, where
+  the launcher turns it on as well. At EP2 it is measured on 4 layers only (MegaMoE section).
+- `moe_router_triton_gemm` on the 3-dense-layer M3 experiment, at EP4 and at EP2.
 - A real dataset and real routing. These runs are mock data with uniform routing.
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).

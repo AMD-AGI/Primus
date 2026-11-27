@@ -133,6 +133,10 @@ modules:
       moe_permute_fusion: true
       # BF16 router logits NaN on the first step with 128 experts.
       moe_router_dtype: fp32
+      # The FP32 router GEMMs on Primus's Triton kernels, as in the DeepSeek-V3 recipe. Measured on the
+      # M3.1-Flash proxy at EP4, MBS 2: 602.6 ms against 620.0 (two runs each, -2.8 %), loss within the
+      # run-to-run spread of MegaMoE. Not measured on the 3-dense-layer M3 experiment itself.
+      moe_router_triton_gemm: true
 
       # rope fusion
       enable_experimental: true
