@@ -9,6 +9,7 @@ import re
 from collections import Counter
 from typing import List, Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness import LAYER
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -478,14 +479,15 @@ class LanguageModelProfiler(BaseModuleProfiler):
             getattr(mp, "use_torch_fsdp2", False)
         )
         multiplier = 4  # param weights + gradients, bf16
-        # fp32 optimizer state: 2 for main params + 4 + 4 for 1st & 2nd moments.
+        # fp32 optimizer state: 4 for main params + 4 + 4 for 1st & 2nd moments
+        # (a gpt-oss MI355X run holds 16 bytes per parameter outside the step).
         # Muon orthogonalizes the 2D weights with momentum only (no 2nd moment),
         # so it drops the 4 bytes of 2nd-moment state on the matrix params that
-        # dominate the parameter count (2 main + 4 momentum = 6).  Embeddings/
+        # dominate the parameter count (4 main + 4 momentum = 8).  Embeddings/
         # norms nominally stay on Adam, but they are a negligible fraction of
         # params, so approximating the whole model at the Muon rate is accurate.
         is_muon = str(getattr(self.config.model_config, "optimizer", "") or "").lower() == "muon"
-        optimizer_state_multiplier = 6.0 if is_muon else 10.0
+        optimizer_state_multiplier = 8.0 if is_muon else 12.0
         if use_dist:
             # Distributed optimizer / dist_muon shards the fp32 optimizer state
             # across the DP group.  get_dp_size() returns world/(EP·PP) = EDP, the
@@ -635,9 +637,10 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     f"\n[Primus:Performance Projection] Benchmarking hybrid '{kind}' layer ({type(module).__name__})..."
                 )
             shapes, kwargs = profiler.require_bench_inputs(LAYER, module, batch_size, seq_len)
-            fwd, bwd, mem = benchmark_layer(
-                module, shapes, transformer_config=getattr(module, "config", None), forward_kwargs=kwargs
-            )
+            with kernel_report.scope(kernel_report.layer_scope("dense", None)):
+                fwd, bwd, mem = benchmark_layer(
+                    module, shapes, transformer_config=getattr(module, "config", None), forward_kwargs=kwargs
+                )
             per_kind[kind] = (fwd, bwd, mem)
             if is_rank_0:
                 print(f"  Forward time:  {fwd:.2f} ms (measured)")
@@ -819,8 +822,11 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 # In simulation mode without a model, the profiler uses its
                 # analytical estimate (set_simulation_mode was already called
                 # by set_simulation_backends).
-                emb_forward = profiler.measured_forward_time(batch_size, seq_len)
-                emb_backward = profiler.measured_backward_time(batch_size, seq_len)
+                with kernel_report.scope("embedding"):
+                    emb_forward = profiler.measured_forward_time(batch_size, seq_len)
+                    emb_backward = profiler.measured_backward_time(batch_size, seq_len)
+                emb_forward += kernel_report.extras("embedding", "fwd")
+                emb_backward += kernel_report.extras("embedding", "bwd")
                 emb_mem = profiler.measured_activation_memory(batch_size, seq_len)
                 if is_rank_0:
                     print(
@@ -854,15 +860,16 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 # In simulation mode without a model, the output_layer profiler
                 # uses its GEMM backend (set_gemm_backend was already called by
                 # set_simulation_backends).
-                out_forward = profiler.measured_forward_time(batch_size, seq_len)
-                out_backward = profiler.measured_backward_time(batch_size, seq_len)
-                out_mem = profiler.measured_activation_memory(batch_size, seq_len)
-                if is_rank_0:
-                    print(
-                        f"  Output Layer -> fwd: {out_forward:.2f} ms, "
-                        f"bwd: {out_backward:.2f} ms, "
-                        f"act: {out_mem / (1024**2):.2f} MB"
-                    )
+                with kernel_report.scope("output"):
+                    out_forward = profiler.measured_forward_time(batch_size, seq_len)
+                    out_backward = profiler.measured_backward_time(batch_size, seq_len)
+                    out_mem = profiler.measured_activation_memory(batch_size, seq_len)
+                    if is_rank_0:
+                        print(
+                            f"  Output Layer -> fwd: {out_forward:.2f} ms, "
+                            f"bwd: {out_backward:.2f} ms, "
+                            f"act: {out_mem / (1024**2):.2f} MB"
+                        )
 
                 loss_profiler = self.sub_profilers["calc_loss"]
                 if not is_simulation_mode and loss_owner is not None and output_module is not None:
@@ -876,6 +883,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     loss_profiler.benchmark_loss(loss_owner, vocab_per_rank, batch_size, seq_len)
                 loss_fwd = loss_profiler.measured_forward_time(batch_size, seq_len)
                 loss_bwd = loss_profiler.measured_backward_time(batch_size, seq_len)
+                out_forward += kernel_report.extras("output", "fwd")
+                out_backward += kernel_report.extras("output", "bwd")
                 loss_mem = loss_profiler.estimated_activation_memory(batch_size, seq_len)
                 fla_fused = is_simulation_mode and loss_profiler.fla_fused()
                 if fla_fused:
@@ -979,28 +988,32 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 layer_profiler._cache_key = None
 
             # Benchmark/simulate full layer
-            forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
-            backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
-            activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
+            layer_scope = kernel_report.layer_scope(layer_type, cr)
+            with kernel_report.scope(layer_scope):
+                forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
+                backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
+                activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
 
-            # Benchmark/simulate Attention
-            attn_profiler = layer_profiler.get_sub_profiler("self_attention")
-            attn_forward = attn_profiler.measured_forward_time(batch_size, seq_len)
-            attn_backward = attn_profiler.measured_backward_time(batch_size, seq_len)
-            attn_mem = attn_profiler.measured_activation_memory(batch_size, seq_len)
+                # Benchmark/simulate Attention
+                attn_profiler = layer_profiler.get_sub_profiler("self_attention")
+                attn_forward = attn_profiler.measured_forward_time(batch_size, seq_len)
+                attn_backward = attn_profiler.measured_backward_time(batch_size, seq_len)
+                attn_mem = attn_profiler.measured_activation_memory(batch_size, seq_len)
 
-            # Benchmark/simulate MLP
-            mlp_profiler = layer_profiler.get_sub_profiler("mlp")
-            mlp_forward = mlp_profiler.measured_forward_time(batch_size, seq_len)
-            mlp_backward = mlp_profiler.measured_backward_time(batch_size, seq_len)
-            mlp_mem = mlp_profiler.measured_activation_memory(batch_size, seq_len)
+                # Benchmark/simulate MLP
+                mlp_profiler = layer_profiler.get_sub_profiler("mlp")
+                mlp_forward = mlp_profiler.measured_forward_time(batch_size, seq_len)
+                mlp_backward = mlp_profiler.measured_backward_time(batch_size, seq_len)
+                mlp_mem = mlp_profiler.measured_activation_memory(batch_size, seq_len)
 
-            # Get decomposed A2A timings for MoE layers (0 for dense layers)
-            mlp_a2a_fwd = 0.0
-            mlp_a2a_bwd = 0.0
-            if is_moe and hasattr(mlp_profiler, "measured_a2a_forward_time"):
-                mlp_a2a_fwd = mlp_profiler.measured_a2a_forward_time(batch_size, seq_len)
-                mlp_a2a_bwd = mlp_profiler.measured_a2a_backward_time(batch_size, seq_len)
+                # Get decomposed A2A timings for MoE layers (0 for dense layers)
+                mlp_a2a_fwd = 0.0
+                mlp_a2a_bwd = 0.0
+                if is_moe and hasattr(mlp_profiler, "measured_a2a_forward_time"):
+                    mlp_a2a_fwd = mlp_profiler.measured_a2a_forward_time(batch_size, seq_len)
+                    mlp_a2a_bwd = mlp_profiler.measured_a2a_backward_time(batch_size, seq_len)
+            forward_time += kernel_report.extras(layer_scope, "fwd")
+            backward_time += kernel_report.extras(layer_scope, "bwd")
 
             results[type_key] = {
                 "type": layer_type,

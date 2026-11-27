@@ -44,6 +44,7 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _estimate_ep_communication_overhead,
     _estimate_pp_communication_overhead,
     _extract_layer_type_timings,
+    _fsdp_insitu_ms,
     _get_deepep_overlap_efficiency,
     _get_parameter_memory,
     _has_dense_layers,
@@ -51,6 +52,7 @@ from primus.core.projection.performance_projection.projection import (  # noqa: 
     _limit_layers_for_projection,
     _load_artifact,
     _load_profiling_results,
+    _megatron_ddp_overlap_contention_ms,
     _normalized_recompute_layer_ids,
     _recompute_layer_count,
     _reduction_info_from_artifact_metadata,
@@ -393,6 +395,14 @@ def test_limit_layers_pure_mamba_keeps_one_pair():
     cfg = _hybrid_cfg(is_hybrid_model=True, hybrid_attention_ratio=0.0)
     _limit_layers_for_projection(cfg)
     assert cfg.num_layers == 2
+
+
+def test_limit_layers_zaya1_keeps_one_attention_and_one_moe_stage():
+    cfg = _hybrid_cfg(model_type="zaya1", zaya_layers=["a", 16, "a", 16])
+    cfg.num_layers = 4
+    _limit_layers_for_projection(cfg)
+    assert cfg.num_layers == 2
+    assert cfg.zaya_layers == ["a", 16]
 
 
 def test_limit_layers_hybrid_pattern_is_trimmed_to_every_kind():
@@ -820,3 +830,97 @@ def test_collective_comm_fsdp_breakdown(_single_node_env):
     )
     assert breakdown["fsdp_allgather_fwd"] > 0
     assert msg["fsdp_enabled"] is True
+    assert msg["fsdp_node_ag_per_layer_ms"] == msg["fsdp_ag_per_layer_ms"]
+
+
+def test_collective_comm_fsdp_keeps_the_in_node_time_across_nodes(_single_node_env):
+    tc = _full_config(use_torch_fsdp2=True)
+    _, _, one, _ = calculate_collective_communication_time(
+        tc, num_nodes=1, gpus_per_node=8, tp=1, pp=1, ep=1, cp=1, dp=8
+    )
+    _, _, two, _ = calculate_collective_communication_time(
+        tc, num_nodes=2, gpus_per_node=8, tp=1, pp=1, ep=1, cp=1, dp=16
+    )
+    assert two["fsdp_node_ag_per_layer_ms"] == pytest.approx(one["fsdp_ag_per_layer_ms"])
+    assert two["fsdp_node_rs_per_layer_ms"] == pytest.approx(one["fsdp_rs_per_layer_ms"])
+
+
+def _fsdp_message_info():
+    return {"fsdp_enabled": True, "num_layers": 80, "fsdp_ag_per_layer_ms": 6.8, "fsdp_rs_per_layer_ms": 7.0}
+
+
+def test_megatron_fsdp_insitu_scales_with_layers_comm_and_compute():
+    msg = _fsdp_message_info()
+    got = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), msg, 80 * 264.0)
+    per_layer = 0.7 * (2 * 6.8 + 7.0) + 0.06 * 264.0 + 1.0 * (2 * 6.8 + 7.0)
+    assert got == pytest.approx(80 * per_layer)
+    assert msg["fsdp_insitu_per_layer_ms"] == pytest.approx(per_layer)
+
+
+def test_megatron_fsdp_insitu_prices_the_in_node_collectives():
+    multi_node = dict(_fsdp_message_info(), fsdp_ag_per_layer_ms=20.0, fsdp_rs_per_layer_ms=21.0)
+    multi_node.update(fsdp_node_ag_per_layer_ms=6.8, fsdp_node_rs_per_layer_ms=7.0)
+    got = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), multi_node, 80 * 264.0)
+    assert got == pytest.approx(
+        _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), _fsdp_message_info(), 80 * 264.0)
+    )
+
+
+def test_megatron_fsdp_insitu_spreads_the_per_iteration_share_over_microbatches():
+    comm = 2 * 6.8 + 7.0
+    one = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), _fsdp_message_info(), 80 * 264.0, 1)
+    four = _fsdp_insitu_ms(SimpleNamespace(framework="megatron"), _fsdp_message_info(), 80 * 264.0, 4)
+    assert one - four == pytest.approx(80 * comm * (1 - 1 / 4))
+
+
+def _ddp_config(framework="megatron", ep=1, use_torch_fsdp2=False, num_layers=32):
+    return SimpleNamespace(
+        framework=framework,
+        model_config=SimpleNamespace(num_layers=num_layers, moe_pattern=None),
+        model_parallel_config=SimpleNamespace(
+            pipeline_model_parallel_size=1,
+            context_model_parallel_size=1,
+            expert_model_parallel_size=ep,
+            use_torch_fsdp2=use_torch_fsdp2,
+        ),
+    )
+
+
+_DDP_PROFILE = {0: {"type": "dense", "forward_time_ms": 25.0, "backward_time_ms": 50.0}}
+
+
+def test_megatron_ddp_contention_is_a_fifth_of_one_microbatch_backward():
+    msg = {"dense_params_per_layer": 2e8, "expert_params_per_layer": 0.0}
+    got = _megatron_ddp_overlap_contention_ms(_ddp_config(), msg, 8, _DDP_PROFILE)
+    assert got == pytest.approx(0.2 * 32 * 50.0)
+
+
+def test_megatron_ddp_contention_skips_experts_sharded_over_the_dp_group():
+    msg = {"dense_params_per_layer": 1e8, "expert_params_per_layer": 3e8}
+    got = _megatron_ddp_overlap_contention_ms(_ddp_config(ep=8), msg, 8, _DDP_PROFILE)
+    assert got == pytest.approx(0.2 * 32 * 50.0 * 0.25)
+
+
+@pytest.mark.parametrize(
+    "config, dp",
+    [(_ddp_config(use_torch_fsdp2=True), 8), (_ddp_config(framework="torchtitan"), 8), (_ddp_config(), 1)],
+    ids=["fsdp2", "torchtitan", "no-dp"],
+)
+def test_megatron_ddp_contention_gated(config, dp):
+    msg = {"dense_params_per_layer": 2e8, "expert_params_per_layer": 0.0}
+    assert _megatron_ddp_overlap_contention_ms(config, msg, dp, _DDP_PROFILE) == 0.0
+
+
+def test_torchtitan_fsdp_insitu_is_a_share_of_compute_only():
+    got = _fsdp_insitu_ms(SimpleNamespace(framework="torchtitan"), _fsdp_message_info(), 80 * 264.0, 1)
+    assert got == pytest.approx(80 * 0.06 * 264.0)
+
+
+@pytest.mark.parametrize("framework", ["megatron", "torchtitan"])
+def test_fsdp_insitu_needs_fsdp(framework):
+    no_fsdp = dict(_fsdp_message_info(), fsdp_enabled=False)
+    assert _fsdp_insitu_ms(SimpleNamespace(framework=framework), no_fsdp, 1000.0) == 0.0
+
+
+def test_fsdp_insitu_unknown_framework_is_zero():
+    assert _fsdp_insitu_ms(SimpleNamespace(framework="maxtext"), _fsdp_message_info(), 1000.0) == 0.0
