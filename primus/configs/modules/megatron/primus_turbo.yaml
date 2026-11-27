@@ -124,6 +124,9 @@ use_turbo_mega_ulysses: false
 # GPU_MAX_HW_QUEUES >= 4, which base_env.sh sets to 2 unless exported).
 # Only read when use_turbo_mega_ulysses is on.
 turbo_mega_ulysses_impl: fused
+# fused / serial (GQA) local attention: turbo (flash_attn_func) | te (TE DotProductAttention, the
+# kernel of the stock CP path)
+turbo_mega_ulysses_local_attn: turbo
 # attn only: striped CP split, chunk c of this many tokens on CP rank c % cp (0: contiguous)
 turbo_mega_ulysses_seq_chunk: 256
 

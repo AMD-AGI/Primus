@@ -31,6 +31,10 @@ sequence, and the exit is ``ulysses_a2a_o_gemm``.
 MLA only, ``per_head`` (Megatron's per-head Ulysses: every head up-projected on the local tokens,
 then one all-to-all of q, k, v).
 
+``turbo_mega_ulysses_local_attn`` picks the local attention of ``fused`` / ``serial`` (GQA): ``turbo``
+(Primus-Turbo's ``flash_attn_func``) or ``te`` (Transformer Engine's ``DotProductAttention``, the
+kernel Megatron's stock CP path runs), for comparisons where only the communication differs.
+
 ``attn`` fuses the all-to-alls into the attention instead of the projections:
 
     x [s/cp, 1, h] --linear_qkv--> q, k, v [s/cp, 1, heads, d] (local tokens, every head)
@@ -77,6 +81,13 @@ def _impl(args) -> str:
         else ("fused", "serial", "attn")
     )
     assert impl in valid, f"turbo_mega_ulysses_impl must be one of {valid}, got {impl!r}"
+    return impl
+
+
+def _local_attn(args) -> str:
+    impl = getattr(args, "turbo_mega_ulysses_local_attn", None) or "turbo"
+    valid = ("turbo", "te")
+    assert impl in valid, f"turbo_mega_ulysses_local_attn must be one of {valid}, got {impl!r}"
     return impl
 
 
@@ -210,6 +221,7 @@ def _is_turbo_mega_ulysses_can_patch(ctx: PatchContext) -> bool:
     if not bool(getattr(args, "use_turbo_mega_ulysses", False)):
         return False
     _impl(args)
+    _local_attn(args)
     reason = _unsupported(args)
     if reason is not None:
         warning_rank_0(f"{_PATCH} {reason}, keeping the stock CP path")
@@ -365,6 +377,37 @@ def _make_gqa_forward(args):
         qkv_op, o_op = _serial_qkv_gemm_a2a, _serial_a2a_o_gemm
     else:
         qkv_op, o_op = ulysses_qkv_gemm_a2a, ulysses_a2a_o_gemm
+    use_te = _local_attn(args) == "te"
+    te_attn = {}  # layer -> TE DotProductAttention on the local heads, without CP
+
+    def local_attn(layer, q, k, v, softmax_scale):
+        if not use_te:
+            # sbhd -> bshd views for flash-attn
+            o = flash_attn_func(
+                q.permute(1, 0, 2, 3),
+                k.permute(1, 0, 2, 3),
+                v.permute(1, 0, 2, 3),
+                dropout_p=0.0,
+                softmax_scale=softmax_scale,
+                causal=True,
+            )
+            return o.permute(1, 0, 2, 3).contiguous()
+        s, b, hq, d = q.shape
+        attn = te_attn.get(id(layer))
+        if attn is None:
+            from transformer_engine.pytorch import DotProductAttention
+
+            attn = DotProductAttention(
+                hq,
+                d,
+                num_gqa_groups=k.shape[2],
+                attention_dropout=0.0,
+                attn_mask_type="causal",
+                qkv_format="sbhd",
+                softmax_scale=softmax_scale,
+            )
+            te_attn[id(layer)] = attn
+        return attn(q, k, v).view(s, b, hq, d)
 
     def forward(
         self,
@@ -410,16 +453,7 @@ def _make_gqa_forward(args):
             )
             q = apply_rotary_pos_emb(q, q_pos_emb, config=cfg, cp_group=no_cp)
             k = apply_rotary_pos_emb(k, k_pos_emb, config=cfg, cp_group=no_cp)
-        # sbhd -> bshd views for flash-attn
-        o = flash_attn_func(
-            q.permute(1, 0, 2, 3),
-            k.permute(1, 0, 2, 3),
-            v.permute(1, 0, 2, 3),
-            dropout_p=0.0,
-            softmax_scale=cfg.softmax_scale,
-            causal=True,
-        )
-        o = o.permute(1, 0, 2, 3).contiguous()
+        o = local_attn(self, q, k, v, cfg.softmax_scale)
         _run_forward_pre_hooks(self.linear_proj)
         y = o_op(o, self.linear_proj.weight, None, cp_group, "sbhd")
         return y, None

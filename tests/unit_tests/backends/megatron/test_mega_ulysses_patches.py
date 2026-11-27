@@ -238,6 +238,16 @@ def test_invalid_impl_raises(eligible_env, mla, impl):
         _is_turbo_mega_ulysses_can_patch(_ctx(params))
 
 
+@pytest.mark.parametrize("local_attn, ok", [("turbo", True), ("te", True), (None, True), ("aiter", False)])
+def test_local_attn_validated(eligible_env, local_attn, ok):
+    params = _params(turbo_mega_ulysses_local_attn=local_attn)
+    if ok:
+        assert _is_turbo_mega_ulysses_can_patch(_ctx(params)) is True
+    else:
+        with pytest.raises(AssertionError, match="turbo_mega_ulysses_local_attn"):
+            _is_turbo_mega_ulysses_can_patch(_ctx(params))
+
+
 @pytest.mark.parametrize("cp_rank", [0, 1, 3])
 def test_contiguous_cp_split(monkeypatch, cp_rank):
     cp, s, b = 4, 16, 2
