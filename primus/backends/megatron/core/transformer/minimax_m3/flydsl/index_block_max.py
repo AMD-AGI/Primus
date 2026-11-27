@@ -49,6 +49,9 @@ from primus_turbo.flydsl.utils import buffer_ops
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
     _tr16,
 )
+from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd import (
+    kernel_name,
+)
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import (
     cat_bf16_16,
     pack_low16_bf16,
@@ -100,7 +103,10 @@ def _build_index_block_max_w32(num_heads: int, index_dim: int, block_size: int, 
     k_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = allocator._align(k_off + block_size * STR * 2, 16)
 
-    @flyc.kernel(known_block_size=[threads, 1, 1])
+    @flyc.kernel(
+        known_block_size=[threads, 1, 1],
+        name=kernel_name("msa_index_block_max_w32", "lean" if mask_skip else ""),
+    )
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -291,7 +297,7 @@ def build_index_block_max(num_heads: int, index_dim: int, block_size: int):
     k_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = allocator._align(k_off + block_size * STR * 2, 16)
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[THREADS, 1, 1], name=kernel_name("msa_index_block_max"))
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -490,7 +496,9 @@ def _build_index_dk_w32(num_heads: int, index_dim: int, topk: int, block_size: i
     # zero_pad: 16 zero elements behind the staged Q
     allocator.ptr = allocator._align(q_off + (DI * stride_t + (16 if zero_pad else 0)) * 2, 16)
 
-    @flyc.kernel(known_block_size=[threads, 1, 1])
+    @flyc.kernel(
+        known_block_size=[threads, 1, 1], name=kernel_name("msa_index_dk_w32", "lean" if zero_pad else "")
+    )
     def k_fn(
         ENT: fx.Tensor,
         CHUNKS: fx.Tensor,
@@ -714,7 +722,7 @@ def _build_index_dk_scatter_w32(
     acc_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = allocator._align(acc_off + NACC * 4, 16)
 
-    @flyc.kernel(known_block_size=[32, 1, 1])
+    @flyc.kernel(known_block_size=[32, 1, 1], name=kernel_name("msa_index_dk_scatter_w32"))
     def k_fn(
         ENT: fx.Tensor,
         CHUNKS: fx.Tensor,
@@ -886,7 +894,7 @@ def build_index_dk(num_heads: int, index_dim: int, topk: int, block_size: int):
     q_off = allocator._align(allocator.ptr, 16)
     allocator.ptr = allocator._align(q_off + TT * STR * 2, 16)
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(known_block_size=[NTH, 1, 1], name=kernel_name("msa_index_dk"))
     def k_fn(
         ENT: fx.Tensor,
         CHUNKS: fx.Tensor,
@@ -1051,7 +1059,7 @@ def build_index_dk_reduce(num_heads: int, index_dim: int, block_size: int):
     SPLIT = NE // SLICE
     assert NE % SLICE == 0
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(known_block_size=[NTH, 1, 1], name=kernel_name("msa_index_dk_reduce"))
     def k_fn(
         WS: fx.Tensor, CHPTR: fx.Tensor, DK: fx.Tensor, S: fx.Int32, B: fx.Int32, NB: fx.Int32, NCH: fx.Int32
     ):
@@ -1141,7 +1149,7 @@ def build_index_dq(num_heads: int, index_dim: int, topk: int):
     THR = DI // EPT
     assert DI % EPT == 0
 
-    @flyc.kernel(known_block_size=[THR, 1, 1])
+    @flyc.kernel(known_block_size=[THR, 1, 1], name=kernel_name("msa_index_dq"))
     def k_fn(G: fx.Tensor, KEYS: fx.Tensor, K: fx.Tensor, DQ: fx.Tensor, S: fx.Int32, B: fx.Int32):
         tid = fx.Index(gpu.thread_idx.x)
         Sn = fx.Index(S)

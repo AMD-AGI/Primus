@@ -96,6 +96,12 @@ def check_buffer_bytes(**tensors):
         )
 
 
+def kernel_name(base: str, *tags: str) -> str:
+    """Symbol of a kernel in profiles and ISA dumps: ``base`` and the tags of the build options it
+    was built with, joined by ``_`` (empty tags dropped), e.g. ``msa_fwd_w32_wg4_slse_lean``."""
+    return "_".join([base, *(t for t in tags if t)])
+
+
 def build_fwd(
     num_kv_heads: int,
     topk: int,
@@ -181,7 +187,17 @@ def build_fwd(
         sl_off = allocator._align(allocator.ptr, 16)  # per-wave slot_lse staging
         allocator.ptr = allocator._align(sl_off + (NW * HPW * SLS + 1) * 4, 16)
 
-    @flyc.kernel(known_block_size=[NTHREADS, 1, 1])
+    name = kernel_name(
+        "msa_fwd",
+        f"w{NW}" if NW > 1 else "",
+        "slse" if emit_slot_lse else "",
+        "" if remap == "lpt" else f"remap_{remap}",
+        "" if step_keys == 16 else f"sk{step_keys}",
+        "" if k_via_lds else "kglobal",
+        "" if pipeline else "nopipe",
+    )
+
+    @flyc.kernel(known_block_size=[NTHREADS, 1, 1], name=name)
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,

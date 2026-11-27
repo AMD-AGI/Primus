@@ -57,6 +57,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
     NXCD,
     D,
     check_buffer_bytes,
+    kernel_name,
 )
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import (
     cat_bf16_16,
@@ -163,8 +164,17 @@ def build_fwd_wave32(
     STAGE = K_BYTES + KPS * VROW * 2
     SLOT = K_BYTES  # two_tile_slots: one K or V tile ([KPS, D + 8] bf16)
     LDS_BYTES = 2 * SLOT if PP else NBUF * STAGE
+    name = kernel_name(
+        "msa_fwd_w32",
+        f"wg{WPG}" if WPG > 1 else "",
+        "slse" if emit_slot_lse else "",
+        "lean" if step_mask_skip else "",
+        "carry" if CARRY else "",
+        "slots2" if PP else "",
+        "" if remap == "lpt" else f"remap_{remap}",
+    )
 
-    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1])
+    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1], name=name)
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,

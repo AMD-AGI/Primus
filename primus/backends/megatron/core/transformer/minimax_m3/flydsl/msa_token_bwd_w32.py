@@ -52,6 +52,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
     STRIDE,
     TK,
     D,
+    kernel_name,
 )
 from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_w32 import (
     cat_bf16_16,
@@ -165,8 +166,9 @@ def build_dq_w32(
     T_BYTES = KPS * ROWE * 2
     STAGE = 2 * T_BYTES  # K then V
     LDS_BYTES = NBUF * STAGE
+    name = kernel_name("msa_bwd_dq_w32", f"wg{WPG}" if WPG > 1 else "", "lean" if step_mask_skip else "")
 
-    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1])
+    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1], name=name)
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -548,8 +550,15 @@ def build_dkdv_w32(
     DS_BYTES = block_size * HPW * 2  # one (token, slot) record of the dS buffer
     CHUNK_DS = bool(emit_ds) and bool(ds_chunk_store)
     NTK = 2 * tps if CHUNK_DS else tps  # loop-state values per step: tokens (+ their entry ids)
+    name = kernel_name(
+        "msa_bwd_dkdv_w32",
+        "" if tps == 4 else f"step{tps}",
+        "lean" if step_mask_skip else "",
+        "ds" if emit_ds else "",
+        "dschunk" if CHUNK_DS else "",
+    )
 
-    @flyc.kernel(known_block_size=[threads, 1, 1])
+    @flyc.kernel(known_block_size=[threads, 1, 1], name=name)
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -1023,8 +1032,14 @@ def build_dq_ds_w32(
     STAGE = T_BYTES + D_BYTES
     LDS_BYTES = NBUF * STAGE
     ENTRY = ds_entry_bytes(block_size) // 2  # elements per record
+    name = kernel_name(
+        "msa_bwd_dq_ds_w32",
+        f"wg{WPG}" if WPG > 1 else "",
+        "slots" if with_slots else "",
+        "early" if EARLY else "",
+    )
 
-    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1])
+    @flyc.kernel(known_block_size=[WAVE * WPG, 1, 1], name=name)
     def k_fn(
         K: fx.Tensor,
         DS: fx.Tensor,

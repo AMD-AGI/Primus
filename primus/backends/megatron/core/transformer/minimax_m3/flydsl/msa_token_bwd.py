@@ -78,6 +78,7 @@ from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd i
     TK,
     D,
     check_buffer_bytes,
+    kernel_name,
 )
 
 _LOG2E = 1.4426950408889634
@@ -153,7 +154,7 @@ def build_dq(num_kv_heads: int, topk: int, block_size: int, scale: float):
     v_off = allocator._align(k_off + NBUF * BUF * 2, 16)
     allocator.ptr = allocator._align(v_off + NBUF * BUF * 2, 16)
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[THREADS, 1, 1], name=kernel_name("msa_bwd_dq"))
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -371,7 +372,9 @@ def build_dkdv(num_kv_heads: int, block_size: int, scale: float, topk: int, toke
     dl_off = allocator._align(lse_off + THREADS * 4, 16)
     allocator.ptr = allocator._align(dl_off + THREADS * 4, 16)
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(
+        known_block_size=[THREADS, 1, 1], name=kernel_name("msa_bwd_dkdv", "" if TPS == 4 else f"step{TPS}")
+    )
     def k_fn(
         Q: fx.Tensor,
         K: fx.Tensor,
@@ -633,7 +636,7 @@ def build_dkdv_reduce(num_kv_heads: int, block_size: int):
     SPLIT = NE // SLICE
     assert NE % SLICE == 0
 
-    @flyc.kernel(known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(known_block_size=[THREADS, 1, 1], name=kernel_name("msa_bwd_dkdv_reduce"))
     def k_fn(
         WS: fx.Tensor,
         CHPTR: fx.Tensor,
@@ -749,7 +752,9 @@ def build_inverted_pass(topk: int, nb_cap: int, place: bool):
     cnt_off = allocator._align(tab_off + SUB * topk * 4, 16)
     allocator.ptr = allocator._align(cnt_off + (nb_cap + 1) * 4, 16)
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(
+        known_block_size=[NTH, 1, 1], name=kernel_name("msa_plan_inverted", "place" if place else "count")
+    )
     def k_fn(
         TBL: fx.Tensor,
         RUNS: fx.Tensor,
@@ -941,7 +946,7 @@ def build_chunk_writer():
     ``CHPTR`` and write ``(row, begin, end)``, or zeros past the live chunks."""
     NTH = 256
 
-    @flyc.kernel(known_block_size=[NTH, 1, 1])
+    @flyc.kernel(known_block_size=[NTH, 1, 1], name=kernel_name("msa_plan_chunk_rows"))
     def k_fn(
         PTR: fx.Tensor, CHPTR: fx.Tensor, CHUNKS: fx.Tensor, NROWS: fx.Int32, NCH: fx.Int32, SIZE: fx.Int32
     ):
