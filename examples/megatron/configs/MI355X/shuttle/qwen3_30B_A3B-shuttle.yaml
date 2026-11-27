@@ -9,7 +9,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # overlapped grad reduce-scatter / param all-gather share the attention's queue and deadlock it.
 # turbo_agkv_mode fused / mega run on the flux FlyDSL attention.
 env:
-  GPU_MAX_HW_QUEUES: "8"
+  GPU_MAX_HW_QUEUES: ${SHUTTLE_HWQ:8}  # E11 varies it; 8 otherwise
   FLUX_ATTN_FLYDSL: ${SHUTTLE_FLUX_ATTN_FLYDSL}  # exported by the shuttle driver (1 unless the run sets it)
 
 modules:

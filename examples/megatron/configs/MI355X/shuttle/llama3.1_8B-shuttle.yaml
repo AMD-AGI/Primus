@@ -9,7 +9,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 # Shuttle experiment config (Llama3.1-8B, CP8 by default): every CP method via PRIMUS_* switches.
 # Derived from llama3.1_8B-BF16-cp8-agkv-pretrain.yaml; adds the MegaUlysses switches.
 env:
-  GPU_MAX_HW_QUEUES: "8"
+  GPU_MAX_HW_QUEUES: ${SHUTTLE_HWQ:8}  # E11 varies it; 8 otherwise
   FLUX_ATTN_FLYDSL: ${SHUTTLE_FLUX_ATTN_FLYDSL}
 
 modules:
