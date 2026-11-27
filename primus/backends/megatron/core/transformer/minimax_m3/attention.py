@@ -77,8 +77,10 @@ _MSA_FUSIONS = (
 )
 # Kernel paths of the flydsl backend on gfx1250, taken wherever a shape is eligible (no switch;
 # other GPUs never take them). Each is decided before any work, and its first call for a shape
-# compares it with the path it replaces (bitwise_check, or stated tolerances and two identical
-# runs for those that sum in another order) and keeps that one on a mismatch; only
+# compares it with the path it replaces (bitwise_check on the call's tensors, or, for those that
+# sum in another order and are checked at run time, stated tolerances and two identical runs on
+# seeded probe inputs of the call's shape, so every rank decides alike) and keeps that one on a
+# mismatch; only
 # msa_bounded_plan_chunks (an integer rule for the plan's chunk sizes) and msa_ds_chunk_store
 # (inside msa_dq_from_ds's comparison) rely on the unit tests alone. All are deterministic: no
 # atomics, fixed summation orders.
@@ -390,9 +392,9 @@ class MinimaxSparseAttention(SelfAttention):
         if not want_loss:
             return outs[0], None
 
-        def exact_loss(scores):
-            """The loss on the bit-exact path (also the one-pass path's first-call reference)."""
-            slot_mass = slot_mass_from_slot_lse(outs[2], outs[1], block_indices.shape[1])
+        def exact_loss(slot_lse, lse, scores, block_indices, walk):
+            """The loss on the bit-exact path (also the reference of the one-pass path's check)."""
+            slot_mass = slot_mass_from_slot_lse(slot_lse, lse, block_indices.shape[1])
             if walk is not None:
                 # the kernel's slot_lse is in walk order: position p of a row is the indexer's slot
                 # walk[1][p]. One scatter on the [b, n_index, sq, topk] mass puts it back.
@@ -415,11 +417,18 @@ class MinimaxSparseAttention(SelfAttention):
             )
 
             indexer_loss = one_pass_indexer_loss(
-                outs[2], outs[1], block_scores, block_indices, walk, self.indexer_loss_coeff, exact_loss
+                outs[2],
+                outs[1],
+                block_scores,
+                block_indices,
+                walk,
+                self.indexer_loss_coeff,
+                exact_loss,
+                self.block_size,
             )
             if indexer_loss is not None:
                 return outs[0], indexer_loss
-        return outs[0], exact_loss(block_scores)
+        return outs[0], exact_loss(outs[2], outs[1], block_scores, block_indices, walk)
 
     def forward(
         self,

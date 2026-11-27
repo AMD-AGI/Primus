@@ -176,7 +176,54 @@ def test_not_eligible_off_gpu_or_with_other_dtypes():
     _, O = _mods()
     slot, lse, scores, table = _inputs(256, 1, 2, 4, 8, "random", 0, "cpu")
     assert not O.eligible(slot, lse, scores, table)  # CPU tensors: the caller keeps its path
-    assert O.one_pass_indexer_loss(slot, lse, scores, table, None, COEFF, reference=None) is None
+    assert O.one_pass_indexer_loss(slot, lse, scores, table, None, COEFF, None, BLOCK) is None
+
+
+@pytest.mark.parametrize("walk", [False, True])
+def test_probe_is_a_function_of_the_shape(walk):
+    """The check's inputs: the same on every call (every rank, a resumed run), and shaped like the
+    forward's: -inf exactly on the dead slots of the order the kernel reads, lse their logsumexp,
+    block scores +inf on the own block and -inf past it."""
+    _, O = _mods()
+    S, B, G, heads, K = 640, 2, 2, 8, 8
+    NB = -(-S // BLOCK)
+    a = O._probe(B, G, S, NB, K, heads, BLOCK, torch.int64, walk, "cpu")
+    b = O._probe(B, G, S, NB, K, heads, BLOCK, torch.int64, walk, "cpu")
+    for x, y in zip(a[:4], b[:4]):
+        assert torch.equal(x, y)
+    slot, lse, scores, indices, w = a
+    assert slot.shape == (S, B, heads, K) and lse.shape == (S, B, heads)
+    assert scores.shape == (B, G, S, NB) and indices.shape == (B, G, S, K) and indices.dtype == torch.int64
+    assert (w is not None) == walk
+    order = indices if w is None else w[0]
+    dead = (order < 0).permute(2, 0, 1, 3).repeat_interleave(heads // G, dim=2)
+    assert bool(torch.isneginf(slot[dead]).all()) and bool(torch.isfinite(slot[~dead]).all())
+    assert torch.equal(lse, torch.logsumexp(slot, dim=-1))
+    own = (torch.arange(S) // BLOCK).view(S, 1)
+    blocks = torch.arange(NB)
+    assert bool(torch.isposinf(scores[..., blocks == own]).all())
+    assert bool(torch.isneginf(scores[..., blocks > own]).all())
+    assert bool(torch.isfinite(scores[..., blocks < own]).all())
+    assert bool((indices[..., 0] == torch.arange(S) // BLOCK).all())  # the own block, forced
+
+
+def test_check_raises_out_of_memory(monkeypatch):
+    """Running out of memory in the check stops the run instead of turning the path off."""
+    _, O = _mods()
+    monkeypatch.setattr(O, "_decided", {})
+
+    def probe():
+        raise torch.cuda.OutOfMemoryError("probe")
+
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        O._checked(("oom",), probe, None, COEFF)
+    assert O._decided == {}
+
+    def broken():
+        raise ValueError("probe")
+
+    assert O._checked(("value",), broken, None, COEFF) is False
+    assert O._decided == {("value",): False}
 
 
 def _fake_attention(gfx1250=True, **config):
@@ -254,31 +301,55 @@ def test_kernels_are_deterministic(case):
         assert torch.equal(first[1].view(torch.int32), again[1].view(torch.int32))
 
 
+def _reference(seen=None):
+    """``attention.msa_core``'s ``exact_loss`` (the eager loss), recording the inputs it is run on."""
+
+    def reference(slot_lse, lse, bs, indices, walk):
+        if seen is not None:
+            seen.append((slot_lse, indices))
+        L, _ = _mods()
+        mass = L.slot_mass_from_slot_lse(slot_lse, lse, indices.shape[1])
+        if walk is not None:
+            mass = torch.empty_like(mass).scatter_(-1, walk[1], mass)
+        return L.compute_sparse_indexer_loss(mass, bs, indices.long(), COEFF)
+
+    return reference
+
+
 @gpu
-def test_first_call_check_takes_and_rejects_the_path(monkeypatch):
+@pytest.mark.parametrize("walk", [False, True])
+def test_check_takes_and_rejects_the_path(monkeypatch, walk):
     _, O = _mods()
     slot, lse, scores, table = _inputs(1024, 1, 4, 16, 16, "random", 4, "cuda")
-
-    def reference(bs):
-        L, _ = _mods()
-        mass = L.slot_mass_from_slot_lse(slot, lse, table.shape[1])
-        return L.compute_sparse_indexer_loss(mass, bs, table, COEFF)
+    w = None
+    if walk:
+        slot, w = _walked(slot, table, 1)
+    seen = []
+    reference = _reference(seen)
 
     monkeypatch.setattr(O, "_decided", {})
     leaf = scores.clone().requires_grad_(True)
-    loss = O.one_pass_indexer_loss(slot, lse, leaf, table, None, COEFF, reference)
+    loss = O.one_pass_indexer_loss(slot, lse, leaf, table, w, COEFF, reference, BLOCK)
     assert loss is not None and len(O._decided) == 1 and all(O._decided.values())
-    ref = reference(scores)
+    # decided on the probe inputs of the shape, not on the call's
+    probe = O._probe(1, 4, 1024, scores.shape[-1], 16, 16, BLOCK, table.dtype, walk, scores.device)
+    assert len(seen) == 1 and torch.equal(seen[0][0], probe[0]) and torch.equal(seen[0][1], probe[3])
+    ref = reference(slot, lse, scores, table, w)
     assert abs(float(loss) - float(ref)) <= O._LOSS_RTOL * abs(float(ref))
+    # other values of the same shape reuse the decision: nothing is run but the path
+    seen.clear()
+    zeros = torch.zeros_like(scores).requires_grad_(True)
+    assert O.one_pass_indexer_loss(slot, lse, zeros, table, w, COEFF, reference, BLOCK) is not None
+    assert not seen
     # a path outside the tolerance is rejected once and for all for that shape
     monkeypatch.setattr(O, "_decided", {})
     monkeypatch.setattr(O, "_LOSS_RTOL", -1.0)
-    assert O.one_pass_indexer_loss(slot, lse, leaf, table, None, COEFF, reference) is None
+    assert O.one_pass_indexer_loss(slot, lse, leaf, table, w, COEFF, reference, BLOCK) is None
     assert list(O._decided.values()) == [False]
-    calls = []
-    assert O.one_pass_indexer_loss(slot, lse, leaf, table, None, COEFF, lambda bs: calls.append(1)) is None
-    assert not calls  # decided: the reference is not run again
-    # an error in the path (not a GPU fault) keeps the replaced path too
+    seen.clear()
+    assert O.one_pass_indexer_loss(slot, lse, leaf, table, w, COEFF, reference, BLOCK) is None
+    assert not seen  # decided: the reference is not run again
+    # an error in the path (not a GPU fault or OOM) keeps the replaced path too
     monkeypatch.setattr(O, "_decided", {})
     monkeypatch.setattr(O, "one_pass_loss", lambda *a: (_ for _ in ()).throw(ValueError("boom")))
-    assert O.one_pass_indexer_loss(slot, lse, leaf, table, None, COEFF, reference) is None
+    assert O.one_pass_indexer_loss(slot, lse, leaf, table, w, COEFF, reference, BLOCK) is None

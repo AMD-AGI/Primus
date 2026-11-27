@@ -160,8 +160,8 @@ class MSATransformerConfig(TransformerConfig):
     """The sparse indexer loss in a few Triton launches (indexer_loss_fused.py). Bit-identical to
     compute_sparse_indexer_loss, checked on first use. With the flydsl backend on gfx1250 the loss
     and its backward take one Triton kernel each instead (msa_indexer_loss_one_pass,
-    indexer_loss_one_pass.py): the same terms summed in another order, checked on the first call
-    for a shape against this path within stated tolerances."""
+    indexer_loss_one_pass.py): the same terms summed in another order, checked once per shape
+    against this path within stated tolerances, on seeded probe inputs of that shape."""
 
     msa_fused_indexer_loss_scatter: bool = False
     """With msa_fused_indexer_loss: the loss backward writes the gradient of block_scores row by
@@ -212,8 +212,9 @@ class MSATransformerConfig(TransformerConfig):
     recomputing dQ kernel (logged once). The slim dQ kernel runs 4 adjacent tokens per workgroup
     wherever S and the block size allow, whatever msa_shared_tile_staging says. Deterministic;
     dq / dk / dv differ from the recomputing path in their last bits (the same terms in another
-    order), and the first call for a shape compares the two (two identical runs, within 1e-3).
-    False: no workspace, the dQ kernel recomputes. Other GPUs never take this path."""
+    order), and the first call for a shape compares the two on seeded probe inputs of that shape
+    (two identical runs, within 1e-3), so that every rank decides alike. False: no workspace, the
+    dQ kernel recomputes. Other GPUs never take this path."""
 
     sparse_indexer_loss_coeff: float = 1.0e-2
     """Weight of the indexer distillation loss. 0.0 leaves the indexer frozen: top-k is not

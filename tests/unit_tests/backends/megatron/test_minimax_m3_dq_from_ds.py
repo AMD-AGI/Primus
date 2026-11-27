@@ -212,12 +212,17 @@ def test_dispatcher_decides_once_per_shape_and_falls_back(monkeypatch):
             assert all(torch.equal(a, b) for a, b in zip(got, want))
         assert list(bwd._DS_OK.values()) == [False]
 
-        # all-zero gradients: nothing to compare, nothing decided, reference kernels
+        # the decision is the shape's, made on probe inputs: a call with all-zero gradients decides
+        # like any other, and later calls of the shape build no probe
         bwd._DS_OK.clear()
         monkeypatch.setattr(bwd, "_DS_CHECK_TOL", 1e-3)
         zero = _backward(q, k, v, torch.zeros_like(dout), table, dq_from_ds=True)
         assert all(not t.any() for t in zero)
-        assert bwd._DS_OK == {}
+        assert list(bwd._DS_OK.values()) == [True]
+        probes = []
+        monkeypatch.setattr(bwd, "_ds_probe", lambda *a, **kw: probes.append(a))
+        again = _backward(q, k, v, dout, table, dq_from_ds=True)
+        assert not probes and all(torch.equal(a, b) for a, b in zip(again, first))
 
         # a dS buffer over the limit: not eligible, nothing decided, reference kernels
         bwd._DS_OK.clear()
@@ -228,6 +233,54 @@ def test_dispatcher_decides_once_per_shape_and_falls_back(monkeypatch):
     finally:
         bwd._DS_OK.clear()
         bwd._DS_OK.update(saved)
+
+
+def test_probe_matches_the_call_shape():
+    """The check's inputs: a function of the shape (the same tensors every time), the call's
+    shapes, the table causal with each token's own block first."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd as bwd,
+    )
+
+    S, B, Hkv, topk = 900, 2, 2, 8
+    for with_walk in (False, True):
+        a, plan, slots = bwd._ds_probe(S, B, Hkv, topk, BLOCK, D**-0.5, "cuda", with_walk)
+        b, _, slots_b = bwd._ds_probe(S, B, Hkv, topk, BLOCK, D**-0.5, "cuda", with_walk)
+        tensors = [t for t in a if isinstance(t, torch.Tensor)]
+        assert all(torch.equal(x, y) for x, y in zip(tensors, [t for t in b if isinstance(t, torch.Tensor)]))
+        dout, q, k, v, out, lse, table = a[:7]
+        assert q.shape == dout.shape == out.shape == (S, B, 16 * Hkv, D) and k.shape == v.shape == (
+            S,
+            B,
+            Hkv,
+            D,
+        )
+        assert table.shape == (B, Hkv, S, topk) and table.dtype == torch.int32
+        assert plan.n_blocks == -(-S // BLOCK) and (slots is not None) == with_walk
+        if with_walk:
+            assert torch.equal(slots, slots_b) and slots.dtype == torch.int32
+    table = bwd.probe_block_table(B, Hkv, S, topk, BLOCK, "cuda")
+    own = (torch.arange(S, device="cuda") // BLOCK).view(1, 1, S)
+    assert torch.equal(table[..., 0].long(), own.expand(B, Hkv, S))
+    assert bool((table <= own.unsqueeze(-1)).all())
+    assert torch.equal((table >= 0).sum(-1), (own + 1).clamp(max=topk).expand(B, Hkv, S))
+
+
+def test_check_raises_out_of_memory(monkeypatch):
+    """Running out of memory in the check stops the run instead of turning the path off."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd as bwd,
+    )
+
+    def probe(*a, **kw):
+        raise torch.cuda.OutOfMemoryError("probe")
+
+    monkeypatch.setattr(bwd, "_DS_OK", {})
+    monkeypatch.setattr(bwd, "_ds_probe", probe)
+    key = (512, 1, 2, 4, BLOCK, D**-0.5, False, False, False, False)
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        bwd._ds_checked(key, "cuda", {}, False)
+    assert bwd._DS_OK == {}
 
 
 def test_lockstep_kernel_refuses_a_sequence_it_does_not_divide(monkeypatch):

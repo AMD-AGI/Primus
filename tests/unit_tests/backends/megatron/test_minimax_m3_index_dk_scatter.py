@@ -296,15 +296,53 @@ def test_dispatcher_decides_once_and_falls_back():
         kept = ibm.index_dk(plan, g, keys, q, BLOCK, scatter=True)
         assert list(ibm._DK_SCATTER_OK.values()) == [False]
         assert torch.equal(kept.view(torch.int16), old.view(torch.int16))
-        # nothing to compare (all gradients zero): undecided, reference kernel, nothing cached
+        # the decision is the shape's, made on probe inputs: all-zero gradients decide like any
+        # other call (and give zeros)
         ibm._DK_SCATTER_OK.clear()
         ibm._DK_SCATTER_TOL = tol
         zero = ibm.index_dk(plan, torch.zeros_like(g), keys, q, BLOCK, scatter=True)
-        assert ibm._DK_SCATTER_OK == {} and not bool(zero.float().abs().any())
+        assert list(ibm._DK_SCATTER_OK.values()) == [True] and not bool(zero.float().abs().any())
     finally:
         ibm._DK_SCATTER_TOL = tol
         ibm._DK_SCATTER_OK.clear()
         ibm._DK_SCATTER_OK.update(saved)
+
+
+@needs_gfx1250
+def test_probe_is_a_function_of_the_shape():
+    """The check's inputs: the same every time; each valid slot's key inside its block and at or
+    before the token, -1 and a zero gradient on the dead slots."""
+    import primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_block_max as ibm
+
+    S, B, H, topk = 900, 2, 4, 8
+    plan, g, keys, q = ibm._dk_scatter_probe(S, B, H, D, topk, BLOCK, "cuda")
+    plan_b, g_b, keys_b, q_b = ibm._dk_scatter_probe(S, B, H, D, topk, BLOCK, "cuda")
+    assert torch.equal(g, g_b) and torch.equal(keys, keys_b) and torch.equal(q, q_b)
+    # the plan's buffers are allocated for the worst case; only the first ptr[-1] entries and
+    # chunk_ptr[-1] chunks are written and read
+    n, c = int(plan.ptr[-1]), int(plan.chunk_ptr[-1])
+    assert torch.equal(plan.ptr, plan_b.ptr) and torch.equal(plan.entries[:n], plan_b.entries[:n])
+    assert torch.equal(plan.chunk_ptr, plan_b.chunk_ptr) and torch.equal(plan.chunks[:c], plan_b.chunks[:c])
+    assert g.shape == keys.shape == (B, H, S, topk) and q.shape == (S, B, H, D)
+    dead = keys < 0
+    assert bool((g[dead] == 0).all())
+    token = torch.arange(S, device="cuda").view(1, 1, S, 1)
+    assert bool((keys[~dead] <= token.expand_as(keys)[~dead]).all())
+
+
+@needs_gfx1250
+def test_check_raises_out_of_memory(monkeypatch):
+    """Running out of memory in the check stops the run instead of turning the path off."""
+    import primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_block_max as ibm
+
+    def probe(*a, **kw):
+        raise torch.cuda.OutOfMemoryError("probe")
+
+    monkeypatch.setattr(ibm, "_DK_SCATTER_OK", {})
+    monkeypatch.setattr(ibm, "_dk_scatter_probe", probe)
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        ibm._dk_scatter_checked((1024, 1, 4, D, 16, BLOCK), "reference", "cuda")
+    assert ibm._DK_SCATTER_OK == {}
 
 
 @needs_gfx1250

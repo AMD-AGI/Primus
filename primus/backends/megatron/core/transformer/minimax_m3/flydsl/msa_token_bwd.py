@@ -1115,6 +1115,28 @@ def build_block_plan(
     return BlockPlan(ptr, entries, chunks, chunk_ptr, n_chunks, n_blocks)
 
 
+def probe_block_table(
+    B: int, H: int, S: int, topk: int, block_size: int, device, seed: int = 0
+) -> torch.Tensor:
+    """An int32 ``[B, H, S, topk]`` table like the indexer's selection, for the first-call checks of
+    the paths that sum in another order: each token's own block in slot 0, then up to ``topk - 1``
+    of its earlier blocks drawn from a private generator, ``-1`` past its visible blocks. A
+    function of the shape and ``seed`` only, so every rank and a resumed run check the same table."""
+    n_blocks = -(-S // block_size)
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    scores = torch.rand((B, H, S, n_blocks), generator=gen, device=device)
+    own = (torch.arange(S, device=device) // block_size).view(S, 1)
+    blocks = torch.arange(n_blocks, device=device)
+    scores = scores.masked_fill(blocks > own, -1.0).masked_fill(blocks == own, 2.0)
+    width = min(topk, n_blocks)
+    values, table = scores.topk(width, dim=-1)
+    table = table.masked_fill(values < 0, -1).to(torch.int32)
+    if width < topk:
+        table = torch.nn.functional.pad(table, (0, topk - width), value=-1)
+    return table.contiguous()
+
+
 _DQ_CACHE: dict = {}
 _DKDV_CACHE: dict = {}
 _RED_CACHE: dict = {}
@@ -1185,42 +1207,78 @@ def dkdv_two_token_steps_eligible(block_size: int, w32: bool) -> bool:
     return bool(w32) and int(block_size) == _TWO_TOKEN_STEP_BLOCK
 
 
-def _ds_first_call(key, args, kwargs, walk_slots):
-    """Both paths on the first call's tensors: use ``dq_from_ds`` for this shape only if two of
-    its runs give the same bits and its ``dq``, ``dk`` and ``dv`` are finite and within
-    ``_DS_CHECK_TOL`` of the reference kernels'. Returns the gradients of the path that is kept.
-    Nothing is decided while the reference gradients are all zero (nothing to compare). A GPU
-    fault is raised, any other error keeps the reference kernels."""
+def _ds_probe(S, B, Hkv, topk, block_size, softmax_scale, device, with_walk, seed=0):
+    """Probe inputs of one MSA backward call's shape for the ``dq_from_ds`` check: ``(args,
+    plan, walk_slots)`` with ``args`` as ``msa_token_bwd`` takes them. q, k, v and dout as the unit
+    tests draw them (dout scaled by 0.05) from a private generator, a :func:`probe_block_table`
+    with its plan (the selection's chunk rule) and, ``with_walk``, its aligned walk (the PyTorch
+    reference of ``block_walk``); out and lse from the forward over the table the backward walks."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
+        bounded_plan_chunks_enabled,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_fwd_w32 import (
+        msa_token_fwd_wave32,
+    )
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+
+    def randn(*shape):
+        return torch.randn(shape, generator=gen, device=device, dtype=torch.bfloat16)
+
+    Hq = HPW * Hkv
+    q, k, v = randn(S, B, Hq, D), randn(S, B, Hkv, D), randn(S, B, Hkv, D)
+    dout = randn(S, B, Hq, D) * 0.05
+    table = probe_block_table(B, Hkv, S, topk, block_size, device, seed)
+    plan = build_block_plan(table, block_size, bounded_plan_chunks_enabled())
+    walk_slots = None
+    if with_walk:
+        table, slots = block_walk._reference(table)
+        walk_slots = slots.to(torch.int32).contiguous()
+    out, lse = msa_token_fwd_wave32(q, k, v, table, softmax_scale, block_size)
+    return (dout, q, k, v, out, lse, table, softmax_scale, block_size), plan, walk_slots
+
+
+def _ds_checked(key, device, kwargs, with_walk) -> bool:
+    """``dq_from_ds`` for the shape of ``key``, decided once on :func:`_ds_probe` inputs of that
+    shape, so that every rank and a resumed run decide alike: kept only if two of its runs give
+    the same bits and its ``dq``, ``dk`` and ``dv`` are finite and within ``_DS_CHECK_TOL`` of the
+    reference kernels'. ``kwargs``: the call's other options (the variant that will be used).
+    Nothing is decided (False, not cached) under graph capture. A GPU fault or running out of
+    memory is raised; any other error keeps the reference kernels."""
+    if torch.cuda.is_current_stream_capturing():
+        return False
     from primus.backends.megatron.core.fusions import bitwise_check
     from primus.core.utils.module_utils import log_rank_0, warning_rank_all
 
-    want = msa_token_bwd(*args, **kwargs)
-    norms = [w.double().norm() for w in want]
-    if not any(bool(n) for n in norms):
-        return want
-    ok, why, got = False, "", None
+    S, B, Hkv, topk, block_size, softmax_scale = key[:6]
     try:
-        got = msa_token_bwd(*args, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
-        again = msa_token_bwd(*args, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
+        args, plan, walk_slots = _ds_probe(S, B, Hkv, topk, block_size, softmax_scale, device, with_walk)
+        want = msa_token_bwd(*args, plan=plan, **kwargs)
+        got = msa_token_bwd(*args, plan=plan, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
+        again = msa_token_bwd(*args, plan=plan, **kwargs, dq_from_ds="force", walk_slots=walk_slots)
         same = all(bitwise_check.same_bits(g, a) for g, a in zip(got, again))
         errs = [
-            ((g.double() - w.double()).norm() / n.clamp_min(1e-30)).item()
-            for g, w, n in zip(got, want, norms)
+            ((g.double() - w.double()).norm() / w.double().norm().clamp_min(1e-30)).item()
+            for g, w in zip(got, want)
         ]
         finite = all(bool(torch.isfinite(g.float()).all()) for g in got)
         ok = same and finite and all(e <= _DS_CHECK_TOL for e in errs)
         why = "relative difference dq / dk / dv " + " / ".join(f"{e:.2e}" for e in errs)
         why += f", two runs identical: {same}"
-    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault keeps the reference kernels
-        if bitwise_check._device_error(e):
+    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault or OOM keeps the reference kernels
+        if bitwise_check._device_error(e) or isinstance(e, torch.cuda.OutOfMemoryError):
             raise
-        why = f"{type(e).__name__}: {e}"
+        ok, why = False, f"{type(e).__name__}: {e}"
     _DS_OK[key] = ok
     if ok:
-        log_rank_0(f"[msa_dq_from_ds {key}] agrees with the reference dQ kernel ({why}); in use")
-        return got
-    warning_rank_all(f"[msa_dq_from_ds {key}] not used ({why}); keeping the reference dQ kernel")
-    return want
+        log_rank_0(
+            f"[msa_dq_from_ds {key}] agrees with the reference dQ kernel on probe inputs ({why}); in use"
+        )
+    else:
+        warning_rank_all(f"[msa_dq_from_ds {key}] not used ({why}); keeping the reference dQ kernel")
+    return ok
 
 
 def msa_token_bwd(
@@ -1268,10 +1326,11 @@ def msa_token_bwd(
             launch. Same terms, the ``dS`` of the dK/dV kernel instead of the dQ kernel's own (they
             differ in the last bit of ``S``) and ``delta`` summed in another order. Deterministic:
             every ``dS`` record is written by exactly one workgroup. The first call for a shape
-            runs both paths on that call's tensors and keeps the reference kernels unless two runs
-            of ``dq_from_ds`` give the same bits and its ``dq``, ``dk`` and ``dv`` agree within
-            ``_DS_CHECK_TOL`` (and are finite). Shapes whose ``dS`` buffer would exceed
-            ``_DS_MAX_BYTES`` keep the reference kernels (logged once per shape).
+            runs both paths on probe inputs of that shape (:func:`_ds_checked`, the same verdict
+            on every rank) and keeps the reference kernels unless two runs of ``dq_from_ds`` give
+            the same bits and its ``dq``, ``dk`` and ``dv`` agree within ``_DS_CHECK_TOL`` (and
+            are finite). Shapes whose ``dS`` buffer would exceed ``_DS_MAX_BYTES`` keep the
+            reference kernels (logged once per shape).
         ds_chunk_store: with ``dq_from_ds`` (``msa_ds_chunk_store``): the same ``dS`` bytes and the same
             arithmetic: the dK/dV kernel stores ``dS`` through one buffer descriptor per
             workgroup instead of one per record (``build_dkdv_w32``), only while a (batch, KV
@@ -1321,8 +1380,7 @@ def msa_token_bwd(
         if dq_from_ds == "force":
             use_ds = True
         else:
-            args = (dout, q, k, v, out, lse, block_table, softmax_scale, block_size)
-            kwargs = dict(plan=plan, shared_tiles=shared_tiles, step_mask_skip=step_mask_skip)
+            kwargs = dict(shared_tiles=shared_tiles, step_mask_skip=step_mask_skip)
             if ds_chunk_store:
                 kwargs["ds_chunk_store"] = True  # the comparison runs the variant that will be used
             if dq_early_issue:
@@ -1343,7 +1401,7 @@ def msa_token_bwd(
             )
             decided = _DS_OK.get(key)
             if decided is None:
-                return _ds_first_call(key, args, kwargs, walk_slots)
+                decided = _ds_checked(key, q.device, kwargs, walk_slots is not None)
             use_ds = decided
 
     out = out.contiguous()

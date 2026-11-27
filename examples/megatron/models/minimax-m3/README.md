@@ -173,12 +173,15 @@ have no switch other than `PRIMUS_MSA_BACKEND=eager`.
 
 **gfx1250 MSA kernel paths.** On gfx1250 the FlyDSL backend takes the following paths wherever a
 shape is eligible (other GPUs never take them); each is decided before any work and named in the
-log as below. All but two are compared with the path they replace on their first call for a shape
-(bit for bit, or within stated tolerances and over two identical runs for the paths that sum in
-another order), and the run keeps that path on a mismatch; `msa_bounded_plan_chunks` (an integer
-rule for the plan's chunk sizes) and `msa_ds_chunk_store` (a store inside `msa_dq_from_ds`'s
-comparison) rely on the unit tests. All are deterministic: no atomics, fixed summation orders.
-Only `msa_bwd_store_ds` has a switch.
+log as below. All but two are compared with the path they replace on their first call for a shape,
+and the run keeps that path on a mismatch: the bit-identical ones (and the aligned walk's table)
+bit for bit, on that call's tensors; `msa_dq_from_ds`, `msa_indexer_loss_one_pass` and
+`msa_index_dk_scatter`, which sum in another order, within stated tolerances and over two
+identical runs, on seeded probe inputs of the call's shape, so that every rank and a resumed run
+decide alike (running out of memory in one of these checks stops the run instead of turning the
+path off). `msa_bounded_plan_chunks` (an integer rule for the plan's chunk sizes) and
+`msa_ds_chunk_store` (a store inside `msa_dq_from_ds`'s comparison) rely on the unit tests. All
+are deterministic: no atomics, fixed summation orders. Only `msa_bwd_store_ds` has a switch.
 
 Bit-identical to the path they replace: `msa_lean_masks` (the forward, dQ and dK/dV kernels and the
 indexer's scoring kernel skip the per-key causal compare and select on steps whose keys are all
@@ -207,8 +210,8 @@ per slot and `dq` differ in their last bits); with `msa_fused_indexer_loss`,
 `msa_indexer_loss_one_pass` (the slot mass and the sparse indexer KL of a layer in one Triton kernel
 and their backward in one more, instead of about 15 small launches forward and 6 backward;
 the same block-level KL, with the row sums, `exp` and `log` taken by Triton and, under
-`msa_aligned_block_walk`, in walk order; the first call for a shape requires the loss within 5e-7,
-the gradient within 2e-5 and two identical runs); `msa_index_dk_scatter` (the indexer backward's dK
+`msa_aligned_block_walk`, in walk order; its check requires the loss within 5e-7, the gradient
+within 2e-5 and two identical runs); `msa_index_dk_scatter` (the indexer backward's dK
 chunk kernel, a one-hot masked WMMA product over all 128 keys of a block, becomes a scatter: each
 plan entry's `g * q` row is added in fp32 to its one winning key row, in plan order, one wave per
 chunk, and the same fixed-order reduce follows; only for an index dimension of 128 and a
@@ -222,13 +225,16 @@ selected block as a BF16 operand, so it also writes it to a transient workspace 
 head and selected block: 1.1 GB per layer call at 4k, 8.6 GB at 32k; shapes above 16 GiB keep the
 recomputing kernel and say so once in the log) and a slim dQ kernel forms `dQ = scale * dS K` from
 it, without staging V or computing `S` and `dS` a second time; it runs four adjacent tokens per
-workgroup wherever S allows, whatever `msa_shared_tile_staging` says. The terms are the same; `dS` is the dK/dV kernel's instead
-of the dQ kernel's own and `delta` is summed in another order, so `dq`, `dk` and `dv` differ in
-their last bits. Two bit-identical paths come with it: `msa_ds_chunk_store` (the dK/dV kernel
-writes `dS` through one buffer descriptor per workgroup instead of one per record, while a
-(batch, KV head) slice of the workspace is under 2 GiB, i.e. below S 32768 at top-k 16) and
-`msa_dq_early_issue` (the slim dQ kernel issues the copies of the next step before it waits for
-those of the current one, so two steps' copies are in flight). `--msa_bwd_store_ds False` keeps
+workgroup wherever S allows, whatever `msa_shared_tile_staging` says. The terms are the same; `dS`
+is the dK/dV kernel's instead of the dQ kernel's own and `delta` is summed in another order, so
+`dq`, `dk` and `dv` differ in their last bits. Two bit-identical paths come with it:
+`msa_ds_chunk_store` (the dK/dV kernel writes `dS` through one buffer descriptor per workgroup
+instead of one per record, while a (batch, KV head) slice of the workspace is under 2 GiB, i.e.
+below S 32768 at top-k 16) and `msa_dq_early_issue` (the slim dQ kernel issues the copies of the
+next step before it waits for those of the current one, so two steps' copies are in flight). The
+first call for a shape also runs the checks of the kernel paths: at S 32768 (MBS 1) one MSA layer
+call (selection, forward and backward) then peaks 25.2 GiB above its inputs, against 10.8 GiB on
+later calls. `--msa_bwd_store_ds False` keeps
 the dQ kernel that recomputes `S` and `dS`, with no workspace; on the M3.1-Flash 1-GPU proxy (S
 4096, MBS 1, GBS 8) the step then takes 356.8 ms instead of 351.4 ms with the same peak memory, and
 one MSA layer at S 32768 (selection, forward and backward) 12.31 ms instead of 10.37 ms.

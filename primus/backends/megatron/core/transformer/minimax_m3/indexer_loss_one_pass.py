@@ -40,9 +40,10 @@ row's valid blocks, which are distinct, into a zero-filled tensor). Cannot hang:
 straight-line Triton launched with one wave per program (``_WARPS``), so the compiled code has no
 workgroup barrier, no wait on another wave and no loop; their grids come from the row count.
 
-The first call for a shape runs this path twice and the path it replaces once, on the call's own
-inputs, and keeps the replaced path unless both runs give the same bits and the loss and the
-block-score gradient are within ``_LOSS_RTOL`` / ``_GRAD_RTOL`` of it (:func:`_checked`).
+The first call for a shape runs this path twice and the path it replaces once, on probe inputs of
+that shape (the same on every rank and after a restart), and keeps the replaced path unless both
+runs give the same bits and the loss and the block-score gradient are within ``_LOSS_RTOL`` /
+``_GRAD_RTOL`` of it (:func:`_checked`).
 A gfx1250 path of ``attention._MSA_GFX1250_PATHS``, taken with ``msa_fused_indexer_loss``.
 """
 
@@ -330,12 +331,40 @@ def _loss_and_grad(fn: Callable, block_scores):
     return loss.detach(), grad
 
 
-def _checked(key: Hashable, run: Callable, reference: Callable, block_scores) -> bool:
-    """First-call decision for ``key``: the one-pass path twice (same bits required) and the
-    replaced path once, on the call's inputs; relative loss error <= ``_LOSS_RTOL``, relative
-    gradient error (2-norm) <= ``_GRAD_RTOL``. Like ``bitwise_check.passed``: nothing is decided
-    under inference mode or graph capture, a GPU fault raises, any other error keeps the replaced
-    path, and each rank decides alone (no collective on either path)."""
+def _probe(B, G, S, NB, K, heads, block_size, table_dtype, with_walk, device, seed=0):
+    """Probe inputs of one loss call's shape, from a private generator: ``(slot_lse, lse,
+    block_scores, block_indices, walk)``. The indices are a ``probe_block_table`` (with its aligned
+    walk, the PyTorch reference of ``block_walk``, when ``with_walk``); slot_lse is 2 N(0, 1) in
+    the order the forward writes it (the walk's when there is one), -inf on the ``-1`` slots, and
+    lse its logsumexp over the slots; the block scores are N(0, 1), ``+inf`` on each token's own
+    (forced) block and ``-inf`` past it, as the indexer hands them over."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        probe_block_table,
+    )
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    indices = probe_block_table(B, G, S, K, block_size, device, seed)
+    walk = block_walk._reference(indices) if with_walk else None
+    order = indices if walk is None else walk[0]
+    dead = (order < 0).permute(2, 0, 1, 3).repeat_interleave(heads // G, dim=2)
+    slot_lse = (torch.randn((S, B, heads, K), generator=gen, device=device) * 2).masked_fill(dead, -torch.inf)
+    lse = torch.logsumexp(slot_lse, dim=-1)
+    own = (torch.arange(S, device=device) // block_size).view(S, 1)
+    blocks = torch.arange(NB, device=device)
+    scores = torch.randn((B, G, S, NB), generator=gen, device=device)
+    scores = scores.masked_fill(blocks > own, -torch.inf).masked_fill(blocks == own, torch.inf)
+    return slot_lse, lse, scores, indices.to(table_dtype), walk
+
+
+def _checked(key: Hashable, probe: Callable, reference: Callable, loss_coeff) -> bool:
+    """Decision for ``key``, once, on ``probe()`` inputs of the call's shape (:func:`_probe`), so
+    that every rank and a resumed run decide alike: the one-pass path twice (same bits required)
+    and the replaced path ``reference(slot_lse, lse, block_scores, block_indices, walk)`` once;
+    relative loss error <= ``_LOSS_RTOL``, relative gradient error (2-norm) <= ``_GRAD_RTOL``.
+    Nothing is decided under inference mode or graph capture; a GPU fault or running out of memory
+    is raised, any other error keeps the replaced path."""
     if key in _decided:
         return _decided[key]
     if torch.is_inference_mode_enabled() or (
@@ -343,9 +372,15 @@ def _checked(key: Hashable, run: Callable, reference: Callable, block_scores) ->
     ):
         return False
     try:
-        loss1, grad1 = _loss_and_grad(run, block_scores)
-        loss2, grad2 = _loss_and_grad(run, block_scores)
-        ref_loss, ref_grad = _loss_and_grad(reference, block_scores)
+        slot_lse, lse, scores, indices, walk = probe()
+        table = indices if walk is None else walk[0]
+
+        def run(bs):
+            return one_pass_loss(slot_lse, lse, bs, table, loss_coeff)
+
+        loss1, grad1 = _loss_and_grad(run, scores)
+        loss2, grad2 = _loss_and_grad(run, scores)
+        ref_loss, ref_grad = _loss_and_grad(lambda bs: reference(slot_lse, lse, bs, indices, walk), scores)
         same = bitwise_check.same_bits(loss1, loss2) and bitwise_check.same_bits(grad1, grad2)
         finite = bool(torch.isfinite(ref_loss)) and bool(torch.isfinite(ref_grad).all())
         loss_err = float(
@@ -356,12 +391,12 @@ def _checked(key: Hashable, run: Callable, reference: Callable, block_scores) ->
         )
         ok = same and finite and loss_err <= _LOSS_RTOL and grad_err <= _GRAD_RTOL
         reason = (
-            f"loss rel err {loss_err:.3e} (limit {_LOSS_RTOL:.1e}), block-score gradient rel err "
-            f"{grad_err:.3e} (limit {_GRAD_RTOL:.1e}), two runs {'identical' if same else 'DIFFER'}"
+            f"on probe inputs, loss rel err {loss_err:.3e} (limit {_LOSS_RTOL:.1e}), block-score gradient "
+            f"rel err {grad_err:.3e} (limit {_GRAD_RTOL:.1e}), two runs {'identical' if same else 'DIFFER'}"
             f"{'' if finite else ', reference not finite'}"
         )
-    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault keeps the replaced path
-        if bitwise_check._device_error(e):
+    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault or OOM keeps the replaced path
+        if bitwise_check._device_error(e) or isinstance(e, torch.cuda.OutOfMemoryError):
             raise
         ok, reason = False, f"{type(e).__name__}: {e}"
     _decided[key] = ok
@@ -375,32 +410,40 @@ def _checked(key: Hashable, run: Callable, reference: Callable, block_scores) ->
 
 
 def one_pass_indexer_loss(
-    slot_lse, lse, block_scores, block_indices, walk, loss_coeff, reference: Callable
+    slot_lse, lse, block_scores, block_indices, walk, loss_coeff, reference: Callable, block_size: int
 ) -> Optional[torch.Tensor]:
     """The sparse indexer loss of ``msa_core`` on the one-pass kernels, or None when the shapes are
-    not :func:`eligible` or the first call for these shapes rejected the path (the caller then runs
-    the path it replaces).
+    not :func:`eligible` or the check for these shapes rejected the path (the caller then runs the
+    path it replaces).
 
     Args:
         slot_lse, lse: the flydsl forward's per-slot and total logsumexp (walk order if ``walk``).
         block_scores, block_indices: the indexer's outputs.
         walk: ``(walk_table, slots)`` of ``block_walk.aligned_block_walk`` or None.
-        reference: ``block_scores -> loss`` on the replaced path (slot mass, walk scatter and
-            ``sparse_indexer_loss``), used by the first-call check only.
+        reference: ``(slot_lse, lse, block_scores, block_indices, walk) -> loss`` on the replaced
+            path (slot mass, walk scatter and ``sparse_indexer_loss``), used by the check only.
+        block_size: the selection's block size (of the check's probe inputs).
     """
     table = block_indices if walk is None else walk[0]
     if not eligible(slot_lse, lse, block_scores, table):
         return None
+    B, G, S, NB = block_scores.shape
+    K, heads = table.shape[-1], slot_lse.shape[2]
     key = (
         tuple(block_scores.shape),
         tuple(slot_lse.shape),
         str(table.dtype),
         float(loss_coeff),
         walk is not None,
+        int(block_size),
     )
-    if not _checked(
-        key, lambda bs: one_pass_loss(slot_lse, lse, bs, table, loss_coeff), reference, block_scores
-    ):
+
+    def probe():
+        return _probe(
+            B, G, S, NB, K, heads, block_size, block_indices.dtype, walk is not None, block_scores.device
+        )
+
+    if not _checked(key, probe, reference, loss_coeff):
         return None
     return one_pass_loss(slot_lse, lse, block_scores, table, loss_coeff)
 

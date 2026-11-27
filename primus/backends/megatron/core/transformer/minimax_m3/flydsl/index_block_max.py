@@ -1243,36 +1243,102 @@ _DK_SCATTER_OK: dict = {}
 _DK_SCATTER_TOL = 1e-4
 
 
-def _dk_scatter_checked(key, run_scatter, run_reference, ws) -> bool:
-    """Whether the scatter chunk kernel may replace the reference one for this shape: decided on
-    the first call that has something to compare, on that call's inputs. Two runs must give the
+def _index_dk_partials(plan, g, keys, q, block_size, kernel, ws_out):
+    """The chunk partials of :func:`index_dk` written to ``ws_out`` by ``kernel``: ``"reference"``
+    (:func:`build_index_dk`, gfx1250's own form there), ``"lean"`` (``_build_index_dk_w32`` with
+    ``zero_pad``) or ``"scatter"`` (``_build_index_dk_scatter_w32``)."""
+    S, B, H, DI = q.shape
+    topk = g.shape[-1]
+    args = (
+        plan.entries,
+        plan.chunks,
+        g.contiguous(),
+        keys.contiguous(),
+        q.contiguous(),
+        ws_out,
+        int(S),
+        int(B),
+        int(plan.n_blocks),
+        int(plan.n_chunks),
+        torch.cuda.current_stream(),
+    )
+    key = (H, DI, topk, block_size) + (() if kernel == "reference" else (kernel,))
+    fn = _DK_CACHE.get(key)
+    if fn is None:
+        if kernel == "lean":
+            fn = _build_index_dk_w32(H, DI, topk, block_size, zero_pad=True).compile(*args)
+        elif kernel == "scatter":
+            fn = _build_index_dk_scatter_w32(H, DI, topk, block_size).compile(*args)
+        else:
+            fn = build_index_dk(H, DI, topk, block_size).compile(*args)
+        _DK_CACHE[key] = fn
+    fn(*args)
+    return (ws_out,)
+
+
+def _dk_scatter_probe(S, B, H, DI, topk, block_size, device, seed=0):
+    """Probe inputs of one :func:`index_dk` call's shape: ``(plan, g, keys, q)``. A
+    ``probe_block_table`` and its plan (the selection's chunk rule); each valid slot's winning key
+    drawn inside its block (at or before the token in the token's own block) and an N(0, 1)
+    gradient, ``-1`` / 0 on the dead slots; N(0, 1) bf16 index queries; all from a private
+    generator."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
+        bounded_plan_chunks_enabled,
+    )
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl.msa_token_bwd import (
+        build_block_plan,
+        probe_block_table,
+    )
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    table = probe_block_table(B, H, S, topk, block_size, device, seed)
+    plan = build_block_plan(table, block_size, bounded_plan_chunks_enabled())
+    valid = table >= 0
+    offset = torch.randint(0, block_size, table.shape, generator=gen, device=device, dtype=torch.int32)
+    token = torch.arange(S, device=device, dtype=torch.int32).view(1, 1, S, 1)
+    keys = torch.minimum(table * block_size + offset, token).masked_fill(~valid, -1)
+    g = torch.randn(table.shape, generator=gen, device=device).masked_fill(~valid, 0.0)
+    q = torch.randn((S, B, H, DI), generator=gen, device=device, dtype=torch.bfloat16)
+    return plan, g, keys.contiguous(), q
+
+
+def _dk_scatter_checked(key, reference_kernel, device) -> bool:
+    """Whether the scatter chunk kernel may replace ``reference_kernel`` (see
+    :func:`_index_dk_partials`) for the shape of ``key``: decided once, on :func:`_dk_scatter_probe`
+    inputs of that shape, so that every rank and a resumed run decide alike. Two runs must give the
     same bits (determinism) and every partial must be within ``_DK_SCATTER_TOL`` of the reference
-    kernel's largest partial. Nothing is decided (False, not cached) under inference mode or
-    while the reference partials are all zero or not finite (a non-finite Q row spreads through
-    the reference's masked products but not through the scatter, so they cannot be compared). A
-    GPU fault is raised; any other error keeps the reference kernel."""
+    kernel's largest partial (finite and not zero). Nothing is decided (False, not cached) under
+    inference mode or graph capture. A GPU fault or running out of memory is raised; any other
+    error keeps the reference kernel."""
     if key in _DK_SCATTER_OK:
         return _DK_SCATTER_OK[key]
-    if torch.is_inference_mode_enabled():
+    if torch.is_inference_mode_enabled() or torch.cuda.is_current_stream_capturing():
         return False
     from primus.backends.megatron.core.fusions import bitwise_check
     from primus.core.utils.module_utils import log_rank_0, warning_rank_all
 
+    S, B, H, DI, topk, block_size = key
     try:
-        (want,) = run_reference(torch.empty_like(ws))
+        plan, g, keys, q = _dk_scatter_probe(S, B, H, DI, topk, block_size, device)
+        ws = torch.empty((plan.n_chunks, block_size, DI), dtype=torch.float32, device=device)
+
+        def run(kernel):
+            return _index_dk_partials(plan, g, keys, q, block_size, kernel, torch.empty_like(ws))[0]
+
+        want = run(reference_kernel)
         top = want.abs().max()
-        if not bool(torch.isfinite(top)) or float(top) == 0.0:
-            return False
-        (got,) = run_scatter(torch.empty_like(ws))
-        (again,) = run_scatter(torch.empty_like(ws))
+        got, again = run("scatter"), run("scatter")
         same = bitwise_check.same_bits(got, again)
         err = float((got - want).abs().max() / top)
-        ok = bool(same) and err <= _DK_SCATTER_TOL  # a NaN err compares False
+        # a NaN err compares False
+        ok = bool(same) and bool(torch.isfinite(top)) and float(top) > 0.0 and err <= _DK_SCATTER_TOL
         reason = (
-            f"two runs identical: {bool(same)}; largest partial difference {err:.3e} of the largest partial"
+            f"on probe inputs, two runs identical: {bool(same)}; largest partial difference {err:.3e} "
+            "of the largest partial"
         )
-    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault keeps the reference kernel
-        if bitwise_check._device_error(e):
+    except Exception as e:  # noqa: BLE001 - any failure but a GPU fault or OOM keeps the reference kernel
+        if bitwise_check._device_error(e) or isinstance(e, torch.cuda.OutOfMemoryError):
             raise
         ok, reason = False, f"{type(e).__name__}: {e}"
     _DK_SCATTER_OK[key] = ok
@@ -1293,8 +1359,8 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
 
     ``scatter`` (gfx1250, ``msa_index_dk_scatter``, sums in another order): the chunk partials come
     from :func:`_build_index_dk_scatter_w32` (each entry added to its winning key row) when the
-    shape is supported and the first call's comparison with the kernel above passes
-    (:func:`_dk_scatter_checked`); the reduce is unchanged.
+    shape is supported and the comparison with the kernel above on probe inputs of the shape
+    passes (:func:`_dk_scatter_checked`, once per shape); the reduce is unchanged.
 
     Args:
         plan: the selection's :class:`BlockPlan` (``msa_token_bwd``'s, shared).
@@ -1321,43 +1387,10 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
     ws = torch.empty((plan.n_chunks, block_size, DI), dtype=torch.float32, device=q.device)
     stream = torch.cuda.current_stream()
     nb, nch = int(plan.n_blocks), int(plan.n_chunks)
-    dk_args = (
-        plan.entries,
-        plan.chunks,
-        g.contiguous(),
-        keys.contiguous(),
-        q.contiguous(),
-        ws,
-        int(S),
-        int(B),
-        nb,
-        nch,
-        stream,
-    )
     red_args = (ws, plan.chunk_ptr, dk, int(S), int(B), nb, nch, stream)
 
-    def run_chunks(lean_kernel, ws_out):
-        args = dk_args[:5] + (ws_out,) + dk_args[6:]
-        key = (H, DI, topk, block_size, "lean") if lean_kernel else (H, DI, topk, block_size)
-        fn = _DK_CACHE.get(key)
-        if fn is None:
-            if lean_kernel:
-                fn = _build_index_dk_w32(H, DI, topk, block_size, zero_pad=True).compile(*args)
-            else:
-                fn = build_index_dk(H, DI, topk, block_size).compile(*args)
-            _DK_CACHE[key] = fn
-        fn(*args)
-        return (ws_out,)
-
-    def run_scatter(ws_out):
-        args = dk_args[:5] + (ws_out,) + dk_args[6:]
-        key = (H, DI, topk, block_size, "scatter")
-        fn = _DK_CACHE.get(key)
-        if fn is None:
-            fn = _build_index_dk_scatter_w32(H, DI, topk, block_size).compile(*args)
-            _DK_CACHE[key] = fn
-        fn(*args)
-        return (ws_out,)
+    def run(kernel, ws_out):
+        return _index_dk_partials(plan, g, keys, q, block_size, kernel, ws_out)
 
     use_lean = False
     if lean and "gfx1250" in get_hip_arch():
@@ -1365,16 +1398,14 @@ def index_dk(plan, g, keys, q, block_size=128, lean=False, scatter=False):
 
         use_lean = bitwise_check.passed(
             "msa_lean_masks index_dk",
-            lambda: run_chunks(True, torch.empty_like(ws)),
-            lambda: run_chunks(False, torch.empty_like(ws)),
+            lambda: run("lean", torch.empty_like(ws)),
+            lambda: run("reference", torch.empty_like(ws)),
             key=(S, B, H, DI, topk, block_size, nch),
         )
-    if want_scatter and _dk_scatter_checked(
-        (S, B, H, DI, topk, block_size, nch), run_scatter, lambda out: run_chunks(use_lean, out), ws
-    ):
-        run_scatter(ws)
-    else:
-        run_chunks(use_lean, ws)
+    chunk_kernel = "lean" if use_lean else "reference"
+    if want_scatter and _dk_scatter_checked((S, B, H, DI, topk, block_size), chunk_kernel, q.device):
+        chunk_kernel = "scatter"
+    run(chunk_kernel, ws)
     red_key = (H, DI, block_size, "reduce")
     red = _DK_CACHE.get(red_key)
     if red is None:
