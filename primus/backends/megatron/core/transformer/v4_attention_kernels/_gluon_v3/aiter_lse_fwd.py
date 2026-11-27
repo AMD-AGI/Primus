@@ -73,58 +73,6 @@ def _v4_topk_to_ragged_gpu(topk_indices: torch.Tensor):
     return flat, indptr
 
 
-@triton.jit
-def _pack_v4_csa_h64_kernel(
-    topk_ptr,
-    indptr_ptr,
-    flat_ptr,
-    stride_t,
-    total_tokens: tl.constexpr,
-    TOPK: tl.constexpr,
-    WINDOW: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0)
-    pool_k: tl.constexpr = TOPK - WINDOW
-    local_count = tl.minimum(row + 1, WINDOW)
-
-    if row < WINDOW:
-        local_prefix = row * (row + 1) // 2
-    else:
-        local_prefix = WINDOW * (WINDOW + 1) // 2 + (row - WINDOW) * WINDOW
-    start = row * pool_k + local_prefix
-    tl.store(indptr_ptr + row, start)
-
-    offs = tl.arange(0, BLOCK)
-    local_mask = offs < local_count
-    pool_offs = offs - local_count
-    pool_mask = (offs >= local_count) & (pool_offs < pool_k)
-    src = tl.where(local_mask, WINDOW - local_count + offs, WINDOW + pool_offs)
-    vals = tl.load(topk_ptr + row * stride_t + src, mask=local_mask | pool_mask, other=-1)
-    tl.store(flat_ptr + start + offs, vals.to(tl.int32), mask=local_mask | pool_mask)
-
-    if row == total_tokens - 1:
-        tl.store(indptr_ptr + total_tokens, start + local_count + pool_k)
-
-
-def _v4_csa_h64_topk_to_ragged(topk_indices: torch.Tensor):
-    total_tokens, topk = topk_indices.shape
-    block = triton.next_power_of_2(topk)
-    indptr = torch.empty(total_tokens + 1, dtype=torch.int32, device=topk_indices.device)
-    flat = torch.empty(total_tokens * topk, dtype=torch.int32, device=topk_indices.device)
-    _pack_v4_csa_h64_kernel[(total_tokens,)](
-        topk_indices,
-        indptr,
-        flat,
-        topk_indices.stride(0),
-        total_tokens,
-        topk,
-        WINDOW=128,
-        BLOCK=block,
-    )
-    return flat, indptr
-
-
 def sparse_mla_fwd_v4_aiter_lse(q, kv, topk_indices, attn_sink=None, kv_lora_rank=512, scale=None):
     """Aiter Gluon sparse-MLA fwd with LSE, adapted to the V4 dense-topk API."""
     _, _, d_qk = q.shape
@@ -146,36 +94,6 @@ def sparse_mla_fwd_v4_aiter_lse(q, kv, topk_indices, attn_sink=None, kv_lora_ran
         seq_info=indptr,
         sm_scale=float(scale),
         has_pe=False,
-        min_kv_seq_len=float("inf"),
-        attn_sink=attn_sink,
-        return_lse=True,
-    )
-
-
-def sparse_mla_fwd_v4_aiter_lse_csa_formula(
-    q, kv, topk_indices, attn_sink=None, kv_lora_rank=512, scale=None
-):
-    """CSA specialization using the V4 [SWA128 + pool topk] dense-topk layout."""
-    _, _, d_qk = q.shape
-    if scale is None:
-        scale = 1.0 / (d_qk**0.5)
-
-    q_nope = q[..., :kv_lora_rank].contiguous()
-    kv2 = kv[:, 0, :] if kv.dim() == 3 else kv
-    kv_c = kv2[:, :kv_lora_rank].contiguous()
-    flat, indptr = _v4_csa_h64_topk_to_ragged(topk_indices)
-    out = torch.empty(q.shape[0], q.shape[1], kv_lora_rank, dtype=q.dtype, device=q.device)
-
-    return mla_gluon(
-        q_nope,
-        None,
-        kv_c,
-        out,
-        page_table=flat,
-        seq_info=indptr,
-        sm_scale=float(scale),
-        has_pe=False,
-        min_kv_seq_len=float("inf"),
         attn_sink=attn_sink,
         return_lse=True,
     )

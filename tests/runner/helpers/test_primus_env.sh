@@ -425,6 +425,30 @@ test_hip_visible_devices() {
 }
 
 # ============================================================================
+# Test 13: CK v3 attention forward in deterministic mode is disabled on gfx950 only
+# ============================================================================
+test_deterministic_ck_fwd_v3() {
+    echo "Test 13: Deterministic CK v3 forward per GPU model"
+
+    local spec model deterministic expected value
+    for spec in MI355X:1:0 MI350X:1:0 MI300X:1:unset MI355X:0:unset; do
+        IFS=: read -r model deterministic expected <<< "$spec"
+        value=$(bash -c "
+            unset NVTE_CK_USES_FWD_V3
+            export MASTER_ADDR=localhost MASTER_PORT=1234 NNODES=1 NODE_RANK=0 GPUS_PER_NODE=8
+            export PRIMUS_SKIP_VALIDATION=1 PRIMUS_GPU_MODEL=$model PRIMUS_DETERMINISTIC=$deterministic
+            source '$PROJECT_ROOT/runner/helpers/envs/primus-env.sh' >/dev/null
+            echo \"\${NVTE_CK_USES_FWD_V3:-unset}\"
+        " 2>/dev/null | tail -n1)
+        if [[ "$value" == "$expected" ]]; then
+            assert_pass "$model PRIMUS_DETERMINISTIC=$deterministic -> NVTE_CK_USES_FWD_V3=$expected"
+        else
+            assert_fail "$model PRIMUS_DETERMINISTIC=$deterministic -> NVTE_CK_USES_FWD_V3=$value (expected $expected)"
+        fi
+    done
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 echo "=========================================="
@@ -444,6 +468,7 @@ test_missing_base_env
 test_env_defaults
 test_mi350x_env_file
 test_hip_visible_devices
+test_deterministic_ck_fwd_v3
 
 echo ""
 echo "=========================================="

@@ -42,7 +42,7 @@ import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 
-from .aiter_lse_fwd import sparse_mla_fwd_v4_aiter_lse_csa_formula
+from .aiter_lse_fwd import sparse_mla_fwd_v4_aiter_lse
 
 # ---------------------------------------------------------------------------
 # Triton capability gate: the gluon_v2 forward is a Gluon kernel (the backend's backward
@@ -691,12 +691,8 @@ def sparse_mla_fwd_v4_gluon_v2(q, kv, topk_indices, attn_sink=None, kv_lora_rank
     else:
         sink_ptr = torch.empty(1, dtype=torch.float32, device=q.device)  # guarded by HAS_SINK
 
-    if num_heads == 128 and topk == 1152 and kv_lora_rank == 512 and rope_rank == 64:
-        return sparse_mla_fwd_v4_aiter_lse_csa_formula(
-            q, kv, topk_indices, attn_sink=attn_sink, kv_lora_rank=kv_lora_rank, scale=scale
-        )
-    if num_heads == 64 and topk == 640 and kv_lora_rank == 512 and rope_rank == 64:
-        return sparse_mla_fwd_v4_aiter_lse_csa_formula(
+    if (num_heads, topk) in ((128, 1152), (64, 640)) and kv_lora_rank == 512 and rope_rank == 64:
+        return sparse_mla_fwd_v4_aiter_lse(
             q, kv, topk_indices, attn_sink=attn_sink, kv_lora_rank=kv_lora_rank, scale=scale
         )
 

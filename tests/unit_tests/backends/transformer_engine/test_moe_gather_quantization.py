@@ -4,6 +4,8 @@
 """Paired Primus/Turbo GPU coverage for forward-only and bidirectional fusion."""
 
 import gc
+import importlib
+from collections import Counter
 
 import pytest
 import torch
@@ -42,7 +44,22 @@ def test_gather_fusions_preserve_outputs_and_all_gradients(monkeypatch, tokens, 
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     if (props.major, props.minor) != (9, 5):
         pytest.skip("Validated grouped MXFP4 path requires gfx950")
-    monkeypatch.setenv("GPTOSS_BACKWARD_GATHER_AUDIT", "1")
+    # Count the deferred backward gathers the fused MXFP4 path consumes and the ones it densifies.
+    gathers = Counter()
+    grouped_mlp_ops = importlib.import_module("primus_turbo.pytorch.ops.grouped_mlp_fp4")
+    resolve, dense = grouped_mlp_ops.resolve_backward_gather, moe_gather._BackwardGatherState.dense
+
+    def counting_resolve(grad, plan):
+        grad, kwargs = resolve(grad, plan)
+        gathers["consumed"] += bool(kwargs)
+        return grad, kwargs
+
+    def counting_dense(state):
+        gathers["materialized"] += state.materialized is None
+        return dense(state)
+
+    monkeypatch.setattr(grouped_mlp_ops, "resolve_backward_gather", counting_resolve)
+    monkeypatch.setattr(moe_gather._BackwardGatherState, "dense", counting_dense)
     torch.manual_seed(9555)
     selected = torch.rand(tokens, 8 if skew else 32, device="cuda").topk(4, dim=1).indices
     routing = torch.zeros(tokens, 32, dtype=torch.bool, device="cuda").scatter_(1, selected, True)
@@ -60,7 +77,7 @@ def test_gather_fusions_preserve_outputs_and_all_gradients(monkeypatch, tokens, 
     try:
         for forward, backward in [(0, 0), (1, 0), (1, 1)]:
             mxfp4_quant_kernel._SR_COUNTER[0] = 9555
-            moe_gather._BACKWARD_GATHER_AUDIT.clear()
+            gathers.clear()
             x, probs, w1, w2 = [value.detach().clone().requires_grad_() for value in data]
             packed, pp, rowmap = moe_permute_with_probs(
                 x,
@@ -101,8 +118,8 @@ def test_gather_fusions_preserve_outputs_and_all_gradients(monkeypatch, tokens, 
             assert not moe_gather._PERMUTED_ACTIVATION_SEAM_TABLE
             assert not moe_gather._BACKWARD_GATHER_OUTPUTS
             if backward:
-                assert moe_gather._BACKWARD_GATHER_AUDIT.get("consumed") == 1
-                assert moe_gather._BACKWARD_GATHER_AUDIT.get("materialized", 0) == 0
+                assert gathers["consumed"] == 1
+                assert gathers["materialized"] == 0
             del x, probs, w1, w2, packed, pp, rowmap, out, restored, actual
     finally:
         mxfp4_quant_kernel._SR_COUNTER[0] = saved_counter

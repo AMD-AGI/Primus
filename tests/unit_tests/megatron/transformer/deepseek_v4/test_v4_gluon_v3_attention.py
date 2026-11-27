@@ -286,7 +286,7 @@ def test_v4_gluon_v3_csa_adapter_matches_eager():
 
 
 @pytest.mark.parametrize("H,pool_k,T", [(64, 512, 64), (128, 1024, 64)], ids=["h64_topk640", "h128_topk1152"])
-def test_v4_gluon_v3_round9_csa_formula_path_matches_eager(H, pool_k, T):
+def test_v4_gluon_v3_round9_aiter_path_matches_eager(H, pool_k, T):
     g = torch.Generator(device="cuda").manual_seed(13 + H)
     scale = 1.0 / math.sqrt(D)
     q512 = torch.randn(T, H, D, generator=g, device="cuda", dtype=torch.bfloat16)
@@ -314,7 +314,48 @@ def test_v4_gluon_v3_round9_csa_formula_path_matches_eager(H, pool_k, T):
     of, lsef = _eager_sparse_mla(qf, kvf, topk, sf, scale=scale)
     of.backward(do.float())
 
-    print(f"\n[gluon_v3 round9 CSA formula] T={T} H={H} TOPK={topk.shape[1]}", flush=True)
+    print(f"\n[gluon_v3 round9 aiter path] T={T} H={H} TOPK={topk.shape[1]}", flush=True)
+    _check("O", og, of, abs_tol=5e-2, med=3e-2, cos=2e-3)
+    _check("LSE", lseg, lsef, abs_tol=1e-2, sig=1e-3, med=1e-3, cos=1e-6)
+    _check("dQ", dqg[:, :, :D], qf.grad[:, :, :D], abs_tol=1e-1, sig=1e-3, med=3e-2, cos=2e-3)
+    _check("dKV", dkvg[:, :, :D], kvf.grad[:, :, :D], abs_tol=3e-1, sig=1e-3, med=5e-2, cos=5e-3)
+    _check("dSink", dsg, sf.grad, abs_tol=1.0, sig=1e-3, med=8e-2, cos=2e-2)
+
+
+@pytest.mark.parametrize("H,pool_k", [(64, 512), (128, 1024)], ids=["h64_topk640", "h128_topk1152"])
+def test_v4_gluon_v3_aiter_path_handles_short_rows(H, pool_k):
+    """Rows of a sequence's first tokens: a partial window and a ``-1``-padded pool."""
+    T, short = 64, 16
+    g = torch.Generator(device="cuda").manual_seed(7 + H)
+    scale = 1.0 / math.sqrt(D)
+    q512 = torch.randn(T, H, D, generator=g, device="cuda", dtype=torch.bfloat16)
+    kv512 = torch.randn(T + pool_k, 1, D, generator=g, device="cuda", dtype=torch.bfloat16)
+    q = torch.cat([q512, torch.zeros(T, H, _ROPE, device="cuda", dtype=torch.bfloat16)], dim=-1).contiguous()
+    kv = torch.cat(
+        [kv512, torch.zeros(T + pool_k, 1, _ROPE, device="cuda", dtype=torch.bfloat16)], dim=-1
+    ).contiguous()
+    sink = torch.randn(H, generator=g, device="cuda", dtype=torch.float32) * 0.1
+
+    ti = torch.arange(T, device="cuda").view(T, 1)
+    win = ti - _SWA + 1 + torch.arange(_SWA, device="cuda").view(1, _SWA)
+    win = torch.where(win >= 0, win, torch.full_like(win, -1))
+    pool_topk = T + torch.randint(0, pool_k, (T, pool_k), generator=g, device="cuda", dtype=torch.int64)
+    seen = torch.arange(pool_k, device="cuda").view(1, pool_k) <= ti[:short]
+    pool_topk[:short] = torch.where(seen, pool_topk[:short], torch.full_like(pool_topk[:short], -1))
+    topk = torch.cat([win, pool_topk], dim=1).to(torch.int32).contiguous()
+    do = torch.randn(T, H, D, generator=g, device="cuda", dtype=torch.bfloat16)
+
+    qg, kvg, sg = _leaf(q, fp32=False), _leaf(kv, fp32=False), _leaf(sink, fp32=False)
+    og, lseg = sparse_mla_fwd_v4_gluon_v3(qg, kvg, topk, attn_sink=sg, kv_lora_rank=D, scale=scale)
+    dqg, dkvg, dsg = sparse_mla_bwd_v4_gluon_v3(
+        qg, kvg, og, do, topk, lseg, attn_sink=sg, kv_lora_rank=D, scale=scale
+    )
+
+    qf, kvf, sf = _leaf(q, fp32=True), _leaf(kv, fp32=True), _leaf(sink, fp32=True)
+    of, lsef = _eager_sparse_mla(qf, kvf, topk, sf, scale=scale)
+    of.backward(do.float())
+
+    print(f"\n[gluon_v3 aiter path, short rows] T={T} H={H} TOPK={topk.shape[1]}", flush=True)
     _check("O", og, of, abs_tol=5e-2, med=3e-2, cos=2e-3)
     _check("LSE", lseg, lsef, abs_tol=1e-2, sig=1e-3, med=1e-3, cos=1e-6)
     _check("dQ", dqg[:, :, :D], qf.grad[:, :, :D], abs_tol=1e-1, sig=1e-3, med=3e-2, cos=2e-3)

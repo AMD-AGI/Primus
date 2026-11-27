@@ -8,7 +8,9 @@ import os
 
 import pytest
 
-from tests.utils import PrimusUT, run_training_script
+from tests.utils import PrimusUT, detect_gpu_platform, run_training_script
+
+GPU_PLATFORM = detect_gpu_platform()
 
 
 def run_script(
@@ -71,7 +73,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_8B-BF16",
-            exp_path="examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml",
+            exp_path=f"examples/torchtitan/configs/{GPU_PLATFORM}/llama3.1_8B-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -86,7 +88,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_8B-FP8",
-            exp_path="examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml",
+            exp_path=f"examples/torchtitan/configs/{GPU_PLATFORM}/llama3.1_8B-FP8-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -101,7 +103,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "qwen3_0.6B",
-            "examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/qwen3_0.6B-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -109,6 +111,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "3",
                 "--training.mock_data",
                 "True",
+                "--metrics.log_freq",
+                "1",
             ],
         )
 
@@ -116,7 +120,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "qwen3_32B",
-            "examples/torchtitan/configs/MI300X/qwen3_32B-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/qwen3_32B-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -124,6 +128,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "3",
                 "--training.mock_data",
                 "True",
+                "--metrics.log_freq",
+                "1",
             ],
         )
 
@@ -131,7 +137,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v3_16b",
-            "examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/deepseek_v3_16b-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -148,7 +154,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v3_16b_fp8",
-            "examples/torchtitan/configs/MI300X/deepseek_v3_16b-FP8-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/deepseek_v3_16b-FP8-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -165,7 +171,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v3_671b",
-            "examples/torchtitan/configs/MI300X/deepseek_v3_671b-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/deepseek_v3_671b-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -183,7 +189,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "gpt_oss_20B",
-            "examples/torchtitan/configs/MI300X/gpt_oss_20B-BF16-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/gpt_oss_20B-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -198,7 +204,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "gpt_oss_20B_fp8",
-            "examples/torchtitan/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/gpt_oss_20B-FP8-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -216,7 +222,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama4_17Bx16E",
-            "examples/torchtitan/configs/MI300X/llama4_17Bx16E-BF16-pretrain.yaml",
+            f"examples/torchtitan/configs/{GPU_PLATFORM}/llama4_17Bx16E-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
