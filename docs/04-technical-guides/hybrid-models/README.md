@@ -26,6 +26,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
   - [Multi-Node (Slurm)](#multi-node-slurm)
   - [Mock Data (Smoke Test)](#mock-data-smoke-test)
 - [Upcycling a dense checkpoint](#upcycling-a-dense-checkpoint)
+- [Native HyLo training](#native-hylo-training)
 - [Step 4: Checkpoint Conversion to HuggingFace](#step-4-checkpoint-conversion-to-huggingface)
 - [Step 5: Evaluation with lm-eval-harness](#step-5-evaluation-with-lm-eval-harness)
 - [Configuration Reference](#configuration-reference)
@@ -41,6 +42,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
 | [Pure KDA guide](kda-guide.md) | End-to-end 300M pure Kimi Delta Attention (KDA) recipe, FLA-validated on 8× MI300X |
 | [GDN ⇄ FLA parity](gdn-fla-parity.md) | Every Primus/Megatron-LM change required for GDN to match the FLA reference implementation |
 | [KDA ⇄ FLA parity](kda-fla-parity.md) | Every Primus/Megatron-LM change required for KDA to match the FLA reference implementation |
+| [Native HyLo training](hylo-native-training.md) | Enhanced-ILD of all-MLA and all-Mamba-2 1B students from a dense Llama teacher |
 
 ---
 
@@ -458,6 +460,25 @@ auto_continue_train: false
 ```
 
 The checkpoint `args` must carry the HyLo widths (`q_lora_rank`, `kv_lora_rank`, `qk_head_dim`, `v_head_dim`, and for GDN the `linear_num_*` / `linear_*_head_dim` fields). `upcycle_report.json` lists tensors that were copied, and `hylo_partial` lists GDN slices that were only partly filled. Start the continued run from a learning rate several times below the dense model's peak, with a short warmup.
+
+---
+
+## Native HyLo training
+
+Primus trains HyLo's stage 1, Enhanced-ILD, natively. Tensor, pipeline, and context parallelism must stay at 1. Data parallelism can use all eight GPUs on one MI300X node. The runtime image is `rocm/primus:v26.9`.
+
+Enhanced-ILD trains an all-MLA student and an all-Mamba-2 student from `meta-llama/Llama-3.2-1B-Instruct` at 4K, matching each block's output and token-mixer output to the teacher's. The public HyLo configs use 2K for this stage; these recipes start at 4K. The recipes set `model_type: hylo`, which builds the student beside the frozen teacher and trains with HyLo's loss.
+
+Prepare the gated teacher once:
+
+```bash
+export HF_TOKEN=...
+python tools/hybrid/prepare_hylo_assets.py --root "$PWD/data/hylo"
+```
+
+[Native HyLo training](hylo-native-training.md) covers the from-teacher initial checkpoints and each student's recipes. A one-step check uses `HYLO_ILD_TRAIN_ITERS=1`, micro-batch 1, and global batch 1.
+
+To reproduce the Zebra-Llama stage-1 checkpoints themselves, train the all-Mamba-2 and all-MLA students on the reference's packed 2048-token data with `hylo_m2_1B-enhanced-ild-packed.yaml` and `hylo_mla_1B-enhanced-ild-packed.yaml`. [Reproduce the reference stage-1 checkpoints](hylo-native-training.md#reproduce-the-reference-stage-1-checkpoints) covers the data preparation, the all-Mamba-2 random init, and the evaluation and comparison tools.
 
 ---
 
