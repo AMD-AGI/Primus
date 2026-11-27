@@ -21,6 +21,16 @@ class PrimusTopKRouter(TopKRouter):
     def __init__(self, config: TransformerConfig, *args, **kwargs) -> None:
         super().__init__(config=config, *args, **kwargs)
 
+    def _post_softmax_topk(self) -> bool:
+        """Softmax over the selected top-k logits (``moe_router_pre_softmax: false``), e.g. Mixtral, Qwen3."""
+        return self.config.moe_router_score_function == "softmax" and not self.config.moe_router_pre_softmax
+
+    def _fused_router_supported(self) -> bool:
+        # Turbo's group-limited top-k ranks groups by softmax scores, while Megatron ranks them by raw
+        # logits when pre_softmax is false, so the two can select different experts.
+        grouped = (self.config.moe_router_num_groups or 1) > 1
+        return not (grouped and self._post_softmax_topk())
+
     def fused_router_and_auxiliary_loss(self, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         try:
             import primus_turbo.pytorch as pt
@@ -43,6 +53,15 @@ class PrimusTopKRouter(TopKRouter):
         )
 
         routing_map = routing_map.bool()
+
+        if self._post_softmax_topk():
+            # Turbo's kernel takes the softmax over all experts (pre_softmax semantics). Renormalizing
+            # over the selected experts gives the softmax over the top-k logits, in forward and backward.
+            probs = probs.float()
+            probs = probs / probs.sum(dim=-1, keepdim=True)
+            if self.config.moe_router_topk_scaling_factor:
+                probs = probs * self.config.moe_router_topk_scaling_factor
+            probs = probs.type_as(logits)
 
         # Apply token dropping to probs and routing_map.
         if self.config.moe_expert_capacity_factor is not None:
@@ -84,7 +103,11 @@ class PrimusTopKRouter(TopKRouter):
             # grok2 router logit softcapping
             fused_softcap(logits, args.router_logit_softcapping)
 
-        if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
+        if (
+            args.enable_primus_turbo
+            and args.moe_use_fused_router_with_aux_score
+            and self._fused_router_supported()
+        ):
             scores, routing_map = self.fused_router_and_auxiliary_loss(logits)
         else:
             scores, routing_map = super().routing(logits, **kwargs)
