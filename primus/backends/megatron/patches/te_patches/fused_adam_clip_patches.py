@@ -78,6 +78,13 @@ def _fp8blk_skip_bf16_enabled() -> bool:
     return _fp8blk_megamoe_enabled() and os.environ.get("PRIMUS_FP8BLK_ADAM_SKIP_BF16", "0") == "1"
 
 
+def _fp8blk_super_enabled() -> bool:
+    """PRIMUS_FP8BLK_ADAM_SUPER=1 (default): a tile-Adam launch whose every weight is a MegaMoE MX-plane cache with
+    W^T and N, K % 256 == 0 runs one block per 256x256 super-tile, so the FP8 W / W^T rows leave as 256-byte segments
+    (128-byte segments write HBM at a fraction of the bandwidth on gfx1250). Bit-identical outputs."""
+    return os.environ.get("PRIMUS_FP8BLK_ADAM_SUPER", "1") == "1"
+
+
 def _optb_dense_skip_bf16_enabled() -> bool:
     """PRIMUS_OPTB_DENSE_SKIP_BF16=1 (with PRIMUS_FP8BLK_ADAM_QUANT=1): the tile Adam does not store the BF16
     copy of the dense FP8-block weights (Turbo fp8blk_weight_cache targets) either. Their GEMMs read the Adam-written
@@ -413,6 +420,8 @@ def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param
         )
     addresses, dims, tile_to_tensor, tile_offsets = [], [], [], []
     total_tiles = 0
+    super_to_tensor, super_offsets, total_supers = [], [], 0
+    super_ok = _fp8blk_super_enabled()
     for idx in range(len(tensor_lists[0])):
         grad, master, exp_avg, exp_avg_sq = (tensor_lists[j][idx] for j in range(4))
         model_param, cache = fp8blk_by_param_ptr[master.data_ptr()]
@@ -460,6 +469,21 @@ def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param
         tile_offsets.append(total_tiles)
         tile_to_tensor.extend([idx] * tiles)
         total_tiles += tiles
+        # 256x256 super-tile kernel: MX-plane cache with W^T, whole 256-blocks, 32-bit in-tile offsets.
+        super_ok = (
+            super_ok
+            and cache.scale_inv is None
+            and wt is not None
+            and n % (2 * _FP8BLK_TILE) == 0
+            and k % (2 * _FP8BLK_TILE) == 0
+            and max(n, k) * 2 * _FP8BLK_TILE < 2**31
+        )
+        supers = batch * (tiles_n // 2) * (tiles_k // 2)
+        super_offsets.append(total_supers)
+        super_to_tensor.extend([idx] * supers)
+        total_supers += supers
+    if super_ok:
+        tile_to_tensor, tile_offsets, total_tiles = super_to_tensor, super_offsets, total_supers
     return (
         torch.tensor(addresses, dtype=torch.int64, device=device),
         torch.tensor(dims, dtype=torch.int64, device=device),
@@ -469,6 +493,7 @@ def _build_fp8blk_metadata(tensor_lists, fp8blk_by_param_ptr, writeback_by_param
         0 if moment_dtype == torch.float32 else 1,
         0 if grad_dtype == torch.float32 else 1,
         [cache for _, cache in (fp8blk_by_param_ptr[p.data_ptr()] for p in tensor_lists[1])],
+        super_ok,
     )
 
 
@@ -703,6 +728,90 @@ def _copy_only_fp32_model_groups(distributed_optimizer) -> None:
             shard_model_param.copy_(shard_main_param)
 
 
+def _single_param_sync_applies(optimizer) -> bool:
+    """PRIMUS_CHAINED_SINGLE_PARAM_SYNC (default 1): with non-overlapped param gathers, every chained
+    DistributedOptimizer's step_with_ready_grads all-gathers *all* DDP bucket groups of the shared model chunk
+    (dense and expert), so with a dense and an expert optimizer the dense parameters are all-gathered twice per
+    step (the second time after the expert Adam, unchanged: ~2.5 ms of RCCL on the EP4 DP4 proxy). Megatron's
+    MXFP8 deferred-sync path already defers the sync until all chained optimizers have stepped and then syncs each
+    bucket group once; use it whenever more than one DistributedOptimizer shares the step. Same gathered bytes."""
+    if os.environ.get("PRIMUS_CHAINED_SINGLE_PARAM_SYNC", "1") != "1":
+        return False
+    if not hasattr(optimizer, "_step_with_deferred_mxfp8_param_sync"):
+        return False
+    from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
+
+    dist = [o for o in optimizer.chained_optimizers if isinstance(o, DistributedOptimizer)]
+    if len(dist) < 2:
+        return False
+    return all(
+        not o.ddp_config.overlap_param_gather and not o.ddp_config.use_megatron_fsdp for o in dist
+    ) and not optimizer.config.overlap_param_gather_with_optimizer_step
+
+
+def _param_sync_overlap_enabled() -> bool:
+    """PRIMUS_PARAM_SYNC_OVERLAP_ADAM=1: with the single param sync, the all-gathers of the bucket groups a chained
+    DistributedOptimizer owns start on a side stream right after its step, so the dense all-gather runs under the
+    following (expert, FP8-block tile) Adam instead of after it; the step joins the side stream at the end."""
+    return os.environ.get("PRIMUS_PARAM_SYNC_OVERLAP_ADAM", "0") == "1"
+
+
+_param_sync_side_stream = None
+
+
+def _chained_step_single_param_sync(optimizer) -> bool:
+    """ChainedOptimizer._step_with_deferred_mxfp8_param_sync, optionally launching each DistributedOptimizer's own
+    bucket groups on a side stream as soon as that optimizer has stepped (PRIMUS_PARAM_SYNC_OVERLAP_ADAM)."""
+    if not _param_sync_overlap_enabled():
+        return optimizer._step_with_deferred_mxfp8_param_sync()
+    global _param_sync_side_stream
+    from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
+
+    pending = optimizer._enable_deferred_mxfp8_param_sync()
+    chained = optimizer.chained_optimizers
+    last_dist = max(i for i, o in enumerate(chained) if isinstance(o, DistributedOptimizer))
+    main = torch.cuda.current_stream()
+    side_used = False
+    success = True
+    try:
+        for idx, child in enumerate(chained):
+            success &= child.step_with_ready_grads()
+            if not success or idx >= last_dist or not isinstance(child, DistributedOptimizer):
+                continue
+            owned_buckets = {
+                id(bucket)
+                for buffers in child.per_model_buffers.values()
+                for buffer in buffers
+                for bucket in buffer.buckets
+            }
+            own = [(c, g) for c, g in pending if g.buckets and id(g.buckets[0]) in owned_buckets]
+            if not own:
+                continue
+            if _param_sync_side_stream is None:
+                _param_sync_side_stream = torch.cuda.Stream()
+            side = _param_sync_side_stream
+            side.wait_stream(main)
+            with torch.cuda.stream(side):
+                for model_chunk, bucket_group in own:
+                    model_chunk._start_bucket_group_param_sync(bucket_group, force_sync=False)
+            side_used = True
+            if not getattr(_chained_step_single_param_sync, "_logged", False):
+                _chained_step_single_param_sync._logged = True
+                log_rank_0(
+                    f"[Patch:{_PATCH_KEY}] PRIMUS_PARAM_SYNC_OVERLAP_ADAM: {len(own)} of {len(pending)} param "
+                    f"all-gather bucket groups start on a side stream after chained optimizer {idx}"
+                )
+            own_ids = {id(g) for _, g in own}
+            pending = [(c, g) for c, g in pending if id(g) not in own_ids]
+    finally:
+        optimizer._disable_deferred_mxfp8_param_sync()
+    if success and pending:
+        optimizer._start_deferred_mxfp8_param_sync(pending)
+    if side_used:
+        main.wait_stream(_param_sync_side_stream)
+    return success
+
+
 def _chained_step_with_device_clip(optimizer, fused_adam_type):
     """Run ChainedOptimizer.step while deferring clipping to each fused Adam."""
 
@@ -748,7 +857,11 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
         _prepare_bf16_writeback(child_optimizer, fused_adam_type)
 
     num_zeros_in_grad = optimizer.count_zeros() if optimizer.config.log_num_zeros_in_grad else None
-    update_successful = optimizer.step_with_ready_grads()
+    if _single_param_sync_applies(optimizer):
+        # One param all-gather per bucket group after all chained steps (see _single_param_sync_applies).
+        update_successful = _chained_step_single_param_sync(optimizer)
+    else:
+        update_successful = optimizer.step_with_ready_grads()
     # The device norm is returned only for logging (PRIMUS_FUSED_ADAM_RETURN_GRAD_NORM,
     # default on): Megatron formats it after the step, when the Adam launch is
     # already queued, so the host read does not stall the optimizer. Set it to 0
@@ -897,8 +1010,15 @@ def _install_patch() -> None:
                     if fmeta is None:
                         fmeta = _build_fp8blk_metadata(sel_lists, fp8blk_by_param_ptr, writeback_by_param_ptr)
                         self._primus_fp8blk_metadata_cache[fkey] = fmeta
-                    f_addr, f_dims, f_t2t, f_toff, f_tiles, f_mdt, f_gdt, f_caches = fmeta
-                    extension.fused_adam_clip_fp8blk(
+                        log_rank_0(
+                            f"[Patch:{_PATCH_KEY}] tile Adam: {len(sel)} weights, {fmeta[4]} "
+                            + ("256x256 super-tiles (PRIMUS_FP8BLK_ADAM_SUPER)" if fmeta[8] else "128x128 tiles")
+                        )
+                    f_addr, f_dims, f_t2t, f_toff, f_tiles, f_mdt, f_gdt, f_caches, f_super = fmeta
+                    launch = (
+                        extension.fused_adam_clip_fp8blk_super if f_super else extension.fused_adam_clip_fp8blk
+                    )
+                    launch(
                         f_addr,
                         f_dims,
                         f_t2t,
