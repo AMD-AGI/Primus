@@ -37,7 +37,9 @@
       "TORCHVISION_VERSION": "Dockerfile pins `torchvision==0.30.0a0+rocm${THE_ROCK_VERSION}` inline rather than as an ARG; the script spells out the same version.",
       "TORCHAUDIO_VERSION": "Dockerfile pins `torchaudio==2.11.0a0+rocm${THE_ROCK_VERSION}` inline rather than as an ARG; the script spells out the same version.",
       "APEX_VERSION": "Dockerfile installs apex unpinned from the torch index; the script pins the version the image resolved to.",
-      "FLYDSL_VERSION": "Primus-Turbo is installed with --no-deps bare-metal, so the flydsl the image resolves through Turbo's requirements is restated explicitly."
+      "FLYDSL_VERSION": "Primus-Turbo is installed with --no-deps bare-metal, so the flydsl the image resolves through Turbo's requirements is restated explicitly.",
+      "HUGGINGFACE_HUB_CAP": "Not a pin variable: stage_torchtune installs with `huggingface-hub<2`. The image capped it in its Flux stage until v26.10 dropped that stage, and uv's resolve still lands below 2 (1.33.0 in v26.10); pip without the cap backtracks tokenizers to an sdist that needs Rust on cp312.",
+      "FBGEMM_NATIVE_HIP_PATCH": "Not a pin variable: since v26.10 the image builds FBGEMM with fbgemm_native_hip.patch from its own build context (pipeline/primus_training/docker/), which is not in this repository. FBGEMM is not built by setup.sh (only the optional torchrec stage exists), and the manual guide names the patch."
     },
     "jax": {
       "TE_SOURCE_COMMIT": "Optional `te_source` stage, which has no Dockerfile counterpart; the commit is the one the TE wheel's local label names.",
