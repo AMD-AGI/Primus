@@ -11,7 +11,8 @@ sorted path for > 3072 indices) allocates a zero ``[vocab, hidden]`` gradient, s
 and the DDP hook then copies that ~1 GB tensor into ``main_grad``. Here the backward
 reproduces the same sums straight into ``main_grad`` on the step's first write (beta 0 via the wgrad_beta0 policy):
 ``main_grad.zero_()`` + one Triton segment-sum kernel; later writes (shared / multi-microbatch) fall back to
-``embedding_dense_backward`` + add, i.e. the DDP hook's add.
+``embedding_dense_backward`` + add, i.e. the DDP hook's add. PRIMUS_EMB_MAIN_GRAD_ACCUM (default on; =0 restores the dense fallback) replaces
+that fallback by the same segment-sum kernel in accumulate mode (touched rows only, same rounding as the add).
 
 Bit-identical to PyTorch's CUDA kernels: indices are stably sorted (cub radix sort is stable), every vocabulary
 row's gradient is the fp32 sum of its tokens' rows in ascending token order, taken in partial sums of
@@ -45,11 +46,15 @@ def _emb_segment_sum_kernel(
     NROWS: tl.constexpr,
     BLOCK_D: tl.constexpr,
     SUMSQ: tl.constexpr = False,
+    ACCUM: tl.constexpr = False,
 ):
     """One program per sorted position (x one D block); only a segment's first position works. No host sync: the
     segment end is found in-kernel, so the whole backward stays CUDA-graph capturable.
     SUMSQ (PRIMUS_OPTB_EMB_SUMSQ): every program also writes SQ[i * nD + pd] = the fp32 sum of squares of
     the bf16 values it stored (0 for a non-first position), so sum(SQ) = sum(main_grad^2) (untouched rows are 0).
+    ACCUM (PRIMUS_EMB_MAIN_GRAD_ACCUM): OUT[row] = bf16(fp32(OUT[row]) + fp32(bf16(segment sum))) for the touched
+    rows only = ``OUT.add_(embedding_dense_backward(...))`` (bf16 grad weight, then a bf16 add in fp32 opmath);
+    untouched rows would get ``OUT + 0`` there, which leaves them unchanged.
     """
     i = tl.program_id(0)
     pd = tl.program_id(1)
@@ -73,6 +78,9 @@ def _emb_segment_sum_kernel(
                 part += tl.load(G + r * stride_g + d, mask=dm, other=0.0).to(tl.float32)
             total += part
         tb = total.to(OUT.dtype.element_ty)
+        if ACCUM:
+            old = tl.load(OUT + row.to(tl.int64) * D + d, mask=dm, other=0.0)
+            tb = (old.to(tl.float32) + tb.to(tl.float32)).to(OUT.dtype.element_ty)
         tl.store(OUT + row.to(tl.int64) * D + d, tb, mask=dm)
         if SUMSQ:
             tf = tl.where(dm, tb.to(tl.float32), 0.0)
@@ -222,6 +230,38 @@ def embedding_grad_into(grad: torch.Tensor, indices: torch.Tensor, out: torch.Te
     )
 
 
+def _emb_accum_enabled() -> bool:
+    return os.environ.get("PRIMUS_EMB_MAIN_GRAD_ACCUM", "1") == "1"
+
+
+def embedding_grad_accumulate_into(grad: torch.Tensor, indices: torch.Tensor, out: torch.Tensor) -> None:
+    """out.add_(embedding_dense_backward(grad, indices, out.shape[0], -1, False)), bit for bit (sorted path,
+    > 3072 indices), touching only the rows in ``indices``: no [vocab, D] zero-fill / scatter / dense add."""
+    D = out.shape[1]
+    g = grad.reshape(-1, D)
+    if g.stride(1) != 1:
+        g = g.contiguous()
+    idx = indices.reshape(-1)
+    N = idx.numel()
+    r = _launch_sort(idx, out.shape[0])
+    sorted_idx, perm = r if r is not None else torch.sort(idx, stable=True)
+    BLOCK_D = 1024
+    _emb_segment_sum_kernel[(N, triton.cdiv(D, BLOCK_D))](
+        g,
+        perm,
+        sorted_idx,
+        out,
+        N,
+        D,
+        g.stride(0),
+        out,
+        NROWS=_NROWS_PER_THREAD,
+        BLOCK_D=BLOCK_D,
+        ACCUM=True,
+        num_warps=4,
+    )
+
+
 def _emb_sumsq_buf(w: torch.Tensor, n_tok: int, D: int):
     """PRIMUS_OPTB_EMB_SUMSQ=1: persistent fp32 partial buffer exposed as ``w._primus_main_grad_sumsq``
     (same contract as Turbo's MoE wgrad sumsq: its sum is sum(main_grad^2) of the step's final main_grad), flagged
@@ -277,7 +317,10 @@ class EmbeddingMainGradFn(torch.autograd.Function):
                     "PRIMUS_GLUE_EMB_TOUCHED=1 needs exactly one embedding gradient write per step "
                     "(one microbatch, untied, no MTP sharing); unset it for this configuration"
                 )
-            mg.add_(torch.ops.aten.embedding_dense_backward(grad, ids, w.shape[0], -1, False))
+            if _emb_accum_enabled() and ids.numel() > 3072 and grad.dtype == mg.dtype:
+                embedding_grad_accumulate_into(grad, ids, mg)
+            else:
+                mg.add_(torch.ops.aten.embedding_dense_backward(grad, ids, w.shape[0], -1, False))
         return None, _get_dummy_wgrad(list(w.shape), w.dtype)
 
 
