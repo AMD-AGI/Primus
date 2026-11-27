@@ -138,6 +138,45 @@ def _has_moe_layers(args) -> bool:
     return any(freq)
 
 
+TURBO_GROUPED_GEMM_SCHEDULES = ("static", "work_steal")
+
+
+def _bf16_grouped_gemm_backend(value) -> str:
+    """The backend ``turbo_grouped_gemm_backend`` picks for BF16, in Primus-Turbo's format (``triton``, or
+    ``bf16:triton,fp8:ck`` / ``other:...`` per precision; BF16, FP16 and FP32 share one entry), lower case;
+    ``default`` when none applies."""
+    value = str(value or "default").strip().lower()
+    if ":" not in value:
+        return value
+    pairs = dict(p.split(":", 1) for p in (s.strip() for s in value.split(",")) if p)
+    for key in ("bf16", "fp16", "fp32", "other"):
+        if key in pairs:
+            return pairs[key].strip()
+    return "default"
+
+
+def validate_turbo_grouped_gemm_schedule(args) -> None:
+    """Reject a schedule Turbo does not have, or work_steal where it would not run: Turbo's backend registry
+    would only report that no grouped GEMM backend accepts the call, on the first forward, and without the
+    Turbo grouped GEMM the setting would do nothing."""
+    schedule = getattr(args, "turbo_grouped_gemm_schedule", "static")
+    if schedule not in TURBO_GROUPED_GEMM_SCHEDULES:
+        raise ValueError(
+            f"turbo_grouped_gemm_schedule must be one of {TURBO_GROUPED_GEMM_SCHEDULES}, got {schedule!r}."
+        )
+    if schedule == "static":
+        return
+    for required in ("enable_primus_turbo", "use_turbo_grouped_gemm"):
+        if not getattr(args, required, False):
+            raise ValueError(f"turbo_grouped_gemm_schedule={schedule} requires {required}=True.")
+    backend = _bf16_grouped_gemm_backend(getattr(args, "turbo_grouped_gemm_backend", "default"))
+    if backend not in ("default", "autotune", "triton", "ck"):
+        raise ValueError(
+            f"turbo_grouped_gemm_schedule={schedule} runs on the Triton or CK BF16 grouped GEMM; "
+            f"turbo_grouped_gemm_backend picks {backend} for BF16."
+        )
+
+
 def validate_turbo_grouped_gemm_with_muon(args) -> None:
     """Muon orthogonalizes only 2-D weights and hands the rest to its scalar optimizer.
 
@@ -317,6 +356,7 @@ def validate_args_on_rocm(args):
         )
 
     validate_turbo_grouped_gemm_without_padding(args)
+    validate_turbo_grouped_gemm_schedule(args)
     validate_turbo_grouped_gemm_with_muon(args)
     validate_turbo_fp8_permute(args)
     # After sync-free MoE, which may auto-enable use_turbo_grouped_gemm.
