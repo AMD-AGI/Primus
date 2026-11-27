@@ -16,14 +16,15 @@ modules:
 
       # moe
       moe_router_force_load_balancing: true
-      moe_router_dtype: null
+      # fused grouped MLP and fused act require fp32 router probs
+      moe_router_dtype: fp32
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 2
-      global_batch_size: 32
+      micro_batch_size: 4
+      global_batch_size: 256
       seq_length: 4096
       max_position_embeddings: 4096
       lr: 1.0e-5
@@ -44,10 +45,14 @@ modules:
       expert_model_parallel_size: 8
       overlap_grad_reduce: true
       overlap_param_gather: true
+      ddp_num_buckets: 32
+      ddp_average_in_collective: true
       gradient_accumulation_fusion: false
 
       # data
       mock_data: true
+      # unused by causal flash attention; building it per micro-batch slows MoE on Megatron-core 0.19
+      create_attention_mask_in_dataloader: false
       train_data_path: null
       valid_data_path: null
       test_data_path: null
@@ -72,9 +77,26 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: false
-      use_turbo_grouped_gemm: false
+      use_turbo_attention: true
+      use_turbo_grouped_gemm: true
+      turbo_fused_grouped_gemm: true
+      use_turbo_fused_act_with_probs: true
+      # turbo_fp8_permute requires deepep, fused grouped gemm and tensorwise scaling
+      turbo_fp8_permute: true
+      moe_router_fusion: true
+      use_turbo_rms_norm: true
+      use_turbo_norm_te_linear: true
+      # first run spends ~10 min compiling FlyDSL kernels; later runs reuse the cache
+      use_turbo_gemm: true
+      turbo_gemm_backend: "fp8:flydsl,fp4:flydsl,other:hipblaslt"
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      turbo_deepep_num_cu: 160
+      turbo_deepep_use_comm_stream: false
 
       # enable fp8 training
       fp8: hybrid
+      fp8_recipe: tensorwise
       moe_use_legacy_grouped_gemm: false
