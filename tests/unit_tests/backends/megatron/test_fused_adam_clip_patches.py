@@ -12,9 +12,12 @@ from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import 
     _chained_step_with_device_clip,
     _clip_coeff,
     _copy_model_grads_to_decoupled,
+    _defer_expert_grad_scaling,
     _deferred_passthrough_reduce_max,
     _get_decoupled_grads_for_grad_norm,
     _get_grad_norm_tensor,
+    _grad_prescale,
+    _load_extension,
     _prepare_bf16_writeback,
     _uses_static_bf16_unity_scale,
 )
@@ -363,3 +366,125 @@ def test_prepare_bf16_writeback_maps_master_to_param_buffer(monkeypatch):
     destination = optimizer.optimizer._primus_bf16_writeback_by_param_ptr[main_param.data_ptr()]
     assert destination.data_ptr() == param_buffer[2:6].data_ptr()
     assert optimizer._primus_bf16_writeback_active
+
+
+def _grad_buffer(factor, params):
+    bucket = type("Bucket", (), {"gradient_scaling_factor": factor})()
+    return type("Buffer", (), {"gradient_scaling_factor": factor, "buckets": [bucket], "params": params})()
+
+
+def _model_optimizer(params):
+    return type(
+        "FakeDistributedOptimizer",
+        (),
+        {"model_float16_groups": [params], "model_fp32_groups": []},
+    )()
+
+
+def test_defer_expert_grad_scaling_moves_factor_to_params():
+    expert = torch.nn.Parameter(torch.zeros(2))
+    unscaled = torch.nn.Parameter(torch.zeros(2))
+    scaled_buffer = _grad_buffer(0.25, [expert])
+    unity_buffer = _grad_buffer(1.0, [unscaled])
+    ddp = type("FakeDDP", (), {"expert_parallel_buffers": [scaled_buffer, unity_buffer]})()
+
+    _defer_expert_grad_scaling(ddp)
+
+    assert scaled_buffer.gradient_scaling_factor == 1.0
+    assert scaled_buffer.buckets[0].gradient_scaling_factor == 1.0
+    assert expert._primus_deferred_grad_scale == 0.25
+    assert not hasattr(unscaled, "_primus_deferred_grad_scale")
+
+
+def test_grad_prescale_reads_deferred_factor(monkeypatch):
+    expert = torch.nn.Parameter(torch.zeros(2))
+    expert._primus_deferred_grad_scale = 0.25
+    dense = torch.nn.Parameter(torch.zeros(2))
+
+    assert _grad_prescale(_model_optimizer([expert])) == 1.0
+    monkeypatch.setenv("PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE", "1")
+    assert _grad_prescale(_model_optimizer([expert])) == 0.25
+    assert _grad_prescale(_model_optimizer([dense])) == 1.0
+    with pytest.raises(RuntimeError, match="several deferred gradient scales"):
+        _grad_prescale(_model_optimizer([expert, dense]))
+
+
+def test_grad_norm_weights_deferred_expert_scale(monkeypatch):
+    from megatron.core.optimizer import clip_grads
+
+    monkeypatch.setenv("PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE", "1")
+    expert = torch.nn.Parameter(torch.zeros(2))
+    expert._primus_deferred_grad_scale = 0.25
+
+    class FakeChild:
+        def __init__(self, params, grad):
+            self.model_float16_groups = [params]
+            self.model_fp32_groups = []
+            self.grad = grad
+
+        def get_grads_for_grad_norm(self):
+            return [self.grad]
+
+    dense_child = FakeChild([torch.nn.Parameter(torch.zeros(2))], torch.tensor([3.0, 0.0]))
+    expert_child = FakeChild([expert], torch.tensor([0.0, 16.0]))
+    chained = type(
+        "FakeChained",
+        (),
+        {
+            "chained_optimizers": [dense_child, expert_child],
+            "get_grad_stats_parallel_group": lambda self: None,
+        },
+    )()
+    monkeypatch.setattr(
+        clip_grads,
+        "multi_tensor_applier",
+        lambda impl, overflow, tensor_lists, per_parameter: (
+            torch.linalg.vector_norm(torch.cat(tensor_lists[0])).reshape(1),
+            None,
+        ),
+    )
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda value, op, group: None)
+
+    # sqrt(3^2 + (16 / 4)^2)
+    assert torch.allclose(_get_grad_norm_tensor(chained), torch.tensor([5.0]))
+
+
+def test_chained_step_forwards_deferred_scale_to_each_adam(monkeypatch):
+    monkeypatch.setenv("PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE", "1")
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.te_patches.fused_adam_clip_patches._get_grad_norm_tensor",
+        lambda optimizer: torch.tensor([3.0]),
+    )
+    optimizer, adam_type = _chained_optimizer()
+    child = optimizer.chained_optimizers[0]
+    expert = torch.nn.Parameter(torch.zeros(2))
+    expert._primus_deferred_grad_scale = 0.25
+    child.model_float16_groups = [[expert]]
+    child.model_fp32_groups = []
+
+    _chained_step_with_device_clip(optimizer, adam_type)
+
+    assert child.optimizer._primus_grad_prescale == 0.25
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_kernel_grad_prescale_matches_prescaled_grad():
+    extension = _load_extension()
+    torch.manual_seed(0)
+    n = 4099
+    grad = torch.randn(n, device="cuda")
+    param = torch.randn(n, device="cuda")
+    exp_avg = torch.randn(n, device="cuda").abs() * 1e-3
+    exp_avg_sq = torch.randn(n, device="cuda").abs() * 1e-6
+    norm = torch.tensor([2.0], device="cuda")
+
+    def step(g, prescale):
+        tensors = [g.clone(), param.clone(), exp_avg.clone(), exp_avg_sq.clone()]
+        metadata = _build_metadata(1024, [[t] for t in tensors])
+        extension.fused_adam_clip(
+            *metadata[:5], 1024, 1e-3, 0.9, 0.95, 1e-8, 3, 1, 1, 0.1, *metadata[5:], norm, 1.0, prescale
+        )
+        return tensors[1:]
+
+    for got, want in zip(step(grad, 0.25), step(grad * 0.25, 1.0)):
+        torch.testing.assert_close(got, want, rtol=1e-6, atol=1e-7)
