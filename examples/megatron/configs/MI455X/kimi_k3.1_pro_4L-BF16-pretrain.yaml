@@ -30,7 +30,12 @@ env:
 #   - the attention-residual mixer on FlyDSL (attn_res_backend: flydsl, MI355X:
 #     the model default eager; PRIMUS_ATTN_RES_BACKEND overrides it);
 #   - the situ activation on FlyDSL (situ_backend: flydsl, MI355X: eager;
-#     PRIMUS_SITU_BACKEND overrides it) and moe_router_fusion on (MI355X: off).
+#     PRIMUS_SITU_BACKEND overrides it) and moe_router_fusion on (MI355X: off);
+#   - KDA on the gfx1250 FlyDSL kernels (kda_backend / use_kimi_k3_attention_backend:
+#     flydsl, MI355X: fla; PRIMUS_ATTN_BACKEND=fla switches back), and for the fla
+#     backend its fused L2 norm, gate and gated RMSNorm and chunk_kda's safe_gate
+#     and disable_recompute (kda_fla_fused_ops, kda_fla_safe_gate,
+#     kda_fla_disable_recompute; MI355X: all off).
 # At world 4 / EP 4 the expert-DP size is 1, so the memory recipe below
 # (distributed + precision-aware optimizer, bf16 grads/moments) is required.
 # Synthetic data (mock_data: true).
@@ -114,14 +119,24 @@ modules:
       eval_interval: 100000
 
       # ---------- Kimi K3 specific ----------
-      # fla chunk kernel + fla causal_conv1d, as on MI355X. fla is Triton; on
+      # KDA on the gfx1250 FlyDSL kernels: the chunk kernel, the short convs, the
+      # q / k L2 norm, the decay gate and the gated output RMSNorm (no fla).
+      # PRIMUS_ATTN_BACKEND=fla switches to the fla chunk kernel + fla
+      # causal_conv1d with the three kda_fla_* settings below (fla is Triton; on
       # gfx1250 Triton's expert scheduling must be off: run with
       # TRITON_HIP_USE_EXPERT_SCHEDULING=0, on a Triton whose
-      # is_expert_scheduling_enabled() honours it. Fall back with
-      # PRIMUS_KDA_BACKEND=eager PRIMUS_ATTN_BACKEND=eager.
-      kda_backend: ${PRIMUS_KDA_BACKEND:fla}
+      # is_expert_scheduling_enabled() honours it); PRIMUS_ATTN_BACKEND=eager to
+      # the reference.
+      kda_backend: ${PRIMUS_KDA_BACKEND:flydsl}
       # Unified KDA backend selector (supersedes kda_backend + K3P_KDA_CONV).
-      use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:fla}
+      use_kimi_k3_attention_backend: ${PRIMUS_ATTN_BACKEND:flydsl}
+      # With the fla backend: fla's fused kernels for the q / k L2 norm, the
+      # decay gate and the gated output RMSNorm, and fla chunk_kda's safe_gate
+      # (valid for the bounded gate, kda_gate_lower_bound -5) and
+      # disable_recompute. The flydsl backend does not read them.
+      kda_fla_fused_ops: ${PRIMUS_KDA_FLA_FUSED_OPS:true}
+      kda_fla_safe_gate: ${PRIMUS_KDA_FLA_SAFE_GATE:true}
+      kda_fla_disable_recompute: ${PRIMUS_KDA_FLA_DISABLE_RECOMPUTE:true}
       # Attention-residual mixer: eager | eager_bcast | flydsl (FlyDSL kernels: gfx950 / gfx1250).
       attn_res_backend: ${PRIMUS_ATTN_RES_BACKEND:flydsl}
       # situ activation: eager | flydsl (FlyDSL kernels: gfx1250; the routed experts fold the router

@@ -73,10 +73,10 @@ _MAX_SAFE_NUM_STAGES = 2
 _FLA_KDA_INTRA_MODULE = "fla.ops.kda.chunk_intra"
 _FLA_KDA_INTRA_KERNELS = (
     "chunk_kda_bwd_kernel_intra",
-    # Unreachable today: only fla's safe_gate=True path calls it, and Primus
-    # never enables safe_gate. Narrowed anyway so the protection is already in
-    # place, but re-measure before enabling safe_gate -- at those shapes this is
-    # the one kernel where num_stages=4 has been seen to win.
+    # Only fla's safe_gate=True path calls it (kda_fla_safe_gate). At some
+    # shapes this is the one kernel where num_stages=4 has been seen to win;
+    # the Kimi K3.1 Pro MI455X recipe's safe_gate numbers were measured with
+    # this narrowing in place.
     "chunk_kda_fwd_kernel_intra_sub_chunk",
 )
 

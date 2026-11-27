@@ -91,6 +91,8 @@ from primus.backends.megatron.core.transformer.kimi_k3.kda_kernels import (
     KDA_BACKENDS,
     kda_gate,
     kda_l2norm,
+    load_fla_fused_ops,
+    load_flydsl_kda_ops,
     resolve_kda_backend,
 )
 
@@ -127,6 +129,13 @@ def _duplicated_linear_kwargs(spec: Union[ModuleSpec, type]) -> dict:
     return {"gather_output": True}
 
 
+def _flydsl_kda_ops(config):
+    """``load_flydsl_kda_ops()`` when ``config`` selects ``kda_backend: flydsl``, else None (also on gfx950)."""
+    if str(getattr(config, "kda_backend", "eager") or "eager") != "flydsl":
+        return None
+    return load_flydsl_kda_ops()
+
+
 class KimiGatedRMSNorm(nn.Module):
     """Head-wise RMSNorm with a sigmoid output gate.
 
@@ -143,6 +152,10 @@ class KimiGatedRMSNorm(nn.Module):
     the gate multiply has to happen *inside* the fp32 region to match
     ``fla`` bit-for-bit, and because the ``weight`` parameter name then
     lines up with the released checkpoint's ``o_norm.weight``.
+
+    With ``kda_backend: flydsl`` on gfx1250 the forward runs on that backend's
+    FlyDSL kernel, otherwise with ``config.kda_fla_fused_ops`` on ``fla``'s
+    fused ``rms_norm_gated`` kernel, instead of the fp32 chain.
     """
 
     def __init__(
@@ -162,8 +175,17 @@ class KimiGatedRMSNorm(nn.Module):
         self.hidden_size = int(hidden_size)
         self.eps = float(eps)
         self.weight = nn.Parameter(torch.ones(self.hidden_size, dtype=params_dtype, device=device))
+        self._fused_forward = None
+        if config is not None:
+            flydsl_ops = _flydsl_kda_ops(config)
+            if flydsl_ops is not None:
+                self._fused_forward = flydsl_ops[2]
+            elif getattr(config, "kda_fla_fused_ops", False):
+                self._fused_forward = load_fla_fused_ops()[2]
 
     def forward(self, x: Tensor, gate: Tensor) -> Tensor:
+        if self._fused_forward is not None:
+            return self._fused_forward(x, gate, self.weight, self.eps)
         out_dtype = x.dtype
         x32 = x.float()
         y = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -199,6 +221,51 @@ class KimiDeltaAttentionSubmodules:
     g_b_proj: Union[ModuleSpec, type] = IdentityOp
     out_norm: Union[ModuleSpec, type] = KimiGatedRMSNorm
     o_proj: Union[ModuleSpec, type] = IdentityOp
+
+
+def _bounded_gate(gate_lower_bound: Optional[float]) -> bool:
+    """Every ``g`` in ``[gate_lower_bound, 0)`` with the bound in ``[-5, 0)``: fla's ``safe_gate`` condition."""
+    return gate_lower_bound is not None and -5.0 <= gate_lower_bound < 0
+
+
+def _resolve_kda_ops(config, backend_name: str, gate_lower_bound: Optional[float]):
+    """``(l2norm, gate, conv, chunk_kwargs)`` of a KDA layer.
+
+    * ``kda_backend: flydsl`` on gfx1250: the backend's own FlyDSL kernels for
+      the L2 norm, the gate and the short convs (``conv(x [B, T, D], weight
+      [D, W])``); it needs the bounded gate. ``kda_fla_*`` do not apply.
+    * otherwise :func:`kda_l2norm` / :func:`kda_gate` (or ``fla``'s fused
+      kernels with ``kda_fla_fused_ops``), ``conv`` None (``_short_conv``
+      chooses), and ``chunk_kwargs`` the ``chunk_kda`` arguments that
+      ``kda_fla_safe_gate`` / ``kda_fla_disable_recompute`` turn on, which only
+      the ``fla`` backend takes (other backends ignore the two fields).
+    """
+    ops = _flydsl_kda_ops(config) if backend_name == "flydsl" else None
+    if ops is not None:
+        if not _bounded_gate(gate_lower_bound):
+            raise ValueError(
+                "kda_backend 'flydsl' on gfx1250 runs fla's safe_gate algorithm, which needs every g in "
+                f"[kda_gate_lower_bound, 0) with the bound in [-5, 0); kda_gate_lower_bound is {gate_lower_bound!r}."
+            )
+        l2norm, gate, _, conv = ops
+        return l2norm, gate, conv, {}
+    l2norm, gate = kda_l2norm, kda_gate
+    if getattr(config, "kda_fla_fused_ops", False):
+        l2norm, gate, _ = load_fla_fused_ops()
+    chunk_kwargs = {}
+    if backend_name == "fla":
+        for field, arg in (
+            ("kda_fla_safe_gate", "safe_gate"),
+            ("kda_fla_disable_recompute", "disable_recompute"),
+        ):
+            if getattr(config, field, False):
+                chunk_kwargs[arg] = True
+    if chunk_kwargs.get("safe_gate") and not _bounded_gate(gate_lower_bound):
+        raise ValueError(
+            "kda_fla_safe_gate needs every g in [kda_gate_lower_bound, 0) with the bound in [-5, 0); "
+            f"kda_gate_lower_bound is {gate_lower_bound!r}."
+        )
+    return l2norm, gate, None, chunk_kwargs
 
 
 def _kda_cp_state():
@@ -370,6 +437,13 @@ class KimiDeltaAttention(MegatronModule):
         # forward, and the per-step dispatch disappears from the hot path.
         self.kda_backend = resolve_kda_backend(self.backend_name)
 
+        # Resolved here for the same reason as the backend.
+        self.l2norm, self.gate_fn, self._flydsl_conv, self.chunk_kwargs = _resolve_kda_ops(
+            config, self.backend_name, self.gate_lower_bound
+        )
+        if self._flydsl_conv is not None and self.conv_bias:
+            raise ValueError("kda_backend 'flydsl' on gfx1250 implements the short convs without a bias.")
+
         # Depthwise-conv1d impl, coordinated with the unified backend selector.
         # ``config.use_kimi_k3_attention_backend`` (when set) supersedes the
         # ``K3P_KDA_CONV`` env: the "fla" family uses fla ``causal_conv1d``, any
@@ -378,7 +452,8 @@ class KimiDeltaAttention(MegatronModule):
         # run_pretrain.sh sets it to "fla"), so the legacy behaviour is unchanged.
         # NOTE: the chunk kernel needs no handling here -- __post_init__ already
         # rewrote ``config.kda_backend`` to the unified selector, so
-        # ``self.backend_name`` above reflects it.
+        # ``self.backend_name`` above reflects it. ``flydsl`` on gfx1250 brings
+        # its own conv kernel (``self._flydsl_conv``), which takes precedence.
         _attn_backend = getattr(config, "use_kimi_k3_attention_backend", None)
         self._kda_conv_use_fla = None if _attn_backend is None else (str(_attn_backend) == "fla")
 
@@ -388,7 +463,10 @@ class KimiDeltaAttention(MegatronModule):
         if self.layer_number in (None, 1):
             import os as _os
 
-            if self._kda_conv_use_fla is None:
+            if self._flydsl_conv is not None:
+                _conv = "flydsl"
+                _src = f"kda_backend={self.backend_name!r} (gfx1250)"
+            elif self._kda_conv_use_fla is None:
                 _conv = "fla" if _os.environ.get("K3P_KDA_CONV", "default") == "fla" else "torch"
                 _src = "kda_backend + K3P_KDA_CONV (legacy)"
             else:
@@ -688,6 +766,12 @@ class KimiDeltaAttention(MegatronModule):
         """Causal depthwise conv + SiLU on a ``[b, s, d]`` tensor."""
         import os
 
+        if self._flydsl_conv is not None:
+            # flydsl on gfx1250: packed sequences arrive one sample at a time
+            # (_kda_forward_segments) and context parallelism is refused in forward.
+            channels, kernel = conv.weight.shape[0], conv.weight.shape[-1]
+            return self._flydsl_conv(x, conv.weight.view(channels, kernel))[..., :seq_len, :]
+
         # Priority: the yaml-level use_kimi_k3_attention_backend (resolved to
         # self._kda_conv_use_fla in __init__) wins; when it is None the legacy
         # K3P_KDA_CONV env decides (default "default" = torch nn.Conv1d).
@@ -780,14 +864,21 @@ class KimiDeltaAttention(MegatronModule):
 
         seq_len, batch, _ = hidden_states.shape
         seq_len = seq_len * self.sp_size
+        # Without sequence or context parallelism the projections run on one [b, s, h] copy of the input, so their
+        # outputs are already in the [b, s, ...] layout the kernels take: two hidden-wide transposes (input and
+        # output) instead of one per projection output. With either, the projections see the [s, b, h] shard.
+        bshd = self.sp_size == 1 and cp_context is None
+        x_in = hidden_states.transpose(0, 1).contiguous() if bshd else hidden_states
+
+        def to_bs(t: Tensor) -> Tensor:
+            return t if bshd else t.transpose(0, 1)
 
         # --- projections, then three separate causal convs --------------
         nvtx_range_push(suffix="kda_in_proj")
-        q, _ = self.q_proj(hidden_states)
-        k, _ = self.k_proj(hidden_states)
-        v, _ = self.v_proj(hidden_states)
-        # s b d -> b s d
-        q, k, v = (x.transpose(0, 1) for x in (q, k, v))
+        q, _ = self.q_proj(x_in)
+        k, _ = self.k_proj(x_in)
+        v, _ = self.v_proj(x_in)
+        q, k, v = (to_bs(x) for x in (q, k, v))
         nvtx_range_pop(suffix="kda_in_proj")
 
         nvtx_range_push(suffix="kda_conv1d")
@@ -799,22 +890,22 @@ class KimiDeltaAttention(MegatronModule):
         q = q.reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
         k = k.reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
         v = v.reshape(batch, seq_len, self.num_heads_local_tp, self.value_head_dim)
-        q = kda_l2norm(q.contiguous())
-        k = kda_l2norm(k.contiguous())
+        q = self.l2norm(q.contiguous())
+        k = self.l2norm(k.contiguous())
 
         # --- gate and write strength ------------------------------------
         nvtx_range_push(suffix="kda_gate")
-        z, _ = self.f_a_proj(hidden_states)
+        z, _ = self.f_a_proj(x_in)
         z, _ = self.f_b_proj(z)
-        z = z.transpose(0, 1).reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
-        g = kda_gate(z, self.A_log, self.dt_bias, self.gate_lower_bound)
-        beta, _ = self.b_proj(hidden_states)
-        beta = torch.sigmoid(beta.transpose(0, 1).float())
+        z = to_bs(z).reshape(batch, seq_len, self.num_heads_local_tp, self.key_head_dim)
+        g = self.gate_fn(z, self.A_log, self.dt_bias, self.gate_lower_bound)
+        beta, _ = self.b_proj(x_in)
+        beta = torch.sigmoid(to_bs(beta).float())
         nvtx_range_pop(suffix="kda_gate")
 
         # --- the delta-rule recurrence ----------------------------------
         nvtx_range_push(suffix="kda_delta_rule")
-        backend_packed = {}
+        backend_packed = dict(self.chunk_kwargs)
         if kda_cu is not None:
             backend_packed["cu_seqlens"] = kda_cu
         if cp_context is not None:
@@ -837,19 +928,22 @@ class KimiDeltaAttention(MegatronModule):
         # --- sigmoid-gated head-wise RMSNorm, then o_proj ---------------
         nvtx_range_push(suffix="kda_out_norm")
         if self.use_full_rank_gate:
-            gate, _ = self.g_proj(hidden_states)
+            gate, _ = self.g_proj(x_in)
         else:
-            gate, _ = self.g_a_proj(hidden_states)
+            gate, _ = self.g_a_proj(x_in)
             gate, _ = self.g_b_proj(gate)
-        gate = gate.transpose(0, 1).reshape(batch, seq_len, self.num_heads_local_tp, self.value_head_dim)
+        gate = to_bs(gate).reshape(batch, seq_len, self.num_heads_local_tp, self.value_head_dim)
         out = self.out_norm(core_out, gate)
         nvtx_range_pop(suffix="kda_out_norm")
 
-        # b s h d -> s b (h d)
-        out = out.reshape(batch, seq_len, self.v_dim_local_tp).transpose(0, 1).contiguous()
+        out = out.reshape(batch, seq_len, self.v_dim_local_tp)
+        if not bshd:
+            out = out.transpose(0, 1).contiguous()  # b s (h d) -> s b (h d), the row-parallel o_proj's layout
         nvtx_range_push(suffix="kda_o_proj")
         out, out_bias = self.o_proj(out)
         nvtx_range_pop(suffix="kda_o_proj")
+        if bshd:
+            out = out.transpose(0, 1).contiguous()
         return out, out_bias
 
     # ------------------------------------------------------------------
