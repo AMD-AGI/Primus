@@ -87,7 +87,9 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:1}
       sequence_parallel: false
       # Overlapping the grad reduce-scatter and param all-gather was 10% slower on one
-      # GPU, 5% on EP2 and 1% on the EP4 8-layer GBS 32 baseline.
+      # GPU, 5% on EP2 and 1% on the EP4 8-layer GBS 32 baseline, and 13% slower there with
+      # MegaMoE (752.6 vs 667.5 ms on M3.1-Flash), which also needs the
+      # megatron.turbo.mega_moe_grad_reduce_order patch to run with it on gfx1250.
       overlap_grad_reduce: false
       overlap_param_gather: false
       use_torch_fsdp2: false
