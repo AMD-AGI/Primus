@@ -20,12 +20,28 @@ import triton.language as tl
 
 @triton.jit
 def _csa_topk_kernel(
-    Pool, Out, S, Skv, P, K, W, TOPK, stride_pb, stride_ps, cp_dwindow, cp_gs, BLOCK: tl.constexpr
+    Pool,
+    Out,
+    S,
+    Skv,
+    P,
+    K,
+    W,
+    TOPK,
+    stride_pb,
+    stride_ps,
+    cp_dwindow,
+    cp_gs,
+    BLOCK: tl.constexpr,
+    LOCAL: tl.constexpr = False,
 ):
     row = tl.program_id(0)
     b = row // S
     t = row % S
+    # LOCAL: every sample's rows index its own [Skv ++ P] kv block from 0 (per-sample band backward)
     base = b * (Skv + P)
+    if LOCAL:
+        base = base * 0
     s = tl.arange(0, BLOCK)
     gpos = t + cp_gs - W + 1 + s
     win = tl.where(gpos >= 0, base + gpos - cp_gs + cp_dwindow, -1)
@@ -37,7 +53,8 @@ def _csa_topk_kernel(
     tl.store(Out + row.to(tl.int64) * TOPK + s, val.to(tl.int32), mask=s < TOPK)
 
 
-def csa_topk(topk_idxs, S, Skv, P, W, cp_dwindow=0, cp_global_start=0):
+def csa_topk(topk_idxs, S, Skv, P, W, cp_dwindow=0, cp_global_start=0, local=False):
+    """[B*S, round64(W + K)] int32 CSA map; ``local=True``: sample-local kv rows (no ``b * (Skv + P)`` base)."""
     B, S_, K = topk_idxs.shape
     assert S_ == S and topk_idxs.stride(2) == 1
     topk = (W + K + 63) // 64 * 64
@@ -57,6 +74,7 @@ def csa_topk(topk_idxs, S, Skv, P, W, cp_dwindow=0, cp_global_start=0):
             int(cp_dwindow),
             int(cp_global_start),
             BLOCK=triton.next_power_of_2(topk),
+            LOCAL=bool(local),
             num_warps=4,
         )
     return out

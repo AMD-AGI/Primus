@@ -27,7 +27,12 @@ import triton
 import triton.language as tl
 
 from ._amd_knobs import amd_pingpong_disabled, is_gfx1250
-from ._turbo_gfx1250 import sparse_mla_fwd_turbo_gfx1250, turbo_gfx1250_enabled
+from ._turbo_gfx1250 import (
+    per_sample_ok,
+    sparse_mla_fwd_turbo_gfx1250,
+    sparse_mla_fwd_turbo_gfx1250_ps,
+    turbo_gfx1250_enabled,
+)
 
 
 def _get_fwd_configs():
@@ -234,3 +239,8 @@ def sparse_mla_fwd_v4_triton(q, kv, topk_indices, attn_sink=None, kv_lora_rank=5
             HAS_SINK=has_sink,
         )
     return o, lse
+
+
+# PRIMUS_V4_BAND_PER_SAMPLE (see _turbo_gfx1250): the adapter runs B > 1 band maps one sample at a time through these.
+sparse_mla_fwd_v4_triton.per_sample = sparse_mla_fwd_turbo_gfx1250_ps
+sparse_mla_fwd_v4_triton.per_sample_ok = per_sample_ok

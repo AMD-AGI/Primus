@@ -119,3 +119,17 @@ def test_checksum_file_is_reproducible_and_detects_one_bit(monkeypatch, tmp_path
     changed = write("c.txt")
     diff = [x for x, y in zip(first.splitlines(), changed.splitlines()) if x != y]
     assert diff and all(x.startswith(("param", "opt")) for x in diff)
+
+
+def test_checksum_file_rank_field(monkeypatch, tmp_path):
+    """``{rank}`` in PRIMUS_DEBUG_CHECKSUM_FILE becomes the global rank (0 without torch.distributed)."""
+    import torch.distributed as dist
+
+    mod = _patch_mod()
+    monkeypatch.setenv("PRIMUS_DEBUG_CHECKSUM_FILE", str(tmp_path / "ck_{rank}.txt"))
+    assert mod._checksum_file() == str(tmp_path / "ck_0.txt")
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_rank", lambda *a, **k: 3)
+    assert mod._checksum_file() == str(tmp_path / "ck_3.txt")
+    monkeypatch.setenv("PRIMUS_DEBUG_CHECKSUM_FILE", str(tmp_path / "ck.txt"))
+    assert mod._checksum_file() == str(tmp_path / "ck.txt")

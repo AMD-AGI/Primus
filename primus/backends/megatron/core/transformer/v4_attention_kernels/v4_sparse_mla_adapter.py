@@ -258,6 +258,24 @@ def _canonical_band(B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, hca_l
     return Skv == S
 
 
+def _per_sample(fwd_fn, bwd_fn, B: int, D: int, H: int, need_fwd: bool) -> bool:
+    """PRIMUS_V4_BAND_PER_SAMPLE (default 1; 0 = off): a B > 1 batch whose every sample is a canonical band map runs
+    the band kernels one sample at a time (``fwd_fn.per_sample`` / ``bwd_fn.per_sample``, see
+    ``_triton_v2._turbo_gfx1250``) instead of the index-driven kernels on the flattened map. Per sample the numerics
+    of an MBS1 step, and run-to-run deterministic at MBS4 (the flattened index-driven path is not). B == 1 is
+    unaffected."""
+    if B <= 1 or os.environ.get("PRIMUS_V4_BAND_PER_SAMPLE", "1") != "1":
+        return False
+    if os.environ.get("PRIMUS_V4_BAND_KERNELS", "1") != "1":
+        return False
+    if getattr(bwd_fn, "per_sample", None) is None:
+        return False
+    if need_fwd and getattr(fwd_fn, "per_sample", None) is None:
+        return False
+    ok = getattr(fwd_fn, "per_sample_ok", None)
+    return ok is not None and bool(ok(D + _ROPE_PAD, H, 64))
+
+
 _ROPE_PAD = 64  # dummy separate-rope block (zeros); the kernels need D_ROPE > 0
 
 
@@ -465,10 +483,30 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         sink_arg = _sink_arg(sink)
         o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
-        ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
+        ctx.band = _csa_band_pool(B, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts)
+        # PRIMUS_V4_BAND_PER_SAMPLE: B > 1, each sample a "window + pool" map -> per-sample band backward, which
+        # takes the sample-local map built from ``topk_idxs`` (kept instead of the flattened map).
+        ctx.ps = 0
+        if (
+            not ctx.band
+            and seq_starts is None
+            and _fused_glue_on(q_bh)
+            and topk_idxs.stride(-1) == 1
+            and _per_sample(fwd_fn, bwd_fn, B, D, H, need_fwd=False)
+        ):
+            b1 = _csa_band_pool(1, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts)
+            if b1:
+                ctx.band, ctx.ps = b1, B
+        ctx.save_for_backward(
+            q_g,
+            kv_g,
+            o_g,
+            lse,
+            topk_idxs if ctx.ps else topk_g,
+            sink_arg if sink is not None else q_g.new_empty(0),
+        )
         _PENDING_OUT[0] = (o_g.data_ptr(), o_g.numel())
         ctx.shapes = (B, H, S, Skv, D, P, W)
-        ctx.band = _csa_band_pool(B, S, Skv, P, W, cp_dwindow, cp_global_start, seq_starts)
         ctx.scale = float(scale)
         ctx.sink_was_none = sink is None
         ctx.bwd_fn = bwd_fn
@@ -497,9 +535,16 @@ class _V4SparseMLACSAFn(torch.autograd.Function):
         tok = _DKV_SIDE.set((holder.stream, keep, dpl)) if holder is not None else None
         try:
             with _band(ctx.band):
-                dq_g, dkv_g, dsink = ctx.bwd_fn(
-                    q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-                )
+                if ctx.ps:
+                    # topk_g holds topk_idxs [B, S, K] here: build the sample-local map (one launch)
+                    topk_l = _glue().csa_topk(topk_g, S, Skv, P, W, local=True)
+                    dq_g, dkv_g, dsink = ctx.bwd_fn.per_sample(
+                        q_g, kv_g, o_g, grad_o_g, topk_l, lse, sink_arg, D, ctx.scale, ctx.ps
+                    )
+                else:
+                    dq_g, dkv_g, dsink = ctx.bwd_fn(
+                        q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+                    )
         finally:
             if tok is not None:
                 _DKV_SIDE.reset(tok)
@@ -604,9 +649,21 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         band = _canonical_band(
             B, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, int(hca_local_seqlen), additive_mask
         )
+        # PRIMUS_V4_BAND_PER_SAMPLE: B > 1 and every sample a canonical band -> the band kernels run per sample on
+        # the B == 1 map (cached like any band map; read only by a Turbo fallback to the index-driven kernel).
+        n_ps = 0
+        if (
+            not band
+            and _per_sample(fwd_fn, bwd_fn, B, D, H, need_fwd=True)
+            and _canonical_band(
+                1, S, Skv, W, cp_dwindow, cp_global_start, seq_starts, int(hca_local_seqlen), additive_mask
+            )
+        ):
+            n_ps, band = B, True
+        Bm = 1 if n_ps else B  # samples in the top-k map
         # A certified band map depends only on (S, Skv, W, pool) -- the same tensor for every layer
         # and step: build it once. (Kernels only read it.)
-        band_key = (B, S, Skv, W, int(hca_local_seqlen), str(q_bh.device)) if band else None
+        band_key = (Bm, S, Skv, W, int(hca_local_seqlen), str(q_bh.device)) if band else None
         topk_g = _BAND_TOPK_CACHE.get(band_key) if band else None
         if topk_g is None:
             device = q_bh.device
@@ -618,7 +675,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
             neg1 = (
                 -1
             )  # Python scalar: torch.tensor(-1, device=cuda) was a pageable H2D copy (host sync, not graph-capturable)
-            base = (torch.arange(B, device=device, dtype=idx_dtype) * Skv).view(B, 1, 1)
+            base = (torch.arange(Bm, device=device, dtype=idx_dtype) * Skv).view(Bm, 1, 1)
             # Context parallel: this rank owns global rows [cp_global_start, +S), and its KV
             # buffer is [boundary ++ local] with `cp_dwindow` boundary rows received from the
             # left neighbour. So the window is validated against GLOBAL positions (a token must
@@ -639,7 +696,7 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
                 topk = torch.cat([win_idx, pool_idx], dim=2)
             else:
                 topk = win_idx
-            topk_g = _pad_topk_64(topk.reshape(B * S, -1))
+            topk_g = _pad_topk_64(topk.reshape(Bm * S, -1))
             if band:
                 if len(_BAND_TOPK_CACHE) > 16:
                     _BAND_TOPK_CACHE.clear()
@@ -656,8 +713,12 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         sink_arg = _sink_arg(sink)
 
         ctx.band = band
+        ctx.ps = n_ps
         with _band(band):
-            o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
+            if n_ps:
+                o_g, lse = fwd_fn.per_sample(q_g, kv_g, topk_g, sink_arg, D, float(scale), n_ps)
+            else:
+                o_g, lse = fwd_fn(q_g, kv_g, topk_g, attn_sink=sink_arg, kv_lora_rank=D, scale=float(scale))
 
         ctx.save_for_backward(q_g, kv_g, o_g, lse, topk_g, sink_arg if sink is not None else q_g.new_empty(0))
         _PENDING_OUT[0] = (o_g.data_ptr(), o_g.numel())
@@ -683,9 +744,14 @@ class _V4SparseMLAAttnFn(torch.autograd.Function):
         grad_o_g = grad_o_bh.permute(0, 2, 1, 3).reshape(B * S, H, D).contiguous()
         lst = _launch_dsink_begin(ctx)
         with _band(ctx.band):
-            dq_g, dkv_g, dsink = ctx.bwd_fn(
-                q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
-            )
+            if ctx.ps:
+                dq_g, dkv_g, dsink = ctx.bwd_fn.per_sample(
+                    q_g, kv_g, o_g, grad_o_g, topk_g, lse, sink_arg, D, ctx.scale, ctx.ps
+                )
+            else:
+                dq_g, dkv_g, dsink = ctx.bwd_fn(
+                    q_g, kv_g, o_g, grad_o_g, topk_g, lse, attn_sink=sink_arg, kv_lora_rank=D, scale=ctx.scale
+                )
         dsink_mg = _launch_dsink_end(lst, dsink) if lst is not None else None
 
         dq_bh = _bshd_slice_to_bhsd(dq_g, B, S, H, D)

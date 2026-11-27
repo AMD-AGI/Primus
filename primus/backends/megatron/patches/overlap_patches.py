@@ -91,7 +91,14 @@ def patch_overlap_join(ctx: PatchContext) -> None:
 
 
 def _checksum_file():
-    return os.environ.get("PRIMUS_DEBUG_CHECKSUM_FILE", "")
+    """PRIMUS_DEBUG_CHECKSUM_FILE; a ``{rank}`` field is replaced by the global rank (one file per rank)."""
+    path = os.environ.get("PRIMUS_DEBUG_CHECKSUM_FILE", "")
+    if "{rank}" in path:
+        import torch.distributed as dist
+
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
+        path = path.replace("{rank}", str(rank))
+    return path
 
 
 def _fingerprint(t) -> str:

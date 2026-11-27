@@ -144,3 +144,122 @@ def sparse_mla_bwd_turbo_gfx1250(q, kv, o, do, topk_indices, lse, attn_sink, kv_
         **_dkv_side_kwargs(),
         **_dsink_kwargs(),
     )
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# PRIMUS_V4_BAND_PER_SAMPLE: closed-form band kernels for a flattened B > 1 batch, one call per sample.
+#
+# The band kernels (SWA / HCA forward and backward, CSA "window + pool" dKV gather without a CSR inverse) are certified
+# only for B == 1: they derive the window from the token position, so in a flattened [B*S] call the first 127 tokens of
+# sample b > 0 would see sample b-1. With MBS > 1 every layer therefore fell back to the index-driven kernels: an
+# intermediate [T, topk, 512] bf16 written and re-read, a torch.sort + searchsorted CSR inverse per chunk and the CSR
+# gather (MBS4 trace: ~11 ms per microbatch of sparse attention, ~2.8 ms of it sort / gather glue in the CSA layer).
+# Here each sample runs exactly the B == 1 (MBS1) kernels on its own rows: q / o / dO / lse / dq / delta are row slices
+# of the batch tensors (contiguous), kv / dkv the sample's [Skv (+ P)] block (the adapter's kv layout is per-sample
+# blocks already), outputs are written in place through Turbo's out= / *_out= kwargs (no concatenation). dsink is taken
+# ONCE over the batch-wide lse / delta (same function and inputs as the flattened call).
+# Numerics: per sample identical to an MBS1 step (the configuration the band kernels were validated in); vs the
+# flattened index-driven MBS4 path the dKV / dsink sums differ in fp32 order (bf16-rounding level), o / dq per token
+# may also differ in the last bit (different kernel); see test_sparse_mla_band_per_sample.py. Default on for B > 1
+# (PRIMUS_V4_BAND_PER_SAMPLE=0 restores the index-driven path); B == 1 never takes it.
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def per_sample_ok(d_qk, num_heads, topk) -> bool:
+    """Per-sample band calls available for a [.., num_heads, d_qk] query and a top-k width: the Turbo gfx1250 kernels
+    are selected (same test as ``turbo_gfx1250_enabled``) and the Turbo build has the out= kwargs."""
+    if os.environ.get("PRIMUS_DSA_GFX1250_TURBO", "0") != "1" or not is_gfx1250():
+        return False
+    if not (d_qk == 576 and num_heads in (32, 64, 128) and topk % 32 == 0):
+        return False
+    return _takes_out_kwargs()
+
+
+@functools.lru_cache(maxsize=1)
+def _takes_out_kwargs() -> bool:
+    import inspect
+
+    fwd, bwd = _kernels()
+    f = inspect.signature(fwd).parameters
+    b = inspect.signature(bwd).parameters
+    return all(k in f for k in ("out", "lse_out")) and all(k in b for k in ("dq_out", "dkv_out", "delta_out"))
+
+
+def sparse_mla_fwd_turbo_gfx1250_ps(q, kv, topk1, attn_sink, kv_lora_rank, scale, batch):
+    """Forward of a band map (SWA / HCA) for ``batch`` samples: ``q`` [B*S, H, 576], ``kv`` [B*nkv, 1, 576] (sample b =
+    rows [b*nkv, (b+1)*nkv)), ``topk1`` the B == 1 map [S, topk] (read only if Turbo falls back to the index-driven
+    kernel). Returns (o [B*S, H, 512], lse [B*S, H])."""
+    import torch
+
+    fwd, _ = _kernels()
+    T, H, _ = q.shape
+    S, nkv = T // batch, kv.shape[0] // batch
+    assert S * batch == T and nkv * batch == kv.shape[0] and topk1.shape[0] == S
+    o = q.new_empty(T, H, kv_lora_rank)
+    lse = torch.empty(T, H, dtype=torch.float32, device=q.device)
+    for b in range(batch):
+        r = slice(b * S, (b + 1) * S)
+        fwd(
+            q[r],
+            kv[b * nkv : (b + 1) * nkv],
+            topk1,
+            attn_sink=attn_sink,
+            kv_lora_rank=kv_lora_rank,
+            scale=float(scale),
+            use_swa=True,
+            out=o[r],
+            lse_out=lse[r],
+        )
+    return o, lse
+
+
+def sparse_mla_bwd_turbo_gfx1250_ps(q, kv, o, do, topk_local, lse, attn_sink, kv_lora_rank, scale, batch):
+    """Backward counterpart: ``topk_local`` [B*S, topk] holds each sample's map in sample-local kv rows (or one
+    [S, topk] map shared by all samples). The band hint (``band_hint()``) selects the SWA / HCA band kernels (True)
+    or the CSA window + pool dKV gather (tuple); the CSA_BWD dKV stream hint is honoured per call (no dpool_out).
+    Returns (dq, dkv, dsink) like ``sparse_mla_bwd_turbo_gfx1250``."""
+    import torch
+
+    from primus_turbo.flydsl.attention.gfx1250_sparse_mla.bwd_kernel import _dsink
+
+    _, bwd = _kernels()
+    T, H, _ = q.shape
+    S, nkv = T // batch, kv.shape[0] // batch
+    assert S * batch == T and nkv * batch == kv.shape[0]
+    shared = topk_local.shape[0] == S
+    dq = torch.empty_like(q)
+    dkv = torch.empty_like(kv)
+    delta = torch.empty(T, H, dtype=torch.float32, device=q.device)
+    band = _band_pool()
+    side = _dkv_side_kwargs()
+    side.pop("dpool_out", None)
+    if os.environ.get("PRIMUS_V4_BAND_PER_SAMPLE_DKV_SIDE", "1") == "0":
+        # Joined per call: the B per-sample [S, topk, 512] intermediates (2.7 GB each for the V4-Flash CSA layer at
+        # S = 4096) are reused instead of all staying alive on the dKV stream until the CSADkvJoin. Leaving the
+        # holder's event unset makes the adapter take the plain (joined) path.
+        side = {}
+    for b in range(batch):
+        r = slice(b * S, (b + 1) * S)
+        k = slice(b * nkv, (b + 1) * nkv)
+        bwd(
+            q[r],
+            kv[k],
+            o[r],
+            do[r],
+            topk_local if shared else topk_local[r],
+            lse[r],
+            attn_sink=None,  # dsink below, once over the batch
+            kv_lora_rank=kv_lora_rank,
+            scale=float(scale),
+            use_swa=_use_band_kernels(),
+            **({"band_pool": band} if band is not None else {}),
+            **side,
+            dq_out=dq[r],
+            dkv_out=dkv[k],
+            delta_out=delta[r],
+        )
+    dsink = None
+    if attn_sink is not None:
+        tgt = _dsink_kwargs().get("dsink_main_grad")
+        dsink = _dsink(attn_sink, lse, delta, tgt)
+    return dq, dkv, dsink

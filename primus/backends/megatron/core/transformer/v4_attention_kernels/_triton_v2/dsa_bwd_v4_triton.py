@@ -29,7 +29,11 @@ import triton
 # so this backend can be tuned independently of the gluon path.
 from .._gluon_dsa._dsa_bwd_gather import _build_inverted_topk_slice
 from ._amd_knobs import amd_pingpong_disabled, is_gfx1250
-from ._turbo_gfx1250 import sparse_mla_bwd_turbo_gfx1250, turbo_gfx1250_enabled
+from ._turbo_gfx1250 import (
+    sparse_mla_bwd_turbo_gfx1250,
+    sparse_mla_bwd_turbo_gfx1250_ps,
+    turbo_gfx1250_enabled,
+)
 from .dsa_bwd_kernels import (
     _bwd_chunk_dkv_store_ds,
     _bwd_chunk_dq_store_ds,
@@ -297,6 +301,10 @@ def sparse_mla_bwd_v4_triton(q, kv, o, do, topk_indices, lse, attn_sink=None, kv
 
     dkv = dkv_acc.to(kv.dtype).unsqueeze(1)
     return dq, dkv, d_sink
+
+
+# PRIMUS_V4_BAND_PER_SAMPLE (see _turbo_gfx1250).
+sparse_mla_bwd_v4_triton.per_sample = sparse_mla_bwd_turbo_gfx1250_ps
 
 
 def _build_inverted_topk_i32(topk_slice, num_kv):
