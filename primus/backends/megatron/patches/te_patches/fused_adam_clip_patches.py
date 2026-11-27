@@ -37,7 +37,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v2"  # v2: grad_prescale argument
 _extension = None
 
 
@@ -229,14 +229,23 @@ def _norm_from_nan_check(optimizer):
     st = optimizer.__dict__.setdefault("_primus_norm_reuse", {"checked": False, "ok": False})
     if not st["checked"]:
         ref = _get_grad_norm_tensor_full(optimizer)
-        got = acc.reshape(1).float().sqrt()
+        got = (acc.reshape(1).float() * (_grad_prescale() ** 2)).sqrt()
         rel = ((got - ref).abs() / ref.clamp_min(1e-30)).item()
         st["checked"], st["ok"] = True, rel < 1e-3
         log_rank_0(
             f"[grad_norm] grad norm from NaN-check sumsq: rel diff {rel:.2e} vs l2norm -> reuse={st['ok']}"
         )
         return ref
-    return acc.reshape(1).float().sqrt() if st["ok"] else None
+    return (acc.reshape(1).float() * (_grad_prescale() ** 2)).sqrt() if st["ok"] else None
+
+
+def _grad_prescale() -> float:
+    """DDP gradient scaling left to the norm / Adam kernels (PRIMUS_DDP_FOLD_GRAD_SCALE), else 1.0."""
+    try:
+        from primus.backends.megatron.patches.ddp_fold_grad_scale_patches import grad_prescale
+    except ImportError:
+        return 1.0
+    return grad_prescale()
 
 
 def _get_grad_norm_tensor(optimizer) -> torch.Tensor:
@@ -264,6 +273,9 @@ def _get_grad_norm_tensor_full(optimizer) -> torch.Tensor:
             [grads_for_norm],
             False,
         )
+        prescale = _grad_prescale()
+        if prescale != 1.0:
+            local_norm = local_norm * prescale  # exact: power-of-two factor (PRIMUS_DDP_FOLD_GRAD_SCALE)
         total_norm_squared = local_norm.square()
     else:
         total_norm_squared = torch.zeros(1, dtype=torch.float32, device="cuda")
@@ -1036,6 +1048,7 @@ def _install_patch() -> None:
                         int(f_gdt),
                         self._primus_clip_norm,
                         float(self._primus_clip_max_norm),
+                        _grad_prescale(),
                     )
                     # Queued on the current stream: later GEMMs on it read the new FP8 weights.
                     for cache in f_caches:
@@ -1087,6 +1100,7 @@ def _install_patch() -> None:
                 int(grad_dtype),
                 self._primus_clip_norm,
                 float(self._primus_clip_max_norm),
+                _grad_prescale(),
             )
             if optb_skip:
                 for p in tensor_lists[1]:

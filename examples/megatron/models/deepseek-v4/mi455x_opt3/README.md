@@ -39,7 +39,7 @@ falls back silently). User-facing switches:
 - Gluon kernels (the Gluon dense GEMM, the quantization kernels, the HyperConnection backward, the BF16 split-K
   GEMMs) need Triton >= 3.9 on gfx1250. With the image Triton 3.8 the gate (`dsv4_features.gluon_ok`) closes and the
   FlyDSL / Triton / hipBLASLt paths run instead. Point `TRITON_MAIN` at a Triton main checkout to enable them.
-- `tunableop_dsv4_gfx1250_bf16_0.csv`: hipBLASLt TunableOp results for lm_head and the grouped o_a bmm. It is tied
+- `tunableop_dsv4_gfx1250_bf16_0.csv`: hipBLASLt TunableOp results for lm_head, the grouped o_a bmm and the MBS4 (16384-token) attention-block BF16 GEMMs (o_a, CSA / HCA compressor, indexer projections). It is tied
   to the hipBLASLt of the image; re-run the BF16 GEMM tests after an image change.
 - Primus-Turbo built for gfx1250.
 

@@ -112,7 +112,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     float lr,
     float decay,
     const float* __restrict__ grad_norm,
-    float max_norm) {
+    float max_norm,
+    float grad_prescale) {
   const int global_chunk = blockIdx.x;
   if (global_chunk >= total_chunks) return;
 
@@ -141,7 +142,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
   if (threadIdx.x == 0) {
     const float clip_coeff = max_norm / (*grad_norm + 1.0e-6f);
     // Match Python's min(1.0, coeff), including its NaN behavior.
-    grad_scale_shared = clip_coeff < 1.0f ? clip_coeff : 1.0f;
+    // grad_prescale: power-of-two DDP gradient scaling folded in (PRIMUS_DDP_FOLD_GRAD_SCALE), else 1.
+    grad_scale_shared = grad_prescale * (clip_coeff < 1.0f ? clip_coeff : 1.0f);
   }
   __syncthreads();
   const float grad_scale = grad_scale_shared;
@@ -769,7 +771,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_fp8blk_kernel(
     float lr,
     float decay,
     const float* __restrict__ grad_norm,
-    float max_norm) {
+    float max_norm,
+    float grad_prescale) {
   const int global_tile = blockIdx.x;
   if (global_tile >= total_tiles) return;
   const int tensor_idx = tile_to_tensor[global_tile];
@@ -794,7 +797,7 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_fp8blk_kernel(
   // chunk kernel): no barrier in front of the tile loads.
   const float clip_coeff = max_norm / (*grad_norm + 1.0e-6f);
   // Match Python's min(1.0, coeff), including its NaN behavior.
-  const float grad_scale = clip_coeff < 1.0f ? clip_coeff : 1.0f;
+  const float grad_scale = grad_prescale * (clip_coeff < 1.0f ? clip_coeff : 1.0f);
 
   __shared__ uint4 xs[kTileIters * kBlockSize];  // parked BF16 weights (32 KB)
   float amax;
@@ -983,7 +986,8 @@ void fused_adam_clip_fp8blk_super_kernel(
     float lr,
     float decay,
     const float* __restrict__ grad_norm,
-    float max_norm) {
+    float max_norm,
+    float grad_prescale) {
   const int g = blockIdx.x;
   if (g >= total_supers) return;
   const int tensor_idx = super_to_tensor[g];
@@ -1014,7 +1018,7 @@ void fused_adam_clip_fp8blk_super_kernel(
   __shared__ __attribute__((aligned(16))) float wave_amax[kBlockSize / 32];
   __shared__ __attribute__((aligned(16))) uint8_t stg[kSuper * kSuperPitch];
   const float clip_coeff = max_norm / (*grad_norm + 1.0e-6f);
-  const float grad_scale = clip_coeff < 1.0f ? clip_coeff : 1.0f;
+  const float grad_scale = grad_prescale * (clip_coeff < 1.0f ? clip_coeff : 1.0f);
   if (ptr.model_param != nullptr) {
     fp8blk_super_body<AdamW, MomentT, GradT, true>(ptr, N, K, tiles_n, tiles_k, bb, sm, sk, beta1, beta2,
         step_size, beta2_corr_inv, epsilon, lr, decay, grad_scale, stg, wave_amax);
@@ -1042,7 +1046,8 @@ void fused_adam_clip(
     int moment_dtype,
     int grad_dtype,
     torch::Tensor grad_norm,
-    double max_norm) {
+    double max_norm,
+    double grad_prescale) {
   TORCH_CHECK(addresses.is_cuda() && sizes.is_cuda() &&
               block_to_tensor.is_cuda() && chunk_offsets.is_cuda(),
               "fused_adam_clip metadata must be on GPU");
@@ -1080,7 +1085,7 @@ void fused_adam_clip(
       static_cast<float>(beta1), static_cast<float>(beta2), step_size, \
       beta2_corr_inv, static_cast<float>(epsilon), static_cast<float>(lr), \
       static_cast<float>(weight_decay), grad_norm.data_ptr<float>(), \
-      static_cast<float>(max_norm))
+      static_cast<float>(max_norm), static_cast<float>(grad_prescale))
   if (mode == 1 && moment_dtype == 0 && grad_dtype == 0) {
     LAUNCH(true, float, float);
   } else if (mode == 1 && moment_dtype == 0) {
@@ -1126,7 +1131,8 @@ void fused_adam_clip_fp8blk(
     int moment_dtype,
     int grad_dtype,
     torch::Tensor grad_norm,
-    double max_norm) {
+    double max_norm,
+    double grad_prescale) {
   TORCH_CHECK(addresses.is_cuda() && dims.is_cuda() && tile_to_tensor.is_cuda() &&
               tile_offsets.is_cuda(), "fused_adam_clip_fp8blk metadata must be on GPU");
   TORCH_CHECK(addresses.scalar_type() == at::kLong && dims.scalar_type() == at::kLong &&
@@ -1160,7 +1166,7 @@ void fused_adam_clip_fp8blk(
       static_cast<float>(beta1), static_cast<float>(beta2), step_size, \
       beta2_corr_inv, static_cast<float>(epsilon), static_cast<float>(lr), \
       static_cast<float>(weight_decay), grad_norm.data_ptr<float>(), \
-      static_cast<float>(max_norm))
+      static_cast<float>(max_norm), static_cast<float>(grad_prescale))
   if (mode == 1 && moment_dtype == 0 && grad_dtype == 0) {
     LAUNCH(true, float, float);
   } else if (mode == 1 && moment_dtype == 0) {
@@ -1202,7 +1208,8 @@ void fused_adam_clip_fp8blk_super(
     int moment_dtype,
     int grad_dtype,
     torch::Tensor grad_norm,
-    double max_norm) {
+    double max_norm,
+    double grad_prescale) {
   TORCH_CHECK(addresses.is_cuda() && dims.is_cuda() && super_to_tensor.is_cuda() &&
               super_offsets.is_cuda(), "fused_adam_clip_fp8blk_super metadata must be on GPU");
   TORCH_CHECK(addresses.scalar_type() == at::kLong && dims.scalar_type() == at::kLong &&
@@ -1233,7 +1240,7 @@ void fused_adam_clip_fp8blk_super(
       static_cast<float>(beta1), static_cast<float>(beta2), step_size, \
       beta2_corr_inv, static_cast<float>(epsilon), static_cast<float>(lr), \
       static_cast<float>(weight_decay), grad_norm.data_ptr<float>(), \
-      static_cast<float>(max_norm))
+      static_cast<float>(max_norm), static_cast<float>(grad_prescale))
   if (mode == 1 && moment_dtype == 0 && grad_dtype == 0) {
     LAUNCH(true, float, float);
   } else if (mode == 1 && moment_dtype == 0) {
