@@ -1006,7 +1006,8 @@ Do not run:
 - Pipeline parallel. The launcher allows `PRIMUS_PP`, but no PP run has been done. Tensor parallel
   and context parallel are not implemented for MSA.
 - EP8 and more than one node.
-- DeepEP beyond one run per model at EP4 on 64 CUs (tas-20261109 image), and MegaMoE at EP8.
+- DeepEP beyond one run per model at EP4 on 64 CUs (tas-20261109 image), and MegaMoE at EP2 and EP8,
+  where the launcher turns it on as well.
 - A real dataset and real routing. These runs are mock data with uniform routing.
 - The full 60-layer model. From the proxy's ~18 bytes/parameter (BF16 weights, FP32 gradients and
   Adam state), a training step at MBS 1, seq 4096 wants on the order of 40 MI455X GPUs (EP8 x PP5).
