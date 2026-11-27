@@ -137,6 +137,27 @@ def _turbo_stages_take_wgrad_accum() -> bool:
     return takes
 
 
+# Called with no arguments right before each MegaMoE backward stage runs; None (the default) leaves
+# the stages alone. The megatron.turbo.mega_moe_grad_reduce_order patch sets it.
+before_backward_stage = None
+
+
+def _before_backward_stage_hook(grad: torch.Tensor) -> None:
+    # read at backward time: the callback may have been dropped since the forward registered this
+    if before_backward_stage is not None:
+        before_backward_stage()
+
+
+def run_before_backward_stage(stage_output: torch.Tensor) -> None:
+    """Have ``before_backward_stage`` run right before the backward of the stage that made ``stage_output``.
+
+    A hook on a stage's output runs when autograd is about to execute that stage's backward node, so
+    anything the callback puts on the current stream is ahead of the stage's kernels.
+    """
+    if before_backward_stage is not None and stage_output.requires_grad:
+        stage_output.register_hook(_before_backward_stage_hook)
+
+
 def mega_moe_router(router):
     """The router builder MegaMoE uses: Megatron's ``TopKRouter`` becomes ``PrimusTopKRouter``.
 
@@ -268,9 +289,10 @@ class MegaMoEExperts(MegatronModule):
         # w2 is fetched only after stage1 so the two weight modules keep their fc1-then-fc2 order.
         w1, b1 = self.fc1_weight()
         l1_out, dwib, handle = fused_mega_moe_stage1(x, topk_idx, topk_weights, w1, self.ep_group, **accum)
+        run_before_backward_stage(l1_out)
         w2, b2 = self.fc2_weight()
         # stage2 owns the activation, so fc1's bias, which sits in front of it, is applied there
-        return fused_mega_moe_stage2(
+        out = fused_mega_moe_stage2(
             l1_out,
             dwib,
             handle,
@@ -283,6 +305,8 @@ class MegaMoEExperts(MegatronModule):
             fc2_bias=b2,
             **accum,
         )
+        run_before_backward_stage(out)
+        return out
 
     def backward_dw(self) -> None:
         # match native fc2-then-fc1 order
@@ -313,8 +337,9 @@ class MegaMoEFP8Experts(MegaMoEExperts):
     def forward(self, x, topk_idx, topk_weights):
         w1, b1 = self.fc1_weight()
         l1_out, dwib, handle, state = fused_mega_moe_fp8_stage1(x, topk_idx, topk_weights, w1, self.ep_group)
+        run_before_backward_stage(l1_out)
         w2, b2 = self.fc2_weight()
-        return fused_mega_moe_fp8_stage2(
+        out = fused_mega_moe_fp8_stage2(
             l1_out,
             dwib,
             handle,
@@ -327,6 +352,8 @@ class MegaMoEFP8Experts(MegaMoEExperts):
             fc1_bias=b1,
             fc2_bias=b2,
         )
+        run_before_backward_stage(out)
+        return out
 
 
 class PrimusTurboMegaMoELayer(MegatronModule):
