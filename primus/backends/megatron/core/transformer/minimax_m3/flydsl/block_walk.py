@@ -59,10 +59,11 @@ _ONE_WAVE_ROWS = 2
 
 @triton.jit
 def _match(t, a, cols):
-    """Position in row ``a`` of each entry of ``t`` (``[BR, KP]`` each), or -1: ``a``'s valid
-    entries are distinct, so at most one position matches."""
+    """Position in row ``a`` of each entry of ``t`` (``[BR, KP]`` each), or -1. The indexer's
+    valid entries are distinct, so at most one position matches; a repeated block takes its last
+    position, so a position never leaves the row."""
     hit = (a[:, None, :] == t[:, :, None]) & (t[:, :, None] >= 0)
-    return tl.sum(tl.where(hit, cols[None, None, :] + 1, 0), axis=2) - 1
+    return tl.max(tl.where(hit, cols[None, None, :] + 1, 0), axis=2) - 1
 
 
 @triton.jit
@@ -149,7 +150,7 @@ def _reference(table: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         want = torch.full((N, K), -1, dtype=torch.int64, device=dev)
         for j in range(i):
             hit = (walk[:, j].unsqueeze(1) == ti.unsqueeze(2)) & (ti.unsqueeze(2) >= 0)
-            pos = (hit * (cols + 1)).sum(-1) - 1
+            pos = (hit * (cols + 1)).amax(-1) - 1
             want = torch.where(want >= 0, want, pos)
         same = (want.unsqueeze(2) == want.unsqueeze(1)) & (want.unsqueeze(2) >= 0)
         want = torch.where((same & lower).any(-1), -1, want)
@@ -213,7 +214,9 @@ def aligned_block_walk(
     ``walk == table.gather(-1, slots)``. None when the shape is not :func:`eligible` or the
     kernel's first result for this shape was not the reference's (the caller keeps ``table``).
     ``one_wave`` (``msa_walk_one_wave``) launches the kernel with one wave per program; that launch
-    is checked against the reference on its own first table and falls back to the four-wave one."""
+    is checked against the reference on its own first table and falls back to the four-wave one.
+    The indexer's rows name distinct blocks; a row that repeats a block (a caller's own table)
+    still gets a permutation of itself, with every write inside its row."""
     if not eligible(table, block_size):
         return None
     table = table.contiguous()

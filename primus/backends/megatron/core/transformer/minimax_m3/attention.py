@@ -127,7 +127,7 @@ _MSA_GFX1250_PATHS = (
 #     dQ = scale * dS K (build_dq_ds_w32); checked within 1e-3, workspaces above 16 GiB keep the
 #     recomputing dQ kernel. Last bits differ (dS and delta are summed in another order).
 #   msa_ds_chunk_store / msa_dq_early_issue: bit-identical on that path: one dS buffer descriptor
-#     per workgroup (slices up to 2 GiB) and the dQ kernel's next-step copies issued before it
+#     per workgroup (slices under 2 GiB) and the dQ kernel's next-step copies issued before it
 #     waits for the current ones (msa_token_bwd_w32.py).
 _MSA_STORE_DS_PATHS = ("msa_dq_from_ds", "msa_ds_chunk_store", "msa_dq_early_issue")
 _FUSIONS_LOGGED = False

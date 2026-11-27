@@ -124,6 +124,26 @@ def test_kernel_is_the_reference_permutation(S, B, Hkv, topk, kind):
         assert _staged_fraction(walk) < 0.7 * _staged_fraction(table)
 
 
+def test_a_repeated_block_in_an_earlier_row_stays_inside_the_row():
+    """Rows that name a block twice (reachable only through ``msa_attention(walk_table=...)``; the
+    indexer's top-k never repeats one) in the group's first three tokens, which the later tokens
+    align to: every position stays inside its row and the kernel still gives the reference's
+    permutation (with positions summed over both matches, the second token's own block would be
+    placed at 0 + 15 + 1 = 16, past the row)."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
+
+    S, topk = 4096, 16
+    table = _table(1, 2, S, topk, "local").clone()
+    for i in range(3):
+        table[:, :, i::4, -1] = table[:, :, i::4, 0]
+    table = table.contiguous()
+    want_walk, want_slots = block_walk._reference(table)
+    walk, slots = block_walk._kernel(table)
+    assert torch.equal(walk, want_walk) and torch.equal(slots, want_slots)
+    assert torch.equal(table.gather(-1, slots), walk)
+    assert torch.equal(slots.sort(-1).values, torch.arange(topk, device="cuda").expand_as(slots))
+
+
 def test_ineligible_shapes_keep_the_table():
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import block_walk
 

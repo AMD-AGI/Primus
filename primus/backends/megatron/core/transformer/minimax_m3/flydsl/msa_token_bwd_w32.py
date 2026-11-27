@@ -505,7 +505,7 @@ def build_dkdv_w32(
 
     ``ds_chunk_store`` (``msa_ds_chunk_store``, with ``emit_ds``): the same bytes to the same records
     through one buffer descriptor per workgroup (the chunk's (batch, KV head) slice of ``DS``,
-    ``S * topk`` records, which the caller guarantees is at most 2 GiB) with a per-lane record
+    ``S * topk`` records, which the caller guarantees is under 2 GiB) with a per-lane record
     offset, instead of one descriptor per record: the entry ids ride in the loop state next to
     the tokens they were loaded for (no second load), and each lane issues its two 16-byte
     stores once instead of four half-masked ones.
@@ -644,7 +644,7 @@ def build_dkdv_w32(
         c_log2e = fx.Float32(_LOG2E)
         c_zero = fx.Float32(0.0)
         if const_expr(CHUNK_DS):
-            # the chunk's (batch, KV head) slice of DS: S * topk records, at most 2 GiB (caller)
+            # the chunk's (batch, KV head) slice of DS: S * topk records, under 2 GiB (caller)
             ds_nent = fx.Int32(Sn * fx.Index(topk))
             ds_ent0 = fx.Int32(bg * Sn * fx.Index(topk))
             ds_chunk_rsrc = buffer_ops.create_buffer_resource(

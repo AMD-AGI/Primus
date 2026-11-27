@@ -100,23 +100,38 @@ def test_ds_chunk_store_does_not_read_or_leave_stale_records():
 
 
 def test_ds_chunk_store_keeps_per_record_stores_for_large_slices(monkeypatch):
-    """A (batch, KV head) slice above the 32-bit limit builds the per-record kernel: decided from
-    S, topk and the block size before any launch."""
+    """A (batch, KV head) slice that reaches the 32-bit limit builds the per-record kernel (a slice
+    of exactly 2 GiB would hold a masked lane's parked offset 0x7FFFFFFF): decided from S, topk and
+    the block size before any launch."""
     from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
         msa_token_bwd,
     )
 
     q, k, v, dout, table = H._inputs(1024, 1, 2, 4, "local")
     want = H._backward(q, k, v, dout, table, None, dq_from_ds="force")
-    monkeypatch.setattr(msa_token_bwd, "_DS_SLICE_MAX_BYTES", 1024 * 4 * BLOCK * 16 * 2 - 1)
+    monkeypatch.setattr(msa_token_bwd, "_DS_SLICE_MAX_BYTES", 1024 * 4 * BLOCK * 16 * 2)
     before = set(msa_token_bwd._DKDV_CACHE)
     got = H._backward(q, k, v, dout, table, None, dq_from_ds="force", ds_chunk_store=True)
     assert _bits_equal(got, want)
     assert not any("ds_chunk_store" in key for key in set(msa_token_bwd._DKDV_CACHE) - before)
-    monkeypatch.setattr(msa_token_bwd, "_DS_SLICE_MAX_BYTES", 1024 * 4 * BLOCK * 16 * 2)
+    monkeypatch.setattr(msa_token_bwd, "_DS_SLICE_MAX_BYTES", 1024 * 4 * BLOCK * 16 * 2 + 1)
     got = H._backward(q, k, v, dout, table, None, dq_from_ds="force", ds_chunk_store=True)
     assert _bits_equal(got, want)
     assert any("ds_chunk_store" in key for key in msa_token_bwd._DKDV_CACHE)
+
+
+def test_ds_chunk_store_slice_limit_at_its_real_boundary():
+    """The slice rule without monkeypatching: S 32768 at top-k 16 (block 128) is exactly 2 GiB per
+    (batch, KV head) and keeps per-record stores; one query group less fits."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        msa_token_bwd,
+    )
+
+    assert 32768 * 16 * BLOCK * 16 * 2 == 2**31
+    assert not msa_token_bwd.ds_chunk_store_fits(32768, 16, BLOCK)
+    assert msa_token_bwd.ds_chunk_store_fits(32764, 16, BLOCK)
+    assert msa_token_bwd.ds_chunk_store_fits(16384, 16, BLOCK)
+    assert not msa_token_bwd.ds_chunk_store_fits(16384, 32, BLOCK)
 
 
 def _fake_attention(**config):

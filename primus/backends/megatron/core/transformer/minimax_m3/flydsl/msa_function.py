@@ -125,7 +125,9 @@ def msa_attention(
     ``walk_table`` (``msa_aligned_block_walk``, see ``block_walk.py``) is ``block_table`` with each
     row permuted, int32: the forward and dQ kernels walk a token's blocks in that order, and
     ``slot_lse`` then comes back in that order too. ``plan`` stays the plan of ``block_table``
-    (dK/dV walks blocks, not rows).
+    (dK/dV walks blocks, not rows); without one it is built here (with the selection's chunk
+    rule, ``msa_bounded_plan_chunks``), and only when a backward can follow (grad mode on and q,
+    k or v requiring grad).
 
     ``dq_from_ds`` (``msa_dq_from_ds``, ``msa_bwd_store_ds``; ``msa_token_bwd``): the backward takes dQ
     from the dK/dV kernel's dS. With a ``walk_table`` it needs ``walk_slots``, the int32 slot of
@@ -149,9 +151,16 @@ def msa_attention(
     if walk_table is not None:
         if walk_table.shape != block_table.shape or walk_table.dtype != torch.int32:
             raise ValueError("walk_table must be an int32 row permutation of block_table")
-        if plan is None:
-            # the plan belongs to the indexer's table: its entries are that table's slots
-            plan = build_block_plan(block_table.to(torch.int32).contiguous(), block_size)
+        if plan is None and torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v)):
+            # the plan belongs to the indexer's table (its entries are that table's slots), with the
+            # indexer's chunk rule; only a backward reads it
+            from primus.backends.megatron.core.transformer.minimax_m3.flydsl.index_select import (
+                bounded_plan_chunks_enabled,
+            )
+
+            plan = build_block_plan(
+                block_table.to(torch.int32).contiguous(), block_size, bounded_plan_chunks_enabled()
+            )
         block_table = walk_table.contiguous()
         if dq_from_ds and walk_slots is None:
             dq_from_ds = False

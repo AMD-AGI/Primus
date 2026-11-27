@@ -226,7 +226,7 @@ workgroup wherever S allows, whatever `msa_shared_tile_staging` says. The terms 
 of the dQ kernel's own and `delta` is summed in another order, so `dq`, `dk` and `dv` differ in
 their last bits. Two bit-identical paths come with it: `msa_ds_chunk_store` (the dK/dV kernel
 writes `dS` through one buffer descriptor per workgroup instead of one per record, while a
-(batch, KV head) slice of the workspace is at most 2 GiB, i.e. up to S 32768 at top-k 16) and
+(batch, KV head) slice of the workspace is under 2 GiB, i.e. below S 32768 at top-k 16) and
 `msa_dq_early_issue` (the slim dQ kernel issues the copies of the next step before it waits for
 those of the current one, so two steps' copies are in flight). `--msa_bwd_store_ds False` keeps
 the dQ kernel that recomputes `S` and `dS`, with no workspace; on the M3.1-Flash 1-GPU proxy (S

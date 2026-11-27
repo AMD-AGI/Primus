@@ -262,8 +262,9 @@ def test_other_gpus_pass_the_arguments_their_kernels_declare(monkeypatch):
     plan = bwd.build_block_plan(table, BLOCK)
     out, lse = msa_token_fwd_wave32(q, k, v, table, None, BLOCK, False, shared_tiles=True)
     declared = {
-        "dq": len(inspect.signature(bwd.build_dq(Hkv, topk, BLOCK, scale)).parameters),
-        "dkdv": len(inspect.signature(bwd.build_dkdv(Hkv, BLOCK, scale, topk)).parameters),
+        # the builders return FlyDSL JitFunctions; .func is the launcher they wrap
+        "dq": len(inspect.signature(bwd.build_dq(Hkv, topk, BLOCK, scale).func).parameters),
+        "dkdv": len(inspect.signature(bwd.build_dkdv(Hkv, BLOCK, scale, topk).func).parameters),
     }
     seen = {}
 

@@ -81,6 +81,37 @@ def test_on_gfx1250_without_a_switch(monkeypatch):
     assert not index_select.bounded_plan_chunks_enabled()
 
 
+@pytest.mark.parametrize("bounded", [False, True])
+def test_walk_plan_is_built_for_a_backward_only(monkeypatch, bounded):
+    """``msa_attention`` with a walk and no plan builds the indexer table's plan, with the
+    selection's chunk rule, only when a backward can follow."""
+    from primus.backends.megatron.core.transformer.minimax_m3.flydsl import (
+        index_select,
+        msa_function,
+    )
+
+    built, applied = [], []
+    monkeypatch.setattr(index_select, "_on_gfx1250", lambda: bounded)
+    monkeypatch.setattr(
+        msa_function, "build_block_plan", lambda table, bs, b=False: built.append(b) or "plan"
+    )
+    monkeypatch.setattr(msa_function._MSAAttention, "apply", lambda *a: applied.append(a[7]))
+    S, B, Hkv, topk = 256, 1, 1, 2
+    table = torch.zeros(B, Hkv, S, topk, dtype=torch.int32)
+    q = torch.zeros(S, B, 16 * Hkv, 128)
+    k, v = torch.zeros(S, B, Hkv, 128), torch.zeros(S, B, Hkv, 128)
+
+    def call(*tensors):
+        msa_function.msa_attention(*tensors, table, None, walk_table=table.clone())
+
+    with torch.no_grad():
+        call(q.requires_grad_(True), k, v)
+    call(q.detach(), k, v)  # nothing requires grad
+    assert built == [] and applied == [None, None]
+    call(q.detach(), k.requires_grad_(True), v)
+    assert built == [bounded] and applied[-1] == "plan"
+
+
 @needs_gfx1250
 def test_plan_past_the_workspace_limit_keeps_the_reference_rule():
     """A table whose bounded plan would need 2 GiB of dK / dV partials or more (8192 rows and more)

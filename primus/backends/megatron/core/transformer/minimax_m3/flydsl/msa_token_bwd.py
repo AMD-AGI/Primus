@@ -1126,8 +1126,17 @@ _DS_OK: dict = {}
 _DS_CHECK_TOL = 1.0e-3
 _DS_MAX_BYTES = 16 * 2**30
 # msa_ds_chunk_store: the dK/dV kernel addresses a (batch, KV head) slice of the dS buffer with 32-bit
-# byte offsets through one descriptor; larger slices keep one descriptor per record
-_DS_SLICE_MAX_BYTES = 2**31
+# byte offsets through one descriptor, so the slice must stay under MAX_BUFFER_BYTES like every
+# other buffer (a masked lane's store goes to byte 0x7FFFFFFF, which must fall outside it); other
+# slices keep one descriptor per record
+_DS_SLICE_MAX_BYTES = MAX_BUFFER_BYTES
+
+
+def ds_chunk_store_fits(S: int, topk: int, block_size: int) -> bool:
+    """``msa_ds_chunk_store``: whether a (batch, KV head) slice of the dS buffer, ``S * topk``
+    records, is under ``_DS_SLICE_MAX_BYTES`` (S 32768 at top-k 16 is exactly 2 GiB: per-record
+    stores)."""
+    return S * topk * block_size * HPW * 2 < _DS_SLICE_MAX_BYTES
 
 
 def _ds_eligible(B, Hkv, S, topk, block_size, block_table, walk_slots) -> bool:
@@ -1266,7 +1275,7 @@ def msa_token_bwd(
         ds_chunk_store: with ``dq_from_ds`` (``msa_ds_chunk_store``): the same ``dS`` bytes and the same
             arithmetic: the dK/dV kernel stores ``dS`` through one buffer descriptor per
             workgroup instead of one per record (``build_dkdv_w32``), only while a (batch, KV
-            head) slice of the buffer is at most ``_DS_SLICE_MAX_BYTES``; larger shapes keep the
+            head) slice of the buffer is under ``_DS_SLICE_MAX_BYTES``; larger shapes keep the
             per-record stores. Bit-identical to ``dq_from_ds`` without it (unit-tested); the
             first-call comparison of ``dq_from_ds`` runs with it.
         dq_early_issue: with ``dq_from_ds`` (``msa_dq_early_issue``): the slim dQ kernel issues the
@@ -1429,8 +1438,7 @@ def msa_token_bwd(
             kv_key = ("step_mask_skip",) + kv_key
         if emit:
             kv_key = ("emit_ds",) + kv_key
-        # msa_ds_chunk_store: one dS descriptor per workgroup needs a (batch, KV head) slice of at most 2 GiB
-        chunk_store = emit and bool(ds_chunk_store) and S * topk * block_size * HPW * 2 <= _DS_SLICE_MAX_BYTES
+        chunk_store = emit and bool(ds_chunk_store) and ds_chunk_store_fits(S, topk, block_size)
         if chunk_store:
             kv_key = ("ds_chunk_store",) + kv_key
         if two:
