@@ -7,6 +7,7 @@
 import importlib
 import pkgutil
 from collections import defaultdict
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,3 +94,43 @@ def set_option():
         options.load(sections)
 
     return _set
+
+
+@pytest.fixture
+def flux_fused_patches(monkeypatch):
+    """The FLUX fused-op patch modules, with every class attribute their installs set restored afterwards."""
+    transformer_flux = pytest.importorskip("diffusers.models.transformers.transformer_flux")
+    from diffusers.models.attention import FeedForward
+
+    from primus.backends.automodel.models.flux import (
+        adaln,
+        adaln_dual,
+        mlp_gelu,
+        qk_norm_rope,
+    )
+    from primus.backends.automodel.models.flux.attn_processor import (
+        PrimusFluxAttnProcessor,
+    )
+
+    single, dual = transformer_flux.FluxSingleTransformerBlock, transformer_flux.FluxTransformerBlock
+    attention = transformer_flux.FluxAttention
+    for attr in ("_default_processor_cls", "_available_processors"):
+        monkeypatch.setattr(attention, attr, getattr(attention, attr))
+    monkeypatch.setattr(PrimusFluxAttnProcessor, "dit_qk_norm_rope", None)
+    monkeypatch.setattr(mlp_gelu, "_single_forward", None)
+    for cls in (FeedForward, single, dual, transformer_flux.FluxTransformer2DModel):
+        monkeypatch.setattr(cls, "forward", cls.forward)
+    for cls, attr in (
+        (FeedForward, mlp_gelu._PATCHED_ATTR),
+        (single, mlp_gelu._PATCHED_ATTR),
+        (attention, qk_norm_rope._PATCHED_ATTR),
+        (single, adaln._PATCHED_ATTR),
+        (dual, adaln_dual._PATCHED_ATTR),
+    ):
+        monkeypatch.setattr(cls, attr, False, raising=False)
+    return SimpleNamespace(
+        adaln_dual=adaln_dual,
+        adaln=adaln,
+        mlp_gelu=mlp_gelu,
+        qk_norm_rope=qk_norm_rope,
+    )
