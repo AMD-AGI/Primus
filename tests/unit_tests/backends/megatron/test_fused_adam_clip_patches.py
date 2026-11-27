@@ -363,3 +363,148 @@ def test_prepare_bf16_writeback_maps_master_to_param_buffer(monkeypatch):
     destination = optimizer.optimizer._primus_bf16_writeback_by_param_ptr[main_param.data_ptr()]
     assert destination.data_ptr() == param_buffer[2:6].data_ptr()
     assert optimizer._primus_bf16_writeback_active
+
+
+def test_metadata_param_remainder_layout():
+    grad = torch.zeros(9, dtype=torch.bfloat16)
+    param = torch.zeros(9, dtype=torch.bfloat16)
+    exp_avg = torch.zeros(9, dtype=torch.bfloat16)
+    exp_avg_sq = torch.zeros(9, dtype=torch.bfloat16)
+    remainder = torch.zeros(9, dtype=torch.int16)
+
+    addresses, sizes, block_map, chunk_offsets, chunks, moment_dtype, grad_dtype = _build_metadata(
+        8, [[grad], [param], [exp_avg], [exp_avg_sq], [remainder]], param_remainder=True
+    )
+
+    assert addresses.tolist() == [t.data_ptr() for t in (grad, param, exp_avg, exp_avg_sq, remainder)]
+    assert sizes.tolist() == [9]
+    assert block_map.tolist() == [0, 0]
+    assert chunk_offsets.tolist() == [0]
+    assert chunks == 2
+    assert (moment_dtype, grad_dtype) == (1, 1)
+
+
+def test_metadata_param_remainder_rejects_fp32_params():
+    tensors = [
+        [torch.zeros(8, dtype=dt)] for dt in (torch.bfloat16, torch.float32, torch.bfloat16, torch.bfloat16)
+    ]
+    with pytest.raises(RuntimeError, match="int16 remainders"):
+        _build_metadata(8, tensors + [[torch.zeros(8, dtype=torch.int16)]], param_remainder=True)
+    with pytest.raises(RuntimeError, match="five-list"):
+        _build_metadata(8, tensors, param_remainder=True)
+
+
+_ADAM = dict(lr=3e-4, beta1=0.9, beta2=0.95, eps=1e-8, step=7, mode=1, bias_correction=1, weight_decay=0.1)
+
+
+def _remainder_state(sizes, seed):
+    """BF16 grads / params / moments and int16 remainders, as TE keeps them, for tensors of ``sizes``."""
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    lists = [[], [], [], [], []]
+    for n in sizes:
+        master = (0.02 * torch.randn(n, generator=g)).cuda()
+        bits = master.view(torch.int32)
+        lo = (bits & 0xFFFF).to(torch.int16)
+        hi = ((bits >> 16) + (lo < 0).to(torch.int32)).to(torch.int16)
+        lists[0].append((1e-3 * torch.randn(n, generator=g)).to("cuda", torch.bfloat16))
+        lists[1].append(hi.view(torch.bfloat16))
+        lists[2].append((1e-4 * torch.randn(n, generator=g)).to("cuda", torch.bfloat16))
+        lists[3].append((1e-8 * torch.rand(n, generator=g)).to("cuda", torch.bfloat16))
+        lists[4].append(lo)
+    return lists
+
+
+def _te_remainder_step(lists):
+    tex = pytest.importorskip("transformer_engine_torch")
+    from transformer_engine.pytorch.optimizers import multi_tensor_applier
+
+    noop = torch.zeros(1, dtype=torch.int, device="cuda")
+    a = _ADAM
+    multi_tensor_applier(
+        tex.multi_tensor_adam_param_remainder, noop, lists, a["lr"], a["beta1"], a["beta2"], a["eps"], a["step"],
+        a["mode"], a["bias_correction"], a["weight_decay"],
+    )  # fmt: skip
+
+
+def _fused_remainder_step(lists, grad_norm, max_norm=1.0, chunk_size=2048 * 32):
+    from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import (
+        _load_extension,
+    )
+
+    addresses, sizes, block_map, offsets, chunks, moment_dtype, grad_dtype = _build_metadata(
+        chunk_size, lists, param_remainder=True
+    )
+    a = _ADAM
+    _load_extension().fused_adam_clip(
+        addresses, sizes, block_map, offsets, chunks, chunk_size, a["lr"], a["beta1"], a["beta2"], a["eps"],
+        a["step"], a["mode"], a["bias_correction"], a["weight_decay"], moment_dtype, grad_dtype,
+        torch.tensor([grad_norm], dtype=torch.float32, device="cuda"), max_norm, 1,
+    )  # fmt: skip
+
+
+def _clone(lists):
+    return [[t.clone() for t in tensors] for tensors in lists]
+
+
+def _require_gpu():
+    if not torch.cuda.is_available():
+        pytest.skip("needs a ROCm / CUDA device")
+
+
+def test_param_remainder_kernel_matches_te_without_clipping():
+    """A norm below max_norm: coefficient 1, so every output must equal TE's ``multi_tensor_adam_param_remainder``
+    bit for bit; sizes cover the 8-wide vector path, its tail and a tensor over one chunk."""
+    _require_gpu()
+    ref = _remainder_state([8, 13, 4096 + 5, 2048 * 32 + 24], seed=0)
+    got = _clone(ref)
+    _te_remainder_step(ref)
+    _fused_remainder_step(got, grad_norm=0.5)
+    for name, r, g in zip(("grad", "param", "exp_avg", "exp_avg_sq", "remainder"), ref, got):
+        for i, (a, b) in enumerate(zip(r, g)):
+            assert torch.equal(a.view(torch.int16), b.view(torch.int16)), f"{name}[{i}] differs"
+
+
+def test_param_remainder_kernel_clips_like_te_on_scaled_fp32_grads():
+    """A norm above max_norm: the kernel scales each BF16 gradient by max_norm / (norm + 1e-6) in FP32 as it loads
+    it, which is TE's step on those FP32-scaled gradients."""
+    _require_gpu()
+    norm, max_norm = 4.0, 1.0
+    base = _remainder_state([4096 + 3, 2048 * 32 + 8], seed=1)
+    got = _clone(base)
+    _fused_remainder_step(got, grad_norm=norm, max_norm=max_norm)
+    coeff = torch.tensor(max_norm, dtype=torch.float32) / (torch.tensor(norm, dtype=torch.float32) + 1e-6)
+    ref = _clone(base)
+    ref[0] = [g.float() * coeff.cuda() for g in ref[0]]
+    try:
+        _te_remainder_step(ref)
+    except RuntimeError as exc:  # a TE build whose remainder op takes BF16 gradients only
+        pytest.skip(f"TE's param-remainder Adam does not take FP32 gradients here: {exc}")
+    for name, r, g in zip(("param", "exp_avg", "exp_avg_sq", "remainder"), ref[1:], got[1:]):
+        for i, (a, b) in enumerate(zip(r, g)):
+            assert torch.equal(a.view(torch.int16), b.view(torch.int16)), f"{name}[{i}] differs"
+    # and the clip changed something: without it the update is TE's unscaled one
+    plain = _clone(base)
+    _te_remainder_step(plain)
+    assert not all(torch.equal(a, b) for a, b in zip(plain[1], got[1]))
+
+
+def test_param_remainder_kernel_matches_te_on_misaligned_shards():
+    """Distributed-optimizer shards are views at any element offset of a flat buffer: views 1 and 3 elements in
+    (2 and 6 bytes past a 16-byte boundary) must still match TE bit for bit."""
+    _require_gpu()
+    sizes = [4096 + 7, 2048 * 32 + 3]
+    full = _remainder_state([n + 3 for n in sizes], seed=2)
+    ref = _clone(full)
+    got = _clone(full)
+
+    def views(lists, offset):
+        return [[t[offset : offset + n] for t, n in zip(tensors, sizes)] for tensors in lists]
+
+    for offset in (1, 3):
+        ref_v, got_v = views(ref, offset), views(got, offset)
+        assert all(t.data_ptr() % 16 for tensors in got_v for t in tensors)
+        _te_remainder_step(ref_v)
+        _fused_remainder_step(got_v, grad_norm=0.5)
+    for name, r, g in zip(("grad", "param", "exp_avg", "exp_avg_sq", "remainder"), ref, got):
+        for i, (a, b) in enumerate(zip(r, g)):
+            assert torch.equal(a.view(torch.int16), b.view(torch.int16)), f"{name}[{i}] differs"

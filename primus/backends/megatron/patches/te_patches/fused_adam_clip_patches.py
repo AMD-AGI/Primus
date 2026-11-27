@@ -11,7 +11,11 @@ but defer application of its clip coefficient to Adam while the gradient is
 already resident in registers.
 
 GPT-OSS gives TE FP32 gradients and FP32 optimizer parameters. Moments may be
-FP32 or BF16; arithmetic remains FP32 in either case. TE's ROCm non-capturable
+FP32 or BF16; arithmetic remains FP32 in either case. With BF16 params and
+``store_param_remainders`` (Megatron's default for a precision-aware
+optimizer, e.g. Kimi K3.1 Pro), TE steps them through
+``multi_tensor_adam_param_remainder`` (the FP32 master as the BF16 param plus an
+int16 remainder); that op is replaced the same way. TE's ROCm non-capturable
 path is important here: it uses one custom
 device-metadata Adam launch instead of the generic path's many launches. This
 patch preserves that layout and compiles a small Primus-owned HIP extension
@@ -37,7 +41,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v6"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v7"
 _extension = None
 
 
@@ -167,11 +171,14 @@ def _metadata_key(chunk_size: int, tensor_lists, writeback_by_param_ptr) -> tupl
     )
 
 
-def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
-    if len(tensor_lists) != 4:
+def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None, param_remainder=False):
+    """Device metadata of one Adam call: TE's four-list FP32-param path (grad, param, exp_avg, exp_avg_sq), or
+    with ``param_remainder`` its five-list path of BF16 params with int16 remainders (..., remainder)."""
+    n_lists = 5 if param_remainder else 4
+    if len(tensor_lists) != n_lists:
         raise RuntimeError(
-            "PRIMUS_FUSED_ADAM_CLIP currently requires TE's four-list "
-            f"FP32 Adam path (grad, param, exp_avg, exp_avg_sq), got {len(tensor_lists)} lists"
+            "PRIMUS_FUSED_ADAM_CLIP requires TE's four-list FP32 Adam path (grad, param, exp_avg, exp_avg_sq) "
+            f"or its five-list param-remainder path, got {len(tensor_lists)} lists"
         )
     num_tensors = len(tensor_lists[0])
     if num_tensors == 0 or any(len(tensors) != num_tensors for tensors in tensor_lists):
@@ -194,15 +201,18 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
     writeback_by_param_ptr = writeback_by_param_ptr or {}
 
     for tensor_idx in range(num_tensors):
-        tensors = [tensor_lists[list_idx][tensor_idx] for list_idx in range(4)]
+        tensors = [tensor_lists[list_idx][tensor_idx] for list_idx in range(n_lists)]
         if any(tensor.device != device for tensor in tensors):
             raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP requires one device per Adam call")
-        expected_dtypes = (grad_dtype, torch.float32, moment_dtype, moment_dtype)
+        if param_remainder:
+            expected_dtypes = (grad_dtype, torch.bfloat16, moment_dtype, moment_dtype, torch.int16)
+        else:
+            expected_dtypes = (grad_dtype, torch.float32, moment_dtype, moment_dtype)
         if any(tensor.dtype != expected for tensor, expected in zip(tensors, expected_dtypes)):
             dtypes = tuple(tensor.dtype for tensor in tensors)
             raise RuntimeError(
-                "PRIMUS_FUSED_ADAM_CLIP requires uniform FP32/BF16 gradients, FP32 "
-                "parameters, and matching FP32 or BF16 moments; tensor "
+                "PRIMUS_FUSED_ADAM_CLIP requires uniform FP32/BF16 gradients, FP32 parameters (or BF16 "
+                "parameters with int16 remainders), and matching FP32 or BF16 moments; tensor "
                 f"{tensor_idx} has dtypes {dtypes}"
             )
         if any(not tensor.is_contiguous() for tensor in tensors):
@@ -210,7 +220,7 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
         if any(tensor.numel() != tensors[0].numel() for tensor in tensors[1:]):
             raise RuntimeError("PRIMUS_FUSED_ADAM_CLIP received mismatched tensor sizes")
 
-        writeback = writeback_by_param_ptr.get(tensors[1].data_ptr())
+        writeback = None if param_remainder else writeback_by_param_ptr.get(tensors[1].data_ptr())
         if writeback is not None:
             if writeback.device != device or writeback.dtype != torch.bfloat16:
                 raise RuntimeError(
@@ -219,7 +229,8 @@ def _build_metadata(chunk_size: int, tensor_lists, writeback_by_param_ptr=None):
             if not writeback.is_contiguous() or writeback.numel() != tensors[1].numel():
                 raise RuntimeError("PRIMUS_FUSED_ADAM_BF16_WRITEBACK received an incompatible destination")
         addresses.extend(tensor.data_ptr() for tensor in tensors)
-        addresses.append(0 if writeback is None else writeback.data_ptr())
+        if not param_remainder:  # the fifth address: the BF16 writeback destination, or none
+            addresses.append(0 if writeback is None else writeback.data_ptr())
         numel = tensors[0].numel()
         sizes.append(numel)
         chunk_offsets.append(total_chunks)
@@ -487,9 +498,9 @@ def _install_patch() -> None:
         self._primus_bf16_writeback_by_param_ptr = {}
         self._primus_bf16_writeback_tensors = []
 
-        def fused_multi_tensor_adam(
+        def run_fused_adam(
+            param_remainder,
             chunk_size,
-            noop_flag,
             tensor_lists,
             lr,
             beta1,
@@ -500,12 +511,11 @@ def _install_patch() -> None:
             bias_correction,
             weight_decay,
         ):
-            del noop_flag
-            writeback_by_param_ptr = self._primus_bf16_writeback_by_param_ptr
-            key = _metadata_key(chunk_size, tensor_lists, writeback_by_param_ptr)
+            writeback_by_param_ptr = {} if param_remainder else self._primus_bf16_writeback_by_param_ptr
+            key = (param_remainder, _metadata_key(chunk_size, tensor_lists, writeback_by_param_ptr))
             metadata = self._primus_adam_metadata_cache.get(key)
             if metadata is None:
-                metadata = _build_metadata(chunk_size, tensor_lists, writeback_by_param_ptr)
+                metadata = _build_metadata(chunk_size, tensor_lists, writeback_by_param_ptr, param_remainder)
                 self._primus_adam_metadata_cache[key] = metadata
             (
                 addresses,
@@ -537,11 +547,21 @@ def _install_patch() -> None:
                 int(grad_dtype),
                 self._primus_clip_norm,
                 float(self._primus_clip_max_norm),
+                int(param_remainder),
             )
 
-        # FusedAdam.step calls this attribute through TE's existing
+        def fused_multi_tensor_adam(chunk_size, noop_flag, tensor_lists, *hyperparams):
+            del noop_flag
+            run_fused_adam(False, chunk_size, tensor_lists, *hyperparams)
+
+        def fused_multi_tensor_adam_param_remainder(chunk_size, noop_flag, tensor_lists, *hyperparams):
+            del noop_flag
+            run_fused_adam(True, chunk_size, tensor_lists, *hyperparams)
+
+        # FusedAdam.step calls these attributes through TE's existing
         # multi_tensor_applier, so all Python-side grouping remains unchanged.
         self.multi_tensor_adam = fused_multi_tensor_adam
+        self.multi_tensor_adam_param_remainder = fused_multi_tensor_adam_param_remainder
 
     @wraps(original_adam_step)
     def patched_adam_step(self, closure=None, grad_scaler=None):
