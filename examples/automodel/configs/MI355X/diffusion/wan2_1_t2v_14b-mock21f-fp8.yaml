@@ -1,0 +1,59 @@
+# Primus EXP config: Wan 2.1 T2V 14B, AutoModel backend, FP8 linears, synthetic 480x832 clips.
+#
+# Reference workload shape: 21 frames (latent 16 x 6 x 60 x 104, 9,360 tokens per
+# sample), 512 text tokens, every block recomputed, 20 steps, MBS 8 / GBS 64 on 8 GPUs.
+# FP8 is Primus-Turbo's Float8Linear (tensorwise, E4M3 forward / E5M2 backward), the
+# same recipe as the Primus Megatron FP8 runs; the conditioning embedders stay in bf16.
+#
+# Launch (inside the Primus container, 8 GPUs):
+#   USE_HIPBLASLT=1 TORCH_BLAS_PREFER_HIPBLASLT=1 HIP_FORCE_DEV_KERNARG=1 GPU_MAX_HW_QUEUES=6 \
+#   GPUS_PER_NODE=8 \
+#   bash ./runner/primus-cli direct -- train pretrain \
+#       --config examples/automodel/configs/MI355X/diffusion/wan2_1_t2v_14b-mock21f-fp8.yaml
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:wan2_1_t2v_14b-mock21f-fp8}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: automodel
+    config: wan_synthetic_pre_trainer.yaml
+    model: wan2_1_t2v_14b.yaml
+
+    overrides:
+      step_scheduler:
+        max_steps: 20
+        num_epochs: 1000
+        local_batch_size: 8
+        global_batch_size: 64
+      data:
+        dataloader:
+          # One epoch covers all 20 steps.
+          num_samples: 1280
+          latent_t: 6
+          latent_h: 60
+          latent_w: 104
+          text_seq_len: 512
+      optimizer:
+        lr: 1.0e-5
+        weight_decay: 0.0
+        betas: [0.9, 0.999]
+      lr_scheduler:
+        lr_decay_style: constant
+        min_lr: 1.0e-5
+      flow_matching:
+        i2v_prob: 0.0
+        cfg_dropout_prob: 0.0
+        use_loss_weighting: false
+      fsdp:
+        enable_compile: true
+        activation_checkpointing: true
+      mlflow:
+        experiment_name: ${PRIMUS_MLFLOW_EXPERIMENT:automodel-diffusion}
+      primus_turbo:
+        fp8_linear: true
+        fp8_linear_granularity: tensorwise
+        fp8_linear_format: hybrid
+      checkpoint:
+        enabled: false

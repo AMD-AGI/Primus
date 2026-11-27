@@ -1,0 +1,16 @@
+# AutoModel model preset: Wan 2.1 T2V 1.3B (dense DiT: 30 blocks, hidden 1536, 12 heads).
+#
+# Merged (as the `model:` block) into the automodel pre_trainer module config by the
+# Primus launcher. `mode: pretrain` builds a randomly initialised WanTransformer3DModel
+# from the repo's transformer/config.json; no weights are downloaded.
+model:
+  pretrained_model_name_or_path: Wan-AI/Wan2.1-T2V-1.3B-Diffusers
+  mode: pretrain
+  attention_backend: flash
+  # fp32 master + bf16 compute.
+  torch_dtype: float32
+  compute_dtype: bfloat16
+  pipeline_spec:
+    transformer_cls: WanTransformer3DModel
+    subfolder: transformer
+    load_full_pipeline: false
