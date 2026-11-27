@@ -46,11 +46,14 @@ SHARED = (
 RECIPES = {
     "m2": ("hylo_m2_1B-enhanced-ild", 2048, 6934, 70, "data/hylo/packed/train"),
     "mla": ("hylo_mla_1B-enhanced-ild", 2048, 6934, 70, "data/hylo/packed/train"),
+    "gdn": ("hylo_gdn_1B-enhanced-ild", 2048, 6934, 70, "data/hylo/packed/train"),
+    "4MLA12GDN": ("hylo_4MLA12GDN_1B-8K-sft", 8192, 1000, 10, "data/hylo/packed-8k/train"),
 }
 
 ENV = (
     "HYLO_PACKED_TRAIN_DATA",
     "HYLO_ILD_TRAIN_ITERS",
+    "HYLO_SFT_TRAIN_ITERS",
     "HYLO_MICRO_BATCH_SIZE",
     "HYLO_GLOBAL_BATCH_SIZE",
     "HYLO_ORDER_DATA_DIR",
@@ -64,7 +67,8 @@ def test_packed_recipe_is_the_sft_recipe_on_the_reference_schedule(kind, monkeyp
     for name in ENV:
         monkeypatch.delenv(name, raising=False)
     sft_name, seq_length, steps, warmup, data = RECIPES[kind]
-    packed = load_primus_config(CONFIGS / f"{sft_name}-packed.yaml", None).modules[0].params
+    packed_name = f"{sft_name}-packed" if kind == "4MLA12GDN" else f"hylo_{kind}_1B-enhanced-ild-packed"
+    packed = load_primus_config(CONFIGS / f"{packed_name}.yaml", None).modules[0].params
     sft = load_primus_config(CONFIGS / f"{sft_name}.yaml", None).modules[0].params
     assert packed.hylo_order_data_dir is None
     monkeypatch.setenv("HYLO_ORDER_DATA_DIR", "/dump")

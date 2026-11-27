@@ -42,7 +42,7 @@ This guide covers the complete workflow: environment setup, data preparation, pr
 | [Pure KDA guide](kda-guide.md) | End-to-end 300M pure Kimi Delta Attention (KDA) recipe, FLA-validated on 8× MI300X |
 | [GDN ⇄ FLA parity](gdn-fla-parity.md) | Every Primus/Megatron-LM change required for GDN to match the FLA reference implementation |
 | [KDA ⇄ FLA parity](kda-fla-parity.md) | Every Primus/Megatron-LM change required for KDA to match the FLA reference implementation |
-| [Native HyLo training](hylo-native-training.md) | Enhanced-ILD of all-MLA and all-Mamba-2 1B students from a dense Llama teacher |
+| [Native HyLo training](hylo-native-training.md) | Enhanced-ILD and pure-KL 4MLA12GDN 1B training with dense Llama teachers |
 
 ---
 
@@ -465,20 +465,44 @@ The checkpoint `args` must carry the HyLo widths (`q_lora_rank`, `kv_lora_rank`,
 
 ## Native HyLo training
 
-Primus trains HyLo's stage 1, Enhanced-ILD, natively. Tensor, pipeline, and context parallelism must stay at 1. Data parallelism can use all eight GPUs on one MI300X node. The runtime image is `rocm/primus:v26.9`.
+Primus trains the public 1B 4MLA12GDN model natively. Tensor, pipeline, and context parallelism must stay at 1. Data parallelism can use all eight GPUs on one MI300X node. The runtime image is `rocm/primus:v26.9`.
 
-Enhanced-ILD trains an all-MLA student and an all-Mamba-2 student from `meta-llama/Llama-3.2-1B-Instruct` at 4K, matching each block's output and token-mixer output to the teacher's. The public HyLo configs use 2K for this stage; these recipes start at 4K. The recipes set `model_type: hylo`, which builds the student beside the frozen teacher and trains with HyLo's loss.
+Stage 1 is Enhanced-ILD at 4K. It trains an all-GDN student and an all-MLA student from `meta-llama/Llama-3.2-1B-Instruct`. The public HyLo configs use 2K for this stage; these recipes start at 4K. Stage 2 is pure `KL(teacher || student)` at 8K against `meta-llama/Llama-3.1-8B-Instruct`, with KL weight 1 and CE weight 0. The released stage-2 mixture also used four AMD-preprocessed datasets that are not public, so `JunxiongWang/sftdatasetv3` reproduces the code path without reproducing the released weights.
 
-Prepare the gated teacher once:
+Prepare the gated teachers once, then run both stages:
 
 ```bash
 export HF_TOKEN=...
 python tools/hybrid/prepare_hylo_assets.py --root "$PWD/data/hylo"
+
+export HYLO_LLAMA32_1B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama32-1b"
+export HYLO_LLAMA31_8B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama31-8b"
+export HYLO_SFT_DATASET=JunxiongWang/sftdatasetv3
+export HYLO_OUTPUT_ROOT="$PWD/output/hylo-native"
+export PRIMUS_IMAGE=rocm/primus:v26.9
+
+tools/hybrid/run_hylo_1b_4mla12gdn.sh
 ```
 
-[Native HyLo training](hylo-native-training.md) covers the from-teacher initial checkpoints and each student's recipes. A one-step check uses `HYLO_ILD_TRAIN_ITERS=1`, micro-batch 1, and global batch 1.
+`HYLO_ILD_SEQ_LENGTH` overrides the 4K stage, and `HYLO_SFT_SEQ_LENGTH` overrides the 8K stage. A one-step check uses `HYLO_ILD_TRAIN_ITERS=1`, `HYLO_SFT_TRAIN_ITERS=1`, micro-batch 1, and global batch 1.
+
+On one MI355X GPU in `rocm/primus:v26.9`, that check logged all-GDN Enhanced-ILD 141.000000 and all-MLA Enhanced-ILD 135.000000 at 4K. Assembly kept each mixer/MLP pair from the matching ILD checkpoint. The following 8K step, started from that assembly, logged summed masked KL 6.558015, with the KL then taken over the supervised targets only. Each saved iteration 1 reloaded with every tensor finite.
+
+The script writes:
+
+| Output | Contents |
+| --- | --- |
+| `$HYLO_OUTPUT_ROOT/gdn-upcycled` | all-GDN initialization |
+| `$HYLO_OUTPUT_ROOT/mla-kv8-upcycled` | all-MLA initialization (8 key/value heads) |
+| `$HYLO_OUTPUT_ROOT/4mla12gdn-kv8-upcycled` | target-layout initialization (8 key/value heads) |
+| `$HYLO_OUTPUT_ROOT/amd/root/gdn-ild/checkpoints` | stage-1 all-GDN student |
+| `$HYLO_OUTPUT_ROOT/amd/root/mla-ild/checkpoints` | stage-1 all-MLA student |
+| `$HYLO_OUTPUT_ROOT/stage2-init` | assembled MLA blocks 1, 5, 10, and 14 |
+| `$HYLO_OUTPUT_ROOT/amd/root/4mla12gdn-8k-sft/checkpoints` | final pure-KL student |
 
 To reproduce the Zebra-Llama stage-1 checkpoints themselves, train the all-Mamba-2 and all-MLA students on the reference's packed 2048-token data with `hylo_m2_1B-enhanced-ild-packed.yaml` and `hylo_mla_1B-enhanced-ild-packed.yaml`. [Reproduce the reference stage-1 checkpoints](hylo-native-training.md#reproduce-the-reference-stage-1-checkpoints) covers the data preparation, the all-Mamba-2 random init, and the evaluation and comparison tools.
+
+The artifact order is in [hylo-stage-workflow.md](hylo-stage-workflow.md).
 
 ---
 

@@ -72,9 +72,8 @@ def test_each_build_gets_the_mamba_student_and_a_new_teacher(monkeypatch):
     monkeypatch.setattr(hylo_distillation, "_RUNTIME", None)
     removed = []
     monkeypatch.setattr(hylo_distillation.HyLoRuntime, "remove_hooks", lambda self: removed.append(self))
-    monkeypatch.setattr(hylo_distillation.HyLoRuntime, "_install_teacher_hooks", lambda self: None)
 
-    args = SimpleNamespace(hylo_distill_stage="ILD")
+    args = SimpleNamespace(hylo_distill_stage="SFT")
     assert (
         hylo_distillation.hylo_builder(args, True, False, None, config="cfg", pg_collection="pg")
         == "student1"
@@ -82,7 +81,7 @@ def test_each_build_gets_the_mamba_student_and_a_new_teacher(monkeypatch):
     first = hylo_distillation._RUNTIME
     assert hylo_distillation.hylo_builder(args, True, True) == "student2"
     assert students == [(True, False, None, "cfg", "pg"), (True, True, None, None, None)]
-    assert first.stage == "ild" and hylo_distillation._RUNTIME is not first and removed == [first]
+    assert first.stage == "sft" and hylo_distillation._RUNTIME is not first and removed == [first]
 
 
 def test_replay_accepts_one_micro_batch_per_rank_per_step():
@@ -124,7 +123,7 @@ def test_patch_switches_replay_to_the_sequential_sampler(run_patch):
 
 
 def test_patch_gives_the_sft_trainer_the_hylo_forward_step(run_patch):
-    args = _args(stage="sft")
+    args = _args(stage="sft", hylo_distill_stage="sft")
     run_patch(args)
     assert sft_forward_step.create_sft_forward_step is hylo_distillation.create_sft_forward_step
     assert args.dataloader_type == "cyclic"

@@ -1,9 +1,16 @@
 # Native HyLo 1B training
 
-Primus can reproduce the first stage of the public HyLo training procedure,
-Enhanced-ILD, without the reference TRL trainer. It trains an all-MLA student
-and an all-Mamba-2 student from `meta-llama/Llama-3.2-1B-Instruct` at 4K
-context. The public reference config uses 2K; these recipes start at 4K.
+Primus can reproduce the public HyLo two-stage training procedure without the
+reference TRL trainer:
+
+1. Enhanced-ILD trains an all-GDN student and an all-MLA student from
+   `meta-llama/Llama-3.2-1B-Instruct` at 4K context. The public reference
+   config uses 2K; this recipe starts at 4K.
+2. ILD weights are assembled into the exact published block layout (MLA blocks
+   1, 5, 10, and 14).
+3. The assembled 4MLA12GDN student is trained at 8K against
+   `meta-llama/Llama-3.1-8B-Instruct` with pure
+   `KL(teacher || student)` (`KL=1`, `CE=0`) and YaRN factor 4.
 
 The runtime currently supports TP=PP=CP=1 without activation recompute. It is intended for eight-way data
 parallel training on MI300X with `rocm/primus:v26.9`.
@@ -15,7 +22,7 @@ settings. The constructor recipes keep `model_type: mamba`.
 
 ## Prepare public assets
 
-Accept access to the gated Meta Llama repository, then keep the token in the
+Accept access to both gated Meta Llama repositories, then keep the token in the
 environment only:
 
 ```bash
@@ -28,30 +35,59 @@ docker run --rm --entrypoint bash \
   'python tools/hybrid/prepare_hylo_assets.py --root /workspace/src/data/hylo'
 ```
 
-This downloads the 1B model, which is both the teacher and the source of every
-upcycled init, converts it to a TP=PP=1 Megatron checkpoint, and exports
-`JunxiongWang/sftdatasetv3` as JSONL. The token is not written to disk.
+This downloads and converts the 1B backbone and 8B teacher to TP=PP=1 Megatron
+checkpoints and exports `JunxiongWang/sftdatasetv3` as JSONL. The token is not
+written to disk.
+
+The public HyLo repository notes that the released stage-2 run also used four
+AMD-preprocessed dataset variants that are not published there. Consequently,
+training with `sftdatasetv3` alone reproduces the code path and public-data
+objective, but cannot be expected to reproduce the released weights bit for
+bit.
 
 ## Create from-teacher initial checkpoints
 
-For each student, first save a constructor checkpoint with `lr: 0`,
-`train_iters: 1`, and `save_interval: 1`: `hylo_mla_1B-constructor.yaml` for
-all-MLA, which has the grouped key/value heads that section
-[All-MLA Enhanced-ILD](#all-mla-enhanced-ild) describes, and
-`hylo_m2_1B-constructor.yaml` for all-Mamba-2. Upcycle it from the converted
-1B checkpoint:
+For each all-GDN, all-MLA, and target 4MLA12GDN layout, first save a
+constructor checkpoint from `hylo_gdn_1B_hybrid.yaml` with `lr: 0`,
+`train_iters: 1`, `save_interval: 1`, and the corresponding
+`hybrid_override_pattern`. Upcycle it from the converted 1B checkpoint:
 
 ```bash
 python tools/hybrid/upcycle_dense_to_hybrid.py \
   --dense-checkpoint data/hylo/megatron/llama32-1b \
   --hybrid-init-checkpoint /path/to/constructor-checkpoint \
   --output-dir /path/to/upcycled-checkpoint \
-  --hybrid-pattern '*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-'
+  --hybrid-pattern 'M-*-M-M-M-*-M-M-M-M-*-M-M-M-*-M-'
 ```
 
-Use `M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-` for all-Mamba-2. The stage recipes are
-under `examples/megatron/configs/MI300X/`. Set `HYLO_ILD_TRAIN_ITERS=1` for a
-smoke run.
+Use `M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-M-` for all-GDN and
+`*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-` for all-MLA. The all-MLA constructor is
+`hylo_mla_1B-constructor.yaml`, which has the grouped key/value heads that
+section [All-MLA Enhanced-ILD](#all-mla-enhanced-ild) describes.
+
+## Run both stages
+
+```bash
+export HYLO_LLAMA32_1B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama32-1b"
+export HYLO_LLAMA31_8B_MEGATRON_CKPT="$PWD/data/hylo/megatron/llama31-8b"
+export HYLO_SFT_DATASET="$PWD/data/hylo/hylo-sft.jsonl"
+export HYLO_GDN_UPCYCLED_CKPT=/path/to/all-gdn-upcycled
+export HYLO_MLA_UPCYCLED_CKPT=/path/to/all-mla-upcycled
+export HYLO_STAGE2_BASE_CKPT=/path/to/4mla12gdn-upcycled
+
+tools/hybrid/run_hylo_1b_4mla12gdn.sh
+```
+
+The stage recipes are under `examples/megatron/configs/MI300X/`. Set
+`HYLO_ILD_TRAIN_ITERS=1` and `HYLO_SFT_TRAIN_ITERS=1` for a smoke run.
+
+The script skips the constructor and upcycle steps for any init that already
+holds `latest_checkpointed_iteration.txt`. All-MLA and 4MLA12GDN inits written
+before the stage-2 recipes moved to 8 key/value heads have per-head MLA weights,
+which the grouped recipes cannot load. The default paths now end in
+`-kv8-upcycled`, so the script rebuilds them; if you point
+`HYLO_MLA_UPCYCLED_CKPT` or `HYLO_STAGE2_BASE_CKPT` at an older init, delete it
+first.
 
 ## Enhanced-ILD loss
 
@@ -67,7 +103,10 @@ is the mean over data-parallel ranks, the value the reference logs.
 
 The SFT recipes pad every sample to `seq_length`, so their means cover only each
 sample's real tokens, every position but its padding. The
-packed recipes below have no padding, and every position counts.
+packed recipes below have no padding, and every position counts. That holds for
+the stage-2 KL too, last position included: HyLo's `kd_trainer.py` averages
+FLA's `kl_div_kernel` over every position of every window, so the packed and
+replay paths use an all-ones loss mask.
 
 ## All-MLA Enhanced-ILD
 
@@ -95,12 +134,20 @@ Build the init checkpoint with `hylo_mla_1B-constructor.yaml`, upcycle it with
 `--hybrid-pattern '*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-*-'`, then train with
 `HYLO_MLA_UPCYCLED_CKPT` set.
 
+The released 4MLA12GDN model also keeps 8 key/value heads. The stage-2 recipes
+use `hylo_grouped_mla_hybrid_stack_spec` with `hylo_mla_kv_heads: 8`, and
+`run_hylo_1b_4mla12gdn.sh` builds both the all-MLA and the 4MLA12GDN
+constructors from `hylo_mla_1B-constructor.yaml`, so assembly copies the
+grouped all-MLA weights into the target as they are. `hylo_1B-constructor.yaml`
+builds only the all-GDN constructor.
+
 ## All-Mamba-2 Enhanced-ILD
 
 `hylo_m2_1B-enhanced-ild.yaml` is the Primus form of Zebra-Llama's
 `configs/llama3.2_1B/zebra_M2_ILD.yaml` in AMD-Hybrid-Models (`feat/HyLo`).
 All 16 Llama-3.2-1B attention blocks become Mamba-2 and train with the same
-Enhanced-ILD objective as the MLA recipe.
+Enhanced-ILD objective as the GDN and MLA recipes. It is a stage-1 recipe on
+its own; the 4MLA12GDN pipeline above does not use it.
 
 The mixer is MambaInLlama's grouped Mamba-2 (`Mamba2DxbMixer` in
 `hylo_m2_hybrid_stack_spec`, widths in `hylo_m2_1B_hybrid.yaml`). x and B are
@@ -121,7 +168,7 @@ fused input norm. z, dt, the convolution, `A_log`, `D`, and `dt_bias` keep the
 constructor's init, which follows HyLo's: `nn.Linear` and `nn.Conv1d` defaults,
 `A = U(1, 16)`, `D = 1`, and `softplus(dt_bias)` log-uniform in [0.001, 0.1].
 
-The teacher keeps its own Llama-3 rope scaling, as in the MLA recipe.
+The teacher keeps its own Llama-3 rope scaling, as in the GDN and MLA recipes.
 `seed: 42`, `weight_decay: 0.0`, and `adam_beta2: 0.999` are the Hugging Face
 Trainer values the reference trained with, in place of the SFT trainer
 defaults (1234, 0.1, and 0.95).
@@ -149,8 +196,9 @@ The recipes above train on the public SFT set at 4K. The Zebra-Llama stage-1
 checkpoints were trained differently: TRL packed a 20% selection of
 `JunxiongWang/sftdatasetv3` into 2048-token windows, with attention across
 conversations and no padding, for one epoch of 6934 steps of 96 windows.
-`hylo_m2_1B-enhanced-ild-packed.yaml` and `hylo_mla_1B-enhanced-ild-packed.yaml`
-keep the model, teacher, and optimizer of the recipes above and train on that data and schedule through the pretrain data
+`hylo_m2_1B-enhanced-ild-packed.yaml`, `hylo_mla_1B-enhanced-ild-packed.yaml`, and
+`hylo_gdn_1B-enhanced-ild-packed.yaml` keep the model, teacher, and optimizer of
+the recipes above and train on that data and schedule through the pretrain data
 path. With them the trained students
 match the reference checkpoints.
 
@@ -201,6 +249,9 @@ match the reference checkpoints.
    HYLO_MLA_UPCYCLED_CKPT=/path/to/all-mla-upcycled HYLO_MLA_ILD_OUTPUT=/path/to/mla-ild \
      ./primus-cli direct -- train pretrain \
      --config examples/megatron/configs/MI300X/hylo_mla_1B-enhanced-ild-packed.yaml
+   HYLO_GDN_UPCYCLED_CKPT=/path/to/all-gdn-upcycled HYLO_GDN_ILD_OUTPUT=/path/to/gdn-ild \
+     ./primus-cli direct -- train pretrain \
+     --config examples/megatron/configs/MI300X/hylo_gdn_1B-enhanced-ild-packed.yaml
    ```
 
    `hylo_warmup_ratio: 0.01` sets the warmup the way the Trainer's `warmup_ratio` does,
@@ -289,11 +340,73 @@ student's YaRN by default (`teacher_rope_from_student`); to match that, set
 On Megatron-LM `d3528a2` in `rocm/primus:v26.8`, for 1000 steps from the same init on the same
 batches, Primus and HyLo give the same per-step
 loss to within 0.3% over the first 25 steps. They drift apart only as bf16 runs do, ending within
-0.3%. The final students score within 0.12% of each other on the test split.
+0.3%. The final students score within 0.12% of each other on the test split. The all-GDN
+student, with the FLA kernels below, ends within 0.14% of HyLo over the last 250 steps and scores
+37.056 against HyLo's 37.126 on the test split.
 
-On Megatron-core 0.19 in `rocm/primus:v26.9` the replays end within 0.42% to 0.59% (three all-MLA
-runs) and 0.30% and 0.75% (two all-Mamba-2 runs) of HyLo over the last 250 steps. The two
-all-Mamba-2 runs, with the same inputs, are themselves 0.45% apart there, so bf16 nondeterminism
-sets that spread. On the test split they score all-MLA 34.263 and 34.217 and all-Mamba-2 48.847
-and 48.640, against HyLo's 34.186 and 48.657. The same all-MLA replay in `rocm/primus:v26.8`
-scores 34.189, so the small all-MLA shift comes with the newer image's kernels.
+On Megatron-core 0.19 in `rocm/primus:v26.9` the replays end within 0.14% (all-GDN), 0.42% to
+0.59% (three all-MLA runs), and 0.30% and 0.75% (two all-Mamba-2 runs) of HyLo over the last 250
+steps. The two all-Mamba-2 runs, with the same inputs, are themselves 0.45% apart there, so bf16
+nondeterminism sets that spread. On the test split they score all-GDN 37.061, all-MLA 34.263 and
+34.217, and all-Mamba-2 48.847 and 48.640, against HyLo's 37.126, 34.186, and 48.657. The same
+all-MLA replay in `rocm/primus:v26.8` scores 34.189, so the small all-MLA shift comes with the
+newer image's kernels.
+
+## Stage 2 settings
+
+Stage 2 is `hylo_distill_stage: sft`: pure KL(teacher || student) on the logits, with no
+Enhanced-ILD hooks. The padded `hylo_4MLA12GDN_1B-8K-sft.yaml` takes the KL over every real
+target, prompt and template included, and skips only the padding; the packed recipe below, like
+HyLo's trainer, takes it over every position.
+
+| Setting | Effect |
+| --- | --- |
+| `hylo_distill_stage` | `ild` for stage 1 (Enhanced-ILD), `sft` for stage 2 (pure KL) |
+| `hylo_kl_weight` | scales the stage-2 KL; the recipes use 1 |
+| `hylo_kl_impl` | `fused` or `chunked`; see [Speed](#speed) |
+| `hylo_kl_chunk_size` | token rows per step of `chunked`, default 4096; `fused` does not use it |
+
+## Stage 2 on packed 8K windows
+
+`hylo_4MLA12GDN_1B-8K-sft-packed.yaml` trains the assembled 4MLA12GDN student the way HyLo's
+`zebra_4MLA12GDN_8bT_SFT_8k_combined.yaml` does: the whole templated, decontaminated
+`sftdatasetv3` (`data_ratio: 1.0`) packed into 8192-token windows, 32 windows a step, pure KL over
+every position. The stage-1 packed data is a 20% selection and cannot be reused. Build the 8K
+data with the full selection; `--seq-length` and `--batch` only change the counts in
+`<out>-stats.json`, whose `trl_steps` is the length of one epoch:
+
+```bash
+python tools/hybrid/prepare_hylo_packed_data.py --split train --ratio 1.0 \
+  --seq-length 8192 --batch 32 \
+  --tokenizer /path/to/Llama-3.2-1B-Instruct --out data/hylo/packed-8k/train
+```
+
+The recipe runs 1000 steps by default, the length of the lockstep runs; set
+`HYLO_SFT_TRAIN_ITERS` to `trl_steps` for a full epoch. `hylo_warmup_ratio: 0.01` follows it
+(10 steps of 1000). Replay works as in stage 1.
+
+From the same init on the same batches, Primus and HyLo log the same first-step KL, 1.693. Over
+the last 250 of 1000 steps their losses differ by 0.21% on average, the final students score a
+held-out KL of 0.3388 and 0.3390, and every weight group keeps a cosine of at least 0.998 to
+HyLo's. On Megatron-core 0.19 the same replay gives a first-step KL of 1.693 and a held-out KL of
+0.3384 against HyLo's 0.3390.
+
+## Speed
+
+HyLo runs the stage-2 KL as one FLA Triton kernel on bf16 logits and the GDN layers with FLA's
+short convolution and fused gated norm, and FSDP reduces its gradients in bf16. The GDN and
+4MLA12GDN recipes, packed and padded, do the same:
+
+| Setting | Effect |
+| --- | --- |
+| `hylo_kl_impl: fused` | FLA's `kl_div_kernel`, which takes Float16Module's bf16 logits and upcasts them in-kernel; `chunked` is the PyTorch reference loop |
+| `use_fla_short_conv`, `use_fla_fused_gated_norm` | the FLA GDN kernels HyLo's `fla.layers.GatedDeltaNet` uses |
+| `grad_reduce_in_bf16` | bf16 gradient all-reduce, as HyLo's FSDP mixed precision |
+
+`fused` raises if FLA's kernel cannot be imported on GPU; set `hylo_kl_impl: chunked` there. Rank
+0 logs the KL implementation once. On eight MI355X GPUs in `rocm/primus:v26.9` (Megatron-core
+0.19), a stage-2 step takes 970 ms against HyLo's 1052 ms, and an all-GDN Enhanced-ILD step 394 ms.
+On the earlier Megatron pin they took 1011 and 417 ms, and 1196 and 466 ms before these settings.
+
+The artifact flow and execution order are summarized separately in
+[hylo-stage-workflow.md](hylo-stage-workflow.md).
