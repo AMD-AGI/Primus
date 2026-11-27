@@ -809,6 +809,7 @@ finished 10 iterations with 0 NaN.
 | M3.1-Flash | this | 1 | MegaMoE and fusion (the default) | 667.5 | 49,094 | 1296.6 | 193.67 GB | 8.89757 |
 | M3.1-Flash | this | 2 | MegaMoE and fusion (the default) | 619.9, 620.1 | 52,864, 52,844 | 1396.1, 1395.6 | 199.50 GB | 8.85583, 8.85585 |
 | M3.1-Flash | this | 2 | MegaMoE, fusion and `moe_router_triton_gemm` (now the yaml default) | 601.8, 603.4 | 54,453, 54,306 | 1438.1, 1434.3 | 199.50 GB | 8.85597, 8.85573 |
+| M3.1-Flash | this | 2 | the yaml defaults alone (1bb730cb5, no flag on the command line) | 603.2 | 54,319 | 1434.5 | 199.50 GB | 8.85600 |
 | M3.1-Flash | this | 2 | MegaMoE and fusion, both overlaps (`overlap_grad_reduce`, `overlap_param_gather`) | 667.9 | 49,060 | 1295.7 | 200.52 GB | 8.85585 |
 | M3.1-Flash | this | 1 | `USE_TURBO_MEGA_MOE=False GRADIENT_ACCUMULATION_FUSION=False`, router Triton GEMM | 720.6 | 45,470 | 1200.9 | 199.72 GB | 8.89765 |
 | M3 | before | 1 | all-to-all, FlyDSL grouped GEMM | 738.0 | 44,404 | 1177.4 | 199.82 GB | 8.19548 |
@@ -824,7 +825,7 @@ finished 10 iterations with 0 NaN.
   as much: the MBS 2 rows end at 8.85573 to 8.85597.
 - `moe_router_triton_gemm` (the FP32 router GEMMs on Primus's Triton kernels, as in the DeepSeek-V3
   recipe) is now in the MI455X MiniMax-M3 yaml, and so in the M3.1-Flash yaml that extends it. On
-  the MBS 2 default it takes 602.6 ms against 620.0 (two runs each, -2.8%). With MegaMoE and the
+  the MBS 2 default it takes 602.6 ms against 620.0 (two runs each, -2.8%; 603.2 ms when the yaml alone sets it). With MegaMoE and the
   fusion off, it changes the loss in the fifth decimal (8.897654 against 8.897763) and takes 720.6
   against 732.5 ms at MBS 1. It was measured on M3.1-Flash only.
 - Two expert-parallel ranks (EP2, 2 GPUs, 4 layers, GBS 16, MBS 1, the baseline shape at half the
