@@ -1,11 +1,12 @@
 ###############################################################################
-# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Some parts of this code are adapted from flash-linear-attention
+# (https://github.com/fla-org/flash-linear-attention, 0.5.2): fla/ops/kda/chunk.py, chunk_fwd.py
+# and chunk_bwd.py (ChunkKDAFunction, chunk_kda_fwd, chunk_kda_bwd): the order of the steps and the
+# tensors each one hands to the next.
+# The steps here are FlyDSL kernels for gfx1250; nothing is imported from fla.
+# Copyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li. Licensed under the MIT License.
 #
-# Portions of this file are adapted from flash-linear-attention
-# (https://github.com/fla-org/flash-linear-attention, MIT license), fla/ops/kda/chunk.py, chunk_fwd.py and
-# chunk_bwd.py (ChunkKDAFunction, chunk_kda_fwd, chunk_kda_bwd): the order of the steps and the tensors each one
-# hands to the next. The steps here are FlyDSL kernels; nothing is imported from fla.
-#
+# Modification Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 ###############################################################################
 

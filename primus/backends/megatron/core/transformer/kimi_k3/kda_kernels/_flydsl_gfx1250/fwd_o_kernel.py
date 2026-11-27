@@ -1,6 +1,10 @@
 ###############################################################################
-# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Some parts of this code are adapted from flash-linear-attention
+# (https://github.com/fla-org/flash-linear-attention, 0.5.2): chunk_gla_fwd_kernel_o,
+# rewritten as a FlyDSL kernel for gfx1250.
+# Copyright (c) 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li. Licensed under the MIT License.
 #
+# Modification Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 ###############################################################################
 

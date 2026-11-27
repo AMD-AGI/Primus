@@ -45,6 +45,12 @@ Primus uses or references the following third-party projects:
    - License: MIT License (Sea AI Lab)
    - Repository: https://github.com/sail-sg/odc
 
+6. flash-linear-attention
+   - License: MIT License (Songlin Yang, Yu Zhang, Zhiyuan Li)
+   - Repository: https://github.com/fla-org/flash-linear-attention
+   - Note: the gfx1250 FlyDSL KDA kernels in primus/backends/megatron/core/transformer/kimi_k3/kda_kernels/_flydsl_gfx1250/
+     (chunk.py and the bwd_*, fwd_* and cumsum kernels) follow fla's KDA and gated delta rule kernels (0.5.2).
+
 User must comply with the respective licenses of these third-party projects when using or distributing Primus.
 
 --------------------------------------------------------------------------------
