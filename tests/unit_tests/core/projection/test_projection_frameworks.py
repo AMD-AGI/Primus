@@ -355,6 +355,7 @@ def test_torchtitan_activation_checkpoint_maps_to_recompute(mode, granularity, m
     assert args.recompute_granularity == granularity
     assert args.recompute_method == method
     assert args.recompute_num_layers == (32 if granularity == "full" else 0)
+    assert args.recompute_measured_in_backward == (granularity == "full")
 
 
 def test_torchtitan_moe_flavor_carries_its_expert_shape():

@@ -283,17 +283,17 @@ def test_extrapolate_per_rank_peak_decomposition():
     # No correction was applied.
     assert bd["activation_correction"]["applied_correction"] is False
 
-    # analytical_at_bench = static(2000+2000+10000) + act(100) + deepep(0) + comm(0) = 14100
+    # analytical_at_bench = static(2000+2000+12000) + act(100) + deepep(0) + comm(0) = 16100
     # framework_overhead = reserved - allocated - comm_at_bench(0) = 30000-20000 = 10000
     assert bd["framework_overhead_bytes"] == 10000
-    # live_tensor_excess = allocated(20000) - analytical_bench.total(14100) = 5900
-    assert bd["live_tensor_excess_bytes"] == 5900
-    assert bd["residual_total_bytes"] == 15900
+    # live_tensor_excess = allocated(20000) - analytical_bench.total(16100) = 3900
+    assert bd["live_tensor_excess_bytes"] == 3900
+    assert bd["residual_total_bytes"] == 13900
 
     # Point/upper math anchored on the corrected target breakdown total.
     target_total = _sum_breakdown_total(bd["analytical_at_target_corrected"])
-    assert proj.point_estimate_bytes == target_total + 15900
-    assert proj.upper_bound_bytes == target_total + int(15900 * 1.05)
+    assert proj.point_estimate_bytes == target_total + 13900
+    assert proj.upper_bound_bytes == target_total + int(13900 * 1.05)
     # Point estimate must never exceed the upper bound.
     assert proj.point_estimate_bytes <= proj.upper_bound_bytes
 
