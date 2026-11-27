@@ -105,6 +105,8 @@ modules:
       # fp32-output GEMMs on gfx1250. Into the bf16 main_grad it needs an expert grouped GEMM
       # whose wgrad accumulates: FlyDSL's cannot (Primus-Turbo 0.6.1), and the Triton backend,
       # which can, costs more than the fusion saves (406.5 vs 372.1 ms on the proxy above).
+      # MegaMoE's expert wgrad kernel accumulates, so the launcher turns the fusion on together
+      # with MegaMoE from two expert-parallel ranks on (GRADIENT_ACCUMULATION_FUSION, README.md).
       gradient_accumulation_fusion: false
       # The check is a norm over every gradient each step: 5 ms at EP4 with 8 layers.
       check_for_nan_in_loss_and_grad: false

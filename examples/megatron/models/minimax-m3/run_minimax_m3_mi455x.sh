@@ -11,6 +11,8 @@
 #   PRIMUS_LAUNCHER=direct bash examples/megatron/models/minimax-m3/run_minimax_m3_mi455x.sh  # in a container
 #
 # One GPU unless GPUS_PER_NODE is set; extra GPUs are data and expert parallel.
+# From two expert-parallel ranks on, the experts run on Primus-Turbo's MegaMoE with
+# the weight gradients accumulated straight into the gradient buffer (README.md).
 # Settings are the environment variables below. Extra arguments are appended
 # to the Primus command line.
 ###############################################################################
@@ -58,9 +60,19 @@ export PRIMUS_TURBO_ATTN_BACKEND=${PRIMUS_TURBO_ATTN_BACKEND:-}
 # Primus-Turbo grouped GEMM for the experts; False: TE's grouped GEMM (one hipBLASLt GEMM per expert)
 export USE_TURBO_GROUPED_GEMM=${USE_TURBO_GROUPED_GEMM:-True}
 # bf16:flydsl (Primus-Turbo's FlyDSL kernels; Primus raises their 64-expert weight-gradient cap to
-# the 128 local experts of one GPU on gfx1250) or default (Primus-Turbo's choice: Triton)
-export TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND:-bf16:flydsl}
+# the 128 local experts of one GPU on gfx1250) or default (Primus-Turbo's choice: Triton). Empty:
+# default with gradient accumulation fusion, which FlyDSL's weight-gradient GEMM cannot do,
+# bf16:flydsl otherwise; decided in the container, below.
+export TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND:-}
 TURBO_GROUPED_GEMM_BACKEND=${TURBO_GROUPED_GEMM_BACKEND,,}
+# MegaMoE (--use_turbo_mega_moe), Primus-Turbo's fused dispatch + expert + combine layer: True, False,
+# or auto: on with 2 to 8 expert-parallel ranks when the Primus-Turbo in use has its gfx1250 kernels.
+# One expert-parallel rank has no dispatch to fuse.
+export USE_TURBO_MEGA_MOE=${USE_TURBO_MEGA_MOE:-auto}
+# Weight gradients accumulated straight into the BF16 gradient buffer (--gradient_accumulation_fusion):
+# True, False, or auto: on with MegaMoE, whose expert weight-gradient kernel accumulates. Without
+# MegaMoE the experts would need the Triton grouped GEMM for it, which costs more than the fusion saves.
+export GRADIENT_ACCUMULATION_FUSION=${GRADIENT_ACCUMULATION_FUSION:-auto}
 export MOCK_DATA=${MOCK_DATA:-True}
 export PROFILE=${PROFILE:-False}
 # 1: switch Triton's gfx1250 expert scheduling off in the container's Triton (needs root), see below
@@ -100,11 +112,40 @@ case "${PRIMUS_TURBO_ATTN_BACKEND,,}" in
         exit 2
         ;;
 esac
+# The two switches may also come as arguments (--use_turbo_mega_moe, --gradient_accumulation_fusion),
+# which then replace the variables: the last "--name value" or "--name=value" among the arguments.
+arg_value() {
+    local name=$1 value="" i
+    shift
+    for ((i = 1; i <= $#; i++)); do
+        if [[ "${!i}" == "--${name}" && $i -lt $# ]]; then
+            local next=$((i + 1))
+            value=${!next}
+        elif [[ "${!i}" == "--${name}="* ]]; then
+            value=${!i#*=}
+        fi
+    done
+    echo "${value}"
+}
+ARG_VALUE=$(arg_value use_turbo_mega_moe "$@")
+USE_TURBO_MEGA_MOE=${ARG_VALUE:-${USE_TURBO_MEGA_MOE}}
+ARG_VALUE=$(arg_value gradient_accumulation_fusion "$@")
+GRADIENT_ACCUMULATION_FUSION=${ARG_VALUE:-${GRADIENT_ACCUMULATION_FUSION}}
+for switch in USE_TURBO_MEGA_MOE GRADIENT_ACCUMULATION_FUSION; do
+    case "${!switch,,}" in
+        auto) declare "${switch}=auto" ;;
+        true | 1 | yes) declare "${switch}=True" ;;
+        false | 0 | no) declare "${switch}=False" ;;
+        *)
+            echo "${switch} must be True, False or auto, not '${!switch}'" >&2
+            exit 2
+            ;;
+    esac
+done
 # FlyDSL's expert weight-gradient GEMM has no beta=1 epilogue, which gradient_accumulation_fusion
 # needs; Primus-Turbo would raise at the first backward.
-GAF_RE=' --gradient_accumulation_fusion[ =](true|1) '
-if [[ "${TURBO_GROUPED_GEMM_BACKEND}" == *flydsl* && " ${*,,} " =~ ${GAF_RE} ]]; then
-    echo "--gradient_accumulation_fusion True needs TURBO_GROUPED_GEMM_BACKEND=default," \
+if [[ "${GRADIENT_ACCUMULATION_FUSION}" == True && "${TURBO_GROUPED_GEMM_BACKEND}" == *flydsl* ]]; then
+    echo "gradient accumulation fusion needs TURBO_GROUPED_GEMM_BACKEND=default," \
         "not '${TURBO_GROUPED_GEMM_BACKEND}'" >&2
     exit 2
 fi
@@ -147,7 +188,8 @@ case "${PRIMUS_LAUNCHER}" in
             case "${v}" in
                 PRIMUS_LAUNCHER) ;;
                 EXP | TURBO_DIR | GPUS_PER_NODE | HIP_VISIBLE_DEVICES | TRAIN_ITERS | MBS | GBS | USE_TURBO_* | \
-                    TURBO_GROUPED_GEMM_BACKEND | MOCK_DATA | PROFILE | PATCH_TRITON_EXPERT_SCHEDULING | \
+                    TURBO_GROUPED_GEMM_BACKEND | GRADIENT_ACCUMULATION_FUSION | MOCK_DATA | PROFILE | \
+                    PATCH_TRITON_EXPERT_SCHEDULING | \
                     MASTER_ADDR | MASTER_PORT | HF_TOKEN | WANDB_API_KEY | ENABLE_NUMA_BINDING | GPU_MAX_HW_QUEUES | \
                     HSA_* | NVTE_* | PRIMUS_* | NCCL_* | RCCL_* | GLOO_* | IONIC_* | HIPBLASLT_*)
                     ENV_ARGS+=(-e "${v}")
@@ -218,6 +260,31 @@ if [[ "${PATCH_TRITON_EXPERT_SCHEDULING}" == 1 ]]; then
     fi
 fi
 
+# MegaMoE needs Primus-Turbo's gfx1250 kernels (tas-20261019's Primus-Turbo predates them) and 2 to 8
+# expert-parallel ranks; Primus leaves the Megatron MoE layer in place otherwise.
+if [[ "${USE_TURBO_MEGA_MOE}" == auto ]]; then
+    USE_TURBO_MEGA_MOE=False
+    if ((PRIMUS_EP >= 2 && PRIMUS_EP <= 8)) && [[ -d "${TURBO_PKG}/flydsl/mega/gfx1250" ]]; then
+        USE_TURBO_MEGA_MOE=True
+    fi
+    echo "USE_TURBO_MEGA_MOE=auto: ${USE_TURBO_MEGA_MOE} (EP ${PRIMUS_EP}, Primus-Turbo at ${TURBO_PKG:-none})"
+fi
+if [[ "${GRADIENT_ACCUMULATION_FUSION}" == auto ]]; then
+    GRADIENT_ACCUMULATION_FUSION=False
+    if [[ "${USE_TURBO_MEGA_MOE}" == True && "${TURBO_GROUPED_GEMM_BACKEND}" != *flydsl* ]] &&
+        ((PRIMUS_EP >= 2 && PRIMUS_EP <= 8)); then
+        GRADIENT_ACCUMULATION_FUSION=True
+    fi
+    echo "GRADIENT_ACCUMULATION_FUSION=auto: ${GRADIENT_ACCUMULATION_FUSION}"
+fi
+if [[ -z "${TURBO_GROUPED_GEMM_BACKEND}" ]]; then
+    if [[ "${GRADIENT_ACCUMULATION_FUSION}" == True ]]; then
+        TURBO_GROUPED_GEMM_BACKEND=default
+    else
+        TURBO_GROUPED_GEMM_BACKEND=bf16:flydsl
+    fi
+fi
+
 # hipBLASLt takes a set but empty HIPBLASLT_TUNING_OVERRIDE_FILE as an override file named ""
 if [[ -z "${HIPBLASLT_TUNING_OVERRIDE_FILE}" ]]; then
     unset HIPBLASLT_TUNING_OVERRIDE_FILE
@@ -251,6 +318,8 @@ mkdir -p "${LOG_DIR}"
     --use_turbo_attention "${USE_TURBO_ATTENTION}" \
     --use_turbo_grouped_gemm "${USE_TURBO_GROUPED_GEMM}" \
     --turbo_grouped_gemm_backend "${TURBO_GROUPED_GEMM_BACKEND}" \
+    --use_turbo_mega_moe "${USE_TURBO_MEGA_MOE}" \
+    --gradient_accumulation_fusion "${GRADIENT_ACCUMULATION_FUSION}" \
     --mock_data "${MOCK_DATA}" \
     --profile "${PROFILE}" \
     --use_pytorch_profiler "${PROFILE}" \
