@@ -107,11 +107,15 @@ _COMPILED = {}
 
 
 def compiled(fn):
-    """``fn`` compiled once per process (static shapes, no graph breaks). Inductor may keep
+    """``fn`` compiled once per process (no graph breaks). Inductor may keep
     an intermediate bf16 value in fp32 inside a fused kernel, so results can differ from
     the eager modules by one bf16 rounding step (``emulate_precision_casts`` would round
-    there too, at ~1-2 % of the step on the 4-layer proxy)."""
+    there too, at ~1-2 % of the step on the 4-layer proxy).
+
+    Shapes are static until one changes: under expert parallelism the expert SwiGLU sees a
+    different row count every step, and ``dynamic=False`` would recompile for each until
+    ``fullgraph=True`` hits the recompile limit."""
     c = _COMPILED.get(fn)
     if c is None:
-        c = _COMPILED[fn] = torch.compile(fn, dynamic=False, fullgraph=True)
+        c = _COMPILED[fn] = torch.compile(fn, dynamic=None, fullgraph=True)
     return c
