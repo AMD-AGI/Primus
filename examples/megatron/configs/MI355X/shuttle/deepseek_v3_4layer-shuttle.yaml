@@ -5,7 +5,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 
 # Shuttle experiment config (4-layer DeepSeek-V3 proxy, CP8 / EP8); variants via PRIMUS_* only.
 env:
-  GPU_MAX_HW_QUEUES: ${SHUTTLE_HWQ:8}  # E11 varies it; 8 otherwise
+  GPU_MAX_HW_QUEUES: ${SHUTTLE_HWQ}  # E11 varies it; 8 otherwise
 
 # 4-layer single-node proxy of deepseek_v3-BF16-pretrain.yaml for long-context CP + EP runs: only the
 # lines marked "proxy" differ from it (layers, parallel layout, sequence / batch / mask, recompute, and the
