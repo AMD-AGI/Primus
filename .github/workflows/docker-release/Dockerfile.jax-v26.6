@@ -474,8 +474,8 @@ FROM jax_training AS jax_maxdiffusion
 # ecosystem libs (flax, drjax, qwix, tokamax, einshape, typeguard,
 # transformers, tensorflow), so only the still-missing/incompatible pieces
 # are handled below. torch, torchvision, scikit-image and imageio-ffmpeg are
-# absent from jax_training; transformers ships as v5 there and is pinned
-# back to 4.57.3 below.
+# absent from jax_training; transformers ships as v5 there and is held to a
+# >=5.10.0 floor below, and torchax is added for FLUX's text encoders.
 # ========================================================================
 
 # jax_training's WORKDIR (/workspace) carries over from jax_base, so no need
@@ -506,28 +506,36 @@ RUN pip install --no-cache-dir \
     imageio-ffmpeg \
     && rm -rf /root/.cache
 
-# MaxDiffusion imports the Flax CLIP classes (FlaxCLIPTextModel) which were
-# removed in transformers v5. jax_training ships transformers 5.x, so pin
-# back to the last Flax-capable 4.x release (matches the previously-working
-# setup).
-# 4.57.3 carries two HIGH CVEs (CVE-2026-4372, CVE-2026-5241) only fixed at
-# transformers>=5.3.0/5.5.0 -- no 4.x backport exists, and bumping to 5.x isn't an
-# option here (see above). Accepted as risk: CVE-2026-4372's RCE path requires the
-# optional `kernels` package, which is never installed in this image (MaxDiffusion
-# itself is installed --no-deps below); CVE-2026-5241's RCE path is specific to
-# loading LightGlue via trust_remote_code, which MaxDiffusion's diffusion/video
-# pipelines never do. Neither exploit precondition is present here.
-RUN pip install --no-cache-dir transformers==4.57.3 \
+# transformers 4.57.3 and earlier carry CVE-2026-4372, CVE-2026-5241 and
+# CVE-2026-9856; 5.10.0 is the first release fixing all three. This image used to
+# pin back to 4.57.3 and accept those as risk, because MaxDiffusion imported the
+# Flax CLIP and T5 classes (FlaxCLIPTextModel, FlaxT5EncoderModel) that
+# transformers 5 removed, and no 4.x backport exists. MAXDIFFUSION_COMMIT below
+# now carries FLUX's text encoders as PyTorch models under Torchax, so the floor
+# moves up instead. Stated as a floor rather than an exact pin: jax_training
+# already ships a 5.x, and this only has to rule out one that is too old.
+RUN pip install --no-cache-dir "transformers>=5.10.0" \
     && rm -rf /root/.cache
 
-# The FLUX text encoder uses transformers' Flax T5, which calls
-# jnp.clip(..., a_max=...). JAX 0.10 removed the a_min/a_max kwargs (renamed to
-# min/max), so this raises "clip() got an unexpected keyword argument 'a_max'".
-# Patch the two jnp.clip calls in the Flax T5 model to the new kwarg names.
-RUN sed -i 's/a_max=/max=/g; s/a_min=/min=/g' \
-    /opt/venv/lib/python*/site-packages/transformers/models/t5/modeling_flax_t5.py
+# Torchax runs FLUX's PyTorch CLIP-L and T5-XXL encoders under JAX. MaxDiffusion
+# is installed --no-deps below, so nothing else brings it in. 0.0.13 declares no
+# unconditional dependencies today; --no-deps keeps a later release from resolving
+# its own torch or jax over the ROCm builds above. Pinned because it dispatches
+# against private torch overloads: it imports cleanly on this image's torch 2.8.0
+# and on 2.12.0, but fails on torch >= 2.14, which dropped the aten.prod Dimname
+# overload it names. The import assertion at the end of the build keeps that pairing
+# honest if the torch install above ever moves.
+RUN pip install --no-cache-dir --no-deps "torchax==0.0.13" \
+    && rm -rf /root/.cache
 
-# Clone and install MaxDiffusion
+# No Flax T5 patch here any more. It rewrote the jnp.clip(..., a_max=) calls that
+# JAX 0.10 renamed, in a modeling_flax_t5.py that transformers 5 does not ship --
+# an unconditional sed against a path that no longer exists would fail the build.
+
+# Clone and install MaxDiffusion. This commit has to carry the Torchax text
+# encoders, since the transformers floor above rules out the Flax classes the
+# older trees import, and it should track third_party/maxdiffusion: move the two
+# together so an image build and a primus-cli launch agree on the tree.
 ARG MAXDIFFUSION_REPO=https://github.com/AI-Hypercomputer/maxdiffusion.git
 ARG MAXDIFFUSION_COMMIT=68e069659f0af80694559e29939a17f879fe7f6a
 RUN git clone ${MAXDIFFUSION_REPO} /workspace/maxdiffusion && \
@@ -573,5 +581,15 @@ RUN sed -i \
 RUN sed -i \
     's|    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"|    if not axis:\n        return 1\n    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"|' \
     /opt/venv/lib/python*/site-packages/transformer_engine/jax/sharding.py
+
+# Fail the build rather than ship an image that looks patched. A later layer that
+# resolves transformers again -- a requirements file with an exact pin, a
+# dependency that caps it -- would undo the floor above silently; that is exactly
+# how a CVE-carrying image shipped once already from ROCm/MAD's downstream build.
+RUN python3 -c "import transformers; from packaging.version import Version; \
+v = Version(transformers.__version__); \
+assert v >= Version('5.10.0'), f'transformers {v} still carries CVE-2026-4372, CVE-2026-5241 and CVE-2026-9856'; \
+print('transformers', v, 'OK')" \
+    && python3 -c "import torchax; print('torchax OK')"
 
 RUN pip3 list
