@@ -93,6 +93,11 @@ class MuseSparkTransformerConfig(TransformerConfig):
     residual before it (attention residual -> ``pre_mlp_layernorm``; MoE residual -> the next
     layer's ``input_layernorm``), handing the output to the norm. Off by default: no faster
     than the separate graphs on the 4-layer proxy (MI455X). Parsed strictly (``bool_flag``)."""
+    muse_spark_triton_softcap: bool = False
+    """Run the logit soft-cap as Triton kernels, bitwise the eager ops (``models/muse_spark/softcap_kernels.py``).
+    With the deferred TE cross entropy (``deferred_cross_entropy``) the soft-cap runs inside the cross entropy:
+    the soft-capped logits are never written. Each path checks itself once against the eager one and keeps the
+    eager one on a mismatch. Parsed strictly (``bool_flag``)."""
     residual_gate_init_value: float = -0.9
     """Initial value of every residual gate ``g`` for a run from random weights (a checkpoint
     load overwrites it). HF initialises ``g ~ N(0, 0.02)`` (beta = 0.5, alpha = 0.87): the
@@ -138,6 +143,7 @@ class MuseSparkTransformerConfig(TransformerConfig):
             "muse_spark_fused_centered_norm",
             "muse_spark_compile_norms",
             "muse_spark_compile_fuse_next_norm",
+            "muse_spark_triton_softcap",
             "embedding_norm",
             "window_size_is_hf_sliding_window",
         ):

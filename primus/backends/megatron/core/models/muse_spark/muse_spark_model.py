@@ -123,7 +123,77 @@ class MuseSparkModel(GPTModel):
                 link_next_norm(layer.self_attn_bda, layer.pre_mlp_layernorm)
             for layer, nxt in zip(layers, layers[1:]):
                 link_next_norm(layer.mlp_bda, nxt.input_layernorm)
+        self.triton_softcap = config_flag(config, "muse_spark_triton_softcap", False)
+        self._muse_defer_softcap = False
         log_rank_0(f"[Primus:muse_spark] built modules: {built_module_summary(self)}")
+
+    def _softcap_into_loss(self) -> bool:
+        """Whether this forward's loss is the deferred TE cross entropy, which then takes the soft-cap fused:
+        the output layer's logits reach ``compute_language_model_loss`` directly (no chunked linear+CE)."""
+        from megatron.core.models.common.language_module import language_module
+
+        cfg = self.config
+        return bool(
+            self.triton_softcap
+            and softcap_value(cfg.final_logit_softcapping) is not None
+            and cfg.cross_entropy_loss_fusion
+            and cfg.cross_entropy_fusion_impl == "te"
+            and getattr(language_module.te_parallel_cross_entropy, "_primus_deferred_round_once", None)
+            is not None
+            and not getattr(GPTModel._postprocess, "_fused_ce_hooked", False)
+            and getattr(cfg, "cuda_graph_impl", None) != "full_iteration"
+        )
+
+    def forward(self, *args, **kwargs):
+        labels = kwargs.get("labels", args[4] if len(args) > 4 else None)
+        self._muse_defer_softcap = labels is not None and self._softcap_into_loss()
+        try:
+            return super().forward(*args, **kwargs)
+        finally:
+            self._muse_defer_softcap = False
+
+    def compute_language_model_loss(self, labels: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
+        pending = logits.__dict__.pop("_muse_pending_softcap", None)
+        if pending is None:
+            return super().compute_language_model_loss(labels, logits)
+        from megatron.core.models.common.language_module import language_module
+
+        from primus.backends.megatron.core.models.muse_spark.softcap_kernels import (
+            softcap_cross_entropy,
+            softcap_cross_entropy_matches,
+        )
+        from primus.backends.megatron.patches.te_patches.cross_entropy_deferred_patches import (
+            eligible,
+        )
+
+        m, cap = pending
+        cross_entropy = language_module.te_parallel_cross_entropy
+        round_once = getattr(cross_entropy, "_primus_deferred_round_once", None)
+        target = labels.transpose(0, 1).contiguous()
+        tp_group = self.pg_collection.tp
+        if (
+            round_once is not None
+            and eligible(logits, target, tp_group, False)
+            and self._triton_softcap_ok(logits, m, cap)
+            and softcap_cross_entropy_matches(logits, target, m, cap, round_once, cross_entropy, tp_group)
+        ):
+            return softcap_cross_entropy(logits, target, m, cap, round_once).transpose(0, 1).contiguous()
+        return super().compute_language_model_loss(labels, self._softcap(logits, m, cap))
+
+    def _triton_softcap_ok(self, logits, m, cap) -> bool:
+        from primus.backends.megatron.core.models.muse_spark.softcap_kernels import (
+            softcap_matches_eager,
+        )
+
+        return softcap_matches_eager(logits, m, cap, _apply_softcap)
+
+    def _softcap(self, logits, m, cap):
+        """The Triton soft-cap where it is bit-identical to the eager one (checked once), else the eager one."""
+        if self._triton_softcap_ok(logits, m, cap):
+            from primus.backends.megatron.core.models.muse_spark.softcap_kernels import fused_softcap
+
+            return fused_softcap(logits, m, cap)
+        return _apply_softcap(logits, m, cap)
 
     def _scale_logits(self, logits: torch.Tensor) -> torch.Tensor:
         # Every loss path calls this: the plain output layer, the fused vocab-parallel cross
@@ -138,4 +208,18 @@ class MuseSparkModel(GPTModel):
         if cached is None or cached[0] != key:
             cached = (key, float(key[0]), softcap_value(key[1]))
             self.__dict__["_muse_logit_scale"] = cached
-        return _apply_softcap(logits, cached[1], cached[2])
+        m, cap = cached[1], cached[2]
+        if (
+            cap is not None
+            and self.__dict__.get("triton_softcap")
+            and logits.is_cuda
+            and logits.dtype == torch.bfloat16
+        ):
+            if self.__dict__.get("_muse_defer_softcap"):
+                # once per forward: these are the output layer's logits on their way to
+                # compute_language_model_loss, which applies the soft-cap inside the cross entropy
+                self._muse_defer_softcap = False
+                logits.__dict__["_muse_pending_softcap"] = (m, cap)
+                return logits
+            return self._softcap(logits, m, cap)
+        return _apply_softcap(logits, m, cap)

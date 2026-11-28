@@ -129,6 +129,8 @@ modules:
 
       # Muse Spark on MI455X
       muse_spark_compile_norms: true
+      # the logit soft-cap inside the deferred cross entropy (below), bitwise the separate ops
+      muse_spark_triton_softcap: true
 
       # Primus-Turbo: grouped GEMM experts and FlyDSL sliding-window attention; DeepEP has
       # nothing to dispatch at EP 1. turbo_sync_free_moe_stage stays 0 (the fused router
@@ -144,6 +146,7 @@ modules:
       moe_token_dispatcher_type: alltoall
       moe_permute_fusion: true
 
-      # Fused CE (TE) on the soft-capped logits
+      # Fused CE (TE) on the soft-capped logits, its gradient built in backward
       cross_entropy_loss_fusion: true
       cross_entropy_fusion_impl: te
+      deferred_cross_entropy: true
