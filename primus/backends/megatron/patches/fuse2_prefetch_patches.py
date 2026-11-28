@@ -30,6 +30,7 @@ from primus.core.utils.module_utils import log_rank_0
 
 _MODE = int(os.environ.get("PRIMUS_FUSE2_PREFETCH", "0") or 0)
 _ENABLED = _MODE in (1, 2)
+_PACK = os.environ.get("PRIMUS_FUSE2_PREFETCH_PACK", "1") == "1"
 
 
 def _iter0(data_iterator, model):
@@ -56,6 +57,87 @@ def install() -> None:
         # staging buffers are reused: the previous staging -> static copies (loader stream) must be done. Do NOT
         # wait on the current stream: it holds the replay just launched, and the copy must overlap it.
         st.wait_stream(self.static_loader.stream)
+        if _PACK:
+            try:
+                staged_list, hosts = _prefetch_packed(self, it, n, st)
+            except StopIteration:
+                self._f2_pf, self._f2_off = None, True
+                return
+        else:
+            staged_list, hosts = None, None
+        if staged_list is None:
+            staged_list, hosts = _prefetch_per_tensor(self, it, n, st)
+            if staged_list is None:
+                self._f2_pf, self._f2_off = None, True
+                return
+        _finish_prefetch(self, it, n, done, st, staged_list, hosts)
+
+    def _prefetch_packed(self, it, n, st):
+        """PRIMUS_FUSE2_PREFETCH_PACK (default 1): the n batches' host tensors are packed (CPU memcpy) into one
+        pinned buffer and moved with ONE host -> device copy into one device staging buffer (views per tensor).
+        The per-tensor path issues ~4 small HtoD copies per micro-batch (~70 us each on MI455X); when the copy
+        stream shares a hardware queue with the main stream they run back to back after the replay and delay the
+        optimizer step (~0.8 ms/step at 3 micro-batches). Same bytes."""
+        batches = []
+        for _ in range(n):
+            h = next(it)
+            if isinstance(h, tuple) and len(h) > 0 and isinstance(h[0], dict):
+                h = h[0]
+            if not isinstance(h, dict):
+                raise TypeError(f"unexpected batch type {type(h)}")
+            batches.append(h)
+        layout, off = [], 0
+        for h in batches:
+            for k, v in h.items():
+                if isinstance(v, torch.Tensor):
+                    if v.device.type != "cpu":
+                        return _stage_given(self, batches, st)
+                    nbytes = v.numel() * v.element_size()
+                    layout.append((k, off, nbytes, v))
+                    off += (nbytes + 255) // 256 * 256
+        total = max(off, 256)
+        pk = getattr(self, "_f2_pack", None)
+        if pk is None or pk["total"] != total:
+            with torch.cuda.stream(st):
+                dev = torch.empty(total, dtype=torch.uint8, device="cuda")
+            pk = self._f2_pack = {
+                "total": total,
+                "dev": dev,
+                "host": [torch.empty(total, dtype=torch.uint8, pin_memory=True) for _ in range(2)],
+                "ev": [None, None],
+                "i": 0,
+            }
+        i = pk["i"]
+        pk["i"] ^= 1
+        if pk["ev"][i] is not None:
+            pk["ev"][i].synchronize()  # the H2D that last read this pinned buffer (two steps ago) is done
+        host = pk["host"][i]
+        for k, o, nb, v in layout:
+            host[o : o + nb].view(v.dtype).view(v.shape).copy_(v)
+        dev = pk["dev"]
+        with torch.cuda.stream(st):
+            dev.copy_(host, non_blocking=True)
+            ev = torch.cuda.Event()
+            ev.record(st)
+        pk["ev"][i] = ev
+        staged_list, j = [], 0
+        for h in batches:
+            staged = {}
+            for k, v in h.items():
+                if isinstance(v, torch.Tensor):
+                    _, o, nb, _ = layout[j]
+                    j += 1
+                    staged[k] = dev[o : o + nb].view(v.dtype).view(v.shape)
+                else:
+                    staged[k] = v
+            staged_list.append(staged)
+        return staged_list, [host] + staged_list
+
+    def _stage_given(self, batches, st):
+        it = iter(batches)
+        return _prefetch_per_tensor(self, it, len(batches), st)
+
+    def _prefetch_per_tensor(self, it, n, st):
         bufs = self._f2_bufs
         hosts = []
         try:
@@ -86,11 +168,13 @@ def install() -> None:
                         staged[k] = v
                 hosts.append(staged)
         except StopIteration:
-            self._f2_pf, self._f2_off = None, True
-            return
+            return None, None
+        staged_list = [h for h in hosts if isinstance(h, dict)]
+        return staged_list, hosts
+
+    def _finish_prefetch(self, it, n, done, st, staged_list, hosts):
         ev = torch.cuda.Event()
         ev.record(st)
-        staged_list = [h for h in hosts if isinstance(h, dict)]
         landed = False
         sb = fcg.StaticBufferLoader.static_buffers["training"]
         if (

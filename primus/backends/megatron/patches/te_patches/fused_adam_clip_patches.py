@@ -225,7 +225,17 @@ def _norm_from_nan_check(optimizer):
         return None
     grp = optimizer.get_grad_stats_parallel_group()
     if grp is not None and torch.distributed.is_initialized() and torch.distributed.get_world_size(grp) != 1:
-        return None
+        try:
+            from primus.backends.megatron.patches.ddp_deferred_grad_check_patches import (
+                shard_sumsq_enabled,
+            )
+        except Exception:
+            return None
+        if not shard_sumsq_enabled():
+            return None
+        # per-rank sums over disjoint shards (+ unsharded expert buckets): their sum is the global sum of squares
+        acc = acc.reshape(1).float().clone()
+        torch.distributed.all_reduce(acc, op=torch.distributed.ReduceOp.SUM, group=grp)
     st = optimizer.__dict__.setdefault("_primus_norm_reuse", {"checked": False, "ok": False})
     if not st["checked"]:
         ref = _get_grad_norm_tensor_full(optimizer)
@@ -769,6 +779,16 @@ def _param_sync_overlap_enabled() -> bool:
 
 
 _param_sync_side_stream = None
+_param_sync_side_last = {"stream": None}
+
+
+def param_sync_side_stream_last_step():
+    """The side stream that carried this step's dense param all-gathers (PRIMUS_PARAM_SYNC_OVERLAP_ADAM), else None.
+    Work queued on it after the step (e.g. the dense FP8 weight-cache refresh) runs after those all-gathers but
+    not behind the rest of the main stream (the expert Adam). Cleared when read."""
+    s = _param_sync_side_last["stream"]
+    _param_sync_side_last["stream"] = None
+    return s
 
 
 def _chained_step_single_param_sync(optimizer) -> bool:
@@ -821,6 +841,7 @@ def _chained_step_single_param_sync(optimizer) -> bool:
         optimizer._start_deferred_mxfp8_param_sync(pending)
     if side_used:
         main.wait_stream(_param_sync_side_stream)
+        _param_sync_side_last["stream"] = _param_sync_side_stream
     return success
 
 

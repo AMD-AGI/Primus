@@ -154,18 +154,72 @@ def patch_mega_moe_fp8blk_weights(ctx: PatchContext):
     except ImportError:
         refresh_unmanaged = None
 
+    import os
+
+    import torch
+
+    # PRIMUS_FP8BLK_REFRESH_SIDE (default 1): the dense refresh (after the param all-gather) runs on a side stream
+    # and the main stream joins it at the start of the next train_step / evaluate, so the step-end host work
+    # (training_log's loss read, logging collectives, timer barriers) no longer queues behind it. Same kernels,
+    # same bytes; the caches are read only by the next forward.
+    side_refresh = os.environ.get("PRIMUS_FP8BLK_REFRESH_SIDE", "1") == "1"
+    state = {"stream": None, "event": None}
+
+    def _join_refresh():
+        ev = state["event"]
+        if ev is not None:
+            torch.cuda.current_stream().wait_event(ev)
+            state["event"] = None
+
+    def _refresh_unmanaged_async():
+        if not side_refresh:
+            return refresh_unmanaged()
+        side = None
+        try:  # dense all-gathers already on a side stream (PRIMUS_PARAM_SYNC_OVERLAP_ADAM): follow them there
+            from primus.backends.megatron.patches.te_patches.fused_adam_clip_patches import (
+                param_sync_side_stream_last_step,
+            )
+
+            side = param_sync_side_stream_last_step()
+        except ImportError:
+            pass
+        if side is None:
+            if state["stream"] is None:
+                state["stream"] = torch.cuda.Stream()
+            side = state["stream"]
+            side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            n = refresh_unmanaged()
+        ev = torch.cuda.Event()
+        ev.record(side)
+        state["event"] = ev
+        return n
+
     @functools.wraps(_original_train_step)
     def _patched_train_step(*args, **kwargs):
+        _join_refresh()
         result = _original_train_step(*args, **kwargs)
         refresh_fp8blk_weights()
         if refresh_unmanaged is not None:
-            n = refresh_unmanaged()
+            n = _refresh_unmanaged_async()
             if n and not getattr(_patched_train_step, "_logged", False):
                 _patched_train_step._logged = True
-                log_rank_0(f"[Patch:megatron.turbo.mega_moe_fp8blk_weights] refreshed {n} dense block-FP8 weight caches")
+                log_rank_0(
+                    f"[Patch:megatron.turbo.mega_moe_fp8blk_weights] refreshed {n} dense block-FP8 weight caches"
+                    + (" (side stream, joined at the next step)" if side_refresh else "")
+                )
         return result
 
     megatron_training.train_step = _patched_train_step
+    if side_refresh and refresh_unmanaged is not None and hasattr(megatron_training, "evaluate"):
+        _original_evaluate = megatron_training.evaluate
+
+        @functools.wraps(_original_evaluate)
+        def _patched_evaluate(*args, **kwargs):
+            _join_refresh()
+            return _original_evaluate(*args, **kwargs)
+
+        megatron_training.evaluate = _patched_evaluate
     log_rank_0(
         "[Patch:megatron.turbo.mega_moe_fp8blk_weights] "
         "Patched train_step to re-quantize the MegaMoE fp8_block expert weights after optimizer.step()"

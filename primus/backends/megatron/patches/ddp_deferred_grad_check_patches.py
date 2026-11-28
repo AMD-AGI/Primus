@@ -48,6 +48,15 @@ def _norm_reuse_requested() -> bool:
     return os.environ.get("PRIMUS_GRAD_NORM_FROM_NAN_CHECK", "0") == "1"
 
 
+def shard_sumsq_enabled() -> bool:
+    """PRIMUS_GRAD_NORM_SHARD_SUMSQ=1 (opt-in; NOT bit-identical to the l2norm: another summation order): with a
+    distributed optimizer over a data-parallel group > 1, the step-end sum of squares (taken inside the
+    full-iteration graph, right after the reduce-scatter) covers only this rank's reduce-scattered shard of each
+    such bucket, so the clip norm is sqrt(all_reduce(sum)) over the grad-stats group and the optimizer skips its
+    multi_tensor_l2norm re-read of every gradient (~1.2 ms/step on the EP4 DP4 proxy)."""
+    return os.environ.get("PRIMUS_GRAD_NORM_SHARD_SUMSQ", "0") == "1"
+
+
 def _enabled(ctx: PatchContext) -> bool:
     if os.environ.get("PRIMUS_DEFERRED_GRAD_NAN_CHECK", "1") == "0":
         return False
@@ -138,19 +147,40 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
         return ranges, folded
 
     def _live_buckets(ddp):
-        """(bucket, grad_data) of every non-empty bucket, or None when one is not a contiguous CUDA tensor."""
+        """(bucket, grad_data, shard_lo, shard_hi) of every non-empty bucket, or None when one is not a contiguous
+        CUDA tensor. [shard_lo, shard_hi) is the whole bucket unless PRIMUS_GRAD_NORM_SHARD_SUMSQ cuts it to this
+        rank's reduce-scattered shard (distributed optimizer, group > 1)."""
         out = []
+        shard = shard_sumsq_enabled()
         for bg in list(getattr(ddp, "bucket_groups", [])) + list(
             getattr(ddp, "expert_parallel_bucket_groups", [])
         ):
+            size = int(getattr(bg, "intra_distributed_optimizer_instance_size", 1) or 1)
+            cut = (
+                shard
+                and size > 1
+                and getattr(getattr(bg, "ddp_config", None), "use_distributed_optimizer", False)
+            )
             for b in bg.buckets:
                 g = b.grad_data
                 if g is None or g.numel() == 0:
                     continue
                 if not (g.is_cuda and g.is_contiguous()):
                     return None
-                out.append((b, g))
+                if cut:
+                    if g.numel() % size:
+                        return None
+                    n = g.numel() // size
+                    r = int(bg.intra_distributed_optimizer_instance_rank)
+                    out.append((b, g, r * n, (r + 1) * n))
+                else:
+                    out.append((b, g, 0, g.numel()))
         return out
+
+    def _ranges_in(b, g, lo_s, hi_s):
+        if lo_s == 0 and hi_s == g.numel():
+            return _bucket_ranges(b, g.numel())
+        return [(lo_s, hi_s)], []  # a shard: no folded per-param buffers (they hold the whole param's sum)
 
     def _sumsq_all_buckets(ddp):
         # with the NaN check off (e.g. --check_for_nan_in_loss_and_grad False under the
@@ -167,8 +197,8 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
             return None
         acc = None
         folded = []
-        for b, g in live:
-            ranges, fb = _bucket_ranges(b, g.numel())
+        for b, g, lo_s, hi_s in live:
+            ranges, fb = _ranges_in(b, g, lo_s, hi_s)
             folded += fb
             for lo, hi in ranges:
                 n = grad_sumsq(g[lo:hi])
@@ -188,8 +218,8 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
         if live is None:
             return None
         ranges, folded = [], []
-        for b, g in live:
-            rr, fb = _bucket_ranges(b, g.numel())
+        for b, g, lo_s, hi_s in live:
+            rr, fb = _ranges_in(b, g, lo_s, hi_s)
             folded += fb
             ranges += [g[lo:hi] for lo, hi in rr]
         if not ranges or len({r.dtype for r in ranges}) != 1 or any(f.dtype != torch.float32 for f in folded):
@@ -218,6 +248,7 @@ def patch_deferred_grad_nan_check(ctx: PatchContext):
             state["exact"] = acc is not None
         _LAST_SUMSQ["value"] = acc if state["exact"] else None
         _LAST_SUMSQ["static"] = bool(acc is not None and torch.cuda.is_current_stream_capturing())
+        _LAST_SUMSQ["shard"] = shard_sumsq_enabled()
         state["exact"] = True
         if checked:
             rsm = get_rerun_state_machine()
