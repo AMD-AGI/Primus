@@ -1,0 +1,151 @@
+# Four-node training (32 GPUs, data parallel 32): weak scaling of
+# zaya1_8B-FP8-pretrain.yaml. Same micro batch per GPU (264), so the global
+# batch is 4 times the single-node recipe's. Everything else is unchanged: data
+# parallel only, distributed optimizer, no gradient or parameter-gather overlap.
+#
+# Measured on rocm/primus:v26.9 with Primus at 82ae0e375, mock data, 50
+# iterations, tokens/s/GPU over iterations 5-30 (harmonic mean), two runs each:
+#   1 node (zaya1_8B-FP8-pretrain.yaml, micro/global batch 264/2112):
+#     24,437 and 24,350, median 24,394
+#   4 nodes (this recipe, micro/global batch 264/8448):
+#     23,995 and 24,282, median 24,139 = 99.0% of 1 node (772,448 tokens/s)
+#
+# Launch, one container per node and one primus-cli direct per container:
+#   srun -N 4 --ntasks-per-node=1 podman run --rm --network host --ipc host \
+#     --security-opt seccomp=unconfined --cap-add SYS_PTRACE --group-add keep-groups \
+#     --device /dev/kfd --device /dev/dri --device /dev/infiniband --ulimit memlock=-1 \
+#     -e ROCR_VISIBLE_DEVICES -e 'NCCL_*' -e GLOO_SOCKET_IFNAME -e HF_HUB_OFFLINE -e SLURM_NODEID \
+#     -v "$PWD":/workspace/Primus docker.io/rocm/primus:v26.9 bash -c \
+#     'cd /workspace/Primus && NNODES=4 NODE_RANK=$SLURM_NODEID MASTER_ADDR=<node 0 IP> \
+#      MASTER_PORT=29500 GPUS_PER_NODE=8 bash runner/primus-cli direct --numa -- train pretrain \
+#      --config examples/megatron/configs/MI325X/zaya1_8B-FP8-4nodes-pretrain.yaml'
+# Environment: env: below sets PYTORCH_HIP_ALLOC_CONF, NCCL_BUFFSIZE, NVTE_USE_CAST_TRANSPOSE_TRITON. The launch
+# script also exported these for the RoCE fabric of the measurement cluster; they
+# are site specific, adjust them to your network: NCCL_SOCKET_IFNAME=eth1
+# GLOO_SOCKET_IFNAME=eth1 NCCL_IB_HCA=mlx5 NCCL_IB_GID_INDEX=3 NCCL_IB_TC=104
+# NCCL_CROSS_NIC=0 NCCL_NET_DISABLE_INTRA=1 NCCL_PXN_DISABLE=0 HF_HUB_OFFLINE=1.
+# MASTER_ADDR is the IP of the first node's fabric interface.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zaya1-fp8-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# The runner enables Transformer Engine's Triton FP8 cast-transpose, which
+# autotunes once per new tensor shape. Expert token counts change every step,
+# so it keeps retuning and FP8 steps stall. The HIP cast kernel has no
+# per-shape cost.
+env:
+  NVTE_USE_CAST_TRANSPOSE_TRITON: "0"
+  PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
+  # RCCL's default 4 MiB per-channel buffers need more device memory than this micro
+  # batch leaves once communicators span nodes: HIP out of memory in the first
+  # collective. 512 KiB fits.
+  NCCL_BUFFSIZE: "524288"
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # Full ZAYA1-base shape lives in zaya1.yaml (80 stages, hidden 2048).
+    model: zaya1.yaml
+    overrides:
+      wandb_project: "Primus_Pretrain"
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 1
+      log_avg_reset_interval: 10
+
+      # 30-step mock-data run (data parallel 32). micro_batch_size 264 is the
+      # single-node recipe's; its comment says how it was chosen. The headroom to
+      # the 256 GiB per GPU stays small (about 2.5 GiB on one node) and
+      # NCCL_BUFFSIZE above keeps the multi-node communicators inside it. If
+      # another image, Primus-Turbo or Transformer Engine build, or other
+      # GPU-memory users run out of memory at evaluation, lower micro_batch_size
+      # in steps of 8 and set global_batch_size to micro_batch_size x 32.
+      train_iters: 30
+      micro_batch_size: 264
+      # One micro batch per GPU per step at DP=32.
+      # Must be divisible by micro_batch_size * data_parallel_size.
+      global_batch_size: 8448
+      seq_length: 128
+      max_position_embeddings: 4096
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 1
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+
+      # Data parallel only. TP, PP, CP, EP and sequence parallel are rejected
+      # by zaya1_builder.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
+      # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
+      # elementwise chains, and CCA's convolutions as GEMMs.
+      # zaya_router_defer_ar stays off: it gained under 1% on MI355X. The ZAYA1
+      # chunked cross-entropy (zaya_chunked_ce) stays off too: it rounds each
+      # chunk's output-layer weight gradient to bf16 before summing, below
+      # Megatron's own fp32 cross-entropy.
+      zaya_attn_flash: true
+      zaya_fuse_norm: true
+      zaya_fuse_cca: true
+      zaya_conv_gemm: true
+      zaya_fuse_moe: true
+      zaya_sort_dispatch: true
+
+      # Synthetic tokens. The mock-data patch forces NullTokenizer and
+      # clears these paths; vocab_size stays 262272 from zaya1.yaml.
+      mock_data: true
+      # No attention mask from the dataloader. With reset_attention_mask false
+      # it would be plain causal, which ZAYA1's attention applies without one,
+      # and the model would check it on the GPU and wait on the host for the
+      # answer every forward.
+      create_attention_mask_in_dataloader: false
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      eval_interval: 100
+      eval_iters: 8
+
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Off: Turbo's FP8 grouped GEMM isn't wired up for ZAYA1 yet, so with
+      # FP8 the experts stay split.
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: false
+
+      # Hybrid FP8: E4M3 forward, E5M2 backward. CCA Q/K/V/O and expert
+      # SwiGLU run as TE GEMMs. Router, conv, RMSNorm, attention, embeddings,
+      # and the tied logits projection stay in BF16.
+      # Tensorwise (current) scaling takes each scale from the tensor being
+      # cast, so FP8 is correct from the first step, including a cold start
+      # from a fresh or loaded checkpoint. Delayed scaling starts with an
+      # empty amax history and quantizes the first steps with scale 1.
+      fp8: hybrid
+      fp8_recipe: tensorwise
