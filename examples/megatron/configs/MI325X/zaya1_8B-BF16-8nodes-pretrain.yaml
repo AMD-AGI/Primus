@@ -1,0 +1,145 @@
+# Eight-node training (64 GPUs, data parallel 64): weak scaling of
+# zaya1_8B-BF16-pretrain.yaml. Same micro batch per GPU (352), so the global
+# batch is 8 times the single-node recipe's. Everything else is unchanged: data
+# parallel only, distributed optimizer, no gradient or parameter-gather overlap.
+#
+# Measured on rocm/primus:v26.9 with Primus at 82ae0e375, mock data, 50
+# iterations, tokens/s/GPU over iterations 5-30 (harmonic mean), two runs each,
+# all in one job on 2026-11-26 (the 4-node recipe's own header quotes an earlier job):
+#   1 node (zaya1_8B-BF16-pretrain.yaml, micro/global batch 352/2816):
+#     34,484 and 34,681, median 34,582
+#   4 nodes (zaya1_8B-BF16-4nodes-pretrain.yaml, micro/global batch 352/11264):
+#     34,621 and 34,236, median 34,428 = 99.6% of 1 node
+#   8 nodes (this recipe, micro/global batch 352/22528):
+#     33,218 and 33,438, median 33,328 = 96.4% of 1 node (2,132,992 tokens/s)
+#
+# Launch, one container per node and one primus-cli direct per container:
+#   srun -N 8 --ntasks-per-node=1 podman run --rm --network host --ipc host \
+#     --security-opt seccomp=unconfined --cap-add SYS_PTRACE --group-add keep-groups \
+#     --device /dev/kfd --device /dev/dri --device /dev/infiniband --ulimit memlock=-1 \
+#     -e ROCR_VISIBLE_DEVICES -e 'NCCL_*' -e GLOO_SOCKET_IFNAME -e HF_HUB_OFFLINE -e SLURM_NODEID \
+#     -v "$PWD":/workspace/Primus docker.io/rocm/primus:v26.9 bash -c \
+#     'cd /workspace/Primus && NNODES=8 NODE_RANK=$SLURM_NODEID MASTER_ADDR=<node 0 IP> \
+#      MASTER_PORT=29500 GPUS_PER_NODE=8 bash runner/primus-cli direct -- train pretrain \
+#      --config examples/megatron/configs/MI325X/zaya1_8B-BF16-8nodes-pretrain.yaml'
+# Environment: env: below sets PYTORCH_HIP_ALLOC_CONF, NCCL_BUFFSIZE. The launch
+# script also exported these for the RoCE fabric of the measurement cluster; they
+# are site specific, adjust them to your network: NCCL_SOCKET_IFNAME=eth1
+# GLOO_SOCKET_IFNAME=eth1 NCCL_IB_HCA=mlx5 NCCL_IB_GID_INDEX=3 NCCL_IB_TC=104
+# NCCL_CROSS_NIC=0 NCCL_NET_DISABLE_INTRA=1 NCCL_PXN_DISABLE=0 HF_HUB_OFFLINE=1.
+# MASTER_ADDR is the IP of the first node's fabric interface.
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:zaya1-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+env:
+  PYTORCH_HIP_ALLOC_CONF: "expandable_segments:True"
+  # RCCL's default 4 MiB per-channel buffers need more device memory than this micro
+  # batch leaves once communicators span nodes: HIP out of memory in the first
+  # collective. 512 KiB fits.
+  NCCL_BUFFSIZE: "524288"
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # Full ZAYA1-base shape lives in zaya1.yaml (80 stages, hidden 2048).
+    model: zaya1.yaml
+    overrides:
+      wandb_project: "Primus_Pretrain"
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 1
+      log_avg_reset_interval: 10
+
+      # 30-step mock-data run (data parallel 64). micro_batch_size 352 is the
+      # single-node recipe's; its comment says how it was chosen. The headroom to
+      # the 256 GiB per GPU stays small (about 3 GiB on one node) and
+      # NCCL_BUFFSIZE above keeps the multi-node communicators inside it. If
+      # another image, Primus-Turbo or Transformer Engine build, or other
+      # GPU-memory users run out of memory at evaluation, lower micro_batch_size
+      # in steps of 8 and set global_batch_size to micro_batch_size x 64.
+      train_iters: 30
+      micro_batch_size: 352
+      # One micro batch per GPU per step at DP=64.
+      # Must be divisible by micro_batch_size * data_parallel_size.
+      global_batch_size: 22528
+      seq_length: 128
+      max_position_embeddings: 4096
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 1
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+
+      # Data parallel only. TP, PP, CP, EP and sequence parallel are rejected
+      # by zaya1_builder.
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      expert_model_parallel_size: 1
+      sequence_parallel: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # ZAYA1 kernel paths (Zaya1TransformerConfig fields, off by default in
+      # zaya1_base.yaml): flash attention, the fused norm, CCA and MoE
+      # elementwise chains, CCA's convolutions as GEMMs, and one data-parallel
+      # all-reduce per micro batch for every router's balancing-bias update,
+      # instead of one per MoE layer.
+      zaya_attn_flash: true
+      zaya_fuse_norm: true
+      zaya_fuse_cca: true
+      zaya_conv_gemm: true
+      zaya_fuse_moe: true
+      zaya_router_defer_ar: true
+
+      # Transformer Engine's fused cross-entropy on the output logits, in
+      # place of Megatron's path, which first copies the logits to fp32. Needs
+      # TE 2.20 or later. The ZAYA1 chunked cross-entropy (zaya_chunked_ce)
+      # stays off: it rounds each chunk's output-layer weight gradient to bf16
+      # before summing.
+      cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: te
+
+      # Average gradients inside the reduce-scatter, so Megatron skips its
+      # separate pass that first scales the gradient buffer by 1/DP. At DP=8
+      # the scale is a power of two, so the gradients come out the same.
+      ddp_average_in_collective: true
+
+      # Synthetic tokens. The mock-data patch forces NullTokenizer and
+      # clears these paths; vocab_size stays 262272 from zaya1.yaml.
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+      eval_interval: 100
+      eval_iters: 8
+
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # The 16 experts run as two Primus Turbo grouped GEMMs whose group sizes
+      # stay on the GPU, so no MoE layer waits on the host.
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_gemm: true
