@@ -472,6 +472,49 @@ class DeepseekV4MoE(MegatronModule):
         y = self.mega_moe_experts(x, topk_idx, topk_weights.to(torch.float32))
         return y.reshape(in_shape).to(hidden.dtype)
 
+    def _route_flb_compact(self, hidden: torch.Tensor, token_ids: Optional[torch.Tensor]):
+        """Force-LB "even" + MegaMoE (PRIMUS_FLB_COMPACT, default 0): ``(topk_weights, topk_idx)`` straight from the
+        router's top-k values (one small kernel, see ``FlbEvenOrderFn``) instead of the dense rewrite
+        (``rows_from_slots``) and the second ``topk`` in ``_mega_moe_forward``: the same pairs and gradients, in the
+        same order unless two of a token's top-k probabilities tie exactly (the kernel breaks ties by expert ascending,
+        torch.topk's tie order is unspecified -> only the combine summation order can change). Default off: -0.2 ms
+        on top of PRIMUS_TURBO_EP_DP_FUSED + PRIMUS_SHARED_OVERLAP_EP. None when it does not apply."""
+        if (
+            self._force_lb_mode != "even"
+            or os.environ.get("PRIMUS_FLB_COMPACT", "0") != "1"
+            or not hidden.is_cuda
+            or self.moe_router_topk > self.num_routed_experts
+        ):
+            return None
+        from primus.backends.megatron.core.transformer.moe._triton.v4_router_post import (
+            FlbEvenOrderFn,
+        )
+
+        if self.use_hash_router:
+            assert self.router is not None
+            if token_ids is None:
+                raise ValueError(
+                    f"layer {self.layer_idx} uses DeepseekV4HashRouter; "
+                    "token_ids is required (shape [B, S])."
+                )
+            probs, _ = self.router(hidden, token_ids)
+        else:
+            assert self.learned_router is not None
+            probs, _ = self.learned_router(hidden)
+        # probs is non-zero only on the real top-k, so topk() extracts exactly them (as in the dense rewrite)
+        topk_vals, _ = torch.topk(probs, self.moe_router_topk, dim=1)
+        return FlbEvenOrderFn.apply(topk_vals.to(probs.dtype), self.num_routed_experts)
+
+    def _mega_moe_forward_compact(
+        self, hidden: torch.Tensor, topk_weights: torch.Tensor, topk_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """``_mega_moe_forward`` with the compact pair already built."""
+        assert self.mega_moe_experts is not None
+        in_shape = hidden.shape
+        x = hidden.reshape(-1, self.hidden_size).to(torch.bfloat16)
+        y = self.mega_moe_experts(x, topk_idx, topk_weights.to(torch.float32))
+        return y.reshape(in_shape).to(hidden.dtype)
+
     def _build_local_experts(self, *, intermediate_size: int) -> nn.ModuleList:
         """Build a local :class:`nn.ModuleList` of clamped-SwiGLU experts.
 
@@ -1077,7 +1120,13 @@ class DeepseekV4MoE(MegatronModule):
             and _overlap.enabled("SHARED")
             and hidden.requires_grad
             and torch.is_grad_enabled()
-            and parallel_state.get_expert_model_parallel_world_size() == 1
+            and (
+                parallel_state.get_expert_model_parallel_world_size() == 1
+                # EP > 1 (PRIMUS_SHARED_OVERLAP_EP, default 1): the shared expert runs next to the router, the EP
+                # dispatch / combine and their rank-skew waits (DeepEP notify) -- same kernels, same grad order
+                # (bit-identical to 0 on DSv4-Flash 4L EP4 MBS4, -3.9 ms/step)
+                or os.environ.get("PRIMUS_SHARED_OVERLAP_EP", "1") != "0"
+            )
             and parallel_state.get_tensor_model_parallel_world_size() == 1
         )
         # (PRIMUS_PERSIST_ROUTER_BWD=1, EP = TP = 1, training): PersistForkFn hands the router / routed /
@@ -1135,9 +1184,21 @@ class DeepseekV4MoE(MegatronModule):
                 out = out + (br.done(y_shared) if br is not None else self.shared_expert(h_sh))
             return out
         if br is not None:
-            probs, _ = self._route(h_r, token_ids)
-            out = self._mega_moe_forward(h_e, probs)
+            flb = self._route_flb_compact(h_r, token_ids)
+            if flb is not None:
+                out = self._mega_moe_forward_compact(h_e, *flb)
+            else:
+                probs, _ = self._route(h_r, token_ids)
+                out = self._mega_moe_forward(h_e, probs)
             return out + br.done(y_shared)
+
+        if self.mega_moe_experts is not None and self.local_experts is None:
+            flb = self._route_flb_compact(hidden, token_ids)
+            if flb is not None:
+                out = self._mega_moe_forward_compact(hidden, *flb)
+                if self.shared_expert is not None and not self.shared_expert_overlap:
+                    out = out + self.shared_expert(hidden)
+                return out
 
         probs, routing_map = self._route(hidden, token_ids)  # [N, E], bool
 

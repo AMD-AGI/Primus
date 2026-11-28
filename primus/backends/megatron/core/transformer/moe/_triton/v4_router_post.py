@@ -675,3 +675,68 @@ class RowsFromSlotsFn(torch.autograd.Function):
             return None, None, None
         (slot,) = ctx.saved_tensors
         return None, d_probs.gather(1, slot), None
+
+
+@triton.jit
+def _flb_even_order_kernel(
+    VALS_PTR,  # [N, K] the router's top-k probabilities (torch.topk values, any order)
+    W_PTR,  # [N, K] out
+    IDX_PTR,  # [N, K] int64 out
+    RANK_PTR,  # [N, K] int64 out: output position of (n, k)
+    N,
+    K: tl.constexpr,
+    KP: tl.constexpr,
+    E: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """(n, k) -> expert slot (n * K + k) % E (the force-LB "even" cycle) with weight VALS[n, k], written at its rank
+    under (value descending, expert ascending): torch.topk(sorted) of the dense rows_from_slots row."""
+    pid = tl.program_id(0)
+    n = pid * BLOCK_N + tl.arange(0, BLOCK_N)
+    k = tl.arange(0, KP)
+    m = (n < N)[:, None] & (k < K)[None, :]
+    off = n[:, None].to(tl.int64) * K + k[None, :]
+    v = tl.load(VALS_PTR + off, mask=m, other=float("-inf"))
+    s = off % E
+    vj = v[:, None, :]
+    vk = v[:, :, None]
+    sj = s[:, None, :]
+    sk = s[:, :, None]
+    before = (k < K)[None, None, :] & ((vj > vk) | ((vj == vk) & (sj < sk)))
+    rank = tl.sum(before.to(tl.int32), axis=2)
+    dst = n[:, None].to(tl.int64) * K + rank
+    tl.store(W_PTR + dst, v, mask=m)
+    tl.store(IDX_PTR + dst, s, mask=m)
+    tl.store(RANK_PTR + off, rank.to(tl.int64), mask=m)
+
+
+class FlbEvenOrderFn(torch.autograd.Function):
+    """``(topk_weights, topk_idx)`` of the force-LB "even" rewrite straight from the router's top-k values: the same
+    pairs as ``rows_from_slots(slot, vals) -> probs.topk(K)``, ordered value descending, ties by expert ascending
+    (torch.topk leaves the tie order unspecified, so exact ties may come out permuted vs the dense path), without the
+    dense [N, E] rows and the second top-k. Gradient: d vals[n, k] = d w[n, rank(n, k)] (a
+    permutation, as the scatter / gather pair of the dense path)."""
+
+    @staticmethod
+    def forward(ctx, vals, num_experts):  # type: ignore[override]
+        N, K = vals.shape
+        v = vals.contiguous()
+        w = torch.empty_like(v)
+        idx = torch.empty((N, K), dtype=torch.int64, device=v.device)
+        rank = torch.empty((N, K), dtype=torch.int64, device=v.device)
+        if N > 0:
+            bn = 64
+            _flb_even_order_kernel[(triton.cdiv(N, bn),)](
+                v, w, idx, rank, N, K=K, KP=triton.next_power_of_2(K), E=int(num_experts), BLOCK_N=bn
+            )
+        ctx.mark_non_differentiable(idx)
+        ctx.set_materialize_grads(False)
+        ctx.save_for_backward(rank)
+        return w, idx
+
+    @staticmethod
+    def backward(ctx, d_w, d_idx):  # type: ignore[override]
+        if d_w is None:
+            return None, None
+        (rank,) = ctx.saved_tensors
+        return d_w.gather(1, rank), None
