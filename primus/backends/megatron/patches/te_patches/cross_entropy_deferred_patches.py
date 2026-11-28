@@ -214,6 +214,8 @@ def make_deferred_cross_entropy(original, round_once=None):
         return DeferredCrossEntropy.apply(logits, labels, round_once)
 
     te_parallel_cross_entropy._primus_deferred_ce = True
+    # read by kernels that fold an elementwise op into this cross entropy (Muse Spark's soft-cap)
+    te_parallel_cross_entropy._primus_deferred_round_once = round_once
     return te_parallel_cross_entropy
 
 
