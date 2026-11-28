@@ -2547,6 +2547,15 @@ def test_the_muse_spark_bool_keys_share_one_parser(value, expected):
     assert bool_flag(value, "some_key") is expected
 
 
+def test_model_types_re_exports_the_flag_utils_names():
+    """model_types re-exports bool_flag from primus.core.utils.flag_utils."""
+    from primus.backends.megatron.core.models.muse_spark import model_types
+    from primus.core.utils import flag_utils
+
+    assert "bool_flag" in model_types.__all__
+    assert model_types.bool_flag is flag_utils.bool_flag
+
+
 @pytest.mark.parametrize("value", [None, "", "   "])
 @pytest.mark.parametrize("default", [True, False])
 def test_an_unset_flag_takes_its_default(value, default):
