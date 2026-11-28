@@ -79,6 +79,7 @@ The `examples/megatron/guides/moe_package/run_*` scripts expose these as composa
 | Loss fusion | `--cross_entropy_fusion_impl te --cross_entropy_loss_fusion True` | Fuses large-vocab loss into one kernel to cut memory + launch overhead. |
 | DeepEP acceleration | `--enable_primus_turbo True --use_turbo_deepep True --turbo_deepep_num_cu 64 --turbo_deepep_use_comm_stream False --moe_shared_expert_overlap False --moe_router_dtype fp32` | GPU-side index calc + sync-free dispatch to cut redundant cross-node A2A traffic. |
 | Sync-free MoE | `--enable_primus_turbo True --turbo_sync_free_moe_stage <N>` | Removes CPU D2H syncs across Router → Dispatcher → Permutation → GroupMLP. |
+| Expert replication | `--moe_replica_planner ultraep` (with Turbo DeepEP and Turbo grouped GEMM) | Copies hot experts to lightly loaded EP ranks for the current routing so the busiest rank finishes sooner. See [MoE expert replication](./moe-expert-replication.md). |
 | NUMA binding | `export ENABLE_NUMA_BINDING=1` | Pins each GPU process to its NUMA socket for better memory bandwidth/stability. |
 | HIP kernarg pool | `export HSA_KERNARG_POOL_SIZE=12582912` | Enlarges the kernel-argument pool (12 MB) to avoid launch stalls under many small kernels. |
 | Manual GC | `--manual_gc True --manual_gc_interval 1` | Periodic host GC to remove iteration-time jitter on long runs. |

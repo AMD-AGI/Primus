@@ -20,6 +20,16 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 
+def reset_moe_replica_schedulers(model):
+    """The warmup micro-batch is not part of a step of the MoE replica schedulers (``moe_replica_planner``): make
+    them forget it, dropping its slot gradients."""
+    for model_chunk in model:
+        for m in model_chunk.modules():
+            replica = getattr(getattr(m, "token_dispatcher", None), "replica", None)
+            if replica is not None:
+                replica.reset()
+
+
 def run_pp_warmup(forward_step_func, model, optimizer, config):
     """Run a single fake forward+backward on every pipeline-parallel rank in parallel.
 
@@ -244,6 +254,8 @@ def run_pp_warmup(forward_step_func, model, optimizer, config):
     torch.cuda.synchronize()
 
     # --- 6. Wipe every trace of the warmup ---------------------------------------
+    # MoE expert replication first, so that a slot gradient it still returns lands in the main_grad zeroed next
+    reset_moe_replica_schedulers(model)
     # (a) main_grad buffers
     for model_chunk in model:
         if hasattr(model_chunk, "zero_grad_buffer"):

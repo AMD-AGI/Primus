@@ -12,6 +12,8 @@ from primus.backends.megatron.patches.args import rocm_arg_validation
 from primus.backends.megatron.patches.args.rocm_arg_validation import (
     ALLOC_CONF_ENVS,
     validate_cross_entropy_exclusivity,
+    validate_moe_replica,
+    validate_moe_routing_replay,
     validate_turbo_fp8_permute,
     validate_turbo_grouped_gemm_with_muon,
     validate_turbo_grouped_gemm_without_padding,
@@ -221,3 +223,228 @@ def test_expandable_segments_false_still_warns(captured_warnings, monkeypatch):
 def test_no_turbo_grouped_gemm_does_not_warn(captured_warnings, args):
     warn_turbo_grouped_gemm_without_expandable_segments(args)
     assert captured_warnings == []
+
+
+@pytest.mark.parametrize(
+    ("backend", "ok"),
+    [
+        ("default", True),
+        ("triton", True),
+        ("TRITON", True),
+        ("bf16:triton,fp8:ck", True),
+        ("other:triton", True),
+        ("fp8:ck", True),  # BF16 left to the default choice
+        ("ck", False),
+        ("bf16:hipblaslt,fp8:triton", False),
+        ("fp8:triton,other:ck", False),
+    ],
+)
+def test_moe_replica_bf16_backend(backend, ok):
+    args = _replica_args(turbo_grouped_gemm_backend=backend)
+    if ok:
+        validate_moe_replica(args)
+    else:
+        with pytest.raises(ValueError, match="BF16 backend"):
+            validate_moe_replica(args)
+
+
+def _dsv3_replica_args(**overrides):
+    # DeepSeek-V3: 3 dense layers and 58 MoE layers, hidden 7168, expert FFN 2048 with SwiGLU, BF16 main_grad
+    values = dict(
+        hidden_size=7168,
+        moe_ffn_hidden_size=2048,
+        swiglu=True,
+        num_layers=61,
+        moe_layer_freq=[0] * 3 + [1] * 58,
+        params_dtype="torch.bfloat16",
+        accumulate_allreduce_grads_in_fp32=False,
+    )
+    values.update(overrides)
+    return _replica_args(**values)
+
+
+def test_moe_replica_slot_memory():
+    expert = 2 * 2048 * 7168 + 2048 * 7168  # fc1 + fc2
+    per_slot_layer = expert * (2 + 2)  # BF16 weights and gradients
+    assert rocm_arg_validation.moe_replica_slot_bytes(_dsv3_replica_args()) == 58 * 4 * per_slot_layer
+    assert rocm_arg_validation.moe_replica_slot_bytes(_dsv3_replica_args(moe_replica_slots=32)) == (
+        58 * 32 * per_slot_layer
+    )
+    # gradients in fp32, as the owners' main_grad
+    fp32_grads = _dsv3_replica_args(accumulate_allreduce_grads_in_fp32=True)
+    assert rocm_arg_validation.moe_replica_slot_bytes(fp32_grads) == 58 * 4 * expert * (2 + 4)
+
+
+def test_moe_replica_memory_is_logged_without_touching_cuda(monkeypatch):
+    def no_cuda(*args, **kwargs):
+        raise AssertionError("validation runs before Megatron sets the device")
+
+    for name in ("is_available", "current_device", "get_device_properties"):
+        monkeypatch.setattr(rocm_arg_validation.torch.cuda, name, no_cuda)
+    logged = []
+    monkeypatch.setattr(rocm_arg_validation, "log_rank_0", logged.append)
+    validate_moe_replica(_dsv3_replica_args(moe_replica_planner="moonep", moe_replica_slots=32))
+    assert len(logged) == 1 and "304.5 GiB per GPU" in logged[0], logged
+    validate_moe_replica(
+        _dsv3_replica_args(moe_replica_planner="moonep", moe_replica_slots=32, pipeline_model_parallel_size=4)
+    )
+    assert "304.5 GiB summed over the pipeline stages" in logged[1], logged
+
+
+def _replica_args(**overrides):
+    values = {
+        "moe_replica_planner": "ultraep",
+        "moe_replica_placement": "per_step",
+        "moe_replica_slots": 4,
+        "moe_replica_min_rows": 1024,
+        "moe_replica_min_gain": 0.1,
+        "moe_replica_cost": 0,
+        "moe_replica_block": 1,
+        "moe_replica_replan_above": 0.0,
+        "moe_replica_log_interval": 0,
+        "enable_primus_turbo": True,
+        "use_turbo_deepep": True,
+        "use_turbo_grouped_gemm": True,
+        "moe_grouped_gemm": True,
+        "expert_model_parallel_size": 8,
+        "num_experts": 256,
+        "turbo_grouped_gemm_backend": "default",
+        "tensor_model_parallel_size": 1,
+        "expert_tensor_parallel_size": None,
+        "pipeline_model_parallel_size": 1,
+        "moe_expert_capacity_factor": None,
+        "overlap_grad_reduce": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_moe_replica_off_is_noop():
+    validate_moe_replica(SimpleNamespace())
+    validate_moe_replica(SimpleNamespace(moe_replica_planner=None))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"moe_replica_planner": "moonep", "moe_replica_slots": 32},
+        {"moe_replica_placement": "per_microbatch", "moe_replica_replan_above": 1.08},
+        {"turbo_grouped_gemm_backend": "triton"},
+        # the megatron.moe.replica_ddp patch defers the owners' grad-ready marking and waits for their all-gather
+        {"overlap_grad_reduce": True, "overlap_param_gather": True, "use_distributed_optimizer": True},
+        # each forward takes its micro-batch along for the backward
+        {"pipeline_model_parallel_size": 2, "moe_replica_placement": "per_microbatch"},
+        {"pipeline_model_parallel_size": 2, "num_layers_per_virtual_pipeline_stage": 1},
+        {"pipeline_model_parallel_size": 2, "patch_primus_pipeline": True, "pp_algorithm": "zero-bubble"},
+        # the end of the step and the slot restores sit on the split path of the EP communication overlap
+        {"overlap_moe_expert_parallel_comm": True},
+    ],
+)
+def test_moe_replica_accepts_supported(overrides):
+    validate_moe_replica(_replica_args(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"moe_replica_planner": "fixed"}, "ultraep or moonep"),
+        ({"moe_replica_placement": "per_layer"}, "per_step or per_microbatch"),
+        ({"moe_replica_slots": 0}, "moe_replica_slots must be >= 1"),
+        ({"moe_replica_min_gain": 1.0}, "moe_replica_min_gain must be in"),
+        ({"moe_replica_block": 0}, "moe_replica_block must be >= 1"),
+        ({"moe_replica_placement": "per_microbatch", "moe_replica_replan_above": 0.5}, "0 or >= 1"),
+        ({"moe_replica_replan_above": 1.08}, "requires moe_replica_placement=per_microbatch"),
+        ({"use_turbo_deepep": False}, "requires use_turbo_deepep=True"),
+        ({"expert_model_parallel_size": 1}, "expert_model_parallel_size > 1"),
+        ({"moe_replica_planner": "moonep"}, "moe_replica_slots >= num_experts"),
+        ({"turbo_grouped_gemm_backend": "ck"}, "turbo_grouped_gemm_backend=ck"),
+        ({"tensor_model_parallel_size": 2}, "tensor_model_parallel_size=1"),
+        ({"expert_tensor_parallel_size": 2}, "expert_tensor_parallel_size=1"),
+        ({"use_turbo_mega_moe": True}, "use_turbo_mega_moe"),
+        ({"fp8": "e4m3"}, "does not support fp8"),
+        ({"turbo_fused_grouped_gemm": True}, "turbo_fused_grouped_gemm"),
+        ({"delay_wgrad_compute": True}, "delay_wgrad_compute"),
+        ({"use_torch_fsdp2": True}, "use_torch_fsdp2"),
+        ({"moe_router_grad_merge": True}, "moe_router_grad_merge"),
+        ({"patch_zero_bubble": True}, "patch_zero_bubble"),
+        ({"patch_primus_pipeline": True, "pp_algorithm": "v-half"}, "pp_algorithm=v-half"),
+        (
+            {"patch_primus_pipeline": True, "pp_algorithm": "1f1b", "overlap_moe_expert_parallel_comm": True},
+            "patch_primus_pipeline schedules and overlap_moe_expert_parallel_comm",
+        ),
+        ({"mlp_chunks_for_training": 2}, "mlp_chunks_for_training > 1"),
+        ({"num_microbatches_with_partial_activation_checkpoints": 2}, "partial_activation_checkpoints"),
+        ({"moe_expert_capacity_factor": 1.0}, "token dropping"),
+        (
+            {"moe_router_force_load_balancing": True, "moe_router_force_load_balancing_type": "even"},
+            "force_load_balancing_type=even",
+        ),
+        ({"enable_cuda_graph": True}, "CUDA graphs"),
+        ({"gtp_weight_remat_size": 2}, "tensor_parallel_num_weight_shards > 1"),
+        ({"num_distributed_optimizer_instances": 2}, "num_distributed_optimizer_instances > 1"),
+        (
+            {"overlap_grad_reduce": True, "overlap_param_gather": True, "use_distributed_optimizer": False},
+            "overlap_param_gather only with the distributed optimizer",
+        ),
+    ],
+)
+def test_moe_replica_rejects_unsupported(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        validate_moe_replica(_replica_args(**overrides))
+
+
+def _replay_args(**overrides):
+    values = {
+        "moe_routing_replay_path": "/traces",
+        "moe_routing_replay_layers": None,
+        "moe_router_fusion": False,
+        "moe_router_force_load_balancing": False,
+        "moe_use_fused_router_with_aux_score": False,
+        "moe_router_force_biased": None,
+        "pipeline_model_parallel_size": 1,
+        "mtp_num_layers": None,
+        "recompute_granularity": None,
+        "recompute_layer_ids": None,
+        "recompute_modules": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"moe_routing_replay_layers": [10, 30, 44, 23]},
+        # moe_act recompute does not route again
+        {"recompute_granularity": "selective", "recompute_modules": ["moe_act"]},
+    ],
+)
+def test_moe_routing_replay_accepts_supported(overrides):
+    validate_moe_routing_replay(_replay_args(**overrides))
+    validate_moe_routing_replay(SimpleNamespace())
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        (
+            {"moe_routing_replay_path": None, "moe_routing_replay_layers": [0]},
+            "requires moe_routing_replay_path",
+        ),
+        ({"disable_primus_topk_router": True}, "disable_primus_topk_router=False"),
+        ({"moe_router_fusion": True}, "moe_router_fusion=False"),
+        ({"moe_use_fused_router_with_aux_score": True}, "moe_use_fused_router_with_aux_score=False"),
+        ({"moe_router_force_load_balancing": True}, "moe_router_force_load_balancing=False"),
+        ({"moe_router_force_biased": 0.3}, "moe_router_force_biased=None"),
+        ({"pipeline_model_parallel_size": 2}, "pipeline_model_parallel_size=1"),
+        ({"mtp_num_layers": 1}, "MTP"),
+        ({"recompute_granularity": "full"}, "recomputing MoE layers"),
+        ({"recompute_layer_ids": [0, 1]}, "recomputing MoE layers"),
+        ({"recompute_granularity": "selective", "recompute_modules": ["moe"]}, "recomputing MoE layers"),
+    ],
+)
+def test_moe_routing_replay_rejects_unsupported(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        validate_moe_routing_replay(_replay_args(**overrides))

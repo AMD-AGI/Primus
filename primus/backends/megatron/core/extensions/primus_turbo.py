@@ -133,6 +133,11 @@ except (ImportError, ModuleNotFoundError):
 from primus.backends.megatron.core.extensions._triton.inplace_add import (
     inplace_add_triton_,
 )
+from primus.backends.megatron.core.transformer.moe.replica.scheduler import (
+    ReplicaConfig,
+    ReplicaScheduler,
+    ReplicaSlots,
+)
 from primus.core.utils.gpu_arch import is_gfx1250
 from primus.core.utils.module_utils import warning_rank_0
 
@@ -312,6 +317,27 @@ def _flydsl_bf16_wgrad_can_accumulate(main_grad: Optional[torch.Tensor]) -> bool
     except ImportError:
         return False
     return True
+
+
+def _turbo_grouped_gemm_takes_segments() -> bool:
+    """Whether Primus-Turbo's BF16 ``grouped_gemm`` takes the weights as a list of segments, run in one launch
+    (an MoE layer's own experts and its replica slots, ``moe_replica_planner``)."""
+    try:
+        from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl import (  # noqa: F401
+            grouped_gemm_segments_impl,
+        )
+    except ImportError:
+        return False
+    return True
+
+
+def _require_turbo_grouped_gemm_segments() -> None:
+    if not _turbo_grouped_gemm_takes_segments():
+        raise RuntimeError(
+            "moe_replica_planner needs a Primus-Turbo whose grouped_gemm takes the weights in segments "
+            "(AMD-AGI/Primus-Turbo#675); rebuild Primus-Turbo from a commit that has it, or unset "
+            "moe_replica_planner"
+        )
 
 
 def _grouped_wgrad_accum_fusion(config) -> bool:
@@ -2483,6 +2509,8 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
 
         tp_size = get_pg_size(self._tp_group)
         assert tp_size == 1, "PrimusTurboGroupedLinear only supports tensor parallel size = 1"
+        # set by attach_replica (the megatron.moe.replica_attach patch) when the MoE layer replicates experts
+        self._replica_slots = None
 
         w0 = self.weight0
         buffer = torch.empty(
@@ -2701,6 +2729,9 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
             m_splits = m_splits.to(x.device)
 
         x, weights, fuse_wgrad_accum_pattern = self.prepare_weights(x)
+        weights, m_splits, fuse_wgrad_accum_pattern = self._with_replica_segments(
+            weights, m_splits, fuse_wgrad_accum_pattern
+        )
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -2734,8 +2765,47 @@ class PrimusTurboGroupedLinear(TEGroupedLinear):
                 trans_b=True,
                 fuse_bgrad_accum_pattern=fuse_wgrad_accum_pattern,
             )
+            if self._replica_slots is not None:
+                out = self._replica_slots.restore_before_backward(out)
 
         return out, None
+
+    def attach_replica(self, sched: ReplicaScheduler) -> None:
+        """This expert linear also computes the replica slots of ``sched``'s MoE layer; allocates them on the
+        device Megatron trains on (the weights may still be on the host). Marks the weights as a replica owner
+        for the ``megatron.moe.replica_ddp`` patch."""
+        self._replica_slots = ReplicaSlots(sched, self.weights, torch.cuda.current_device())
+        self.weights.moe_replica_owner = True
+
+    def _with_replica_segments(self, weights, m_splits, fuse_wgrad_accum_pattern):
+        """Dynamic expert replication: the weight operand of this micro-batch with the replica slots
+        (``ReplicaSlots.weight_segments``); unchanged without replication. What depends on Primus-Turbo is
+        decided here: which precisions take weight segments, and whether the slots' ``main_grad`` can take
+        the fused wgrad accumulation."""
+        slots = self._replica_slots
+        if slots is None:
+            return weights, m_splits, fuse_wgrad_accum_pattern
+        if (
+            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            or PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled()
+        ):
+            raise NotImplementedError(
+                "moe replica supports BF16 experts only: the slots hold BF16 weights and the FP8 / FP4 "
+                "grouped GEMMs of Primus-Turbo take no weight segments (validate_moe_replica rejects "
+                "this at startup)"
+            )
+        # one launch, one accumulation pattern: with replicas, fuse only if the slots' main_grad can take it
+        # too
+        if (
+            slots.sched.has_replicas
+            and fuse_wgrad_accum_pattern is not None
+            and not _bf16_grouped_wgrad_can_accumulate(slots.main_grad)
+        ):
+            fuse_wgrad_accum_pattern = None
+        weights, m_splits = slots.weight_segments(
+            weights, m_splits, fused=fuse_wgrad_accum_pattern is not None
+        )
+        return weights, m_splits, fuse_wgrad_accum_pattern
 
 
 class PrimusTurboColumnParallelGroupedLinear(PrimusTurboGroupedLinear):
@@ -2889,8 +2959,17 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 pad_multiple = 32
 
         use_turbo_grouped_gemm = args.use_turbo_grouped_gemm
+        # dynamic expert replication: the DeepEP dispatcher sees R * (L + B) physical experts, so the
+        # experts get tokens_per_expert (m_splits) with L + B groups per rank, the own experts and then
+        # the replica slots (ReplicaSlots.weight_segments)
+        self.replica = None
+        replica_cfg = ReplicaConfig.from_args(args)
+        if replica_cfg is not None:
+            _require_turbo_grouped_gemm_segments()
+            assert self.tp_size == 1, "moe replica needs expert tensor parallel size 1"
+            self.replica = ReplicaScheduler(replica_cfg, self.ep_group, config.num_moe_experts)
         self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
-            num_experts=config.num_moe_experts,
+            num_experts=self.replica.num_physical if self.replica is not None else config.num_moe_experts,
             router_topk=config.moe_router_topk,
             ep_group=self.ep_group,
             tp_group=self.tp_group,
@@ -2977,6 +3056,11 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 )
                 % self.config.num_moe_experts
             )
+        if self.replica is not None:
+            routing_map, probs, token_indices = self.replica.to_physical_routes(
+                routing_map, probs, token_indices, self.config.moe_router_topk
+            )
+            hidden_states = self.replica.end_step_after_backward(hidden_states)
 
         hidden_states, probs = self.deepep_dispatcher._pre_dispatch(
             hidden_states, probs, routing_map, token_indices
