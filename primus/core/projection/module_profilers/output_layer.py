@@ -6,6 +6,7 @@
 
 from typing import Optional
 
+from primus.core.projection import kernel_report
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.bench_harness.base import OUTPUT
 
@@ -55,29 +56,32 @@ class OutputLayerProfiler(BaseModuleProfiler):
         vocab_size = self.config.model_config.padded_vocab_size
 
         # Output projection GEMM fwd: [batch_tokens, hidden_size] x [hidden_size, vocab_size]
-        fwd_result = self._gemm_backend.simulate_gemm(
-            m=batch_tokens,
-            n=vocab_size,
-            k=hidden_size,
-            dtype="bf16",
-        )
+        with kernel_report.label("lm_head", "fwd"):
+            fwd_result = self._gemm_backend.simulate_gemm(
+                m=batch_tokens,
+                n=vocab_size,
+                k=hidden_size,
+                dtype="bf16",
+            )
         fwd_time = fwd_result.forward_time_ms
 
         # Backward: simulate actual dgrad + wgrad GEMMs
         # dgrad: [batch_tokens, vocab_size] x [vocab_size, hidden_size] -> [batch_tokens, hidden_size]
-        dgrad_result = self._gemm_backend.simulate_gemm(
-            m=batch_tokens,
-            n=hidden_size,
-            k=vocab_size,
-            dtype="bf16",
-        )
+        with kernel_report.label("lm_head", "dgrad"):
+            dgrad_result = self._gemm_backend.simulate_gemm(
+                m=batch_tokens,
+                n=hidden_size,
+                k=vocab_size,
+                dtype="bf16",
+            )
         # wgrad: [hidden_size, batch_tokens] x [batch_tokens, vocab_size] -> [hidden_size, vocab_size]
-        wgrad_result = self._gemm_backend.simulate_gemm(
-            m=hidden_size,
-            n=vocab_size,
-            k=batch_tokens,
-            dtype="bf16",
-        )
+        with kernel_report.label("lm_head", "wgrad"):
+            wgrad_result = self._gemm_backend.simulate_gemm(
+                m=hidden_size,
+                n=vocab_size,
+                k=batch_tokens,
+                dtype="bf16",
+            )
         bwd_time = dgrad_result.forward_time_ms + wgrad_result.forward_time_ms
 
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)

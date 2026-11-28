@@ -90,6 +90,7 @@ def main():
 
     if not script.exists():
         log_info(f"Backend prepare script not found: {script}")
+        return
 
     log_info(f"Running backend prepare: {script}")
     cmd = [

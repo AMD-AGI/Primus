@@ -24,8 +24,10 @@ class ModelParallelConfig:
     virtual_pipeline_model_parallel_size: int = 1
     context_model_parallel_size: int = 1
     expert_model_parallel_size: int = 1
+    expert_tensor_parallel_size: int = None  # None: the tensor-parallel size
     use_torch_fsdp2: bool = False
     use_distributed_optimizer: bool = False
+    accumulate_allreduce_grads_in_fp32: bool = False
     overlap_grad_reduce: bool = True
     overlap_param_gather: bool = False
     # Pipeline stage layer distribution
@@ -38,6 +40,9 @@ class ModelParallelConfig:
     recompute_method: str = None  # "uniform" (recompute every layer) or "block" (first N)
     # Megatron selective block recompute: global transformer layer indices (0..num_layers-1)
     recompute_layer_ids: Optional[List[int]] = None
+    # The layer benchmark ran the blocks checkpointed, so its backward already
+    # re-runs the forward the way training does (TorchTitan's compiled full AC).
+    recompute_measured_in_backward: bool = False
     # Precision-aware optimizer (Megatron `--use-precision-aware-optimizer`).
     # When enabled the optimizer state dtypes follow the *_dtype fields below;
     # the projection's bytes-per-param formula uses these to size the static
@@ -137,8 +142,9 @@ class ModelConfig:
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
     turbo_sync_free_moe_stage: int = 0  # 0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act
 
-    # Loss fusion – fuses cross-entropy with output layer avoiding full logits materialisation
+    # Fused vocab-parallel cross-entropy (the logits are still materialised by the output layer)
     cross_entropy_loss_fusion: bool = False
+    cross_entropy_fusion_impl: str = "native"  # "native" (Megatron's fused path) or "te"
 
     # ------------------------------------------------------------------
     # Sparse-embedding + HSTU (DLRM-v4 / TorchRec ranker) fields.
@@ -440,6 +446,12 @@ def hybrid_layer_types(args) -> Optional[list]:
     pattern = hybrid_layer_pattern(args)
     if pattern is not None:
         return list(pattern)
+    if getattr(args, "model_type", None) == "zaya1":
+        # ZAYA1 alternates CCA-attention-only and MoE-only stages; zaya_layers wins.
+        kinds = getattr(args, "zaya_layers", None) or [
+            "a" if i % 2 == 0 else "m" for i in range(args.num_layers)
+        ]
+        return ["*" if k == "a" else "E" for k in kinds]
     if not getattr(args, "is_hybrid_model", False):
         return None
     return allocate_hybrid_layers(args.num_layers, getattr(args, "hybrid_attention_ratio", 0.0) or 0.0)
