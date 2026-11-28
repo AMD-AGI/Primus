@@ -190,7 +190,9 @@ class MuseSparkModel(GPTModel):
     def _softcap(self, logits, m, cap):
         """The Triton soft-cap where it is bit-identical to the eager one (checked once), else the eager one."""
         if self._triton_softcap_ok(logits, m, cap):
-            from primus.backends.megatron.core.models.muse_spark.softcap_kernels import fused_softcap
+            from primus.backends.megatron.core.models.muse_spark.softcap_kernels import (
+                fused_softcap,
+            )
 
             return fused_softcap(logits, m, cap)
         return _apply_softcap(logits, m, cap)
