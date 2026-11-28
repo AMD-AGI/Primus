@@ -136,10 +136,42 @@ The matrix uses the same Dockerfile and SpecForge source pin for both variants.
 It streams the required files from the Primus checkout as the build context and
 requires a Linux Docker runner with BuildKit enabled. No GPU is needed to build.
 
-Relevant non-draft PRs and pushes to `main`, version-tag pushes, and manual
-dispatches trigger the workflow. Draft PRs wait until marked ready for review.
-The `ci:gpu` label does not gate image builds, matching the existing Primus image
-workflow. The build runs the Dockerfile's existing GPU-free checks.
+Build frequency:
+
+- Non-draft PRs build only for changes under `examples/specforge/` (including
+  Docker files and training recipes), `primus/backends/specforge/`, the image-build
+  workflow, or its `.github/scripts/specforge_image_changes.py` helper.
+  Draft PRs wait until marked ready for review.
+- Main is checked nightly at **06:23 UTC**. Both variants build only when tracked
+  image inputs differ from the last successful main publication of both variants.
+  Ordinary pushes to main do not trigger image builds.
+- Version-tag pushes (`v*`) and manual dispatches always build, even if inputs
+  are unchanged. Use manual dispatch when an immediate main image is needed.
+
+The nightly check covers the allowlisted build context (`primus/`, `runner/`,
+`examples/specforge/`, `primus_cli.py`, `pyproject.toml`, `LICENSE`, `README.md`)
+and `.gitattributes`, plus the workflow/change-check helper. It compares Git trees,
+so unrelated changes
+and fully reverted changes do not rebuild images. PR builds, skipped nights,
+failed runs, and partial/skipped publications cannot advance the reference.
+With no retained successful main publication, the first nightly bootstraps both
+variants. An unavailable published commit also triggers a recovery build, so a
+main history rewrite cannot leave every nightly failing on a missing object.
+Other Git comparison or GitHub API failures fail the check rather than silently
+skipping a build. Main publications are serialized; a nightly cannot cancel an
+active manual rebuild. Only PR runs cancel older in-progress runs.
+Mutable upstream dependencies changing without a
+tracked input change require a manual build or a pin update.
+
+The `ci:gpu` label does not gate image builds. The build runs the Dockerfile's
+existing GPU-free checks; the nightly decision runs on a lightweight hosted
+runner before allocating the Docker build runner.
+
+The main CPU CI runs the gate tests even for PRs outside the image path filters.
+Shared core/CLI changes intentionally wait for nightly image coverage unless a
+maintainer requests a manual image build. Reference lookup scans retained successful
+runs, including skipped nights, to find actual publication; this costs one job-list
+request per candidate run rather than maintaining separate writable checkpoint state.
 
 Main and version-tag builds publish the version-bearing tag described above.
 PR builds publish `pr-<number>-<version-bearing-tag>` so they cannot overwrite

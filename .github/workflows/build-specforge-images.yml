@@ -2,44 +2,53 @@ name: Build SpecForge Images
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "23 6 * * *"
   push:
-    branches: [main]
     tags: ["v*"]
-    paths:
-      - .github/workflows/build-specforge-images.yml
-      - examples/specforge/**
-      - primus/**
-      - runner/**
-      - primus_cli.py
-      - pyproject.toml
-      - LICENSE
-      - README.md
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/build-specforge-images.yml
+      - .github/scripts/specforge_image_changes.py
       - examples/specforge/**
-      - primus/**
-      - runner/**
-      - primus_cli.py
-      - pyproject.toml
-      - LICENSE
-      - README.md
+      - primus/backends/specforge/**
 
 permissions:
   contents: read
 
 concurrency:
   group: specforge-images-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Serialize main publications; a quiet nightly must not cancel a manual rebuild.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   IMAGE_REPOSITORY: docker.io/tasimage/primus-specforge
 
 jobs:
-  build:
-    # Match the main CI image build: drafts wait until ready for review.
+  changes:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      build: ${{ steps.changes.outputs.build }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ github.event_name == 'schedule' && '0' || '1' }}
+      - name: Check inputs since the last successful main publication
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/specforge_image_changes.py
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: build-docker
     timeout-minutes: 120
     strategy:

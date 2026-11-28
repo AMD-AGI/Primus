@@ -59,6 +59,16 @@ env:
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.8
 
 jobs:
+  specforge-image-gate-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Test SpecForge image build decisions
+        run: python3 -m unittest discover -s tests/scripts -p test_specforge_image_changes.py
+
   code-lint:
     runs-on: ubuntu-latest
     strategy:
