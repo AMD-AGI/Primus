@@ -408,6 +408,34 @@ def _lift_streams_in(
     return x
 
 
+def _final_norm(norm, x: torch.Tensor, post_process: bool) -> torch.Tensor:
+    """final_layernorm; PRIMUS_V4_FINAL_NORM_SBD (default on) with the rmsnorm_g90 PrimusTurboRMSNorm on the last
+    stage: the norm writes its output in the sequence-first [S, B, D] storage order and returns the [B, S, D] view,
+    so ``_lower_streams_out``'s transpose(0, 1).contiguous() is free, and its backward reads the output layer's
+    contiguous [S, B, D] gradient in place (two ~100 us transposing copies per microbatch). Same per-row math and
+    the same row order of the dgamma partials, so the same bits."""
+    if (
+        post_process
+        and x.dim() == 3
+        and x.is_contiguous()
+        and type(norm).__name__ == "PrimusTurboRMSNorm"
+        and not getattr(norm, "sequence_parallel", False)
+        and getattr(norm, "bias", None) is None
+        and x.is_cuda
+        and x.dtype in (torch.bfloat16, torch.float16)
+        and os.environ.get("PRIMUS_V4_FINAL_NORM_SBD", "1") != "0"
+    ):
+        from primus.backends.megatron.core.transformer.v4_attention_kernels._triton_common.rmsnorm_g90 import (
+            rmsnorm_g90,
+            rmsnorm_g90_enabled,
+        )
+
+        if rmsnorm_g90_enabled():
+            w = norm.weight + 1 if getattr(norm, "zero_centered_gamma", False) else norm.weight
+            return rmsnorm_g90(x, w, norm.eps, sbd=True)
+    return norm(x)
+
+
 def _lower_streams_out(
     x: torch.Tensor,
     *,
@@ -1316,7 +1344,7 @@ class DeepseekV4TransformerBlock(TransformerBlock):
             x = self.hyper_head(x)  # [B, S, D]
 
         if self.final_layernorm is not None:
-            x = self.final_layernorm(x)
+            x = _final_norm(self.final_layernorm, x, self.post_process)
 
         if not self.pre_process and len(self.layers) == 0 and self.final_layernorm is None:
             x = x.clone()

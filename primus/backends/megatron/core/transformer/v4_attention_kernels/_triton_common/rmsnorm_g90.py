@@ -44,7 +44,15 @@ def _glue_main_grad(gamma):
 
 
 @triton.jit
-def _rms_fwd_kernel(X, G, Y, RSTD, M, H: tl.constexpr, eps, BH: tl.constexpr, RB: tl.constexpr):
+def _sb_row(rows, SEQ, BAT):
+    """row t = b * SEQ + s of a [B, S, H] tensor stored as [S, B, H]: its storage row s * BAT + b."""
+    return (rows % SEQ) * BAT + rows // SEQ
+
+
+@triton.jit
+def _rms_fwd_kernel(
+    X, G, Y, RSTD, M, H: tl.constexpr, eps, BH: tl.constexpr, RB: tl.constexpr, SEQ=1, BAT=1, YSB: tl.constexpr = False
+):
     rows = tl.program_id(0) * RB + tl.arange(0, RB)
     cols = tl.arange(0, BH)
     rm = rows < M
@@ -54,13 +62,28 @@ def _rms_fwd_kernel(X, G, Y, RSTD, M, H: tl.constexpr, eps, BH: tl.constexpr, RB
     x = tl.load(X + off, mask=m2, other=0.0).to(tl.float32)
     rstd = 1.0 / tl.sqrt(tl.sum(x * x, axis=1) / H + eps)
     g = tl.load(G + cols, mask=cm, other=0.0).to(tl.float32)
+    if YSB:  # y written in [S, B, H] storage order (same values)
+        off = _sb_row(rows, SEQ, BAT)[:, None].to(tl.int64) * H + cols[None, :]
     tl.store(Y + off, (x * rstd[:, None] * g[None, :]).to(Y.dtype.element_ty), mask=m2)
     tl.store(RSTD + rows, rstd, mask=rm)
 
 
 @triton.jit
 def _rms_bwd_kernel(
-    DY, X, G, RSTD, DX, DGP, M, H: tl.constexpr, BH: tl.constexpr, RB: tl.constexpr, ROWS_PER_PROG
+    DY,
+    X,
+    G,
+    RSTD,
+    DX,
+    DGP,
+    M,
+    H: tl.constexpr,
+    BH: tl.constexpr,
+    RB: tl.constexpr,
+    ROWS_PER_PROG,
+    SEQ=1,
+    BAT=1,
+    DYSB: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     cols = tl.arange(0, BH)
@@ -74,7 +97,12 @@ def _rms_bwd_kernel(
         m2 = rm[:, None] & cm[None, :]
         off = rows[:, None].to(tl.int64) * H + cols[None, :]
         x = tl.load(X + off, mask=m2, other=0.0).to(tl.float32)
-        dy = tl.load(DY + off, mask=m2, other=0.0).to(tl.float32)
+        if DYSB:  # dy is the [B, S, H] view of an [S, B, H] tensor
+            dy = tl.load(
+                DY + _sb_row(rows, SEQ, BAT)[:, None].to(tl.int64) * H + cols[None, :], mask=m2, other=0.0
+            ).to(tl.float32)
+        else:
+            dy = tl.load(DY + off, mask=m2, other=0.0).to(tl.float32)
         rstd = tl.load(RSTD + rows, mask=rm, other=0.0)
         xh = x * rstd[:, None]
         dxh = dy * g[None, :]
@@ -133,7 +161,7 @@ def _rms_dg_partial_kernel(DY, X, RSTD, DGP, M, H: tl.constexpr, BC: tl.constexp
 
 class RMSNormG90Fn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, gamma, eps):  # type: ignore[override]
+    def forward(ctx, x, gamma, eps, sbd=False):  # type: ignore[override]
         H = x.shape[-1]
         x2 = x.reshape(-1, H)
         if not x2.is_contiguous():
@@ -141,10 +169,20 @@ class RMSNormG90Fn(torch.autograd.Function):
         M = x2.shape[0]
         BH = triton.next_power_of_2(H)
         rb = 2 if BH <= 8192 else 1
-        y = torch.empty_like(x2)
         rstd = torch.empty((M,), dtype=torch.float32, device=x.device)
         g = gamma.contiguous()
-        _rms_fwd_kernel[(triton.cdiv(M, rb),)](x2, g, y, rstd, M, H, float(eps), BH=BH, RB=rb, num_warps=4)
+        # sbd: x [B, S, H] -> y returned as the [B, S, H] view of an [S, B, H] tensor (the sequence-first layout the
+        # block hands to the output layer; its transpose(0, 1).contiguous() is then free)
+        sbd = bool(sbd) and x.dim() == 3
+        if sbd:
+            Bb, Ss = x.shape[0], x.shape[1]
+            y = torch.empty((Ss, Bb, H), dtype=x.dtype, device=x.device)
+            _rms_fwd_kernel[(triton.cdiv(M, rb),)](
+                x2, g, y, rstd, M, H, float(eps), BH=BH, RB=rb, SEQ=Ss, BAT=Bb, YSB=True, num_warps=4
+            )
+        else:
+            y = torch.empty_like(x2)
+            _rms_fwd_kernel[(triton.cdiv(M, rb),)](x2, g, y, rstd, M, H, float(eps), BH=BH, RB=rb, num_warps=4)
         ctx.save_for_backward(x2, g, rstd)
         ctx.x_shape = x.shape
         # PRIMUS_GLUE_RMSNORM=1: dgamma goes straight into gamma.main_grad (no DDP hook copy / add); flagged in
@@ -154,19 +192,32 @@ class RMSNormG90Fn(torch.autograd.Function):
             gamma.grad_added_to_main_grad = True
             gamma._primus_fwd_claim = True
             ctx.wparam = gamma
+        if sbd:
+            return y.transpose(0, 1)
         return y.view(x.shape)
 
     @staticmethod
     def backward(ctx, dy):  # type: ignore[override]
         x2, g, rstd = ctx.saved_tensors
         M, H = x2.shape
-        dy2 = dy.reshape(-1, H)
-        if not dy2.is_contiguous():
-            dy2 = dy2.contiguous()
+        sbk = {}
+        if (
+            dy.dim() == 3
+            and not dy.is_contiguous()
+            and dy.stride() == (H, dy.shape[0] * H, 1)
+            and os.environ.get("PRIMUS_RMSNORM_G90_DYSB", "1") != "0"
+        ):
+            # dy is the [B, S, H] view of a contiguous [S, B, H] gradient: read it in place (no transposing copy)
+            dy2 = dy.transpose(0, 1)
+            sbk = dict(SEQ=dy.shape[1], BAT=dy.shape[0], DYSB=True)
+        else:
+            dy2 = dy.reshape(-1, H)
+            if not dy2.is_contiguous():
+                dy2 = dy2.contiguous()
         BH = triton.next_power_of_2(H)
         rb = 2 if BH <= 8192 else 1
         dx = torch.empty_like(x2)
-        if os.environ.get("PRIMUS_RMSNORM_G90_BWD", "loop") == "split":
+        if os.environ.get("PRIMUS_RMSNORM_G90_BWD", "loop") == "split" and not sbk:
             # dx row-parallel + dgamma column-parallel partials (two passes over x, dy; no serial row loops)
             _rms_dx_kernel[(triton.cdiv(M, rb),)](dy2, x2, g, rstd, dx, M, H, BH=BH, RB=rb, num_warps=4)
             RS = 64
@@ -181,7 +232,7 @@ class RMSNormG90Fn(torch.autograd.Function):
             P = triton.cdiv(M, rpp)
             dgp = torch.empty((P, H), dtype=torch.float32, device=x2.device)
             _rms_bwd_kernel[(P,)](
-                dy2, x2, g, rstd, dx, dgp, M, H, BH=BH, RB=rb, ROWS_PER_PROG=rpp, num_warps=8
+                dy2, x2, g, rstd, dx, dgp, M, H, BH=BH, RB=rb, ROWS_PER_PROG=rpp, num_warps=8, **sbk
             )
         wparam, ctx.wparam = ctx.wparam, None
         mg = _glue_main_grad(wparam) if wparam is not None else None
@@ -201,11 +252,11 @@ class RMSNormG90Fn(torch.autograd.Function):
                 dg = torch.empty_like(g)
                 _rms_dg_reduce_kernel[(triton.cdiv(H, 64),)](dgp, dg, P, H, BH=64, BP=64, num_warps=4)
                 mg.view(-1).copy_(dg) if first else mg.view(-1).add_(dg)
-            return dx.view(ctx.x_shape), _get_dummy_wgrad(list(g.shape), g.dtype), None
+            return dx.view(ctx.x_shape), _get_dummy_wgrad(list(g.shape), g.dtype), None, None
         dg = torch.empty_like(g)
         _rms_dg_reduce_kernel[(triton.cdiv(H, 64),)](dgp, dg, P, H, BH=64, BP=64, num_warps=4)
-        return dx.view(ctx.x_shape), dg, None
+        return dx.view(ctx.x_shape), dg, None, None
 
 
-def rmsnorm_g90(x: torch.Tensor, gamma: torch.Tensor, eps: float) -> torch.Tensor:
-    return RMSNormG90Fn.apply(x, gamma, eps)
+def rmsnorm_g90(x: torch.Tensor, gamma: torch.Tensor, eps: float, sbd: bool = False) -> torch.Tensor:
+    return RMSNormG90Fn.apply(x, gamma, eps, sbd)

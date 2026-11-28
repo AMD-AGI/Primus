@@ -112,6 +112,13 @@ def _gluon_b3_enabled() -> bool:
     return _HAVE_GLUON
 
 
+def _dpr_row() -> bool:
+    """PRIMUS_HC_DPR_ROW (default on): the folded-norm dpre partials are stored row-major [M, NC, K] (each row's 64
+    partials contiguous instead of 64 scattered 4 B stores in _hc_norm_dpre_bwd_kernel; MBS4 101 -> 61 us); same values,
+    read by _hc_pre_bwd_kernel in the same loop / summation order (bitwise checked)."""
+    return os.environ.get("PRIMUS_HC_DPR_ROW", "1") != "0"
+
+
 def hc_fused_enabled() -> bool:
     return os.environ.get("PRIMUS_HC_FUSED", "0") == "1"
 
@@ -415,6 +422,7 @@ def _hc_pre_bwd_kernel(
     BLOCK_D: tl.constexpr,
     PARTS: tl.constexpr = False,
     NCP: tl.constexpr = 0,
+    DPR_ROW: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -432,7 +440,10 @@ def _hc_pre_bwd_kernel(
 
     # dpre_k = <dcollapsed, x_k>
     dpre = tl.zeros((BLOCK_M, K), dtype=tl.float32)
-    if PARTS:  # per-column-tile partials from _hc_dpre2d_kernel
+    if PARTS and DPR_ROW:  # [M, NC, K] partials (row-major, from the folded-norm backward), same loop / order
+        for c in range(0, NC):
+            dpre += tl.load(DPREP + r2 * (NC * K) + c * K + kk[None, :], mask=m2, other=0.0)
+    elif PARTS:  # per-column-tile partials from _hc_dpre2d_kernel
         for c in range(0, NC):
             dpre += tl.load(DPREP + c * M * K + r2 * K + kk[None, :], mask=m2, other=0.0)
     else:
@@ -989,11 +1000,13 @@ class HCPreFn(torch.autograd.Function):
         two_d = f["two_d"] and D % f["t2_bc"] == 0 and (not has_post or link.nc > 0)
         dgamma = None
         dgp = None
+        dpr_row = False
         tail = use_gl and ctx.direct is not None
         if ctx.fold and tail:
             dbc = f["t2_bc"]
             nc = D // dbc
-            dcoll, dprep, dgp = norm_dpre_bwd(x3, pre, gamma, rstd_n, dcoll, dbc, reduce=False)
+            dpr_row = _dpr_row()
+            dcoll, dprep, dgp = norm_dpre_bwd(x3, pre, gamma, rstd_n, dcoll, dbc, reduce=False, rowmaj=dpr_row)
             n_prog = triton.cdiv(M, f["rm_bm"])
             part = torch.empty((NP, n_prog), dtype=torch.float32, device=dev)
         elif ctx.fold:
@@ -1059,6 +1072,7 @@ class HCPreFn(torch.autograd.Function):
             BLOCK_D=f["row_bd"],
             num_warps=f["rm_warps"] if two_d else f["row_warps"],
             **({"NCP": link.nc} if (has_post and two_d and link.nc != nc) else {}),
+            DPR_ROW=dpr_row,
         )
         if use_gl:
             bt, ts = f["gl_bt"], f["gl_tsplit"]

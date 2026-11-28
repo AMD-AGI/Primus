@@ -43,6 +43,34 @@ def _v4_fused_ce_enabled() -> bool:
     return os.environ.get("FUSED_LINEAR_CE", "0") == "1"
 
 
+def _embed_sbd_view(emb, input_ids, training: bool):
+    """PRIMUS_V4_EMB_VIEW (default on): the ``[S, B, D]`` decoder input as the transposed VIEW of the ``[B, S, D]``
+    word-embedding output. LanguageModelEmbedding copies ``[b s h] -> [s b h]`` (``.contiguous()``) and the block's
+    HC lift transposes it straight back (a second full copy, ~95 us each at MBS4); with the view neither copy runs
+    and the lift reads the gather output directly. Same values and the same backward (views only). Taken only
+    when the embedding adds nothing else (no position / tokentype embedding, no MuP scale, no fp32 residual, no
+    SP / reduce-scatter, dropout inactive); returns None otherwise."""
+    if os.environ.get("PRIMUS_V4_EMB_VIEW", "1") == "0" or emb is None:
+        return None
+    cfg = emb.config
+    drop = getattr(emb, "embedding_dropout", None)
+    if (
+        getattr(emb, "add_position_embedding", True)
+        or getattr(emb, "tokentype_embeddings", None) is not None
+        or getattr(emb, "reduce_scatter_embeddings", True)
+        or (getattr(cfg, "use_mup", False) and getattr(cfg, "mup_embedding_mult", 1.0) != 1.0)
+        or getattr(cfg, "fp32_residual_connection", False)
+        or getattr(cfg, "sequence_parallel", False)
+        or drop is None
+        or (training and float(getattr(drop, "p", 1.0)) != 0.0)
+    ):
+        return None
+    out = emb.word_embeddings(input_ids)
+    if out.dim() != 3 or not out.is_contiguous():
+        return out.transpose(0, 1).contiguous()
+    return out.transpose(0, 1)
+
+
 class DeepseekV4Model(LanguageModule):
     """DeepSeek-V4 language model rooted on LanguageModule."""
 
@@ -245,7 +273,9 @@ class DeepseekV4Model(LanguageModule):
                     position_ids = (
                         input_ids.new_arange(seq, dtype=input_ids.dtype).unsqueeze(0).expand(batch, -1)
                     )
-                decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
+                decoder_input = _embed_sbd_view(self.embedding, input_ids, self.training)
+                if decoder_input is None:
+                    decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
             else:
                 decoder_input = None
 

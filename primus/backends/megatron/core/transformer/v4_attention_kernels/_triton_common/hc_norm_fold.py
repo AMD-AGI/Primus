@@ -93,10 +93,24 @@ def _hc_collapse_norm_fwd_kernel(
 # ------------------------------------------------------------------------------------------------
 @triton.jit
 def _dpre_store(
-    DPREP, xk, dhf, c_t, t64, rm, M, k: tl.constexpr, RB: tl.constexpr, NCT: tl.constexpr, BC: tl.constexpr
+    DPREP,
+    xk,
+    dhf,
+    c_t,
+    t64,
+    rm,
+    M,
+    k: tl.constexpr,
+    RB: tl.constexpr,
+    NCT: tl.constexpr,
+    BC: tl.constexpr,
+    ROWMAJ: tl.constexpr = False,
 ):
     pk = tl.sum(tl.reshape(xk.to(tl.float32) * dhf, (RB, NCT, BC)), axis=2)  # [RB, NCT]
-    tl.store(DPREP + c_t[None, :].to(tl.int64) * M * 4 + t64[:, None] * 4 + k, pk, mask=rm[:, None])
+    if ROWMAJ:  # [M, NCT, 4]: one row's partials contiguous
+        tl.store(DPREP + t64[:, None] * (NCT * 4) + c_t[None, :] * 4 + k, pk, mask=rm[:, None])
+    else:  # [NCT, M, 4]
+        tl.store(DPREP + c_t[None, :].to(tl.int64) * M * 4 + t64[:, None] * 4 + k, pk, mask=rm[:, None])
 
 
 @triton.jit
@@ -115,6 +129,7 @@ def _hc_norm_dpre_bwd_kernel(
     RB: tl.constexpr,
     BC: tl.constexpr,
     NPROG: tl.constexpr,
+    ROWMAJ: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
     cols = tl.arange(0, BD)
@@ -155,10 +170,10 @@ def _hc_norm_dpre_bwd_kernel(
         dhb = ((dxh - xh * mm[:, None]) * rstd[:, None]).to(DH.dtype.element_ty)
         tl.store(DH + tc[:, None] * D + cols[None, :], dhb, mask=m2c)
         dhf = dhb.to(tl.float32)
-        _dpre_store(DPREP, x0, dhf, c_t, tc, rmc, M, 0, RB, NCT, BC)
-        _dpre_store(DPREP, x1, dhf, c_t, tc, rmc, M, 1, RB, NCT, BC)
-        _dpre_store(DPREP, x2, dhf, c_t, tc, rmc, M, 2, RB, NCT, BC)
-        _dpre_store(DPREP, x3, dhf, c_t, tc, rmc, M, 3, RB, NCT, BC)
+        _dpre_store(DPREP, x0, dhf, c_t, tc, rmc, M, 0, RB, NCT, BC, ROWMAJ)
+        _dpre_store(DPREP, x1, dhf, c_t, tc, rmc, M, 1, RB, NCT, BC, ROWMAJ)
+        _dpre_store(DPREP, x2, dhf, c_t, tc, rmc, M, 2, RB, NCT, BC, ROWMAJ)
+        _dpre_store(DPREP, x3, dhf, c_t, tc, rmc, M, 3, RB, NCT, BC, ROWMAJ)
         dg += dy * xh
     tl.store(DGP + pid * D + cols, tl.sum(dg, axis=0), mask=cm)
 
@@ -199,7 +214,7 @@ def collapse_norm_fwd(x3, pre, gamma, eps):
     return y, rstd
 
 
-def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc, reduce=True):
+def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc, reduce=True, rowmaj=False):
     """-> dh [M, D] (bf16, = HC dcoll), dprep [D/bc, M, 4] fp32 partials, dgamma (gamma dtype); with
     ``reduce=False`` the [P, D] fp32 dgamma partials instead of dgamma (fuse-hc reduces them in its tail launch).
     """
@@ -212,7 +227,8 @@ def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc, reduce=True):
     dev = x3.device
     dh = torch.empty((M, D), dtype=x3.dtype, device=dev)
     nc = D // bc
-    dprep = torch.empty((nc, M, K), dtype=torch.float32, device=dev)
+    # rowmaj: dprep [M, nc, K] (each row's partials contiguous: one 256 B store / load per row), else [nc, M, K]
+    dprep = torch.empty((M, nc, K) if rowmaj else (nc, M, K), dtype=torch.float32, device=dev)
     rb = f["bwd_rb"]
     nprog = min(triton.cdiv(M, rb), f["bwd_ppc"] * _n_cu(dev))
     dgp = torch.empty((nprog, D), dtype=torch.float32, device=dev)
@@ -231,6 +247,7 @@ def norm_dpre_bwd(x3, pre, gamma, rstd, dy, bc, reduce=True):
         RB=rb,
         BC=bc,
         NPROG=nprog,
+        ROWMAJ=rowmaj,
         num_warps=f["bwd_warps"],
     )
     if not reduce:
