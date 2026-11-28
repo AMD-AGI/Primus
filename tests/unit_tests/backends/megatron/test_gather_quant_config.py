@@ -69,6 +69,34 @@ def test_incompatible_consumer_is_rejected(key, value):
         gather.validate_gather_quant_config(config(**{key: value}))
 
 
+@pytest.mark.parametrize(
+    "gfx1250, turbo_attrs, accepted",
+    [
+        (True, {"CONSUMES_PERMUTE_SEAM_MXFP8": True}, True),
+        (False, {"CONSUMES_PERMUTE_SEAM_MXFP8": True}, False),
+        (True, {}, False),
+    ],
+    ids=["gfx1250", "other_arch", "turbo_without_the_flag"],
+)
+def test_mxfp8_consumer_needs_gfx1250_and_turbos_handoff(monkeypatch, gfx1250, turbo_attrs, accepted):
+    """Turbo's fused grouped MXFP8 MLP gathers in its quantizer like the MXFP4 one, on gfx1250 and where it says
+    so. Anywhere else it would quantize the permute's unwritten placeholder: refused with the reason, and MXFP4
+    is not affected."""
+    import primus.core.utils.gpu_arch as gpu_arch
+
+    monkeypatch.setattr(gpu_arch, "is_gfx1250", lambda: gfx1250)
+    module = ModuleType("primus_turbo.pytorch.ops.grouped_mlp_fp8")  # a stand-in for Primus-Turbo's module
+    module.__dict__.update(turbo_attrs)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    mx8 = config(fp4=None, fp4_recipe=None, fp8="e4m3", fp8_recipe="mxfp8")
+    if accepted:
+        assert gather.validate_gather_quant_config(mx8) == (True, True)
+    else:
+        with pytest.raises(ValueError, match="gfx1250 and a Primus-Turbo .* CONSUMES_PERMUTE_SEAM_MXFP8"):
+            gather.validate_gather_quant_config(mx8)
+        assert gather.validate_gather_quant_config(config()) == (True, True)
+
+
 def test_backward_requires_forward():
     with pytest.raises(ValueError, match="requires moe_permute_quant_fusion"):
         gather.validate_gather_quant_config(config(moe_permute_quant_fusion=False))
@@ -88,7 +116,7 @@ def test_only_dispatcher_scope_opts_in_and_restores_after_error(monkeypatch, bac
     module = ModuleType("megatron.core.transformer.moe.token_dispatcher")
     module.MoEAlltoAllTokenDispatcher = Dispatcher
     monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setattr(gather, "_uses_mxfp4", lambda: True)
+    monkeypatch.setattr(gather, "_uses_mx", lambda: True)
     wrapped = gather.configure_gather_quant_fusion(
         config(moe_backward_permute_quant_fusion=backward), permute
     )
@@ -100,5 +128,5 @@ def test_only_dispatcher_scope_opts_in_and_restores_after_error(monkeypatch, bac
     with pytest.raises(RuntimeError, match="test failure"):
         Dispatcher().dispatch_preprocess("raise")
     assert wrapped() == expected_eager
-    monkeypatch.setattr(gather, "_uses_mxfp4", lambda: False)
+    monkeypatch.setattr(gather, "_uses_mx", lambda: False)
     assert Dispatcher().dispatch_preprocess() == expected_eager

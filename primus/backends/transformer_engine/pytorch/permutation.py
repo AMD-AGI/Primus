@@ -1042,7 +1042,7 @@ def moe_permute_with_probs(
         Number of output tokens (rows in the permuted buffer). Must be > 0,
         e.g. int(routing_map.sum()) or num_tokens * top_k.
     fuse_permute_quant : bool, default = False
-        Defer activation gathering to a paired Turbo MXFP4 quantizer. The caller
+        Defer activation gathering to a paired Turbo MXFP4 / MXFP8 quantizer. The caller
         must guarantee that the next value consumer is the supported quantizer.
     fuse_backward_permute_quant : bool, default = False
         Also enroll the paired grouped MLP output for deferred backward gathering.

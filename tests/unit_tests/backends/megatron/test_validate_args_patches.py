@@ -447,3 +447,18 @@ class TestFp4NativeTeAutocastTurboGemmGuard:
             fp4_use_native_te_autocast=True,
             transformer_impl="local",
         )
+
+
+def test_validate_args_on_rocm_checks_mxfp8_on_gfx1250(monkeypatch):
+    """MXFP8 on gfx1250 without a Primus-Turbo GEMM is refused by the ROCm argument validation."""
+    _install_fake_megatron(monkeypatch)
+
+    import primus.core.utils.gpu_arch as gpu_arch
+    from primus.backends.megatron.patches.args.rocm_arg_validation import (
+        validate_args_on_rocm,
+    )
+
+    monkeypatch.setattr(gpu_arch, "is_gfx1250", lambda: True)
+    monkeypatch.setenv("NVTE_ROCM_ENABLE_MXFP8", "1")
+    with pytest.raises(ValueError, match="fp8_recipe=mxfp8 on gfx1250"):
+        validate_args_on_rocm(_make_args(fp8="e4m3", fp8_recipe="mxfp8"))

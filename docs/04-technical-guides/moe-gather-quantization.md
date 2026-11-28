@@ -34,6 +34,10 @@ moe_permute_quant_fusion: true
 moe_backward_permute_quant_fusion: true
 ```
 
+On MI455X/gfx1250 the fused grouped MXFP8 MLP takes the same handoff: `fp8: e4m3` and
+`fp8_recipe: mxfp8` replace the `fp4` pair, with a Primus-Turbo whose `grouped_mlp_fp8`
+exports `CONSUMES_PERMUTE_SEAM_MXFP8`. Any other MXFP8 setup is refused.
+
 Set `moe_backward_permute_quant_fusion: false` for forward-only fusion. Both fusion arguments are false
 by default; they are not a general-purpose replacement for every permutation
 consumer. The forward placeholder has no activation values until its registered
@@ -78,7 +82,7 @@ validation.
 ## Argument-based integration
 
 Primus validates the topology and Turbo consumer from the training arguments,
-then opts in only inside the all-to-all dispatcher’s MXFP4 forward path. Generic
+then opts in only inside the all-to-all dispatcher’s MXFP4 / MXFP8 forward path. Generic
 permutation calls remain eager. Direct callers use
 `moe_permute_with_probs(..., fuse_permute_quant=True,
 fuse_backward_permute_quant=True)` and must provide the supported Turbo consumer.

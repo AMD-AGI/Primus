@@ -69,6 +69,27 @@ tas-20261019's predates them. The default, `auto`, turns MegaMoE on when the Pri
 and `False` keeps it off. With MegaMoE, the yaml's `gradient_accumulation_fusion: true` covers the expert
 weights too: their wgrads accumulate straight into `main_grad`.
 
+**MXFP8.** `EXP=examples/megatron/configs/MI455X/deepseek_v3-MXFP8-pretrain.yaml` runs the proxy in MXFP8
+(`fp8: e4m3`, `fp8_recipe: mxfp8`: E4M3 data, one E8M0 scale per 32 values along each GEMM's reduction
+dimension), quantized by Primus-Turbo; TransformerEngine's autocast stays off on gfx1250 and the LM head
+stays BF16. It needs a Primus-Turbo with the gfx1250 MXFP8 GEMMs, through `TURBO_DIR` until the default
+image has one. It quantizes the MLA and shared-expert linears and the routed experts:
+
+- MegaMoE (EP 2 to 8, so the 4-GPU defaults): the yaml's `turbo_mega_moe_precision: mxfp8`;
+  `--turbo_mega_moe_precision bf16` keeps the routed experts BF16.
+- Grouped GEMMs: `USE_TURBO_MEGA_MOE=False`; `--turbo_fused_grouped_gemm True` runs them as the fused MXFP8
+  grouped MLP.
+- One GPU: the 1-GPU variant with the fused grouped MLP, and the MoE permute fused into the experts'
+  quantizer:
+
+  ```bash
+  EXP=examples/megatron/configs/MI455X/deepseek_v3-MXFP8-pretrain.yaml \
+  GPUS_PER_NODE=1 PRIMUS_EP=1 PRIMUS_NUM_EXPERTS=32 GBS=16 USE_TURBO_MEGA_MOE=False \
+      bash examples/megatron/models/deepseek-v3/run_deepseek_v3_proxy_mi455x.sh \
+      --turbo_fused_grouped_gemm True --moe_permute_quant_fusion True \
+      --moe_backward_permute_quant_fusion True
+  ```
+
 **Another Primus-Turbo checkout.** Build it in place for the image once (gfx1250 only, OpenMPI off the
 paths so rocSHMEM is not linked), then pass it as `TURBO_DIR`; the launcher puts it first on `PYTHONPATH`:
 
