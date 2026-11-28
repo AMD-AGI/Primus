@@ -99,6 +99,14 @@ def _bwd_takes_dsink_main_grad() -> bool:
     return "dsink_main_grad" in inspect.signature(bwd).parameters
 
 
+@functools.lru_cache(maxsize=1)
+def _bwd_takes_dkv_defer() -> bool:
+    import inspect
+
+    _, bwd = _kernels()
+    return "dkv_defer" in inspect.signature(bwd).parameters
+
+
 def _dsink_kwargs():
     """PRIMUS_LAUNCH_DSINK: the sink's ``(main_grad, accumulate)`` set by the adapter's backward is passed as
     ``dsink_main_grad`` (Turbo writes the sink gradient there and returns None for it). Taking the entry tells the
@@ -263,6 +271,18 @@ def sparse_mla_bwd_turbo_gfx1250_ps(q, kv, o, do, topk_local, lse, attn_sink, kv
         b_iter = ()
     else:
         b_iter = range(batch)
+    # PRIMUS_V4_CSA_GATHER_LATE=1: the CSA dKV entry lists + gathers of all samples are issued on the dKV stream
+    # after the last sample's pp kernel instead of next to the following samples' pp kernels (which they slow down
+    # by more than they take). Same kernels and inputs -> same bits.
+    late = None
+    if (
+        band is not None
+        and "dkv_stream" in side
+        and os.environ.get("PRIMUS_V4_CSA_GATHER_LATE", "0") == "1"
+        and _bwd_takes_dkv_defer()
+    ):
+        late = []
+        side["dkv_defer"] = late
     for b in b_iter:
         r = slice(b * S, (b + 1) * S)
         k = slice(b * nkv, (b + 1) * nkv)
@@ -283,6 +303,12 @@ def sparse_mla_bwd_turbo_gfx1250_ps(q, kv, o, do, topk_local, lse, attn_sink, kv
             dkv_out=dkv[k],
             delta_out=delta[r],
         )
+    if late:
+        st = side["dkv_stream"]
+        st.wait_stream(torch.cuda.current_stream(q.device))
+        with torch.cuda.stream(st):
+            for fn in late:
+                side["dkv_keep"].extend(fn())
     dsink = None
     if attn_sink is not None:
         tgt = _dsink_kwargs().get("dsink_main_grad")
