@@ -24,6 +24,7 @@ from megatron.core.models.common.embeddings.rope_utils import (  # noqa: E402
 from primus.backends.megatron.core.transformer.muse_spark.attention import (  # noqa: E402
     MuseSparkQKNorm,
     MuseSparkSelfAttention,
+    _turbo_shape_error,
 )
 
 EPS = 1e-5
@@ -85,6 +86,10 @@ def test_fused_qkv_matches_megatron_split_norm_rope(rope):
     S, B, G, H, D, hidden = 256, 2, 4, 8, 64, 512
     a = _attention(G, H, D, hidden)
     freqs = _freqs(S, D)
+    probe = torch.empty(S, B, G, (2 * H + 2) * D, device=DEV, dtype=torch.bfloat16)
+    why = _turbo_shape_error(probe, freqs if rope else None, [H * D, H * D, D, D])
+    if why is not None:
+        pytest.skip(f"the fused path does not run here: {why}")
     h0 = torch.randn(S, B, hidden, device=DEV).bfloat16()
     outs, grads = [], []
     # Megatron's split / norm / unfused RoPE, the same with the RoPE rounded once, then the fused path
