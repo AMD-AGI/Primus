@@ -81,6 +81,8 @@ muse_spark_fused_centered_norm: true
 muse_spark_compile_norms: false
 # with compile_norms: also fold each centered norm into the gated residual before it
 muse_spark_compile_fuse_next_norm: false
+# gated QKV split + weightless Q / K norms + RoPE as one Primus-Turbo kernel per pass (TP=1, CP=1)
+muse_spark_fused_qk_norm_rope: false
 # the logit soft-cap as Triton kernels (bitwise eager); inside the cross entropy with deferred_cross_entropy
 muse_spark_triton_softcap: false
 

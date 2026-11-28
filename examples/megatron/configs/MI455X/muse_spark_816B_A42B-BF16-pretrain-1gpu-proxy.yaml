@@ -129,6 +129,8 @@ modules:
 
       # Muse Spark on MI455X
       muse_spark_compile_norms: true
+      # gated QKV split + weightless Q / K norms + RoPE as one Primus-Turbo kernel per pass
+      muse_spark_fused_qk_norm_rope: true
       # the logit soft-cap inside the deferred cross entropy (below), bitwise the separate ops
       muse_spark_triton_softcap: true
 
