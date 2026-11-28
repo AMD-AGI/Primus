@@ -93,6 +93,13 @@ class MuseSparkTransformerConfig(TransformerConfig):
     residual before it (attention residual -> ``pre_mlp_layernorm``; MoE residual -> the next
     layer's ``input_layernorm``), handing the output to the norm. Off by default: no faster
     than the separate graphs on the 4-layer proxy (MI455X). Parsed strictly (``bool_flag``)."""
+    muse_spark_fused_qk_norm_rope: bool = False
+    """Split the gated packed QKV, apply the weightless Q / K norms and the rotate-half RoPE (none on NoPE
+    layers) as Primus-Turbo's ``fused_qkv_rmsnorm_rope`` with a gate block and no norm weights, one kernel per
+    pass; the RoPE is rounded once per output, as TE's fused RoPE (``transformer/muse_spark/attention.py``).
+    Needs a Primus-Turbo whose ``fused_qkv_rmsnorm_rope`` takes a gate block (otherwise Megatron's path runs).
+    TP=1, CP=1, self attention without packed sequences or inference; other calls take Megatron's path. Takes
+    precedence over ``muse_spark_compile_norms`` for the Q / K norms. Parsed strictly (``bool_flag``)."""
     muse_spark_triton_softcap: bool = False
     """Run the logit soft-cap as Triton kernels, bitwise the eager ops (``models/muse_spark/softcap_kernels.py``).
     With the deferred TE cross entropy (``deferred_cross_entropy``) the soft-cap runs inside the cross entropy:
@@ -143,6 +150,7 @@ class MuseSparkTransformerConfig(TransformerConfig):
             "muse_spark_fused_centered_norm",
             "muse_spark_compile_norms",
             "muse_spark_compile_fuse_next_norm",
+            "muse_spark_fused_qk_norm_rope",
             "muse_spark_triton_softcap",
             "embedding_norm",
             "window_size_is_hf_sliding_window",
