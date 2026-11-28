@@ -58,6 +58,23 @@ Set by `torchrun`, Slurm launchers, or `runner/primus-cli-direct.sh` / `runner/p
 | `PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND` | `TURBO` | User; hooks may set `DEEP_EP` | `primus/backends/megatron/patches/args/rocm_arg_validation.py`, `runner/helpers/hooks/05_using_uep.sh` | MoE dispatch/combine backend selector. |
 | `PRIMUS_CONVERT_RUN_ID` | (unset) | User | `primus/backends/megatron/checkpoint/native_loader_muse_spark.py` (`conversion_run_tag`) | Optional launch id for a multi-node Muse Spark checkpoint conversion. Set one new value per launch, the same on every node (for example `${SLURM_JOB_ID}.${SLURM_STEP_ID}`). With it, the waiting nodes see a failure of node 0 at once, also one that happened before they started waiting. Without it, such a failure is seen after 1800 s. The conversion's markers and records are in the checkpoint directory (`DATA_PATH`), which must be on storage that every node shares. Under `primus-cli container` it reaches the container without any setting: `runner/primus-cli-container.sh` passes every `PRIMUS_*` variable that is set on the host. See [Megatron parameters §11.6](megatron-parameters.md). |
 
+### Fused Adam with in-kernel gradient clipping (Megatron)
+
+These switch on and extend Primus's HIP Adam (patch id `megatron.optimizer.te_fused_adam_clip`), which replaces the
+kernel of Transformer Engine's `FusedAdam`. Only the value `1` turns a switch on. The switches below the first one
+have no effect without `PRIMUS_FUSED_ADAM_CLIP=1`. Unmet requirements stop the run with an error naming the switch
+(`PRIMUS_STATIC_BF16_LOSS_SCALE_CPU` instead keeps the usual path where it does not apply). The log line
+`[Patch:megatron.optimizer.te_fused_adam_clip] enabled: ...` lists what is active.
+
+| Variable | Default | Where set | Where used | Description |
+|----------|---------|-----------|------------|-------------|
+| `PRIMUS_FUSED_ADAM_CLIP` | `0` | User / experiment YAML `env` | `primus/backends/megatron/patches/te_patches/fused_adam_clip_patches.py` | `1` keeps Megatron's global gradient norm on the device and applies the clip coefficient inside the Adam kernel, so there is no separate clip pass over the gradients and no host sync for the norm (Megatron then logs no grad norm). Needs Transformer Engine `FusedAdam` (the Triton fused AdamW steps aside with a warning while this patch is installed), FP32 or BF16 gradients and moments, and no AMP `GradScaler` (no FP16 loss scaling). |
+| `PRIMUS_FUSED_ADAM_BF16_WRITEBACK` | `0` | User / experiment YAML `env` | Same | `1` also writes the updated BF16 model parameters from the Adam kernel, instead of a separate FP32-master to BF16 copy after the step. Needs BF16 model parameters with separate FP32 master parameters (Megatron's own; with `use_precision_aware_optimizer` that takes `PRIMUS_FUSED_ADAM_MCORE_MASTER=1`) and Megatron's distributed optimizer without Megatron-FSDP. |
+| `PRIMUS_FUSED_ADAM_BF16_GRAD` | `0` | User / experiment YAML `env` | Same | `1` lets Adam read the BF16 DDP gradient shards directly (TE's decoupled gradients), instead of first copying them into FP32 main gradients. Needs BF16 or FP32 DDP gradients and the distributed optimizer without Megatron-FSDP. |
+| `PRIMUS_FUSED_ADAM_MCORE_MASTER` | `0` | User / experiment YAML `env` | Same | `1` keeps Megatron-core's FP32 master shards when `use_precision_aware_optimizer` is set, using precision-aware mode only to select BF16 Adam moments. Needs `use_precision_aware_optimizer` and an FP32 `main_params_dtype`. |
+| `PRIMUS_STATIC_BF16_LOSS_SCALE_CPU` | `0` | User / experiment YAML `env` | Same | `1` returns the unscaled loss and a CPU loss scale of 1 when every optimizer is BF16 without a grad scaler, so the loss-scale logging does not sync with the GPU. Other configurations are unchanged. |
+| `PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE` | `0` | User / experiment YAML `env` | Same | `1` moves DDP's expert gradient scaling (`expert_dp / dp` with `ddp_average_in_collective`, else `1 / dp`) from a pass over the expert gradient buffers into the Adam kernel's clip multiply. The expert buffers hold unscaled gradients until Adam, and the global gradient norm weights the expert part by the factor, so the update is unchanged. That saves one read and write of every expert gradient per step; with one rank in the expert data-parallel group (e.g. EP equal to the data-parallel size) the scaling pass was all that ran on those buffers before their reduction. Needs Megatron's distributed optimizer (not Megatron-FSDP), with expert and dense parameters in separate optimizers (Megatron's default). |
+
 ---
 
 ## 3. Primus YAML substitution

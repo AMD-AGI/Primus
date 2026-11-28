@@ -20,6 +20,12 @@ with a device-resident norm argument. It does not modify the TE installation.
 The global norm and clip coefficient remain device-resident. The Adam kernel
 loads the one-element norm tensor and derives the coefficient in-kernel, so the
 optimizer no longer drains the GPU pipeline through ``Tensor.item()``.
+
+``PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE=1`` also moves DDP's expert gradient
+scaling (``expert_dp / dp`` with ``average_in_collective``, else ``1 / dp``) from
+a pass over the expert gradient buffers into the same in-register multiply. The
+expert buffers then hold unscaled gradients until Adam, and the global norm
+weights the expert part by the factor.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.module_utils import log_rank_0
 
 _PATCH_KEY = "megatron.optimizer.te_fused_adam_clip"
-_EXTENSION_NAME = "primus_te_fused_adam_clip_v6"
+_EXTENSION_NAME = "primus_te_fused_adam_clip_v7"
 _extension = None
 
 
@@ -72,6 +78,49 @@ def _mcore_master_enabled() -> bool:
     return os.environ.get("PRIMUS_FUSED_ADAM_MCORE_MASTER", "0") == "1"
 
 
+def _expert_grad_scale_enabled() -> bool:
+    return os.environ.get("PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE", "0") == "1"
+
+
+def _defer_expert_grad_scaling(ddp) -> None:
+    """Leave DDP's expert gradient buffers unscaled and tag their params with the factor."""
+
+    for buffer in ddp.expert_parallel_buffers:
+        factor = float(buffer.gradient_scaling_factor)
+        if factor == 1.0:
+            continue
+        buffer.gradient_scaling_factor = 1.0
+        for bucket in buffer.buckets:
+            bucket.gradient_scaling_factor = 1.0
+        for param in buffer.params:
+            param._primus_deferred_grad_scale = factor
+
+
+def _grad_prescale(optimizer) -> float:
+    """The gradient factor DDP deferred to Adam for this optimizer's params (1.0 if none)."""
+
+    if not _expert_grad_scale_enabled() or getattr(optimizer, "is_stub_optimizer", False):
+        return 1.0
+    cached = getattr(optimizer, "_primus_grad_prescale", None)
+    if cached is not None:
+        return cached
+    model_groups = getattr(optimizer, "model_float16_groups", None)
+    if model_groups is None:
+        raise RuntimeError("PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE requires Megatron's DistributedOptimizer")
+    scales = {
+        getattr(param, "_primus_deferred_grad_scale", 1.0)
+        for group in (*model_groups, *optimizer.model_fp32_groups)
+        for param in group
+    }
+    if len(scales) > 1:
+        raise RuntimeError(
+            "PRIMUS_FUSED_ADAM_EXPERT_GRAD_SCALE found one optimizer with several deferred "
+            f"gradient scales {sorted(scales)}; expert and dense params must use separate optimizers"
+        )
+    optimizer._primus_grad_prescale = scales.pop() if scales else 1.0
+    return optimizer._primus_grad_prescale
+
+
 def _clip_coeff(total_norm: float, max_norm: float) -> float:
     """Return Megatron's gradient clipping coefficient."""
 
@@ -95,27 +144,38 @@ def _separate_grad_norm_groups() -> tuple:
     return tuple(getattr(mcore_optimizer, "SEPARATE_GRAD_NORM_GROUPS", ()))
 
 
+def _local_norm_squared(optimizer, grads_for_norm) -> torch.Tensor:
+    from megatron.core.optimizer import clip_grads
+
+    if not grads_for_norm:
+        return torch.zeros(1, dtype=torch.float32, device="cuda")
+    dummy_overflow_buf = getattr(optimizer, "_primus_norm_overflow_buf", None)
+    grad_device = grads_for_norm[0].device
+    if dummy_overflow_buf is None or dummy_overflow_buf.device != grad_device:
+        dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=grad_device)
+        optimizer._primus_norm_overflow_buf = dummy_overflow_buf
+    local_norm, _ = clip_grads.multi_tensor_applier(
+        clip_grads.l2_norm_impl,
+        dummy_overflow_buf,
+        [grads_for_norm],
+        False,
+    )
+    return local_norm.square()
+
+
 def _get_grad_norm_tensor(optimizer) -> torch.Tensor:
     """Megatron's FP32 L2 norm path without its final host synchronization."""
 
-    from megatron.core.optimizer import clip_grads
-
-    grads_for_norm = _grads_for_grad_norm(optimizer)
-    if grads_for_norm:
-        dummy_overflow_buf = getattr(optimizer, "_primus_norm_overflow_buf", None)
-        grad_device = grads_for_norm[0].device
-        if dummy_overflow_buf is None or dummy_overflow_buf.device != grad_device:
-            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=grad_device)
-            optimizer._primus_norm_overflow_buf = dummy_overflow_buf
-        local_norm, _ = clip_grads.multi_tensor_applier(
-            clip_grads.l2_norm_impl,
-            dummy_overflow_buf,
-            [grads_for_norm],
-            False,
-        )
-        total_norm_squared = local_norm.square()
+    children = getattr(optimizer, "chained_optimizers", None) or [optimizer]
+    prescales = [_grad_prescale(child) for child in children]
+    if all(scale == 1.0 for scale in prescales):
+        total_norm_squared = _local_norm_squared(optimizer, _grads_for_grad_norm(optimizer))
     else:
-        total_norm_squared = torch.zeros(1, dtype=torch.float32, device="cuda")
+        total_norm_squared = sum(
+            _local_norm_squared(optimizer, _grads_for_grad_norm(child)) * (scale * scale)
+            for child, scale in zip(children, prescales)
+            if not getattr(child, "is_stub_optimizer", False)
+        )
 
     torch.distributed.all_reduce(
         total_norm_squared,
@@ -415,6 +475,7 @@ def _chained_step_with_device_clip(optimizer, fused_adam_type):
             )
         inner_optimizer._primus_clip_norm = grad_norm
         inner_optimizer._primus_clip_max_norm = float(child_optimizer.config.clip_grad)
+        inner_optimizer._primus_grad_prescale = _grad_prescale(child_optimizer)
         _prepare_bf16_writeback(child_optimizer, fused_adam_type)
 
     num_zeros_in_grad = optimizer.count_zeros() if optimizer.config.log_num_zeros_in_grad else None
@@ -483,6 +544,7 @@ def _install_patch() -> None:
         original_adam_init(self, *args, **kwargs)
         self._primus_clip_norm = None
         self._primus_clip_max_norm = 1.0
+        self._primus_grad_prescale = 1.0
         self._primus_adam_metadata_cache = {}
         self._primus_bf16_writeback_by_param_ptr = {}
         self._primus_bf16_writeback_tensors = []
@@ -537,6 +599,7 @@ def _install_patch() -> None:
                 int(grad_dtype),
                 self._primus_clip_norm,
                 float(self._primus_clip_max_norm),
+                float(self._primus_grad_prescale),
             )
 
         # FusedAdam.step calls this attribute through TE's existing
@@ -552,6 +615,7 @@ def _install_patch() -> None:
         finally:
             self._primus_clip_norm = None
             self._primus_clip_max_norm = 1.0
+            self._primus_grad_prescale = 1.0
 
     @wraps(original_scale_loss)
     def patched_scale_loss(self, loss):
@@ -625,6 +689,7 @@ def _install_patch() -> None:
             )
         inner_optimizer._primus_clip_norm = grad_norm
         inner_optimizer._primus_clip_max_norm = float(clip_grad)
+        inner_optimizer._primus_grad_prescale = _grad_prescale(self)
         # Megatron only uses this return value for optional logging after the
         # update. Falling through with None avoids a device-to-host synchronization.
 
@@ -655,6 +720,20 @@ def _install_patch() -> None:
     if getattr(reduce_max_stat, "__name__", "") == "_passthrough_reduce_max":
         megatron_training.reduce_max_stat_across_model_parallel_group = _deferred_passthrough_reduce_max
 
+    if _expert_grad_scale_enabled():
+        from megatron.core.distributed.distributed_data_parallel import (
+            DistributedDataParallel,
+        )
+
+        original_ddp_init = DistributedDataParallel.__init__
+
+        @wraps(original_ddp_init)
+        def patched_ddp_init(self, *args, **kwargs):
+            original_ddp_init(self, *args, **kwargs)
+            _defer_expert_grad_scaling(self)
+
+        DistributedDataParallel.__init__ = patched_ddp_init
+
     mark_patched(FusedAdam, _PATCH_KEY)
     log_rank_0(
         f"[Patch:{_PATCH_KEY}] enabled: device gradient norm and clip coefficient "
@@ -666,6 +745,7 @@ def _install_patch() -> None:
             else "."
         )
         + ("; BF16 DDP gradient shards are consumed directly by Adam." if _bf16_grad_enabled() else "")
+        + ("; expert gradient scaling is applied inside Adam." if _expert_grad_scale_enabled() else "")
         + (
             "; static BF16 unity loss scale is logged from CPU without a device sync."
             if _static_bf16_loss_scale_cpu_enabled()

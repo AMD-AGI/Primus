@@ -57,7 +57,8 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
     float lr,
     float decay,
     const float* __restrict__ grad_norm,
-    float max_norm) {
+    float max_norm,
+    float grad_prescale) {
   const int global_chunk = blockIdx.x;
   if (global_chunk >= total_chunks) return;
 
@@ -86,7 +87,7 @@ __global__ __launch_bounds__(kBlockSize) void fused_adam_clip_kernel(
   if (threadIdx.x == 0) {
     const float clip_coeff = max_norm / (*grad_norm + 1.0e-6f);
     // Match Python's min(1.0, coeff), including its NaN behavior.
-    grad_scale_shared = clip_coeff < 1.0f ? clip_coeff : 1.0f;
+    grad_scale_shared = grad_prescale * (clip_coeff < 1.0f ? clip_coeff : 1.0f);
   }
   __syncthreads();
   const float grad_scale = grad_scale_shared;
@@ -206,7 +207,8 @@ void fused_adam_clip(
     int moment_dtype,
     int grad_dtype,
     torch::Tensor grad_norm,
-    double max_norm) {
+    double max_norm,
+    double grad_prescale) {
   TORCH_CHECK(addresses.is_cuda() && sizes.is_cuda() &&
               block_to_tensor.is_cuda() && chunk_offsets.is_cuda(),
               "fused_adam_clip metadata must be on GPU");
@@ -244,7 +246,7 @@ void fused_adam_clip(
       static_cast<float>(beta1), static_cast<float>(beta2), step_size, \
       beta2_corr_inv, static_cast<float>(epsilon), static_cast<float>(lr), \
       static_cast<float>(weight_decay), grad_norm.data_ptr<float>(), \
-      static_cast<float>(max_norm))
+      static_cast<float>(max_norm), static_cast<float>(grad_prescale))
   if (mode == 1 && moment_dtype == 0 && grad_dtype == 0) {
     LAUNCH(true, float, float);
   } else if (mode == 1 && moment_dtype == 0) {
