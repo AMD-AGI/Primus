@@ -185,6 +185,20 @@ def _takes_out_kwargs() -> bool:
     return all(k in f for k in ("out", "lse_out")) and all(k in b for k in ("dq_out", "dkv_out", "delta_out"))
 
 
+@functools.lru_cache(maxsize=1)
+def _takes_batch_kwarg() -> bool:
+    """Turbo build whose fwd / bwd take ``batch=`` (all samples' band kernels in one launch, same bytes)."""
+    import inspect
+
+    fwd, bwd = _kernels()
+    return "batch" in inspect.signature(fwd).parameters and "batch" in inspect.signature(bwd).parameters
+
+
+def _batched_band() -> bool:
+    # PRIMUS_V4_BAND_BATCHED (default 1): one launch for all samples of a band layer instead of one per sample.
+    return os.environ.get("PRIMUS_V4_BAND_BATCHED", "1") == "1" and _takes_batch_kwarg()
+
+
 def sparse_mla_fwd_turbo_gfx1250_ps(q, kv, topk1, attn_sink, kv_lora_rank, scale, batch):
     """Forward of a band map (SWA / HCA) for ``batch`` samples: ``q`` [B*S, H, 576], ``kv`` [B*nkv, 1, 576] (sample b =
     rows [b*nkv, (b+1)*nkv)), ``topk1`` the B == 1 map [S, topk] (read only if Turbo falls back to the index-driven
@@ -197,6 +211,10 @@ def sparse_mla_fwd_turbo_gfx1250_ps(q, kv, topk1, attn_sink, kv_lora_rank, scale
     assert S * batch == T and nkv * batch == kv.shape[0] and topk1.shape[0] == S
     o = q.new_empty(T, H, kv_lora_rank)
     lse = torch.empty(T, H, dtype=torch.float32, device=q.device)
+    if _batched_band():
+        fwd(q, kv, topk1, attn_sink=attn_sink, kv_lora_rank=kv_lora_rank, scale=float(scale), use_swa=True, out=o,
+            lse_out=lse, batch=batch)
+        return o, lse
     for b in range(batch):
         r = slice(b * S, (b + 1) * S)
         fwd(
@@ -238,7 +256,14 @@ def sparse_mla_bwd_turbo_gfx1250_ps(q, kv, o, do, topk_local, lse, attn_sink, kv
         # S = 4096) are reused instead of all staying alive on the dKV stream until the CSADkvJoin. Leaving the
         # holder's event unset makes the adapter take the plain (joined) path.
         side = {}
-    for b in range(batch):
+    if band is None and _use_band_kernels() and _batched_band():
+        # SWA / HCA band: all samples in one launch (dsink below, as in the loop)
+        bwd(q, kv, o, do, topk_local, lse, attn_sink=None, kv_lora_rank=kv_lora_rank, scale=float(scale),
+            use_swa=True, dq_out=dq, dkv_out=dkv, delta_out=delta, batch=batch)
+        b_iter = ()
+    else:
+        b_iter = range(batch)
+    for b in b_iter:
         r = slice(b * S, (b + 1) * S)
         k = slice(b * nkv, (b + 1) * nkv)
         bwd(
